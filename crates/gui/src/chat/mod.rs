@@ -636,6 +636,37 @@ impl ChatView {
         false
     }
 
+    /// The text drawn last, a piece a line, top to bottom, then the
+    /// question asked, if one is, and the message being typed: what
+    /// someone looking at the chat reads. For looking at the window
+    /// without a desktop (see `crate::app::look`).
+    pub(crate) fn shown_text(&self) -> String {
+        let mut text = String::new();
+        let mut last = None;
+        for shown in &self.shown {
+            // A piece drawn in several blocks is said once.
+            let piece = (shown.key.turn, shown.key.piece);
+            if last == Some(piece) {
+                continue;
+            }
+            last = Some(piece);
+            if let Some(piece) = self.piece_text(shown.key) {
+                text.push_str(&piece);
+                text.push('\n');
+            }
+        }
+        if let Some(question) = &self.node.question {
+            text.push_str(&question.title);
+            text.push('\n');
+            for choice in &question.choices {
+                text.push_str(&choice.name);
+                text.push('\n');
+            }
+        }
+        text.push_str(self.editor.raw_text());
+        text
+    }
+
     /// Whether input waits to be settled.
     pub(crate) fn unsettled(&self) -> bool {
         !self.queued.is_empty()

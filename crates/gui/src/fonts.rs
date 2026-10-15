@@ -304,6 +304,22 @@ impl Fonts {
         self.ui.baseline = (metrics.leading / 2.0 + metrics.ascent).round();
     }
 
+    /// The fonts a window opens with: the terminal's from `options`, and
+    /// the interface's the `desktop` names, both at a pixel a point until
+    /// the window says how many its screen has.
+    pub(crate) fn for_window(
+        options: &FontOptions,
+        desktop: &crate::desktop::Desktop,
+    ) -> anyhow::Result<Self> {
+        let mut fonts = Self::load(options, 1.0)?;
+        let (family, points) = match &desktop.font {
+            Some((family, points)) => (Some(family.as_str()), *points),
+            None => (None, 11.0),
+        };
+        fonts.load_ui(family, points, 1.0);
+        Ok(fonts)
+    }
+
     /// Loads the interface font: `family`, or the system's sans-serif font,
     /// at `points`. Without either, the terminal's font stays in its place.
     pub(crate) fn load_ui(&mut self, family: Option<&str>, points: f32, scale: f64) {

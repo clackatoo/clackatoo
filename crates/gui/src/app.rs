@@ -18,6 +18,7 @@ use clackatoo_term::Row;
 use clackatoo_term::mouse::MouseAction;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::error::ExternalError;
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, OwnedDisplayHandle};
 use winit::keyboard::{Key, KeyLocation, NamedKey};
@@ -47,6 +48,8 @@ use crate::render::{
 use crate::screen::Screen;
 use crate::session::{Location, Session, SessionEvent};
 use crate::updates;
+
+pub mod look;
 
 /// Lines scrolled per notch of a mouse wheel.
 const WHEEL_LINES: f64 = 3.0;
@@ -135,7 +138,7 @@ struct Reconnecting {
 }
 
 /// A GPU device, made on its own thread while the window opens.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Gpu {
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
@@ -302,18 +305,70 @@ pub(crate) struct Startup {
     pub(crate) launch: LaunchToken,
 }
 
-/// The open window and what draws into it.
+/// The open window, or the picture drawn in its place, and what draws
+/// into it.
 #[derive(Debug)]
 struct Frame {
-    window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
+    target: Target,
     gpu: Gpu,
     renderer: Renderer,
     fonts: Fonts,
     /// Whether the compositor shows what's behind the window where it's
     /// see-through, which lets the window round its corners.
     transparent: bool,
+}
+
+/// What frames are drawn on.
+#[derive(Debug)]
+enum Target {
+    /// A window on the desktop.
+    Window {
+        window: Arc<Window>,
+        surface: wgpu::Surface<'static>,
+        config: wgpu::SurfaceConfiguration,
+    },
+    /// A picture in memory, in place of a window, to look at the window
+    /// without a desktop (see [`look`]).
+    Offscreen(look::Offscreen),
+}
+
+impl Frame {
+    /// The window on the desktop, unless frames are drawn offscreen.
+    fn window(&self) -> Option<&Arc<Window>> {
+        match &self.target {
+            Target::Window { window, .. } => Some(window),
+            Target::Offscreen(_) => None,
+        }
+    }
+
+    /// How big frames are, in pixels.
+    fn size(&self) -> [u32; 2] {
+        match &self.target {
+            Target::Window { config, .. } => [config.width, config.height],
+            Target::Offscreen(offscreen) => offscreen.size(),
+        }
+    }
+
+    /// How many pixels there are to a point.
+    fn scale_factor(&self) -> f64 {
+        match &self.target {
+            Target::Window { window, .. } => window.scale_factor(),
+            Target::Offscreen(offscreen) => offscreen.scale,
+        }
+    }
+
+    /// Asks for a frame to be drawn.
+    fn request_redraw(&self) {
+        match &self.target {
+            Target::Window { window, .. } => window.request_redraw(),
+            Target::Offscreen(offscreen) => offscreen.redraw.set(true),
+        }
+    }
+
+    /// Whether the window fills the screen, as a maximised one does.
+    fn is_maximized(&self) -> bool {
+        self.window().is_some_and(|window| window.is_maximized())
+    }
 }
 
 /// A menu open over the window, for a workspace or a tab.
@@ -336,6 +391,10 @@ const MENU_ITEMS: [&str; 2] = ["Rename", "Close"];
 
 /// The window's whole state.
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent states of the window"
+)]
 pub(crate) struct App {
     started: Instant,
     startup: Option<Startup>,
@@ -403,14 +462,19 @@ pub(crate) struct App {
     /// The ports forwarded to the daemon's machine, kept through every
     /// reconnection (see [`crate::forwards`]).
     forwards: Forwards,
+    /// Whether something asked the window to close, as its close button
+    /// does. The event loop ends once the event that asked is handled.
+    closing: bool,
     /// Why the window closed, if something went wrong.
     pub(crate) result: anyhow::Result<()>,
 }
 
 impl App {
+    /// The window, which opens with `startup` once the event loop starts,
+    /// or with none, offscreen (see [`look`]).
     pub(crate) fn new(
         started: Instant,
-        startup: Startup,
+        startup: Option<Startup>,
         session: Session,
         remote_command: String,
     ) -> Self {
@@ -418,7 +482,7 @@ impl App {
         let forwards = Forwards::new(move || drop(proxy.send_event(SessionEvent::Forwards)));
         Self {
             started,
-            startup: Some(startup),
+            startup,
             frame: None,
             desk: Desk::default(),
             buttons: ButtonLayout::default(),
@@ -451,6 +515,7 @@ impl App {
             picked: None,
             remote_command,
             forwards,
+            closing: false,
             result: Ok(()),
         }
     }
@@ -517,9 +582,11 @@ impl App {
         );
         let transparent = config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
         Ok(Frame {
-            window,
-            surface,
-            config,
+            target: Target::Window {
+                window,
+                surface,
+                config,
+            },
             gpu,
             renderer,
             fonts,
@@ -538,11 +605,8 @@ impl App {
     fn geometry(&self) -> Option<Geometry> {
         let frame = self.frame.as_ref()?;
         #[allow(clippy::cast_precision_loss)]
-        let padding = padding(&frame.window) as f32;
-        Some(Geometry::new(
-            [frame.config.width, frame.config.height],
-            metrics(&frame.fonts, padding),
-        ))
+        let padding = padding(frame.scale_factor()) as f32;
+        Some(Geometry::new(frame.size(), metrics(&frame.fonts, padding)))
     }
 
     /// Where everything in the window's frame goes, now.
@@ -720,10 +784,10 @@ impl App {
             Hit::Panes => CursorIcon::Text,
             Hit::TopBar | Hit::Finder(None) | Hit::Nothing => CursorIcon::Default,
         };
-        if let Some(frame) = &self.frame
+        if let Some(window) = self.frame.as_ref().and_then(Frame::window)
             && icon != self.cursor_icon
         {
-            frame.window.set_cursor(icon);
+            window.set_cursor(icon);
             self.cursor_icon = icon;
         }
         let lit = |hit: Hit| {
@@ -908,21 +972,18 @@ impl App {
     }
 
     fn hit(&mut self, point: [f32; 2]) -> Hit {
-        let maximised = self
-            .frame
-            .as_ref()
-            .is_some_and(|frame| frame.window.is_maximized());
+        let maximised = self.frame.as_ref().is_some_and(Frame::is_maximized);
         self.chrome()
             .map_or(Hit::Nothing, |chrome| chrome.hit(point, maximised))
     }
 
     /// Handles a click: moving or resizing the window, its buttons, and
     /// switching to the workspace, tab or pane clicked.
-    fn clicked(&mut self, event_loop: &ActiveEventLoop, button: MouseButton) {
+    fn clicked(&mut self, button: MouseButton) {
         let (Some(point), Some(frame)) = (self.pointer, &self.frame) else {
             return;
         };
-        let window = Arc::clone(&frame.window);
+        let window = frame.window().cloned();
         #[allow(clippy::cast_precision_loss)]
         let cell = [
             frame.fonts.cell.width as f32,
@@ -966,30 +1027,21 @@ impl App {
             return;
         }
         if button == MouseButton::Right {
-            return self.right_clicked(hit, point, &window);
+            return self.right_clicked(hit, point, window.as_deref());
         }
         if button != MouseButton::Left {
             return;
         }
         let result = match hit {
-            Hit::Resize(direction) => window.drag_resize_window(direction),
-            Hit::Button(Button::Minimise) => {
-                window.set_minimized(true);
-                Ok(())
-            }
-            Hit::Button(Button::Maximise) => {
-                window.set_maximized(!window.is_maximized());
-                Ok(())
-            }
             Hit::Button(Button::Close) => {
-                event_loop.exit();
+                self.closing = true;
                 Ok(())
             }
-            Hit::TopBar if double => {
-                window.set_maximized(!window.is_maximized());
-                Ok(())
+            // The desktop's to carry out: offscreen, there's no window to
+            // move, resize or maximise.
+            Hit::Resize(_) | Hit::Button(_) | Hit::TopBar => {
+                window.map_or(Ok(()), |window| frame_clicked(&window, hit, double))
             }
-            Hit::TopBar => window.drag_window(),
             Hit::Workspace(workspace) => {
                 self.desk.show_workspace(workspace);
                 Ok(())
@@ -1021,7 +1073,7 @@ impl App {
         if let Some(row) = row.filter(|_| button == MouseButton::Left) {
             if let Some(picker) = &mut self.picker {
                 let outcome = picker.click(row, double);
-                self.picker_did(None, outcome);
+                self.picker_did(outcome, false);
                 return;
             }
             self.desk.finder_click(row, double);
@@ -1033,7 +1085,7 @@ impl App {
 
     /// A right click on `hit`, at `point`: a workspace's or tab's menu, or
     /// on the top bar, the desktop's menu for the window.
-    fn right_clicked(&mut self, hit: Hit, point: [f32; 2], window: &Window) {
+    fn right_clicked(&mut self, hit: Hit, point: [f32; 2], window: Option<&Window>) {
         let target = match hit {
             Hit::Workspace(workspace) => Some(MenuTarget::Workspace(workspace)),
             Hit::Tab(tab) => Some(MenuTarget::Tab(tab)),
@@ -1044,7 +1096,9 @@ impl App {
                 self.menu = Some(Menu { at: point, target });
                 self.request_redraw();
             }
-            None if hit == Hit::TopBar => {
+            None if hit == Hit::TopBar
+                && let Some(window) = window =>
+            {
                 window.show_window_menu(PhysicalPosition::new(point[0], point[1]));
             }
             None => {}
@@ -1060,7 +1114,9 @@ impl App {
             None => title.to_owned(),
         };
         if title != self.title {
-            frame.window.set_title(&title);
+            if let Some(window) = frame.window() {
+                window.set_title(&title);
+            }
             self.title = title;
         }
     }
@@ -1094,7 +1150,7 @@ impl App {
         if let Some(frame) = &mut self.frame
             && self.desk.settle_chats(&mut frame.fonts)
         {
-            frame.window.request_redraw();
+            frame.request_redraw();
         }
         // Text copied, by a key, a click or an answer from the daemon.
         for (text, to) in self.desk.take_yanked() {
@@ -1134,20 +1190,48 @@ impl App {
         }
     }
 
-    fn key_pressed(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
+    /// The desktop says a key went down: handles it as the press it is,
+    /// with the modifiers held.
+    fn key_down(&mut self, event: &winit::event::KeyEvent) {
+        let press = input::KeyPress {
+            key: &event.logical_key,
+            text: event.text.as_deref(),
+            location: event.location,
+            code: match event.physical_key {
+                winit::keyboard::PhysicalKey::Code(code) => Some(code),
+                winit::keyboard::PhysicalKey::Unidentified(_) => None,
+            },
+            modifiers: self.modifiers,
+        };
+        self.key_event(&press, event.repeat);
+    }
+
+    /// A key went down, `repeat` if it's held: the input method's, while
+    /// it composes, or else the window's.
+    fn key_event(&mut self, press: &input::KeyPress<'_>, repeat: bool) {
+        // While the input method composes, keys are its, and a key it
+        // committed as well counts once. A modifier alone types nothing,
+        // so it's none of the input method's business.
+        if input::is_modifier(press.key) || self.ime.key(press.text, Instant::now()) {
+            self.key_pressed(press, repeat);
+            self.sync_ime();
+        }
+    }
+
+    fn key_pressed(&mut self, press: &input::KeyPress<'_>, repeat: bool) {
         // Any key closes a menu, and Esc does nothing else.
         if self.menu.take().is_some() {
             self.request_redraw();
-            if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            if matches!(press.key, Key::Named(NamedKey::Escape)) {
                 return;
             }
         }
         if self.picker.is_some() {
-            self.picker_key(event_loop, event);
+            self.picker_key(press);
             return;
         }
         if self.notice.is_some() {
-            self.notice_key(event_loop, event);
+            self.notice_key(press, repeat);
             return;
         }
         if !self.desk.takes_keys_offline() && self.out_of_touch() {
@@ -1155,23 +1239,14 @@ impl App {
             self.request_redraw();
             return;
         }
-        let redraw = if is_paste(&event.logical_key, self.modifiers) {
+        let redraw = if is_paste(press.key, self.modifiers) {
             match paste_text(&mut self.clipboard, Copy::Clipboard) {
                 Ok(text) => self.desk.paste(&text),
                 Err(err) => log::warn!("pasting failed: {err:#}"),
             }
             true
         } else {
-            self.desk.key(&input::KeyPress {
-                key: &event.logical_key,
-                text: event.text.as_deref(),
-                location: event.location,
-                code: match event.physical_key {
-                    winit::keyboard::PhysicalKey::Code(code) => Some(code),
-                    winit::keyboard::PhysicalKey::Unidentified(_) => None,
-                },
-                modifiers: self.modifiers,
-            })
+            self.desk.key(press)
         };
         self.open_links();
         self.update();
@@ -1210,11 +1285,11 @@ impl App {
     }
 
     /// Handles a key while the picker of a machine is open.
-    fn picker_key(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
+    fn picker_key(&mut self, press: &input::KeyPress<'_>) {
         let Some(picker) = &mut self.picker else {
             return;
         };
-        let outcome = if is_paste(&event.logical_key, self.modifiers) {
+        let outcome = if is_paste(press.key, self.modifiers) {
             match paste_text(&mut self.clipboard, Copy::Clipboard) {
                 Ok(text) => picker.paste(&text),
                 Err(err) => {
@@ -1224,29 +1299,25 @@ impl App {
             }
         } else {
             picker.key(&input::KeyPress {
-                key: &event.logical_key,
-                text: event.text.as_deref(),
-                location: event.location,
                 code: None,
-                modifiers: self.modifiers,
+                ..press.clone()
             })
         };
-        self.picker_did(Some(event_loop), outcome);
+        self.picker_did(outcome, true);
     }
 
     /// Carries out what a key or click did to the picker of a machine.
-    /// Closing it closes the window too, if the window was opened as it.
-    fn picker_did(&mut self, event_loop: Option<&ActiveEventLoop>, outcome: connect::Outcome) {
+    /// Closing it with a key, `by_key`, closes the window too, if the
+    /// window was opened as it.
+    fn picker_did(&mut self, outcome: connect::Outcome, by_key: bool) {
         let purpose = self.picker.as_ref().map(HostPicker::purpose);
         match (outcome, purpose) {
             (connect::Outcome::Nothing, _) | (_, None) => return,
             (connect::Outcome::Changed, _) => {}
             (connect::Outcome::Close, Some(purpose)) => {
                 self.picker = None;
-                if purpose == Purpose::ThisWindow
-                    && let Some(event_loop) = event_loop
-                {
-                    event_loop.exit();
+                if purpose == Purpose::ThisWindow && by_key {
+                    self.closing = true;
                 }
             }
             (connect::Outcome::Connect(host), Some(Purpose::ThisWindow)) => {
@@ -1419,7 +1490,9 @@ impl App {
         };
         let wanted = typing && self.desk.options().ime;
         if let Some(allowed) = self.ime.allow(wanted) {
-            frame.window.set_ime_allowed(allowed);
+            if let Some(window) = frame.window() {
+                window.set_ime_allowed(allowed);
+            }
             self.ime_area = None;
             if !allowed {
                 self.composing_in_chat = false;
@@ -1437,25 +1510,27 @@ impl App {
         let Some(frame) = &self.frame else { return };
         let allowed = self.ime.allowed();
         if let Some([x, y, width, height]) = area.filter(|_| allowed && area != self.ime_area) {
-            frame.window.set_ime_cursor_area(
-                PhysicalPosition::new(x, y),
-                PhysicalSize::new(width, height),
-            );
+            if let Some(window) = frame.window() {
+                window.set_ime_cursor_area(
+                    PhysicalPosition::new(x, y),
+                    PhysicalSize::new(width, height),
+                );
+            }
             self.ime_area = area;
         }
     }
 
     /// Handles a key while a notice is shown: answering its question, or
     /// typing the answer to ssh's.
-    fn notice_key(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
+    fn notice_key(&mut self, press: &input::KeyPress<'_>, repeat: bool) {
         let Some(notice) = &mut self.notice else {
             return;
         };
-        let key = &event.logical_key;
+        let key = press.key;
         // A held key, as Enter from the picker that chose the machine,
         // never answers a notice that came up meanwhile.
-        let enter = matches!(key, Key::Named(NamedKey::Enter)) && !event.repeat;
-        let escape = matches!(key, Key::Named(NamedKey::Escape)) && !event.repeat;
+        let enter = matches!(key, Key::Named(NamedKey::Enter)) && !repeat;
+        let escape = matches!(key, Key::Named(NamedKey::Escape)) && !repeat;
         match notice {
             Notice::Ask { input, answer, .. } => {
                 if enter || escape {
@@ -1475,7 +1550,7 @@ impl App {
                     if matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("u")) {
                         input.0.clear();
                     }
-                } else if let Some(text) = &event.text {
+                } else if let Some(text) = press.text {
                     input.push(text);
                 }
             }
@@ -1529,7 +1604,7 @@ impl App {
             | Notice::Updating { .. }
                 if escape =>
             {
-                event_loop.exit();
+                self.closing = true;
             }
             _ => return,
         }
@@ -1563,7 +1638,7 @@ impl App {
         if let Some(picker) = &mut self.picker {
             if over_finder {
                 let outcome = picker.scroll(isize::try_from(-whole).unwrap_or_default());
-                self.picker_did(None, outcome);
+                self.picker_did(outcome, false);
             }
             return;
         }
@@ -1578,7 +1653,7 @@ impl App {
 
     fn request_redraw(&self) {
         if let Some(frame) = &self.frame {
-            frame.window.request_redraw();
+            frame.request_redraw();
         }
     }
 
@@ -1635,6 +1710,10 @@ impl App {
     /// back while one is under way waits for that one.
     fn hear_clipboard(&mut self) {
         use std::sync::atomic::Ordering;
+        // Offscreen, there's no desktop, so no clipboard either.
+        if self.frame.as_ref().and_then(Frame::window).is_none() {
+            return;
+        }
         if self.reading_clipboard.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -1669,7 +1748,7 @@ impl App {
     fn rounded(&self) -> bool {
         self.frame
             .as_ref()
-            .is_some_and(|frame| frame.transparent && !frame.window.is_maximized())
+            .is_some_and(|frame| frame.transparent && !frame.is_maximized())
     }
 
     /// The window's background, rounded if the window is.
@@ -2072,6 +2151,38 @@ fn drawings<'a>(
     drawings
 }
 
+/// Carries out a left click on the window's frame, `hit`, that's the
+/// desktop's to carry out: moving or resizing the window, or a button
+/// minimising or maximising it, as a double click on the top bar does
+/// too, if `double`.
+fn frame_clicked(window: &Window, hit: Hit, double: bool) -> Result<(), ExternalError> {
+    match hit {
+        Hit::Resize(direction) => window.drag_resize_window(direction),
+        Hit::Button(Button::Minimise) => {
+            window.set_minimized(true);
+            Ok(())
+        }
+        Hit::Button(Button::Maximise) => {
+            window.set_maximized(!window.is_maximized());
+            Ok(())
+        }
+        Hit::TopBar if double => {
+            window.set_maximized(!window.is_maximized());
+            Ok(())
+        }
+        Hit::TopBar => window.drag_window(),
+        Hit::Button(Button::Close)
+        | Hit::Workspace(_)
+        | Hit::Tab(_)
+        | Hit::Panes
+        | Hit::NewWorkspace
+        | Hit::NewTab
+        | Hit::Menu(_)
+        | Hit::Finder(_)
+        | Hit::Nothing => Ok(()),
+    }
+}
+
 /// The sizes the window's frame is worked out from, for `fonts` and
 /// `padding` pixels of space between things.
 #[allow(clippy::cast_precision_loss)]
@@ -2201,15 +2312,26 @@ fn surface_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat
 /// Draws `picture` into the window and shows it. Returns whether a frame
 /// was shown.
 fn present(frame: &mut Frame, picture: &Picture<'_>) -> bool {
-    let texture = match frame.surface.get_current_texture() {
+    let (window, surface, config) = match &mut frame.target {
+        Target::Window {
+            window,
+            surface,
+            config,
+        } => (window, surface, config),
+        Target::Offscreen(offscreen) => {
+            offscreen.render(&frame.gpu, &mut frame.renderer, picture, &mut frame.fonts);
+            return true;
+        }
+    };
+    let texture = match surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(texture)
         | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
         wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
             return false;
         }
         wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-            frame.surface.configure(&frame.gpu.device, &frame.config);
-            frame.window.request_redraw();
+            surface.configure(&frame.gpu.device, config);
+            window.request_redraw();
             return false;
         }
         wgpu::CurrentSurfaceTexture::Validation => {
@@ -2223,11 +2345,11 @@ fn present(frame: &mut Frame, picture: &Picture<'_>) -> bool {
     frame.renderer.render(
         (&frame.gpu.device, &frame.gpu.queue),
         &view,
-        [frame.config.width, frame.config.height],
+        [config.width, config.height],
         picture,
         &mut frame.fonts,
     );
-    frame.window.pre_present_notify();
+    window.pre_present_notify();
     frame.gpu.queue.present(texture);
     true
 }
@@ -2529,10 +2651,10 @@ fn mouse_button(button: MouseButton) -> Option<clackatoo_term::mouse::MouseButto
     }
 }
 
-/// The padding around the grid in physical pixels.
-fn padding(window: &Window) -> u32 {
+/// The space between things, in pixels, at `scale` pixels to a point.
+fn padding(scale: f64) -> u32 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let padding = (PADDING * window.scale_factor()).round() as u32;
+    let padding = (PADDING * scale).round() as u32;
     padding
 }
 
@@ -2556,7 +2678,7 @@ impl ApplicationHandler<SessionEvent> for App {
             Ok(frame) => {
                 // Whatever arrived while the window opened is drawn now:
                 // the notice, or panes whose snapshots came first.
-                frame.window.request_redraw();
+                frame.request_redraw();
                 self.frame = Some(frame);
                 self.fit_panes();
                 if said {
@@ -2570,28 +2692,56 @@ impl ApplicationHandler<SessionEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         self.handle_window_event(event_loop, event);
         self.send_outbox();
+        if self.closing {
+            event_loop.exit();
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: SessionEvent) {
-        self.handle_session_event(event);
-        self.send_outbox();
-        if self.desk.finished() {
+        if self.session_event(event) {
             event_loop.exit();
         }
     }
 
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         if let StartCause::ResumeTimeReached { .. } = cause {
-            let now = Instant::now();
-            if self.desk.format_if_due(now) {
-                self.send_outbox();
-            }
-            self.retry_if_due(now);
-            self.request_redraw();
+            self.woke(Instant::now());
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let flow = match self.idle() {
+            Some(wake) => ControlFlow::WaitUntil(wake),
+            None => ControlFlow::Wait,
+        };
+        event_loop.set_control_flow(flow);
+    }
+}
+
+impl App {
+    /// Handles `event`, from the session thread or another of the
+    /// window's. Returns whether the window is finished with, as it is
+    /// once every workspace has closed.
+    fn session_event(&mut self, event: SessionEvent) -> bool {
+        self.handle_session_event(event);
+        self.send_outbox();
+        self.desk.finished()
+    }
+
+    /// The time the window asked to wake at, from [`idle`](Self::idle),
+    /// has come, at `now`.
+    fn woke(&mut self, now: Instant) {
+        if self.desk.format_if_due(now) {
+            self.send_outbox();
+        }
+        self.retry_if_due(now);
+        self.request_redraw();
+    }
+
+    /// Does what's due once every event so far is handled, and returns
+    /// when to wake next, if anything's waiting for a time rather than an
+    /// event.
+    fn idle(&mut self) -> Option<Instant> {
         // An editor may have something to ask, now typing has paused, or
         // a command to give up on, that waited too long for the grammar.
         if self.desk.tick_editors(Instant::now()) {
@@ -2619,7 +2769,7 @@ impl ApplicationHandler<SessionEvent> for App {
             .reconnecting
             .as_ref()
             .and_then(|reconnecting| reconnecting.retry_at);
-        let soonest = (counting.into_iter())
+        (counting.into_iter())
             .chain(retry)
             .chain(self.desk.flash_ends())
             .chain(self.desk.grep_at())
@@ -2628,12 +2778,7 @@ impl ApplicationHandler<SessionEvent> for App {
             .chain(self.desk.chat_wakes())
             .chain(self.desk.pane_wakes())
             .chain(self.desk.config_ends())
-            .min();
-        let flow = match soonest {
-            Some(wake) => ControlFlow::WaitUntil(wake),
-            None => ControlFlow::Wait,
-        };
-        event_loop.set_control_flow(flow);
+            .min()
     }
 }
 
@@ -2644,23 +2789,23 @@ impl App {
             WindowEvent::Resized(size) => {
                 log::debug!("resized to {size:?}");
                 if let Some(frame) = &mut self.frame
+                    && let Target::Window {
+                        window,
+                        surface,
+                        config,
+                    } = &mut frame.target
                     && size.width > 0
                     && size.height > 0
                 {
-                    frame.config.width = size.width;
-                    frame.config.height = size.height;
-                    frame.surface.configure(&frame.gpu.device, &frame.config);
-                    frame.window.request_redraw();
+                    config.width = size.width;
+                    config.height = size.height;
+                    surface.configure(&frame.gpu.device, config);
+                    window.request_redraw();
                 }
                 self.fit_panes();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                if let Some(frame) = &mut self.frame {
-                    frame.fonts.set_scale(scale_factor);
-                    frame.renderer.forget_glyphs();
-                    frame.window.request_redraw();
-                }
-                self.fit_panes();
+                self.rescaled(scale_factor);
             }
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -2683,17 +2828,7 @@ impl App {
                 event,
                 is_synthetic: false,
                 ..
-            } if event.state.is_pressed() => {
-                // While the input method composes, keys are its, and a key
-                // it committed as well counts once. A modifier alone types
-                // nothing, so it's none of the input method's business.
-                if input::is_modifier(&event.logical_key)
-                    || self.ime.key(event.text.as_deref(), Instant::now())
-                {
-                    self.key_pressed(event_loop, &event);
-                    self.sync_ime();
-                }
-            }
+            } if event.state.is_pressed() => self.key_down(&event),
             WindowEvent::Ime(ime) => self.ime_event(ime),
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
             #[allow(clippy::cast_possible_truncation)]
@@ -2707,7 +2842,7 @@ impl App {
                 ..
             } => {
                 self.desk.user_active();
-                self.clicked(event_loop, button);
+                self.clicked(button);
             }
             WindowEvent::MouseInput {
                 state: ElementState::Released,
@@ -2735,6 +2870,16 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// The window moved to a screen with `scale` pixels to a point.
+    fn rescaled(&mut self, scale: f64) {
+        if let Some(frame) = &mut self.frame {
+            frame.fonts.set_scale(scale);
+            frame.renderer.forget_glyphs();
+            frame.request_redraw();
+        }
+        self.fit_panes();
     }
 
     /// Hands the desk what the daemon says of file explorers, and of the

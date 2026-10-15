@@ -33,6 +33,10 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) enum Location {
     /// On this machine, in this runtime directory.
     Local(RuntimeDir),
+    /// On this machine, in this runtime directory, running already, and
+    /// never started if it isn't: for a window drawn offscreen against a
+    /// daemon of its own (see [`crate::look`]).
+    Started(RuntimeDir),
     /// On another machine, reached with ssh.
     Remote(Remote),
 }
@@ -46,7 +50,7 @@ impl Location {
     /// The other machine, if the daemon is on one.
     pub(crate) fn remote(&self) -> Option<&Remote> {
         match self {
-            Self::Local(_) => None,
+            Self::Local(_) | Self::Started(_) => None,
             Self::Remote(remote) => Some(remote),
         }
     }
@@ -136,6 +140,30 @@ pub(crate) enum SessionEvent {
     Forwards,
 }
 
+/// A way to wake the window with a [`SessionEvent`], from another thread:
+/// through its event loop, or for a window drawn offscreen, with no event
+/// loop (see [`crate::look`]), through a channel its own loop waits on.
+#[derive(Clone, Debug)]
+pub(crate) enum Proxy {
+    EventLoop(EventLoopProxy<SessionEvent>),
+    Channel(mpsc::Sender<SessionEvent>),
+}
+
+impl Proxy {
+    /// Sends `event` to the window. It fails only once the window has
+    /// closed.
+    pub(crate) fn send_event(&self, event: SessionEvent) -> Result<(), Closed> {
+        match self {
+            Self::EventLoop(proxy) => proxy.send_event(event).map_err(|_| Closed),
+            Self::Channel(sender) => sender.send(event).map_err(|_| Closed),
+        }
+    }
+}
+
+/// The window an event was sent to has closed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Closed;
+
 /// What the window tells the session thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionCommand {
@@ -151,7 +179,7 @@ pub(crate) struct Session {
     location: Option<Location>,
     /// Where the socket ssh asks questions through goes.
     runtime: RuntimeDir,
-    proxy: EventLoopProxy<SessionEvent>,
+    proxy: Proxy,
     /// Answers the thread's questions. Replacing it tells the last thread
     /// to give up.
     commands: mpsc::Sender<SessionCommand>,
@@ -163,11 +191,7 @@ impl Session {
     /// Starts connecting to the daemon at `location`. Its events arrive
     /// through `proxy`. The socket ssh asks questions through, if the
     /// daemon is on another machine, goes in `runtime`.
-    pub(crate) fn start(
-        location: Location,
-        runtime: &RuntimeDir,
-        proxy: EventLoopProxy<SessionEvent>,
-    ) -> Self {
+    pub(crate) fn start(location: Location, runtime: &RuntimeDir, proxy: Proxy) -> Self {
         let mut session = Self::waiting(runtime, proxy);
         session.connect(location);
         session
@@ -175,7 +199,7 @@ impl Session {
 
     /// A session that connects to nothing until it's told where the
     /// daemon is, by [`connect`](Self::connect).
-    pub(crate) fn waiting(runtime: &RuntimeDir, proxy: EventLoopProxy<SessionEvent>) -> Self {
+    pub(crate) fn waiting(runtime: &RuntimeDir, proxy: Proxy) -> Self {
         Self {
             location: None,
             runtime: runtime.clone(),
@@ -191,7 +215,7 @@ impl Session {
         // The last one's socket goes first: the next is at the same path.
         self.askpass = None;
         self.askpass = match location {
-            Location::Local(_) => None,
+            Location::Local(_) | Location::Started(_) => None,
             Location::Remote(_) => {
                 let proxy = self.proxy.clone();
                 let asked = Askpass::serve(&self.runtime, move |question| {
@@ -239,7 +263,7 @@ impl Session {
     /// connection was lost because the daemon upgraded. Never starts one.
     pub(crate) fn daemon_listening(&self) -> bool {
         match &self.location {
-            Some(Location::Local(runtime)) => {
+            Some(Location::Local(runtime) | Location::Started(runtime)) => {
                 std::os::unix::net::UnixStream::connect(runtime.socket_path()).is_ok()
             }
             Some(Location::Remote(_)) | None => false,
@@ -247,7 +271,7 @@ impl Session {
     }
 
     /// A way to wake the window with an event, from another thread.
-    pub(crate) fn proxy(&self) -> EventLoopProxy<SessionEvent> {
+    pub(crate) fn proxy(&self) -> Proxy {
         self.proxy.clone()
     }
 
@@ -280,7 +304,7 @@ fn askpass_path(askpass: Option<&Askpass>) -> Option<PathBuf> {
 fn spawn(
     location: Location,
     askpass: Option<PathBuf>,
-    proxy: EventLoopProxy<SessionEvent>,
+    proxy: Proxy,
 ) -> mpsc::Sender<SessionCommand> {
     let (commands, received) = mpsc::channel();
     std::thread::Builder::new()
@@ -301,7 +325,7 @@ enum Connected {
 fn run(
     location: &Location,
     askpass: Option<&Path>,
-    proxy: &EventLoopProxy<SessionEvent>,
+    proxy: &Proxy,
     commands: &mpsc::Receiver<SessionCommand>,
 ) {
     // Failing to send an event means the window has closed.
@@ -423,6 +447,12 @@ fn connect(location: &Location, askpass: Option<&Path>, replace: bool) -> Connec
             }
             launch::connect_or_start(runtime).map_err(|err| match err {
                 LaunchError::Client(ClientError::VersionMismatch { daemon, .. }) => Ok(daemon),
+                err => Err(with_causes(&err)),
+            })
+        }
+        Location::Started(runtime) => {
+            Client::connect(&runtime.socket_path()).map_err(|err| match err {
+                ClientError::VersionMismatch { daemon, .. } => Ok(daemon),
                 err => Err(with_causes(&err)),
             })
         }

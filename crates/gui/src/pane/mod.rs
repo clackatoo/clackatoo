@@ -285,6 +285,12 @@ impl Pane {
         self.chat.is_some()
     }
 
+    /// The text the chat the pane shows drew last, if it shows one (see
+    /// [`ChatView::shown_text`]).
+    pub(crate) fn chat_text(&self) -> Option<String> {
+        self.chat.as_ref().map(|chat| chat.shown_text())
+    }
+
     /// Tells the chat the pane shows, if any, that the daemon has gone out
     /// of reach, if `offline`, or come back.
     pub(crate) fn chat_offline(&mut self, offline: bool) {

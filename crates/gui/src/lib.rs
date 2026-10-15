@@ -61,6 +61,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::Context;
+#[doc(hidden)]
+pub use app::look;
 use clackatoo_daemon::RuntimeDir;
 use clackatoo_daemon::remote::Remote;
 pub use editor::{EditorBench, Ranking};
@@ -162,12 +164,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 // Asking the desktop takes a few milliseconds, which the
                 // GPU takes longer than anyway.
                 let desktop = desktop::Desktop::read();
-                let mut fonts = fonts::Fonts::load(&options, 1.0)?;
-                let (family, points) = match &desktop.font {
-                    Some((family, points)) => (Some(family.as_str()), *points),
-                    None => (None, 11.0),
-                };
-                fonts.load_ui(family, points, 1.0);
+                let fonts = fonts::Fonts::for_window(&options, &desktop)?;
                 Ok((fonts, desktop))
             })?
     };
@@ -198,16 +195,16 @@ pub fn run(options: Options) -> anyhow::Result<()> {
             lua::Lua::start(lua::Source::Dir(dir.clone()), options.clone(), wake)
         }))
     });
-    let proxy = event_loop.create_proxy();
+    let proxy = session::Proxy::EventLoop(event_loop.create_proxy());
     let session = if options.pick_remote {
         session::Session::waiting(&options.runtime, proxy)
     } else {
         session::Session::start(location, &options.runtime, proxy)
     };
-    updates::after_opening(event_loop.create_proxy());
+    updates::after_opening(session::Proxy::EventLoop(event_loop.create_proxy()));
     let mut app = app::App::new(
         started,
-        app::Startup { fonts, gpu, launch },
+        Some(app::Startup { fonts, gpu, launch }),
         session,
         options.remote_command,
     );

@@ -1440,6 +1440,54 @@ fn ends_mid_flag(row: &clackatoo_term::Row, continued: bool) -> bool {
     (before + run) % 2 == 1
 }
 
+/// Copies what's drawn in `texture` back from the GPU, once the GPU has
+/// drawn it, and returns its pixels, row by row from the top, four bytes
+/// each, in the texture's format. For drawing offscreen: tests, and
+/// looking at the window without a desktop.
+pub(crate) fn read_back(
+    (device, queue): (&wgpu::Device, &wgpu::Queue),
+    texture: &wgpu::Texture,
+) -> Vec<u8> {
+    let [width, height] = [texture.width(), texture.height()];
+    // Rows of a texture copy must be padded to 256 bytes.
+    let row_bytes = width * 4;
+    let padded = row_bytes.div_ceil(256) * 256;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: u64::from(padded * height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+        },
+        texture.size(),
+    );
+    queue.submit([encoder.finish()]);
+    buffer
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |result| result.expect("map"));
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+    let mapped = buffer.slice(..).get_mapped_range().expect("mapped");
+    // A row at a time: byte by byte is slow without optimisations, and a
+    // big window's frame is millions of them.
+    let mut pixels = Vec::with_capacity((row_bytes * height) as usize);
+    for row in mapped.chunks(padded as usize) {
+        pixels.extend_from_slice(&row[..row_bytes as usize]);
+    }
+    pixels
+}
+
 /// The uniforms, the atlas and its sampler.
 fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

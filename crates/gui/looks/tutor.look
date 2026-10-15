@@ -1,0 +1,9 @@
+# :Tutor, and a lesson.
+size 1400x860
+keys <C-;>:Tutor<CR>
+wait-for Basics
+shot tutor
+type file explorer
+keys <CR>
+wait-for Go to the explorer
+shot tutor-lesson

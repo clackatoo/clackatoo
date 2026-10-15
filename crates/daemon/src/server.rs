@@ -1080,7 +1080,7 @@ impl Daemon {
     /// Writes the shell integration scripts into `dir`, for the shells
     /// this daemon starts from now on. If that fails, they start as they
     /// are.
-    pub(crate) fn install_shell_integration(&mut self, dir: PathBuf) {
+    pub fn install_shell_integration(&mut self, dir: PathBuf) {
         self.config.shell_integration = crate::shell::install(dir)
             .map_err(|err| log::warn!("shells won't mark their commands: {err}"))
             .ok();

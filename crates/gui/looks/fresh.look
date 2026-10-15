@@ -1,0 +1,6 @@
+# A fresh window: one workspace, one tab, one shell, at one and two
+# pixels to a point.
+size 1280x800
+shot fresh
+scale 2
+shot fresh-2x

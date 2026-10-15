@@ -1,0 +1,8 @@
+# The command line, with what it suggests.
+size 1280x800
+keys <C-;>:
+shot command
+type Ex
+shot command-typed
+keys <Tab>
+shot command-tab

@@ -1,0 +1,19 @@
+# A terminal with output: colours, a listing, and a command that failed,
+# which the shell marks as blocks.
+size 1280x800
+file README.md <<END
+# demo
+END
+file src/main.rs <<END
+fn main() {}
+END
+file notes.txt
+shell ls --color=always -p
+shell printf '\e[31mred \e[32mgreen \e[33myellow \e[34mblue \e[35mmagenta \e[36mcyan\e[0m \e[1mbold\e[0m \e[4munderline\e[0m\n'
+shell false
+shell seq 1 3
+wait-for 3
+shot terminal
+# Normal mode: the window's own cursor, and the bottom bar's colour.
+keys <C-;>k
+shot terminal-normal

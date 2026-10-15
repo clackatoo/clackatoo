@@ -1,0 +1,15 @@
+# The finder, <Space>pf, finding the project's files by name.
+size 1400x860
+file Cargo.toml
+file README.md
+file src/main.rs
+file src/lib.rs
+file src/finder/mod.rs
+file src/finder/view.rs
+file src/chrome.rs
+keys <C-;><Space>pf
+wait-for main.rs
+shot finder
+type fin
+wait-for view.rs
+shot finder-query

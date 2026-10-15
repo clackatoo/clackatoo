@@ -1,0 +1,17 @@
+# The top and bottom bars with several workspaces and tabs.
+size 1400x860
+shell echo first
+keys <C-;>:Terminal<CR>
+keys :Terminal<CR>
+keys :ws api<CR>
+keys :Terminal<CR>
+keys :ws docs<CR>
+keys :ws 1<CR>
+keys :1<CR>
+shot bars
+# The mouse over a workspace, and its menu.
+move 120 20
+shot bars-hover
+click 120 20 right
+shot bars-menu
+keys <Esc>

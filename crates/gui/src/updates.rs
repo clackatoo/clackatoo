@@ -15,16 +15,15 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use clackatoo_update::{Source, Version, check};
-use winit::event_loop::EventLoopProxy;
 
-use crate::session::SessionEvent;
+use crate::session::{Proxy, SessionEvent};
 
 /// How long after opening the window looks for a release: long enough for
 /// the config to have set `updatecheck`, and never while it's opening.
 const LOOK_AFTER: Duration = Duration::from_secs(10);
 
 /// Sends [`SessionEvent::UpdateDue`] a while after the window opens.
-pub(crate) fn after_opening(proxy: EventLoopProxy<SessionEvent>) {
+pub(crate) fn after_opening(proxy: Proxy) {
     let started = std::thread::Builder::new()
         .name("update-wait".into())
         .spawn(move || {
@@ -38,7 +37,7 @@ pub(crate) fn after_opening(proxy: EventLoopProxy<SessionEvent>) {
 
 /// Looks for a newer release on a thread of its own, and sends
 /// [`SessionEvent::NewRelease`] if there is one.
-pub(crate) fn look(proxy: EventLoopProxy<SessionEvent>) {
+pub(crate) fn look(proxy: Proxy) {
     let started = std::thread::Builder::new()
         .name("update-check".into())
         .spawn(move || {
@@ -79,7 +78,7 @@ pub(crate) struct Updated {
 
 /// Runs `program update` on a thread of its own, for `asked`, and sends
 /// [`SessionEvent::Updated`] with what came of it.
-pub(crate) fn update(program: PathBuf, asked: Asked, proxy: EventLoopProxy<SessionEvent>) {
+pub(crate) fn update(program: PathBuf, asked: Asked, proxy: Proxy) {
     let started = std::thread::Builder::new()
         .name("update".into())
         .spawn(move || {

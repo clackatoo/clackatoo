@@ -1,0 +1,11 @@
+# Splits: three terminals, one focused.
+size 1400x860
+shell echo left
+keys <C-;>:|<CR>
+keys i
+shell echo right, top
+keys <C-;>:-<CR>
+keys i
+shell echo right, bottom
+wait-for right, bottom
+shot splits

@@ -1,0 +1,5 @@
+# The start page of :Agent: a new chat, and the agent's past sessions.
+size 1400x860
+keys <C-;>:Agent<CR>
+wait-for Fix the parser
+shot agent-start

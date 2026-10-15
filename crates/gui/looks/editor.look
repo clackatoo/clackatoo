@@ -1,0 +1,38 @@
+# An editor with code: syntax colours, from the curly test grammar, and
+# the fake language server's diagnostics (it says every `bad` is wrong).
+size 1400x860
+file project
+file app/main.fk <<END
+fn main(args) {
+    let count = 42;
+    let total = add(count, 8);
+    if ready {
+        print(total, bad);
+    } else {
+        fail(bad);
+    }
+}
+
+fn add(left, right) {
+    sum(left, right);
+}
+END
+file app/data.json <<END
+{
+  "name": "clackatoo",
+  "version": 3,
+  "tags": ["fast", "light"],
+  "ok": true
+}
+END
+open app/main.fk
+wait-for fn main
+sleep 1000
+shot editor
+# The cursor on a `bad`, and what the server says of it.
+keys 5G$hhhK
+sleep 500
+shot editor-hover
+keys <Esc>:|Editor app/data.json<CR>
+wait-for "clackatoo"
+shot editor-split

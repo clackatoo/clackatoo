@@ -1,0 +1,20 @@
+# The tree explorer, and a folder's listing in an editor.
+size 1400x860
+file Cargo.toml
+file README.md
+file src/main.rs
+file src/lib.rs
+file src/ui/bar.rs
+file src/ui/pane.rs
+file tests/look.rs
+keys <C-;><Space>e
+wait-for README.md
+# Open src, then src/ui, under it.
+keys /src<CR>l
+wait-for lib.rs
+keys /ui<CR>l
+wait-for bar.rs
+shot explorer
+keys <C-;>:Editor src<CR>
+wait-for lib.rs
+shot listing

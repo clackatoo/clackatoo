@@ -16,20 +16,12 @@ use crate::screen::Screen;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// The GPU device every test shares, or `None` on machines without one.
-/// It's made once: tests making and dropping devices of their own at the
-/// same time sometimes hung NVIDIA's Vulkan driver.
+/// The GPU device every test shares, or `None` on machines without one:
+/// the one windows drawn offscreen share. It's made once: tests making and
+/// dropping devices of their own at the same time sometimes hung NVIDIA's
+/// Vulkan driver.
 pub(crate) fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    static GPU: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue)>> =
-        std::sync::OnceLock::new();
-    GPU.get_or_init(|| {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .ok()?;
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-    })
-    .clone()
+    crate::app::look::shared_device()
 }
 
 /// Renders `output` played into a terminal of `cols` × `rows`, and returns
@@ -148,42 +140,7 @@ fn draw_with(
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     renderer.render((device, queue), &view, size, picture, fonts);
-
-    // Rows of a texture copy must be padded to 256 bytes.
-    let row_bytes = size[0] * 4;
-    let padded = row_bytes.div_ceil(256) * 256;
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: u64::from(padded * size[1]),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    encoder.copy_texture_to_buffer(
-        texture.as_image_copy(),
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buffer,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(size[1]),
-            },
-        },
-        texture.size(),
-    );
-    queue.submit([encoder.finish()]);
-    buffer
-        .slice(..)
-        .map_async(wgpu::MapMode::Read, |result| result.expect("map"));
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("poll");
-    let mapped = buffer.slice(..).get_mapped_range().expect("mapped");
-    mapped
-        .chunks(padded as usize)
-        .flat_map(|row| &row[..row_bytes as usize])
-        .copied()
-        .collect()
+    crate::render::read_back((device, queue), &texture)
 }
 
 /// Saves an image under `target/gui-snapshots/`, for a person to look at.

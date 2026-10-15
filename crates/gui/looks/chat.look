@@ -1,0 +1,18 @@
+# A chat with the fake agent: messages, a tool's card, and a question
+# asking for permission. Its messages choose what it does: see
+# crates/daemon/examples/fake_agent.rs.
+size 1400x900
+keys <C-;>:Agent claude<CR>
+keys i
+type hello there
+keys <CR>
+wait-for echo: hello there
+shot chat
+type tool
+keys <CR>
+wait-for done
+shot chat-tool
+type ask
+keys <CR>
+wait-for Allow
+shot chat-ask
