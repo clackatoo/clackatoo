@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.30 (2026-10-15)
+
+### Features
+
+- **remote:** :PortForward forwards a port from the window's machine to the daemon's, over the window's QUIC connection (c953783)
+
 ## 2026.10.29 (2026-10-15)
 
 ### Fixes
