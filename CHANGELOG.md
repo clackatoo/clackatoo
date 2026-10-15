@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.37 (2026-10-15)
+
+### Features
+
+- **gui:** crowded bars scroll, and messages keep off the tabs (7d3f0e9)
+
 ## 2026.10.36 (2026-10-15)
 
 ### Features
