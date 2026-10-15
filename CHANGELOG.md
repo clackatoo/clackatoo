@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.10.36 (2026-10-15)
+
+### Features
+
+- **gui:** look at the real window headlessly, from a script, with screenshots and timings (210d4cf)
+
+### Fixes
+
+- **daemon:** wait for a gone peer's last messages by the parser's progress (7079e56)
+- open every tutor lesson, and say a chat waits for you while it asks (0b53366)
+
 ## 2026.10.35 (2026-10-15)
 
 ### Fixes
