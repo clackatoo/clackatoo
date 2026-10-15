@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.34 (2026-10-15)
+
+### Speed
+
+- **daemon:** let what agents and language servers flood in give way to keys (5d9d7c4)
+
 ## 2026.10.33 (2026-10-15)
 
 ### Features
