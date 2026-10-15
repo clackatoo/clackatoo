@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.40 (2026-10-15)
+
+### Features
+
+- **gui:** a real command line, counts in terminal normal mode, and a word for Ctrl+V (698d112)
+
 ## 2026.10.39 (2026-10-15)
 
 ### Fixes
