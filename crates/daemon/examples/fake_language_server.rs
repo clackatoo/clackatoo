@@ -76,6 +76,8 @@
 //! | `--queue-uses FILE` | Holds questions of where a name is used until FILE exists, taking everything else in meanwhile, then answers them in order |
 //! | `--queue-hints FILE` | Holds questions of what to write inline until FILE exists, taking everything else in meanwhile, then answers them in order |
 //! | `--hint-flood` | Answers what to write inline with 10,000 hints with labels of 300 characters, then one whose label has 10,000 parts: more of each than its client looks at |
+//! | `--big-hints FILE` | Answers what to write inline with as many bytes of hints, all at the file's start, as FILE says when asked, in one write |
+//! | `--exit-after-hints` | Exits, as if it crashed, as soon as it has sent its first answer of what to write inline |
 //! | `--refresh-hints` | Asks its client to ask for inlay hints again, fifty times at once, after it's answered the first question of them |
 //! | `--format-error` | Answers formatting a file, or part of one, with an error, `RequestFailed`, as `gcsl lsp` does for a file with a syntax error |
 //! | `--prepare HOW` | Checks a rename first, answering as HOW says: `range` with the word's range, `placeholder` with its range and the word in capitals, `default` leaving it to its client, `error` with an error; and with `null` where there's no word |
@@ -155,6 +157,8 @@ fn main() {
         queue_hints: value("--queue-hints"),
         queued_hints: Vec::new(),
         hint_flood: flag("--hint-flood"),
+        big_hints: value("--big-hints"),
+        exit_after_hints: flag("--exit-after-hints"),
         refresh_hints: flag("--refresh-hints"),
         format_error: flag("--format-error"),
         prepare: value("--prepare"),
@@ -284,6 +288,8 @@ struct Fake {
     /// until `queue_hints` exists.
     queued_hints: Vec<Value>,
     hint_flood: bool,
+    big_hints: Option<String>,
+    exit_after_hints: bool,
     /// It's yet to ask its client to ask for inlay hints again.
     refresh_hints: bool,
     format_error: bool,
@@ -335,6 +341,31 @@ fn read(input: &mut impl BufRead) -> Option<Value> {
     let mut body = vec![0; length?];
     input.read_exact(&mut body).ok()?;
     serde_json::from_slice(&body).ok()
+}
+
+/// Answers `message`, a question of what to write inline, with about as
+/// many bytes of hints as the file at `size` says, all at the file's
+/// start: built as text and sent in one write, so that even a debug build
+/// sends tens of megabytes quickly.
+fn big_hints(message: &Value, size: &str) {
+    let size: usize = (std::fs::read_to_string(size).ok())
+        .and_then(|size| size.trim().parse().ok())
+        .unwrap_or(0);
+    let hint = r#"{"position":{"line":0,"character":0},"label":": Option<HashMap<String, Vec<u8>>>","kind":1,"paddingLeft":false,"paddingRight":true}"#;
+    let mut body = format!(r#"{{"jsonrpc":"2.0","id":{},"result":["#, message["id"]);
+    body.reserve(size + hint.len());
+    for at in 0..=size / (hint.len() + 1) {
+        if at > 0 {
+            body.push(',');
+        }
+        body.push_str(hint);
+    }
+    body.push_str("]}");
+    let mut framed = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+    framed.extend_from_slice(body.as_bytes());
+    let mut out = std::io::stdout().lock();
+    out.write_all(&framed).unwrap();
+    out.flush().unwrap();
 }
 
 fn send(message: &Value) {
@@ -520,6 +551,12 @@ impl Fake {
                     self.queued_uses.push(answer);
                 } else {
                     send(&answer);
+                }
+            }
+            "textDocument/inlayHint" if self.big_hints.is_some() => {
+                big_hints(message, self.big_hints.as_deref().unwrap_or_default());
+                if self.exit_after_hints {
+                    std::process::exit(1);
                 }
             }
             "textDocument/inlayHint" => {

@@ -151,9 +151,9 @@ type Ended = (String, Result<(), String>);
 
 impl Agents {
     /// Whether any agent's read budget ran out with more of its output
-    /// or stderr waiting.
+    /// or stderr waiting, or the parser's thread has parsed what one sent.
     pub(super) fn unread(&self) -> bool {
-        (self.running.values()).any(|slot| slot.unread || slot.unread_errors)
+        (self.running.values()).any(|slot| slot.unread || slot.unread_errors || slot.agent.parsed())
     }
 
     /// The agent called `name`, if it's running.
@@ -588,7 +588,7 @@ impl Daemon {
         spec: AgentSpec,
         command: Vec<OsString>,
     ) -> io::Result<AgentId> {
-        let agent = Agent::start(&spec.name, &command)?;
+        let agent = Agent::start(&spec.name, &command, &self.parser)?;
         let id = AgentId(self.agents.next);
         self.agents.next += 1;
         let mut tokens: Vec<Token> = Vec::new();
@@ -639,7 +639,7 @@ impl Daemon {
             Pipe::Exit => {
                 // What it said last comes first.
                 self.read_agent(id);
-                self.agent_gone(id);
+                self.agent_ended(id);
             }
         }
     }
@@ -713,16 +713,54 @@ impl Daemon {
             return;
         };
         if slot.agent.has_outgoing() && slot.agent.flush().is_err() {
+            self.agent_ended(id);
+        }
+    }
+
+    /// Agent `id` has gone by itself: it's let go once what it sent last
+    /// has been parsed and taken in, or once that has taken too long (see
+    /// [`crate::rpc::Inbox::gone`]), so its last words still reach its
+    /// chats.
+    fn agent_ended(&mut self, id: AgentId) {
+        let Some(slot) = self.agents.running.get_mut(&id) else {
+            return;
+        };
+        if slot.agent.gone() {
             self.agent_gone(id);
+        } else {
+            // Read again once the rest has been parsed, not before.
+            slot.unread = false;
+        }
+    }
+
+    /// When the next agent that has gone is let go however much of what
+    /// it sent is still being parsed, if one is waiting for that.
+    pub(super) fn next_gone_agent_due(&self) -> Option<Instant> {
+        (self.agents.running.values())
+            .filter_map(|slot| slot.agent.gone_due())
+            .min()
+    }
+
+    /// Lets go the agents that went whose last messages have taken too
+    /// long to parse.
+    pub(super) fn let_gone_agents_go(&mut self) {
+        let now = Instant::now();
+        let due: Vec<AgentId> = (self.agents.running.iter())
+            .filter(|(_, slot)| slot.agent.gone_due().is_some_and(|due| due <= now))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in due {
+            self.agent_ended(id);
         }
     }
 
     /// Reads what every agent whose read budget ran out has sent since,
-    /// or written to stderr.
+    /// or written to stderr, and what the parser's thread has parsed of
+    /// what they sent.
     pub(super) fn read_agents_unread(&mut self) {
         let unread: Vec<(AgentId, bool, bool)> = (self.agents.running.iter())
-            .filter(|(_, slot)| slot.unread || slot.unread_errors)
-            .map(|(&id, slot)| (id, slot.unread, slot.unread_errors))
+            .map(|(&id, slot)| (id, slot.unread || slot.agent.parsed(), slot.unread_errors))
+            .filter(|&(_, output, errors)| output || errors)
             .collect();
         for (id, output, errors) in unread {
             if output {
@@ -759,8 +797,9 @@ impl Daemon {
             self.receive_from_agent(id, &name, message);
         }
         self.agents.incoming = incoming;
-        if read.is_err() {
-            self.agent_gone(id);
+        let slot = self.agents.running.get(&id);
+        if read.is_err() || slot.is_some_and(|slot| slot.agent.has_gone()) {
+            self.agent_ended(id);
         } else {
             self.flush_agent(id);
         }

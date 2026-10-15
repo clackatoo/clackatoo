@@ -17,12 +17,12 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::{Content, Done, Event, Found, PaneId};
 use clackatoo_text::Rope;
 use mio::Token;
-use serde_json::Value;
 
 use super::Daemon;
 use super::language::{MAX_SYMBOLS, Opened, ServerId};
 use crate::find::{Job, Project};
 use crate::lsp;
+use crate::rpc::Heavy;
 
 /// A client's search for symbols, asked of a server and waiting for its
 /// answer.
@@ -162,7 +162,7 @@ impl Daemon {
         &mut self,
         server: ServerId,
         request: u64,
-        result: Result<Value, String>,
+        result: Result<Heavy, String>,
     ) {
         let Some(index) = (self.servers.symbol_searches.iter())
             .position(|search| search.server == server && search.request == request)

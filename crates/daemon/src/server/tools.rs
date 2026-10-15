@@ -86,6 +86,9 @@ pub(super) struct Tools {
     /// The connections with more of the agent's messages waiting than
     /// one read took.
     unread: Vec<Token>,
+    /// The connections with messages on the parser's thread, read again
+    /// once they've been parsed.
+    parsing: Vec<Token>,
     /// The pane each chat opened last, by chat, under which the next pane
     /// it opens goes.
     sides: BTreeMap<TerminalId, PaneId>,
@@ -232,6 +235,7 @@ impl Daemon {
             chat,
             client.outgoing,
             (instructions, browser),
+            &self.parser,
         )));
         log::info!("chat {chat}: its agent's tools are served");
         self.flush_tools(new);
@@ -415,6 +419,9 @@ impl Daemon {
         if more && !self.tools.unread.contains(&token) {
             self.tools.unread.push(token);
         }
+        if connection.parsing() && !self.tools.parsing.contains(&token) {
+            self.tools.parsing.push(token);
+        }
         for message in incoming {
             match message {
                 Incoming::Call { id, tool } => self.call_tool(token, chat, id, tool),
@@ -424,14 +431,34 @@ impl Daemon {
         self.flush_tools(token);
     }
 
-    /// Whether an agent sent its tools more than one read took.
+    /// Whether an agent sent its tools more than one read took, or what
+    /// it sent has been parsed on the parser's thread.
     pub(super) fn tools_unread(&self) -> bool {
-        !self.tools.unread.is_empty()
+        !self.tools.unread.is_empty() || self.tools.parsing.iter().any(|&token| self.parsed(token))
     }
 
-    /// Reads on from where the last read of each connection stopped.
+    /// Whether the connection at `token` has messages the parser's thread
+    /// has parsed, to be read.
+    fn parsed(&self, token: Token) -> bool {
+        matches!(self.sources.get(token.0), Some(Source::Tools(connection)) if connection.parsed())
+    }
+
+    /// Reads on from where the last read of each connection stopped, and
+    /// takes what the parser's thread has parsed.
     pub(super) fn read_tools_unread(&mut self) {
+        let mut parsing = std::mem::take(&mut self.tools.parsing);
+        parsing.retain(|&token| match self.sources.get(token.0) {
+            Some(Source::Tools(connection)) => connection.parsing(),
+            _ => false,
+        });
+        let parsed: Vec<Token> = (parsing.iter().copied())
+            .filter(|&token| self.parsed(token))
+            .collect();
+        self.tools.parsing = parsing;
         for token in std::mem::take(&mut self.tools.unread) {
+            self.read_tools(token);
+        }
+        for token in parsed {
             self.read_tools(token);
         }
     }
@@ -449,7 +476,9 @@ impl Daemon {
             &mut connection.outgoing,
             &mut connection.wants_writable,
         );
-        if written.is_err() || (connection.finished && connection.outgoing.is_empty()) {
+        if written.is_err()
+            || (connection.finished && connection.outgoing.is_empty() && connection.let_go())
+        {
             self.drop_tools(token);
         }
     }
@@ -1390,13 +1419,30 @@ impl Daemon {
             | Wait::Boards { due, .. } => Some(due),
             Wait::Permission { .. } | Wait::Browser { .. } => None,
         });
-        typing.chain(waits).min()
+        let finished =
+            (self.tools.parsing.iter()).filter_map(|token| match self.sources.get(token.0) {
+                Some(Source::Tools(connection)) => connection.gone_due(),
+                _ => None,
+            });
+        typing.chain(waits).chain(finished).min()
     }
 
     /// Types commands whose shells never showed a prompt, and answers
     /// waits that have timed out with what their terminals show.
     pub(super) fn time_out_tools(&mut self) {
         let now = Instant::now();
+        // Finished connections whose last messages took too long to parse.
+        let finished: Vec<Token> = (self.tools.parsing.iter().copied())
+            .filter(|token| match self.sources.get(token.0) {
+                Some(Source::Tools(connection)) => {
+                    connection.gone_due().is_some_and(|due| due <= now)
+                }
+                _ => false,
+            })
+            .collect();
+        for token in finished {
+            self.flush_tools(token);
+        }
         let late: Vec<TerminalId> = (self.tools.commanded.iter())
             .filter(|(_, commanded)| {
                 commanded

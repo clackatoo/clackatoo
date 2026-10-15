@@ -83,6 +83,12 @@ impl Daemon {
     /// LSP asks, while the loop goes on. A server not ready yet, which
     /// may be told nothing else, is told to exit at once.
     pub(super) fn stop_server(&mut self, id: ServerId) {
+        // One gone already, waiting only for what it sent last to be
+        // parsed, can be asked nothing, and its exit was heard: it's let
+        // go, to be reaped as an orphan, and not started again.
+        if (self.servers.slots.get(&id)).is_some_and(|slot| slot.server.has_gone()) {
+            return self.let_server_go(id);
+        }
         let Some(slot) = self.forget_server(id) else {
             return;
         };
@@ -158,16 +164,22 @@ impl Daemon {
     }
 
     /// Whether a server stopping has more output or stderr waiting than
-    /// its read budget let be read.
+    /// its read budget let be read, or the parser's thread has parsed what
+    /// it sent, as its answer to `shutdown` may be behind a big message.
     pub(super) fn stopping_unread(&self) -> bool {
-        (self.servers.stopping.values()).any(|stopping| stopping.unread || stopping.unread_errors)
+        (self.servers.stopping.values())
+            .any(|stopping| stopping.unread || stopping.unread_errors || stopping.server.parsed())
     }
 
-    /// Reads again from servers stopping whose read budget ran out.
+    /// Reads again from servers stopping whose read budget ran out, or
+    /// whose messages have been parsed.
     pub(super) fn read_stopping_unread(&mut self) {
         let unread: Vec<(ServerId, bool, bool)> = (self.servers.stopping.iter())
-            .filter(|(_, stopping)| stopping.unread || stopping.unread_errors)
-            .map(|(&id, stopping)| (id, stopping.unread, stopping.unread_errors))
+            .map(|(&id, stopping)| {
+                let output = stopping.unread || stopping.server.parsed();
+                (id, output, stopping.unread_errors)
+            })
+            .filter(|&(_, output, errors)| output || errors)
             .collect();
         for (id, output, errors) in unread {
             if output {
@@ -423,6 +435,32 @@ pub(super) mod tests {
             assert!(Instant::now() < deadline, "it never came");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn a_server_gone_while_its_last_answer_is_parsed_is_let_go_when_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let size = root.join("size");
+        // Long enough to parse that it's still being parsed when the
+        // server is seen to have gone.
+        std::fs::write(&size, "30000000").unwrap();
+        let size = size.display().to_string();
+        let args = ["--big-hints", &size, "--exit-after-hints"];
+        let (mut daemon, id) = daemon_with_fake(&root, &args);
+        let slot = daemon.servers.slots.get_mut(&id).unwrap();
+        let text = clackatoo_text::Rope::from_str("bad\n");
+        let query = clackatoo_protocol::Query::InlayHints { end: 3 };
+        slot.server.ask(query, &root.join("app/a.fk"), &text, 0);
+        slot.server.flush().unwrap();
+        read_servers_until(&mut daemon, |daemon| {
+            (daemon.servers.slots.get(&id)).is_some_and(|slot| slot.server.has_gone())
+        });
+        // Its exit was heard already: waiting for it in `stopping` would
+        // wait for good, and kill a zombie at the end.
+        daemon.stop_server(id);
+        assert!(daemon.servers.stopping.is_empty());
+        assert!(!daemon.servers.slots.contains_key(&id));
     }
 
     #[test]

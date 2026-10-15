@@ -27,7 +27,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::pty::Process;
-use crate::rpc::{Framing, Message, Peer};
+use crate::rpc::{Framing, Heavy, Message, Parser, Peer};
 
 /// How columns are counted: in UTF-8 bytes, which clackatoo uses and
 /// servers such as rust-analyzer can, or in UTF-16 code units, which every
@@ -106,7 +106,7 @@ pub(crate) enum Incoming {
     /// `id`, or why there's none.
     Answer {
         id: u64,
-        result: Result<Value, String>,
+        result: Result<Heavy, String>,
     },
     /// The request numbered `id` wasn't answered because the text changed
     /// while the server worked on it, as rust-analyzer says while it's
@@ -119,7 +119,7 @@ pub(crate) enum Incoming {
     /// running a command: its request numbered `id`, which
     /// [`answer_request`](LanguageServer::answer_request) answers once the
     /// edit has been made, or hasn't.
-    ApplyEdit { id: Value, edit: Value },
+    ApplyEdit { id: Value, edit: Heavy },
     /// It asks to hear of changes on disk to the files `watchers`, a
     /// `DidChangeWatchedFilesRegistrationOptions`, says (see
     /// [`watchers`]), until it asks to hear no more under `id`.
@@ -336,14 +336,16 @@ struct Offers {
 impl LanguageServer {
     /// Starts `command` for the project in `root`, and introduces the
     /// daemon to it. Every message either way is written to the file at
-    /// `trace`, if given (see [`Peer::trace_to`]).
+    /// `trace`, if given (see [`Peer::trace_to`]). Its big messages are
+    /// parsed by `parser`.
     pub(crate) fn start(
         name: &str,
         command: &[OsString],
         root: &Path,
         trace: Option<&Path>,
+        parser: &Parser,
     ) -> io::Result<Self> {
-        let mut peer = Peer::start(name, command, Some(root), Framing::Headers)?;
+        let mut peer = Peer::start(name, command, Some(root), Framing::Headers, parser)?;
         if let Some(trace) = trace {
             peer.trace_to(trace);
         }
@@ -842,6 +844,29 @@ impl LanguageServer {
         self.peer.flush()
     }
 
+    /// Whether messages it sent have been parsed, for [`read`](Self::read)
+    /// to take.
+    pub(crate) fn parsed(&self) -> bool {
+        self.peer.parsed()
+    }
+
+    /// Notes that it has gone. Returns whether to let it go now, or wait
+    /// for what it sent last (see [`crate::rpc::Inbox::gone`]).
+    pub(crate) fn gone(&mut self) -> bool {
+        self.peer.gone()
+    }
+
+    /// Whether it has been found to have gone.
+    pub(crate) fn has_gone(&self) -> bool {
+        self.peer.has_gone()
+    }
+
+    /// When it's let go, gone, however much of what it sent is still
+    /// being parsed, if it's waiting for that.
+    pub(crate) fn gone_due(&self) -> Option<std::time::Instant> {
+        self.peer.gone_due()
+    }
+
     /// Whether messages are waiting for the pipe to take them.
     pub(crate) fn has_outgoing(&self) -> bool {
         self.peer.has_outgoing()
@@ -893,7 +918,7 @@ impl LanguageServer {
         self.peer.group()
     }
 
-    fn receive(&mut self, message: Message, incoming: &mut Vec<Incoming>) {
+    fn receive(&mut self, mut message: Message, incoming: &mut Vec<Incoming>) {
         match (message.method, message.id) {
             (Some(method), None) => match method.as_str() {
                 "textDocument/publishDiagnostics" => {
@@ -911,7 +936,8 @@ impl LanguageServer {
                     // Answered once it's been made, or hasn't, which may
                     // take a while, as files not open are written.
                     "workspace/applyEdit" => {
-                        let edit = message.params.get("edit").cloned().unwrap_or_default();
+                        let edit = message.params.get_mut("edit").map(Value::take);
+                        let edit = Heavy::new(edit.unwrap_or_default(), message.trash);
                         incoming.push(Incoming::ApplyEdit { id, edit });
                         return;
                     }
@@ -967,7 +993,9 @@ impl LanguageServer {
                                 return;
                             }
                             (_, Some(error)) => Err(error.message),
-                            (result, None) => Ok(result.unwrap_or(Value::Null)),
+                            (result, None) => {
+                                Ok(Heavy::new(result.unwrap_or(Value::Null), message.trash))
+                            }
                         };
                         incoming.push(Incoming::Answer { id, result });
                     }

@@ -32,6 +32,7 @@ use super::watched::{Walking, Wanted};
 use super::{Daemon, OUTPUT_BUDGET, Orphan, Source};
 use crate::lsp::{self, Incoming, LanguageServer, Prepared, Reported};
 use crate::pty::Process;
+use crate::rpc::Heavy;
 
 /// Identifies a language server within one daemon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -502,7 +503,7 @@ impl Daemon {
             args[0] = program.into_os_string();
         }
         let trace = self.config.lsp_trace.as_deref();
-        let server = match LanguageServer::start(name, &args, &root, trace) {
+        let server = match LanguageServer::start(name, &args, &root, trace, &self.parser) {
             Ok(server) => server,
             Err(err) => {
                 log::warn!("{name} couldn't start for {}: {err}", root.display());
@@ -749,7 +750,7 @@ impl Daemon {
             Pipe::Input => self.flush_server(id),
             Pipe::Exit => {
                 self.read_server(id);
-                self.server_gone(id);
+                self.server_ended(id);
             }
         }
     }
@@ -760,7 +761,44 @@ impl Daemon {
             return;
         };
         if slot.server.has_outgoing() && slot.server.flush().is_err() {
+            self.server_ended(id);
+        }
+    }
+
+    /// Server `id` has gone by itself: it's let go once what it sent last
+    /// has been parsed and taken in, or once that has taken too long (see
+    /// [`crate::rpc::Inbox::gone`]), so an answer it sent just before it
+    /// went still comes.
+    fn server_ended(&mut self, id: ServerId) {
+        let Some(slot) = self.servers.slots.get_mut(&id) else {
+            return;
+        };
+        if slot.server.gone() {
             self.server_gone(id);
+        } else {
+            // Read again once the rest has been parsed, not before.
+            slot.unread = false;
+        }
+    }
+
+    /// When the next server that has gone is let go however much of what
+    /// it sent is still being parsed, if one is waiting for that.
+    pub(super) fn next_gone_server_due(&self) -> Option<Instant> {
+        (self.servers.slots.values())
+            .filter_map(|slot| slot.server.gone_due())
+            .min()
+    }
+
+    /// Lets go the servers that went whose last messages have taken too
+    /// long to parse.
+    pub(super) fn let_gone_servers_go(&mut self) {
+        let now = Instant::now();
+        let due: Vec<ServerId> = (self.servers.slots.iter())
+            .filter(|(_, slot)| slot.server.gone_due().is_some_and(|due| due <= now))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in due {
+            self.server_ended(id);
         }
     }
 
@@ -779,8 +817,9 @@ impl Daemon {
         for message in incoming {
             self.receive_from_server(id, message);
         }
-        if read.is_err() {
-            self.server_gone(id);
+        let slot = self.servers.slots.get(&id);
+        if read.is_err() || slot.is_some_and(|slot| slot.server.has_gone()) {
+            self.server_ended(id);
         } else {
             self.flush_server(id);
         }
@@ -794,12 +833,13 @@ impl Daemon {
         }
     }
 
-    /// Reads again from servers whose read budget ran out, those stopping
+    /// Reads again from servers whose read budget ran out, or whose
+    /// messages have been parsed on the parser's thread, those stopping
     /// too.
     pub(super) fn read_servers_unread(&mut self) {
         let unread: Vec<(ServerId, bool, bool)> = (self.servers.slots.iter())
-            .filter(|(_, slot)| slot.unread || slot.unread_errors)
-            .map(|(&id, slot)| (id, slot.unread, slot.unread_errors))
+            .map(|(&id, slot)| (id, slot.unread || slot.server.parsed(), slot.unread_errors))
+            .filter(|&(_, output, errors)| output || errors)
             .collect();
         for (id, output, errors) in unread {
             if output {
@@ -812,9 +852,11 @@ impl Daemon {
         self.read_stopping_unread();
     }
 
-    /// Whether a server's read budget ran out with more waiting.
+    /// Whether a server's read budget ran out with more waiting, or the
+    /// parser's thread has parsed what one sent.
     pub(super) fn servers_unread(&self) -> bool {
-        (self.servers.slots.values()).any(|slot| slot.unread || slot.unread_errors)
+        (self.servers.slots.values())
+            .any(|slot| slot.unread || slot.unread_errors || slot.server.parsed())
             || self.stopping_unread()
     }
 
@@ -1176,7 +1218,7 @@ impl Daemon {
         clippy::too_many_lines,
         reason = "an arm for each kind of question, most short"
     )]
-    fn answered(&mut self, server: ServerId, request: u64, result: Result<Value, String>) {
+    fn answered(&mut self, server: ServerId, request: u64, result: Result<Heavy, String>) {
         let Some(index) = (self.servers.asked.iter())
             .position(|asked| asked.server == server && asked.request == request)
         else {
@@ -1240,10 +1282,13 @@ impl Daemon {
                 },
             ) => {
                 let client = (asked.token, asked.buffer, asked.id);
+                let (value, trash) = value.into_parts();
                 let Some(action) = lsp::resolved_action(action, value) else {
                     let why = format!("{title}: its language server couldn't say what it does");
                     return self.answer_client(client, Answer::Failed(why));
                 };
+                // Freed off the loop, if it came in a big message.
+                let action = Heavy::new(action, trash);
                 return self.do_action(server, client, &action, before);
             }
             (Ok(_), Asking::Command { title, files }) => Answer::Acted {
@@ -1480,11 +1525,18 @@ impl Daemon {
         &mut self,
         server: ServerId,
         asked: &Asked,
-        value: Value,
+        value: Heavy,
         before: Vec<Before>,
     ) -> Answer {
-        let actions = lsp::code_actions(value);
-        let (shown, raw): (Vec<_>, Vec<_>) = actions.into_iter().take(MAX_ACTIONS).unzip();
+        let (value, trash) = value.into_parts();
+        let mut actions = lsp::code_actions(value);
+        if actions.len() > MAX_ACTIONS {
+            let left = actions.split_off(MAX_ACTIONS);
+            if let Some(trash) = trash {
+                trash.throw(left);
+            }
+        }
+        let (shown, raw): (Vec<_>, Vec<_>) = actions.into_iter().unzip();
         let offered = &mut self.servers.offered;
         offered.retain(|offered| offered.token != asked.token || offered.buffer != asked.buffer);
         offered.push(Offered {
@@ -1756,7 +1808,7 @@ impl Daemon {
     /// what `asked` asked: their places moved along with edits made while
     /// it thought, as many as are passed on. They're kept, as sent, to be
     /// resolved.
-    fn completions(&mut self, server: ServerId, asked: &Asked, value: Value) -> Answer {
+    fn completions(&mut self, server: ServerId, asked: &Asked, value: Heavy) -> Answer {
         let (Some(encoding), Some(slot)) = (
             self.server_encoding(server),
             self.buffers.get(&asked.buffer),
@@ -1774,6 +1826,7 @@ impl Daemon {
                 .fold(byte, |byte, edit| edit.map(byte, Bias::Before))
                 .min(len)
         };
+        let (value, trash) = value.into_parts();
         let (raw, mut incomplete) = lsp::completion_items(value);
         let mut read: Vec<(lsp::Completion, Value)> = (raw.into_iter())
             .filter_map(|item| Some((lsp::completion(&item)?, item)))
@@ -1782,7 +1835,10 @@ impl Daemon {
             read.sort_by_cached_key(|(item, _)| {
                 item.sort.clone().unwrap_or_else(|| item.label.clone())
             });
-            read.truncate(MAX_COMPLETIONS);
+            let left = read.split_off(MAX_COMPLETIONS);
+            if let Some(trash) = trash {
+                trash.throw(left);
+            }
             incomplete = true;
         }
         let mut items = Vec::with_capacity(read.len());
@@ -1973,7 +2029,7 @@ impl Daemon {
 
     /// Lets server `id` go, as it has gone by itself, and watches its
     /// process until it exits, if it hasn't.
-    fn let_server_go(&mut self, id: ServerId) {
+    pub(super) fn let_server_go(&mut self, id: ServerId) {
         let Some(slot) = self.forget_server(id) else {
             return;
         };

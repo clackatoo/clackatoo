@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 
 use crate::browser::Act;
 use crate::client::{ClientError, agree, receive};
-use crate::rpc::{self, Framing, Message};
+use crate::rpc::{self, Framing, Inbox, Message, Parser};
 
 /// What the agent knows the tools by: Claude Code calls them
 /// `mcp__clackatoo__open_file` and so on.
@@ -277,8 +277,8 @@ pub(crate) struct Connection {
     pub(crate) stream: UnixStream,
     /// The chat whose agent it serves.
     pub(crate) chat: TerminalId,
-    /// What's been read of a message not yet whole.
-    incoming: Vec<u8>,
+    /// What's been read and not yet taken.
+    incoming: Inbox,
     /// Encoded messages not yet written.
     pub(crate) outgoing: Vec<u8>,
     pub(crate) wants_writable: bool,
@@ -296,17 +296,19 @@ impl Connection {
     /// Serves the chat `chat`'s tools on `stream`, starting with
     /// `outgoing`, the answer that made it one, and whatever followed it.
     /// The agent is told `instructions` about them.
-    /// The browser's tools are listed if `browser`.
+    /// The browser's tools are listed if `browser`. Big messages are
+    /// parsed by `parser`.
     pub(crate) fn new(
         stream: UnixStream,
         chat: TerminalId,
         outgoing: Vec<u8>,
         (instructions, browser): (String, bool),
+        parser: &Parser,
     ) -> Self {
         Self {
             stream,
             chat,
-            incoming: Vec::new(),
+            incoming: Inbox::new(Framing::Lines, parser),
             outgoing,
             wants_writable: false,
             finished: false,
@@ -325,15 +327,22 @@ impl Connection {
         }
     }
 
-    /// Reads what the agent sent, up to [`READ_BUDGET`] bytes, answering
-    /// what needs nothing of the daemon, and puts the rest in `incoming`.
-    /// Returns whether more may be waiting, as when the budget ran out.
+    /// Takes what the parser's thread has parsed of what the agent sent,
+    /// then reads on, up to [`READ_BUDGET`] bytes, answering what needs
+    /// nothing of the daemon, and puts the rest in `incoming`. Returns
+    /// whether more may be waiting, as when the budget ran out. Nothing is
+    /// read while the parser's thread is too far behind: once it catches
+    /// up, [`parsed`](Self::parsed) says so.
     pub(crate) fn read(&mut self, buffer: &mut [u8], incoming: &mut Vec<Incoming>) -> bool {
         let mut messages = Vec::new();
+        self.incoming.take(&mut messages);
         let mut total = 0;
         let more = loop {
             if total >= READ_BUDGET {
                 break true;
+            }
+            if self.incoming.full() {
+                break false;
             }
             match self.stream.read(buffer) {
                 Ok(0) => {
@@ -342,10 +351,9 @@ impl Connection {
                 }
                 Ok(n) => {
                     total += n;
-                    self.incoming.extend_from_slice(&buffer[..n]);
                     let name = "agent's tools";
-                    let framing = Framing::Lines;
-                    if rpc::unframe(name, framing, &mut self.incoming, &mut messages).is_err() {
+                    let pushed = (self.incoming).push(name, &buffer[..n], &mut messages, |_| {});
+                    if pushed.is_err() {
                         self.finished = true;
                         break false;
                     }
@@ -368,6 +376,30 @@ impl Connection {
         more && !self.finished
     }
 
+    /// Whether the parser's thread has parsed messages the agent sent,
+    /// for [`read`](Self::read) to take.
+    pub(crate) fn parsed(&self) -> bool {
+        self.incoming.parsed()
+    }
+
+    /// Whether messages the agent sent are with the parser's thread.
+    pub(crate) fn parsing(&self) -> bool {
+        self.incoming.parsing()
+    }
+
+    /// Whether the connection, finished, can be dropped: once what the
+    /// agent sent last has been parsed and taken in, or once that's taken
+    /// too long (see [`rpc::Inbox::gone`]).
+    pub(crate) fn let_go(&mut self) -> bool {
+        self.incoming.gone()
+    }
+
+    /// When the connection, finished, is dropped however much of what the
+    /// agent sent is still being parsed, if it's waiting for that.
+    pub(crate) fn gone_due(&self) -> Option<std::time::Instant> {
+        self.incoming.gone_due()
+    }
+
     fn receive(&mut self, message: Message, incoming: &mut Vec<Incoming>) {
         let (Some(method), id) = (message.method, message.id) else {
             // An answer: the server asks the agent nothing.
@@ -382,6 +414,10 @@ impl Connection {
             // `notifications/initialized`, and others, need nothing.
             return;
         };
+        // Too long to read (see `rpc::Inbox::refuse`): refused.
+        if let Some(error) = message.error {
+            return self.fail(&id, error.code, &error.message);
+        }
         match method.as_str() {
             "initialize" => {
                 let asked = message.params["protocolVersion"].as_str();
@@ -1661,10 +1697,51 @@ mod tests {
     }
 
     #[test]
+    fn a_call_too_long_to_read_is_refused() {
+        let (ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        ours.set_nonblocking(true).unwrap();
+        let ours = UnixStream::from_std(ours);
+        let parser = rpc::Parser::idle();
+        let info = (String::new(), false);
+        let mut connection = Connection::new(ours, TerminalId(1), Vec::new(), info, &parser);
+        let start = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"run","arguments":{"command":""#;
+        let writing = std::thread::spawn(move || {
+            use std::io::Write as _;
+            theirs.write_all(start.as_bytes()).unwrap();
+            let chunk = vec![b'x'; 1024 * 1024];
+            for _ in 0..65 {
+                theirs.write_all(&chunk).unwrap();
+            }
+            theirs.write_all(b"\n").unwrap();
+            theirs
+        });
+        let mut buffer = vec![0; 64 * 1024];
+        let mut incoming = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_mins(1);
+        while connection.outgoing.is_empty() {
+            assert!(std::time::Instant::now() < deadline, "never answered");
+            connection.read(&mut buffer, &mut incoming);
+        }
+        let _theirs = writing.join().unwrap();
+        assert!(incoming.is_empty(), "never called");
+        let answer: Value = serde_json::from_slice(connection.outgoing.trim_ascii()).unwrap();
+        assert_eq!(answer["id"], 3);
+        assert_eq!(answer["error"]["code"], -32600);
+        let why = answer["error"]["message"].as_str().unwrap();
+        assert!(why.starts_with("a message of 68"), "{why}");
+    }
+
+    #[test]
     fn an_agent_that_stops_reading_loses_its_connection() {
         let (ours, _theirs) = UnixStream::pair().unwrap();
-        let mut connection =
-            Connection::new(ours, TerminalId(1), Vec::new(), (String::new(), false));
+        let parser = rpc::Parser::idle();
+        let mut connection = Connection::new(
+            ours,
+            TerminalId(1),
+            Vec::new(),
+            (String::new(), false),
+            &parser,
+        );
         let long = "x".repeat(1024 * 1024);
         for id in 0..8 {
             connection.answer(&json!(id), Ok(long.clone()));

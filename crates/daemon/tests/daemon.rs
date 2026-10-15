@@ -6233,6 +6233,148 @@ fn a_flood_of_inlay_hints_is_cut_to_a_few_screens_of_short_labels() {
     assert!(hints.iter().all(|hint| hint.label == cut), "{:?}", hints[0]);
 }
 
+/// A daemon whose fake language server answers what to write inline with
+/// as many bytes as the file `size` in its directory says, a project open
+/// in it, and a terminal in a client of its own that echoes each key, in
+/// raw mode, ready for [`BigHints::worst_echo_while_hinting`].
+struct BigHints {
+    daemon: TestDaemon,
+    asker: Option<Client>,
+    buffer: BufferId,
+    typing: Client,
+    terminal: TerminalId,
+    view: View,
+    letter: u8,
+}
+
+impl BigHints {
+    fn start() -> Self {
+        let daemon = with_fake_language_server(|dir| {
+            vec![
+                "--big-hints".to_owned(),
+                dir.join("size").display().to_string(),
+            ]
+        });
+        let (asker, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+        let mut typing = daemon.client();
+        let terminal = spawn(
+            &mut typing,
+            &["sh", "-c", "stty raw -echo; printf ready; exec cat"],
+        );
+        wait_for_screen(&mut typing, terminal, |text| text.starts_with("ready"));
+        let view = attach(&mut typing, terminal);
+        typing.frame_done(terminal).unwrap();
+        Self {
+            daemon,
+            asker: Some(asker),
+            buffer,
+            typing,
+            terminal,
+            view,
+            letter: b'a',
+        }
+    }
+
+    /// Types a letter, back at the line's start, and waits for its echo.
+    fn echo(&mut self) -> Duration {
+        let started = Instant::now();
+        let letter = self.letter;
+        self.letter = if letter == b'z' { b'a' } else { letter + 1 };
+        self.typing
+            .send_input(self.terminal, &[b'\r', letter])
+            .unwrap();
+        loop {
+            self.view
+                .apply(next_update(&mut self.typing, self.terminal));
+            self.typing.frame_done(self.terminal).unwrap();
+            if screen_text(&self.view).starts_with(char::from(letter)) {
+                return started.elapsed();
+            }
+        }
+    }
+
+    /// The longest a key took to echo while the server's answer of `size`
+    /// bytes to the question numbered `id` was on its way: keys are typed
+    /// one after another, from asking until the answer comes.
+    fn worst_echo_while_hinting(&mut self, size: usize, id: u64) -> Duration {
+        std::fs::write(self.daemon.dir.path().join("size"), size.to_string()).unwrap();
+        let mut asker = self.asker.take().unwrap();
+        let buffer = self.buffer;
+        let asking = std::thread::spawn(move || {
+            ask_hints(&mut asker, buffer, id, (0, 3));
+            let (answered, answer) = next_answer(&mut asker);
+            assert_eq!(answered, id);
+            assert!(matches!(answer, Answer::InlayHints { .. }), "{answer:?}");
+            asker
+        });
+        let mut worst = Duration::ZERO;
+        while !asking.is_finished() {
+            worst = worst.max(self.echo());
+        }
+        self.asker = Some(asking.join().unwrap());
+        worst
+    }
+}
+
+#[test]
+fn keys_echo_at_once_while_a_language_server_sends_a_huge_answer() {
+    let mut hints = BigHints::start();
+    // A small answer, and one sixteen times bigger, twice each, the better
+    // of each pair kept, so one hiccup on a busy machine doesn't count.
+    // Parsed on the loop, the bigger held every key about sixteen times
+    // longer: in a debug build about 0.1 s against 1.6, in a release build
+    // about 12 ms against 190. Parsed off it, a few milliseconds each in a
+    // release build, a dozen in a debug one.
+    let small = (hints.worst_echo_while_hinting(2_000_000, 1))
+        .min(hints.worst_echo_while_hinting(2_000_000, 2));
+    let big = (hints.worst_echo_while_hinting(32_000_000, 3))
+        .min(hints.worst_echo_while_hinting(32_000_000, 4));
+    // What's compared is how the wait grows, not how long it is: a busy
+    // machine may hold any key a while, but not sixteen times as long for
+    // a bigger message. The floor is well above a scheduler's stall on a
+    // busy machine, and four times it well below what a release build
+    // waited on the loop, so the test fails in either build.
+    let allowed = small.max(Duration::from_millis(25)) * 4;
+    assert!(big < allowed, "{small:?} for 2 MB, {big:?} for 32");
+}
+
+#[test]
+fn a_huge_answer_sent_just_before_its_server_stops_still_comes() {
+    let daemon = with_fake_language_server(|dir| {
+        vec![
+            "--big-hints".to_owned(),
+            dir.join("size").display().to_string(),
+            "--exit-after-hints".to_owned(),
+        ]
+    });
+    std::fs::write(daemon.dir.path().join("size"), "2000000").unwrap();
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    // It's still being parsed when the server is seen to have gone: it's
+    // let go once the answer has come.
+    ask_hints(&mut client, buffer, 1, (0, 3));
+    let (id, answer) = next_answer(&mut client);
+    assert_eq!(id, 1);
+    assert!(matches!(answer, Answer::InlayHints { .. }), "{answer:?}");
+}
+
+#[test]
+fn a_small_answer_sent_after_a_huge_one_comes_after_it() {
+    let daemon = with_fake_language_server(|dir| {
+        vec![
+            "--big-hints".to_owned(),
+            dir.join("size").display().to_string(),
+        ]
+    });
+    std::fs::write(daemon.dir.path().join("size"), "2000000").unwrap();
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    // The huge one is parsed off the loop, and the small one behind it
+    // waits for it.
+    ask_hints(&mut client, buffer, 1, (0, 3));
+    client.query(buffer, 2, (0, 0), Query::Definition).unwrap();
+    assert_eq!(next_answer(&mut client).0, 1);
+    assert_eq!(next_answer(&mut client).0, 2);
+}
+
 #[test]
 fn a_server_that_says_its_hints_are_stale_again_and_again_has_its_features_told_seldom() {
     let daemon = with_fake_language_server(|_| vec!["--refresh-hints".to_owned()]);

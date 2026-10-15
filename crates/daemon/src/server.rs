@@ -724,6 +724,9 @@ pub struct Daemon {
     poll: Poll,
     listener: UnixListener,
     waker: Arc<Waker>,
+    /// Parses big messages from agents and language servers off the loop,
+    /// with a thread started the first time one comes.
+    parser: crate::rpc::Parser,
     shutdown: Arc<AtomicBool>,
     sources: Slab<Source>,
     terminals: BTreeMap<TerminalId, Slot>,
@@ -886,6 +889,7 @@ impl Daemon {
         Ok(Self {
             poll,
             listener,
+            parser: crate::rpc::Parser::new(&waker),
             waker,
             shutdown: Arc::new(AtomicBool::new(false)),
             sources: Slab::new(),
@@ -1182,6 +1186,8 @@ impl Daemon {
                     .chain(self.groups.next_due())
                     .chain(self.next_file_changes_due())
                     .chain(self.next_agent_due())
+                    .chain(self.next_gone_server_due())
+                    .chain(self.next_gone_agent_due())
                     .chain(self.next_web_due())
                     .chain(self.next_fit_due())
                     .chain(self.next_forward_due())
@@ -1231,6 +1237,8 @@ impl Daemon {
             // it isn't taken for a change from outside.
             self.check_disk();
             self.stop_idle_servers();
+            self.let_gone_servers_go();
+            self.let_gone_agents_go();
             self.push_stopping_servers();
             self.groups.push();
             self.tell_file_changes();

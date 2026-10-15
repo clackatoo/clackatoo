@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 use crate::mcp;
 use crate::profiles::Limits;
 use crate::pty::Process;
-use crate::rpc::{Framing, Message, Peer, RpcError};
+use crate::rpc::{Framing, Message, Parser, Peer, RpcError};
 
 /// The ACP version spoken.
 const PROTOCOL_VERSION: u16 = 1;
@@ -221,10 +221,11 @@ pub(crate) struct Agent {
 
 impl Agent {
     /// Starts `command`, the agent called `name`, and introduces the
-    /// daemon to it.
-    pub(crate) fn start(name: &str, command: &[OsString]) -> io::Result<Self> {
+    /// daemon to it. Its big messages are parsed by `parser`.
+    pub(crate) fn start(name: &str, command: &[OsString], parser: &Parser) -> io::Result<Self> {
+        let logged = format!("agent {name}");
         let mut agent = Self {
-            peer: Peer::start(&format!("agent {name}"), command, None, Framing::Lines)?,
+            peer: Peer::start(&logged, command, None, Framing::Lines, parser)?,
             next_id: 0,
             pending: BTreeMap::new(),
             held: None,
@@ -457,6 +458,29 @@ impl Agent {
         self.peer.flush()
     }
 
+    /// Whether messages it sent have been parsed, for [`read`](Self::read)
+    /// to take.
+    pub(crate) fn parsed(&self) -> bool {
+        self.peer.parsed()
+    }
+
+    /// Notes that it has gone. Returns whether to let it go now, or wait
+    /// for what it sent last (see [`crate::rpc::Inbox::gone`]).
+    pub(crate) fn gone(&mut self) -> bool {
+        self.peer.gone()
+    }
+
+    /// Whether it has been found to have gone.
+    pub(crate) fn has_gone(&self) -> bool {
+        self.peer.has_gone()
+    }
+
+    /// When it's let go, gone, however much of what it sent is still
+    /// being parsed, if it's waiting for that.
+    pub(crate) fn gone_due(&self) -> Option<std::time::Instant> {
+        self.peer.gone_due()
+    }
+
     /// Whether messages are waiting for the pipe to take them.
     pub(crate) fn has_outgoing(&self) -> bool {
         self.peer.has_outgoing()
@@ -501,6 +525,14 @@ impl Agent {
                 }
             }
             (Some(method), Some(id)) => {
+                // Too long to read (see `rpc::Inbox::refuse`): refused.
+                if let Some(error) = message.error {
+                    return self.reply(&json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": error.code, "message": error.message },
+                    }));
+                }
                 let params = message.params;
                 let asked = match method.as_str() {
                     "session/request_permission" => {
