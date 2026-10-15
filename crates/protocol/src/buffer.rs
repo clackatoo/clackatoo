@@ -74,6 +74,18 @@ pub struct OpenFile {
     pub cwd: Option<String>,
 }
 
+/// An empty buffer with no file yet, as Vim's `:enew` makes, for a new
+/// pane or in place of what a pane shows. Nothing is written until it's
+/// named with [`Request::SaveAs`](crate::Request::SaveAs). New in
+/// protocol 88: a client asks [`wire::daemon_has`] with [`wire::BLANK`]
+/// before asking for one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenBlank {
+    /// The directory the name it's given is from, as are paths opened
+    /// beside it. `None` uses the one the pane beside it is in.
+    pub cwd: Option<String>,
+}
+
 /// Who made an edit. Each undoes their own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Author {
@@ -86,7 +98,15 @@ pub enum Author {
 /// A buffer as it is now: what a window attaching to it gets first.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BufferSnapshot {
-    /// The file's path on the daemon's machine, made absolute.
+    /// The file's path on the daemon's machine, made absolute; empty for a
+    /// buffer with no file yet ([`OpenBlank`]). Only windows of protocol 88
+    /// or later ask for one, but an older window may be shown it, as an
+    /// editor with no name in its title and `""` in its jumps: its save is
+    /// refused, saying why, as is anything that would close the last pane
+    /// showing one with changes, or show something else there, whoever
+    /// asks. The pane isn't sent to older windows as
+    /// [`Content::Other`](crate::Content::Other), which would need the
+    /// workspaces rewritten for each of them.
     pub path: String,
     /// Its text.
     pub text: String,

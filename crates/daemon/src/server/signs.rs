@@ -51,12 +51,13 @@ struct Staging {
 
 impl Daemon {
     /// Has buffer `id` compared with git, if its file is in a work tree,
-    /// starting the thread that compares if it's the first.
+    /// starting the thread that compares if it's the first. One with no
+    /// file yet has nothing to compare.
     pub(super) fn compare_buffer(&mut self, id: BufferId) {
         let Some(slot) = self.buffers.get_mut(&id) else {
             return;
         };
-        if slot.compared {
+        if slot.compared || slot.buffer.is_blank() {
             return;
         }
         if self.signs.git.is_none() {

@@ -2034,6 +2034,9 @@ impl Daemon {
                     None => Err(Error::NotAChat(chat)),
                 };
             }
+            PaneTerminal::Blank(blank) => {
+                return Ok(Content::Buffer(self.open_blank(&blank, beside)));
+            }
         };
         Ok(Content::Terminal(terminal))
     }
@@ -2589,6 +2592,7 @@ impl Daemon {
             | Request::CloseWorkspace { .. }
             | Request::ResizeSplit { .. }
             | Request::OpenHere { .. }
+            | Request::BlankHere { .. }
             | Request::SplitTab { .. }) => self.respond_about_workspaces(request, token),
             asked @ (Request::CarryQuic | Request::CarryMcp { .. }) => self.carry(token, &asked),
             Request::AttachBuffer {
@@ -2608,6 +2612,11 @@ impl Daemon {
                 Ok(Response::Done)
             }
             Request::Save { buffer, force } => self.save_buffer(buffer, force),
+            Request::SaveAs {
+                buffer,
+                path,
+                force,
+            } => self.save_as(token, buffer, &path, force),
             Request::AttachFiles { files } => self.attach_files(token, files),
             Request::DetachFiles { files } => Ok(self.detach_files(token, files)),
             Request::AttachBoard { board } => self.attach_board(token, board),
@@ -2648,11 +2657,32 @@ impl Daemon {
     }
 
     /// Answers a request about workspaces from the client at `token`.
+    /// Nothing is closed, or shown in place of what a pane shows, that
+    /// would lose a buffer with no file yet that has changes, whoever asks:
+    /// a window that saw it, one that didn't, or one too old to know of it.
     fn respond_about_workspaces(
         &mut self,
         request: Request,
         token: Token,
     ) -> Result<Response, Error> {
+        let ids = |panes: Vec<Pane>| panes.iter().map(|pane| pane.id).collect();
+        let closing: Vec<PaneId> = match &request {
+            Request::ClosePane { pane }
+            | Request::OpenHere { pane, .. }
+            | Request::BlankHere { pane, .. } => vec![*pane],
+            Request::CloseTab { tab } => ids(self.workspaces.tab_panes(*tab)?),
+            Request::CloseWorkspace { workspace } => {
+                ids(self.workspaces.workspace_panes(*workspace)?)
+            }
+            _ => Vec::new(),
+        };
+        if self.loses_blank(&closing) {
+            let wire = match self.sources.get(token.0) {
+                Some(Source::Client(client)) => client.wire,
+                _ => PROTOCOL_VERSION,
+            };
+            return Err(buffers::blank_kept(wire));
+        }
         match request {
             Request::WatchWorkspaces => {
                 if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
@@ -2723,6 +2753,7 @@ impl Daemon {
                     Response::Done
                 }),
             Request::OpenHere { pane, file } => self.open_here(pane, file),
+            Request::BlankHere { pane, blank } => self.blank_here(pane, &blank),
             Request::CloseTab { tab } => {
                 let panes = self.workspaces.tab_panes(tab)?;
                 self.close_panes(&panes)

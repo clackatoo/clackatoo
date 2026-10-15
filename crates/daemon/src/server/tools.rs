@@ -1010,11 +1010,13 @@ impl Daemon {
         let showing = tab.and_then(|tab| {
             (tab.layout.panes().into_iter()).find(|pane| pane.content == Content::Buffer(buffer))
         });
+        // Not the last view of a buffer with no file yet, with changes,
+        // which nothing could show again: the file goes beside it.
         let last = (self.tools.editors.get(&chat).copied()).filter(|&pane| {
             tab.is_some_and(|tab| {
                 (tab.layout.panes().iter())
                     .any(|shown| shown.id == pane && matches!(shown.content, Content::Buffer(_)))
-            })
+            }) && !self.loses_blank(&[pane])
         });
         let pane = match (showing, last) {
             (Some(pane), _) => pane.id,
@@ -1139,7 +1141,12 @@ impl Daemon {
         match content {
             Content::Buffer(buffer) => match self.buffers.get(&buffer) {
                 Some(slot) => {
-                    let path = shorten(slot.buffer.path(), dir);
+                    // One with no file yet is called as windows call it.
+                    let path = if slot.buffer.is_blank() {
+                        "[No Name]".to_owned()
+                    } else {
+                        shorten(slot.buffer.path(), dir)
+                    };
                     let changed = if slot.buffer.modified() {
                         " (changed, not saved)"
                     } else {

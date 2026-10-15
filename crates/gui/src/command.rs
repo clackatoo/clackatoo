@@ -119,6 +119,9 @@ pub(crate) enum Command {
     /// of the focused pane, or showing the folder's listing if it's a
     /// folder.
     Edit { place: Place, path: String },
+    /// `:e` alone: an explorer of the focused pane's folder, with an
+    /// empty buffer with no file yet where `:e PATH` would put the file.
+    EditBlank,
     /// A number alone: in an editor, go to that line, as Vim does; or
     /// else move to this tab of the workspace shown, counting from 1.
     Tab(usize),
@@ -130,8 +133,14 @@ pub(crate) enum Command {
     /// with changes that aren't saved, or if `force`, throwing them away.
     Quit { force: bool },
     /// `:w`: write the focused pane's file, over changes made to the file
-    /// since if `force`, then close the pane if `quit`, as `:wq` does.
-    Write { force: bool, quit: bool },
+    /// since if `force`, then close the pane if `quit`, as `:wq` does. A
+    /// `name`, as `:w NAME`, names a buffer with no file yet, writing
+    /// over a file that's there only if `force`.
+    Write {
+        force: bool,
+        quit: bool,
+        name: Option<String>,
+    },
     /// `:e!`: throw away the focused pane's file's changes that aren't
     /// saved.
     Discard,
@@ -482,7 +491,10 @@ fn agent_named(word: &str, rest: &str, argument: Option<&str>) -> Result<Option<
 /// Vim's commands for files, if `word` is one: `w`, `q`, `wq`, `e` and
 /// their kin.
 fn file_command(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
-    let write = |force, quit| Some(Ok(Command::Write { force, quit }));
+    let write = |force, quit| {
+        let name = argument.map(unescape);
+        Some(Ok(Command::Write { force, quit, name }))
+    };
     match word {
         "q" | "quit" => Some(Ok(Command::Quit { force: false })),
         "q!" | "quit!" => Some(Ok(Command::Quit { force: true })),
@@ -492,16 +504,12 @@ fn file_command(word: &str, argument: Option<&str>) -> Option<Result<Command, St
         "wq!" | "x!" => write(true, true),
         "e!" | "edit!" => Some(Ok(Command::Discard)),
         "Format" => Some(Ok(Command::Format)),
-        "e" | "edit" => Some(
-            argument
-                .map(|path| Command::Edit {
-                    place: Place::Here,
-                    path: unescape(path),
-                })
-                .ok_or_else(|| {
-                    "e needs a file or a folder: :e PATH, or :e . for this one's".to_owned()
-                }),
-        ),
+        "e" | "edit" => Some(Ok(argument.map_or(Command::EditBlank, |path| {
+            Command::Edit {
+                place: Place::Here,
+                path: unescape(path),
+            }
+        }))),
         _ => None,
     }
 }
@@ -701,7 +709,7 @@ pub(crate) fn takes(word: &str) -> Takes {
     let (_, word) = place(word);
     let word = word.strip_suffix('!').unwrap_or(word);
     match word {
-        "e" | "edit" | EDITOR | "Explore" | "Ex" => Takes::Path,
+        "e" | "edit" | "w" | "write" | "wq" | "x" | EDITOR | "Explore" | "Ex" => Takes::Path,
         "set" | "se" => Takes::Options,
         "workspace" | "ws" => Takes::Workspace,
         "Tutor" => Takes::Lesson,
@@ -895,6 +903,9 @@ mod tests {
         assert_eq!(takes("e!"), Takes::Nothing);
         assert_eq!(takes("|<Editor"), Takes::Path);
         assert_eq!(takes("Explore!"), Takes::Path);
+        // A name for a buffer with no file yet.
+        assert_eq!(takes("w"), Takes::Path);
+        assert_eq!(takes("wq!"), Takes::Path);
         assert_eq!(takes("se"), Takes::Options);
     }
 
@@ -991,7 +1002,9 @@ mod tests {
             parse("|Editor src/main.rs"),
             Ok(edit(Place::Beside(Side::Right)))
         );
-        assert!(parse("e").is_err());
+        // Alone, an explorer beside a buffer with no file yet.
+        assert_eq!(parse("e"), Ok(Command::EditBlank));
+        assert_eq!(parse("edit"), Ok(Command::EditBlank));
         // An editor of the focused pane's folder.
         let here = |place| Command::Edit {
             place,
@@ -1000,20 +1013,23 @@ mod tests {
         assert_eq!(parse("Editor"), Ok(here(Place::Tab)));
         assert_eq!(parse("-Editor"), Ok(here(Place::Beside(Side::Below))));
         assert_eq!(parse("e!"), Ok(Command::Discard));
+        let write = |force, quit, name: Option<&str>| Command::Write {
+            force,
+            quit,
+            name: name.map(str::to_owned),
+        };
+        assert_eq!(parse("w"), Ok(write(false, false, None)));
+        assert_eq!(parse("wq!"), Ok(write(true, true, None)));
+        // A name, for a buffer with no file yet.
         assert_eq!(
-            parse("w"),
-            Ok(Command::Write {
-                force: false,
-                quit: false
-            })
+            parse("w notes.md"),
+            Ok(write(false, false, Some("notes.md")))
         );
         assert_eq!(
-            parse("wq!"),
-            Ok(Command::Write {
-                force: true,
-                quit: true
-            })
+            parse(r"w! my\ notes.md"),
+            Ok(write(true, false, Some("my notes.md")))
         );
+        assert_eq!(parse("x a.md"), Ok(write(false, true, Some("a.md"))));
         assert_eq!(parse("q!"), Ok(Command::Quit { force: true }));
         assert_eq!(parse("close"), Ok(Command::Close));
     }

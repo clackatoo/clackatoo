@@ -833,6 +833,14 @@ fn tame(message: &mut ClientMessage, rng: &mut Rng, started: &mut usize, root: &
             file.cwd = None;
             return true;
         }
+        Request::BlankHere { blank, .. } => {
+            blank.cwd = None;
+            return true;
+        }
+        Request::SaveAs { path, .. } => {
+            inside(path);
+            return true;
+        }
         Request::NewWorkspace { terminal, .. }
         | Request::NewTab { terminal, .. }
         | Request::Split { terminal, .. }
@@ -862,6 +870,10 @@ fn tame(message: &mut ClientMessage, rng: &mut Rng, started: &mut usize, root: &
         }
         PaneTerminal::Review(review) => {
             review.cwd = None;
+            true
+        }
+        PaneTerminal::Blank(blank) => {
+            blank.cwd = None;
             true
         }
         PaneTerminal::Existing(_) | PaneTerminal::Board(_) | PaneTerminal::Browser(_) => true,

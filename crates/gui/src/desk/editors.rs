@@ -15,8 +15,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use clackatoo_protocol::{
-    Answer, BufferId, BufferUpdate, ClientMessage, Content, FileLocation, OpenFile, PaneId,
-    PaneTerminal, Request, Size, wire,
+    Answer, BufferId, BufferUpdate, ClientMessage, Content, FileLocation, OpenBlank, OpenFile,
+    PaneId, PaneTerminal, Request, Size, wire,
 };
 use clackatoo_term::mouse::{MouseAction, MouseButton};
 use clackatoo_text::Edit;
@@ -366,12 +366,8 @@ impl Desk {
     /// isn't left: they'd be lost. Where its cursor was to go before, it
     /// won't. Returns whether it asked the daemon.
     pub(super) fn open_here(&mut self, pane: PaneId, path: String) -> bool {
-        if let Some(why) = self.keeps_its_folder(pane) {
+        if let Some(why) = self.stays(pane) {
             self.say(why.into());
-            return false;
-        }
-        if self.is_explorer(pane) && !self.is_folder(pane) {
-            self.say("editing folders as text: :w makes the changes, :q! leaves".into());
             return false;
         }
         self.editors.landings.remove(&pane);
@@ -384,7 +380,8 @@ impl Desk {
         }
         let kept = (self.editors.panes.get(&pane))
             .and_then(|editor| self.editors.buffers.get(&editor.buffer()))
-            .filter(|copy| !copy.is_scratch() && copy.modified() && copy.path() != path)
+            .filter(|copy| !copy.is_scratch() && !copy.is_blank() && copy.modified())
+            .filter(|copy| copy.path() != path)
             .map(|copy| copy.path().to_owned());
         if let Some(kept) = kept {
             self.say(format!(
@@ -394,6 +391,102 @@ impl Desk {
         let file = OpenFile { path, cwd: None };
         self.request(Request::OpenHere { pane, file }, Asked::OpenedHere(pane));
         true
+    }
+
+    /// Why `pane` can't show anything in place of what it shows, as `:e`
+    /// would have it, if it can't: a folder's listing whose edits would be
+    /// lost, folders being edited as text, or a buffer with no file yet
+    /// with changes, which nothing could open again.
+    fn stays(&self, pane: PaneId) -> Option<&'static str> {
+        if let Some(why) = self.keeps_its_folder(pane) {
+            return Some(why);
+        }
+        if self.is_explorer(pane) && !self.is_folder(pane) {
+            return Some("editing folders as text: :w makes the changes, :q! leaves");
+        }
+        self.loses_blank(&[pane])
+            .then_some("[No Name] has changes: :w NAME writes them, :e! drops them")
+    }
+
+    /// Whether closing `panes` would lose a buffer with no file yet that
+    /// has changes: one that only they show, which the daemon lets go, as
+    /// nothing could open it again. Only the workspace shown's editors are
+    /// known.
+    pub(super) fn loses_blank(&self, panes: &[PaneId]) -> bool {
+        let shown_elsewhere = |buffer| {
+            (self.workspaces.list.iter())
+                .flat_map(|workspace| &workspace.tabs)
+                .flat_map(|tab| tab.layout.panes())
+                .any(|shown| !panes.contains(&shown.id) && shown.content == Content::Buffer(buffer))
+        };
+        (panes.iter())
+            .filter_map(|pane| self.editors.panes.get(pane))
+            .map(Editor::buffer)
+            .any(|buffer| {
+                (self.editors.buffers.get(&buffer)).is_some_and(BufferCopy::blank_changed)
+                    && !shown_elsewhere(buffer)
+            })
+    }
+
+    /// `:e` alone: an explorer of the focused pane's folder, as
+    /// `<Space>e` finds or opens one, rooted there, with an empty buffer
+    /// with no file yet where `:e PATH` would put the file: in place of an
+    /// editor's, or in a new tab beside anything else. Its name, once
+    /// `:w NAME` gives it one, is from that folder too. The explorer has
+    /// the focus, to choose a file from.
+    pub(super) fn edit_blank(&mut self) {
+        let Some(shown) = self.shown else { return };
+        if !self.needs_daemon(":e alone", wire::BLANK) {
+            return;
+        }
+        let dir = (self.focused_folder()).map(|dir| dir.display().to_string());
+        let blank = OpenBlank { cwd: dir.clone() };
+        if let Some((_, copy)) = self.focused_editor() {
+            let unchanged_blank = copy.is_blank() && !copy.blank_changed();
+            if let Some(why) = self.stays(shown.pane) {
+                self.say(why.into());
+                return;
+            }
+            // One with no file and no changes is as good as a new one.
+            if !unchanged_blank {
+                self.blank_here(shown.pane, blank);
+            }
+            self.open_explorer_at(dir);
+            return;
+        }
+        let request = Request::NewTab {
+            workspace: shown.workspace,
+            terminal: PaneTerminal::Blank(blank),
+        };
+        self.request(request, Asked::Blank(dir));
+    }
+
+    /// The editor `pane` shows an empty buffer with no file yet, `blank`,
+    /// in place of its file, or the folder it shows, as
+    /// [`open_here`](Self::open_here) shows a file there, saying so if the
+    /// file it showed has changes that aren't written.
+    fn blank_here(&mut self, pane: PaneId, blank: OpenBlank) {
+        self.record_jump(pane, None);
+        self.editors.landings.remove(&pane);
+        self.forget_folder_landing(pane);
+        let kept = (self.editors.panes.get(&pane))
+            .and_then(|editor| self.editors.buffers.get(&editor.buffer()))
+            .filter(|copy| !copy.is_scratch() && !copy.is_blank() && copy.modified())
+            .map(|copy| copy.path().to_owned());
+        if let Some(kept) = kept {
+            self.say(format!(
+                "{kept} has changes not written, kept unseen: :e it to go back"
+            ));
+        }
+        self.request(Request::BlankHere { pane, blank }, Asked::Command);
+    }
+
+    /// The new pane `pane`, showing a buffer with no file yet for `:e`
+    /// alone, has been made in a tab of its own: an explorer of `dir`, or
+    /// where the daemon roots one beside it, goes down its left.
+    pub(super) fn blank_made(&mut self, pane: PaneId, dir: Option<String>) {
+        self.show_pane(pane);
+        self.open_explorer_at(dir);
     }
 
     /// The daemon has answered about the oldest file asked to open in
@@ -436,7 +529,8 @@ impl Desk {
         }
         let editor = editors.panes.get(&pane)?;
         (editors.buffers.get(&editor.buffer()))
-            .filter(|copy| !copy.is_scratch())
+            // A buffer with no file yet, or whose text hasn't come, names none.
+            .filter(|copy| !copy.is_scratch() && !copy.path().is_empty())
             .map(BufferCopy::path)
     }
 
@@ -462,7 +556,8 @@ impl Desk {
         }
         let file = (editors.panes.get(&pane))
             .and_then(|editor| Some((editor, editors.buffers.get(&editor.buffer())?)))
-            .filter(|(_, copy)| copy.loaded() && !copy.is_scratch())
+            // One with no file yet has no place to come back to.
+            .filter(|(_, copy)| copy.loaded() && !copy.is_scratch() && !copy.is_blank())
             .map(|(editor, copy)| {
                 let byte = byte.unwrap_or_else(|| editor.cursor_byte(copy));
                 FilePlace::at(copy.path(), copy.text(), byte)
@@ -1585,17 +1680,33 @@ impl Desk {
     }
 
     /// `:w`, and `:wq`: writes the focused pane's file, formatting it
-    /// first if `formatonsave` says, then closes the pane if `quit`.
-    pub(super) fn write_file(&mut self, force: bool, quit: bool) {
+    /// first if `formatonsave` says, then closes the pane if `quit`. A
+    /// buffer with no file yet is written to the file `name` says, as
+    /// `:w NAME` names it, over one that's there only if `force`; with no
+    /// name, the command line asks for one.
+    pub(super) fn write_file(&mut self, force: bool, quit: bool, name: Option<String>) {
         let Some(shown) = self.shown else { return };
-        if self.explorer(shown.pane).is_some_and(Explorer::editing) {
+        let listings = self.explorer(shown.pane).is_some_and(Explorer::editing);
+        if listings && name.is_none() {
             return self.write_listings(shown.pane, quit);
         }
-        let Some((editor, _)) = self.focused_editor() else {
+        let Some((editor, copy)) = self.focused_editor().filter(|_| !listings) else {
             self.say("this pane has no file to write".into());
             return;
         };
         let buffer = editor.buffer();
+        let blank = copy.is_blank();
+        match (blank, &name) {
+            (true, None) => return self.ask_for_name(force, quit),
+            (false, Some(_)) => {
+                let named = copy.name();
+                self.say(format!(
+                    ":w NAME names a buffer with no name: this is ‘{named}’, which :w writes"
+                ));
+                return;
+            }
+            _ => {}
+        }
         // Text the window kept in place of the daemon's, after a lost
         // connection, replaces it only if asked, as the daemon's may have
         // changes the window hasn't: then it goes first, as one change, for
@@ -1616,14 +1727,42 @@ impl Desk {
             let change = copy.take_outbox();
             self.outbox.extend(change);
         }
+        let then_close = quit.then_some(shown.pane);
+        // With no file, it has no language to format it by.
+        if let Some(path) = name {
+            let request = Request::SaveAs {
+                buffer,
+                path,
+                force,
+            };
+            return self.request(request, Asked::Saved { buffer, then_close });
+        }
         if self.options.formatonsave {
             return self.format_then_write(force, quit);
         }
-        let then_close = quit.then_some(shown.pane);
         self.request(
             Request::Save { buffer, force },
             Asked::Saved { buffer, then_close },
         );
+    }
+
+    /// `:w` in a buffer with no file yet: the command line asks for its
+    /// name, as `:w NAME`, `force`d or then quitting as the `:w` was. Not
+    /// while something else is being typed there, or a macro types keys,
+    /// which would go into it.
+    fn ask_for_name(&mut self, force: bool, quit: bool) {
+        if self.input.is_some() || self.replaying() {
+            self.say("[No Name] has no file yet: :w NAME writes it".into());
+            return;
+        }
+        let word = match (quit, force) {
+            (false, false) => "w",
+            (false, true) => "w!",
+            (true, false) => "wq",
+            (true, true) => "wq!",
+        };
+        self.input = Some(super::Input::new(Purpose::Command, format!("{word} ")));
+        self.say("[No Name] has no file yet: type its name".into());
     }
 
     /// `:q`: closes the focused pane, unless it's the last showing a file
@@ -1645,10 +1784,11 @@ impl Desk {
                 .flat_map(|workspace| &workspace.tabs)
                 .flat_map(|tab| tab.layout.panes())
                 .any(|pane| pane.id != shown.pane && pane.content == Content::Buffer(buffer));
-            if last && copy.modified() {
+            if last && (copy.modified() || copy.blank_changed()) {
                 if !force {
+                    let write = if copy.is_blank() { ":w NAME" } else { ":w" };
                     self.say(format!(
-                        "{} has unsaved changes: :w writes them, :q! drops them",
+                        "{} has unsaved changes: {write} writes them, :q! drops them",
                         copy.name()
                     ));
                     return;

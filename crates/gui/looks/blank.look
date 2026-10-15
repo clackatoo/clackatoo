@@ -1,0 +1,27 @@
+# `:e` alone: the explorer at the folder you're in, beside a file with no
+# name yet, which `:w` asks to name.
+size 1400x860
+file README.md
+file src/main.rs <<END
+fn main() {}
+END
+file notes/todo.txt
+# From a terminal: a tab of its own.
+keys <C-;>:e<CR>
+wait-for README.md
+shot from-terminal
+# `:w` asks for a name, and writes it there.
+keys <C-l>i
+type A note with no file yet.
+keys <C-;>:w<CR>
+shot w-asks
+type notes/later.txt
+keys <CR>
+wait-for later.txt written
+shot named
+# From an editor: in place of its file, at its folder.
+open src/main.rs
+wait-for fn main
+keys <C-;>:e<CR>
+wait-for ~/blank/src
+shot from-editor

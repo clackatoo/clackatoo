@@ -144,6 +144,28 @@ Open `notes.txt` with Enter.
 file "notes.txt"
 ```
 
+## Start a new file
+
+`:e` with nothing after it opens the explorer at the folder of the pane you're in, a terminal's folder or the one an editor's file is in, as `<Space>e` finds or opens one, beside an empty file with no name yet. That goes where `:e PATH` would put a file: in place of an editor's file, or in a tab of its own from a terminal or anything else. The explorer has the focus, to pick a file from. A file left with changes not written is kept, unseen, as `:e PATH` keeps it.
+
+Type `:e`, with nothing after it.
+
+```check
+focused explorer
+pane blank
+```
+
+## Name it
+
+A file with no name is called `[No Name]`. `:w` asks for a name on the command line, and `:w NAME` gives it one, from the folder the explorer showed, writing it there. A file that's there already is written over only with `:w!`. Until it has a name, `:e` and `:q` won't leave its changes behind: `:e!` and `:q!` throw them away.
+
+Go to it with Ctrl+L, type something in it, and write it as `later.txt` with `:w later.txt`.
+
+```check
+file "later.txt"
+listed "later.txt"
+```
+
 ## More
 
 `x` or `y` cuts or copies what's at the cursor, and `p` moves or copies it into the folder at the cursor. `.` shows hidden files, `/` searches the names shown, `R` lists everything again, and `q` closes the explorer. `g?` lists the explorer's keys at its foot, and again hides them; the bar says so while they're hidden.

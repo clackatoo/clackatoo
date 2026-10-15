@@ -114,6 +114,9 @@ pub(crate) enum Heard {
 const FAILED: &str =
     "the daemon couldn't make one of this window's changes, and the file has changed since";
 
+/// What a buffer with no file yet is called, in titles and the bar.
+pub(crate) const NO_NAME: &str = "[No Name]";
+
 /// The most text, in bytes, whose changes made while disconnected are
 /// worked out by comparing it with the daemon's: past it, the comparison
 /// replaces the whole text, which merges with nothing.
@@ -408,14 +411,33 @@ impl BufferCopy {
         }
     }
 
-    /// The file's path on the daemon's machine.
+    /// The file's path on the daemon's machine, or none for a buffer with
+    /// no file yet (see [`is_blank`](Self::is_blank)).
     pub(crate) fn path(&self) -> &str {
         &self.path
     }
 
-    /// The file's name, for titles.
+    /// The file's name, for titles, or `[No Name]`, as Vim says, for a
+    /// buffer with no file yet.
     pub(crate) fn name(&self) -> &str {
+        if self.is_blank() {
+            return NO_NAME;
+        }
         self.path.rsplit('/').next().unwrap_or(&self.path)
+    }
+
+    /// Whether it's of a buffer with no file yet, as `:e` alone makes,
+    /// which `:w NAME` names: one whose text has come, with no path.
+    pub(crate) fn is_blank(&self) -> bool {
+        self.loaded && self.path.is_empty()
+    }
+
+    /// Whether it's of a buffer with no file yet that has changes, or may
+    /// have: as the daemon says, or with edits it hasn't yet heard, as
+    /// straight after `ihello<Esc>`, or with any text, which a blank one
+    /// starts without.
+    pub(crate) fn blank_changed(&self) -> bool {
+        self.is_blank() && (self.modified || !self.waiting.is_empty() || self.text.len_bytes() > 0)
     }
 
     pub(crate) fn modified(&self) -> bool {

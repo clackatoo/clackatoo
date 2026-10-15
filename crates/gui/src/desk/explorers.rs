@@ -1270,6 +1270,21 @@ impl Desk {
     pub(super) fn open_explorer(&mut self, dir: Option<String>, edit: bool) {
         let Some(shown) = self.shown else { return };
         let reveal = self.file_in(shown.pane).map(str::to_owned);
+        self.open_explorer_revealing(dir, edit, reveal);
+    }
+
+    /// `:e` alone's explorer: the tab's, rooted at `dir`, or a new one
+    /// down the tab's left, rooted at `dir`, or the focused pane's
+    /// project. With no `dir`, the tab's is left where it's rooted.
+    /// Nothing in it is shown, the file beside it having none yet.
+    pub(super) fn open_explorer_at(&mut self, dir: Option<String>) {
+        self.open_explorer_revealing(dir, false, None);
+    }
+
+    /// [`open_explorer`](Self::open_explorer), showing the file at
+    /// `reveal` in it, if any.
+    fn open_explorer_revealing(&mut self, dir: Option<String>, edit: bool, reveal: Option<String>) {
+        let Some(shown) = self.shown else { return };
         if let Some(pane) = self.explorer_in_tab() {
             self.show_pane(pane);
             if let Some(explorer) = self.explorers.panes.get_mut(&pane) {

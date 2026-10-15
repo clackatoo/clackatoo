@@ -7,8 +7,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use clackatoo_protocol::{
-    Author, BufferId, BufferSnapshot, BufferUpdate, Change, Content, Edit, Error, Event, OpenFile,
-    OpenFiles, PaneId, Response, Resume, ServerMessage, frame,
+    Author, BufferId, BufferSnapshot, BufferUpdate, Change, Content, Edit, Error, Event, OpenBlank,
+    OpenFile, OpenFiles, PROTOCOL_VERSION, PaneId, Response, Resume, ServerMessage, frame, wire,
 };
 use clackatoo_syntax::{Found, Highlighted, Syntax, pack};
 use clackatoo_text::{AgentHunks, Highlights, Hunks, Maker, Rope, Span};
@@ -16,7 +16,7 @@ use mio::Token;
 
 use super::language::Opened;
 use super::{Daemon, Source};
-use crate::buffer::{Buffer, DiskStamp, Made};
+use crate::buffer::{Buffer, DiskStamp, Made, Restamp};
 
 /// A buffer, and the clients following it.
 #[derive(Debug)]
@@ -159,9 +159,11 @@ impl Daemon {
     }
 
     /// The directory a relative path is from: `cwd`, or else the directory
-    /// of the pane `beside`, or else the home directory.
+    /// of the pane `beside`, or else the home directory. A `cwd` that isn't
+    /// absolute is from nowhere in particular, so it's passed over.
     fn opened_from(&self, cwd: Option<&str>, beside: Option<PaneId>) -> PathBuf {
         (cwd.map(PathBuf::from))
+            .filter(|cwd| cwd.is_absolute())
             .or_else(|| {
                 beside
                     .and_then(|pane| self.working_directory(pane))
@@ -195,6 +197,137 @@ impl Daemon {
         self.compare_buffer(id);
         self.watch_buffer(id);
         Ok(id)
+    }
+
+    /// A new empty buffer with no file yet, never one already open, as
+    /// each `:enew` is a buffer of its own. Its name, once it's given one,
+    /// is from `blank.cwd`, or else the directory of the pane `beside`, or
+    /// else the home directory. With no file, it has no language, git or
+    /// watch until it's named (see [`save_as`](Self::save_as)).
+    pub(super) fn open_blank(&mut self, blank: &OpenBlank, beside: Option<PaneId>) -> BufferId {
+        let dir = self.opened_from(blank.cwd.as_deref(), beside);
+        let id = BufferId(self.next_buffer);
+        self.next_buffer += 1;
+        log::info!("buffer {id}: blank, in {}", dir.display());
+        self.buffers.insert(id, BufferSlot::new(Buffer::blank(dir)));
+        // What its words are made of, as for a file with no language.
+        self.find_words(id);
+        id
+    }
+
+    /// Answers [`Request::BlankHere`](clackatoo_protocol::Request::BlankHere):
+    /// `pane`, which shows a file or a folder, shows a new empty buffer
+    /// with no file yet in place of it, which goes as
+    /// [`open_here`](Self::open_here) says, and is refused as it is.
+    pub(super) fn blank_here(
+        &mut self,
+        pane: PaneId,
+        blank: &OpenBlank,
+    ) -> Result<Response, Error> {
+        let old = self.workspaces.check_pane(pane)?;
+        if !matches!(old, Content::Buffer(_) | Content::Folder(_)) {
+            return Err(Error::NotAFile(pane));
+        }
+        if self.loses_blank(&[pane]) {
+            return Err(blank_kept(PROTOCOL_VERSION));
+        }
+        let new = Content::Buffer(self.open_blank(blank, Some(pane)));
+        self.workspaces.set_content(pane, new)?;
+        self.workspaces_changed();
+        match old {
+            Content::Buffer(old) => self.close_if_unwanted(old),
+            Content::Folder(files) => self.close_files(files),
+            _ => {}
+        }
+        Ok(Response::Done)
+    }
+
+    /// Whether closing `panes`, or showing something else in them, would
+    /// lose a buffer with no file yet that has changes: one no other pane
+    /// shows, which nothing could open again, as a file's path opens a
+    /// file's buffer kept unseen.
+    pub(super) fn loses_blank(&self, panes: &[PaneId]) -> bool {
+        if panes.is_empty() {
+            return false;
+        }
+        let workspaces = self.workspaces.get();
+        let all: Vec<_> = (workspaces.list.iter())
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| tab.layout.panes())
+            .collect();
+        let shown_elsewhere = |buffer| {
+            (all.iter())
+                .any(|pane| !panes.contains(&pane.id) && pane.content == Content::Buffer(buffer))
+        };
+        (all.iter())
+            .filter(|pane| panes.contains(&pane.id))
+            .filter_map(|pane| pane.content.buffer())
+            .any(|buffer| {
+                (self.buffers.get(&buffer))
+                    .is_some_and(|slot| slot.buffer.is_blank() && slot.buffer.modified())
+                    && !shown_elsewhere(buffer)
+            })
+    }
+
+    /// Answers [`Request::SaveAs`](clackatoo_protocol::Request::SaveAs):
+    /// writes buffer `id`, which has no file yet, to `path`, from the
+    /// directory it was opened in, and has it edit that file from then on,
+    /// as though it had opened it. Refused, with nothing changed, for a
+    /// buffer with a file, a path another buffer edits, a folder, or
+    /// unless `force`, a file that's there. The client at `token`, which
+    /// asked, is offered its language's install, as one attaching is.
+    pub(super) fn save_as(
+        &mut self,
+        token: Token,
+        id: BufferId,
+        path: &str,
+        force: bool,
+    ) -> Result<Response, Error> {
+        let slot = self.buffers.get(&id).ok_or(Error::NoSuchBuffer(id))?;
+        let refused = |to: &Path, reason: &str| Error::SaveFailed {
+            path: to.display().to_string(),
+            reason: reason.to_owned(),
+        };
+        if !slot.buffer.is_blank() {
+            return Err(refused(slot.buffer.path(), "it has a name already"));
+        }
+        let to = resolve(path, slot.buffer.dir(), &self.config.home);
+        if path.is_empty() || path.ends_with('/') || to.is_dir() {
+            return Err(refused(&to, "it's a folder"));
+        }
+        if (self.buffers.values()).any(|slot| slot.buffer.path() == to) {
+            return Err(refused(&to, "it's open already: :e it"));
+        }
+        // A stat, as opening a file is.
+        if !force && to.symlink_metadata().is_ok() {
+            return Err(refused(&to, "it's there already: :w! NAME writes over it"));
+        }
+        let slot = self.buffers.get_mut(&id).ok_or(Error::NoSuchBuffer(id))?;
+        slot.buffer.moved_to(to.clone(), Restamp::To(None));
+        // Written over only if asked to, the file there having been looked
+        // at just now.
+        let saved = match slot.buffer.save(force) {
+            Ok(saved) => saved,
+            Err(err) => {
+                slot.buffer.moved_to(PathBuf::new(), Restamp::To(None));
+                return Err(err);
+            }
+        };
+        log::info!("buffer {id}: named {}", to.display());
+        let shown = to.display().to_string();
+        self.tell_viewers(id, None, &BufferUpdate::Moved(shown));
+        if let Some(modified) = saved {
+            self.tell_viewers(id, None, &BufferUpdate::Modified(modified));
+        }
+        self.files_written(&to);
+        // As a file opened is, now it has one.
+        self.opened_in_review(id);
+        self.parse_buffer(id);
+        self.open_in_server(id);
+        self.compare_buffer(id);
+        self.watch_buffer(id);
+        self.offer_install(token, id);
+        Ok(Response::Done)
     }
 
     /// Starts sending `id` to the client at `token`, with a snapshot, or,
@@ -495,6 +628,11 @@ impl Daemon {
         if !matches!(old, Content::Buffer(_) | Content::Folder(_)) {
             return Err(Error::NotAFile(pane));
         }
+        // Not over the last view of a buffer with no file yet, with
+        // changes: nothing could show them again.
+        if self.loses_blank(&[pane]) {
+            return Err(blank_kept(PROTOCOL_VERSION));
+        }
         let new = self.open_content(file, Some(pane))?;
         if new != old {
             self.workspaces.set_content(pane, new)?;
@@ -592,7 +730,10 @@ impl Daemon {
     }
 
     /// Closes `buffer` if no pane shows it and it has no changes to save.
-    /// One with changes waits, unseen, to be opened again.
+    /// One with changes waits, unseen, to be opened again. One with no file
+    /// yet couldn't be, so closing or replacing the last pane showing it
+    /// with changes is refused first (see [`loses_blank`](Self::loses_blank)):
+    /// it goes once they're thrown away, as `:q!` does.
     pub(super) fn close_if_unwanted(&mut self, buffer: BufferId) {
         let unwanted = !self.workspaces.shows(buffer)
             && (self.buffers.get(&buffer)).is_some_and(|slot| !slot.buffer.modified());
@@ -807,6 +948,22 @@ pub(super) fn key(id: BufferId) -> clackatoo_syntax::Key {
     u64::from(id.0)
 }
 
+/// Why closing or replacing panes is refused, for a client speaking `wire`:
+/// it would lose a buffer with no file yet that has changes (see
+/// [`Daemon::loses_blank`]). In words of its own for a client that reads
+/// them, and, for one from before [`wire::FALLBACKS`], which has no
+/// [`Error::Other`] and would be dropped for one, as a save that can't be.
+pub(super) fn blank_kept(wire: u32) -> Error {
+    if wire >= wire::FALLBACKS {
+        Error::Other("[No Name] has changes no file holds: :w NAME writes them".to_owned())
+    } else {
+        Error::SaveFailed {
+            path: "[No Name]".to_owned(),
+            reason: "it has changes no file holds, which closing it would lose".to_owned(),
+        }
+    }
+}
+
 /// `path` made absolute, from `dir` if it's relative, or from `home` if it
 /// starts with `~/`, with its links followed as far as they exist.
 pub(super) fn resolve(path: &str, dir: &Path, home: &Path) -> PathBuf {
@@ -874,5 +1031,44 @@ mod tests {
             real.join("no/such/dir/a")
         );
         assert_eq!(resolve("~/a", &real, &real), real.join("a"));
+    }
+
+    #[test]
+    fn a_blank_buffer_with_changes_outlives_an_upgrade_and_is_named_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (mut daemon, _) = super::super::agent_files::tests::daemon_with_chat(&root);
+        let blank = OpenBlank {
+            cwd: Some(root.display().to_string()),
+        };
+        let id = daemon.open_blank(&blank, None);
+        let name = daemon.workspaces.name_for_new(None).unwrap();
+        let pane = daemon.workspaces.new_workspace(name, Content::Buffer(id));
+        let slot = daemon.buffers.get_mut(&id).unwrap();
+        let edit = Edit::replace(0, 0, "", "draft\n");
+        slot.buffer.edit(edit, 0, true, Author::User).unwrap();
+        slot.buffer.check_modified();
+
+        let config = daemon.config.clone();
+        let handover = daemon.hand_over(std::time::Instant::now()).unwrap();
+        drop(daemon);
+        let mut resumed = Daemon::resume(handover, config).unwrap();
+        let slot = &resumed.buffers[&id];
+        assert!(slot.buffer.is_blank() && slot.buffer.modified());
+        assert_eq!((slot.buffer.dir(), slot.watched), (root.as_path(), false));
+        assert_eq!(
+            resumed.workspaces.check_pane(pane).unwrap(),
+            Content::Buffer(id)
+        );
+        assert_eq!(
+            resumed
+                .save_as(Token(usize::MAX), id, "draft.md", false)
+                .unwrap(),
+            Response::Done
+        );
+        let written = std::fs::read_to_string(root.join("draft.md")).unwrap();
+        assert_eq!(written, "draft\n");
+        let slot = &resumed.buffers[&id];
+        assert!(!slot.buffer.is_blank() && !slot.buffer.modified() && slot.watched);
     }
 }

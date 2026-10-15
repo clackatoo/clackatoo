@@ -19,11 +19,12 @@ use clackatoo_protocol::{
     ChatAction, ChatNode, ChatState, ClientMessage, CompletionItem, Construct, Content, Diff, Done,
     Edit, Error, Event, FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesId,
     FilesUpdate, Found, FoundBuffer, FoundLine, FoundSymbol, GitMark, InlayHint, InlayHintKind,
-    Item, Kind, Layout, Limit, Location, NewAgent, NewTerminal, OpenFile, OpenFiles, Outcome,
-    PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, ProviderModels, Query, Request, Response,
-    Resume, Search, Selection, ServerFeatures, ServerMessage, Side, Size, Span, SubagentStatus,
-    Symbol, TerminalId, TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus,
-    Trigger, TurnFiles, TurnFilesState, Usage, Use, UseKind, View, ViewUpdate, Workspaces,
+    Item, Kind, Layout, Limit, Location, NewAgent, NewTerminal, OpenBlank, OpenFile, OpenFiles,
+    Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, ProviderModels, Query, Request,
+    Response, Resume, Search, Selection, ServerFeatures, ServerMessage, Side, Size, Span,
+    SubagentStatus, Symbol, TerminalId, TerminalStatus, TextChange, Tool, ToolContent, ToolKind,
+    ToolStatus, Trigger, TurnFiles, TurnFilesState, Usage, Use, UseKind, View, ViewUpdate,
+    Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -9176,6 +9177,258 @@ fn a_pane_shows_another_file_in_place_as_e_does() {
     assert_eq!(refused.unwrap(), Response::Error(Error::NotAFile(terminal)));
 }
 
+/// A pane showing a new buffer with no file yet, whose name is from `dir`.
+fn blank(dir: &Path) -> PaneTerminal {
+    PaneTerminal::Blank(OpenBlank {
+        cwd: Some(dir.display().to_string()),
+    })
+}
+
+#[test]
+fn a_blank_buffer_has_no_file_until_it_is_written_with_a_name() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path().canonicalize().unwrap();
+    std::fs::write(dir.join("taken.md"), "mine\n").unwrap();
+    std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = client.new_workspace(None, blank(&dir)).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    let snapshot = attach_buffer(&mut client, buffer);
+    assert_eq!((snapshot.path.as_str(), snapshot.text.as_str()), ("", ""));
+    assert!(!snapshot.modified);
+
+    // Each is a buffer of its own, though both have no file.
+    let other = client.split_pane(pane, Side::Right, blank(&dir)).unwrap();
+    assert_ne!(buffer_in(&mut client, other), buffer);
+
+    // It has nowhere to be written until it's named.
+    send_change(&mut client, buffer, 1, insert(0, 0, "hello\n", 0));
+    let refused = client.request(&Request::Save {
+        buffer,
+        force: true,
+    });
+    assert!(
+        matches!(&refused, Ok(Response::Error(Error::SaveFailed { reason, .. }))
+            if reason.contains(":w NAME")),
+        "{refused:?}"
+    );
+    let save_as = |client: &mut Client, path: &str, force| {
+        client.request(&Request::SaveAs {
+            buffer,
+            path: path.to_owned(),
+            force,
+        })
+    };
+    let refused_because = |answer: Result<Response, ClientError>, why: &str| match answer {
+        Ok(Response::Error(Error::SaveFailed { reason, .. })) => {
+            assert!(reason.contains(why), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    };
+
+    // Not over a file that's there, without `!`, nor a folder, nor a file
+    // another buffer edits; and nothing's changed.
+    refused_because(save_as(&mut client, "taken.md", false), "there already");
+    refused_because(save_as(&mut client, "sub", true), "folder");
+    refused_because(save_as(&mut client, "sub/", true), "folder");
+    let a = client
+        .split_pane(pane, Side::Below, open_file(&dir, "a.rs"))
+        .unwrap();
+    buffer_in(&mut client, a);
+    refused_because(save_as(&mut client, "a.rs", true), "open already");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("taken.md")).unwrap(),
+        "mine\n"
+    );
+
+    // Named, it's written from the folder it was opened in, and edits that
+    // file from then on, as every window following it is told.
+    assert_eq!(
+        save_as(&mut client, "new.md", false).unwrap(),
+        Response::Done
+    );
+    let path = dir.join("new.md");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello\n");
+    let mut moved = None;
+    let mut saved = false;
+    while moved.is_none() || !saved {
+        match next_buffer_update(&mut client) {
+            BufferUpdate::Moved(to) => moved = Some(to),
+            BufferUpdate::Modified(false) => saved = true,
+            _ => {}
+        }
+    }
+    assert_eq!(moved.as_deref(), Some(path.to_str().unwrap()));
+    refused_because(save_as(&mut client, "again.md", false), "has a name");
+    // Now the file's, it's what opening that file finds.
+    let again = client
+        .split_pane(pane, Side::Left, open_file(&dir, "new.md"))
+        .unwrap();
+    assert_eq!(buffer_in(&mut client, again), buffer);
+}
+
+#[test]
+fn a_blank_buffer_shows_in_place_of_a_file_and_goes_when_nothing_shows_it() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path().canonicalize().unwrap().join("project");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = client.new_workspace(None, open_file(&dir, "a.rs")).unwrap();
+    let a = buffer_in(&mut client, pane);
+    let blank_here = |client: &mut Client, pane| {
+        client.request(&Request::BlankHere {
+            pane,
+            blank: OpenBlank { cwd: None },
+        })
+    };
+    let gone = |client: &mut Client, buffer| {
+        let answer = client.request(&Request::AttachBuffer {
+            buffer,
+            window: 1,
+            resume: None,
+        });
+        answer.unwrap() == Response::Error(Error::NoSuchBuffer(buffer))
+    };
+
+    // In place of a file, which goes, having no changes.
+    assert_eq!(blank_here(&mut client, pane).unwrap(), Response::Done);
+    let first = buffer_in(&mut client, pane);
+    assert_ne!(first, a);
+    assert!(gone(&mut client, a));
+    assert_eq!(attach_buffer(&mut client, first).path, "");
+
+    // `:e!` empties it.
+    send_change(&mut client, first, 1, insert(0, 0, "draft", 0));
+    let answer = client.request(&Request::Discard { buffer: first });
+    assert_eq!(answer.unwrap(), Response::Done);
+    assert_eq!(attach_buffer(&mut client, first).text, "");
+
+    // With changes, nothing is shown in its place, as nothing could open
+    // it again: not even straight after the change, before any window has
+    // heard it's changed, as `ihello<Esc>:e` would ask.
+    send_change(&mut client, first, 2, insert(0, 0, "draft", 2));
+    assert!(kept_blank(&blank_here(&mut client, pane).unwrap()));
+    let answer = client.request(&Request::OpenHere {
+        pane,
+        file: OpenFile {
+            path: "a.rs".into(),
+            cwd: None,
+        },
+    });
+    assert!(kept_blank(&answer.unwrap()));
+    assert!(!gone(&mut client, first));
+    // Its changes thrown away, as `:e!` throws them, it goes.
+    client.request(&Request::Discard { buffer: first }).unwrap();
+    blank_here(&mut client, pane).unwrap();
+    let second = buffer_in(&mut client, pane);
+    assert_ne!(second, first);
+    assert!(gone(&mut client, first));
+    // Its paths, and the folder it's in, are from the pane it replaced.
+    client.find(1, Some(pane), Search::Files).unwrap();
+    let (found_files, _) = found(&mut client, 1);
+    assert_eq!(files_found(&found_files).1, ["a.rs"]);
+    let answer = client.request(&Request::OpenHere {
+        pane,
+        file: OpenFile {
+            path: "a.rs".into(),
+            cwd: None,
+        },
+    });
+    assert_eq!(answer.unwrap(), Response::Done);
+    assert_ne!(buffer_in(&mut client, pane), second);
+    assert!(gone(&mut client, second));
+
+    // A terminal's pane shows no file to put one in place of.
+    let terminal = client
+        .split_pane(pane, Side::Below, new_pane(&["cat"]))
+        .unwrap();
+    let refused = blank_here(&mut client, terminal);
+    assert_eq!(refused.unwrap(), Response::Error(Error::NotAFile(terminal)));
+}
+
+/// Whether `answer` refuses, as closing the last view of a buffer with no
+/// file yet that has changes is refused.
+fn kept_blank(answer: &Response) -> bool {
+    matches!(answer, Response::Error(Error::Other(why)) if why.contains(":w NAME"))
+}
+
+#[test]
+fn a_blank_buffer_with_changes_is_closed_by_nobody() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path().canonicalize().unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = client.new_workspace(None, blank(&dir)).unwrap();
+    let workspaces = loop {
+        let workspaces = next_workspaces(&mut client);
+        if workspaces.find_pane(pane).is_some() {
+            break workspaces;
+        }
+    };
+    let (workspace, tab, shown) = workspaces.find_pane(pane).unwrap();
+    let (workspace, tab) = (workspace.id, tab.id);
+    let buffer = shown.content.buffer().expect("a buffer");
+    attach_buffer(&mut client, buffer);
+    // Typed in, and closed at once, before the window has heard it's
+    // changed, as `ihello<Esc>:q<CR>` would.
+    send_change(&mut client, buffer, 1, insert(0, 0, "hello", 0));
+    let answer = client.request(&Request::ClosePane { pane }).unwrap();
+    assert!(kept_blank(&answer), "{answer:?}");
+    // Nor its tab, nor its workspace, though no window shows it, as a
+    // window has another workspace shown.
+    client.new_workspace(None, new_pane(&["cat"])).unwrap();
+    let answer = client.request(&Request::CloseTab { tab }).unwrap();
+    assert!(kept_blank(&answer), "{answer:?}");
+    let answer = client.request(&Request::CloseWorkspace { workspace });
+    assert!(kept_blank(&answer.unwrap()));
+
+    // Nor by another window, which never saw it.
+    let mut other = daemon.client();
+    let answer = other.request(&Request::ClosePane { pane }).unwrap();
+    assert!(kept_blank(&answer), "{answer:?}");
+
+    // Nor by a window too old to know what it is, asking for a file in its
+    // place; and one from before the fallbacks is told in a way it reads,
+    // and stays.
+    for old in [wire::BLANK - 1, wire::MIN_CLIENT] {
+        let mut raw = Raw::open(&daemon, old);
+        raw.hello(old);
+        raw.request(Request::OpenHere {
+            pane,
+            file: OpenFile {
+                path: "a.txt".into(),
+                cwd: Some(dir.display().to_string()),
+            },
+        });
+        let answer = loop {
+            if let ServerMessage::Response(answer) = raw.next().expect("an answer") {
+                break answer;
+            }
+        };
+        let told = match &answer {
+            Response::Error(Error::SaveFailed { path, .. }) => {
+                old < wire::FALLBACKS && path == "[No Name]"
+            }
+            answer => old >= wire::FALLBACKS && kept_blank(answer),
+        };
+        assert!(told, "{old}: {answer:?}");
+        raw.request(Request::ListTerminals);
+        assert!(raw.next().is_some(), "{old} is still connected");
+    }
+    assert!(!std::fs::exists(dir.join("a.txt")).unwrap());
+
+    // With its changes thrown away, as `:q!` throws them, it closes.
+    client.request(&Request::Discard { buffer }).unwrap();
+    assert_eq!(
+        client.request(&Request::ClosePane { pane }).unwrap(),
+        Response::Done
+    );
+}
+
 /// The explorer of the folder pane `pane` shows, once the workspaces have
 /// it.
 fn folder_in(client: &mut Client, pane: PaneId) -> FilesId {
@@ -11336,6 +11589,46 @@ fn files_open_beside_the_chat_at_a_line_in_one_pane() {
     let reopened = tab_contents(&mut client);
     assert_eq!(reopened.len(), 2);
     assert_ne!(reopened[1], opened[1]);
+}
+
+#[test]
+fn a_file_an_agent_opens_goes_beside_a_blank_buffer_with_changes() {
+    let daemon = TestDaemon::with_tools();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+    std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let words = last_words(&ask(
+        &mut client,
+        chat,
+        "mcp open_file {\"path\":\"a.txt\"}",
+    ));
+    assert!(words.contains("in pane 2."), "{words}");
+    // The pane the agent opens files in shows a blank buffer, typed in.
+    let answer = client.request(&Request::BlankHere {
+        pane: PaneId(2),
+        blank: OpenBlank { cwd: None },
+    });
+    assert_eq!(answer.unwrap(), Response::Done);
+    let Content::Buffer(blank) = tab_contents(&mut client)[1] else {
+        panic!("no buffer");
+    };
+    let mut window = daemon.client();
+    attach_buffer(&mut window, blank);
+    send_change(&mut window, blank, 1, insert(0, 0, "draft", 0));
+    // Made, as the next request's answer says.
+    window.request(&Request::ListTerminals).unwrap();
+    let prompt = "mcp open_file {\"path\":\"b.txt\"}\nmcp list_panes";
+    let words = last_words(&ask(&mut client, chat, prompt));
+    assert!(words.contains("in pane 3."), "{words}");
+    assert!(
+        words.contains("pane 2: editor, [No Name] (changed, not saved)"),
+        "{words}"
+    );
+    let contents = tab_contents(&mut client);
+    assert_eq!(contents.len(), 3);
+    assert!(contents.contains(&Content::Buffer(blank)));
 }
 
 #[test]

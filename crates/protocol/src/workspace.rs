@@ -438,6 +438,10 @@ pub enum PaneTerminal {
     Review(NewReview),
     /// The page a chat's agent drives, by the chat's ID.
     Browser(TerminalId),
+    /// An empty buffer with no file yet. New in protocol 88: a client asks
+    /// [`wire::daemon_has`](crate::wire::daemon_has) with
+    /// [`wire::BLANK`](crate::wire::BLANK) before asking for one.
+    Blank(crate::OpenBlank),
 }
 
 impl Workspaces {

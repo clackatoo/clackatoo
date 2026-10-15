@@ -27,8 +27,8 @@ use clackatoo_text::{
 
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
-    BLOCK_MARKS, BLOCKS, COLOURS, EXITED, FALLBACKS, FORWARD_PACE, FORWARDS, HOVER, INLAY_HINTS,
-    LIMITS, PHONE_TERMINALS, PREVIEW_COLOURS, SYMBOLS, USES, WORDS,
+    BLANK, BLOCK_MARKS, BLOCKS, COLOURS, EXITED, FALLBACKS, FORWARD_PACE, FORWARDS, HOVER,
+    INLAY_HINTS, LIMITS, PHONE_TERMINALS, PREVIEW_COLOURS, SYMBOLS, USES, WORDS,
 };
 use crate::{
     AgentSession, AgentTools, Author, Axis, BlockMarks, BoardId, BufferId, BufferSnapshot,
@@ -47,10 +47,10 @@ use crate::{
     BrowserFrame, BrowserStatus, BrowserUpdate, ChatChoices, ChatSummary, CodeAction, CommentPlace,
     CompletionItem, Device, Done, Entry, EntryKind, Expect, FileLocation, FileOp, FileOpError,
     FileStamp, FilesAction, FilesUpdate, Forward, ForwardFailure, Found, FoundLine, FoundSymbol,
-    GitMark, Hunks, InlayHint, InlayHintKind, Made, OpenBoard, OpenFile, OpenFiles, PairingAsk,
-    PairingState, PostKind, Query, ReviewAction, ReviewChat, ReviewComment, ReviewFile, ReviewHunk,
-    ReviewList, ReviewScope, Search, ServerFeatures, Symbol, TextChange, Trigger, Udp, Use,
-    UseKind,
+    GitMark, Hunks, InlayHint, InlayHintKind, Made, OpenBlank, OpenBoard, OpenFile, OpenFiles,
+    PairingAsk, PairingState, PostKind, Query, ReviewAction, ReviewChat, ReviewComment, ReviewFile,
+    ReviewHunk, ReviewList, ReviewScope, Search, ServerFeatures, Symbol, TextChange, Trigger, Udp,
+    Use, UseKind,
 };
 
 /// One sample: a message either side sends.
@@ -842,6 +842,34 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             },
         })),
     ));
+    // A buffer with no file yet, in a new tab and in place of a file, and
+    // named once it's written.
+    samples.extend([
+        (
+            BLANK,
+            Client(ClientMessage::Request(Request::NewTab {
+                workspace: WorkspaceId(1),
+                terminal: PaneTerminal::Blank(OpenBlank {
+                    cwd: Some("/home/jack/src".into()),
+                }),
+            })),
+        ),
+        (
+            BLANK,
+            Client(ClientMessage::Request(Request::BlankHere {
+                pane: PaneId(3),
+                blank: OpenBlank { cwd: None },
+            })),
+        ),
+        (
+            BLANK,
+            Client(ClientMessage::Request(Request::SaveAs {
+                buffer: BufferId(4),
+                path: "notes.md".into(),
+                force: true,
+            })),
+        ),
+    ]);
     samples
 }
 

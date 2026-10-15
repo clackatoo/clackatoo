@@ -105,7 +105,9 @@ impl Daemon {
             },
             Search::Buffers => Job::Buffers {
                 project: self.project(pane),
+                // One with no file yet has no name to find it by.
                 buffers: (self.buffers.values().rev())
+                    .filter(|slot| !slot.buffer.is_blank())
                     .map(|slot| (slot.buffer.path().to_owned(), slot.buffer.modified()))
                     .collect(),
             },
@@ -246,6 +248,10 @@ impl Daemon {
                 let Some(slot) = self.buffers.get(&buffer) else {
                     return Project::Dir(home.clone());
                 };
+                // One with no file yet is in the folder it was opened in.
+                if slot.buffer.is_blank() {
+                    return Project::Dir(slot.buffer.dir().to_owned());
+                }
                 if let Some(root) = self.buffer_root(buffer) {
                     return Project::Root(root);
                 }

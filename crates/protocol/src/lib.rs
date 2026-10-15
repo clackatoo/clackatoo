@@ -82,8 +82,8 @@ pub use board::{
 pub use browser::{BrowserFrame, BrowserStatus, BrowserUpdate};
 pub use buffer::{
     Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, CodeAction, CompletionItem,
-    FileLocation, InlayHint, InlayHintKind, OpenFile, Query, Resume, ServerFeatures, Symbol,
-    TextChange, Trigger, Use, UseKind,
+    FileLocation, InlayHint, InlayHintKind, OpenBlank, OpenFile, Query, Resume, ServerFeatures,
+    Symbol, TextChange, Trigger, Use, UseKind,
 };
 pub use chat::{
     AMBER, AgentSession, ChatAction, ChatChoices, ChatNode, ChatPatch, ChatState, ChatSummary,
@@ -119,7 +119,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 87;
+pub const PROTOCOL_VERSION: u32 = 88;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -628,7 +628,12 @@ pub enum Request {
     },
     /// Closes a pane and the terminal it shows. A tab goes with its last
     /// pane, and a workspace with its last tab. A pane also closes when its
-    /// terminal's program exits.
+    /// terminal's program exits. Since protocol 88, it's refused, as
+    /// [`Request::CloseTab`], [`Request::CloseWorkspace`],
+    /// [`Request::OpenHere`] and [`Request::BlankHere`] are, if it would
+    /// close the last pane showing a buffer with no file yet that has
+    /// changes, which nothing could open again: the changes are thrown
+    /// away first, with [`Request::Discard`], as `:q!` does.
     ClosePane {
         /// The pane to close.
         pane: PaneId,
@@ -723,7 +728,8 @@ pub enum Request {
         buffer: BufferId,
     },
     /// Writes the buffer to its file. Refused if the file has changed since
-    /// it was read or last written, unless `force`.
+    /// it was read or last written, unless `force`, and for a buffer with
+    /// no file yet, which [`Request::SaveAs`] names.
     Save {
         /// The buffer.
         buffer: BufferId,
@@ -731,7 +737,8 @@ pub enum Request {
         force: bool,
     },
     /// Throws away the buffer's changes that aren't saved, reading its file
-    /// again: an edit by the user, which can be undone.
+    /// again, or for a buffer with no file yet, emptying it: an edit by the
+    /// user, which can be undone.
     Discard {
         /// The buffer.
         buffer: BufferId,
@@ -933,6 +940,32 @@ pub enum Request {
         from: Position,
         /// The other.
         to: Position,
+    },
+    /// Shows an empty buffer with no file yet ([`OpenBlank`]) in `pane`,
+    /// which shows a file or a folder, in place of what it shows, as
+    /// [`Request::OpenHere`] shows a file. New in protocol 88: a client
+    /// asks [`wire::daemon_has`] with [`wire::BLANK`] before sending it.
+    BlankHere {
+        /// The pane.
+        pane: PaneId,
+        /// The buffer.
+        blank: OpenBlank,
+    },
+    /// Writes a buffer with no file yet to the file at `path`, which is
+    /// from the directory it was opened in, and has it edit that file from
+    /// then on, as Vim's `:w NAME` names a buffer with no name: every
+    /// client following it is told with [`BufferUpdate::Moved`]. Refused
+    /// for a buffer with a file, for a path another buffer edits, and,
+    /// unless `force`, for a file that's there already. New in protocol
+    /// 88: a client asks [`wire::daemon_has`] with [`wire::BLANK`] before
+    /// sending it.
+    SaveAs {
+        /// The buffer.
+        buffer: BufferId,
+        /// The file's path.
+        path: String,
+        /// Write over a file that's there.
+        force: bool,
     },
 }
 

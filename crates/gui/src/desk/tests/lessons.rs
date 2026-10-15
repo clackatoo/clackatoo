@@ -1379,3 +1379,80 @@ fn the_explorer_lessons_editor_goes_to_its_folder_with_minus_and_opens_a_file_fr
     load(&mut desk, 9, &notes, "Notes for the explorer lesson.\n");
     assert_eq!(step(&desk), browse + 4);
 }
+
+#[test]
+fn the_explorer_lessons_e_alone_opens_the_explorer_beside_a_blank_file_which_w_names() {
+    use clackatoo_protocol::{FilesAction, FilesId, FilesUpdate, OpenBlank};
+    let mut desk = one_terminal(Some(seen_everything()));
+    let dir = format!("{SCRATCH}/explorer");
+    let explorer = Layout::Pane(LayoutPane {
+        id: PaneId(4),
+        content: Content::Files(FilesId(5)),
+    });
+    open(&mut desk, "explorer", file_pane(2, 9));
+    let layout = side_by_side(vec![file_pane(3, 8), explorer.clone(), file_pane(2, 9)]);
+    desk.workspaces_changed(workspaces(vec![with_lesson(layout, vec![], 2)]));
+    answer_all(&mut desk);
+    let root = FilesUpdate::Root {
+        path: dir.clone(),
+        name: "explorer".into(),
+    };
+    desk.files_changed(FilesId(5), root);
+    load(&mut desk, 9, &format!("{dir}/notes.txt"), "Notes.\n");
+    let lesson = tutor::lesson("explorer").unwrap();
+    let start = (lesson.steps.iter())
+        .position(|step| step.title == "Start a new file")
+        .expect("the step");
+    desk.tutor.open.as_mut().unwrap().step = start;
+    desk.show_pane(PaneId(2));
+    desk.settle_lesson();
+    answer_all(&mut desk);
+    assert_eq!(step(&desk), start, "not done before it's started");
+
+    // `:e` alone: a blank file in place of notes.txt, from its folder, the
+    // lesson's, which the tab's explorer, kept in it, stays at.
+    command(&mut desk, "e");
+    let messages = desk.take_outbox();
+    assert!(
+        messages.iter().any(|message| matches!(
+            message,
+            ClientMessage::Request(Request::BlankHere { pane: PaneId(2), blank: OpenBlank { cwd } })
+                if cwd.as_deref() == Some(dir.as_str())
+        )),
+        "{messages:?}"
+    );
+    assert!(messages.iter().any(|message| matches!(
+        message,
+        ClientMessage::Files { files: FilesId(5), action: FilesAction::Root(root) } if *root == dir
+    )));
+    let layout = side_by_side(vec![file_pane(3, 8), explorer.clone(), file_pane(2, 10)]);
+    desk.workspaces_changed(workspaces(vec![with_lesson(layout, vec![], 2)]));
+    answer_all(&mut desk);
+    assert_eq!(step(&desk), start, "its text hasn't come");
+    let blank = clackatoo_protocol::BufferSnapshot {
+        path: String::new(),
+        text: String::new(),
+        version: 0,
+        modified: false,
+        applied: None,
+        landed: None,
+        daemon: 0,
+    };
+    desk.buffer_changed(BufferId(10), BufferUpdate::Snapshot(blank));
+    assert_eq!(step(&desk), start + 1);
+
+    // Named, from the editor, as the explorer lists it.
+    desk.show_pane(PaneId(2));
+    desk.buffer_changed(
+        BufferId(10),
+        BufferUpdate::Moved(format!("{dir}/later.txt")),
+    );
+    let listed = FilesUpdate::Listed {
+        dir: dir.clone(),
+        entries: vec![entry("later.txt", false), entry("notes.txt", false)],
+        cut_short: false,
+    };
+    desk.files_changed(FilesId(5), listed);
+    desk.settle_lesson();
+    assert_eq!(step(&desk), start + 2);
+}

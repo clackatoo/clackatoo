@@ -101,6 +101,9 @@ enum Asked {
     /// A new file explorer, to switch to once made, showing the file at
     /// `reveal` once it can, and editing a folder as text if `edit`.
     Explorer { reveal: Option<String>, edit: bool },
+    /// A new tab's pane, showing a buffer with no file yet for `:e` alone,
+    /// to switch to once made, with an explorer of this folder beside it.
+    Blank(Option<String>),
     /// Something for the tutor's lesson.
     Lesson(lessons::Serial, lessons::LessonAsked),
     /// Something asked of reviewing, whose answer is said in the bar.
@@ -133,6 +136,10 @@ enum Missed {
 /// How many times a minute the window asks again for one thing it missed,
 /// before it takes it that it will only miss it again.
 const MOST_MISSED: usize = 5;
+
+/// Why a pane, tab or workspace showing a buffer with no file yet that has
+/// changes isn't closed: they'd go with it.
+const BLANK_KEPT: &str = "[No Name] has changes: :w NAME writes them, :e! in it drops them";
 
 /// The time those are counted over.
 const MISSED_OVER: std::time::Duration = std::time::Duration::from_mins(1);
@@ -931,13 +938,32 @@ impl Desk {
         }
     }
 
-    /// Closes `workspace`, with every terminal in it.
+    /// Closes `workspace`, with every terminal in it, unless that would
+    /// lose a buffer with no file yet that has changes.
     pub(crate) fn close_workspace(&mut self, workspace: WorkspaceId) {
+        let panes: Vec<PaneId> = (self.workspaces.get(workspace).into_iter())
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| tab.layout.panes())
+            .map(|pane| pane.id)
+            .collect();
+        if self.loses_blank(&panes) {
+            self.say(BLANK_KEPT.into());
+            return;
+        }
         self.request(Request::CloseWorkspace { workspace }, Asked::Command);
     }
 
-    /// Closes `tab`, with every terminal in it.
+    /// Closes `tab`, with every terminal in it, unless that would lose a
+    /// buffer with no file yet that has changes.
     pub(crate) fn close_tab(&mut self, tab: TabId) {
+        let panes: Vec<PaneId> = (self.workspaces.find_tab(tab).into_iter())
+            .flat_map(|(_, tab)| tab.layout.panes())
+            .map(|pane| pane.id)
+            .collect();
+        if self.loses_blank(&panes) {
+            self.say(BLANK_KEPT.into());
+            return;
+        }
         self.request(Request::CloseTab { tab }, Asked::Command);
     }
 
@@ -1532,6 +1558,14 @@ impl Desk {
                     false
                 }
             },
+            Some(Asker::Window(Asked::Blank(dir))) => {
+                match response {
+                    Response::PaneCreated(pane) => self.blank_made(pane, dir),
+                    Response::Error(err) => self.warn(err.to_string()),
+                    _ => {}
+                }
+                true
+            }
             Some(Asker::Window(Asked::Explorer { reveal, edit })) => {
                 match response {
                     Response::PaneCreated(pane) => self.explorer_made(pane, reveal, edit),
@@ -2434,13 +2468,17 @@ impl Desk {
                 },
                 Asked::Command,
             ),
+            // Not a buffer with no file yet with changes, which would go
+            // with its pane: a file's waits, unseen, to be opened again.
+            Command::Close if self.loses_blank(&[shown.pane]) => self.say(BLANK_KEPT.into()),
             Command::Close => {
                 self.request(Request::ClosePane { pane: shown.pane }, Asked::Command);
             }
             Command::Edit { place, path } => self.open_file(place, path),
+            Command::EditBlank => self.edit_blank(),
             Command::Quit { force } => self.quit(force),
             Command::Tutor(topic) => self.tutor(topic.as_deref()),
-            Command::Write { force, quit } => self.write_file(force, quit),
+            Command::Write { force, quit, name } => self.write_file(force, quit, name),
             Command::Discard => self.discard_changes(),
             Command::Format => self.format_file(),
             Command::Find { kind, query } => self.open_finder(kind, query),
@@ -2575,6 +2613,7 @@ pub(super) fn shown_in_names(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod blank;
     mod folders;
     mod lessons;
     mod messages;

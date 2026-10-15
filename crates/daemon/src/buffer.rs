@@ -23,8 +23,12 @@ use crate::handover;
 /// A file being edited.
 #[derive(Debug)]
 pub(crate) struct Buffer {
+    /// Its file's path, or an empty one for a buffer with no file yet (see
+    /// [`blank`](Self::blank)), which no file's path, always absolute,
+    /// ever equals.
     path: PathBuf,
-    /// The directory paths opened beside it are from.
+    /// The directory paths opened beside it are from, and a blank one's
+    /// name, once it's given one.
     dir: PathBuf,
     text: Rope,
     history: History<Author>,
@@ -170,8 +174,28 @@ impl Buffer {
         })
     }
 
+    /// An empty buffer with no file yet, as Vim's `:enew` makes, which
+    /// isn't written until it's named, with paths opened beside it, and
+    /// its name, from `dir`.
+    pub(crate) fn blank(dir: PathBuf) -> Self {
+        Self {
+            path: PathBuf::new(),
+            dir,
+            text: Rope::new(),
+            history: History::new(0),
+            saved: Rope::new(),
+            modified: false,
+            disk: None,
+        }
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Whether it has no file yet: see [`blank`](Self::blank).
+    pub(crate) fn is_blank(&self) -> bool {
+        self.path.as_os_str().is_empty()
     }
 
     /// Its file has moved to `path`, as a file explorer moving it does.
@@ -299,8 +323,14 @@ impl Buffer {
     /// Writes `text` beside the file, to be put in its place, unless
     /// something else has changed the file since it was read or last
     /// written and not `force`. Once it is, [`written`](Self::written)
-    /// says so.
+    /// says so. A buffer with no file yet has nowhere to write.
     pub(crate) fn stage(&self, text: &Rope, force: bool) -> Result<Staged, Error> {
+        if self.is_blank() {
+            return Err(Error::SaveFailed {
+                path: "a buffer with no name".to_owned(),
+                reason: ":w NAME names it".to_owned(),
+            });
+        }
         let failed = |err: io::Error| Error::SaveFailed {
             path: self.path.display().to_string(),
             reason: err.to_string(),
@@ -499,9 +529,14 @@ impl Buffer {
 
     /// The edit that throws away the changes that aren't saved, reading the
     /// file again. Making it is up to the caller, so it's an edit like any
-    /// other, which can be undone.
+    /// other, which can be undone. A buffer with no file yet is emptied.
     pub(crate) fn discard(&mut self) -> Result<Edit, Error> {
-        let (text, disk) = match read(&self.path) {
+        let read = if self.is_blank() {
+            Err(io::ErrorKind::NotFound.into())
+        } else {
+            read(&self.path)
+        };
+        let (text, disk) = match read {
             Ok((text, disk)) => (text, Some(disk)),
             Err(err) if err.kind() == io::ErrorKind::NotFound => (String::new(), None),
             Err(err) => {

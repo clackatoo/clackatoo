@@ -89,12 +89,12 @@ impl Daemon {
     }
 
     /// Watches buffer `id`'s file for changes, if it isn't watched.
-    /// Returns whether it's watched, or gone.
+    /// Returns whether it's watched, or gone, or has no file to watch.
     fn try_watch_buffer(&mut self, id: BufferId) -> bool {
         let Some(slot) = self.buffers.get(&id) else {
             return true;
         };
-        if slot.watched {
+        if slot.watched || slot.buffer.is_blank() {
             return true;
         }
         let path = slot.buffer.path().to_owned();

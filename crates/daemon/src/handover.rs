@@ -607,7 +607,9 @@ pub(crate) struct Files {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Buffer {
     pub(crate) id: u32,
-    /// The file's path, as bytes.
+    /// The file's path, as bytes; none for a buffer with no file yet.
+    /// Nothing reads a buffer's path as it's resumed, so an older build
+    /// taking one over has a buffer it can't write, not a failed handover.
     pub(crate) path: Vec<u8>,
     /// The directory paths opened beside it are from, as bytes.
     pub(crate) dir: Vec<u8>,

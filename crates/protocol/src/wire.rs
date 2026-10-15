@@ -166,6 +166,9 @@ gates! {
     BLOCK_MARKS = 86,
     /// Copying a block of a terminal's columns: `Request::BlockText`.
     BLOCKS = 87,
+    /// Buffers with no file yet: `PaneTerminal::Blank` (`OpenBlank`),
+    /// `Request::BlankHere`, and `Request::SaveAs`, which names one.
+    BLANK = 88,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

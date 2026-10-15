@@ -445,12 +445,12 @@ impl Opened {
 impl Daemon {
     /// Opens buffer `id` in its language's server, starting one for its
     /// project if there's none, unless it's open already or its language
-    /// has no server.
+    /// has no server, or it has no file yet, and so no language.
     pub(super) fn open_in_server(&mut self, id: BufferId) {
         let (Some(languages), Some(slot)) = (&mut self.languages, self.buffers.get(&id)) else {
             return;
         };
-        if slot.server.is_some() {
+        if slot.server.is_some() || slot.buffer.is_blank() {
             return;
         }
         let path = slot.buffer.path().to_owned();

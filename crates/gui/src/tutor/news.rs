@@ -491,6 +491,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "shell",
         what: "The web app marks commands that failed, as the window does",
     },
+    News {
+        id: "e-alone",
+        date: "2026-10-15",
+        lesson: "explorer",
+        what: ":e alone opens the explorer at the folder you're in beside an empty file, which :w NAME names",
+    },
 ];
 
 impl News {

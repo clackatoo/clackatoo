@@ -269,9 +269,13 @@ pub(crate) struct Marks {
 
 impl Marks {
     /// Sets `mark` at `place`, in place of where it was: in `place`'s file,
-    /// for a file's own mark, or anywhere.
+    /// for a file's own mark, or anywhere. A buffer with no file yet keeps
+    /// only its own: one for anywhere would have nothing to open.
     pub(crate) fn set(&mut self, mark: char, place: FilePlace) {
         let local = local(mark);
+        if !local && place.path.is_empty() {
+            return;
+        }
         self.list
             .retain(|(set, at)| *set != mark || (local && at.path != place.path));
         self.list.push((mark, place));

@@ -333,13 +333,16 @@ impl Desk {
     }
 
     /// The folder the focused pane is in: a terminal's shell's, the
-    /// folder of an editor's file, or an explorer's root.
-    fn focused_folder(&self) -> Option<PathBuf> {
-        if let Some((_, copy)) = self.focused_editor() {
-            return Path::new(copy.path()).parent().map(Path::to_owned);
-        }
+    /// folder of an editor's file, or an explorer's root, an editor's
+    /// folder's too, whose listing is an editor's. None for a chat, whose
+    /// folder the window has only as it's shown, nor for a buffer with no
+    /// file yet.
+    pub(super) fn focused_folder(&self) -> Option<PathBuf> {
         if let Some(explorer) = self.focused_explorer() {
             return explorer.root().map(PathBuf::from);
+        }
+        if let Some((_, copy)) = self.focused_editor() {
+            return Path::new(copy.path()).parent().map(Path::to_owned);
         }
         let terminal = self.focused_terminal()?;
         self.panes.get(&terminal)?.cwd().map(PathBuf::from)

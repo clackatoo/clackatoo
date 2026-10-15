@@ -29,7 +29,7 @@ use clackatoo_protocol::{
 };
 
 use super::{Asked, Desk};
-use crate::editor::{Lit, Prose, Stretch};
+use crate::editor::{BufferCopy, Lit, Prose, Stretch};
 use crate::finder::{self, Finder, LocalItem};
 use crate::input::{KeptPress, KeyPress};
 use crate::keymap::KeyMode;
@@ -948,8 +948,9 @@ impl Desk {
         };
         // Only what shows its scratch files goes: its own panes, a file a
         // link opened there, an explorer of its directory, the practice
-        // terminal. A pane gone on to a file of yours, as after `:e`,
-        // stays as it is, unsaved changes and all.
+        // terminal, a buffer with no file yet made there. A pane gone on to
+        // a file of yours, as after `:e`, stays as it is, unsaved changes
+        // and all.
         let in_scratch = |path: &str| {
             let path = Path::new(path);
             path.starts_with(&open.dir) || path == open.lesson_file
@@ -958,7 +959,7 @@ impl Desk {
             let (close, discard) = match pane.content {
                 Content::Buffer(buffer) => {
                     let scratch = match self.buffer_copy(buffer).filter(|copy| copy.loaded()) {
-                        Some(copy) => in_scratch(copy.path()),
+                        Some(copy) => copy.is_blank() || in_scratch(copy.path()),
                         // Not come yet: the lesson's own, as they opened.
                         None => [open.practice_buffer, open.lesson_buffer].contains(&Some(buffer)),
                     };
@@ -1140,6 +1141,11 @@ impl DeskFacts<'_> {
                 Kind::Chat
             }
             Content::Terminal(_) => Kind::Terminal,
+            Content::Buffer(buffer)
+                if (self.desk.buffer_copy(buffer)).is_some_and(BufferCopy::is_blank) =>
+            {
+                Kind::Blank
+            }
             Content::Buffer(_) => Kind::Editor,
             Content::Files(_) => Kind::Explorer,
             Content::Folder(_) => Kind::Folder,
