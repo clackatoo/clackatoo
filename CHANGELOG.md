@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.51 (2026-10-15)
+
+### Features
+
+- **gui,daemon:** :e alone opens the explorer beside a blank file, which :w NAME names (c20d5d4)
+
 ## 2026.10.50 (2026-10-15)
 
 ### Fixes
