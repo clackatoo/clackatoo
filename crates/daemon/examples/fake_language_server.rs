@@ -82,6 +82,7 @@
 //! | `--exit-after-hints` | Exits, as if it crashed, as soon as it has sent its first answer of what to write inline |
 //! | `--filler-before-hints` | Sends a notification of exactly 64 MiB, the most its client takes, just before each answer of `--big-hints`: as much as its client lets wait for parsing |
 //! | `--hang-up-before-hints` | Closes its input as it answers what to write inline with `--big-hints`, then, in the same write as the answer, asks its client for its settings, sends 200 KB it takes no notice of, and asks again, so answering the second time fails |
+//! | `--pause-before-hints` | Waits 300 ms between what it sends just before an answer of `--big-hints` and the answer, so its client finds its pipe empty for a while |
 //! | `--refresh-hints` | Asks its client to ask for inlay hints again, fifty times at once, after it's answered the first question of them |
 //! | `--format-error` | Answers formatting a file, or part of one, with an error, `RequestFailed`, as `gcsl lsp` does for a file with a syntax error |
 //! | `--prepare HOW` | Checks a rename first, answering as HOW says: `range` with the word's range, `placeholder` with its range and the word in capitals, `default` leaving it to its client, `error` with an error; and with `null` where there's no word |
@@ -171,6 +172,7 @@ fn main() {
         chatty: value("--chatty-grandchild"),
         filler_before_hints: flag("--filler-before-hints"),
         hang_up_before_hints: flag("--hang-up-before-hints"),
+        pause_before_hints: flag("--pause-before-hints"),
         refresh_hints: flag("--refresh-hints"),
         format_error: flag("--format-error"),
         prepare: value("--prepare"),
@@ -343,6 +345,7 @@ struct Fake {
     chatty: Option<String>,
     filler_before_hints: bool,
     hang_up_before_hints: bool,
+    pause_before_hints: bool,
     /// It's yet to ask its client to ask for inlay hints again.
     refresh_hints: bool,
     format_error: bool,
@@ -401,8 +404,9 @@ fn read(input: &mut impl BufRead) -> Option<Value> {
 /// many bytes of hints as the file at `size` says, all at the file's
 /// start: built as text and sent in one write, so that even a debug build
 /// sends tens of megabytes quickly. What's in `before`, framed, goes in
-/// the same write, first.
-fn big_hints(message: &Value, size: &str, before: Vec<u8>) {
+/// the same write, first; or, if `pause` isn't zero, in a write of its
+/// own, and the answer that long after.
+fn big_hints(message: &Value, size: &str, before: Vec<u8>, pause: std::time::Duration) {
     let size: usize = (std::fs::read_to_string(size).ok())
         .and_then(|size| size.trim().parse().ok())
         .unwrap_or(0);
@@ -417,9 +421,15 @@ fn big_hints(message: &Value, size: &str, before: Vec<u8>) {
     }
     body.push_str("]}");
     let mut framed = before;
+    let mut out = std::io::stdout().lock();
+    if !pause.is_zero() {
+        out.write_all(&framed).unwrap();
+        out.flush().unwrap();
+        std::thread::sleep(pause);
+        framed.clear();
+    }
     write!(framed, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
     framed.extend_from_slice(body.as_bytes());
-    let mut out = std::io::stdout().lock();
     out.write_all(&framed).unwrap();
     out.flush().unwrap();
 }
@@ -651,7 +661,9 @@ impl Fake {
                     before.extend(ask_settings("settings 2"));
                 }
                 let size = self.big_hints.as_deref().unwrap_or_default();
-                big_hints(message, size, before);
+                let pause = if self.pause_before_hints { 300 } else { 0 };
+                let pause = std::time::Duration::from_millis(pause);
+                big_hints(message, size, before, pause);
                 if self.exit_after_hints {
                     if let Some(file) = &self.chatty {
                         // Its pipe full when it exits, and kept full.

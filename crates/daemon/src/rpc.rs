@@ -116,6 +116,9 @@ pub(crate) struct Peer {
     outgoing: Vec<u8>,
     /// What's been read and not yet taken.
     incoming: Inbox,
+    /// Whether its process has been seen to exit (see
+    /// [`exited`](Self::exited)).
+    exited: bool,
     /// What's been read of a line of stderr not yet ended.
     errors: Vec<u8>,
     /// The last lines of stderr, to say why it stopped if it stops soon.
@@ -178,6 +181,7 @@ impl Peer {
             stderr,
             outgoing: Vec::new(),
             incoming: Inbox::new(framing, parser),
+            exited: false,
             errors: Vec::new(),
             last_errors: VecDeque::new(),
             trace: None,
@@ -290,9 +294,25 @@ impl Peer {
         self.incoming.gone()
     }
 
-    /// Whether the program has been found to have gone.
+    /// Whether the program has been found to have gone. One whose input
+    /// broke may still be running, and writing.
     pub(crate) fn has_gone(&self) -> bool {
         self.incoming.has_gone()
+    }
+
+    /// Notes that the program has exited, so it has gone. A process's
+    /// pipes are closed as it exits, before its exit is told, so all it
+    /// wrote is in its pipe by now.
+    pub(crate) fn exited(&mut self) {
+        self.exited = true;
+        self.incoming.gone();
+    }
+
+    /// Whether the program has been seen to exit: if so, a read that comes
+    /// up short has read all it wrote. One that has only gone, as its
+    /// input broke, may write more after a pause.
+    pub(crate) fn has_exited(&self) -> bool {
+        self.exited
     }
 
     /// When the program, gone, is let go however much of what it sent is

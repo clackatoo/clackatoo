@@ -81,9 +81,10 @@ impl Daemon {
     /// LSP asks, while the loop goes on. A server not ready yet, which
     /// may be told nothing else, is told to exit at once.
     pub(super) fn stop_server(&mut self, id: ServerId) {
-        // One gone already, waiting only for what it sent last to be
-        // parsed, can be asked nothing, and its exit was heard: it's let
-        // go, to be reaped as an orphan, and not started again.
+        // One gone already, as it exited or its input broke, waiting only
+        // for what it sent last, can be asked nothing: it's let go, its
+        // process group ended if it's still running, to be reaped as an
+        // orphan, and not started again.
         if (self.servers.slots.get(&id)).is_some_and(|slot| slot.server.has_gone()) {
             return self.let_server_go(id);
         }

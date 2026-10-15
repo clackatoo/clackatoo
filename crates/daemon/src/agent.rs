@@ -470,9 +470,22 @@ impl Agent {
         self.peer.gone()
     }
 
-    /// Whether it has been found to have gone.
+    /// Whether it has been found to have gone. One whose input broke may
+    /// still be running, and writing.
     pub(crate) fn has_gone(&self) -> bool {
         self.peer.has_gone()
+    }
+
+    /// Notes that it has exited, so it has gone, and all it wrote is in
+    /// its pipe (see [`crate::rpc::Peer::exited`]).
+    pub(crate) fn exited(&mut self) {
+        self.peer.exited();
+    }
+
+    /// Whether it has been seen to exit, so a read that comes up short has
+    /// read all it wrote.
+    pub(crate) fn has_exited(&self) -> bool {
+        self.peer.has_exited()
     }
 
     /// When it's let go, gone, however much of what it sent is still

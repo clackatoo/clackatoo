@@ -640,7 +640,7 @@ impl Daemon {
             // read to the end.
             Pipe::Exit => {
                 if let Some(slot) = self.agents.running.get_mut(&id) {
-                    slot.agent.gone();
+                    slot.agent.exited();
                 }
                 self.read_agent(id, Reading::Last);
             }
@@ -711,12 +711,17 @@ impl Daemon {
     }
 
     /// Writes what's queued for agent `id`. If writing fails, it has gone,
-    /// but what it sent before it went may still be waiting: that's read
-    /// to the end, at the end of the turn, and then it's let go.
+    /// but it may still be running, and what it sends meanwhile is still
+    /// read: from the end of the turn, then as it comes, until it exits
+    /// and that's been read to the end, or until it's been gone too long.
+    /// Nothing more is written to one that has gone.
     fn flush_agent(&mut self, id: AgentId) {
         let Some(slot) = self.agents.running.get_mut(&id) else {
             return;
         };
+        if slot.agent.has_gone() {
+            return;
+        }
         if slot.agent.has_outgoing() && slot.agent.flush().is_err() {
             slot.agent.gone();
             self.queue_flood(Flood::Agent(id));
@@ -804,7 +809,9 @@ impl Daemon {
     /// Reads what agent `id` sent, [`FIRST_LOOK`] bytes or a little more if
     /// there are that many, and hands it to its chats. Returns how many
     /// bytes it read, or `None` once it's no longer read: its output ended,
-    /// or it has gone and there's nothing more to read for now.
+    /// or it has exited and there's nothing more to read. One that has
+    /// only gone, as its input broke, is still running, and may write more
+    /// after a pause.
     fn read_agent_once(&mut self, id: AgentId) -> Option<usize> {
         let slot = self.agents.running.get_mut(&id)?;
         let mut incoming = std::mem::take(&mut self.agents.incoming);
@@ -816,8 +823,8 @@ impl Daemon {
         }
         self.agents.incoming = incoming;
         let more = read.as_ref().is_ok_and(|&read| read >= FIRST_LOOK);
-        let gone = |slot: &AgentSlot| slot.agent.has_gone();
-        if read.is_err() || (!more && self.agents.running.get(&id).is_some_and(gone)) {
+        let exited = |slot: &AgentSlot| slot.agent.has_exited();
+        if read.is_err() || (!more && self.agents.running.get(&id).is_some_and(exited)) {
             self.agent_ended(id);
             return None;
         }

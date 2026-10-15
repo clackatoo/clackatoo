@@ -2189,6 +2189,19 @@ fn when_the_agent_stops_the_next_message_starts_it_again() {
 }
 
 #[test]
+fn what_an_agent_says_a_while_after_it_hangs_up_still_comes() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    // Answering what it asks fails, as it has closed its input, and its
+    // pipe is then empty for a while. It's still running, though, and
+    // what it says after that still comes.
+    let node = ask(&mut client, chat, "hang-up");
+    assert_eq!(last_words(&node), "still here\n");
+    assert_eq!(last_outcome(&node), Some(&Outcome::Done));
+}
+
+#[test]
 fn closing_a_chat_ends_its_session() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
@@ -6648,6 +6661,15 @@ fn an_answer_sent_as_its_server_hangs_up_still_comes() {
     // write as the answer: answering fails, but what it sent is read to
     // the end before it's let go.
     hints_come_from_a_server_that_exits(200_000, &["--hang-up-before-hints"]);
+}
+
+#[test]
+fn an_answer_sent_a_while_after_its_server_hangs_up_still_comes() {
+    // As above, but it pauses between asking again and answering: its
+    // pipe is empty for a while once answering has failed, which isn't its
+    // end, as it's still running.
+    let args = ["--hang-up-before-hints", "--pause-before-hints"];
+    hints_come_from_a_server_that_exits(200_000, &args);
 }
 
 #[test]

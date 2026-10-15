@@ -765,7 +765,7 @@ impl Daemon {
             // read to the end.
             Pipe::Exit => {
                 if let Some(slot) = self.servers.slots.get_mut(&id) {
-                    slot.server.gone();
+                    slot.server.exited();
                 }
                 self.read_server(id, Reading::Last);
             }
@@ -773,12 +773,17 @@ impl Daemon {
     }
 
     /// Writes what's queued for server `id`. If writing fails, it has gone,
-    /// but what it sent before it went may still be waiting: that's read
-    /// to the end, at the end of the turn, and then it's let go.
+    /// but it may still be running, and what it sends meanwhile is still
+    /// read: from the end of the turn, then as it comes, until it exits
+    /// and that's been read to the end, or until it's been gone too long.
+    /// Nothing more is written to one that has gone.
     pub(super) fn flush_server(&mut self, id: ServerId) {
         let Some(slot) = self.servers.slots.get_mut(&id) else {
             return;
         };
+        if slot.server.has_gone() {
+            return;
+        }
         if slot.server.has_outgoing() && slot.server.flush().is_err() {
             slot.server.gone();
             self.queue_flood(Flood::Server(id));
@@ -844,7 +849,9 @@ impl Daemon {
     /// Reads what server `id` sent, [`FIRST_LOOK`] bytes or a little more
     /// if there are that many, and hands it to its buffers. Returns how many
     /// bytes it read, or `None` once it's no longer read: its output ended,
-    /// or it has gone and there's nothing more to read for now.
+    /// or it has exited and there's nothing more to read. One that has
+    /// only gone, as its input broke, is still running, and may write more
+    /// after a pause.
     fn read_server_once(&mut self, id: ServerId) -> Option<usize> {
         let slot = self.servers.slots.get_mut(&id)?;
         let mut incoming = Vec::new();
@@ -854,8 +861,8 @@ impl Daemon {
             self.receive_from_server(id, message);
         }
         let more = read.as_ref().is_ok_and(|&read| read >= FIRST_LOOK);
-        let gone = |slot: &ServerSlot| slot.server.has_gone();
-        if read.is_err() || (!more && self.servers.slots.get(&id).is_some_and(gone)) {
+        let exited = |slot: &ServerSlot| slot.server.has_exited();
+        if read.is_err() || (!more && self.servers.slots.get(&id).is_some_and(exited)) {
             self.server_ended(id);
             return None;
         }
