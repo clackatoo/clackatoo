@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.33 (2026-10-15)
+
+### Features
+
+- **gui:** take the launcher's startup token, so the window takes focus and the spinner ends (73b945c)
+
 ## 2026.10.32 (2026-10-15)
 
 ### Speed
