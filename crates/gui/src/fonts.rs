@@ -320,6 +320,46 @@ impl Fonts {
         Ok(fonts)
     }
 
+    /// Lays `text` out on a thread of its own in each of `families`, at
+    /// the terminal's size, and lets it go: so the families
+    /// parley looks through for it, and the fonts behind them for what
+    /// they haven't got, are found before the window needs them.
+    ///
+    /// Finding a family is fontconfig sorting every font on the system
+    /// against it, which takes milliseconds a family; the first chat drawn
+    /// would otherwise wait for each family its stack goes through. The
+    /// thread's copy of the collection shares the system's fonts with this
+    /// one, and what it finds of each family is kept there, for both. It
+    /// runs once and ends; nothing waits for it. Returns it, if it started.
+    pub(crate) fn warm(
+        &self,
+        families: Vec<parley::FontFamily<'static>>,
+        text: String,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        let collection = self.font_cx.collection.clone();
+        let size = self.ppem;
+        let spawned = std::thread::Builder::new()
+            .name("fonts".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let mut font_cx = parley::FontContext {
+                    collection,
+                    source_cache: SourceCache::default(),
+                };
+                let mut layout_cx = parley::LayoutContext::<()>::new();
+                for family in families {
+                    let mut builder = layout_cx.ranged_builder(&mut font_cx, &text, 1.0, true);
+                    builder.push_default(parley::StyleProperty::FontFamily(family));
+                    builder.push_default(parley::StyleProperty::FontSize(size));
+                    builder.build(&text);
+                }
+                log::debug!("fonts found ahead in {:.1?}", started.elapsed());
+            });
+        spawned
+            .inspect_err(|err| log::warn!("couldn't find fonts ahead: {err}"))
+            .ok()
+    }
+
     /// Loads the interface font at `points`: `family`, or if it isn't
     /// installed, as when the desktop names one it doesn't have, the first
     /// of the [`ui_families`] that is. Without any, the terminal's font

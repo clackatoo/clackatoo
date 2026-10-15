@@ -448,6 +448,10 @@ pub(crate) struct App {
     connected_at: Option<(Instant, u32)>,
     /// Whether a frame has shown a terminal, rather than a notice.
     first_frame_drawn: bool,
+    /// The terminal family the chat's fonts were last found ahead for,
+    /// by its generation (see [`App::warm_fonts`]): at first the one the
+    /// window's fonts load with, found as they load.
+    fonts_warmed: u32,
     /// The input method: whether it's on, which it is while keys type
     /// text, and what it's composing.
     ime: InputMethod,
@@ -518,6 +522,7 @@ impl App {
             reconnecting: None,
             connected_at: None,
             first_frame_drawn: false,
+            fonts_warmed: 0,
             ime: InputMethod::default(),
             ime_area: None,
             composing_in_chat: false,
@@ -1723,6 +1728,7 @@ impl App {
             && self.desk.use_font(&mut frame.fonts)
         {
             frame.renderer.forget_glyphs();
+            self.warm_fonts();
             self.fit_panes();
             self.send_outbox();
         }
@@ -1756,6 +1762,21 @@ impl App {
         // The code the chats laid out, to colour.
         if self.desk.ask_colours() {
             self.send_outbox();
+        }
+    }
+
+    /// Has the fonts the chat lays its text out in found on a thread for
+    /// a terminal family the window changed to (see `chat::warm_fonts`),
+    /// so the first chat drawn in it doesn't wait. Changes of size alone
+    /// find nothing new.
+    fn warm_fonts(&mut self) {
+        let Some(frame) = &self.frame else {
+            return;
+        };
+        let generation = frame.fonts.generation;
+        if self.fonts_warmed != generation {
+            self.fonts_warmed = generation;
+            crate::chat::warm_fonts(&frame.fonts);
         }
     }
 

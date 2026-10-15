@@ -683,6 +683,169 @@ fn an_indented_greps_match_is_picked_out_in_a_preview_coloured_by_bytes() {
     );
 }
 
+/// How a keyword is coloured.
+fn keyword_ink() -> Ink {
+    crate::colors::syntax_ink(clackatoo_text::Kind::Keyword)
+}
+
+/// The preview of `path`, `lines` as they come from the daemon's search
+/// numbered `search`, with no colours, as a file not open comes.
+fn plain_preview(finder: &mut Finder, search: u64, path: &str, lines: &[&str]) {
+    finder.previewing(search, path.into(), 0);
+    finder.preview_found(Found::Preview {
+        first: 0,
+        lines: lines.iter().map(|&line| line.to_owned()).collect(),
+        spans: Vec::new(),
+    });
+}
+
+#[test]
+fn a_preview_of_a_file_not_open_is_asked_to_be_coloured_once_the_latest_only() {
+    let now = Instant::now();
+    let mut finder = Finder::new(Kind::Files, String::new(), Case::default());
+    finder.searching(1);
+    root(&mut finder);
+    // b.rs is picked, as the list shows only it.
+    files(&mut finder, &["b.rs"]);
+    plain_preview(
+        &mut finder,
+        2,
+        "/home/jack/project/a.rs",
+        &["fn a() {}", "x"],
+    );
+    // Its code, in its file's language, as the daemon numbers its bytes:
+    // each line with its break.
+    let (search, code) = finder.take_colour_ask(now).expect("an ask");
+    assert_eq!(search, 2);
+    assert_eq!(code.language, "rs");
+    assert_eq!(code.text, "fn a() {}\nx\n");
+    assert_eq!(finder.take_colour_ask(now), None, "once");
+    finder.colours_asked(Some(7), (search, code), now);
+    assert_eq!(finder.colour_ask(), Some(7));
+    // Another preview comes while that's answered: it waits its turn.
+    plain_preview(&mut finder, 3, "/home/jack/project/b.rs", &["let b = 1;"]);
+    assert_eq!(finder.take_colour_ask(now), None, "one at a time");
+    // The answer for the preview gone is let go...
+    let keyword = |start, end| Span {
+        start,
+        end,
+        kind: clackatoo_text::Kind::Keyword,
+    };
+    // ...though it's drawn again, for the one shown to be asked about
+    // after...
+    assert!(finder.coloured(vec![keyword(0, 2)]));
+    assert_eq!(finder.colour_ask(), None);
+    let shown = finder.view((10, 60), Some((9, 40))).preview.unwrap();
+    assert!(
+        inked(&shown.lines[0])
+            .iter()
+            .all(|&(_, ink)| ink != keyword_ink()),
+        "its colours aren't the other's"
+    );
+    // ...and then it is.
+    let (search, code) = finder.take_colour_ask(now).expect("the latest");
+    assert_eq!((search, code.text.as_str()), (3, "let b = 1;\n"));
+    finder.colours_asked(Some(8), (search, code), now);
+    // Its answer colours it, out of order as it may come.
+    assert!(finder.coloured(vec![keyword(8, 9), keyword(0, 3)]));
+    let preview = finder.view((10, 60), Some((9, 40))).preview.unwrap();
+    let ink = keyword_ink();
+    assert_eq!(
+        inked(&preview.lines[0]),
+        [
+            ("1 ", Ink::Muted),
+            ("let", ink),
+            (" b = ", Ink::Plain),
+            ("1", ink),
+            (";", Ink::Plain)
+        ]
+    );
+    assert!(!finder.coloured(vec![keyword(0, 3)]), "answered already");
+}
+
+#[test]
+fn a_preview_already_coloured_or_of_no_language_or_lost_with_the_daemon_is_handled() {
+    let now = Instant::now();
+    let mut finder = Finder::new(Kind::Files, String::new(), Case::default());
+    finder.searching(1);
+    root(&mut finder);
+    // A file with no ending names no language: nothing's asked.
+    plain_preview(&mut finder, 2, "/home/jack/project/Makefile", &["all:"]);
+    assert_eq!(finder.take_colour_ask(now), None);
+    // Nor is an empty file.
+    plain_preview(&mut finder, 3, "/home/jack/project/e.rs", &[]);
+    assert_eq!(finder.take_colour_ask(now), None);
+    // Nor a file open, which comes coloured.
+    finder.previewing(4, "/home/jack/project/a.rs".into(), 0);
+    finder.preview_found(Found::Preview {
+        first: 0,
+        lines: vec!["fn a".into()],
+        spans: vec![Span {
+            start: 0,
+            end: 2,
+            kind: clackatoo_text::Kind::Keyword,
+        }],
+    });
+    assert_eq!(finder.take_colour_ask(now), None);
+    // A daemon that can't colour code: it stays plain, with nothing
+    // waiting.
+    plain_preview(&mut finder, 5, "/home/jack/project/b.rs", &["b"]);
+    let ask = finder.take_colour_ask(now).unwrap();
+    finder.colours_asked(None, ask, now);
+    assert_eq!(finder.colour_ask(), None);
+    assert_eq!(finder.take_colour_ask(now), None);
+    // The connection gone while it's answered: it's asked again.
+    plain_preview(&mut finder, 6, "/home/jack/project/c.rs", &["c"]);
+    let ask = finder.take_colour_ask(now).unwrap();
+    finder.colours_asked(Some(9), ask, now);
+    finder.forget_colour_ask();
+    assert_eq!(finder.colour_ask(), None);
+    let (search, code) = finder.take_colour_ask(now).expect("asked again");
+    assert_eq!((search, code.text.as_str()), (6, "c\n"));
+}
+
+#[test]
+fn an_ask_the_daemon_dropped_is_given_up_on_and_a_coloured_preview_wants_nothing() {
+    let now = Instant::now();
+    let mut finder = Finder::new(Kind::Files, String::new(), Case::default());
+    finder.searching(1);
+    root(&mut finder);
+    plain_preview(&mut finder, 2, "/home/jack/project/a.rs", &["a"]);
+    let ask = finder.take_colour_ask(now).unwrap();
+    finder.colours_asked(Some(7), ask, now);
+    // Its answer never comes, as a daemon with too many waiting drops it.
+    plain_preview(&mut finder, 3, "/home/jack/project/b.rs", &["b"]);
+    let soon = now + Duration::from_secs(1);
+    assert_eq!(
+        finder.take_colour_ask(soon),
+        None,
+        "still answered, for all it knows"
+    );
+    let later = now + COLOURING_GIVEN_UP;
+    let (search, _) = finder.take_colour_ask(later).expect("given up on");
+    assert_eq!(search, 3);
+    // A preview that comes coloured, as an open file's does, leaves the
+    // plain one before it unwanted.
+    let code = Code {
+        language: "rs".into(),
+        text: "b\n".into(),
+    };
+    finder.colours_asked(Some(8), (3, code), later);
+    plain_preview(&mut finder, 4, "/home/jack/project/c.rs", &["c"]);
+    finder.previewing(5, "/home/jack/project/a.rs".into(), 0);
+    finder.preview_found(Found::Preview {
+        first: 0,
+        lines: vec!["a".into()],
+        spans: vec![Span {
+            start: 0,
+            end: 1,
+            kind: clackatoo_text::Kind::Keyword,
+        }],
+    });
+    assert!(!finder.coloured(Vec::new()), "nothing waits");
+    assert_eq!(finder.take_colour_ask(later), None);
+}
+
 #[test]
 fn an_empty_file_says_so_in_the_preview() {
     let mut finder = Finder::new(Kind::Files, String::new(), Case::default());

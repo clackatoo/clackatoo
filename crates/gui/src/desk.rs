@@ -6366,6 +6366,71 @@ mod tests {
     }
 
     #[test]
+    fn the_finders_preview_of_a_file_not_open_is_coloured_by_the_daemon() {
+        use clackatoo_protocol::{Found, Search, Span, wire};
+        let preview_of = |desk: &mut Desk, version| {
+            desk.daemon_is(version, None);
+            type_keys(desk, " pf");
+            let (id, _) = search_in(&finds(desk));
+            found_files(desk, id, &["src/lib.rs"]);
+            finder_rows(desk);
+            let preview = (finds(desk).into_iter())
+                .find_map(|message| match message {
+                    ClientMessage::Find {
+                        id,
+                        search: Search::Preview { .. },
+                        ..
+                    } => Some(id),
+                    _ => None,
+                })
+                .expect("a preview asked for");
+            desk.found(
+                preview,
+                Found::Preview {
+                    first: 0,
+                    lines: vec!["pub fn x() {}".into()],
+                    spans: Vec::new(),
+                },
+            );
+        };
+        let colour_asks = |desk: &mut Desk| -> Vec<(u64, Vec<clackatoo_protocol::Code>)> {
+            (desk.take_outbox().into_iter())
+                .filter_map(|message| match message {
+                    ClientMessage::Colour { id, code } => Some((id, code)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut desk = editing("/p/src/main.rs", "fn main() {}\n");
+        preview_of(&mut desk, clackatoo_protocol::PROTOCOL_VERSION);
+        assert!(desk.ask_colours());
+        let asks = colour_asks(&mut desk);
+        let [(id, code)] = &asks[..] else {
+            panic!("one ask: {asks:?}")
+        };
+        assert_eq!(code.len(), 1);
+        assert_eq!(code[0].language, "rs");
+        assert_eq!(code[0].text, "pub fn x() {}\n");
+        assert!(!desk.ask_colours(), "asked once");
+        // The answer colours the preview, and it's drawn again.
+        let keyword = Span {
+            start: 0,
+            end: 3,
+            kind: clackatoo_protocol::Kind::Keyword,
+        };
+        assert!(desk.coloured(*id, vec![vec![keyword]]));
+        let view = desk.finder_view((10, 60), Some((9, 40))).unwrap();
+        let line = &view.preview.expect("a preview").lines[0];
+        let ink = crate::colors::syntax_ink(clackatoo_protocol::Kind::Keyword);
+        assert!(line.runs.iter().any(|&(_, run)| run == ink), "{line:?}");
+        // A daemon too old to colour code isn't asked.
+        let mut desk = editing("/p/src/main.rs", "fn main() {}\n");
+        preview_of(&mut desk, wire::COLOURS - 1);
+        assert!(!desk.ask_colours());
+        assert!(colour_asks(&mut desk).is_empty());
+    }
+
+    #[test]
     fn space_p_f_finds_the_projects_files_and_opens_the_one_picked() {
         use clackatoo_protocol::{OpenFile, Search};
         let mut desk = editing("/p/src/main.rs", "fn main() {}\n");

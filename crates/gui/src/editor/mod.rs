@@ -89,7 +89,7 @@ use keys::{Action, Command, Entry, Operator, Parsed, Target, ViewAt};
 pub(crate) use marks::{FilePlace, Marks};
 #[cfg(test)]
 pub(crate) use panel::Line as PanelLine;
-pub(crate) use panel::PanelView;
+pub(crate) use panel::{BESIDE_GAP, Beside, PanelView};
 use panel::{Hover, Panel};
 pub(crate) use pattern::{Matching, Pattern};
 pub(crate) use pieces::{GiveUp, PATIENCE};

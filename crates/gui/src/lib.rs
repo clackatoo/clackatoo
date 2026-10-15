@@ -166,6 +166,9 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 // GPU takes longer than anyway.
                 let desktop = desktop::Desktop::read();
                 let fonts = fonts::Fonts::for_window(&options, &desktop)?;
+                // The chat's fonts are found from now, alongside the GPU,
+                // so a chat on screen as the window opens doesn't wait.
+                chat::warm_fonts(&fonts);
                 Ok((fonts, desktop))
             })?
     };

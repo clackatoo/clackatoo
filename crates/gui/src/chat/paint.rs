@@ -90,6 +90,22 @@ fn mono_family(fonts: &Fonts) -> FontFamily<'static> {
     ]))
 }
 
+/// A character no font has: laid out, parley looks through every family
+/// of a stack for it, and the fonts behind them, as it would for any
+/// character the interface's font hasn't got, such as the send button's
+/// `↑` or a symbol in an agent's words.
+const IN_NO_FONT: char = '\u{10FFFD}';
+
+/// Has the families the chat lays its text out in found on a thread of
+/// their own, for its words and its code, all the way down each stack,
+/// so the first chat drawn doesn't wait for fontconfig, which the first
+/// look into each family behind the interface's takes milliseconds over
+/// (see [`Fonts::warm`]). Returns the thread, if it started.
+pub(crate) fn warm_fonts(fonts: &Fonts) -> Option<std::thread::JoinHandle<()>> {
+    let text = format!("Aa1 {IN_NO_FONT}");
+    fonts.warm(vec![ui_family(fonts), mono_family(fonts)], text)
+}
+
 /// The family called `name`, or `generic` without one.
 fn named_or(name: Option<&String>, generic: GenericFamily) -> FontFamilyName<'static> {
     match name {
@@ -261,9 +277,11 @@ struct LaidBlock {
     top: f32,
     /// A list item's marker, laid out, and where it goes from the left.
     marker: Option<(Layout<Brush>, f32)>,
-    /// For a table's cell, what it was laid out from, hashed: a table laid
-    /// out again as more of it comes keeps the cells that haven't changed.
-    key: Option<u64>,
+    /// What it was laid out from, hashed: text laid out again as more of
+    /// it comes keeps the blocks, and tables' cells, that haven't changed,
+    /// so an answer streaming in lays out only its last paragraph again,
+    /// not every one before it.
+    key: u64,
 }
 
 /// Sizes, from the text's size.
@@ -283,7 +301,7 @@ impl Measures {
 }
 
 /// What a piece of the chat is drawn as.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Look {
     /// The agent's words: Markdown.
     Words,
@@ -2430,7 +2448,8 @@ fn lay_out(
 
 /// Lays out `text` as `look` says, `width` wide, its code coloured as
 /// `colours` knows it, if it's given, and wanted from them if it isn't
-/// known, and its tables' cells taken from `cells` where they're there.
+/// known, and its blocks, tables' cells among them, taken from `cells` where
+/// they're there, laid out just so.
 fn lay_out_coloured(
     layout_cx: &mut parley::LayoutContext<Brush>,
     fonts: &mut Fonts,
@@ -2505,14 +2524,12 @@ fn lay_out_coloured(
         };
         let size = text_size_of(&block.kind, look, m);
         let syntax = code_colours(&block, colours.as_deref_mut(), &mut laid.waiting);
-        let layout = lay_out_block(
-            layout_cx,
-            fonts,
-            (&block, &syntax),
-            look,
-            size,
-            (width - indent).max(m.em(4.0)),
-        );
+        let wrap = (width - indent).max(m.em(4.0));
+        // As it was, if it was laid out before just so.
+        let key = block_key(&block, &syntax, look, size, wrap);
+        let layout = cells.remove(&key).unwrap_or_else(|| {
+            lay_out_block(layout_cx, fonts, (&block, &syntax), look, size, wrap)
+        });
         let marker = match &block.kind {
             BlockKind::Item(marker) => {
                 let layout = lay_out_marker(layout_cx, fonts, marker, size);
@@ -2534,11 +2551,28 @@ fn lay_out_coloured(
             left: indent,
             top: laid.height,
             marker,
-            key: None,
+            key,
         });
         laid.height += height;
     }
     laid
+}
+
+/// What `block`, a block other than a table's cell, is laid out from,
+/// hashed: its text, styles and kind, its code's colours, `syntax`, how it
+/// looks, and its text's size and the width it wraps to.
+fn block_key(
+    block: &markdown::Block,
+    syntax: &[clackatoo_protocol::Span],
+    look: Look,
+    size: f32,
+    width: f32,
+) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    let sizes = (size.to_bits(), width.to_bits());
+    (&block.text, &block.spans, &block.kind, syntax, look, sizes).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// How big the text of a block of `kind` is, laid out as `look` says.
@@ -2887,6 +2921,118 @@ mod tests {
         chat.cache.notes.clear();
         crate::chat::fixtures::paint(&mut chat, &mut fonts);
         assert!(!(chat.cache.notes.keys()).any(|(text, _)| text.starts_with("Claude Code in")));
+    }
+
+    #[test]
+    fn the_chats_fonts_are_found_ahead_on_a_thread_that_ends() {
+        let mut fonts = crate::chat::fixtures::fonts();
+        let thread = warm_fonts(&fonts).expect("a thread");
+        thread.join().expect("it finds them without panicking");
+        // The window's own collection lays text out as ever.
+        let mut layout_cx = parley::LayoutContext::new();
+        let m = Measures::of(text_size(&fonts));
+        let laid = lay_out(
+            &mut layout_cx,
+            &mut fonts,
+            m,
+            "Send ↑ · done ✓",
+            Look::Words,
+            1000.0,
+        );
+        assert!(laid.width > 0.0);
+    }
+
+    #[test]
+    fn words_streaming_in_lay_out_again_only_the_block_that_changed() {
+        let mut fonts = crate::chat::fixtures::fonts();
+        let mut layout_cx = parley::LayoutContext::new();
+        let m = Measures::of(text_size(&fonts));
+        let lay = |text: &str, cells: &mut Cells, fonts: &mut Fonts, layout_cx: &mut _| {
+            lay_out_coloured(
+                layout_cx,
+                fonts,
+                m,
+                (text, Look::Words),
+                (600.0, cells),
+                None,
+            )
+        };
+        let before = "# Plan\n\nFirst, **this**.\n\n- one\n- two\n\nThen th";
+        let laid = lay(before, &mut Cells::new(), &mut fonts, &mut layout_cx);
+        assert_eq!(laid.blocks.len(), 5);
+        let mut cells = laid.into_cells();
+        let after = format!("{before}at, which goes on.");
+        let again = lay(&after, &mut cells, &mut fonts, &mut layout_cx);
+        // Every block but the last was kept: only the last is left over.
+        assert_eq!(cells.len(), 1, "only the paragraph that grew is laid out");
+        assert_eq!(again.blocks[4].text, "Then that, which goes on.");
+        // Laid out at another width, or as thinking, nothing is kept.
+        let mut cells = again.into_cells();
+        lay_out_coloured(
+            &mut layout_cx,
+            &mut fonts,
+            m,
+            (&after, Look::Thought),
+            (600.0, &mut cells),
+            None,
+        );
+        assert_eq!(cells.len(), 5, "its tone is part of what's kept");
+        lay(&after, &mut cells, &mut fonts, &mut layout_cx);
+        assert_eq!(cells.len(), 0);
+        let mut cells = lay(&after, &mut Cells::new(), &mut fonts, &mut layout_cx).into_cells();
+        lay_out_coloured(
+            &mut layout_cx,
+            &mut fonts,
+            m,
+            (&after, Look::Words),
+            (500.0, &mut cells),
+            None,
+        );
+        assert_eq!(cells.len(), 5);
+    }
+
+    #[test]
+    fn code_laid_out_plain_is_laid_out_again_once_its_colours_come() {
+        use crate::chat::colours::Colours;
+        let mut fonts = crate::chat::fixtures::fonts();
+        let mut layout_cx = parley::LayoutContext::new();
+        let m = Measures::of(text_size(&fonts));
+        let text = "```rust\nfn main() {}\n```";
+        let mut colours = Colours::default();
+        let words = (text, Look::Words);
+        let mut cells = Cells::new();
+        let plain = lay_out_coloured(
+            &mut layout_cx,
+            &mut fonts,
+            m,
+            words,
+            (600.0, &mut cells),
+            Some(&mut colours),
+        );
+        assert!(plain.waiting);
+        let mut cells = plain.into_cells();
+        let asked = colours.take_wanted();
+        let span = clackatoo_protocol::Span {
+            start: 0,
+            end: 2,
+            kind: clackatoo_protocol::Kind::Keyword,
+        };
+        colours.asked(1, asked.into_iter().flatten().collect());
+        assert!(colours.answered(1, vec![vec![span]]));
+        let coloured = lay_out_coloured(
+            &mut layout_cx,
+            &mut fonts,
+            m,
+            words,
+            (600.0, &mut cells),
+            Some(&mut colours),
+        );
+        assert!(!coloured.waiting);
+        assert_eq!(
+            cells.len(),
+            1,
+            "the plain layout isn't taken for the coloured"
+        );
     }
 
     #[test]

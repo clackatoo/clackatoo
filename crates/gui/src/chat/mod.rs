@@ -34,7 +34,7 @@ use crate::pane::Copy;
 use paint::{How, Picked, Position, Shown, TextKey};
 use picker::{Row, Spot};
 
-pub(crate) use paint::ChatPaint;
+pub(crate) use paint::{ChatPaint, warm_fonts};
 
 /// How a piece of the chat's text is drawn, carried through layout.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

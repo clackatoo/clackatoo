@@ -367,7 +367,7 @@ impl Daemon {
                     let _ = write!(
                         then,
                         ", outside this chat's project ({})",
-                        homely(&root, &self.config.home)
+                        code_span(&visible(&homely(&root, &self.config.home)))
                     );
                 }
                 Some(asked("send", &new.prompt, &then))
@@ -404,7 +404,7 @@ impl Daemon {
                     let _ = write!(
                         then,
                         ", some outside this chat's project ({})",
-                        homely(&root, &self.config.home)
+                        code_span(&visible(&homely(&root, &self.config.home)))
                     );
                 }
                 Some(asked_each("send", &each, &then))

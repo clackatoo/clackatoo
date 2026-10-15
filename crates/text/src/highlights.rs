@@ -127,7 +127,7 @@ impl Kind {
 }
 
 /// A piece of text of one [`Kind`]: bytes `start` to `end`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Span {
     /// Its first byte.

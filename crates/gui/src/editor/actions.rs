@@ -177,8 +177,8 @@ impl ActionMenu {
         }
         Line {
             runs,
-            block: false,
             picked: index == self.selected,
+            ..Line::default()
         }
     }
 
@@ -187,6 +187,7 @@ impl ActionMenu {
         let placed = self.placed?;
         Some(super::PanelView {
             placed,
+            beside: None,
             lines: &self.lines,
             first: self.top,
             total: self.actions.len(),

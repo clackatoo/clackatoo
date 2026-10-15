@@ -200,16 +200,16 @@ pub(super) struct TableLaid {
     pub(super) marks: [Layout<Brush>; 2],
 }
 
-/// Tables' cells, laid out, by what they were laid out from, hashed: see
-/// [`LaidBlock`]'s `key`.
+/// Blocks, tables' cells among them, laid out, by what they were laid out
+/// from, hashed: see [`LaidBlock`]'s `key`.
 pub(super) type Cells = HashMap<u64, Layout<Brush>>;
 
 impl Laid {
-    /// Its tables' cells, laid out, to lay it out again with, as more of
-    /// it comes.
+    /// Its blocks, laid out, to lay it out again with, as more of it
+    /// comes.
     pub(super) fn into_cells(self) -> Cells {
         (self.blocks.into_iter())
-            .filter_map(|block| Some((block.key?, block.layout)))
+            .map(|block| (block.key, block.layout))
             .collect()
     }
 }
@@ -327,7 +327,7 @@ pub(super) fn lay_out_table(
             left: left + xs[cell.column] + within,
             top: top + ys[cell.row],
             marker: None,
-            key: Some(key),
+            key,
         });
     }
     laid.tables.push(TableLaid {
@@ -529,7 +529,7 @@ mod tests {
         // As a row comes, the head's cells are kept, not laid out again.
         let laid = &chat.cache.turns[0].laid.as_ref().unwrap().pieces[&ITEMS];
         let mut cells: Cells = (laid.blocks.iter())
-            .filter_map(|block| Some((block.key?, block.layout.clone())))
+            .map(|block| (block.key, block.layout.clone()))
             .collect();
         let grown = format!("{head}\n| {} |", wide.join(" | "));
         let mut layout_cx = parley::LayoutContext::new();
@@ -543,7 +543,7 @@ mod tests {
         // A cell in bold, or in the head, is another cell to keep.
         let block = &again.blocks[0];
         let markdown = crate::chat::markdown::blocks("| **column 0** |\n|---|");
-        assert_ne!(cell_key(&markdown[0], true), block.key.unwrap());
+        assert_ne!(cell_key(&markdown[0], true), block.key);
         assert_ne!(cell_key(&markdown[0], false), cell_key(&markdown[0], true));
     }
 

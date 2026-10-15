@@ -1219,7 +1219,8 @@ fn whats_wrong_is_shown_in_full_in_the_panel() {
     setup.answer(setup.queries[1].0, hover);
     let text = panel_text(&mut setup).unwrap();
     assert_eq!(text.last().map(String::as_str), Some("y: u32"));
-    assert!(text[3].starts_with('─'), "{text:?}");
+    assert!(text[3].is_empty(), "{text:?}");
+    assert!(setup.editor.panel().unwrap().lines[3].rule, "a line across");
 }
 
 #[test]
@@ -1929,7 +1930,7 @@ impl Setup {
         self.editor.settle(&self.copy);
         let view = self.editor.completion.as_ref()?.menu()?;
         let labels = (view.lines.iter())
-            .map(|line| line.text().split_whitespace().nth(1).unwrap().to_owned())
+            .map(|line| line.text().split_whitespace().next().unwrap().to_owned())
             .collect();
         Some(labels)
     }

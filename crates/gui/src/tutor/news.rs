@@ -431,6 +431,18 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "explorer",
         what: ":w's changes to a folder are titled with it, and asked about right under them",
     },
+    News {
+        id: "completion-columns",
+        date: "2026-10-15",
+        lesson: "snippets",
+        what: "The completion menu's labels start under the word you type, with kinds at the right, and its documentation sits apart",
+    },
+    News {
+        id: "finder-previews-coloured",
+        date: "2026-10-15",
+        lesson: "finder",
+        what: "The finder colours previews of files that aren't open too, and the first chat opens without a pause",
+    },
 ];
 
 impl News {

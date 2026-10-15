@@ -220,6 +220,8 @@ impl Window {
         // scaled to the screen's.
         let desktop = crate::desktop::Desktop::read();
         let mut fonts = Fonts::for_window(&font, &desktop)?;
+        // As `run` does.
+        crate::chat::warm_fonts(&fonts);
         app.desk.use_font(&mut fonts);
         app.buttons = desktop.buttons;
         fonts.set_scale(scale);

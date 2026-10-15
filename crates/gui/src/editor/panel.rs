@@ -43,6 +43,9 @@ pub(crate) struct Line {
     /// Whether it's what's picked, as a completion menu's item is, which
     /// is lit behind, across the panel.
     pub(crate) picked: bool,
+    /// Whether it's a line across, between parts of what's shown, drawn
+    /// a pixel thick across its middle, with no text.
+    pub(crate) rule: bool,
 }
 
 impl Line {
@@ -61,7 +64,11 @@ enum Block {
     /// A line of code, in runs of inks, wrapped wherever it reaches the
     /// edge.
     Code(Vec<Run>),
-    /// A line across, between what the server says and what's wrong.
+    /// A line of code wrapped as code is, with no band behind it: what a
+    /// completion item is, over its documentation.
+    Detail(Vec<Run>),
+    /// A line across, between what the server says and what's wrong, or
+    /// what a completion item is and what it does.
     Rule,
     /// An empty line, between paragraphs.
     Gap,
@@ -80,6 +87,9 @@ pub(crate) struct Panel {
     scroll: usize,
     /// Where it goes, as last settled, if there's room for it.
     placed: Option<Placed>,
+    /// Which side of a completion menu it's beside, if it was settled
+    /// beside one.
+    beside: Option<Beside>,
     /// Where it was asked for: moving the cursor from there closes it.
     pub(crate) anchor: crate::motion::Point,
     /// What the language server said in it, if it says anything.
@@ -130,10 +140,26 @@ pub(crate) struct Placed {
     pub(crate) height: usize,
 }
 
+/// Which side of a completion menu its documentation is on. A cell is left
+/// free between them, and the documentation is drawn into it, towards the
+/// menu, as far as leaves a gap of [`BESIDE_GAP`] paddings, so the two
+/// boxes read as two at any size of font.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Beside {
+    Right,
+    Left,
+}
+
+/// The gap between a completion menu and its documentation, in paddings:
+/// 8 px at a pixel a point.
+pub(crate) const BESIDE_GAP: f32 = 2.0;
+
 /// The panel as it's to be drawn.
 #[derive(Debug)]
 pub(crate) struct PanelView<'a> {
     pub(crate) placed: Placed,
+    /// Which side of a completion menu it's beside, if it's beside one.
+    pub(crate) beside: Option<Beside>,
     /// The lines shown.
     pub(crate) lines: &'a [Line],
     /// The first shown, and how many there are in all, for its scroll
@@ -194,6 +220,7 @@ impl Panel {
             wrapped_to: 0,
             scroll: 0,
             placed: None,
+            beside: None,
             anchor,
             hovered: None,
         })
@@ -251,6 +278,7 @@ impl Panel {
             wrapped_to: 0,
             scroll: 0,
             placed: None,
+            beside: None,
             anchor,
             hovered: None,
         })
@@ -272,8 +300,9 @@ impl Panel {
     }
 
     /// A completion item's documentation, as shown beside the menu: what
-    /// it is, `detail`, as code, then `documentation`, as markdown if it
-    /// says so. `None` if there's neither.
+    /// it is, `detail`, as code, dimmed and with no band behind it, then
+    /// under a line across, `documentation`, as markdown if it says so.
+    /// `None` if there's neither.
     pub(crate) fn documentation(
         detail: Option<&str>,
         documentation: Option<(&str, bool)>,
@@ -281,11 +310,17 @@ impl Panel {
     ) -> Option<Self> {
         let mut blocks: Vec<Block> = (detail.into_iter())
             .flat_map(str::lines)
-            .map(|line| code(expand_tabs(line, tabstop), Ink::Plain))
+            .map(|line| {
+                Block::Detail(vec![Run {
+                    text: expand_tabs(line, tabstop),
+                    ink: Ink::Muted,
+                    code: false,
+                }])
+            })
             .collect();
         if let Some((text, markdown)) = documentation {
             if !blocks.is_empty() {
-                blocks.push(Block::Gap);
+                blocks.push(Block::Rule);
             }
             if markdown {
                 blocks.extend(from_markdown(text, tabstop, &[]));
@@ -358,6 +393,7 @@ impl Panel {
     pub(crate) fn settle(&mut self, (rows, cols): (usize, usize), cursor: Option<(usize, usize)>) {
         let width = self.wrap(cols);
         let lines = self.lines.len();
+        self.beside = None;
         self.placed = cursor.and_then(|cursor| place((rows, cols), cursor, (width, lines)));
         if let Some(placed) = self.placed {
             self.scroll = self.scroll.min(self.lines.len() - placed.height);
@@ -379,8 +415,13 @@ impl Panel {
         (least, most): (usize, usize),
     ) {
         self.placed = None;
+        self.beside = None;
+        // A cell between them is left free (see `Beside`).
         let menu_end = menu.left + menu.width + 2;
-        let (right, left) = (cols.saturating_sub(menu_end), menu.left);
+        let (right, left) = (
+            cols.saturating_sub(menu_end + 1),
+            menu.left.saturating_sub(1),
+        );
         let (room, on_right) = if right >= least + 2 {
             (right, true)
         } else if left >= least + 2 {
@@ -402,12 +443,17 @@ impl Panel {
         self.placed = Some(Placed {
             top: if below { from } else { to - height - 1 },
             left: if on_right {
-                menu_end
+                menu_end + 1
             } else {
-                menu.left - width - 2
+                menu.left - width - 3
             },
             width,
             height,
+        });
+        self.beside = Some(if on_right {
+            Beside::Right
+        } else {
+            Beside::Left
         });
         self.scroll = self.scroll.min(self.lines.len() - height);
     }
@@ -426,6 +472,7 @@ impl Panel {
         /// The most lines shown.
         const MOST: usize = 4;
         self.placed = None;
+        self.beside = None;
         let Some((line, col)) = cursor else { return };
         if cols < 3 {
             return;
@@ -455,6 +502,7 @@ impl Panel {
         let placed = self.placed?;
         Some(PanelView {
             placed,
+            beside: self.beside,
             lines: &self.lines[self.scroll..self.scroll + placed.height],
             first: self.scroll,
             total: self.lines.len(),
@@ -490,7 +538,9 @@ impl Block {
                 let text: String = runs.iter().map(|run| run.text.as_str()).collect();
                 text.split('\n').map(mono_width).max().unwrap_or(0)
             }
-            Self::Code(runs) => runs.iter().map(|run| mono_width(&run.text)).sum(),
+            Self::Code(runs) | Self::Detail(runs) => {
+                runs.iter().map(|run| mono_width(&run.text)).sum()
+            }
             Self::Rule | Self::Gap => 0,
         }
     }
@@ -499,15 +549,15 @@ impl Block {
     fn wrap(&self, width: usize) -> Vec<Line> {
         match self {
             Self::Prose(runs) => wrap_prose(runs, width),
-            Self::Code(runs) => {
+            Self::Code(runs) | Self::Detail(runs) => {
+                let block = matches!(self, Self::Code(_));
                 let chars: Vec<(char, usize)> = (runs.iter().enumerate())
                     .flat_map(|(index, run)| run.text.chars().map(move |ch| (ch, index)))
                     .collect();
                 if chars.is_empty() {
                     return vec![Line {
-                        runs: Vec::new(),
-                        block: true,
-                        picked: false,
+                        block,
+                        ..Line::default()
                     }];
                 }
                 let mut lines = Vec::new();
@@ -515,20 +565,15 @@ impl Block {
                 while !rest.is_empty() {
                     let (fits, _) = fit(rest, width);
                     let mut line = line_of(&rest[..fits], runs);
-                    line.block = true;
+                    line.block = block;
                     lines.push(line);
                     rest = &rest[fits..];
                 }
                 lines
             }
             Self::Rule => vec![Line {
-                runs: vec![Run {
-                    text: "─".repeat(width),
-                    ink: Ink::Muted,
-                    code: false,
-                }],
-                block: false,
-                picked: false,
+                rule: true,
+                ..Line::default()
             }],
             Self::Gap => vec![Line::default()],
         }
@@ -1213,11 +1258,12 @@ mod tests {
                 "error: mismatched types".to_owned(),
                 "expected u32".to_owned(),
                 "[E0308 rustc]".to_owned(),
-                // As wide as the widest line.
-                "─".repeat("error: mismatched types".len()),
+                // A line across, drawn, with no text.
+                String::new(),
                 "u32".to_owned(),
             ]
         );
+        assert!(view.lines[3].rule && !view.lines[2].rule);
         assert_eq!(
             view.lines[0].runs[0].ink,
             Ink::Color(colors::diagnostic(Severity::Error))
@@ -1301,7 +1347,11 @@ mod tests {
         };
         docs.settle_beside((12, 80), under, true, (10, 40));
         let placed = docs.view().unwrap().placed;
-        assert_eq!((placed.top, placed.height, placed.left), (5, 6, 22));
+        assert_eq!(
+            (placed.top, placed.height, placed.left),
+            (5, 6, 23),
+            "a cell after the menu"
+        );
         // A menu over it, rows 0 to 4: level with its bottom.
         let over = Placed { top: 0, ..under };
         docs.settle_beside((12, 80), over, false, (10, 40));

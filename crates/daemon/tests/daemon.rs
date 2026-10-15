@@ -12748,13 +12748,44 @@ fn a_chat_started_gets_its_parents_mode_and_only_its_family_goes_unasked() {
         )
         .unwrap();
     let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
-    let title = asking.question.unwrap().title;
+    let title = asking.question.as_ref().unwrap().title.clone();
     assert!(
         title.contains("in `/`, outside this chat's project ("),
         "{title}"
     );
+    assert_project_quoted(&asking, "outside this chat's project (");
     answer(&mut client, a, Some("reject".to_owned()));
     wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
+
+    // So does starting several, one of them outside.
+    let chats = serde_json::json!({ "chats": [{ "prompt": "x" }, { "prompt": "y", "cwd": "/" }] });
+    (client.chat(a, ChatAction::Send(format!("mcp start_chats {chats}")))).unwrap();
+    let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
+    assert_project_quoted(&asking, "some outside this chat's project (");
+    answer(&mut client, a, Some("reject".to_owned()));
+    wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
+}
+
+/// Checks the question `node` asks names the chat's project after `words`
+/// as code, quoted as the folders an agent names are, between `words` and
+/// a closing bracket.
+fn assert_project_quoted(node: &ChatNode, words: &str) {
+    use clackatoo_protocol::Said;
+    let question = node.question.as_ref().unwrap();
+    let said = question.said();
+    let at = (said.iter())
+        .position(|piece| matches!(piece, Said::Words(text) if text.ends_with(words)))
+        .unwrap_or_else(|| panic!("{:?}", question.title));
+    assert!(
+        matches!(&said[at + 1], Said::Code(root) if !root.is_empty() && root != "/"),
+        "the project, quoted: {:?}",
+        question.title
+    );
+    assert!(
+        matches!(said.get(at + 2), Some(Said::Words(text)) if text.starts_with(')')),
+        "{:?}",
+        question.title
+    );
 }
 
 // --- Moving a chat between agents ------------------------------------------

@@ -22,7 +22,7 @@ pub(super) struct Block {
 }
 
 /// What a block is.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum BlockKind {
     Paragraph,
     /// A heading, from 1, the largest.
@@ -42,7 +42,7 @@ pub(super) enum BlockKind {
 }
 
 /// Where a cell goes in its table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Cell {
     /// Which table of the text it's in, from 0.
     pub(super) table: usize,
@@ -54,7 +54,7 @@ pub(super) struct Cell {
 }
 
 /// How a table's column lines its cells up.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(super) enum Align {
     #[default]
     Left,

@@ -31,8 +31,12 @@ const MENU_HEIGHT: usize = 10;
 /// is cut to fit.
 const MENU_WIDTH: usize = 60;
 
-/// The cells an item's kind takes, before its label, with the gap after.
-const KIND_WIDTH: usize = 8;
+/// The cells between an item's label, what's said of it and its kind.
+const GAP: usize = 2;
+
+/// The fewest cells of label the kinds' column leaves: in a narrower pane
+/// the kinds aren't shown.
+const LEAST_LABEL: usize = 4;
 
 /// The narrowest the documentation beside the menu is worth showing at.
 const LEAST_DOCS: usize = 24;
@@ -507,7 +511,7 @@ impl Completion {
             return;
         };
         let shown = self.ranking.shown().len();
-        if shown == 0 || cols < KIND_WIDTH + 6 {
+        if shown == 0 || cols < 6 {
             return;
         }
         self.top = self.top.min(shown.saturating_sub(MENU_HEIGHT));
@@ -536,21 +540,35 @@ impl Completion {
         let in_view = self.top..self.top + height;
         let room = (cols - 2).min(MENU_WIDTH);
         let indices: Vec<u32> = self.ranking.shown()[in_view.clone()].to_vec();
+        // The kinds make a column at the right, as wide as the widest,
+        // unless the pane's too narrow to leave a few cells of label
+        // beside it.
+        let kinds = (indices.iter())
+            .map(|&index| kind_name(self.items[index as usize].kind).len())
+            .max()
+            .filter(|&kinds| GAP + kinds + LEAST_LABEL <= room)
+            .unwrap_or(0);
         let width = (indices.iter())
             .map(|&index| {
                 let item = &self.items[index as usize];
                 let detail = mono_width(&item.detail);
-                KIND_WIDTH + mono_width(&item.label) + if detail > 0 { 2 + detail } else { 0 }
+                mono_width(&item.label)
+                    + if detail > 0 { GAP + detail } else { 0 }
+                    + if kinds > 0 { GAP + kinds } else { 0 }
             })
             .max()
             .unwrap_or(0)
             .min(room);
         self.lines = (indices.iter().enumerate())
-            .map(|(offset, &index)| self.line(index, width, self.top + offset == self.selected))
+            .map(|(offset, &index)| {
+                let picked = self.top + offset == self.selected;
+                self.line(index, (width, kinds), picked)
+            })
             .collect();
-        // The labels line up with the word, as far as the pane allows.
+        // The labels start in the word's column, the box a cell before it,
+        // as far as the pane allows.
         let boxed = width + 2;
-        let left = word.saturating_sub(KIND_WIDTH + 1).min(cols - boxed);
+        let left = word.saturating_sub(1).min(cols - boxed);
         let placed = Placed {
             top,
             left,
@@ -563,23 +581,23 @@ impl Completion {
         }
     }
 
-    /// The line showing item `index`, `width` cells wide: its kind, its
-    /// label with what matches what's typed highlighted, and its detail,
-    /// dimmed, as much as fits.
-    fn line(&mut self, index: u32, width: usize, picked: bool) -> Line {
+    /// The line showing item `index`, `width` cells wide, with a column
+    /// `kinds` wide for the kinds at its right: its label, with what
+    /// matches what's typed highlighted, then its detail, dimmed, as much
+    /// as fits, and its kind at the right, dimmed, as nvim-cmp shows them.
+    /// The detail is cut first, then the label; the kind never is.
+    fn line(&mut self, index: u32, (width, kinds): (usize, usize), picked: bool) -> Line {
         let item = &self.items[index as usize];
         let (label, detail) = (item.label.clone(), item.detail.clone());
         let kind = kind_name(item.kind);
         let matched = self.ranking.matched(&label);
-        let mut runs = vec![Run {
-            text: format!("{kind:<KIND_WIDTH$}"),
-            ink: Ink::Muted,
-            code: false,
-        }];
-        let mut used = KIND_WIDTH;
+        // What the label and detail may take, left of the kinds.
+        let room = width.saturating_sub(if kinds > 0 { GAP + kinds } else { 0 });
+        let mut runs: Vec<Run> = Vec::new();
+        let mut used = 0;
         for (index, ch) in (0..).zip(label.chars()) {
             let cells = mono_cells(ch);
-            if used + cells > width {
+            if used + cells > room {
                 break;
             }
             used += cells;
@@ -597,30 +615,45 @@ impl Completion {
                 }),
             }
         }
-        if !detail.is_empty() && used + 3 <= width {
-            let mut shown = String::from("  ");
-            let room = width - used - 2;
+        if !detail.is_empty() && used + GAP < room {
+            let mut shown = " ".repeat(GAP);
+            let room = room - used - GAP;
             let mut taken = 0;
             for ch in detail.chars() {
                 let cells = mono_cells(ch);
                 if taken + cells > room {
-                    shown.pop();
+                    // The last that fit makes way for the mark.
+                    if taken > 0
+                        && let Some(last) = shown.pop()
+                    {
+                        taken -= mono_cells(last);
+                    }
                     shown.push('…');
+                    taken += 1;
                     break;
                 }
                 taken += cells;
                 shown.push(ch);
             }
+            used += GAP + taken;
             runs.push(Run {
                 text: shown,
                 ink: Ink::Muted,
                 code: false,
             });
         }
+        if kinds > 0 && !kind.is_empty() {
+            let pad = width.saturating_sub(used + kind.len());
+            runs.push(Run {
+                text: format!("{:pad$}{kind}", ""),
+                ink: Ink::Muted,
+                code: false,
+            });
+        }
         Line {
             runs,
-            block: false,
             picked,
+            ..Line::default()
         }
     }
 
@@ -629,6 +662,7 @@ impl Completion {
         let placed = self.placed?;
         Some(super::PanelView {
             placed,
+            beside: None,
             lines: &self.lines,
             first: self.top,
             total: self.ranking.shown().len(),
@@ -824,14 +858,139 @@ mod tests {
     fn the_matched_characters_of_a_label_are_lit() {
         let mut completion = Completion::new(1, 0, vec![item("print_line")], false);
         completion.narrow("pl");
-        let line = completion.line(0, 40, true);
+        let line = completion.line(0, (20, 3), true);
         let lit: Vec<&str> = (line.runs.iter())
             .filter(|run| run.ink == Ink::Matched)
             .map(|run| run.text.as_str())
             .collect();
         assert_eq!(lit, ["p", "l"]);
         assert!(line.picked);
-        assert_eq!(line.text(), "var     print_line");
+        assert_eq!(line.text(), "print_line       var");
+    }
+
+    /// A completion of `items`, each a label, its kind and its detail,
+    /// settled in a pane 20 rows by `cols`, the cursor on row 5 and the
+    /// word starting in column `word`.
+    fn settled(items: &[(&str, u8, &str)], cols: usize, word: usize) -> Completion {
+        let items = (items.iter())
+            .map(|&(label, kind, detail)| {
+                let mut item = item(label);
+                item.kind = kind;
+                detail.clone_into(&mut item.detail);
+                item
+            })
+            .collect();
+        let mut completion = Completion::new(1, 0, items, false);
+        completion.narrow("co");
+        completion.document(4);
+        completion.settle((20, cols), Some((5, word + 2)), word);
+        completion
+    }
+
+    #[test]
+    fn the_labels_start_in_the_words_column_with_the_kinds_at_the_right() {
+        let items = [("count", 6, "a word"), ("compare", 3, ""), ("cos", 14, "")];
+        let completion = settled(&items, 80, 10);
+        let menu = completion.menu().unwrap();
+        // The box is a cell wider than its text on each side: its text
+        // starts where the word does.
+        assert_eq!(menu.placed.left + 1, 10);
+        let texts: Vec<String> = menu.lines.iter().map(Line::text).collect();
+        assert_eq!(
+            texts,
+            [
+                "compare             fn",
+                "cos            keyword",
+                "count  a word      var",
+            ]
+        );
+        let count = &menu.lines[2].runs;
+        assert_eq!(count.last().unwrap().ink, Ink::Muted, "the kind, dimmed");
+        assert_eq!(count[count.len() - 2].ink, Ink::Muted, "the detail, dimmed");
+        // At the pane's left, the box can't start a cell before the word.
+        assert_eq!(settled(&items, 80, 0).menu().unwrap().placed.left, 0);
+        // Nor go past its right.
+        let near_edge = settled(&items, 30, 25);
+        let placed = near_edge.menu().unwrap().placed;
+        assert_eq!(placed.left + placed.width + 2, 30);
+    }
+
+    #[test]
+    fn a_narrow_pane_shows_labels_without_their_kinds_never_past_the_box() {
+        let items = [("counter", 14, "a word")];
+        // Twelve columns leave ten for the text: too few for a label and
+        // `keyword` beside it.
+        let menu = settled(&items, 12, 0);
+        let menu = menu.menu().unwrap();
+        assert_eq!(menu.lines[0].text(), "counter  …");
+        // Fifteen leave thirteen: four of the label, and the kind.
+        let menu = settled(&items, 15, 0);
+        let menu = menu.menu().unwrap();
+        assert_eq!(menu.lines[0].text(), "coun  keyword");
+        // However narrow, no line is wider than the box.
+        for cols in 6..20 {
+            let completion = settled(&items, cols, 0);
+            let menu = completion.menu().unwrap();
+            for line in menu.lines {
+                assert!(mono_width(&line.text()) <= menu.placed.width, "{cols}");
+            }
+            assert!(menu.placed.left + menu.placed.width + 2 <= cols, "{cols}");
+        }
+    }
+
+    #[test]
+    fn a_long_detail_is_cut_before_the_kind_and_the_label_after_it() {
+        let detail = "fn(a: String, b: String, c: String) -> Result<String, Error>";
+        let completion = settled(&[("count", 3, detail)], 30, 0);
+        let menu = completion.menu().unwrap();
+        // The pane leaves 28 cells for the text.
+        assert_eq!(menu.placed.width, 28);
+        assert_eq!(menu.lines[0].text(), "count  fn(a: String, b:…  fn");
+        let label = "a_very_long_name_indeed_for_a_completion";
+        let completion = settled(&[(label, 6, "x")], 20, 0);
+        assert_eq!(
+            completion.menu().unwrap().lines[0].text(),
+            "a_very_long_n  var"
+        );
+        // A wide character that doesn't fit is cut whole.
+        let completion = settled(&[("count", 3, "x字字字字字字字字字字字字")], 30, 0);
+        let text = completion.menu().unwrap().lines[0].text();
+        assert!(text.contains("字…") && text.ends_with("  fn"), "{text}");
+        assert_eq!(mono_width(&text), 28, "{text}");
+    }
+
+    #[test]
+    fn the_documentation_is_a_gap_away_its_detail_dimmed_over_a_line() {
+        let mut completion = settled(&[("count", 6, "num")], 80, 10);
+        completion.resolve(
+            0,
+            Resolved {
+                detail: None,
+                documentation: Some(("How many.".into(), false)),
+            },
+        );
+        completion.document(4);
+        completion.settle((20, 80), Some((5, 12)), 10);
+        let menu = completion.menu().unwrap().placed;
+        let docs = completion.docs().unwrap();
+        // A cell is left between them, which the window draws mostly over
+        // to leave the gap.
+        assert_eq!(docs.placed.left, menu.left + menu.width + 2 + 1);
+        assert_eq!(docs.beside, Some(super::super::Beside::Right));
+        let detail = &docs.lines[0];
+        assert_eq!(detail.text(), "num");
+        assert_eq!(detail.runs[0].ink, Ink::Muted);
+        assert!(!detail.block, "no band behind it");
+        assert!(docs.lines[1].rule && docs.lines[1].runs.is_empty());
+        assert_eq!(docs.lines[2].text(), "How many.");
+        // With no room on the right, it's on the left, a cell away too.
+        let mut completion = settled(&[("count", 6, "num")], 60, 50);
+        completion.document(4);
+        completion.settle((20, 60), Some((5, 52)), 50);
+        let menu = completion.menu().unwrap().placed;
+        let docs = completion.docs().unwrap();
+        assert_eq!(docs.beside, Some(super::super::Beside::Left));
+        assert_eq!(docs.placed.left + docs.placed.width + 2 + 1, menu.left);
     }
 
     /// `snippet` written out with no variables known, its line breaks

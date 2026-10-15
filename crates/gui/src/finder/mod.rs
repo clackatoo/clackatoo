@@ -28,9 +28,12 @@ pub(crate) mod rank;
 pub(crate) mod view;
 
 use std::fmt::Write as _;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    Answer, Done, FileLocation, Found, FoundBuffer, FoundLine, FoundSymbol, Side, Span, Symbol,
+    Answer, Code, Done, FileLocation, Found, FoundBuffer, FoundLine, FoundSymbol, Side, Span,
+    Symbol,
 };
 use winit::keyboard::{Key, NamedKey};
 
@@ -165,11 +168,39 @@ struct Preview {
     /// and line it's of.
     asked: Option<(u64, String, u64)>,
     shown: Option<Shown>,
+    /// The code of the preview of a file not open, which the daemon sends
+    /// plain, to ask it to colour, as the chats' code is: by the search
+    /// for the preview, and its language and text. Only the latest is
+    /// kept, and asked about once no other ask is being answered, so
+    /// going through the list fast asks about few.
+    wanted: Option<(u64, Code)>,
+    /// The ask being answered.
+    colouring: Option<Colouring>,
 }
+
+/// An ask about a preview's code, being answered.
+#[derive(Debug)]
+struct Colouring {
+    /// Its number.
+    id: u64,
+    /// Which preview's code it is, by its search, and the code, kept to
+    /// ask again if the connection goes.
+    search: u64,
+    code: Code,
+    /// When it was asked.
+    since: Instant,
+}
+
+/// How long an ask about a preview's code goes unanswered before the
+/// next preview is asked about anyway: far longer than the daemon takes,
+/// which drops asks only when a window has hundreds waiting.
+const COLOURING_GIVEN_UP: Duration = Duration::from_secs(5);
 
 /// A preview come from the daemon.
 #[derive(Debug)]
 struct Shown {
+    /// The search it came from.
+    search: u64,
     /// The file, and the line asked about.
     path: String,
     line: u64,
@@ -676,7 +707,7 @@ impl Finder {
 
     /// Takes in what the daemon's search for a preview found.
     pub(crate) fn preview_found(&mut self, found: Found) {
-        let Some((_, path, line)) = &self.preview.asked else {
+        let Some((search, path, line)) = &self.preview.asked else {
             return;
         };
         let lines = match found {
@@ -692,11 +723,102 @@ impl Finder {
             }
             _ => return,
         };
+        // Another preview's code is no longer wanted; this one's is, if
+        // it's of a file not open, which comes plain.
+        self.preview.wanted = None;
+        if let Ok((_, lines, spans)) = &lines
+            && spans.is_empty()
+            && !lines.is_empty()
+            && let Some(language) = (Path::new(path).extension()).and_then(|ext| ext.to_str())
+        {
+            let mut text = lines.join("\n");
+            text.push('\n');
+            let code = Code {
+                language: language.to_owned(),
+                text,
+            };
+            self.preview.wanted = Some((*search, code));
+        }
         self.preview.shown = Some(Shown {
+            search: *search,
             path: path.clone(),
             line: *line,
             lines,
         });
+    }
+
+    /// The code of the preview shown to ask the daemon to colour, with the
+    /// search the preview came from, if it wants colouring and no other
+    /// ask is being answered at `now`. An ask unanswered for
+    /// [`COLOURING_GIVEN_UP`] is given up on, as the daemon drops asks
+    /// past those it can keep waiting.
+    pub(crate) fn take_colour_ask(&mut self, now: Instant) -> Option<(u64, Code)> {
+        if let Some(colouring) = &self.preview.colouring {
+            if now.saturating_duration_since(colouring.since) < COLOURING_GIVEN_UP {
+                return None;
+            }
+            self.preview.colouring = None;
+        }
+        let (search, code) = self.preview.wanted.take()?;
+        // A preview gone already isn't asked about.
+        let shown = self.preview.shown.as_ref()?;
+        (shown.search == search).then_some((search, code))
+    }
+
+    /// The code [`take_colour_ask`](Self::take_colour_ask) gave, of the
+    /// preview from search `search`, was asked about at `now`, numbered
+    /// `id`; or with none, couldn't be, as the daemon doesn't colour code,
+    /// and the preview stays plain.
+    pub(crate) fn colours_asked(
+        &mut self,
+        id: Option<u64>,
+        (search, code): (u64, Code),
+        now: Instant,
+    ) {
+        self.preview.colouring = id.map(|id| Colouring {
+            id,
+            search,
+            code,
+            since: now,
+        });
+    }
+
+    /// The ask about a preview's code being answered, by its number.
+    pub(crate) fn colour_ask(&self) -> Option<u64> {
+        (self.preview.colouring.as_ref()).map(|colouring| colouring.id)
+    }
+
+    /// The daemon's answer to the ask about a preview's code: its spans,
+    /// for the preview, if it's still shown. Returns whether to draw
+    /// again: as it's coloured, or as a newer preview's code waits to be
+    /// asked about, which it is once the frame's drawn.
+    pub(crate) fn coloured(&mut self, mut spans: Vec<Span>) -> bool {
+        let Some(Colouring { search, .. }) = self.preview.colouring.take() else {
+            return false;
+        };
+        let waiting = self.preview.wanted.is_some();
+        let Some(Shown {
+            search: shown,
+            lines: Ok((_, _, kept)),
+            ..
+        }) = &mut self.preview.shown
+        else {
+            return waiting;
+        };
+        if *shown != search || spans.is_empty() {
+            return waiting;
+        }
+        spans.sort_by_key(|span| span.start);
+        *kept = spans;
+        true
+    }
+
+    /// Forgets the ask about a preview's code being answered, as the
+    /// connection's gone: it's asked again, unless a newer is wanted.
+    pub(crate) fn forget_colour_ask(&mut self) {
+        if let Some(Colouring { search, code, .. }) = self.preview.colouring.take() {
+            self.preview.wanted.get_or_insert((search, code));
+        }
     }
 
     /// What to draw, for a list `rows` things tall and `cols` cells wide,

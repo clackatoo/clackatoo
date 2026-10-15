@@ -1979,10 +1979,19 @@ pub(crate) fn paint_panel<'a>(
     let metrics = geometry.metrics;
     let [cell_width, cell_height] = metrics.cell;
     let placed = view.placed;
+    // Beside a completion menu, drawn into the cell left free between
+    // them, as far as leaves the gap, or not at all if the cell's
+    // narrower than the gap.
+    let toward = (cell_width - crate::editor::BESIDE_GAP * metrics.padding).max(0.0);
+    let nudge = match view.beside {
+        Some(crate::editor::Beside::Right) => -toward,
+        Some(crate::editor::Beside::Left) => toward,
+        None => 0.0,
+    };
     // A cell of room either side of the text, and half a cell above and
     // below.
     let rect = Rect {
-        x: (origin[0] + placed.left as f32 * cell_width).round(),
+        x: (origin[0] + placed.left as f32 * cell_width + nudge).round(),
         y: (origin[1] + placed.top as f32 * cell_height).round(),
         width: ((placed.width + 2) as f32 * cell_width).round(),
         height: ((placed.height + 1) as f32 * cell_height).round(),
@@ -1996,6 +2005,17 @@ pub(crate) fn paint_panel<'a>(
     let top = (rect.y + cell_height / 2.0).round();
     for (index, line) in view.lines.iter().enumerate() {
         let y = top + index as f32 * cell_height;
+        if line.rule {
+            over.push(Fill::solid(
+                [
+                    left,
+                    (y + (cell_height - geometry.edge) / 2.0).round(),
+                    placed.width as f32 * cell_width,
+                    geometry.edge,
+                ],
+                Paint::PaletteEdge,
+            ));
+        }
         if line.block {
             over.push(Fill::solid(
                 [

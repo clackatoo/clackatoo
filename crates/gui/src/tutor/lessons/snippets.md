@@ -13,7 +13,7 @@ fn main() {
 
 ## The menu
 
-As you type a word in insert mode, the server is asked what could finish it, once typing pauses; a character such as `.` asks at once, and so do Ctrl+Space, Ctrl+N and Ctrl+P. The menu narrows as you type, best first, with each item's kind, its letters that match lit, and its detail dimmed; the picked item's documentation shows beside it.
+As you type a word in insert mode, the server is asked what could finish it, once typing pauses; a character such as `.` asks at once, and so do Ctrl+Space, Ctrl+N and Ctrl+P. The menu narrows as you type, best first. Each item's label starts right under the word you're typing, with its letters that match lit and its detail dimmed, and its kind dimmed at the right. The picked item's documentation shows beside the menu: what it is, dimmed, over a line, then what it does.
 
 Ctrl+N and Ctrl+P, or Down and Up, pick; Ctrl+Y accepts; Enter accepts the item you moved to, and otherwise starts a new line, as the option `completeaccept` says; Ctrl+E closes the menu, and Esc closes it and leaves insert mode.
 
