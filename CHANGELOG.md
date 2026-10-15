@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.49 (2026-10-15)
+
+### Features
+
+- **gui,web:** counts for config bindings and jumps, desc and groups in the panel of keys, failed marks on the phone (a78a5c5)
+
 ## 2026.10.48 (2026-10-15)
 
 ### Features
