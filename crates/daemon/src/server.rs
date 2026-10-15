@@ -2274,7 +2274,8 @@ impl Daemon {
                     | ClientMessage::Files { .. }
                     | ClientMessage::FileOp { .. }
                     | ClientMessage::Board { .. }
-                    | ClientMessage::ListSessions { .. }),
+                    | ClientMessage::ListSessions { .. }
+                    | ClientMessage::Colour { .. }),
                 ) => {
                     self.serve_unanswered(token, message);
                     continue;
@@ -2346,6 +2347,7 @@ impl Daemon {
             ClientMessage::ListSessions { id, agent, cwd } => {
                 self.list_sessions(token, id, &agent, &cwd);
             }
+            ClientMessage::Colour { id, code } => self.colour_code(token, id, code),
             other => log::error!("{other:?} is answered"),
         }
     }

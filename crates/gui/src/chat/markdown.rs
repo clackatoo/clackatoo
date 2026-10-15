@@ -3,11 +3,12 @@
 //!
 //! Only what a chat needs is kept: paragraphs, headings, lists, quotes,
 //! code, rules and tables, with bold, italic, struck-through, code and
-//! links inside them. Anything else is shown as its text.
+//! links inside them. Anything else is shown as its text. A table is a
+//! block for each cell, which says where in the table it goes.
 
 use std::ops::Range;
 
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 /// One block of text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,25 +27,65 @@ pub(super) enum BlockKind {
     Paragraph,
     /// A heading, from 1, the largest.
     Heading(u8),
-    /// Code, in the terminal's font, on a background of its own.
-    Code,
+    /// Code, in the terminal's font, on a background of its own, and the
+    /// language to colour it as: the one its fence names, once the fence
+    /// is closed. Code still coming isn't coloured.
+    Code(Option<String>),
     /// A list item's first block, after its marker: "•" or "1.".
     Item(String),
     /// Text in a quote, with a bar beside it.
     Quote,
     /// A line across.
     Rule,
+    /// A cell of a table.
+    Cell(Cell),
+}
+
+/// Where a cell goes in its table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Cell {
+    /// Which table of the text it's in, from 0.
+    pub(super) table: usize,
+    /// Its row, from 0, the table's head.
+    pub(super) row: usize,
+    pub(super) column: usize,
+    /// How its column lines its cells up.
+    pub(super) align: Align,
+}
+
+/// How a table's column lines its cells up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Align {
+    #[default]
+    Left,
+    Middle,
+    Right,
+}
+
+impl BlockKind {
+    /// Whether it's code.
+    pub(super) fn code(&self) -> bool {
+        matches!(self, Self::Code(_))
+    }
+
+    /// Where it goes in a table, if it's a cell of one.
+    pub(super) fn cell(&self) -> Option<Cell> {
+        match self {
+            Self::Cell(cell) => Some(*cell),
+            _ => None,
+        }
+    }
 }
 
 /// A piece of a block's text and its style.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Span {
     pub(super) range: Range<usize>,
     pub(super) style: Style,
 }
 
 /// How a piece of text is styled.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "independent styles, as in Markdown"
@@ -62,7 +103,16 @@ pub(super) fn blocks(markdown: &str) -> Vec<Block> {
     let mut reader = Reader::default();
     let options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
-    for event in Parser::new_ext(markdown, options) {
+    for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
+        if event == Event::End(TagEnd::CodeBlock)
+            && !closed(&markdown[range])
+            && let Some(Block {
+                kind: BlockKind::Code(language),
+                ..
+            }) = &mut reader.open
+        {
+            *language = None;
+        }
         reader.event(event);
     }
     reader.finish_block();
@@ -80,11 +130,23 @@ struct Reader {
     /// The marker of an item whose first block hasn't started.
     marker: Option<String>,
     quotes: u8,
+    /// The table being read: how many came before it, how its columns
+    /// line up, and the row and column of the cell next.
+    table: Option<TableAt>,
+    tables: usize,
     /// How deep in each style the text is.
     bold: u8,
     italic: u8,
     strike: u8,
     link: u8,
+}
+
+/// Where in a table the reader is.
+struct TableAt {
+    index: usize,
+    aligns: Vec<Align>,
+    row: usize,
+    column: usize,
 }
 
 impl Reader {
@@ -114,9 +176,49 @@ impl Reader {
 
     fn start(&mut self, tag: &Tag<'_>) {
         match tag {
-            Tag::Paragraph | Tag::TableHead | Tag::TableRow => self.begin(BlockKind::Paragraph),
+            Tag::Paragraph => self.begin(BlockKind::Paragraph),
             Tag::Heading { level, .. } => self.begin(BlockKind::Heading(heading(*level))),
-            Tag::CodeBlock(_) => self.begin(BlockKind::Code),
+            Tag::CodeBlock(kind) => {
+                let language = match kind {
+                    CodeBlockKind::Fenced(info) => info.split_whitespace().next(),
+                    CodeBlockKind::Indented => None,
+                };
+                self.begin(BlockKind::Code(language.map(str::to_owned)));
+            }
+            Tag::Table(aligns) => {
+                self.finish_block();
+                let aligns = (aligns.iter())
+                    .map(|align| match align {
+                        Alignment::Center => Align::Middle,
+                        Alignment::Right => Align::Right,
+                        Alignment::Left | Alignment::None => Align::Left,
+                    })
+                    .collect();
+                self.table = Some(TableAt {
+                    index: self.tables,
+                    aligns,
+                    row: 0,
+                    column: 0,
+                });
+                self.tables += 1;
+            }
+            Tag::TableHead | Tag::TableRow => {
+                self.finish_block();
+                if let Some(table) = &mut self.table {
+                    table.column = 0;
+                }
+            }
+            Tag::TableCell => {
+                if let Some(table) = &self.table {
+                    let cell = Cell {
+                        table: table.index,
+                        row: table.row,
+                        column: table.column,
+                        align: table.aligns.get(table.column).copied().unwrap_or_default(),
+                    };
+                    self.begin(BlockKind::Cell(cell));
+                }
+            }
             Tag::List(start) => {
                 self.finish_block();
                 self.lists.push(*start);
@@ -147,11 +249,23 @@ impl Reader {
 
     fn end(&mut self, tag: TagEnd) {
         match tag {
-            TagEnd::Paragraph
-            | TagEnd::Heading(_)
-            | TagEnd::Item
-            | TagEnd::TableHead
-            | TagEnd::TableRow => self.finish_block(),
+            TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item => self.finish_block(),
+            TagEnd::TableHead | TagEnd::TableRow => {
+                self.finish_block();
+                if let Some(table) = &mut self.table {
+                    table.row += 1;
+                }
+            }
+            TagEnd::TableCell => {
+                self.finish_block();
+                if let Some(table) = &mut self.table {
+                    table.column += 1;
+                }
+            }
+            TagEnd::Table => {
+                self.finish_block();
+                self.table = None;
+            }
             TagEnd::CodeBlock => {
                 if let Some(block) = &mut self.open {
                     let end = block.text.trim_end_matches('\n').len();
@@ -162,7 +276,6 @@ impl Reader {
                 }
                 self.finish_block();
             }
-            TagEnd::TableCell => self.push("   ", false),
             TagEnd::List(_) => {
                 self.finish_block();
                 self.lists.pop();
@@ -235,11 +348,31 @@ impl Reader {
 
     fn finish_block(&mut self) {
         if let Some(block) = self.open.take()
-            && (!block.text.trim().is_empty() || block.kind == BlockKind::Code)
+            && (!block.text.trim().is_empty() || block.kind.code())
         {
             self.blocks.push(block);
         }
     }
+}
+
+/// Whether `code`, a fenced block of code as written, has its closing
+/// fence: a last line of as many of the opening fence's backticks or
+/// tildes, or more, and nothing else, but the `>` of the quotes it's in.
+fn closed(code: &str) -> bool {
+    fn quoted(line: &str) -> &str {
+        line.trim_start_matches(|ch: char| ch == '>' || ch.is_whitespace())
+    }
+    let code = code.trim_end_matches(['\n', '\r']);
+    let opening = quoted(code);
+    let Some(fence) = opening.chars().next().filter(|ch| matches!(ch, '`' | '~')) else {
+        return false;
+    };
+    let length = opening.len() - opening.trim_start_matches(fence).len();
+    let Some((_, last)) = code.rsplit_once('\n') else {
+        return false;
+    };
+    let last = quoted(last).trim_end();
+    last.len() >= length && last.chars().all(|ch| ch == fence)
 }
 
 fn heading(level: HeadingLevel) -> u8 {
@@ -271,7 +404,11 @@ mod tests {
             [
                 (BlockKind::Heading(1), "Title".into(), 0),
                 (BlockKind::Paragraph, "Some text wrapped.".into(), 0),
-                (BlockKind::Code, "fn main() {}".into(), 0),
+                (
+                    BlockKind::Code(Some("rust".into())),
+                    "fn main() {}".into(),
+                    0
+                ),
                 (BlockKind::Rule, String::new(), 0),
             ]
         );
@@ -329,13 +466,64 @@ mod tests {
     }
 
     #[test]
+    fn a_table_is_its_cells_each_saying_where_it_goes() {
+        let cell = |table, row, column, align| {
+            BlockKind::Cell(Cell {
+                table,
+                row,
+                column,
+                align,
+            })
+        };
+        let read = kinds("| a | b |\n|---|--:|\n| 1 | `2` |\n|  | 4 |\n\n| c |\n|:-:|\n| 5 |");
+        assert_eq!(
+            read,
+            [
+                (cell(0, 0, 0, Align::Left), "a".into(), 0),
+                (cell(0, 0, 1, Align::Right), "b".into(), 0),
+                (cell(0, 1, 0, Align::Left), "1".into(), 0),
+                (cell(0, 1, 1, Align::Right), "2".into(), 0),
+                // An empty cell is no block: the next says where it goes.
+                (cell(0, 2, 1, Align::Right), "4".into(), 0),
+                (cell(1, 0, 0, Align::Middle), "c".into(), 0),
+                (cell(1, 1, 0, Align::Middle), "5".into(), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn code_is_coloured_only_once_its_fence_is_closed() {
+        let language = |markdown: &str| match &blocks(markdown)[0].kind {
+            BlockKind::Code(language) => language.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(language("```rust\nlet x = 1;\n```"), Some("rust".into()));
+        assert_eq!(language("~~~~py\nx = 1\n~~~~\n\nmore"), Some("py".into()));
+        assert_eq!(language("```rust {.x}\nlet x\n```"), Some("rust".into()));
+        // Still coming: the fence isn't closed, or only half.
+        assert_eq!(language("```rust\nlet x = 1;"), None);
+        assert_eq!(language("```rust\nlet x = 1;\n``"), None);
+        assert_eq!(language("```rust"), None);
+        assert_eq!(language("````rust\nlet x\n```"), None);
+        // No language, nothing to colour.
+        assert_eq!(language("```\nlet x\n```"), None);
+        // In a quote, and a quote in a quote.
+        assert_eq!(language("> ```rust\n> let x\n> ```"), Some("rust".into()));
+        assert_eq!(
+            language("> > ```rust\n> > let x\n> > ```"),
+            Some("rust".into())
+        );
+        assert_eq!(language("> ```rust\n> let x"), None);
+    }
+
+    #[test]
     fn half_written_markdown_still_reads() {
         // As it streams in: an unclosed fence, and bold not yet ended.
         assert_eq!(
             kinds("Look:\n\n```\nlet x"),
             [
                 (BlockKind::Paragraph, "Look:".into(), 0),
-                (BlockKind::Code, "let x".into(), 0),
+                (BlockKind::Code(None), "let x".into(), 0),
             ]
         );
         assert_eq!(kinds("**bold so f")[0].1, "**bold so f");

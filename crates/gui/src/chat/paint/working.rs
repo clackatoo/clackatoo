@@ -1,6 +1,7 @@
 //! The line just above the box while the agent works: three dots that
 //! pulse in the accent colour, what it's doing, and how long the turn has
-//! been going, "Running cargo test… 12s".
+//! been going, "Running: cargo test · 12s", from the column's left, as
+//! the rest of the column is.
 //!
 //! It's out of the conversation, so it shows wherever that's scrolled to:
 //! the line a turn's work folds under is at the turn's top, which a long
@@ -44,7 +45,8 @@ const PULSE: f32 = 0.4;
 const SMALLEST: f32 = 0.5;
 
 /// The line, laid out: what the agent is doing, and apart, so a narrow
-/// pane cuts what it's doing rather than them, the seconds, if counted.
+/// pane cuts what it's doing rather than them, the seconds, if counted,
+/// after a `·`.
 pub(super) struct WorkingLaid {
     pub(super) doing: Laid,
     pub(super) seconds: Option<Laid>,
@@ -111,7 +113,7 @@ impl ChatView {
     pub(in crate::chat) fn working_said(&self, now: u64) -> Option<String> {
         let (doing, seconds) = self.working_label(now)?;
         Some(match seconds {
-            Some(seconds) => format!("{doing} {seconds}"),
+            Some(seconds) => format!("{doing} · {seconds}"),
             None => doing,
         })
     }
@@ -134,16 +136,18 @@ impl ChatView {
             None => (None, None),
         };
         let doing = lay_out_line(&mut self.layout_cx, fonts, m, &doing, was_doing);
-        let seconds = seconds
-            .map(|seconds| lay_out_line(&mut self.layout_cx, fonts, m, &seconds, was_seconds));
+        let seconds = seconds.map(|seconds| {
+            let seconds = format!("· {seconds}");
+            lay_out_line(&mut self.layout_cx, fonts, m, &seconds, was_seconds)
+        });
         self.cache.working = Some(WorkingLaid { doing, seconds });
         true
     }
 
     /// Draws the line in `row`, the column's left, top, width and height:
-    /// the dots, what the agent is doing and the seconds, side by side in
-    /// its middle. Too wide for it, they start at its left, and what it's
-    /// doing is cut short to leave the seconds room.
+    /// the dots, what the agent is doing and the seconds, side by side
+    /// from its left. Too wide for it, what it's doing is cut short to
+    /// leave the seconds room.
     pub(super) fn draw_working(
         &self,
         canvas: &mut Canvas<'_>,
@@ -214,15 +218,12 @@ impl ChatView {
 
 /// Where the line starts, in a column from `left`, `column` wide, and how
 /// much of what the agent is doing shows, given how wide what goes before
-/// it is (the dots), it is, and what goes after it is (the seconds). It's
-/// in the middle, or if it's too wide for that, from the left, with what
-/// the agent is doing cut short so what's after it still shows.
+/// it is (the dots), it is, and what goes after it is (the seconds). It
+/// starts at the column's left, with the turns, and if it's too wide, what
+/// the agent is doing is cut short so what's after it still shows.
 fn place(left: f32, column: f32, [before, doing, after]: [f32; 3]) -> (f32, f32) {
-    let x = (left + (column - before - doing - after) / 2.0)
-        .round()
-        .max(left);
-    let room = (left + column - after - x - before).max(0.0);
-    (x, doing.min(room))
+    let room = (column - after - before).max(0.0);
+    (left.round(), doing.min(room))
 }
 
 /// Draws `laid`, one line, from `at`: its left, and the middle of the
@@ -307,27 +308,27 @@ mod tests {
     fn the_line_says_what_the_agent_is_doing_and_counts_the_seconds() {
         let mut fonts = fonts();
         let cases = [
-            (vec![], "Working… 12s"),
-            (vec![Item::Thought("Let me look.".into())], "Thinking… 12s"),
+            (vec![], "Working · 12s"),
+            (vec![Item::Thought("Let me look.".into())], "Thinking · 12s"),
             (
                 vec![tool("cargo test", ToolKind::Execute, ToolStatus::Running)],
-                "Running cargo test… 12s",
+                "Running: cargo test · 12s",
             ),
             (
                 vec![tool("Read Cargo.toml", ToolKind::Read, ToolStatus::Running)],
-                "Reading Cargo.toml… 12s",
+                "Reading Cargo.toml · 12s",
             ),
             (
                 vec![
                     tool("Read Cargo.toml", ToolKind::Read, ToolStatus::Done),
                     Item::Words("It's".into()),
                 ],
-                "Writing… 12s",
+                "Writing · 12s",
             ),
             // Between tools.
             (
                 vec![tool("Read Cargo.toml", ToolKind::Read, ToolStatus::Done)],
-                "Working… 12s",
+                "Working · 12s",
             ),
         ];
         for (items, said) in cases {
@@ -342,11 +343,11 @@ mod tests {
         drawn(&mut chat, &mut fonts, SENT + 400, true);
         assert_eq!(
             drawn(&mut chat, &mut fonts, SENT + 400, true).as_deref(),
-            Some("Working… <1s")
+            Some("Working · <1s")
         );
         assert_eq!(
             drawn(&mut chat, &mut fonts, SENT + 61_000, true).as_deref(),
-            Some("Working… 1m 1s")
+            Some("Working · 1m 1s")
         );
     }
 
@@ -361,14 +362,14 @@ mod tests {
         let mut chat = ChatView::new(String::new(), node.clone());
         assert_eq!(
             drawn(&mut chat, &mut fonts, SENT, true).as_deref(),
-            Some("Starting Claude Code…")
+            Some("Starting Claude Code")
         );
         // A message waiting for it: they count.
         node.turns = answering(vec![]).turns;
         let mut chat = ChatView::new(String::new(), node.clone());
         assert_eq!(
             drawn(&mut chat, &mut fonts, SENT + 3_000, true).as_deref(),
-            Some("Starting Claude Code… 3s")
+            Some("Starting Claude Code · 3s")
         );
         // With turns from before, as after an upgrade: it loads the
         // session. No seconds: each turn told again comes as one going.
@@ -381,7 +382,7 @@ mod tests {
         let mut chat = ChatView::new(String::new(), node);
         assert_eq!(
             drawn(&mut chat, &mut fonts, SENT + 3_000, true).as_deref(),
-            Some("Loading the session…")
+            Some("Loading the session")
         );
         assert!(wake(&chat).is_some(), "the dots still move");
     }
@@ -460,7 +461,7 @@ mod tests {
         let fold = (chat.shown.iter())
             .any(|shown| shown.key.turn == last && shown.key.piece == super::super::FOLD);
         assert!(!fold, "the turn's top is out of view");
-        assert_eq!(said(&chat).as_deref(), Some("Working… 40s"));
+        assert_eq!(said(&chat).as_deref(), Some("Working · 40s"));
         assert!(chat.live().is_some(), "and the window wakes for it");
     }
 
@@ -473,7 +474,7 @@ mod tests {
         chat.node.notice = Some("Claude Code can't tell clackatoo its turns".into());
         assert_eq!(
             drawn(&mut chat, &mut fonts, SENT + 3_000, true).as_deref(),
-            Some("Working… 3s")
+            Some("Working · 3s")
         );
         let m = super::Measures::of(super::super::text_size(&fonts));
         assert!((one - chat.view_height - m.em(1.8)).abs() < 0.5);
@@ -512,12 +513,12 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_line_cuts_what_its_doing_and_keeps_the_seconds() {
-        // Room for all: in the middle.
+    fn the_line_starts_at_the_columns_left_and_a_narrow_one_keeps_the_seconds() {
+        // Room for all: from the left, as the turns are.
         let (x, doing) = super::place(100.0, 400.0, [30.0, 100.0, 40.0]);
-        assert!((x - 215.0).abs() < 1.0 && (doing - 100.0).abs() < f32::EPSILON);
-        // Too narrow: from the left, and what it's doing cut to leave the
-        // seconds their room.
+        assert!((x - 100.0).abs() < f32::EPSILON && (doing - 100.0).abs() < f32::EPSILON);
+        // Too narrow: what it's doing is cut to leave the seconds their
+        // room.
         let (x, doing) = super::place(100.0, 200.0, [30.0, 300.0, 40.0]);
         assert!((x - 100.0).abs() < f32::EPSILON);
         assert!((x + 30.0 + doing + 40.0 - 300.0).abs() < 1.0, "{doing}");
@@ -559,6 +560,14 @@ mod tests {
             .filter(|fill| fill.rect[1] > chat.view_height && fill.rect[2] < m.em)
             .collect();
         assert_eq!(dots.len(), 3, "{dots:?}");
+        // From the column's left, where the turns' text starts.
+        let column = (900.0 - 2.0 * m.em(1.5)).clamp(m.em(8.0), m.em(super::super::COLUMN));
+        let left = ((900.0 - column) / 2.0).round();
+        let first = dots
+            .iter()
+            .map(|fill| fill.rect[0])
+            .fold(f32::MAX, f32::min);
+        assert!(first >= left && first < left + m.em, "{first} vs {left}");
         let working = chat.view_height;
         let mut done = chat.node.turns[0].clone();
         done.end = Some(TurnEnd {

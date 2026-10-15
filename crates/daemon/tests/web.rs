@@ -1252,6 +1252,28 @@ fn a_device_cant_upgrade_the_daemon_carry_quic_or_serve_tools() {
 }
 
 #[test]
+fn a_device_isnt_given_colours_for_chats_code() {
+    let daemon = TestDaemon::start();
+    let cookie = daemon.pair();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    phone.send(&ClientMessage::Colour {
+        id: 1,
+        code: vec![clackatoo_protocol::Code {
+            language: "json".into(),
+            text: "[1]".into(),
+        }],
+    });
+    // Answered in order: by the time a request after it is, it was
+    // refused, and nothing came for it.
+    assert!(matches!(phone.request(Request::Version), Response::Text(_)));
+    assert!(
+        !(phone.events.iter()).any(|event| matches!(event, Event::Coloured { .. })),
+        "{:?}",
+        phone.events
+    );
+}
+
+#[test]
 fn one_address_opens_only_so_many_connections() {
     let pems = tempfile::tempdir().unwrap();
     let (certificate, key, _) = make_certificate(pems.path());

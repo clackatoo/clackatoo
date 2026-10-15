@@ -142,6 +142,7 @@ mod bindings;
 mod boards;
 mod browsers;
 mod clipboard;
+mod colours;
 mod connecting;
 mod devices;
 mod editors;
@@ -258,6 +259,10 @@ pub(crate) struct Desk {
     asked: VecDeque<Asker>,
     /// Messages for the daemon, oldest first, besides the panes' own.
     outbox: Vec<ClientMessage>,
+    /// The chats that asked for their code's colours, by the number of the
+    /// ask not yet answered, and the number of the last.
+    colour_asks: HashMap<u64, TerminalId>,
+    next_colour: u64,
     /// The space the panes' tiles share, once the window is open.
     area: Option<Area>,
     /// What's being typed in the palette, such as a command after `:`.
@@ -1252,6 +1257,7 @@ impl Desk {
         self.closes_asked.clear();
         self.macros.requests_forgotten();
         self.outbox.clear();
+        self.forget_colour_asks();
         self.formatting.clear();
         self.unformatted.clear();
         self.resizes_pending = 0;
@@ -1824,15 +1830,15 @@ impl Desk {
             return self.review_wheel(pane, lines);
         }
         // Away from the panes, as over the bars, the focused pane scrolls.
-        let Some((terminal, cell, _)) = self
+        let Some((terminal, cell, pixel)) = self
             .cell_at(point, None)
-            .or_else(|| Some((self.focused_terminal()?, [0, 0], [0.0; 2])))
+            .or_else(|| Some((self.focused_terminal()?, [0, 0], [-1.0; 2])))
         else {
             return false;
         };
         self.panes
             .get_mut(&terminal)
-            .is_some_and(|pane| pane.wheel(lines, cell, modifiers))
+            .is_some_and(|pane| pane.wheel(lines, (cell, pixel), modifiers))
     }
 
     // --- The mouse --------------------------------------------------------
@@ -2566,6 +2572,7 @@ mod tests {
                 | ClientMessage::Hello { .. }
                 | ClientMessage::Present { .. }
                 | ClientMessage::ListSessions { .. }
+                | ClientMessage::Colour { .. }
                 | ClientMessage::Upgrade { .. } => None,
             })
             .collect();
@@ -2942,6 +2949,90 @@ mod tests {
         assert!(!desk.tab_names()[1].1.contains(Mark::Working.suffix()));
         paint_chat_two(&mut desk, &mut fonts);
         assert!(desk.chat_wakes().is_none(), "zero CPU when idle");
+    }
+
+    #[test]
+    fn a_chats_code_is_asked_to_be_coloured_once_and_its_colours_go_to_it() {
+        use clackatoo_protocol::{ChatPatch, Item, Patch, Span, wire};
+
+        let (mut desk, mut turn) = working_chat_desk();
+        turn.items = vec![Item::Words("Here:\n\n```rust\nfn main() {}\n```".into())];
+        desk.view_changed(
+            TerminalId(2),
+            &ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn { index: 0, turn })]),
+        );
+        let mut fonts = crate::chat::fixtures::fonts();
+        paint_chat_two(&mut desk, &mut fonts);
+        assert!(desk.ask_colours());
+        let asks: Vec<(u64, Vec<clackatoo_protocol::Code>)> = (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Colour { id, code } => Some((id, code)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asks.len(), 1);
+        let (id, code) = &asks[0];
+        assert_eq!(code[0].language, "rust");
+        assert_eq!(code[0].text, "fn main() {}");
+        assert_eq!(desk.colour_asker(*id), Some(TerminalId(2)));
+        // Drawn again, it isn't asked again.
+        paint_chat_two(&mut desk, &mut fonts);
+        assert!(!desk.ask_colours());
+        // The answer goes to the chat, once, and it's drawn again.
+        let spans = vec![vec![Span {
+            start: 0,
+            end: 2,
+            kind: clackatoo_protocol::Kind::Keyword,
+        }]];
+        assert!(desk.coloured(*id, spans.clone()));
+        assert!(!desk.coloured(*id, spans), "answered already");
+        // A daemon too old to colour chats' code isn't asked: the code is
+        // plain.
+        let (mut desk, mut turn) = working_chat_desk();
+        desk.daemon_is(wire::COLOURS - 1, None);
+        turn.items = vec![Item::Words("```rust\nlet x = 1;\n```".into())];
+        desk.view_changed(
+            TerminalId(2),
+            &ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn { index: 0, turn })]),
+        );
+        paint_chat_two(&mut desk, &mut fonts);
+        assert!(!desk.ask_colours());
+        assert!(
+            !(desk.take_outbox().iter())
+                .any(|message| matches!(message, ClientMessage::Colour { .. }))
+        );
+    }
+
+    #[test]
+    fn colours_asked_for_as_the_daemon_went_are_asked_for_again_when_its_back() {
+        use clackatoo_protocol::{ChatPatch, Item, Patch};
+
+        let (mut desk, mut turn) = working_chat_desk();
+        turn.items = vec![Item::Words("```rust\nfn main() {}\n```".into())];
+        desk.view_changed(
+            TerminalId(2),
+            &ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn { index: 0, turn })]),
+        );
+        let mut fonts = crate::chat::fixtures::fonts();
+        paint_chat_two(&mut desk, &mut fonts);
+        assert!(desk.ask_colours());
+        desk.take_outbox();
+        // Gone before it answered: nothing is asked while it's away.
+        desk.lost();
+        paint_chat_two(&mut desk, &mut fonts);
+        assert!(!desk.ask_colours());
+        // Back: the code is laid out again, and asked for again.
+        let layout = vec![
+            tab(1, pane(1)),
+            tab(2, side_by_side(vec![pane(2), pane(3)])),
+        ];
+        desk.connected(workspaces(vec![workspace(1, "work", layout)]), false);
+        paint_chat_two(&mut desk, &mut fonts);
+        assert!(desk.ask_colours());
+        let asked = (desk.take_outbox().into_iter())
+            .filter(|message| matches!(message, ClientMessage::Colour { .. }))
+            .count();
+        assert_eq!(asked, 1);
     }
 
     #[test]

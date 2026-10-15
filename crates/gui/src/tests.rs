@@ -2480,6 +2480,58 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
 }
 
 #[test]
+fn a_chats_normal_mode_cursor_is_drawn_solid_and_its_code_and_tables_as_they_should_be() {
+    use clackatoo_protocol::{Kind, Span};
+
+    let answer =
+        "Some words.\n\n```rust\nfn main() {}\n```\n\n| name | size |\n|---|---|\n| a | 1 |";
+    let node = crate::chat::fixtures::talk(&[("show me", answer)]);
+    let mut cursor = None;
+    let Some(pixels) = render_chat_with("chat-cursor", node, "", 1.0, |chat| {
+        // The code's colours have come, and the chat's in normal mode.
+        chat.paint(&mut fonts(1.0), [0.0; 2], [720.0, 640.0], true);
+        let asks = chat.take_colour_asks();
+        chat.colours_asked(Some(1), asks[0].clone());
+        let keyword = Span {
+            start: 0,
+            end: 2,
+            kind: Kind::Keyword,
+        };
+        chat.coloured(1, vec![vec![keyword]]);
+        chat.reading = true;
+        cursor = Some(());
+    }) else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    assert!(cursor.is_some());
+    let width = 720;
+    let at = |x: usize, y: usize| {
+        let at = (y * width + x) * 4;
+        [pixels[at], pixels[at + 1], pixels[at + 2]]
+    };
+    let gold = |[r, g, b]: [u8; 3]| r > 0xb0 && g > 0x90 && b < 0x80;
+    // Solid: somewhere in the conversation, a block of the accent colour
+    // four pixels square, which a hollow box's edge isn't.
+    let solid = (0..470).any(|y| {
+        (0..width - 4).any(|x| (0..4).all(|dy| (0..4).all(|dx| gold(at(x + dx, y + dy)))))
+    });
+    assert!(solid, "the cursor is drawn solid");
+    // `fn` in the keywords' colour, which plain text never is.
+    let keyword = crate::colors::syntax(Kind::Keyword).fg;
+    let theme = crate::colors::Theme::default();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let [r, g, b] = {
+        let rgba = theme.resolve(keyword).expect("a colour of the palette");
+        [0, 1, 2].map(|at| (rgba[at] * 255.0).round() as u8)
+    };
+    let near =
+        |[pr, pg, pb]: [u8; 3]| pr.abs_diff(r) < 24 && pg.abs_diff(g) < 24 && pb.abs_diff(b) < 24;
+    let coloured = (0..470).any(|y| (0..width).any(|x| near(at(x, y))));
+    assert!(coloured, "the code's keyword is coloured");
+}
+
+#[test]
 fn a_chat_at_work_says_so_above_its_box_however_long_the_turn() {
     // A long turn still going, between tools: its top, where the line its
     // work folds under is, is far above the view.
@@ -2493,11 +2545,11 @@ fn a_chat_at_work_says_so_above_its_box_however_long_the_turn() {
         eprintln!("no GPU available; skipping");
         return;
     };
-    // The dots, in the accent colour, just above the box, left of the
-    // middle, where "Working… 12s" goes after them.
+    // The dots, in the accent colour, just above the box, at the column's
+    // left, where "Working · 12s" goes after them.
     let width = 720;
     let gold = (480..540).any(|y| {
-        (200..360).any(|x| {
+        (0..120).any(|x| {
             let at = (y * width + x) * 4;
             let [r, g, b] = [pixels[at], pixels[at + 1], pixels[at + 2]];
             r > 0xb0 && g > 0x90 && b < 0x80

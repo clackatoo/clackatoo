@@ -523,8 +523,7 @@ impl Pane {
         }
     }
 
-    /// The chat it shows, if it shows one, for tests.
-    #[cfg(test)]
+    /// The chat it shows, if it shows one.
     pub(crate) fn chat_mut(&mut self) -> Option<&mut ChatView> {
         self.chat.as_deref_mut()
     }
@@ -800,17 +799,30 @@ impl Pane {
     }
 
     /// Scrolls `lines` up (or down, if negative), as from the mouse wheel
-    /// turned with the pointer at `at`, a cell of the view. A program that
-    /// asked for mouse reports gets the wheel instead (see
-    /// [`mouse`](self::mouse)). On the alternate screen, which has no
-    /// history, other programs get arrow keys, as other terminals send
-    /// them. Returns whether the pane must be redrawn.
-    pub(crate) fn wheel(&mut self, lines: i64, at: [i64; 2], modifiers: input::Modifiers) -> bool {
+    /// turned with the pointer at `at`, a cell of the view, and a pixel
+    /// from the pane's top left. A program that asked for mouse reports
+    /// gets the wheel instead (see [`mouse`](self::mouse)). On the
+    /// alternate screen, which has no history, other programs get arrow
+    /// keys, as other terminals send them. In a chat, with Shift over a
+    /// table too wide for it, the table scrolls sideways. Returns whether
+    /// the pane must be redrawn.
+    pub(crate) fn wheel(
+        &mut self,
+        lines: i64,
+        (at, pixel): ([i64; 2], [f32; 2]),
+        modifiers: input::Modifiers,
+    ) -> bool {
         if let Some(chat) = &mut self.chat {
             // The wheel drops an answer armed, as a key does.
             let disarmed = chat.disarm();
             #[allow(clippy::cast_precision_loss)]
-            return chat.scroll_lines(lines as f32 * 3.0) || disarmed;
+            let lines = lines as f32 * 3.0;
+            if modifiers.shift
+                && let Some(moved) = chat.wheel_sideways(pixel, lines)
+            {
+                return moved || disarmed;
+            }
+            return chat.scroll_lines(lines) || disarmed;
         }
         if self.reports_mouse(modifiers.shift) {
             let button = if lines > 0 {
@@ -2162,7 +2174,7 @@ mod mouse_tests {
             input(&mut pane),
             "\x1b[<0;3;2M\x1b[<32;4;2M\x1b[<32;12;5M\x1b[<0;12;5m"
         );
-        pane.wheel(2, [0, 0], Modifiers::default());
+        pane.wheel(2, ([0, 0], [0.0; 2]), Modifiers::default());
         assert_eq!(input(&mut pane), "\x1b[<64;1;1M\x1b[<64;1;1M");
         // Shift keeps the mouse clackatoo's.
         let shift = Modifiers {

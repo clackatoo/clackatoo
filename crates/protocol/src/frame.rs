@@ -29,7 +29,7 @@ const HEADER_LEN: usize = 4;
 
 /// How many kinds of [`ClientMessage`](crate::ClientMessage) this build
 /// has: a newer client's begin at this number.
-const CLIENT_MESSAGES: u32 = 16;
+const CLIENT_MESSAGES: u32 = 17;
 
 /// Serializes `message` into a complete frame, as a build of protocol
 /// `wire` would: downgraded first, for a peer older than this build (see
@@ -784,10 +784,9 @@ mod tests {
     fn a_head_knows_the_kinds_of_message_this_build_has() {
         let head = |bytes: Vec<u8>| Head::of(&bytes[HEADER_LEN..]);
         // The last kind of client message is known; the next isn't.
-        let last = ClientMessage::ListSessions {
+        let last = ClientMessage::Colour {
             id: 1,
-            agent: String::new(),
-            cwd: String::new(),
+            code: Vec::new(),
         };
         let last = head(encode(PROTOCOL_VERSION, &last).unwrap());
         assert_eq!(last.get(0), Some(CLIENT_MESSAGES - 1));

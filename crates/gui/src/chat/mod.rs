@@ -13,6 +13,7 @@
 //! anything to the daemon and before drawing.
 
 mod card;
+mod colours;
 #[cfg(test)]
 pub(crate) mod fixtures;
 mod markdown;
@@ -41,6 +42,9 @@ pub(crate) struct Brush {
     pub(crate) tone: Tone,
     /// It's code, on a background of its own.
     pub(crate) code: bool,
+    /// It's code its language's grammar says is this, coloured as an
+    /// editor colours it, rather than in its tone.
+    pub(crate) syntax: Option<clackatoo_protocol::Kind>,
 }
 
 /// The colour of a piece of the chat's text.
@@ -210,6 +214,10 @@ pub(crate) struct ChatView {
     /// generation it was styled in.
     editor_size: f32,
     editor_fonts: u32,
+    /// The width the editor's text was last laid out to. parley lays the
+    /// whole message out again whenever it's told a width, the same or
+    /// not, so it's told only when the width changes.
+    editor_width: Option<f32>,
     layout_cx: LayoutContext<Brush>,
     queued: Vec<Input>,
     /// Laid-out turns, kept while their text and the width stay the same.
@@ -251,6 +259,12 @@ pub(crate) struct ChatView {
     /// The turns whose card for the chats their agent started is open, by
     /// their index.
     open_agents: std::collections::HashSet<usize>,
+    /// How far tables too wide for the column are scrolled sideways, by
+    /// their turn, piece and number in it.
+    table_scrolls: std::collections::HashMap<(usize, usize, usize), f32>,
+    /// The colours of the code in the agent's words, as the daemon read
+    /// them.
+    colours: colours::Colours,
     /// The time, as turns count it, if it's not the clock's, as for tests.
     clock: Option<u64>,
     /// When the chat must next be drawn by itself, if anything it drew
@@ -279,6 +293,13 @@ pub(crate) struct ChatView {
     /// Whether the pane is in normal or visual mode, reading the chat
     /// rather than typing in it.
     pub(crate) reading: bool,
+    /// Whether it was, when last drawn: coming into normal mode puts the
+    /// cursor where it shows.
+    was_reading: bool,
+    /// Whether the daemon quotes what agents wrote in its questions so
+    /// nothing in it can end the quote (protocol 84 on), which questions
+    /// are then shown with as code.
+    quoted: bool,
     /// The cursor in the conversation, in normal mode.
     cursor: Option<Position>,
     /// How far across the column `j` and `k` keep the cursor.
@@ -369,6 +390,7 @@ impl ChatView {
             editor: PlainEditor::new(16.0),
             editor_size: 0.0,
             editor_fonts: 0,
+            editor_width: None,
             layout_cx: LayoutContext::new(),
             queued: Vec::new(),
             cache: paint::Cache::default(),
@@ -387,6 +409,8 @@ impl ChatView {
             said: None,
             folds: std::collections::HashMap::new(),
             open_agents: std::collections::HashSet::new(),
+            table_scrolls: std::collections::HashMap::new(),
+            colours: colours::Colours::default(),
             clock: None,
             live: None,
             moving: false,
@@ -396,6 +420,8 @@ impl ChatView {
             picked: None,
             picking: false,
             reading: false,
+            was_reading: false,
+            quoted: true,
             cursor: None,
             goal: None,
             reveal: false,
@@ -432,6 +458,9 @@ impl ChatView {
                 for slot in &mut self.cache.turns {
                     slot.stale = true;
                 }
+                // Turns gone take how far their tables were scrolled.
+                let turns = self.node.turns.len();
+                (self.table_scrolls).retain(|&(turn, _, _), _| turn < turns);
             }
             ViewUpdate::Patch(patches) => {
                 for patch in patches {
@@ -525,7 +554,46 @@ impl ChatView {
         self.offline = offline;
         if offline {
             self.live = None;
+            // What was asked won't be answered: it's asked again once the
+            // daemon's back, as what's waiting for it is laid out again.
+            self.colours.forget_asked();
+        } else {
+            self.recolour();
         }
+    }
+
+    /// Whether the daemon quotes what agents wrote so nothing in it can end
+    /// the quote, as it has since protocol 84.
+    pub(crate) fn set_quoted(&mut self, quoted: bool) {
+        self.quoted = quoted;
+    }
+
+    /// The blocks of code to ask the daemon to colour, in asks no bigger
+    /// than it colours: those laid out since last asked whose colours
+    /// aren't known.
+    pub(crate) fn take_colour_asks(&mut self) -> Vec<Vec<clackatoo_protocol::Code>> {
+        self.colours.take_wanted()
+    }
+
+    /// `code` was asked for, numbered `id`; or with none, couldn't be, as
+    /// the daemon doesn't colour chats' code, and stays plain.
+    pub(crate) fn colours_asked(&mut self, id: Option<u64>, code: Vec<clackatoo_protocol::Code>) {
+        if let Some(id) = id {
+            self.colours.asked(id, code);
+        } else {
+            self.colours.plain(code);
+            self.recolour();
+        }
+    }
+
+    /// The daemon's answer to the ask numbered `id`: each block's spans.
+    /// Returns whether the chat must be drawn again, as it was its ask.
+    pub(crate) fn coloured(&mut self, id: u64, spans: Vec<Vec<clackatoo_protocol::Span>>) -> bool {
+        let ours = self.colours.answered(id, spans);
+        if ours {
+            self.recolour();
+        }
+        ours
     }
 
     /// Whether the agent is answering, or starting to.
@@ -1448,6 +1516,16 @@ impl ChatView {
         let styles = self.editor.edit_styles();
         for property in paint::body_style(fonts, size) {
             styles.insert(property);
+        }
+    }
+
+    /// Lays the editor's text out `width` wide, if it isn't already: a key
+    /// typed lays the message out once, as it's typed, and drawing it
+    /// again costs nothing more.
+    fn size_editor(&mut self, width: f32) {
+        if self.editor_width.map(f32::to_bits) != Some(width.to_bits()) {
+            self.editor_width = Some(width);
+            self.editor.set_width(Some(width));
         }
     }
 

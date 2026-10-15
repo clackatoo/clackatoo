@@ -3,7 +3,7 @@
 //!
 //! Done, the line says how long the work took, "Worked for 42s ›", and
 //! the turn shows just its message and its answer. While the agent works,
-//! the line says "Working… ⌄", and the work shows as it comes; what it's
+//! the line says "Working ⌄", and the work shows as it comes; what it's
 //! doing, and for how long, is said above the box (see `working.rs`). A
 //! click on the line, Enter on it, or `za`, opens or folds it.
 
@@ -193,11 +193,7 @@ impl ChatView {
 fn fold_label(turn: &Turn, open: bool, asking: bool) -> String {
     let chevron = if open { "⌄" } else { "›" };
     let Some(end) = &turn.end else {
-        let going = if asking {
-            "Waiting for you"
-        } else {
-            "Working…"
-        };
+        let going = if asking { "Waiting for you" } else { "Working" };
         return format!("{going}  {chevron}");
     };
     // A turn from before turns said when they were sent can't say how
@@ -290,12 +286,12 @@ mod tests {
         chat.set_clock(400_000 + 12_400);
         paint(&mut chat, &mut fonts);
         assert_eq!(label(&chat, 0).as_deref(), Some("Worked for 4m 58s  ›"));
-        assert_eq!(label(&chat, 1).as_deref(), Some("Working…  ⌄"));
+        assert_eq!(label(&chat, 1).as_deref(), Some("Working  ⌄"));
         // What it's doing, the tool's title to its first line, and the
         // seconds, are said above the box.
         assert_eq!(
             chat.working_said(chat.now()).as_deref(),
-            Some("Reading build.rs… 12s")
+            Some("Reading build.rs · 12s")
         );
         // Folded, a turn shows its message and its answer; going, all of
         // it.
@@ -348,13 +344,13 @@ mod tests {
             Some(question(true)),
         ))]));
         paint(&mut chat, &mut fonts);
-        assert_eq!(label(&chat, 1).as_deref(), Some("Working…  ⌄"));
+        assert_eq!(label(&chat, 1).as_deref(), Some("Working  ⌄"));
         // Answered, it works on.
         chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Question(
             None,
         ))]));
         paint(&mut chat, &mut fonts);
-        assert_eq!(label(&chat, 1).as_deref(), Some("Working…  ⌄"));
+        assert_eq!(label(&chat, 1).as_deref(), Some("Working  ⌄"));
         assert_eq!(tones(&chat, 1), [Tone::Muted]);
         assert!(chat.live().is_some());
     }

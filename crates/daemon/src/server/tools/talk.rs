@@ -44,11 +44,13 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{AgentTools, ChatState, Item, Outcome, TerminalId, ToolStatus, Turn};
+use clackatoo_protocol::{
+    AgentTools, ChatState, Item, Outcome, TerminalId, ToolStatus, Turn, code_span,
+};
 use mio::Token;
 use serde_json::Value;
 
-use super::{Wait, Waiting, asked, visible};
+use super::{Wait, Waiting, asked, asked_each, homely, visible};
 use crate::chat::{Cause, HostedChat, MAX_INBOX, Message};
 use crate::mcp::{NewChat, Tool};
 use crate::server::Daemon;
@@ -355,12 +357,18 @@ impl Daemon {
                     return None;
                 }
                 let profile = new.profile.as_deref().unwrap_or(crate::profiles::DEFAULT);
+                // The folder, which the agent may have named, is quoted too.
                 let mut then = format!(
-                    "to a new {title} chat it starts, as {profile}, in {}",
-                    visible(&dir.display().to_string())
+                    "to a new {title} chat it starts, with the {} profile, in {}",
+                    visible(profile),
+                    code_span(&visible(&homely(&dir, &self.config.home)))
                 );
                 if outside {
-                    let _ = write!(then, ", outside this chat's project ({})", root.display());
+                    let _ = write!(
+                        then,
+                        ", outside this chat's project ({})",
+                        homely(&root, &self.config.home)
+                    );
                 }
                 Some(asked("send", &new.prompt, &then))
             }
@@ -369,25 +377,19 @@ impl Daemon {
                 // wrote, which is quoted, so no message can pass for
                 // another chat: messages only say which chat they're for.
                 let mut outside = false;
-                let mut each = String::new();
+                let mut each = Vec::new();
                 let mut places = Vec::new();
                 for (number, new) in news.iter().enumerate() {
                     let (title, dir, out) = self.start_place(chat, new)?;
                     outside |= out;
                     let profile = new.profile.as_deref().unwrap_or(crate::profiles::DEFAULT);
                     places.push(format!(
-                        "{}. {title}, as {}, in {}",
+                        "{}. {title}, with the {} profile, in {}",
                         number + 1,
                         visible(profile),
-                        visible(&dir.display().to_string())
+                        code_span(&visible(&homely(&dir, &self.config.home)))
                     ));
-                    let _ = write!(
-                        each,
-                        "{}[to {}] {}",
-                        if number == 0 { "" } else { "\n" },
-                        number + 1,
-                        new.prompt
-                    );
+                    each.push(new.prompt.as_str());
                 }
                 if tools == AgentTools::Allow && !outside {
                     return None;
@@ -402,10 +404,10 @@ impl Daemon {
                     let _ = write!(
                         then,
                         ", some outside this chat's project ({})",
-                        root.display()
+                        homely(&root, &self.config.home)
                     );
                 }
-                Some(asked("send", &each, &then))
+                Some(asked_each("send", &each, &then))
             }
             _ => None,
         }

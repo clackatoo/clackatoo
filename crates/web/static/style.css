@@ -175,8 +175,16 @@ a { color: var(--accent); }
   white-space: pre;
   -webkit-overflow-scrolling: touch;
 }
-.words table { border-collapse: collapse; display: block; overflow-x: auto; }
-.words th, .words td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; }
+/* Tables as the window draws them: a grid with no lines but the one under
+   the head, which is bold, its first column at the text's left edge, and
+   sideways scrolling when it's wider than the screen. */
+.words table { border-collapse: collapse; display: block; overflow-x: auto; white-space: nowrap; }
+.words th, .words td { padding: 3px 0 3px 24px; text-align: left; }
+.words th:first-child, .words td:first-child { padding-left: 0; }
+.words th { font-weight: 600; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.words tr:nth-child(2) td { padding-top: 6px; }
+.words .middle { text-align: center; }
+.words .right { text-align: right; }
 .words hr { border: 0; border-top: 1px solid var(--line); }
 
 details > summary { cursor: pointer; list-style: none; }

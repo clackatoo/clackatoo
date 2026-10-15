@@ -21,7 +21,8 @@
 //! | Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y | Scroll half a view, or a line |
 //! | `v` `V` | Select characters, or lines; `o` goes to the other end |
 //! | `y` | Copy what's selected, or the block of code, message or card under the cursor |
-//! | `za` `zo` `zc`, Enter | Open or fold the turn's work; `zR` and `zM` all of them |
+//! | `za` `zo` `zc`, Enter | Open or fold the turn's work, or on its card, the chats it started; `zR` and `zM` all of both |
+//! | `zl` `zh`, `zL` `zH` | Scroll the table the cursor's in sideways, a little or half the column; Shift and the wheel do too |
 //! | `u`, Ctrl+R | Undo what the turn changed in files, or redo it; with nothing there, the last turn's, or the first's undone |
 //! | `K` | Show how much context the chat fills, and its account's limits, or hide it again |
 //! | `i` `a` `I` `A` `o`, Enter | Type a message |
@@ -336,13 +337,52 @@ impl ChatView {
     /// cursor's in, or every turn's.
     fn fold_key(&mut self, character: Option<char>) -> bool {
         let turn = self.cursor.map(|cursor| cursor.text.turn);
+        // On the card of the chats the turn started, it's the card that
+        // opens and folds.
+        let card = self
+            .cursor
+            .is_some_and(|cursor| cursor.text.piece == AGENTS);
+        // Sideways, the table the cursor's in, as Vim scrolls a line too
+        // long for the window: a few characters, or half the column.
+        let (em, half) = (self.cache.size, self.cache.width / 2.0);
+        let sideways = match character {
+            Some('l') => Some(4.0 * em),
+            Some('h') => Some(-4.0 * em),
+            Some('L') => Some(half),
+            Some('H') => Some(-half),
+            _ => None,
+        };
+        if let Some(pixels) = sideways {
+            return self.scroll_sideways(None, pixels);
+        }
         match (character, turn) {
-            (Some('R'), _) => self.set_all_folds(true),
-            (Some('M'), _) => self.set_all_folds(false),
+            (Some(all @ ('R' | 'M')), _) => {
+                self.set_all_folds(all == 'R');
+                self.set_all_agents(all == 'R');
+            }
+            (Some('a'), Some(turn)) if card => self.toggle_agents(turn),
+            (Some('o'), Some(turn)) if card => self.set_agents(turn, true),
+            (Some('c'), Some(turn)) if card => self.set_agents(turn, false),
             (Some('a'), Some(turn)) => self.toggle_fold(turn),
             (Some('o'), Some(turn)) => self.set_fold(turn, true),
             (Some('c'), Some(turn)) => self.set_fold(turn, false),
             _ => return false,
+        }
+        // A chat's line on a card folded away can't keep the cursor: it
+        // goes to the card's own line.
+        if let Some(cursor) = self.cursor
+            && cursor.text.piece == AGENTS
+            && cursor.text.part > 0
+            && !self.agents_open(cursor.text.turn)
+        {
+            self.cursor = Some(Position {
+                text: TextKey {
+                    part: 0,
+                    ..cursor.text
+                },
+                byte: 0,
+            });
+            self.picked = None;
         }
         // What's folded away can't keep the cursor: it goes to the line
         // its work folds under.
@@ -460,26 +500,75 @@ impl ChatView {
         self.cursor
     }
 
-    /// Where the cursor starts: the last line drawn fully in view.
+    /// Where the cursor starts: the start of the last line in view, even
+    /// of a block that runs on below it.
     fn default_cursor(&self) -> Option<Position> {
-        let bottom = self.view_height;
-        let shown = (self.shown.iter().rev())
-            .find(|shown| shown.at[1] + shown.size[1] <= bottom)
-            .or_else(|| self.shown.first())?;
-        let text = self.text(shown.key)?;
-        let lines = text.layout.len();
-        let line = (0..lines)
-            .rev()
-            .find(|&line| {
-                super::paint::line_middle(text.layout, line)
-                    .is_some_and(|(middle, _)| shown.at[1] + middle < bottom)
-            })
-            .unwrap_or(0);
-        let byte = super::paint::line_middle(text.layout, line).map_or(0, |(_, range)| range.start);
+        for shown in self.shown.iter().rev() {
+            if let Some(line) = self.last_line_in_view(shown) {
+                let text = self.text(shown.key)?;
+                let byte = (super::paint::line_middle(text.layout, line))
+                    .map_or(0, |(_, range)| range.start);
+                return Some(Position {
+                    text: shown.key,
+                    byte,
+                });
+            }
+        }
+        let first = self.shown.first()?;
         Some(Position {
-            text: shown.key,
-            byte,
+            text: first.key,
+            byte: 0,
         })
+    }
+
+    /// The last line of `shown` whose middle is in view, if any is: none
+    /// of a table's cell scrolled out of it sideways.
+    fn last_line_in_view(&self, shown: &super::paint::Shown) -> Option<usize> {
+        if !self.across_in_view(shown) {
+            return None;
+        }
+        let text = self.text(shown.key)?;
+        let in_view = |middle: f32| (0.0..self.view_height).contains(&(shown.at[1] + middle));
+        (0..text.layout.len()).rev().find(|&line| {
+            super::paint::line_middle(text.layout, line).is_some_and(|(middle, _)| in_view(middle))
+        })
+    }
+
+    /// Whether some of `shown` is in the column, across: a table's cell
+    /// scrolled sideways may not be.
+    fn across_in_view(&self, shown: &super::paint::Shown) -> bool {
+        let left = self.column_right - self.cache.width;
+        shown.at[0] < self.column_right && shown.at[0] + shown.size[0].max(1.0) > left
+    }
+
+    /// Coming into normal mode, puts the cursor where it shows: on the
+    /// last line in view, unless it's in view already. So pressing Ctrl+;
+    /// always shows a cursor, never one left above the view, or none.
+    pub(super) fn cursor_on_arrival(&mut self) {
+        let arrived = self.reading && !self.was_reading;
+        self.was_reading = self.reading;
+        if !arrived || self.picked.is_some() {
+            return;
+        }
+        let shown = self.cursor.is_some_and(|cursor| {
+            let Some(shown) = self.shown.iter().find(|shown| shown.key == cursor.text) else {
+                return false;
+            };
+            if !self.across_in_view(shown) {
+                return false;
+            }
+            let Some(text) = self.text(cursor.text) else {
+                return false;
+            };
+            let line = super::paint::line_of(text.layout, cursor.byte);
+            (super::paint::line_middle(text.layout, line)).is_some_and(|(middle, _)| {
+                (0.0..self.view_height).contains(&(shown.at[1] + middle))
+            })
+        });
+        if !shown {
+            self.cursor = self.default_cursor();
+            self.goal = None;
+        }
     }
 
     /// Puts the cursor at `position`, and scrolls to it.
@@ -539,7 +628,14 @@ impl ChatView {
         let (key, line) = if let Some(line) = within {
             (cursor.text, Some(line))
         } else {
-            let Some(key) = self.next_text(cursor.text, way) else {
+            // In a table, up and down go to the cell above or below, and
+            // off its top or bottom, to what's before or after it.
+            let next = match self.table_step(cursor.text, way == Way::Back) {
+                Some(Ok(cell)) => Some(cell),
+                Some(Err(edge)) => self.next_text(edge, way),
+                None => self.next_text(cursor.text, way),
+            };
+            let Some(key) = next else {
                 return;
             };
             let line = self.text(key).map(|text| match way {
@@ -915,6 +1011,62 @@ mod tests {
         // `G` goes to the end.
         read(&mut chat, "G");
         assert_eq!(chat.cursor.map(|cursor| cursor.text), Some(key(1, ITEMS)));
+    }
+
+    #[test]
+    fn coming_into_normal_mode_shows_the_cursor_on_the_last_line_in_view() {
+        use crate::render::{Ink, Paint};
+        // A long chat, scrolled up a little, so its last block runs on
+        // below the view.
+        let mut node = crate::chat::fixtures::long_chat(3);
+        let last = node.turns.len() - 1;
+        let long = "A long answer, line after line of it. ".repeat(200);
+        node.turns[last]
+            .items
+            .push(clackatoo_protocol::Item::Words(long));
+        let mut fonts = fonts();
+        let mut chat = ChatView::new(String::new(), node);
+        paint(&mut chat, &mut fonts);
+        chat.scroll_lines(10.0);
+        paint(&mut chat, &mut fonts);
+        assert!(chat.cursor.is_none());
+        chat.reading = true;
+        let drawn = paint(&mut chat, &mut fonts);
+        let cursor = chat.cursor.expect("a cursor, at once");
+        let shown = (chat.shown.iter())
+            .find(|shown| shown.key == cursor.text)
+            .expect("in view");
+        let text = chat.text(cursor.text).unwrap();
+        let line = crate::chat::paint::line_of(text.layout, cursor.byte);
+        let (middle, _) = crate::chat::paint::line_middle(text.layout, line).unwrap();
+        let y = shown.at[1] + middle;
+        assert!(y >= 0.0 && y < chat.view_height, "{y}");
+        // The last line in view: the one after is out of it.
+        let (next, _) = crate::chat::paint::line_middle(text.layout, line + 1).unwrap();
+        assert!(shown.at[1] + next >= chat.view_height);
+        // Drawn solid, with the character under it drawn over it.
+        assert!(drawn.over.iter().any(|fill| fill.paint == Paint::Accent));
+        assert!(
+            drawn
+                .over_glyphs
+                .iter()
+                .any(|glyph| glyph.ink == Ink::OnColor)
+        );
+        // Moved to the top, it stays there while in normal mode...
+        read(&mut chat, "gg");
+        paint(&mut chat, &mut fonts);
+        let top = chat.cursor;
+        paint(&mut chat, &mut fonts);
+        assert_eq!(chat.cursor, top);
+        // ...and, out of view after typing for a while, comes back into it
+        // when normal mode does.
+        chat.reading = false;
+        chat.scroll = chat.max_scroll;
+        paint(&mut chat, &mut fonts);
+        chat.reading = true;
+        paint(&mut chat, &mut fonts);
+        assert_ne!(chat.cursor, top);
+        assert_eq!(chat.cursor.map(|cursor| cursor.text), Some(cursor.text));
     }
 
     #[test]

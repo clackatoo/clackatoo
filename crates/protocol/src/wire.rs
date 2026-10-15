@@ -152,6 +152,9 @@ gates! {
     /// they can, rather than as background traffic: `Forward`'s
     /// `unpaced`.
     FORWARD_PACE = 83,
+    /// Colouring the code in agents' words: `ClientMessage::Colour`
+    /// (`Code`), answered with `Event::Coloured`.
+    COLOURS = 84,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -426,6 +429,7 @@ impl Since for Event {
             | Self::Pairing(_)
             | Self::Sessions { .. } => EARLIER,
             Self::Exited { .. } => EXITED,
+            Self::Coloured { .. } => COLOURS,
         }
     }
 }
@@ -618,7 +622,9 @@ impl Downgrade for ServerMessage {
     /// ended takes its pane closing as someone else's doing, and goes on
     /// in normal mode, the safe side. So is `BufferUpdate::Coloured`: a
     /// hover's code stays plain. And `BufferUpdate::Language`: words are
-    /// read as in plain text, as they were before.
+    /// read as in plain text, as they were before. And `Event::Coloured`,
+    /// which only answers what a newer window asked: its code stays
+    /// plain.
     /// A new answer, or a new kind of thing found, only ever answers what
     /// a newer window asked; should one reach an older peer all the same,
     /// it's told its question failed, rather than wait for ever.
@@ -629,6 +635,7 @@ impl Downgrade for ServerMessage {
         match self {
             Self::Event(
                 Event::Exited { .. }
+                | Event::Coloured { .. }
                 | Event::Buffer {
                     update: BufferUpdate::Coloured { .. } | BufferUpdate::Language { .. },
                     ..
@@ -829,11 +836,13 @@ mod tests {
         // it, a window goes on in normal mode, which sends nothing typed.
         // And a hover's colours: without them, its code is plain. And
         // what a buffer's words are made of: without it, they're plain
-        // text's.
+        // text's. And the colours of a chat's code: without them, it's
+        // plain.
         matches!(
             message,
             ServerMessage::Event(
                 Event::Exited { .. }
+                    | Event::Coloured { .. }
                     | Event::Buffer {
                         update: BufferUpdate::Coloured { .. } | BufferUpdate::Language { .. },
                         ..
@@ -943,6 +952,11 @@ mod tests {
             terminal: crate::TerminalId(1),
         };
         assert_eq!(exited.since(), EXITED);
+        let code = Event::Coloured {
+            id: 1,
+            spans: Vec::new(),
+        };
+        assert_eq!(code.since(), COLOURS);
         let coloured = BufferUpdate::Coloured {
             id: 1,
             spans: Vec::new(),

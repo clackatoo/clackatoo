@@ -87,10 +87,11 @@ pub use buffer::{
 };
 pub use chat::{
     AMBER, AgentSession, ChatAction, ChatChoices, ChatNode, ChatPatch, ChatState, ChatSummary,
-    Choice, ChoiceKind, Diff, Fullness, Item, Limit, Location, Outcome, Provider, ProviderModels,
-    Question, RED, ResumeSession, Sender, Setting, SettingChoice, SettingKind, Subagent,
-    SubagentStatus, Switch, Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles,
-    TurnFilesState, Usage, UsageLine, tokens, turn_number, turn_numbered,
+    Choice, ChoiceKind, Code, Diff, Fullness, Item, Limit, Location, Outcome, Provider,
+    ProviderModels, Question, RED, ResumeSession, Said, Sender, Setting, SettingChoice,
+    SettingKind, Subagent, SubagentStatus, Switch, Tool, ToolContent, ToolKind, ToolStatus, Turn,
+    TurnEnd, TurnFiles, TurnFilesState, Usage, UsageLine, code_span, tokens, turn_number,
+    turn_numbered,
 };
 pub use clackatoo_text::{
     AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
@@ -118,7 +119,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 83;
+pub const PROTOCOL_VERSION: u32 = 84;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -301,6 +302,19 @@ pub enum ClientMessage {
         /// The directory.
         cwd: String,
     },
+    /// Asks how the code in an agent's words is coloured, as its
+    /// language's grammar reads it, as hovers' code is: each block of it,
+    /// in the language its fence names. Not answered as a request is, as
+    /// the grammars are read on a thread of their own: the colours come in
+    /// an [`Event::Coloured`] numbered `id`. Only to a daemon of protocol
+    /// 84 or later.
+    Colour {
+        /// The client's number for it, which the answer gives back.
+        id: u64,
+        /// The blocks of code. The daemon colours no more than 64 of them,
+        /// nor more than 256 KiB of code in all.
+        code: Vec<Code>,
+    },
 }
 
 /// Everything the daemon sends.
@@ -461,6 +475,17 @@ pub enum Event {
     Exited {
         /// The terminal.
         terminal: TerminalId,
+    },
+    /// How the code the client's [`ClientMessage::Colour`] numbered `id`
+    /// asked about is coloured: each block's spans, as bytes of its text,
+    /// in the order asked. A block in a language that isn't installed, or
+    /// one past what the daemon colours, has none. Only to a client of
+    /// protocol 84 or later.
+    Coloured {
+        /// Its number.
+        id: u64,
+        /// Each block's spans.
+        spans: Vec<Vec<Span>>,
     },
 }
 

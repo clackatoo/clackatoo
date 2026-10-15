@@ -1,5 +1,5 @@
 //! The card a turn shows for the chats its agent started there, its
-//! subagents: one line, "3 subagents working… 12s ›", that opens to a line
+//! subagents: one line, "3 subagents working · 12s ›", that opens to a line
 //! for each, saying what it is, what it was asked, and how it's going.
 //!
 //! They run in the background, in no pane, so the card is where they're
@@ -59,10 +59,32 @@ impl ChatView {
 
     /// Opens turn `index`'s card, or folds it.
     pub(in crate::chat) fn toggle_agents(&mut self, index: usize) {
-        if !self.open_agents.remove(&index) {
-            self.open_agents.insert(index);
+        let open = !self.agents_open(index);
+        self.set_agents(index, open);
+    }
+
+    /// Opens turn `index`'s card, if `open`, or folds it.
+    pub(in crate::chat) fn set_agents(&mut self, index: usize, open: bool) {
+        let changed = if open {
+            self.open_agents.insert(index)
+        } else {
+            self.open_agents.remove(&index)
+        };
+        if changed {
+            self.restyled(index);
         }
-        self.restyled(index);
+    }
+
+    /// Opens every turn's card, if `open`, or folds them all, as `zR` and
+    /// `zM` do with the turns' work.
+    pub(in crate::chat) fn set_all_agents(&mut self, open: bool) {
+        let turns: std::collections::BTreeSet<usize> = (0..self.node.turns.len())
+            .filter(|&index| !self.subagents_in(index).is_empty())
+            .chain(self.open_agents.iter().copied())
+            .collect();
+        for index in turns {
+            self.set_agents(index, open);
+        }
     }
 
     /// How tall turn `index`'s card is, with `rows` chats, in `m`.
@@ -249,11 +271,11 @@ fn agents_label(entries: &[&Subagent], open: bool, now: u64) -> String {
         .unwrap_or(now);
     let mut label = if going > 0 {
         let working = if going == count {
-            format!("{count} {noun} working…")
+            format!("{count} {noun} working")
         } else {
-            format!("{going} of {count} {noun} working…")
+            format!("{going} of {count} {noun} working")
         };
-        format!("{working} {}", duration(now.saturating_sub(first)))
+        format!("{working} · {}", duration(now.saturating_sub(first)))
     } else {
         let last = (entries.iter().filter_map(|entry| entry.ended)).max();
         let took = last.map_or_else(String::new, |last| {
@@ -381,7 +403,7 @@ mod tests {
         paint(&mut chat, &mut fonts);
         assert_eq!(
             header(&chat).as_deref(),
-            Some("2 subagents working… 12s  ›")
+            Some("2 subagents working · 12s  ›")
         );
         assert!(chat.live().is_some(), "it counts the seconds");
         // Folded, it's one line; a click opens it, a line a chat.
@@ -427,7 +449,7 @@ mod tests {
         paint(&mut chat, &mut fonts);
         assert_eq!(
             header(&chat).as_deref(),
-            Some("2 subagents working… 12s · 1 needs you  ›")
+            Some("2 subagents working · 12s · 1 needs you  ›")
         );
         let mut done = chat.node.subagents.clone();
         for (entry, ended) in done.iter_mut().zip([130_000, 160_000]) {
@@ -475,5 +497,42 @@ mod tests {
                 chat: TerminalId(5)
             }]
         );
+    }
+
+    #[test]
+    fn zr_and_zm_open_and_fold_the_card_too_and_za_on_it_toggles_it() {
+        let mut fonts = fonts();
+        let mut chat = ChatView::new(String::new(), starting());
+        chat.set_clock(112_400);
+        chat.reading = true;
+        paint(&mut chat, &mut fonts);
+        assert!(!chat.agents_open(0));
+        read(&mut chat, "zR");
+        assert!(chat.agents_open(0), "open, with the turns' work");
+        paint(&mut chat, &mut fonts);
+        // On a chat's line, `zM` folds it, and the cursor goes to the
+        // card's own line.
+        read(&mut chat, "G");
+        assert_eq!(chat.cursor.map(|cursor| cursor.text.part), Some(2));
+        read(&mut chat, "zM");
+        assert!(!chat.agents_open(0));
+        let cursor = chat
+            .cursor
+            .map(|cursor| (cursor.text.piece, cursor.text.part));
+        assert_eq!(cursor, Some((AGENTS, 0)));
+        paint(&mut chat, &mut fonts);
+        // On the card's line, `za` opens it and folds it, and `zo` and
+        // `zc` likewise; the turn's work stays as it was.
+        let work = |chat: &ChatView| chat.shape(0, &chat.node.turns[0]).open;
+        let before = work(&chat);
+        read(&mut chat, "za");
+        assert!(chat.agents_open(0));
+        read(&mut chat, "za");
+        assert!(!chat.agents_open(0));
+        read(&mut chat, "zo");
+        assert!(chat.agents_open(0));
+        read(&mut chat, "zc");
+        assert!(!chat.agents_open(0));
+        assert_eq!(work(&chat), before);
     }
 }

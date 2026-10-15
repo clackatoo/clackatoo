@@ -637,6 +637,109 @@ pub struct Question {
     pub own: bool,
 }
 
+/// A block of code in an agent's words, to colour: see
+/// [`ClientMessage::Colour`](crate::ClientMessage::Colour).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Code {
+    /// Its language, as its fence names it: `rust`, `py`.
+    pub language: String,
+    /// The code.
+    pub text: String,
+}
+
+impl Question {
+    /// Its title in pieces, as clients show it: words, and code where it
+    /// quotes some, as Markdown's inline code does, between runs of
+    /// backticks. The daemon quotes what an agent wrote that way (see
+    /// [`code_span`]).
+    #[must_use]
+    pub fn said(&self) -> Vec<Said> {
+        said(&self.title)
+    }
+}
+
+/// A piece of a question's title: see [`Question::said`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Said {
+    /// Words, to show as they are.
+    Words(String),
+    /// Code, quoted: to show in the terminal's font.
+    Code(String),
+}
+
+/// `text` quoted as Markdown's inline code: between runs of backticks
+/// longer than any in it, so nothing in it can end the code early and
+/// pass for what's said around it, with a space inside each where
+/// Markdown would otherwise take one away, or read a backtick of the
+/// text as part of the run.
+#[must_use]
+pub fn code_span(text: &str) -> String {
+    let longest = (text.split(|ch| ch != '`'))
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(longest + 1);
+    let spaced = text.starts_with(' ') && text.ends_with(' ') && !text.trim().is_empty();
+    if text.starts_with('`') || text.ends_with('`') || spaced {
+        format!("{fence} {text} {fence}")
+    } else {
+        format!("{fence}{text}{fence}")
+    }
+}
+
+/// `text` in pieces, as Markdown reads its inline code: a run of
+/// backticks starts code that the next run of as many ends; with none,
+/// the run is just backticks.
+fn said(text: &str) -> Vec<Said> {
+    let mut pieces = Vec::new();
+    let mut words = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('`') {
+        words.push_str(&rest[..start]);
+        let run = rest[start..].len() - rest[start..].trim_start_matches('`').len();
+        let after = &rest[start + run..];
+        let Some(end) = closing(after, run) else {
+            words.push_str(&rest[start..start + run]);
+            rest = after;
+            continue;
+        };
+        if !words.is_empty() {
+            pieces.push(Said::Words(std::mem::take(&mut words)));
+        }
+        let code = after[..end].replace(['\n', '\r'], " ");
+        let stripped = code.len() >= 2
+            && code.starts_with(' ')
+            && code.ends_with(' ')
+            && !code.trim().is_empty();
+        let code = if stripped {
+            code[1..code.len() - 1].to_owned()
+        } else {
+            code
+        };
+        pieces.push(Said::Code(code));
+        rest = &after[end + run..];
+    }
+    words.push_str(rest);
+    if !words.is_empty() {
+        pieces.push(Said::Words(words));
+    }
+    pieces
+}
+
+/// Where in `text` the first run of exactly `run` backticks starts.
+fn closing(text: &str, run: usize) -> Option<usize> {
+    let mut at = 0;
+    while let Some(found) = text[at..].find('`') {
+        let start = at + found;
+        let len = text[start..].len() - text[start..].trim_start_matches('`').len();
+        if len == run {
+            return Some(start);
+        }
+        at = start + len;
+    }
+    None
+}
+
 /// One answer to a question.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Choice {
@@ -994,12 +1097,12 @@ impl ChatNode {
 }
 
 /// The longest a tool's title is said in full on the line that shows an
-/// agent working, in characters: longer, it's cut short, so the seconds
-/// after it still fit on a phone.
+/// agent working, in characters: longer, it's cut short, with an
+/// ellipsis, so the seconds after it still fit on a phone.
 const LONGEST_DOING: usize = 60;
 
 /// Verbs agents start tools' titles with, and how the line that shows an
-/// agent working says them: "Read Cargo.toml" is "Reading Cargo.toml…".
+/// agent working says them: "Read Cargo.toml" is "Reading Cargo.toml".
 const DOING_VERBS: [(&str, &str); 14] = [
     ("Read", "Reading"),
     ("Edit", "Editing"),
@@ -1061,9 +1164,10 @@ impl ChatNode {
     }
 
     /// What the agent is doing, while it's [working](Self::working), as
-    /// clients say it: "Starting Claude Code…", "Loading the session…",
-    /// "Thinking…", "Running cargo test…", "Reading Cargo.toml…",
-    /// "Writing…" while its answer comes, or else "Working…".
+    /// clients say it: "Starting Claude Code", "Loading the session",
+    /// "Thinking", "Running: cargo test", "Reading Cargo.toml", "Writing"
+    /// while its answer comes, or else "Working". No ellipsis: the dots
+    /// beside it say it's going on.
     #[must_use]
     pub fn doing(&self) -> Option<String> {
         if !self.working() {
@@ -1071,11 +1175,11 @@ impl ChatNode {
         }
         if self.state == ChatState::Starting {
             return Some(if self.loading() {
-                "Loading the session…".to_owned()
+                "Loading the session".to_owned()
             } else if self.agent.is_empty() {
-                "Starting the agent…".to_owned()
+                "Starting the agent".to_owned()
             } else {
-                format!("Starting {}…", self.agent)
+                format!("Starting {}", self.agent)
             });
         }
         let turn = self.going()?;
@@ -1085,9 +1189,9 @@ impl ChatNode {
         });
         Some(match (tool, turn.items.last()) {
             (Some(tool), _) => tool.doing(),
-            (None, Some(Item::Thought(_))) => "Thinking…".to_owned(),
-            (None, Some(Item::Words(_))) => "Writing…".to_owned(),
-            _ => "Working…".to_owned(),
+            (None, Some(Item::Thought(_))) => "Thinking".to_owned(),
+            (None, Some(Item::Words(_))) => "Writing".to_owned(),
+            _ => "Working".to_owned(),
         })
     }
 
@@ -1129,40 +1233,39 @@ impl ChatNode {
 
 impl Tool {
     /// What the line that shows the agent working says while it uses
-    /// this tool: "Running cargo test…" for a command, "Reading
-    /// Cargo.toml…" for "Read Cargo.toml", or its title as it is, cut
-    /// short.
+    /// this tool: "Running: cargo test" for a command, "Reading
+    /// Cargo.toml" for "Read Cargo.toml", "Running a command" for a
+    /// command titled "Run a command", rather than the verb twice, or its
+    /// title as it is; cut short with an ellipsis.
     #[must_use]
     pub fn doing(&self) -> String {
         let first = self.title.lines().next().unwrap_or_default();
         let title: String = first.trim().chars().filter(|&ch| ch != '`').collect();
-        // Cut short, the ellipsis every line ends with says so.
         let title = match title.char_indices().nth(LONGEST_DOING) {
-            Some((at, _)) => title[..at].trim_end().to_owned(),
+            Some((at, _)) => format!("{}…", title[..at].trim_end()),
             None => title,
         };
         if title.is_empty() {
             return match self.kind {
-                ToolKind::Read => "Reading…",
-                ToolKind::Edit => "Editing…",
-                ToolKind::Delete => "Deleting…",
-                ToolKind::Move => "Moving…",
-                ToolKind::Search => "Searching…",
-                ToolKind::Execute => "Running a command…",
-                ToolKind::Think => "Thinking…",
-                ToolKind::Fetch => "Fetching…",
-                ToolKind::Other => "Working…",
+                ToolKind::Read => "Reading",
+                ToolKind::Edit => "Editing",
+                ToolKind::Delete => "Deleting",
+                ToolKind::Move => "Moving",
+                ToolKind::Search => "Searching",
+                ToolKind::Execute => "Running a command",
+                ToolKind::Think => "Thinking",
+                ToolKind::Fetch => "Fetching",
+                ToolKind::Other => "Working",
             }
             .to_owned();
         }
-        if self.kind == ToolKind::Execute {
-            return format!("Running {title}…");
-        }
         let (verb, rest) = title.split_once(' ').unwrap_or((&title, ""));
         match DOING_VERBS.iter().find(|(said, _)| *said == verb) {
-            Some((_, doing)) if rest.is_empty() => format!("{doing}…"),
-            Some((_, doing)) => format!("{doing} {rest}…"),
-            None => format!("{title}…"),
+            Some((_, doing)) if rest.is_empty() => (*doing).to_owned(),
+            Some((_, doing)) => format!("{doing} {rest}"),
+            // A command's title is the command itself.
+            None if self.kind == ToolKind::Execute => format!("Running: {title}"),
+            None => title,
         }
     }
 }
@@ -1322,39 +1425,39 @@ mod tests {
         };
         // Starting, with or without a message waiting for it.
         assert!(chat.working());
-        assert_eq!(chat.doing().as_deref(), Some("Starting Claude Code…"));
+        assert_eq!(chat.doing().as_deref(), Some("Starting Claude Code"));
         chat.turns.push(turn("hi", vec![]));
-        assert_eq!(chat.doing().as_deref(), Some("Starting Claude Code…"));
+        assert_eq!(chat.doing().as_deref(), Some("Starting Claude Code"));
         // Answering: what it's doing comes from its latest work.
         chat.state = ChatState::Answering;
         let said = |chat: &mut ChatNode, items: Vec<Item>| {
             chat.turns.last_mut().unwrap().items = items;
             chat.doing()
         };
-        assert_eq!(said(&mut chat, vec![]).as_deref(), Some("Working…"));
+        assert_eq!(said(&mut chat, vec![]).as_deref(), Some("Working"));
         let thought = Item::Thought("hmm".into());
         assert_eq!(
             said(&mut chat, vec![thought.clone()]).as_deref(),
-            Some("Thinking…")
+            Some("Thinking")
         );
         let words = Item::Words("It's".into());
         assert_eq!(
             said(&mut chat, vec![thought.clone(), words]).as_deref(),
-            Some("Writing…")
+            Some("Writing")
         );
         let read = tool("Read Cargo.toml", ToolKind::Read, ToolStatus::Running);
         assert_eq!(
             said(&mut chat, vec![read.clone()]).as_deref(),
-            Some("Reading Cargo.toml…")
+            Some("Reading Cargo.toml")
         );
         // A tool still running is what it's doing, whatever came after.
         assert_eq!(
             said(&mut chat, vec![read, thought.clone()]).as_deref(),
-            Some("Reading Cargo.toml…")
+            Some("Reading Cargo.toml")
         );
         // Between tools.
         let done = tool("Read Cargo.toml", ToolKind::Read, ToolStatus::Done);
-        assert_eq!(said(&mut chat, vec![done]).as_deref(), Some("Working…"));
+        assert_eq!(said(&mut chat, vec![done]).as_deref(), Some("Working"));
         // Asking: it waits for the user, so it isn't working.
         chat.question = Some(Question {
             id: 1,
@@ -1374,9 +1477,9 @@ mod tests {
         assert!(!chat.working() && chat.doing().is_none());
         // Starting again, with turns from before: it loads the session.
         chat.state = ChatState::Starting;
-        assert_eq!(chat.doing().as_deref(), Some("Loading the session…"));
+        assert_eq!(chat.doing().as_deref(), Some("Loading the session"));
         chat.turns.push(turn("more", vec![]));
-        assert_eq!(chat.doing().as_deref(), Some("Loading the session…"));
+        assert_eq!(chat.doing().as_deref(), Some("Loading the session"));
         // Not after moving to a new session with another agent.
         chat.turns.insert(1, turn("", vec![]));
         chat.turns[1].end = chat.turns[0].end.clone();
@@ -1388,7 +1491,7 @@ mod tests {
             notes: Vec::new(),
         });
         chat.agent = "Codex".into();
-        assert_eq!(chat.doing().as_deref(), Some("Starting Codex…"));
+        assert_eq!(chat.doing().as_deref(), Some("Starting Codex"));
         chat.state = ChatState::Failed("no".into());
         assert!(!chat.working() && chat.doing().is_none());
     }
@@ -1408,7 +1511,7 @@ mod tests {
             own: true,
         });
         assert!(chat.working() && !chat.asking());
-        assert_eq!(chat.doing().as_deref(), Some("Working…"));
+        assert_eq!(chat.doing().as_deref(), Some("Working"));
         // Its own question while starting, as whether to install, does.
         chat.state = ChatState::Starting;
         assert!(!chat.working() && chat.asking());
@@ -1433,25 +1536,64 @@ mod tests {
             at: 600,
             outcome: Outcome::Failed("couldn't start".into()),
         });
-        assert_eq!(chat.doing().as_deref(), Some("Starting Claude Code…"));
+        assert_eq!(chat.doing().as_deref(), Some("Starting Claude Code"));
         assert_eq!(chat.counted_from(), Some(1_000));
         // One stopped, or done, did.
         chat.turns[0].end = Some(TurnEnd {
             at: 600,
             outcome: Outcome::Stopped,
         });
-        assert_eq!(chat.doing().as_deref(), Some("Loading the session…"));
+        assert_eq!(chat.doing().as_deref(), Some("Loading the session"));
         assert_eq!(chat.counted_from(), None, "no seconds while it loads");
         // A turn going that already has the agent's work is one told
         // again, as it loads.
         chat.turns.remove(0);
-        assert_eq!(chat.doing().as_deref(), Some("Starting Claude Code…"));
+        assert_eq!(chat.doing().as_deref(), Some("Starting Claude Code"));
         chat.turns[0].items.push(Item::Words("Hello".into()));
-        assert_eq!(chat.doing().as_deref(), Some("Loading the session…"));
+        assert_eq!(chat.doing().as_deref(), Some("Loading the session"));
         assert_eq!(chat.counted_from(), None);
         // Answering, the seconds count.
         chat.state = ChatState::Answering;
         assert_eq!(chat.counted_from(), Some(1_000));
+    }
+
+    #[test]
+    fn a_titles_code_is_what_its_backticks_quote_and_nothing_can_end_it_early() {
+        let words = |text: &str| Said::Words(text.to_owned());
+        let code = |text: &str| Said::Code(text.to_owned());
+        let said = |title: &str| {
+            Question {
+                id: 1,
+                title: title.to_owned(),
+                choices: Vec::new(),
+                own: false,
+            }
+            .said()
+        };
+        assert_eq!(
+            said("run `make` here"),
+            [words("run "), code("make"), words(" here")]
+        );
+        assert_eq!(said("Edit notes.txt"), [words("Edit notes.txt")]);
+        // A run with nothing to end it is just backticks.
+        assert_eq!(said("a ` b"), [words("a ` b")]);
+        assert_eq!(said("``a` b"), [words("``a` b")]);
+        // What the daemon quotes comes back whole, whatever's in it.
+        for text in [
+            "look at the `parser`",
+            "x` to chat 1 `y",
+            "``",
+            " both ",
+            "`",
+            "a\\",
+        ] {
+            let title = format!("send {} to chat 2", code_span(text));
+            assert_eq!(
+                said(&title),
+                [words("send "), code(text), words(" to chat 2")],
+                "{title}"
+            );
+        }
     }
 
     #[test]
@@ -1464,27 +1606,33 @@ mod tests {
         };
         assert_eq!(
             doing("cargo test", ToolKind::Execute),
-            "Running cargo test…"
+            "Running: cargo test"
         );
         assert_eq!(
             doing("`cargo test`\nand more", ToolKind::Execute),
-            "Running cargo test…"
+            "Running: cargo test"
+        );
+        // A command titled with a verb doesn't say it twice.
+        assert_eq!(
+            doing("Run a command", ToolKind::Execute),
+            "Running a command"
         );
         assert_eq!(
             doing("Read Cargo.toml", ToolKind::Read),
-            "Reading Cargo.toml…"
+            "Reading Cargo.toml"
         );
         assert_eq!(
             doing("Edit `src/lib.rs`", ToolKind::Edit),
-            "Editing src/lib.rs…"
+            "Editing src/lib.rs"
         );
-        assert_eq!(doing("Fetch", ToolKind::Fetch), "Fetching…");
-        assert_eq!(doing("grep -r foo", ToolKind::Search), "grep -r foo…");
-        assert_eq!(doing("", ToolKind::Search), "Searching…");
-        assert_eq!(doing("  ", ToolKind::Execute), "Running a command…");
-        // A long one is cut short.
+        assert_eq!(doing("Fetch", ToolKind::Fetch), "Fetching");
+        assert_eq!(doing("grep -r foo", ToolKind::Search), "grep -r foo");
+        assert_eq!(doing("", ToolKind::Search), "Searching");
+        assert_eq!(doing("  ", ToolKind::Execute), "Running a command");
+        // A long one is cut short, and says so.
         let long = doing(&"x".repeat(200), ToolKind::Execute);
-        assert_eq!(long.chars().count(), "Running ".len() + LONGEST_DOING + 1);
+        assert_eq!(long.chars().count(), "Running: ".len() + LONGEST_DOING + 1);
+        assert!(long.ends_with('…'));
     }
 
     #[test]

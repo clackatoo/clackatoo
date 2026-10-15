@@ -32,7 +32,9 @@ finder agent
 
 Below each message, what the agent did with it, in order: its words, its thinking, each tool it uses with `○` while it runs and `✓` or `✗` after, and each command it runs and change it makes, on a card of its own. Click a card to open it.
 
-While it works, a line just above the box says so, wherever the chat is scrolled to: three dots pulsing in clackatoo's colour, what the agent is doing, such as `Thinking…`, `Running cargo test…` or `Writing…`, and how long the turn has been going. The dots move only while the chat has the keyboard; elsewhere they step once a second, and once the agent stops, nothing moves. Ctrl+C asks it to stop.
+Its words are Markdown: headings, lists, quotes, links, code, and tables. Code in a language you've installed is coloured as an editor colours it, once its block is whole. A table is a grid, its head in bold over a line; one too wide for the chat scrolls sideways with Shift and the wheel over it, or `zl` and `zh` in the chat's normal mode (`zL` and `zH` go half the width), and moving the cursor to a cell out of view brings it into view.
+
+While it works, a line just above the box says so, wherever the chat is scrolled to: three dots pulsing in clackatoo's colour, what the agent is doing, such as `Thinking`, `Running: cargo test` or `Writing`, and how long the turn has been going, as `· 12s`. The dots move only while the chat has the keyboard; elsewhere they step once a second, and once the agent stops, nothing moves. Ctrl+C asks it to stop.
 
 Along the box's bottom are its settings: its mode on the left, how much it does without asking; its model and effort on the right. Shift+Tab steps through the modes.
 
@@ -41,6 +43,10 @@ Beside the model is how full the chat's context is, as `42% context` over a thin
 ## Which chats need you
 
 A tab says what its chats are doing after its name: `⋯` while one is at work, `?` while one asks you something, and `•` when one finished while this window wasn't showing it with the focus, until you show it. The workspaces in the top bar say the same of theirs, so a chat in another workspace that wants you shows there. When chats in one tab or workspace would say different things, the one that needs you most is shown: `?`, then `⋯`, then `•`.
+
+## Reading in normal mode
+
+Ctrl+; puts the chat in normal mode, with a solid cursor on the last line in view, or where it was if that's still in view. `h`, `j`, `k`, `l`, `w`, `b`, `gg` and `G` move it as in an editor; in a table, `j` and `k` go to the cell below and above. `v` and `V` select, and `y` copies. `za` opens or folds the turn's work under the cursor, and on the line of a turn's subagents, their card; `zR` opens all of them, and `zM` folds them.
 
 ## Copying, and when it was said
 
@@ -64,7 +70,7 @@ Under each turn that changed files, the chat says how many, with Undo. In the ch
 
 ## Subagents
 
-An agent hands work on with clackatoo's `start_chat`, or `start_chats` for several at once. Each starts a chat of its own, a subagent, in the background: your chat shows them as one line under the turn that started them, such as `3 subagents working… 12s ›`. Click it, or press Enter on it in normal mode, to see a line for each: what it is, what it was asked, and how it's going. Click one, or press Enter on its line, to open it as a pane.
+An agent hands work on with clackatoo's `start_chat`, or `start_chats` for several at once. Each starts a chat of its own, a subagent, in the background: your chat shows them as one line under the turn that started them, such as `3 subagents working · 12s ›`. Click it, or press Enter or `za` on it in normal mode, to see a line for each: what it is, what it was asked, and how it's going; `zR` opens every card in the chat. Click one, or press Enter on its line, to open it as a pane.
 
 A subagent is a chat like any other: you can steer it, review and undo what it changes, and answer its questions. The card says when one is waiting for you. Subagents in the background close with the chat that started them.
 

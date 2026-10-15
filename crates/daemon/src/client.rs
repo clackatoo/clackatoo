@@ -9,10 +9,10 @@ use std::path::Path;
 use clackatoo_protocol::frame::{self, FrameDecoder, FrameError, Head};
 use clackatoo_protocol::wire;
 use clackatoo_protocol::{
-    Block, BufferId, Change, ChatAction, ClientMessage, Error, Event, FileOp, FilesAction, FilesId,
-    HistoryLines, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal, Query, Request, Response,
-    Search, ServerMessage, Side, Size, TerminalId, TerminalInfo, Udp, View, Which, WorkspaceId,
-    Workspaces,
+    Block, BufferId, Change, ChatAction, ClientMessage, Code, Error, Event, FileOp, FilesAction,
+    FilesId, HistoryLines, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal, Query, Request,
+    Response, Search, ServerMessage, Side, Size, TerminalId, TerminalInfo, Udp, View, Which,
+    WorkspaceId, Workspaces,
 };
 
 use crate::quic::{self, Carried, Contact, Redial, Route};
@@ -554,6 +554,16 @@ impl Client {
             agent: agent.to_owned(),
             cwd: cwd.to_owned(),
         })
+    }
+
+    /// Asks how `code`, blocks of code from an agent's words, is coloured,
+    /// numbered `id`. The colours come in an [`Event::Coloured`].
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn colour(&mut self, id: u64, code: Vec<Code>) -> Result<(), ClientError> {
+        self.send(&ClientMessage::Colour { id, code })
     }
 
     /// Limits how long [`next_event`](Self::next_event) and requests wait.

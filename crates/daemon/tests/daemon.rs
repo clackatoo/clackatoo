@@ -4083,7 +4083,8 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Chats(_)
             | Event::Pairing(_)
             | Event::Sessions { .. }
-            | Event::Exited { .. }) => {
+            | Event::Exited { .. }
+            | Event::Coloured { .. }) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }
@@ -5495,6 +5496,99 @@ fn next_coloured(client: &mut Client) -> (u64, Vec<Span>) {
             return (id, spans);
         }
     }
+}
+
+#[test]
+fn a_chats_code_is_coloured_in_its_language_and_always_answered() {
+    let daemon = with_fake_language_server_and_grammars(|_| Vec::new());
+    let mut client = daemon.client();
+    let code = |language: &str, text: &str| clackatoo_protocol::Code {
+        language: language.to_owned(),
+        text: text.to_owned(),
+    };
+    // JSON is installed, under any case; a language that isn't, and
+    // nothing, stay plain.
+    let asked = vec![
+        code("JSON", "{\"a\": [1, true]}"),
+        code("cobol", "MOVE A TO B."),
+        code("json", "   "),
+    ];
+    client.colour(7, asked).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    let spans = loop {
+        if let Event::Coloured { id, spans } = client.next_event().unwrap() {
+            assert_eq!(id, 7);
+            break spans;
+        }
+    };
+    assert_eq!(spans.len(), 3, "a list for each block, in order");
+    assert!(
+        spans[0]
+            .iter()
+            .any(|span| (span.start, span.end, span.kind) == (7, 8, Kind::Number)),
+        "{spans:?}"
+    );
+    assert!(
+        spans[0]
+            .iter()
+            .all(|span| span.end <= "{\"a\": [1, true]}".len())
+    );
+    assert_eq!(spans[1], []);
+    assert_eq!(spans[2], []);
+    // Nothing to colour: answered at once all the same.
+    client
+        .colour(8, vec![code("cobol", "MOVE A TO B.")])
+        .unwrap();
+    let spans = loop {
+        if let Event::Coloured { id, spans } = client.next_event().unwrap() {
+            assert_eq!(id, 8);
+            break spans;
+        }
+    };
+    assert_eq!(spans, [Vec::<Span>::new()]);
+}
+
+#[test]
+fn many_asks_to_colour_code_each_get_an_answer_in_turn_and_extra_blocks_stay_plain() {
+    let daemon = with_fake_language_server_and_grammars(|_| Vec::new());
+    let mut client = daemon.client();
+    let code = |language: &str, text: &str| clackatoo_protocol::Code {
+        language: language.to_owned(),
+        text: text.to_owned(),
+    };
+    // More asks than are coloured at once, of known and unknown tags.
+    for id in 0..12 {
+        let asked = vec![
+            code("json", &format!("[{id}, true]")),
+            code(&format!("nothing-{id}"), "x"),
+        ];
+        client.colour(id, asked).unwrap();
+    }
+    // And one of more blocks than are coloured: those past the most, in a
+    // known language, are plain all the same.
+    let many: Vec<_> = (0..70).map(|n| code("json", &format!("[{n}]"))).collect();
+    client.colour(99, many).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    let mut answered = std::collections::HashMap::new();
+    while answered.len() < 13 {
+        if let Event::Coloured { id, spans } = client.next_event().unwrap() {
+            assert!(answered.insert(id, spans).is_none(), "answered once");
+        }
+    }
+    for id in 0..12 {
+        let spans = &answered[&id];
+        assert_eq!(spans.len(), 2);
+        assert!(!spans[0].is_empty(), "{id}: {spans:?}");
+        assert!(spans[1].is_empty());
+    }
+    let many = &answered[&99];
+    assert_eq!(many.len(), 70);
+    assert!(many[..64].iter().all(|spans| !spans.is_empty()));
+    assert!(many[64..].iter().all(Vec::is_empty));
 }
 
 #[test]
@@ -11294,7 +11388,7 @@ fn chats_list_message_read_and_wait_for_each_other() {
     let names: Vec<&str> = (question.choices.iter())
         .map(|choice| choice.name.as_str())
         .collect();
-    assert_eq!(names, ["Allow", "Always allow for that chat", "Deny"]);
+    assert_eq!(names, ["Allow", "Always allow for that chat", "Reject"]);
     answer(&mut client, a, Some("allow".to_owned()));
     let node = wait_for_chat_for(&mut client, a, Duration::from_secs(10), |node| {
         last_outcome(node).is_some()
@@ -11435,9 +11529,12 @@ fn starting_a_chat_asks_then_opens_it_beside_with_the_message() {
     let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
     let title = asking.question.unwrap().title;
     assert!(
-        title.starts_with("send `hi kid` to a new Claude Code chat it starts, as general, in /"),
+        title.starts_with(
+            "send `hi kid` to a new Claude Code chat it starts, with the general profile, in `"
+        ),
         "{title}"
     );
+    assert!(title.ends_with('`'), "the folder is quoted: {title}");
     assert_eq!(tab_contents(&mut client).len(), 1, "nothing starts first");
     answer(&mut client, a, Some("allow".to_owned()));
     let node = wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
@@ -12562,7 +12659,7 @@ fn a_chat_started_gets_its_parents_mode_and_only_its_family_goes_unasked() {
     let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
     let title = asking.question.unwrap().title;
     assert!(
-        title.contains("in /, outside this chat's project ("),
+        title.contains("in `/`, outside this chat's project ("),
         "{title}"
     );
     answer(&mut client, a, Some("reject".to_owned()));

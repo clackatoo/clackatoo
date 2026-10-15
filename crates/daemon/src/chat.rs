@@ -179,7 +179,7 @@ const TALK_CHOICES: [(&str, &str, ChoiceKind); 3] = [
         "Always allow for that chat",
         ChoiceKind::AllowAlways,
     ),
-    ("reject", "Deny", ChoiceKind::RejectOnce),
+    ("reject", "Reject", ChoiceKind::RejectOnce),
 ];
 
 /// The answers to the question asked before an agent first opens a page in
@@ -196,7 +196,7 @@ pub(crate) enum Choices {
     /// Allow, Always allow, which lets the agent run commands in its own
     /// terminals, and Reject.
     Tool,
-    /// Allow, Always allow for the chat it's about, and Deny.
+    /// Allow, Always allow for the chat it's about, and Reject.
     Talk,
     /// Allow for this chat, which lets its agent open pages in the
     /// browser from then on, and Reject.
@@ -4208,7 +4208,7 @@ mod tests {
         let names: Vec<&str> = (question.choices.iter())
             .map(|choice| choice.name.as_str())
             .collect();
-        assert_eq!(names, ["Allow", "Always allow for that chat", "Deny"]);
+        assert_eq!(names, ["Allow", "Always allow for that chat", "Reject"]);
         assert_eq!(
             answer(&mut chat, Some("pair".into())),
             [Action::Permit {

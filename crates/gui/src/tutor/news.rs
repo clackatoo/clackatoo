@@ -371,6 +371,24 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "A terminal's selection ends a cell past each line's text, as what y copies does, not at the pane's edge",
     },
+    News {
+        id: "chat-markdown",
+        date: "2026-10-15",
+        lesson: "agents",
+        what: "Chats draw tables as grids that scroll sideways, colour code in its language, and line code and quotes up",
+    },
+    News {
+        id: "chat-cursor",
+        date: "2026-10-15",
+        lesson: "agents",
+        what: "A chat's normal mode shows a solid cursor at once, in view; zR, zM and za fold subagents' cards too",
+    },
+    News {
+        id: "chat-wording",
+        date: "2026-10-15",
+        lesson: "agents",
+        what: "Chats say Running: cargo test · 12s, their questions say Reject, and long messages type faster",
+    },
 ];
 
 impl News {

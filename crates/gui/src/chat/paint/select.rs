@@ -27,7 +27,7 @@ use crate::chat::markdown::{self, BlockKind};
 use crate::chat::{Brush, ChatView, Hit, Tone};
 use crate::fonts::Fonts;
 use crate::pane::Selection;
-use crate::render::{Fill, Paint};
+use crate::render::{Fill, Ink, Paint};
 
 /// One block of the conversation's text: a block of a message, the line
 /// a turn's work folds under, or a line of a card.
@@ -91,7 +91,7 @@ pub(in crate::chat) struct TextAt<'a> {
 impl TextAt<'_> {
     /// Whether it's a block of code.
     pub(in crate::chat) fn code(&self) -> bool {
-        self.kind == Some(&BlockKind::Code)
+        self.kind.is_some_and(BlockKind::code)
     }
 }
 
@@ -121,19 +121,42 @@ pub(in crate::chat) fn before(text: &str, byte: usize) -> usize {
 }
 
 /// The blocks of `markdown`'s text, as they're copied: a line apart in a
-/// list, and a blank line apart otherwise.
+/// list, a table's cells a tab apart and its rows a line, and a blank
+/// line apart otherwise.
 fn blocks_text(markdown: &str) -> String {
     let mut text = String::new();
-    let mut was_item = false;
-    for (index, block) in markdown::blocks(markdown).into_iter().enumerate() {
-        let item = matches!(block.kind, BlockKind::Item(_));
-        if index > 0 {
-            text.push_str(if item && was_item { "\n" } else { "\n\n" });
-        }
+    let mut before: Option<BlockKind> = None;
+    for block in markdown::blocks(markdown) {
+        text.push_str(&joint(before.as_ref(), &block.kind));
         text.push_str(&block.text);
-        was_item = item;
+        before = Some(block.kind);
     }
     text
+}
+
+/// What goes before a block copied, `after`, after the block before it,
+/// `before`, if there's one in the same piece: a line break between a
+/// list's items, a blank line between other blocks, and in a table, a tab
+/// for each column and a line break for each row between them, so empty
+/// cells, which are no blocks, still have their places.
+fn joint(before: Option<&BlockKind>, after: &BlockKind) -> String {
+    let tabs = |count: usize| "\t".repeat(count);
+    match (before.and_then(BlockKind::cell), after.cell()) {
+        (Some(before), Some(after)) if before.table == after.table => {
+            if before.row == after.row {
+                tabs(after.column.saturating_sub(before.column))
+            } else {
+                "\n".repeat(after.row - before.row) + &tabs(after.column)
+            }
+        }
+        (_, Some(after)) if before.is_none() => tabs(after.column),
+        (_, Some(after)) => "\n\n".to_owned() + &tabs(after.column),
+        _ => match before {
+            None => String::new(),
+            Some(BlockKind::Item(_)) if matches!(after, BlockKind::Item(_)) => "\n".to_owned(),
+            Some(_) => "\n\n".to_owned(),
+        },
+    }
 }
 
 /// Where the line of `text` that `byte` is in starts, and where it ends,
@@ -239,10 +262,15 @@ impl ChatView {
         } else {
             [0.0; 2]
         };
+        let scroll = (piece.table_of(key.part))
+            .map_or(0.0, |table| self.table_scroll(key.turn, key.piece, table));
         Some(TextAt {
             layout: &block.layout,
             text: &block.text,
-            at: [origin[0] + block.left, span.top + origin[1] + block.top],
+            at: [
+                origin[0] + block.left - scroll,
+                span.top + origin[1] + block.top,
+            ],
             kind: Some(&block.kind),
         })
     }
@@ -388,7 +416,7 @@ impl ChatView {
     /// The text from `start` to `end` that turn `turn`, laid out, shows.
     fn laid_text_between(&self, start: Position, end: Position, turn: usize) -> String {
         let mut copied = String::new();
-        let mut last: Option<(TextKey, bool)> = None;
+        let mut last: Option<(TextKey, Option<BlockKind>)> = None;
         for key in self.turn_texts(turn) {
             if key < start.text || key > end.text || control(key.piece) {
                 continue;
@@ -396,14 +424,13 @@ impl ChatView {
             let Some(text) = self.text(key) else {
                 continue;
             };
-            let item = matches!(text.kind, Some(BlockKind::Item(_)));
-            if let Some((before, was_item)) = last {
+            if let Some((before, kind)) = &last {
                 let same = (before.turn, before.piece) == (key.turn, key.piece);
-                let card = text.kind.is_none();
-                copied.push_str(if same && (card || (item && was_item)) {
-                    "\n"
-                } else {
-                    "\n\n"
+                copied.push_str(&match (kind, text.kind) {
+                    _ if !same => "\n\n".to_owned(),
+                    (Some(before), Some(after)) => joint(Some(before), after),
+                    // A card's lines.
+                    _ => "\n".to_owned(),
                 });
             }
             let from = if key == start.text {
@@ -417,7 +444,7 @@ impl ChatView {
                 text.text.len()
             };
             copied.push_str(&text.text[from..to.max(from)]);
-            last = Some((key, item));
+            last = Some((key, text.kind.cloned()));
         }
         copied
     }
@@ -446,6 +473,7 @@ impl ChatView {
         if !self.reveal {
             return;
         }
+        self.reveal_cell();
         let Some(cursor) = self.cursor else {
             return;
         };
@@ -575,6 +603,12 @@ impl ChatView {
         pane: [f32; 2],
         (caret, label): (bool, Option<Laid>),
     ) {
+        // Inside the column, as all its text is but a table's cells
+        // scrolled sideways out of it, which the cursor and the selection
+        // mustn't be drawn over the margins for.
+        let view = canvas.clip;
+        let left = pane[0] + self.column_right - self.cache.width;
+        canvas.clip = super::intersection(view, [left, view[1], self.cache.width, view[3]]);
         if let Some((start, end)) = self.picked_range() {
             for shown in &self.shown {
                 if shown.key < start.text || shown.key > end.text || control(shown.key.piece) {
@@ -622,8 +656,13 @@ impl ChatView {
                     [caret[0], caret[1], m.em(0.55), caret[3]]
                 }
             };
-            canvas.fill(Fill::rounded(rect, Paint::Selected, 2.0).bordered(1.5, Paint::Accent));
+            // Solid, as an editor's is in normal mode, with the character
+            // under it drawn again over it in the colour that shows there.
+            let solid = Fill::rounded(rect, Paint::Accent, 2.0).clipped(canvas.clip);
+            canvas.paint.over.push(solid);
+            canvas.text_over(text.layout, at, rect, Ink::OnColor);
         }
+        canvas.clip = view;
         let Some(label) = label else {
             return;
         };
@@ -682,6 +721,30 @@ mod tests {
     use crate::chat::{ChatView, Hit, Pointer};
     use crate::input::{KeyPress, Modifiers};
     use crate::pane::Copy;
+
+    #[test]
+    fn a_tables_cells_copy_a_tab_apart_and_its_rows_a_line() {
+        assert_eq!(
+            super::blocks_text("Look:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n- x\n- y"),
+            "Look:\n\na\tb\n1\t2\n\nx\ny"
+        );
+        // Empty cells keep their places: leading, in the middle, a whole
+        // row, and the first cell of all.
+        assert_eq!(
+            super::blocks_text(
+                "| a | b | c |\n|---|---|---|\n|  | 2 | 3 |\n| 4 |  | 6 |\n|  |  |  |\n| 7 | 8 | 9 |"
+            ),
+            "a\tb\tc\n\t2\t3\n4\t\t6\n\n7\t8\t9"
+        );
+        assert_eq!(
+            super::blocks_text("|  | b |\n|---|---|\n| 1 | 2 |"),
+            "\tb\n1\t2"
+        );
+        assert_eq!(
+            super::blocks_text("Look:\n\n|  | b |\n|---|---|"),
+            "Look:\n\n\tb"
+        );
+    }
 
     /// Where text `key` was drawn.
     fn shown(chat: &ChatView, turn: usize, piece: usize) -> Shown {

@@ -230,11 +230,19 @@ impl Languages {
     /// matter. The directory is read again if a pack has been added or
     /// taken away since.
     pub fn named(&mut self, tag: &str) -> Option<Arc<Pack>> {
+        self.refresh();
+        self.named_as_read(tag)
+    }
+
+    /// The pack for code tagged `tag`, as [`named`](Self::named) finds it,
+    /// from the packs as the directory was last read: for many tags at
+    /// once, after one [`refresh`](Self::refresh).
+    #[must_use]
+    pub fn named_as_read(&self, tag: &str) -> Option<Arc<Pack>> {
         let tag = tag.to_ascii_lowercase();
         let tag = (ALIASES.iter())
             .find_map(|&(alias, name)| (alias == tag).then_some(name))
             .unwrap_or(&tag);
-        self.refresh();
         let packs = self.packs.iter();
         (packs
             .clone()
@@ -247,7 +255,9 @@ impl Languages {
         .cloned()
     }
 
-    fn refresh(&mut self) {
+    /// Reads the directory again, if a pack has been added or taken away
+    /// since it was last read.
+    pub fn refresh(&mut self) {
         let changed = fs::metadata(&self.dir)
             .and_then(|meta| meta.modified())
             .ok();

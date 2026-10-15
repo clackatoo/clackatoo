@@ -12,6 +12,7 @@ mod divider;
 mod edge;
 mod fold;
 mod select;
+mod tables;
 mod usage;
 mod working;
 
@@ -19,8 +20,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use clackatoo_protocol::{
-    ChatState, ChoiceKind, Item, Outcome, Setting, SettingKind, ToolStatus, Turn, TurnFiles,
-    TurnFilesState,
+    ChatState, ChoiceKind, Item, Outcome, Said, Setting, SettingKind, ToolStatus, Turn, TurnFiles,
+    TurnFilesState, code_span,
 };
 use parley::{
     Alignment, AlignmentOptions, FontFamily, FontFamilyName, FontStyle, FontWeight, GenericFamily,
@@ -28,6 +29,7 @@ use parley::{
 };
 
 use super::card::Card;
+use super::colours::{Colouring, Colours};
 use super::markdown::{self, BlockKind};
 use super::picker::{self, ChoiceRow, Row, SliderRow, Spot};
 use super::{Brush, ChatView, Hit, Menu, Tone};
@@ -36,6 +38,7 @@ use crate::render::{Fill, Ink, Paint, PlacedGlyph};
 pub(super) use select::{
     How, Picked, Position, Shown, TextKey, after, before, line_middle, line_of, within, x_of,
 };
+use tables::{Cells, TableLaid, lay_out_table};
 pub(super) use usage::Detail;
 
 /// The widest the column of turns gets, in ems.
@@ -131,7 +134,7 @@ pub(super) fn control(piece: usize) -> bool {
 pub(super) struct Cache {
     /// The column's width and the text's size they were laid out for.
     pub(super) width: f32,
-    size: f32,
+    pub(super) size: f32,
     /// The fonts' [`generation`](Fonts::generation) they were laid out in.
     fonts: u32,
     /// By turn, in order.
@@ -149,6 +152,19 @@ pub(super) struct Cache {
     /// The line above the box that says what the agent is doing, laid
     /// out, while it works: what it says changes as it goes on.
     working: Option<working::WorkingLaid>,
+    /// The box's own short lines, as its chips say, laid out.
+    labels: Labels,
+}
+
+/// Short lines of the box's own, such as its chips' labels and the
+/// meter, laid out for the frame before and this one, by what they say
+/// and their tone: drawing the box lays out only what's changed, and
+/// what isn't drawn again is let go, so labels that come and go, as the
+/// meter's do, don't pile up.
+#[derive(Default)]
+struct Labels {
+    last: HashMap<(String, Tone), Laid>,
+    now: HashMap<(String, Tone), Laid>,
 }
 
 /// What's kept of one turn between frames.
@@ -205,10 +221,32 @@ struct FilesLaid {
 /// Something laid out: the text it was laid out from, and its blocks.
 struct Laid {
     source: String,
+    /// The tone plain text was laid out in, which [`ChatView::box_label`]
+    /// keeps it by: plain, for Markdown.
+    tone: Tone,
     blocks: Vec<LaidBlock>,
+    /// Its tables, whose cells are among its blocks.
+    tables: Vec<TableLaid>,
+    /// Some of its code was laid out plain, as its colours were still to
+    /// come: when they do, it's laid out again.
+    waiting: bool,
     height: f32,
     /// The widest line.
     width: f32,
+}
+
+impl ChatView {
+    /// Lays the turns whose code was waiting for colours out again, when
+    /// next they're near the view, as some have come.
+    pub(super) fn recolour(&mut self) {
+        for index in 0..self.cache.turns.len() {
+            let waiting = (self.cache.turns[index].laid.as_ref())
+                .is_some_and(|laid| laid.pieces.values().any(|piece| piece.waiting));
+            if waiting {
+                self.restyled(index);
+            }
+        }
+    }
 }
 
 /// One block, placed within what it belongs to.
@@ -223,6 +261,9 @@ struct LaidBlock {
     top: f32,
     /// A list item's marker, laid out, and where it goes from the left.
     marker: Option<(Layout<Brush>, f32)>,
+    /// For a table's cell, what it was laid out from, hashed: a table laid
+    /// out again as more of it comes keeps the cells that haven't changed.
+    key: Option<u64>,
 }
 
 /// Sizes, from the text's size.
@@ -305,6 +346,9 @@ impl Canvas<'_> {
                 };
                 let ppem = run.run().font_size();
                 let ink = match brush.tone {
+                    _ if let Some(kind) = brush.syntax => {
+                        Ink::Color(crate::colors::syntax(kind).fg)
+                    }
                     Tone::Plain => Ink::Plain,
                     Tone::Muted => Ink::Muted,
                     Tone::Accent => Ink::Accent,
@@ -342,6 +386,47 @@ impl Canvas<'_> {
                         ],
                         Paint::Icon,
                     ));
+                }
+            }
+        }
+    }
+}
+
+impl Canvas<'_> {
+    /// Draws the glyphs of `layout`, with its top left at `origin`, that
+    /// start inside `rect`, over everything, in `ink`: the character
+    /// under a solid cursor, in the colour that shows on it.
+    fn text_over(&mut self, layout: &Layout<Brush>, origin: [f32; 2], rect: [f32; 4], ink: Ink) {
+        let [left, top, width, height] = rect;
+        for line in layout.lines() {
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(run) = item else {
+                    continue;
+                };
+                let Some(face) = self.fonts.face_for(run.run().font(), run.run().synthesis())
+                else {
+                    continue;
+                };
+                let ppem = run.run().font_size();
+                for glyph in run.positioned_glyphs() {
+                    let pen = [origin[0] + glyph.x, origin[1] + glyph.y];
+                    let inside = pen[0] >= left - 0.5
+                        && pen[0] < left + width - 0.5
+                        && pen[1] > top
+                        && pen[1] <= top + height;
+                    let Ok(id) = u16::try_from(glyph.id) else {
+                        continue;
+                    };
+                    if inside {
+                        self.paint.over_glyphs.push(PlacedGlyph {
+                            face,
+                            glyph: id,
+                            ppem,
+                            pen,
+                            ink,
+                            clip: self.clip,
+                        });
+                    }
                 }
             }
         }
@@ -387,6 +472,11 @@ impl ChatView {
                 ..Cache::default()
             };
         }
+
+        // What the box said last frame, to say again without laying it
+        // out; what it doesn't say again goes.
+        let labels = &mut self.cache.labels;
+        labels.last = std::mem::take(&mut labels.now);
 
         let mut paint = ChatPaint::default();
         self.hits.clear();
@@ -437,6 +527,7 @@ impl ChatView {
         self.column_right = left + column;
         self.cursor_onto_text();
         self.cursor_into_view();
+        self.cursor_on_arrival();
         let label = self.copy_label(canvas.fonts, m);
         self.draw_reading(&mut canvas, m, origin, (caret, label));
         if self.node.turns.is_empty() && matches!(self.node.state, ChatState::Ready) {
@@ -477,6 +568,7 @@ impl ChatView {
         let (mut hits, mut texts) = (Vec::new(), Vec::new());
         let mut drawn = Drawn {
             pane,
+            view: canvas.clip,
             hits: &mut hits,
             texts: &mut texts,
             copy: &copy,
@@ -640,6 +732,8 @@ impl ChatView {
             }
             near
         });
+        // Nor how far their tables were scrolled sideways.
+        (self.table_scrolls).retain(|&(turn, _, _), _| keep.contains(&turn));
     }
 
     /// The turns near enough the view to be laid out: in it, and within a
@@ -932,9 +1026,47 @@ impl ChatView {
         width: f32,
     ) -> Laid {
         match old {
-            Some(laid) if laid.source == text => laid,
-            _ => lay_out(&mut self.layout_cx, fonts, m, text, look, width),
+            // Not if its code was waiting for colours, which may have come.
+            Some(laid) if laid.source == text && !laid.waiting => laid,
+            old => {
+                let colours = matches!(look, Look::Words).then_some(&mut self.colours);
+                let mut cells = old.map(Laid::into_cells).unwrap_or_default();
+                let (layout_cx, words) = (&mut self.layout_cx, (text, look));
+                lay_out_coloured(layout_cx, fonts, m, words, (width, &mut cells), colours)
+            }
         }
+    }
+
+    /// One of the box's short lines, `tone`, laid out `width` wide, or as
+    /// it was for the frame before: given back with
+    /// [`keep_label`](Self::keep_label) once drawn.
+    fn box_label(
+        &mut self,
+        fonts: &mut Fonts,
+        m: Measures,
+        text: &str,
+        tone: Tone,
+        width: f32,
+    ) -> Laid {
+        let key = (text.to_owned(), tone);
+        let labels = &mut self.cache.labels;
+        match labels.now.remove(&key).or_else(|| labels.last.remove(&key)) {
+            Some(laid) => laid,
+            None => lay_out(
+                &mut self.layout_cx,
+                fonts,
+                m,
+                text,
+                Look::Plain(tone),
+                width,
+            ),
+        }
+    }
+
+    /// Keeps `laid`, from [`box_label`](Self::box_label), for the next frame.
+    fn keep_label(&mut self, laid: Laid) {
+        let key = (laid.source.clone(), laid.tone);
+        self.cache.labels.now.insert(key, laid);
     }
 
     /// Text of the chat's own, laid out.
@@ -1002,8 +1134,9 @@ impl ChatView {
                 Piece::Agents => self.draw_agents(canvas, m, index, [origin[0], top], drawn),
                 Piece::Item(piece) => {
                     if let Some(item) = laid.pieces.get(&piece) {
-                        draw_laid(canvas, m, item, [origin[0], top], column);
-                        drawn.note_laid(item, [origin[0], top], (index, piece));
+                        let scrolled = |table| self.table_scroll(index, piece, table);
+                        draw_scrolled(canvas, m, item, [origin[0], top], column, &scrolled);
+                        drawn.note_scrolled(item, [origin[0], top], (index, piece), &scrolled);
                     }
                 }
                 Piece::Note => {
@@ -1052,7 +1185,7 @@ impl ChatView {
         let inner = (place.column - 2.0 * pad).max(m.em(4.0));
         let question = self.lay_out_question(fonts, m, inner);
         let editor_height = if question.is_none() {
-            self.editor.set_width(Some(inner));
+            self.size_editor(inner);
             let layout = self.editor.layout(&mut fonts.font_cx, &mut self.layout_cx);
             layout.height().max(m.em(LINE))
         } else {
@@ -1107,12 +1240,11 @@ impl ChatView {
         inner: f32,
     ) -> Option<QuestionLaid> {
         let question = self.node.question.clone()?;
-        let title = asked(&question);
         let title = lay_out(
             &mut self.layout_cx,
             fonts,
             m,
-            &format!("**{}**", escape(&title)),
+            &format!("**{}**", asked(&question, self.quoted)),
             Look::Words,
             inner,
         );
@@ -1288,19 +1420,13 @@ impl ChatView {
             size / 2.0,
         ));
         let tone = if lit { Tone::OnAccent } else { Tone::Muted };
-        let laid = lay_out(
-            &mut self.layout_cx,
-            canvas.fonts,
-            m,
-            label,
-            Look::Plain(tone),
-            size,
-        );
+        let laid = self.box_label(canvas.fonts, m, label, tone, size);
         let text = [
             rect[0] + (size - laid.width) / 2.0,
             rect[1] + (size - laid.height) / 2.0,
         ];
         draw_laid(canvas, m, &laid, text, size);
+        self.keep_label(laid);
         self.hits.push((hit, frame.place.in_pane(rect)));
     }
 }
@@ -1335,18 +1461,13 @@ impl ChatView {
                 .map(chosen_name)
                 .collect::<Vec<_>>()
                 .join(" · ");
-            let laid = lay_out(
-                &mut self.layout_cx,
-                canvas.fonts,
-                m,
-                &format!("{label}  ▾"),
-                Look::Plain(Tone::Muted),
-                frame.inner,
-            );
+            let label = format!("{label}  ▾");
+            let laid = self.box_label(canvas.fonts, m, &label, Tone::Muted, frame.inner);
             let width = laid.width + m.em(1.2);
             let rect = [right - width, top, width, size];
             let ids = picked.into_iter().map(|setting| setting.id).collect();
             self.draw_chip(canvas, m, frame, rect, &laid, ids);
+            self.keep_label(laid);
             right = rect[0] - m.em(0.6);
         }
         // The chips on the left first, for the meter to have the room
@@ -1364,15 +1485,7 @@ impl ChatView {
         ];
         let chips: Vec<(Laid, String)> = (chips.into_iter().flatten())
             .map(|(label, id)| {
-                let look = Look::Plain(Tone::Muted);
-                let laid = lay_out(
-                    &mut self.layout_cx,
-                    canvas.fonts,
-                    m,
-                    &label,
-                    look,
-                    frame.inner,
-                );
+                let laid = self.box_label(canvas.fonts, m, &label, Tone::Muted, frame.inner);
                 (laid, id)
             })
             .collect();
@@ -1380,14 +1493,16 @@ impl ChatView {
             (chips.iter()).fold(start, |left, (laid, _)| left + laid.width + m.em(1.2) + gap);
         let meter = self.draw_meter(canvas, m, frame, (right, chips_end, top, size));
         let mut left = start;
+        let mut room = true;
         for (laid, id) in chips {
             let width = laid.width + m.em(1.2);
-            if left + width > meter - gap {
-                break;
+            room &= left + width <= meter - gap;
+            if room {
+                let rect = [left, top, width, size];
+                self.draw_chip(canvas, m, frame, rect, &laid, vec![id]);
+                left += width + gap;
             }
-            let rect = [left, top, width, size];
-            self.draw_chip(canvas, m, frame, rect, &laid, vec![id]);
-            left += width + gap;
+            self.keep_label(laid);
         }
     }
 
@@ -1935,6 +2050,8 @@ impl TurnSlot {
 struct Drawn<'a> {
     /// The pane's top left.
     pane: [f32; 2],
+    /// What's in view, from the window's top left.
+    view: [f32; 4],
     hits: &'a mut Vec<(Hit, [f32; 4])>,
     texts: &'a mut Vec<Shown>,
     /// The button under each answer's label, laid out: "Copy", and
@@ -1957,13 +2074,31 @@ impl Drawn<'_> {
     /// Notes `laid`'s blocks, drawn with the column's left at
     /// `origin[0]` and its top at `origin[1]`, as `piece` of `turn`.
     fn note_laid(&mut self, laid: &Laid, origin: [f32; 2], (turn, piece): (usize, usize)) {
+        self.note_scrolled(laid, origin, (turn, piece), &|_| 0.0);
+    }
+
+    /// Notes `laid`'s blocks as [`note_laid`](Self::note_laid) does, with
+    /// its tables scrolled sideways as far as `scrolled` says.
+    fn note_scrolled(
+        &mut self,
+        laid: &Laid,
+        origin: [f32; 2],
+        (turn, piece): (usize, usize),
+        scrolled: &dyn Fn(usize) -> f32,
+    ) {
         for (part, block) in laid.blocks.iter().enumerate() {
-            let at = [origin[0] + block.left, origin[1] + block.top];
+            let scroll = laid.table_of(part).map_or(0.0, scrolled);
+            let at = [origin[0] + block.left - scroll, origin[1] + block.top];
+            // Above or below the view, as most of a long answer is.
+            let (top, bottom) = (at[1], at[1] + block.layout.height());
+            if bottom < self.view[1] || top > self.view[1] + self.view[3] {
+                continue;
+            }
             self.note_text(
                 TextKey { turn, piece, part },
                 at,
                 &block.layout,
-                block.kind == BlockKind::Code,
+                block.kind.code(),
             );
         }
     }
@@ -2123,24 +2258,80 @@ pub(super) fn answer_to_copy(turn: &Turn) -> Option<usize> {
 /// Draws `laid` with the column's left at `origin[0]`, its top at
 /// `origin[1]`: its blocks, and what goes with them.
 fn draw_laid(canvas: &mut Canvas<'_>, m: Measures, laid: &Laid, origin: [f32; 2], column: f32) {
-    for block in &laid.blocks {
+    draw_scrolled(canvas, m, laid, origin, column, &|_| 0.0);
+}
+
+/// Draws `laid` as [`draw_laid`] does, with each of its tables scrolled
+/// sideways as far as `scrolled` says, by the table's number.
+fn draw_scrolled(
+    canvas: &mut Canvas<'_>,
+    m: Measures,
+    laid: &Laid,
+    origin: [f32; 2],
+    column: f32,
+    scrolled: &dyn Fn(usize) -> f32,
+) {
+    for (number, table) in laid.tables.iter().enumerate() {
+        // The line under its head, as far across as it shows.
+        let shown = table.width.min(column - table.left);
+        let y = origin[1] + table.top + table.rule;
+        let rule = [origin[0] + table.left, y, shown, 1.0];
+        canvas.fill(Fill::solid(rule, Paint::Divider));
+        let scroll = scrolled(number).clamp(0.0, table.max_scroll(column));
+        let view = canvas.clip;
+        let room = [
+            origin[0] + table.left,
+            view[1],
+            column - table.left,
+            view[3],
+        ];
+        canvas.clip = intersection(view, room);
+        for block in &laid.blocks[table.blocks.clone()] {
+            let at = [origin[0] + block.left - scroll, origin[1] + block.top];
+            let size = [block.layout.width(), block.layout.height()];
+            if overlaps(canvas.clip, [at[0], at[1], size[0], size[1]]) {
+                canvas.text(&block.layout, at);
+            }
+        }
+        canvas.clip = view;
+        draw_cut_off(
+            canvas,
+            m,
+            table,
+            [origin[0] + table.left, origin[1]],
+            (column, scroll),
+        );
+    }
+    for (index, block) in laid.blocks.iter().enumerate() {
         let x = origin[0] + block.left;
         let y = origin[1] + block.top;
         let height = block.layout.height();
+        // Out of view, as most of a long answer is, or a table's cell:
+        // nothing to draw here. What's drawn round a block reaches an em
+        // past it at most.
+        let reach = [x - m.em, y - m.em, column + 2.0 * m.em, height + 2.0 * m.em];
+        if laid.table_of(index).is_some() || !overlaps(canvas.clip, reach) {
+            continue;
+        }
         match &block.kind {
-            // From a little left of the text to the column's right edge.
-            BlockKind::Code => canvas.fill(Fill::rounded(
-                [
-                    x - m.em(0.6),
-                    y - m.em(0.4),
-                    column - block.left + m.em(0.6),
-                    height + m.em(0.8),
-                ],
-                Paint::Code,
-                m.em(0.5),
-            )),
+            // Its background from the left of the text around it, which
+            // is where the cards start too, to the column's right edge.
+            BlockKind::Code(_) => {
+                let inset = code_inset(m);
+                canvas.fill(Fill::rounded(
+                    [
+                        x - inset,
+                        y - m.em(0.4),
+                        column - block.left + inset,
+                        height + m.em(0.8),
+                    ],
+                    Paint::Code,
+                    m.em(0.5),
+                ));
+            }
+            // Its bar where the text around it starts.
             BlockKind::Quote => canvas.fill(Fill::solid(
-                [x - m.em(0.9), y, m.em(0.2).max(2.0), height],
+                [x - quote_inset(m), y, quote_bar(m), height],
                 Paint::RaisedEdge,
             )),
             BlockKind::Rule => canvas.fill(Fill::solid(
@@ -2165,6 +2356,27 @@ fn lay_out(
     look: Look,
     width: f32,
 ) -> Laid {
+    lay_out_coloured(
+        layout_cx,
+        fonts,
+        m,
+        (text, look),
+        (width, &mut Cells::new()),
+        None,
+    )
+}
+
+/// Lays out `text` as `look` says, `width` wide, its code coloured as
+/// `colours` knows it, if it's given, and wanted from them if it isn't
+/// known, and its tables' cells taken from `cells` where they're there.
+fn lay_out_coloured(
+    layout_cx: &mut parley::LayoutContext<Brush>,
+    fonts: &mut Fonts,
+    m: Measures,
+    (text, look): (&str, Look),
+    (width, cells): (f32, &mut Cells),
+    mut colours: Option<&mut Colours>,
+) -> Laid {
     let blocks = match look {
         Look::Words | Look::Thought => markdown::blocks(text),
         Look::Plain(_) | Look::Mono(_) => vec![markdown::Block {
@@ -2174,38 +2386,67 @@ fn lay_out(
             indent: 0,
         }],
     };
+    let tone = match look {
+        Look::Plain(tone) | Look::Mono(tone) => tone,
+        Look::Words | Look::Thought => Tone::Plain,
+    };
     let mut laid = Laid {
         source: text.to_owned(),
+        tone,
         blocks: Vec::new(),
+        tables: Vec::new(),
+        waiting: false,
         height: 0.0,
         width: 0.0,
     };
     let step = m.em(1.5);
-    for (index, block) in blocks.into_iter().enumerate() {
-        if index > 0 {
+    let mut blocks = blocks.into_iter().peekable();
+    let mut first = true;
+    let mut after_code = false;
+    while let Some(block) = blocks.next() {
+        // Code's background reaches past its text: what's around it is as
+        // far from that as from other text.
+        if !first {
             laid.height += match block.kind {
                 BlockKind::Item(_) => m.em(0.3),
-                BlockKind::Code => m.em(1.1),
+                BlockKind::Code(_) => m.em(1.1),
                 _ => m.em(0.7),
-            };
+            } + if after_code { m.em(0.4) } else { 0.0 };
+        }
+        first = false;
+        after_code = block.kind.code();
+        if let Some(cell) = block.kind.cell() {
+            // The table's cells, all of them.
+            let mut table = vec![block];
+            while let Some(next) = blocks.next_if(|next| {
+                next.kind
+                    .cell()
+                    .is_some_and(|next| next.table == cell.table)
+            }) {
+                table.push(next);
+            }
+            lay_out_table((layout_cx, fonts), m, (look, cells), table, &mut laid);
+            continue;
         }
         let indent = f32::from(block.indent) * step
             + match block.kind {
-                BlockKind::Item(_) | BlockKind::Quote => step,
+                BlockKind::Item(_) => step,
                 _ => 0.0,
             };
-        let size = match block.kind {
-            _ if matches!(look, Look::Mono(_)) => m.em * 0.93,
-            BlockKind::Heading(1) => m.em * 1.35,
-            BlockKind::Heading(2) => m.em * 1.2,
-            BlockKind::Heading(_) => m.em * 1.08,
-            BlockKind::Code => m.em * 0.93,
-            _ => m.em,
+        // A quote's text goes just after its bar, which is where the text
+        // around it starts; code goes inside its background, which starts
+        // there too.
+        let indent = match block.kind {
+            BlockKind::Quote => indent - step + quote_inset(m),
+            BlockKind::Code(_) => indent + code_inset(m),
+            _ => indent,
         };
+        let size = text_size_of(&block.kind, look, m);
+        let syntax = code_colours(&block, colours.as_deref_mut(), &mut laid.waiting);
         let layout = lay_out_block(
             layout_cx,
             fonts,
-            &block,
+            (&block, &syntax),
             look,
             size,
             (width - indent).max(m.em(4.0)),
@@ -2231,17 +2472,111 @@ fn lay_out(
             left: indent,
             top: laid.height,
             marker,
+            key: None,
         });
         laid.height += height;
     }
     laid
 }
 
-/// Lays out one block, its text `size` pixels, `width` wide.
+/// How big the text of a block of `kind` is, laid out as `look` says.
+fn text_size_of(kind: &BlockKind, look: Look, m: Measures) -> f32 {
+    match kind {
+        _ if matches!(look, Look::Mono(_)) => m.em * 0.93,
+        BlockKind::Heading(1) => m.em * 1.35,
+        BlockKind::Heading(2) => m.em * 1.2,
+        BlockKind::Heading(_) => m.em * 1.08,
+        BlockKind::Code(_) => m.em * 0.93,
+        _ => m.em,
+    }
+}
+
+/// How `block` is coloured, if it's code `colours` know: none if it
+/// isn't, or they don't, and then, if they're to come, `waiting`.
+fn code_colours(
+    block: &markdown::Block,
+    colours: Option<&mut Colours>,
+    waiting: &mut bool,
+) -> Vec<clackatoo_protocol::Span> {
+    let (BlockKind::Code(Some(language)), Some(colours)) = (&block.kind, colours) else {
+        return Vec::new();
+    };
+    match colours.of(language, &block.text) {
+        Colouring::Known(spans) => spans.to_vec(),
+        Colouring::Waiting => {
+            *waiting = true;
+            Vec::new()
+        }
+        Colouring::Plain => Vec::new(),
+    }
+}
+
+/// Whether `rect`, its left, top, width and height, overlaps `clip`.
+fn overlaps(clip: [f32; 4], rect: [f32; 4]) -> bool {
+    let [width, height] = [intersection(clip, rect)[2], intersection(clip, rect)[3]];
+    width > 0.0 && height > 0.0
+}
+
+/// Marks the sides of `table`, drawn from `origin`, its left, and the top
+/// of what it belongs to, where it's cut off, scrolled `scroll` in a
+/// column `column` wide: a `‹` or `›` on the background, over the cells
+/// it hides.
+fn draw_cut_off(
+    canvas: &mut Canvas<'_>,
+    m: Measures,
+    table: &TableLaid,
+    origin: [f32; 2],
+    (column, scroll): (f32, f32),
+) {
+    let most = table.max_scroll(column);
+    if most <= 0.0 {
+        return;
+    }
+    let (wide, top) = (m.em(1.2), origin[1] + table.top);
+    let sides = [
+        (scroll > 0.5, origin[0], &table.marks[0]),
+        (
+            scroll < most - 0.5,
+            origin[0] + column - table.left - wide,
+            &table.marks[1],
+        ),
+    ];
+    for (cut, left, mark) in sides {
+        if !cut {
+            continue;
+        }
+        canvas.fill(Fill::solid([left, top, wide, table.height], Paint::Tile));
+        let at = [
+            left + (wide - mark.width()) / 2.0,
+            top + (table.height - mark.height()) / 2.0,
+        ];
+        canvas.text(mark, at);
+    }
+}
+
+/// How far a quote's text is from its bar's left, which is the left of
+/// the text around it: the bar, and a gap.
+fn quote_inset(m: Measures) -> f32 {
+    quote_bar(m) + m.em(0.75)
+}
+
+/// How wide a quote's bar is.
+fn quote_bar(m: Measures) -> f32 {
+    m.em(0.2).max(2.0)
+}
+
+/// How far a block of code's text is inside its background, whose left is
+/// the left of the text around it.
+fn code_inset(m: Measures) -> f32 {
+    m.em(0.75)
+}
+
+/// Lays out one block, its text `size` pixels, `width` wide, the code
+/// in it coloured as `syntax` says.
 fn lay_out_block(
     layout_cx: &mut parley::LayoutContext<Brush>,
     fonts: &mut Fonts,
-    block: &markdown::Block,
+    (block, syntax): (&markdown::Block, &[clackatoo_protocol::Span]),
     look: Look,
     size: f32,
     width: f32,
@@ -2256,7 +2591,11 @@ fn lay_out_block(
     for property in body {
         builder.push_default(property);
     }
-    builder.push_default(StyleProperty::Brush(Brush { tone, code: false }));
+    builder.push_default(StyleProperty::Brush(Brush {
+        tone,
+        code: false,
+        syntax: None,
+    }));
     if matches!(look, Look::Thought) {
         builder.push_default(StyleProperty::FontStyle(FontStyle::Italic));
     }
@@ -2268,7 +2607,10 @@ fn lay_out_block(
     }
     match block.kind {
         BlockKind::Heading(_) => builder.push_default(StyleProperty::FontWeight(FontWeight::BOLD)),
-        BlockKind::Code => {
+        BlockKind::Cell(cell) if cell.row == 0 => {
+            builder.push_default(StyleProperty::FontWeight(FontWeight::BOLD));
+        }
+        BlockKind::Code(_) => {
             builder.push_default(StyleProperty::FontFamily(mono.clone()));
             builder.push_default(StyleProperty::LineHeight(LineHeight::FontSizeRelative(
                 1.35,
@@ -2277,6 +2619,7 @@ fn lay_out_block(
         BlockKind::Quote => builder.push_default(StyleProperty::Brush(Brush {
             tone: Tone::Muted,
             code: false,
+            syntax: None,
         })),
         _ => {}
     }
@@ -2294,18 +2637,35 @@ fn lay_out_block(
         if style.code {
             builder.push(StyleProperty::FontFamily(mono.clone()), range.clone());
             builder.push(StyleProperty::FontSize(size * 0.93), range.clone());
-            builder.push(StyleProperty::Brush(Brush { tone, code: true }), range);
+            builder.push(
+                StyleProperty::Brush(Brush {
+                    tone,
+                    code: true,
+                    syntax: None,
+                }),
+                range,
+            );
         } else if style.link {
             let brush = Brush {
                 tone: Tone::Accent,
                 code: false,
+                syntax: None,
             };
             builder.push(StyleProperty::Brush(brush), range);
         }
     }
+    for span in syntax {
+        let brush = Brush {
+            tone,
+            code: false,
+            syntax: Some(span.kind),
+        };
+        builder.push(StyleProperty::Brush(brush), span.start..span.end);
+    }
     let mut layout = builder.build(&block.text);
-    // Code keeps its lines, however long.
-    layout.break_all_lines((block.kind != BlockKind::Code).then_some(width));
+    // Code keeps its lines, however long, and a table's cells theirs.
+    let unbroken = block.kind.code() || block.kind.cell().is_some();
+    layout.break_all_lines((!unbroken).then_some(width));
     layout.align(Alignment::Start, AlignmentOptions::default());
     layout
 }
@@ -2325,6 +2685,7 @@ fn lay_out_marker(
     builder.push_default(StyleProperty::Brush(Brush {
         tone: Tone::Muted,
         code: false,
+        syntax: None,
     }));
     let mut layout = builder.build(marker);
     layout.break_all_lines(None);
@@ -2368,16 +2729,32 @@ fn tool_tone(status: ToolStatus) -> Tone {
     }
 }
 
-/// `question`, as it's shown: the daemon's own, as whether to install the
-/// agent, as it is; any other, about what the agent would do, as "run
-/// `make` in a terminal", as "Allow the agent to …?", however its title
-/// is worded, so an agent can't pass one off as the daemon's.
-fn asked(question: &clackatoo_protocol::Question) -> String {
-    if question.own {
-        question.title.clone()
-    } else {
-        format!("Allow the agent to {}?", question.title)
+/// `question`, as it's shown, in Markdown: the daemon's own, as whether
+/// to install the agent, as it is; any other as asking whether to let the
+/// agent do what it says. Only the code its title quotes is read as
+/// Markdown: the rest is shown as it's written.
+fn asked(question: &clackatoo_protocol::Question, quoted: bool) -> String {
+    let mut shown = String::new();
+    if !question.own {
+        shown.push_str("Allow the agent to ");
     }
+    // A daemon from before protocol 84 quoted what an agent wrote between
+    // single backticks, which the agent's own backticks could end: read
+    // as code, its words could pass for clackatoo's. Its titles are shown
+    // as they are.
+    if !quoted {
+        shown.push_str(&escape(&question.title));
+    }
+    for piece in question.said().into_iter().filter(|_| quoted) {
+        match piece {
+            Said::Words(words) => shown.push_str(&escape(&words)),
+            Said::Code(code) => shown.push_str(&code_span(&code)),
+        }
+    }
+    if !question.own {
+        shown.push('?');
+    }
+    shown
 }
 
 /// `text` with its first letter capital.
@@ -2407,6 +2784,203 @@ mod tests {
     use crate::fonts::FontOptions;
 
     #[test]
+    fn a_key_lays_the_message_out_once_and_drawing_it_again_lays_out_nothing() {
+        let mut fonts = crate::chat::fixtures::fonts();
+        let node = crate::chat::fixtures::long_chat(3);
+        let mut view = ChatView::new(String::new(), node);
+        view.paste(&"a message long enough to wrap, ".repeat(10));
+        view.settle(&mut fonts);
+        crate::chat::fixtures::paint(&mut view, &mut fonts);
+        let laid = view.editor.generation();
+        // Drawn again, as the dots or the agent's words make it: the
+        // message isn't laid out again.
+        crate::chat::fixtures::paint(&mut view, &mut fonts);
+        assert_eq!(view.editor.generation(), laid);
+        // A key lays it out as it's typed, and drawing it doesn't again.
+        view.paste("x");
+        view.settle(&mut fonts);
+        let typed_in = view.editor.generation();
+        assert_ne!(typed_in, laid);
+        crate::chat::fixtures::paint(&mut view, &mut fonts);
+        assert_eq!(view.editor.generation(), typed_in);
+        // Another width does lay it out again.
+        view.paint(&mut fonts, [0.0; 2], [600.0, 1000.0], true);
+        assert_ne!(view.editor.generation(), typed_in);
+        // And another font size, at the same width.
+        let width = view.editor_width.expect("laid out to a width");
+        let laid = view.editor.generation();
+        let options = FontOptions {
+            size: 15.0,
+            ..FontOptions::default()
+        };
+        let mut bigger = Fonts::load(&options, 1.0).expect("a font");
+        view.style_editor(&bigger);
+        view.size_editor(width);
+        view.editor.layout(&mut bigger.font_cx, &mut view.layout_cx);
+        assert_ne!(view.editor.generation(), laid, "laid out in the new size");
+    }
+
+    #[test]
+    fn the_boxs_labels_are_kept_while_drawn_and_let_go_once_not() {
+        let mut fonts = crate::chat::fixtures::fonts();
+        let mut node = clackatoo_protocol::ChatNode {
+            state: ChatState::Ready,
+            ..clackatoo_protocol::ChatNode::default()
+        };
+        node.settings.push(clackatoo_protocol::Setting {
+            id: "mode".into(),
+            name: "Mode".into(),
+            kind: clackatoo_protocol::SettingKind::Mode,
+            value: "auto".into(),
+            choices: vec![clackatoo_protocol::SettingChoice {
+                value: "auto".into(),
+                name: "Auto".into(),
+                description: None,
+            }],
+        });
+        let mut view = ChatView::new(String::new(), node);
+        let kept = |view: &ChatView| {
+            let mut kept: Vec<String> = (view.cache.labels.now.keys())
+                .map(|(text, _)| text.clone())
+                .collect();
+            kept.sort();
+            kept
+        };
+        crate::chat::fixtures::paint(&mut view, &mut fonts);
+        assert_eq!(kept(&view), ["Auto  ▾", "↑"]);
+        crate::chat::fixtures::paint(&mut view, &mut fonts);
+        assert_eq!(kept(&view), ["Auto  ▾", "↑"]);
+        // The mode's gone: its label goes with the frame after.
+        view.node.settings.clear();
+        crate::chat::fixtures::paint(&mut view, &mut fonts);
+        assert_eq!(kept(&view), ["↑"]);
+        crate::chat::fixtures::paint(&mut view, &mut fonts);
+        assert!(
+            !(view.cache.labels.last.keys()).any(|(text, _)| text.starts_with("Auto")),
+            "let go"
+        );
+    }
+
+    /// `markdown` laid out as the agent's words, 600 pixels wide, and
+    /// what drawing it at the window's top left draws.
+    pub(super) fn laid_and_drawn(markdown: &str) -> (Laid, ChatPaint) {
+        let mut fonts = Fonts::load(&FontOptions::default(), 1.0).expect("a font");
+        let m = Measures::of(16.0);
+        let mut layout_cx = parley::LayoutContext::new();
+        let laid = lay_out(&mut layout_cx, &mut fonts, m, markdown, Look::Words, 600.0);
+        let mut paint = ChatPaint::default();
+        let mut canvas = Canvas {
+            paint: &mut paint,
+            fonts: &mut fonts,
+            clip: [0.0, 0.0, 2000.0, 2000.0],
+            em: m.em,
+            over: false,
+        };
+        draw_laid(&mut canvas, m, &laid, [100.0, 0.0], 600.0);
+        (laid, paint)
+    }
+
+    #[test]
+    fn prose_code_and_quotes_start_at_one_left_edge() {
+        let (laid, paint) = laid_and_drawn("Some words.\n\n```rust\nlet x = 1;\n```\n\n> quoted");
+        let m = Measures::of(16.0);
+        let [words, code, quote] = [&laid.blocks[0], &laid.blocks[1], &laid.blocks[2]];
+        assert!(words.left.abs() < f32::EPSILON);
+        // Code's background starts at the column's left, as cards do, and
+        // its text inside it.
+        let background = (paint.fills.iter())
+            .find(|fill| fill.paint == Paint::Code)
+            .unwrap();
+        assert!((background.rect[0] - 100.0).abs() < f32::EPSILON);
+        assert!((code.left - code_inset(m)).abs() < f32::EPSILON);
+        // A quote's bar is there too, with its text just after it.
+        let bar = (paint.fills.iter())
+            .find(|fill| fill.paint == Paint::RaisedEdge)
+            .unwrap();
+        assert!((bar.rect[0] - 100.0).abs() < f32::EPSILON);
+        assert!((quote.left - quote_inset(m)).abs() < f32::EPSILON);
+        assert!(quote.left > bar.rect[2]);
+        // What's after code is as far from its background as from text.
+        let gap = quote.top - (code.top + code.layout.height() + m.em(0.4));
+        assert!((gap - m.em(0.7)).abs() < 0.01, "{gap}");
+    }
+
+    #[test]
+    fn a_long_answer_draws_and_notes_only_what_is_in_view() {
+        use crate::chat::fixtures::{paint as draw, talk};
+
+        let answer = (0..400)
+            .map(|n| format!("Paragraph {n} of a long answer."))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut fonts = Fonts::load(&FontOptions::default(), 1.0).expect("a font");
+        let mut chat = ChatView::new(String::new(), talk(&[("show me", &answer)]));
+        draw(&mut chat, &mut fonts);
+        chat.scroll_lines(40.0);
+        let painted = draw(&mut chat, &mut fonts);
+        let answers: Vec<_> = (chat.shown.iter())
+            .filter(|shown| shown.key.piece == ITEMS)
+            .collect();
+        assert!(
+            !answers.is_empty() && answers.len() < 100,
+            "{}",
+            answers.len()
+        );
+        let height = chat.view_height;
+        for shown in answers {
+            assert!(shown.at[1] + shown.size[1] >= 0.0 && shown.at[1] <= height);
+        }
+        // A paragraph's few dozen glyphs for each in view, not 400 of them.
+        assert!(painted.glyphs.len() < 100 * 40, "{}", painted.glyphs.len());
+    }
+
+    #[test]
+    fn code_is_drawn_in_its_languages_colours_once_they_come() {
+        use crate::chat::fixtures::{paint as draw, talk};
+        use clackatoo_protocol::{Kind, Span};
+
+        let mut fonts = Fonts::load(&FontOptions::default(), 1.0).expect("a font");
+        let answer = "Here:\n\n```rust\nfn main() {}\n```\n\nand still coming:\n\n```rust\nlet";
+        let mut chat = ChatView::new(String::new(), talk(&[("show me", answer)]));
+        let keyword = Ink::Color(crate::colors::syntax(Kind::Keyword).fg);
+        let coloured = |paint: &ChatPaint| {
+            paint
+                .glyphs
+                .iter()
+                .filter(|glyph| glyph.ink == keyword)
+                .count()
+        };
+        let painted = draw(&mut chat, &mut fonts);
+        assert_eq!(coloured(&painted), 0, "plain until the colours come");
+        // Only the block that's whole is asked about.
+        let asks = chat.take_colour_asks();
+        assert_eq!(asks.len(), 1);
+        assert_eq!(asks[0].len(), 1);
+        assert_eq!(asks[0][0].text, "fn main() {}");
+        chat.colours_asked(Some(4), asks[0].clone());
+        let spans = vec![vec![Span {
+            start: 0,
+            end: 2,
+            kind: Kind::Keyword,
+        }]];
+        assert!(chat.coloured(4, spans));
+        let painted = draw(&mut chat, &mut fonts);
+        assert_eq!(coloured(&painted), 2, "`fn`, in the keywords' colour");
+        assert!(chat.take_colour_asks().is_empty(), "nothing more to ask");
+        // In the thinking, it's left quiet.
+        let mut node = talk(&[("show me", "")]);
+        node.turns[0].items = vec![Item::Thought("```rust\nfn x() {}\n```".into())];
+        let mut chat = ChatView::new(String::new(), node);
+        chat.toggle_fold(0);
+        draw(&mut chat, &mut fonts);
+        assert!(
+            chat.shown.iter().any(|shown| shown.code),
+            "the thought's code is shown"
+        );
+        assert!(chat.take_colour_asks().is_empty());
+    }
+
+    #[test]
     fn only_the_daemons_own_question_is_shown_as_it_is() {
         let question = |title: &str, own| clackatoo_protocol::Question {
             id: 1,
@@ -2415,16 +2989,60 @@ mod tests {
             own,
         };
         assert_eq!(
-            asked(&question("run `make` in a terminal", false)),
+            asked(&question("run `make` in a terminal", false), true),
             "Allow the agent to run `make` in a terminal?"
         );
         let own = "Keep waiting for Codex, start it again and ask again, or stop?";
-        assert_eq!(asked(&question(own, true)), own);
+        assert_eq!(asked(&question(own, true), true), own);
         // Worded as the daemon's, an agent's is still the agent's.
         assert_eq!(
-            asked(&question(own, false)),
+            asked(&question(own, false), true),
             format!("Allow the agent to {own}?")
         );
+        // From a daemon that quoted with single backticks, all as it is.
+        let old = "send `x` to chat 1 (trusted) `y` to chat 2";
+        assert_eq!(
+            asked(&question(old, false), false),
+            format!("Allow the agent to {}?", escape(old))
+        );
+        // Only the code it quotes is Markdown: no stars make bold.
+        assert_eq!(
+            asked(&question("send ``a `b` **c**`` to *chat* 2", false), true),
+            "Allow the agent to send ``a `b` **c**`` to \\*chat\\* 2?"
+        );
+    }
+
+    #[test]
+    fn a_questions_quoted_code_is_drawn_as_code() {
+        let mut fonts = Fonts::load(&FontOptions::default(), 1.0).expect("a font");
+        let mut node = clackatoo_protocol::ChatNode {
+            state: ChatState::Answering,
+            ..clackatoo_protocol::ChatNode::default()
+        };
+        node.question = Some(clackatoo_protocol::Question {
+            id: 1,
+            title: "send `` look at the `parser` `` to a new chat".into(),
+            choices: Vec::new(),
+            own: false,
+        });
+        let mut chat = ChatView::new(String::new(), node);
+        let paint = crate::chat::fixtures::paint(&mut chat, &mut fonts);
+        // The code has its background, and no backtick is drawn.
+        assert!(paint.fills.iter().any(|fill| fill.paint == Paint::Code));
+        let question = chat
+            .lay_out_question(&mut fonts, Measures::of(16.0), 600.0)
+            .unwrap();
+        let text: String = (question.title.blocks.iter())
+            .map(|block| block.text.as_str())
+            .collect();
+        assert_eq!(
+            text,
+            "Allow the agent to send look at the `parser` to a new chat?"
+        );
+        // From a daemon before protocol 84, the title is shown as it is.
+        chat.set_quoted(false);
+        let paint = crate::chat::fixtures::paint(&mut chat, &mut fonts);
+        assert!(!paint.fills.iter().any(|fill| fill.paint == Paint::Code));
     }
 
     #[test]

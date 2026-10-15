@@ -27,8 +27,8 @@ use clackatoo_text::{
 
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
-    EXITED, FALLBACKS, FORWARD_PACE, FORWARDS, HOVER, INLAY_HINTS, LIMITS, PHONE_TERMINALS,
-    SYMBOLS, USES, WORDS,
+    COLOURS, EXITED, FALLBACKS, FORWARD_PACE, FORWARDS, HOVER, INLAY_HINTS, LIMITS,
+    PHONE_TERMINALS, SYMBOLS, USES, WORDS,
 };
 use crate::{
     AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
@@ -729,6 +729,30 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             unpaced: true,
         }))),
     ));
+    // The code in an agent's words, asked about and coloured.
+    samples.extend([
+        (
+            COLOURS,
+            Client(ClientMessage::Colour {
+                id: 9,
+                code: vec![crate::Code {
+                    language: "rust".into(),
+                    text: "fn main() {}".into(),
+                }],
+            }),
+        ),
+        (
+            COLOURS,
+            Server(ServerMessage::Event(Event::Coloured {
+                id: 9,
+                spans: vec![vec![Span {
+                    start: 0,
+                    end: 2,
+                    kind: Kind::Keyword,
+                }]],
+            })),
+        ),
+    ]);
     samples
 }
 

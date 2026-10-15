@@ -7,12 +7,19 @@
 //! a [`BufferUpdate::Coloured`], once it's read them. Code in a language
 //! that isn't installed, or tagged with one clackatoo doesn't know, stays
 //! plain, and nothing is offered to install.
+//!
+//! The code in agents' words is coloured the same way, for the windows
+//! that lay chats out: a window sends the blocks it shows, already read
+//! out of the Markdown, in a [`ClientMessage::Colour`], and their colours
+//! go back in an [`Event::Coloured`].
+//!
+//! [`ClientMessage::Colour`]: clackatoo_protocol::ClientMessage::Colour
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 
-use clackatoo_protocol::{Answer, BufferId, BufferUpdate, wire};
+use clackatoo_protocol::{Answer, BufferId, BufferUpdate, Code, wire};
 use clackatoo_syntax::{Coloured, Pack, Snippet};
 use clackatoo_text::Span;
 use mio::Token;
@@ -25,12 +32,45 @@ use super::{Daemon, Source};
 /// parsing every buffer. Those after are left plain.
 const MAX_SNIPPETS: usize = 64;
 
-/// The hovers whose code the thread parsing buffers is colouring, by the
-/// number it answers with.
+/// The most bytes of code one window's ask has coloured, all its blocks
+/// together: more than a chat shows at once, and few enough that a window
+/// can't hold up the thread parsing every buffer. Blocks past it, or past
+/// [`MAX_SNIPPETS`], are left plain.
+const MAX_CODE: usize = 256 * 1024;
+
+/// The most of one window's asks about its chats' code the thread parsing
+/// buffers has at once: the rest wait their turn, so a window can't fill
+/// the thread's queue ahead of the buffers it parses.
+const MOST_ASKS: usize = 3;
+
+/// The most of one window's asks that wait their turn: more than a
+/// window that's working right ever has, as it asks for each block once.
+/// Past it, an ask is dropped.
+const MOST_WAITING: usize = 256;
+
+/// The hovers whose code the thread parsing buffers is colouring, and the
+/// chats' code, by the number it answers with; and the asks about chats'
+/// code waiting their turn, by whose they are.
 #[derive(Debug, Default)]
 pub(super) struct Colourings {
     asked: HashMap<u64, Colouring>,
+    code: HashMap<u64, CodeColouring>,
+    waiting: HashMap<Token, VecDeque<Ask>>,
     next_ticket: u64,
+}
+
+/// A window's ask about its chats' code: its number, and the blocks.
+type Ask = (u64, Vec<Code>);
+
+/// A window's chats' code being coloured: whose it is, and which of the
+/// blocks it asked about went to be coloured, by where each is among
+/// those that went.
+#[derive(Debug)]
+struct CodeColouring {
+    token: Token,
+    /// The window's number for its ask.
+    id: u64,
+    sent: Vec<Option<usize>>,
 }
 
 /// A hover being coloured: whose it is, and where each snippet's text is
@@ -132,6 +172,10 @@ impl Daemon {
     /// buffers found for its code, as places in the hover's text, if it
     /// found any and the client still follows the buffer.
     pub(super) fn coloured(&mut self, coloured: &Coloured) {
+        if let Some(colouring) = self.colourings.code.remove(&coloured.ticket) {
+            self.code_coloured(&colouring, &coloured.spans);
+            return self.next_code_colourings(colouring.token);
+        }
         let Some(colouring) = self.colourings.asked.remove(&coloured.ticket) else {
             return;
         };
@@ -152,17 +196,152 @@ impl Daemon {
 
     /// Forgets the hovers being coloured for the client at `token` about
     /// `buffer`, or any buffer, as it's asked about another, stopped
-    /// following the buffer, or gone.
+    /// following the buffer, or gone; and with no buffer, its chats' code.
     pub(super) fn forget_colourings(&mut self, token: Token, buffer: Option<BufferId>) {
         (self.colourings.asked).retain(|_, colouring| {
             colouring.token != token || buffer.is_some_and(|buffer| buffer != colouring.buffer)
         });
+        if buffer.is_none() {
+            (self.colourings.code).retain(|_, colouring| colouring.token != token);
+            self.colourings.waiting.remove(&token);
+        }
+    }
+
+    /// Has the client at `token`'s blocks of code, `code`, from the chats
+    /// it shows, coloured, for its ask numbered `id`: at once, or once
+    /// fewer than [`MOST_ASKS`] of its asks are being coloured. A device on
+    /// the web app has no grammars to ask for, and is refused.
+    pub(super) fn colour_code(&mut self, token: Token, id: u64, code: Vec<Code>) {
+        match self.sources.get(token.0) {
+            Some(Source::Client(client)) if !matches!(client.link, super::Link::Web(_)) => {}
+            _ => {
+                log::warn!("chats' code is coloured only for windows");
+                return;
+            }
+        }
+        let colourings = &mut self.colourings;
+        let busy = (colourings.code.values())
+            .filter(|colouring| colouring.token == token)
+            .count();
+        if busy < MOST_ASKS {
+            return self.start_code_colouring(token, id, code);
+        }
+        let waiting = colourings.waiting.entry(token).or_default();
+        if waiting.len() < MOST_WAITING {
+            waiting.push_back((id, code));
+        } else {
+            log::warn!("a window asked to colour more code than any needs: an ask is dropped");
+        }
+    }
+
+    /// Starts the asks of the client at `token` that waited, while fewer
+    /// than [`MOST_ASKS`] of its are being coloured.
+    fn next_code_colourings(&mut self, token: Token) {
+        loop {
+            let colourings = &mut self.colourings;
+            let busy = (colourings.code.values())
+                .filter(|colouring| colouring.token == token)
+                .count();
+            if busy >= MOST_ASKS {
+                return;
+            }
+            let Some(waiting) = colourings.waiting.get_mut(&token) else {
+                return;
+            };
+            let Some((id, code)) = waiting.pop_front() else {
+                colourings.waiting.remove(&token);
+                return;
+            };
+            self.start_code_colouring(token, id, code);
+        }
+    }
+
+    /// Has `code` coloured for the client at `token`'s ask numbered `id`:
+    /// each block in the language its fence names, if it's installed, as
+    /// many as [`MAX_SNIPPETS`] and [`MAX_CODE`] allow, every block
+    /// counting, and those past them left plain without being looked up.
+    /// The answer is always sent, at once with no colours if none can be
+    /// found, so the window never waits for ever.
+    fn start_code_colouring(&mut self, token: Token, id: u64, code: Vec<Code>) {
+        let mut snippets = Vec::new();
+        let mut sent = Vec::with_capacity(code.len());
+        let mut bytes = 0;
+        if let Some(languages) = &mut self.languages {
+            // The directory is read again once for the ask, not for each
+            // block.
+            languages.refresh();
+            let mut packs: HashMap<String, Option<Arc<Pack>>> = HashMap::new();
+            for (index, block) in code.into_iter().enumerate() {
+                bytes += block.text.len();
+                let room = index < MAX_SNIPPETS && bytes <= MAX_CODE;
+                let pack = if room && !block.text.trim().is_empty() {
+                    let tag = block.language.to_ascii_lowercase();
+                    let pack =
+                        (packs.entry(tag)).or_insert_with_key(|tag| languages.named_as_read(tag));
+                    pack.clone()
+                } else {
+                    None
+                };
+                sent.push(pack.map(|pack| {
+                    snippets.push(Snippet {
+                        pack,
+                        text: block.text,
+                    });
+                    snippets.len() - 1
+                }));
+            }
+        } else {
+            sent.resize(code.len(), None);
+        }
+        let colouring = CodeColouring { token, id, sent };
+        if snippets.is_empty() {
+            return self.code_coloured(&colouring, &[]);
+        }
+        self.start_syntax();
+        let Some(syntax) = self.syntax.as_ref().filter(|syntax| !syntax.stopped()) else {
+            return self.code_coloured(&colouring, &[]);
+        };
+        let colourings = &mut self.colourings;
+        let ticket = colourings.next_ticket;
+        colourings.next_ticket += 1;
+        syntax.colour(ticket, snippets);
+        colourings.code.insert(ticket, colouring);
+    }
+
+    /// Sends the window whose chats' code `colouring` is the colours of
+    /// the blocks that went to be coloured, `spans`, and none for the
+    /// rest.
+    fn code_coloured(&mut self, colouring: &CodeColouring, spans: &[Vec<Span>]) {
+        let spans = (colouring.sent.iter())
+            .map(|sent| {
+                sent.and_then(|at| spans.get(at).cloned())
+                    .unwrap_or_default()
+            })
+            .collect();
+        let event = clackatoo_protocol::Event::Coloured {
+            id: colouring.id,
+            spans,
+        };
+        self.send_event(colouring.token, event);
     }
 
     /// Forgets every hover being coloured, as the thread parsing buffers
     /// has stopped: they stay plain.
     pub(super) fn forget_all_colourings(&mut self) {
         self.colourings.asked.clear();
+        // The windows asking about chats' code are told there's none to be
+        // had, rather than left to wait.
+        let code: Vec<CodeColouring> = self.colourings.code.drain().map(|(_, code)| code).collect();
+        for colouring in code {
+            self.code_coloured(&colouring, &[]);
+        }
+        let waiting: Vec<(Token, VecDeque<Ask>)> = self.colourings.waiting.drain().collect();
+        for (token, asks) in waiting {
+            for (id, code) in asks {
+                let sent = vec![None; code.len()];
+                self.code_coloured(&CodeColouring { token, id, sent }, &[]);
+            }
+        }
     }
 }
 

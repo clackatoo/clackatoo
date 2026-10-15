@@ -155,6 +155,16 @@ impl ChatView {
         }
         let rect = [start, top, right - start, size];
         self.hits.push((Hit::Usage, frame.place.in_pane(rect)));
+        match laid {
+            MeterLaid::Whole { context, pressing } => {
+                self.keep_label(context);
+                if let Some(pressing) = pressing {
+                    self.keep_label(pressing);
+                }
+            }
+            MeterLaid::Context(context) => self.keep_label(context),
+            MeterLaid::Bar => {}
+        }
         // The detail opens above the box, lined up with the meter's right.
         if self.detail.is_some() {
             self.detail_anchor = Some([right, frame.top]);
@@ -176,8 +186,7 @@ impl ChatView {
         let fullness = percent.map_or(Fullness::Room, Fullness::of);
         let pressing = usage.pressing(now);
         let mut lay = |text: &str, fullness| {
-            let look = Look::Plain(tone(fullness, Tone::Muted));
-            lay_out(&mut self.layout_cx, fonts, m, text, look, f32::INFINITY)
+            self.box_label(fonts, m, text, tone(fullness, Tone::Muted), f32::INFINITY)
         };
         let context = lay(&usage.label(), fullness);
         let pressing_laid = pressing.as_ref().map(|(text, full)| lay(text, *full));
@@ -191,13 +200,19 @@ impl ChatView {
                 pressing: pressing_laid,
             };
         }
-        if context.width <= room {
-            return match pressing {
-                Some((_, full)) if full > fullness => MeterLaid::Context(lay(&usage.label(), full)),
-                _ => MeterLaid::Context(context),
-            };
+        let laid = if context.width > room {
+            MeterLaid::Bar
+        } else if let Some((_, full)) = pressing.filter(|(_, full)| *full > fullness) {
+            MeterLaid::Context(lay(&usage.label(), full))
+        } else {
+            return MeterLaid::Context(context);
+        };
+        // What isn't shown is kept, for when there's room again.
+        self.keep_label(context);
+        if let Some(pressing) = pressing_laid {
+            self.keep_label(pressing);
         }
-        MeterLaid::Bar
+        laid
     }
 
     /// Draws the detail, over everything, opening upward from `anchor`:

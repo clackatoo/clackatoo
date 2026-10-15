@@ -1749,6 +1749,10 @@ impl App {
             }
         }
         self.desk.drawn(&drawn);
+        // The code the chats laid out, to colour.
+        if self.desk.ask_colours() {
+            self.send_outbox();
+        }
     }
 
     /// Tells the desk what's on the clipboard and the primary selection,
@@ -1991,10 +1995,14 @@ impl App {
                 Some((pane.content.terminal()?, tile, id == shown.pane))
             })
             .collect();
+        let quoted = self.desk.daemon_has(clackatoo_protocol::wire::COLOURS);
         for (terminal, tile, focused) in tiles {
             let Some(pane) = self.desk.pane_mut(terminal).filter(|pane| pane.is_chat()) else {
                 continue;
             };
+            if let Some(chat) = pane.chat_mut() {
+                chat.set_quoted(quoted);
+            }
             // In insert mode, the cursor is in the box; in normal mode, in
             // the conversation.
             let caret = focused && self.focused;
@@ -3097,6 +3105,11 @@ impl App {
             }
             SessionEvent::Message(ServerMessage::Event(Event::Sessions { id, sessions })) => {
                 if self.desk.sessions_listed(id, sessions) {
+                    self.request_redraw();
+                }
+            }
+            SessionEvent::Message(ServerMessage::Event(Event::Coloured { id, spans })) => {
+                if self.desk.coloured(id, spans) {
                     self.request_redraw();
                 }
             }

@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
     AgentTools, BufferId, Content, Error, FileLocation, NewTerminal, OpenFile, OpenFiles, PaneId,
-    PaneTerminal, Response, ServerMessage, Side, TerminalId, Which,
+    PaneTerminal, Response, ServerMessage, Side, TerminalId, Which, code_span,
 };
 use clackatoo_term::{Progress, Terminal};
 use mio::event::Event;
@@ -1646,12 +1646,14 @@ impl Daemon {
 
 /// The question, finishing "Allow the agent to …?", for doing `verb`
 /// with `text` `then`: "run `make` in a new terminal". The text is shown
-/// whole, made visible (see [`visible`]), unless it's over [`MAX_ASKED`]
-/// bytes: then it goes in the conversation, returned beside the question.
+/// whole, made visible (see [`visible`]) and quoted as code (see
+/// [`code_span`]), so no backtick in it can end the quote and pass for
+/// clackatoo's words, unless it's over [`MAX_ASKED`] bytes: then it goes
+/// in the conversation, returned beside the question.
 fn asked(verb: &str, text: &str, then: &str) -> (String, Option<String>) {
     let shown = visible(text);
     if shown.len() <= MAX_ASKED {
-        return (format!("{verb} `{shown}` {then}"), None);
+        return (format!("{verb} {} {then}", code_span(&shown)), None);
     }
     let size = text.len().div_ceil(1024);
     let question = format!(
@@ -1659,6 +1661,35 @@ fn asked(verb: &str, text: &str, then: &str) -> (String, Option<String>) {
          first"
     );
     (question, Some(shown))
+}
+
+/// The question, finishing "Allow the agent to …?", for doing `verb` with
+/// each of `texts`, to its own chat, `then`: "send [to 1] `a` [to 2] `b`
+/// to 2 new chats". Each text is quoted on its own, as [`asked`] quotes
+/// one, with which chat it's for outside the quote, so no text can pass
+/// for another's. Over [`MAX_ASKED`] bytes, they go in the conversation,
+/// returned beside the question.
+fn asked_each(verb: &str, texts: &[&str], then: &str) -> (String, Option<String>) {
+    let shown: Vec<String> = (texts.iter().enumerate())
+        .map(|(number, text)| format!("[to {}] {}", number + 1, code_span(&visible(text))))
+        .collect();
+    let shown = shown.join(" ");
+    if shown.len() <= MAX_ASKED {
+        return (format!("{verb} {shown} {then}"), None);
+    }
+    let whole: Vec<String> = (texts.iter().enumerate())
+        .map(|(number, text)| format!("[to {}] {}", number + 1, visible(text)))
+        .collect();
+    let size = texts
+        .iter()
+        .map(|text| text.len())
+        .sum::<usize>()
+        .div_ceil(1024);
+    let question = format!(
+        "{verb} {size} KB of text {then}? It's long: read it in full in the conversation above \
+         first"
+    );
+    (question, Some(whole.join("\n")))
 }
 
 /// `text` with nothing in it that could go unseen: line breaks as `⏎`,
@@ -1700,6 +1731,16 @@ fn visible(text: &str) -> String {
     }
     flush(&mut shown, &mut spaces);
     shown
+}
+
+/// `path`, with the home folder at its start as `~`, as people write it.
+pub(super) fn homely(path: &Path, home: &Path) -> String {
+    match path.strip_prefix(home) {
+        _ if home.as_os_str().is_empty() || home == Path::new("/") => path.display().to_string(),
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
+    }
 }
 
 /// Whether `ch` shows nothing itself but changes how what's around it
@@ -1799,6 +1840,48 @@ fn shorten(path: &Path, dir: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quoted_text_is_code_no_backtick_in_it_can_end() {
+        assert_eq!(code_span("make"), "`make`");
+        assert_eq!(
+            code_span("look at the `parser`"),
+            "`` look at the `parser` ``"
+        );
+        assert_eq!(code_span("a ``b`` c"), "```a ``b`` c```");
+        assert_eq!(code_span(" both "), "`  both  `");
+        assert_eq!(code_span("   "), "`   `");
+        let (question, _) = asked("send", "x` to chat 1 `y", "to chat 2");
+        assert_eq!(question, "send ``x` to chat 1 `y`` to chat 2");
+    }
+
+    #[test]
+    fn several_texts_are_each_quoted_with_which_chat_outside_the_quotes() {
+        let (question, long) =
+            asked_each("send", &["look `here`", "a` [to 1] `b"], "to 2 new chats");
+        assert_eq!(
+            question,
+            "send [to 1] `` look `here` `` [to 2] ``a` [to 1] `b`` to 2 new chats"
+        );
+        assert_eq!(long, None);
+        let big = "x".repeat(MAX_ASKED);
+        let (question, long) = asked_each("send", &[&big, "y"], "to 2 new chats");
+        assert!(
+            question.starts_with("send 3 KB of text to 2 new chats?"),
+            "{question}"
+        );
+        assert_eq!(long.unwrap(), format!("[to 1] {big}\n[to 2] y"));
+    }
+
+    #[test]
+    fn paths_in_the_home_folder_start_with_a_tilde() {
+        let home = Path::new("/home/me");
+        assert_eq!(homely(Path::new("/home/me/proj"), home), "~/proj");
+        assert_eq!(homely(Path::new("/home/me"), home), "~");
+        assert_eq!(homely(Path::new("/home/meant"), home), "/home/meant");
+        assert_eq!(homely(Path::new("/srv/x"), home), "/srv/x");
+        assert_eq!(homely(Path::new("/srv/x"), Path::new("/")), "/srv/x");
+    }
 
     #[test]
     fn output_keeps_its_last_lines_and_bytes() {

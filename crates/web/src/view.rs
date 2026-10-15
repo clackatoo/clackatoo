@@ -8,7 +8,7 @@
 
 use clackatoo_protocol::{
     ChatNode, ChatState, ChatSummary, ChoiceKind, Diff, Fullness, Item, Outcome, ProviderModels,
-    Setting, SettingKind, Subagent, SubagentStatus, TerminalInfo, TerminalStatus, Tool,
+    Said, Setting, SettingKind, Subagent, SubagentStatus, TerminalInfo, TerminalStatus, Tool,
     ToolContent, ToolStatus, Turn, TurnFilesState, WorkspaceId,
 };
 
@@ -460,11 +460,7 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
 /// counts the seconds without the turn being drawn again.
 fn fold_label(turn: &Turn, asking: bool) -> String {
     let Some(end) = &turn.end else {
-        let going = if asking {
-            "Waiting for you"
-        } else {
-            "Working…"
-        };
+        let going = if asking { "Waiting for you" } else { "Working" };
         return going.to_owned();
     };
     if turn.sent == 0 {
@@ -474,8 +470,8 @@ fn fold_label(turn: &Turn, asking: bool) -> String {
 }
 
 /// What the line just above the box says while the agent works, at
-/// `now`: what it's doing, "Running cargo test…", and how long the turn
-/// going has been going, "12s", or nothing if its seconds don't count,
+/// `now`: what it's doing, "Running: cargo test", and how long the turn
+/// going has been going, "· 12s", or nothing if its seconds don't count,
 /// as while it starts with no message, or loads the session. `None`
 /// while it isn't working, as when it asks you something, or while the
 /// app isn't `online`, as what the chat shows may be long over.
@@ -486,7 +482,7 @@ pub fn working(node: &ChatNode, online: Online, now: u64) -> Option<(String, Str
     }
     let doing = node.doing()?;
     let seconds = (node.counted_from())
-        .map(|sent| duration(now.saturating_sub(sent)))
+        .map(|sent| format!("· {}", duration(now.saturating_sub(sent))))
         .unwrap_or_default();
     Some((doing, seconds))
 }
@@ -675,16 +671,24 @@ pub fn footer(state: &State, node: Option<&ChatNode>) -> Element {
                 .text(choice.name.clone())
         });
         // The daemon's own question as it is; any other is about what the
-        // agent would do, however it's worded.
-        let asked = if question.own {
-            question.title.clone()
-        } else {
-            format!("Allow the agent to {}?", question.title)
-        };
+        // agent would do, however it's worded. The code it quotes is code.
+        let mut asked = el("p");
+        if !question.own {
+            asked = asked.child(Node::Text("Allow the agent to ".to_owned()));
+        }
+        for piece in question.said() {
+            asked = asked.child(match piece {
+                Said::Words(words) => Node::Text(words),
+                Said::Code(code) => el("code").text(code).into(),
+            });
+        }
+        if !question.own {
+            asked = asked.child(Node::Text("?".to_owned()));
+        }
         footer = footer.child(
             el("div")
                 .class("question")
-                .child(el("p").text(asked))
+                .child(asked)
                 .child(el("div").class("choices").children(choices)),
         );
     }
@@ -1195,6 +1199,37 @@ mod tests {
     }
 
     #[test]
+    fn the_code_a_question_quotes_is_code() {
+        let node = ChatNode {
+            question: Some(Question {
+                id: 1,
+                title: "send `` look at the `parser` `` to a new chat".into(),
+                choices: Vec::new(),
+                own: false,
+            }),
+            ..ChatNode::default()
+        };
+        let footer = footer(&State::default(), Some(&node));
+        assert_eq!(
+            footer.all_text(),
+            "Allow the agent to send look at the `parser` to a new chat?"
+        );
+        let question = (footer.find_all("class").into_iter())
+            .find(|element| element.get("class") == Some("question"))
+            .expect("the question");
+        let Some(Node::Element(asked)) = question.children.first() else {
+            panic!("{question:?}");
+        };
+        let codes: Vec<String> = (asked.children.iter())
+            .filter_map(|child| match child {
+                Node::Element(code) if code.tag == "code" => Some(code.all_text()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(codes, ["look at the `parser`"]);
+    }
+
+    #[test]
     fn a_question_offers_every_choice() {
         let node = ChatNode {
             question: Some(Question {
@@ -1480,7 +1515,7 @@ mod tests {
         };
         assert_eq!(
             said(&node, 13_400).as_deref(),
-            Some("Running cargo test… 12s")
+            Some("Running: cargo test · 12s")
         );
         // Drawn again on the turn's next second.
         assert_eq!(next_second(&node, Online::Open, 13_400), Some(14_000));
@@ -1494,16 +1529,16 @@ mod tests {
         let section = turn(&node, &open(), 0, 13_400);
         let work = &section.find_all("data-fold")[0];
         assert!(
-            work.all_text().starts_with("Working…"),
+            work.all_text().starts_with("Working"),
             "{}",
             work.all_text()
         );
         assert_eq!(turn(&node, &open(), 0, 99_000), section);
         // Thinking, then writing.
         node.turns[0].items = vec![Item::Thought("hmm".into())];
-        assert_eq!(said(&node, 13_400).as_deref(), Some("Thinking… 12s"));
+        assert_eq!(said(&node, 13_400).as_deref(), Some("Thinking · 12s"));
         node.turns[0].items.push(Item::Words("It's".into()));
-        assert_eq!(said(&node, 13_400).as_deref(), Some("Writing… 12s"));
+        assert_eq!(said(&node, 13_400).as_deref(), Some("Writing · 12s"));
         // Asking you, it waits: nothing.
         node.question = Some(Question {
             id: 1,
@@ -1531,7 +1566,7 @@ mod tests {
         assert!(
             section.find_all("data-fold")[0]
                 .all_text()
-                .starts_with("Working…")
+                .starts_with("Working")
         );
         assert_eq!(waiting(&section), 0);
         // Starting, before any message: no seconds.
@@ -1541,7 +1576,7 @@ mod tests {
         };
         assert_eq!(
             working(&starting, Online::Open, 0),
-            Some(("Starting Claude Code…".to_owned(), String::new()))
+            Some(("Starting Claude Code".to_owned(), String::new()))
         );
         assert_eq!(next_second(&starting, Online::Open, 0), None);
         // Done: nothing, and nothing to draw again for.

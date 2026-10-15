@@ -7,7 +7,7 @@
 //! text. Images aren't loaded, which the page's policy forbids anyway:
 //! they're links.
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use crate::ui::{Element, Node, el};
 
@@ -18,8 +18,11 @@ pub fn render(markdown: &str) -> Vec<Node> {
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     // The innermost element being built is last; the first holds them all.
     let mut stack: Vec<Element> = vec![el("div")];
-    // Whether the table being read is in its head, whose cells are `th`.
+    // Whether the table being read is in its head, whose cells are `th`,
+    // how its columns line up, and the column of the cell next.
     let mut in_head = false;
+    let mut aligns: Vec<Alignment> = Vec::new();
+    let mut column = 0;
     for event in Parser::new_ext(markdown, options) {
         match event {
             Event::Start(tag) => {
@@ -46,20 +49,36 @@ pub fn render(markdown: &str) -> Vec<Node> {
                     Tag::Strong => el("strong"),
                     Tag::Strikethrough => el("del"),
                     Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => link(&dest_url),
-                    Tag::Table(_) => el("table"),
+                    Tag::Table(columns) => {
+                        aligns = columns;
+                        el("table")
+                    }
                     Tag::TableHead => {
                         in_head = true;
+                        column = 0;
                         el("tr")
                     }
-                    Tag::TableRow => el("tr"),
-                    Tag::TableCell => el(if in_head { "th" } else { "td" }),
+                    Tag::TableRow => {
+                        column = 0;
+                        el("tr")
+                    }
+                    Tag::TableCell => {
+                        let cell = el(if in_head { "th" } else { "td" });
+                        match aligns.get(column) {
+                            Some(Alignment::Center) => cell.class("middle"),
+                            Some(Alignment::Right) => cell.class("right"),
+                            _ => cell,
+                        }
+                    }
                     _ => el("span"),
                 };
                 stack.push(element);
             }
             Event::End(end) => {
-                if end == TagEnd::TableHead {
-                    in_head = false;
+                match end {
+                    TagEnd::TableHead => in_head = false,
+                    TagEnd::TableCell => column += 1,
+                    _ => {}
                 }
                 close(&mut stack);
             }
@@ -189,6 +208,12 @@ mod tests {
         assert_eq!(
             html(&render("| a | b |\n|---|---|\n| 1 | 2 |")),
             "<table><tr><th>a</th><th>b</th></tr><tr><td>1</td><td>2</td></tr></table>"
+        );
+        // Columns lined up as the table says, as in the window.
+        assert_eq!(
+            html(&render("| a | b | c |\n|---|:-:|--:|\n| 1 | 2 | 3 |")),
+            "<table><tr><th>a</th><th class=\"middle\">b</th><th class=\"right\">c</th></tr>\
+             <tr><td>1</td><td class=\"middle\">2</td><td class=\"right\">3</td></tr></table>"
         );
     }
 

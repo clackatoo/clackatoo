@@ -525,9 +525,9 @@ mod tests {
         assert_eq!(link_cells(&mut pane, [0, 3]), None);
         // Once the row above is to hand, the URL is found whole, though
         // its start is out of view.
-        pane.wheel(1, [0, 0], Modifiers::default());
+        pane.wheel(1, ([0, 0], [0.0; 2]), Modifiers::default());
         serve_history(&mut pane, &terminal);
-        pane.wheel(-1, [0, 0], Modifiers::default());
+        pane.wheel(-1, ([0, 0], [0.0; 2]), Modifiers::default());
         assert_eq!(
             link_cells(&mut pane, [0, 3]),
             Some(vec![(0, 3..12), (1, 0..12), (2, 0..2)])
@@ -617,7 +617,7 @@ mod tests {
         let output = "\x1b]8;;https://old/\x07old\x1b]8;;\x07\r\n1\r\n2\r\n3";
         let terminal = terminal(10, 2, output);
         let mut pane = pane_of(&terminal);
-        pane.wheel(3, [0, 0], Modifiers::default());
+        pane.wheel(3, ([0, 0], [0.0; 2]), Modifiers::default());
         // Answer the fetch for history, as the daemon would.
         for message in pane.take_outbox() {
             let ClientMessage::Request(Request::History { end, count, .. }) = message else {
