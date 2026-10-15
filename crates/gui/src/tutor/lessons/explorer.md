@@ -71,7 +71,7 @@ not listed "plans.txt"
 
 `e` shows the folder at the cursor as text, in the explorer's pane: a line for each file or folder, folders ending `/`. Edit it as you would any file. Change a line to rename what it names, or give it a path, as `sub/x`, to move it; delete a line to delete it; add a line to make a file, or a folder if it ends `/`; copy a line and change the copy's name to copy it. Enter on a folder's line shows its listing, and `-` the folder above's, so a line cut in one folder and put in another moves it.
 
-`:w` lists every change and asks before making any: `y` makes them, one at a time, `n` goes back to the text. Nothing is written over, and deletes go to the trash. `:q!` leaves without making any.
+`:w` lists every change, under "Changes to" and the folder, and asks right under them before making any: `y` makes them, one at a time, `n` goes back to the text. Nothing is written over, and deletes go to the trash. `:q!` leaves without making any.
 
 Press `e`, rename `todo.txt` to `done.txt`, add a line `drafts/`, then `:w` and `y`.
 

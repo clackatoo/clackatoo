@@ -188,6 +188,15 @@ impl Input {
             completing: None,
         }
     }
+
+    /// A new name for `purpose`, starting as the old one, `was`, all of
+    /// it selected, so a name typed replaces it and an arrow keeps it.
+    fn renaming(purpose: Purpose, was: impl Into<String>) -> Self {
+        Self {
+            line: cmdline::Line::selected(was),
+            ..Self::new(purpose, String::new())
+        }
+    }
 }
 
 /// What's typed in the palette is for.
@@ -510,6 +519,13 @@ impl Desk {
         }
     }
 
+    /// Whether one of the window's own prompts has the keys: the command
+    /// line, a search, a name or an answer being typed, or the finder.
+    /// The focused pane's cursor is drawn hollow meanwhile.
+    pub(crate) fn prompt_has_keys(&self) -> bool {
+        self.text_goes_to() == Some(TextTarget::Bar)
+    }
+
     /// The options, as config and `:set` have set them.
     pub(crate) fn options(&self) -> &Options {
         &self.options
@@ -532,13 +548,19 @@ impl Desk {
     }
 
     /// When a pane's highlight on text just copied goes, the soonest of
-    /// them: the window must be drawn again then.
+    /// them, or anything else timed is due, such as the panel of keys
+    /// waiting: the window must be drawn again then.
     pub(crate) fn flash_ends(&self) -> Option<std::time::Instant> {
         let panes = self.panes.values().filter_map(Pane::flash_ends);
         let pointed = (self.pointed)
             .and_then(|(_, until)| (until > std::time::Instant::now()).then_some(until));
+        // The panel of keys waiting, once it's due.
+        let keys = self
+            .which_keys_due()
+            .filter(|&due| due > std::time::Instant::now());
         (panes.chain(self.editor_flash_ends()).chain(pointed))
             .chain(self.listing_said())
+            .chain(keys)
             .min()
     }
 
@@ -704,11 +726,13 @@ impl Desk {
                 label,
                 text,
                 choices,
+                selected,
                 ..
             } => Status::Typing {
                 label,
                 text,
                 choices,
+                selected,
                 under: Some(Box::new(self.bar_under_typing())),
             },
             tabs @ Status::Tabs { .. } => tabs,
@@ -753,6 +777,7 @@ impl Desk {
                     label: None,
                     text: label,
                     choices: Vec::new(),
+                    selected: editor.label_selected(),
                     under: None,
                 };
             }
@@ -771,6 +796,7 @@ impl Desk {
                     label: None,
                     text: label,
                     choices: Vec::new(),
+                    selected: None,
                     under: None,
                 };
             }
@@ -793,6 +819,7 @@ impl Desk {
                 label: None,
                 text: prompt,
                 choices: Vec::new(),
+                selected: None,
                 under: None,
             };
         }
@@ -807,13 +834,11 @@ impl Desk {
         }
     }
 
-    /// The bottom bar's note, and what kind it is: the keys that can come
-    /// next, while some wait; or else the window's message, or what the
-    /// focused pane has `said`, until the next key; or else its `label`.
+    /// The bottom bar's note, and what kind it is: the window's message,
+    /// or what the focused pane has `said`, until the next key; or else
+    /// its `label`. The keys that can come next, while some wait, are in a
+    /// panel of their own (see [`Desk::which_keys`]).
     fn note(&self, said: Option<String>, label: Option<String>) -> (Option<String>, NoteKind) {
-        if let Some(keys) = self.keymap.hint() {
-            return (Some(keys), NoteKind::Keys);
-        }
         if let Some((message, kind)) = self.message_note() {
             return (Some(message), kind);
         }
@@ -870,7 +895,7 @@ impl Desk {
     /// Opens the palette to rename `workspace`, starting from its name.
     pub(crate) fn rename_workspace(&mut self, workspace: WorkspaceId) {
         if let Some(found) = self.workspaces.get(workspace) {
-            self.input = Some(Input::new(
+            self.input = Some(Input::renaming(
                 Purpose::RenameWorkspace(workspace),
                 found.name.clone(),
             ));
@@ -886,7 +911,7 @@ impl Desk {
                 .or_else(|| self.tab_title(found))
                 .unwrap_or_default()
                 .to_owned();
-            self.input = Some(Input::new(Purpose::RenameTab(tab), text));
+            self.input = Some(Input::renaming(Purpose::RenameTab(tab), text));
         }
     }
 
@@ -3482,6 +3507,83 @@ mod tests {
         assert!(cursor.is_some());
     }
 
+    /// How the cursor of the shown tab's first pane is drawn, in a window
+    /// with the focus.
+    fn drawn_cursor(desk: &mut Desk) -> Option<crate::render::CursorStyle> {
+        drawn_cursor_picking(desk, false)
+    }
+
+    /// `drawn_cursor`, with the picker of a machine open if `picking`.
+    fn drawn_cursor_picking(desk: &mut Desk, picking: bool) -> Option<crate::render::CursorStyle> {
+        desk.settle_editors();
+        desk.settle_explorers();
+        let area = crate::layout::Area {
+            rect: crate::layout::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+            cell: [10.0, 20.0],
+            gap: 1.0,
+            inset: 4.0,
+        };
+        crate::app::drawn_cursors(desk, &area, picking)[0]
+    }
+
+    /// Whether the bar, under what's typed, still shows the mode and the
+    /// tabs.
+    fn bar_under_prompt(desk: &Desk) -> bool {
+        matches!(
+            desk.status(),
+            Status::Typing { under: Some(under), .. }
+                if matches!(*under, Status::Tabs { mode: Some(_), panes: 1.., .. })
+        )
+    }
+
+    #[test]
+    fn while_a_prompt_has_the_keys_the_panes_cursor_is_hollow_and_the_bar_stays() {
+        use crate::render::CursorStyle;
+        let hollow = Some(CursorStyle::Hollow);
+        // A terminal: the command line, a search, and the finder.
+        let mut desk = desk(one_tab(pane(1)));
+        snapshot(&mut desk, 1);
+        normal_mode(&mut desk);
+        let solid = drawn_cursor(&mut desk);
+        assert!(solid.is_some() && solid != hollow, "{solid:?}");
+        for keys in [":", "/4"] {
+            type_keys(&mut desk, keys);
+            assert_eq!(drawn_cursor(&mut desk), hollow, "{keys}");
+            assert!(bar_under_prompt(&desk), "{keys}: {:?}", desk.status());
+            escape(&mut desk);
+            assert_eq!(drawn_cursor(&mut desk), solid, "{keys}");
+        }
+        // The picker of a machine, Ctrl+B r, too.
+        assert_eq!(drawn_cursor_picking(&mut desk, true), hollow, "the picker");
+        desk.open_finder(crate::finder::Kind::Files, String::new());
+        assert_eq!(drawn_cursor(&mut desk), hollow, "the finder");
+        // An editor's search.
+        let mut desk = editing("/p/a.txt", TEN_LINES);
+        let solid = drawn_cursor(&mut desk);
+        assert!(solid.is_some() && solid != hollow, "{solid:?}");
+        type_keys(&mut desk, "/l5");
+        assert_eq!(drawn_cursor(&mut desk), hollow);
+        assert!(bar_under_prompt(&desk), "{:?}", desk.status());
+        escape(&mut desk);
+        assert_eq!(drawn_cursor(&mut desk), solid);
+        // An explorer's search.
+        let mut desk = self::desk(one_tab(files_pane(2, 1)));
+        explore_p(&mut desk);
+        answer_all(&mut desk);
+        let solid = drawn_cursor(&mut desk);
+        assert!(solid.is_some() && solid != hollow, "{solid:?}");
+        type_keys(&mut desk, "/a");
+        assert_eq!(drawn_cursor(&mut desk), hollow);
+        assert!(bar_under_prompt(&desk), "{:?}", desk.status());
+        escape(&mut desk);
+        assert_eq!(drawn_cursor(&mut desk), solid);
+    }
+
     #[test]
     fn switching_workspaces_keeps_the_mode_and_each_panes_state() {
         let mut desk = desk(workspaces(vec![
@@ -3578,26 +3680,22 @@ mod tests {
         ctrl_b(&mut desk, "[");
         assert_eq!(desk.shown().unwrap().tab, TabId(3), "round to the last");
         ctrl_b(&mut desk, "1");
-        // While Ctrl+B waits, the bar says what it takes.
+        // While Ctrl+B waits, a panel says what it takes, and the panes,
+        // three here, are numbered.
         ctrl(&mut desk, "b");
-        assert!(matches!(
-            desk.status(),
-            Status::Tabs { note: Some(note), .. }
-                if note == "tab 1-9 c [ ] ,  pane p h j k l | - x  jump o i  agent a  workspace w  connect r"
-        ));
+        let which = desk.which_keys().expect("the keys, at once after Ctrl");
+        assert_eq!(
+            (which.title.as_str(), desk.keys_waiting().as_deref()),
+            ("Ctrl+B", Some("^B"))
+        );
+        assert!(desk.numbering_panes());
         assert!(desk.cancel_keys());
+        assert_eq!(desk.which_keys(), None);
         // Panes by number, shown on screen while one is awaited.
         ctrl_b(&mut desk, "p");
         assert!(desk.numbering_panes());
-        assert_eq!(
-            desk.status(),
-            Status::Tabs {
-                mode: Some(ModeName::Insert),
-                note: Some("pane 1-9".into()),
-                kind: NoteKind::Keys,
-                panes: 3
-            }
-        );
+        let which = desk.which_keys().expect("the keys");
+        assert_eq!(which.rows, [("1-9".to_owned(), "pick a pane".to_owned())]);
         type_keys(&mut desk, "3");
         assert!(!desk.numbering_panes());
         assert_eq!(shown_pane(&desk), PaneId(3));
@@ -3612,6 +3710,147 @@ mod tests {
         ctrl_b(&mut desk, "p1");
         assert_eq!(shown_pane(&desk), PaneId(1));
         assert_eq!(mode(&desk, 1), Mode::Normal);
+    }
+
+    #[test]
+    fn ctrl_b_numbers_one_pane_only_after_p_and_lists_every_key_it_takes() {
+        let mut desk = desk(one_tab(pane(1)));
+        ctrl(&mut desk, "b");
+        assert!(!desk.numbering_panes(), "one pane needs no number");
+        // Every key Ctrl+B takes, from the bindings, saying what it does.
+        let which = desk.which_keys().unwrap();
+        let rows: Vec<(&str, &str)> = (which.rows.iter())
+            .map(|(keys, does)| (keys.as_str(), does.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("1-9", "go to tab"),
+                ("c", "new tab"),
+                ("[", "tab before"),
+                ("]", "next tab"),
+                (",", "rename tab"),
+                ("p", "+pick a pane"),
+                ("h", "pane left"),
+                ("j", "pane below"),
+                ("k", "pane above"),
+                ("l", "pane right"),
+                ("|", "split right"),
+                ("-", "split below"),
+                ("x", "close pane"),
+                ("o", "jump back"),
+                ("i", "jump forward"),
+                ("a", "agent chat"),
+                ("w", "workspaces"),
+                ("r", "connect"),
+                ("^B", "send Ctrl+B"),
+            ]
+        );
+        type_keys(&mut desk, "p");
+        assert!(desk.numbering_panes(), "asked for, it's numbered");
+        assert!(desk.cancel_keys());
+        // A key bound by the config is listed too, and a key bound again
+        // says what it does now.
+        desk.lua_from(
+            r#"
+            client.keys.map("niv", "<C-b>g", "gri")
+            client.keys.map("niv", "<C-b>c", function() end)
+            "#,
+        );
+        ctrl(&mut desk, "b");
+        let rows = desk.which_keys().unwrap().rows;
+        assert!(
+            rows.contains(&("c".into(), "from your config".into())),
+            "{rows:?}"
+        );
+        assert!(rows.contains(&("g".into(), "types gri".into())), "{rows:?}");
+        assert!(desk.cancel_keys());
+        // Two panes are numbered as soon as Ctrl+B waits.
+        let mut desk = three_tabs();
+        ctrl(&mut desk, "b");
+        assert!(desk.numbering_panes());
+    }
+
+    #[test]
+    fn every_default_key_after_another_says_what_it_does() {
+        let keys = bindings::Keys::default();
+        for (chords, label) in keys.labels() {
+            if chords.len() > 1 {
+                let keys = crate::keymap::display(chords);
+                assert!(label.is_some_and(|label| !label.is_empty()), "{keys}");
+            }
+        }
+    }
+
+    #[test]
+    fn space_typed_quickly_never_shows_the_panel_of_keys() {
+        let mut desk = desk(one_tab(pane(1)));
+        snapshot(&mut desk, 1);
+        normal_mode(&mut desk);
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Space),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(desk.which_keys(), None);
+        type_keys(&mut desk, "p");
+        assert_eq!(desk.keys_waiting().as_deref(), Some("␣p"));
+        assert_eq!(desk.which_keys(), None);
+        type_keys(&mut desk, "f");
+        assert!(desk.finding(), "the finder opened");
+        assert_eq!((desk.which_keys(), desk.keys_waiting()), (None, None));
+        // With no delay, it shows at once.
+        desk.close_finder();
+        command(&mut desk, "set whichkeydelay=0");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Space),
+            None,
+            Modifiers::default(),
+        );
+        assert!(desk.which_keys().is_some());
+    }
+
+    #[test]
+    fn space_lists_its_keys_with_each_that_starts_more_on_a_row_of_its_own() {
+        let mut desk = desk(one_tab(pane(1)));
+        snapshot(&mut desk, 1);
+        normal_mode(&mut desk);
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Space),
+            None,
+            Modifiers::default(),
+        );
+        // Marked at once, but listed only after a pause.
+        assert_eq!(desk.keys_waiting().as_deref(), Some("␣"));
+        assert_eq!(desk.which_keys(), None);
+        let due = desk.flash_ends().expect("a wake for the panel");
+        while std::time::Instant::now() < due {
+            std::thread::sleep(due - std::time::Instant::now());
+        }
+        let which = desk.which_keys().expect("the keys");
+        assert_eq!(which.title, "Space");
+        assert_eq!(desk.flash_ends(), None, "nothing more to wake for");
+        let rows: Vec<(&str, &str)> = (which.rows.iter())
+            .map(|(keys, does)| (keys.as_str(), does.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("p", "+3 keys"),
+                ("?", "open files"),
+                ("d", "+problems"),
+                ("b", "+file symbols"),
+                ("h", "+3 keys"),
+                ("e", "explorer"),
+                ("t", "+inlay hints"),
+                ("g", "+3 keys"),
+                ("c", "comment"),
+            ]
+        );
+        assert!(!desk.numbering_panes());
     }
 
     #[test]
@@ -4176,6 +4415,39 @@ mod tests {
             Modifiers::default(),
         );
         assert!(matches!(desk.status(), Status::Tabs { .. }));
+    }
+
+    #[test]
+    fn a_new_name_starts_as_the_old_one_selected_and_the_first_key_replaces_it() {
+        let mut desk = desk(workspaces(vec![workspace(
+            1,
+            "work",
+            vec![tab(1, pane(1))],
+        )]));
+        desk.rename_workspace(WorkspaceId(1));
+        let Status::Typing { text, selected, .. } = desk.status() else {
+            panic!("the palette");
+        };
+        assert_eq!(&text[selected.unwrap()], "work");
+        type_keys(&mut desk, "home");
+        assert!(matches!(
+            desk.status(),
+            Status::Typing { text, selected: None, .. } if text == "home▏"
+        ));
+        escape(&mut desk);
+        // An arrow keeps it, to add to.
+        desk.rename_workspace(WorkspaceId(1));
+        press(
+            &mut desk,
+            Key::Named(NamedKey::End),
+            None,
+            Modifiers::default(),
+        );
+        type_keys(&mut desk, "s");
+        assert!(matches!(
+            desk.status(),
+            Status::Typing { text, selected: None, .. } if text == "works▏"
+        ));
     }
 
     #[test]
@@ -7019,7 +7291,8 @@ mod tests {
             .collect();
         assert_eq!(sent, [b"j".to_vec()], "not ^B");
         assert!(
-            matches!(desk.status(), Status::Tabs { note: Some(note), .. } if note.starts_with("tab 1-9"))
+            desk.which_keys()
+                .is_some_and(|which| which.title == "Ctrl+B")
         );
         assert!(desk.cancel_keys());
         // And `jk` types Ctrl+;, found by where it is on the keyboard,
@@ -9657,7 +9930,7 @@ mod tests {
         explore_with(&mut desk, vec![stamped("a.txt", 1), stamped("b.txt", 1)]);
         type_keys(&mut desk, "edd");
         command(&mut desk, "w");
-        assert_eq!(note(&desk), "make this change? (y/n)");
+        assert_eq!(note(&desk), "1 change to make");
         // a.txt is written meanwhile.
         explore_with(&mut desk, vec![stamped("a.txt", 2), stamped("b.txt", 1)]);
         type_keys(&mut desk, "y");
@@ -9738,7 +10011,11 @@ mod tests {
         command(&mut desk, "w");
         assert_eq!(
             explorer_rows(&mut desk),
-            ["to do (2 names left out)", "  delete ok.txt, to the trash"]
+            [
+                "Changes to ~/p (2 names left out)",
+                "  delete ok.txt, to the trash",
+                "Apply this change?  y yes · n no"
+            ]
         );
     }
 
@@ -9850,10 +10127,15 @@ mod tests {
         // The text is the window's alone: nothing of it is sent.
         assert_eq!(sent(&mut desk), []);
         command(&mut desk, "w");
-        assert_eq!(note(&desk), "make these 2 changes? (y/n)");
+        assert_eq!(note(&desk), "2 changes to make");
         assert_eq!(
             explorer_rows(&mut desk),
-            ["to do", "  make   new/", "  rename a.txt to b.txt"]
+            [
+                "Changes to ~/p",
+                "  make   new/",
+                "  rename a.txt to b.txt",
+                "Apply 2 changes?  y yes · n no"
+            ]
         );
         assert_eq!(file_ops(&mut desk), [], "not until it's said yes to");
         type_keys(&mut desk, "y");
@@ -9879,6 +10161,112 @@ mod tests {
     }
 
     #[test]
+    fn the_plans_question_sits_under_its_steps_in_view_with_its_keys_in_bold() {
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        answer_all(&mut desk);
+        type_keys(&mut desk, "jedk");
+        desk.fit_explorer(PaneId(2), clackatoo_protocol::Size::new(60, 20).unwrap());
+        command(&mut desk, "w");
+        desk.settle_explorers();
+        let rows = |desk: &Desk| -> Vec<String> {
+            let (rows, _) = desk.explorer(PaneId(2)).expect("an explorer").scene();
+            (rows.iter())
+                .map(|row| row.text().trim_end().to_owned())
+                .collect()
+        };
+        // Under the steps, after a blank row, not at the pane's foot.
+        let shown = rows(&desk);
+        assert_eq!(
+            shown[..5],
+            [
+                "Changes to ~/p",
+                "  delete src and everything in it, to the trash",
+                "  delete a.txt, to the trash",
+                "",
+                "Apply 2 changes?  y yes · n no"
+            ]
+        );
+        let (scene, _) = desk.explorer(PaneId(2)).unwrap().scene();
+        let row = scene[4];
+        let bold = |col: usize| {
+            (row.style(row.cells()[col]).attributes).contains(clackatoo_protocol::Attributes::BOLD)
+        };
+        let col = |text: &str| shown[4][..shown[4].find(text).unwrap()].chars().count();
+        let (y, n) = (col("y yes"), col("n no"));
+        assert!(bold(y) && bold(n) && !bold(y + 2) && !bold(0));
+        // Asked there, it isn't asked in the bar too.
+        assert_eq!(note(&desk), "2 changes to make");
+        // In a pane too short for every step, the question keeps its place
+        // in view, and the steps scroll above it.
+        let short = clackatoo_protocol::Size::new(60, 4).unwrap();
+        desk.fit_explorer(PaneId(2), short);
+        desk.settle_explorers();
+        assert_eq!(
+            rows(&desk),
+            [
+                "Changes to ~/p",
+                "  delete src and everything in it, to the trash",
+                "",
+                "Apply 2 changes?  y yes · n no"
+            ]
+        );
+        type_keys(&mut desk, "j");
+        desk.settle_explorers();
+        assert_eq!(rows(&desk)[1], "  delete a.txt, to the trash");
+        assert_eq!(rows(&desk)[3], "Apply 2 changes?  y yes · n no");
+        // With no room for the question in the pane, the bar asks it.
+        desk.fit_explorer(PaneId(2), clackatoo_protocol::Size::new(60, 3).unwrap());
+        desk.settle_explorers();
+        assert_eq!(note(&desk), "apply 2 changes? (y/n)");
+        // Its keys are as they were: n goes back, having done nothing.
+        type_keys(&mut desk, "n");
+        assert_eq!(file_ops(&mut desk), []);
+        assert_eq!(note(&desk), "nothing was done: back to the listing");
+    }
+
+    #[test]
+    fn the_plans_question_names_its_keys_only_while_its_pane_has_the_focus() {
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        answer_all(&mut desk);
+        type_keys(&mut desk, "jedk");
+        desk.fit_explorer(PaneId(2), clackatoo_protocol::Size::new(60, 20).unwrap());
+        command(&mut desk, "w");
+        let question = |desk: &mut Desk| -> (String, bool) {
+            desk.settle_explorers();
+            let (rows, _) = desk.explorer(PaneId(2)).expect("an explorer").scene();
+            let row = rows[4];
+            let bold = (0..row.cells().len()).any(|col| {
+                (row.style(row.cells()[col]).attributes)
+                    .contains(clackatoo_protocol::Attributes::BOLD)
+            });
+            (row.text().trim_end().to_owned(), bold)
+        };
+        assert_eq!(
+            question(&mut desk),
+            ("Apply 2 changes?  y yes · n no".into(), true)
+        );
+        // Away in the terminal, `y` goes there: the question says so.
+        ctrl_b(&mut desk, "l");
+        assert_eq!(shown_pane(&desk), PaneId(3));
+        assert_eq!(
+            question(&mut desk),
+            ("Apply 2 changes? (focus to answer)".into(), false)
+        );
+        type_keys(&mut desk, "y");
+        assert_eq!(file_ops(&mut desk), [], "nothing done from elsewhere");
+        escape(&mut desk);
+        // Back, it asks with its keys again.
+        ctrl_b(&mut desk, "h");
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        assert_eq!(
+            question(&mut desk),
+            ("Apply 2 changes?  y yes · n no".into(), true)
+        );
+    }
+
+    #[test]
     fn a_step_that_fails_stops_the_rest_and_says_what_was_done() {
         use clackatoo_protocol::{FileOp, FileOpError};
         let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
@@ -9886,7 +10274,7 @@ mod tests {
         type_keys(&mut desk, "jeddox");
         escape(&mut desk);
         command(&mut desk, "w");
-        assert_eq!(note(&desk), "make these 2 changes? (y/n)");
+        assert_eq!(note(&desk), "2 changes to make");
         // `n` goes back to the text, as it was left.
         type_keys(&mut desk, "n");
         assert_eq!(listing_shown(&desk), ["..", "src/", "x"]);
@@ -9917,7 +10305,11 @@ mod tests {
         );
         assert_eq!(
             explorer_rows(&mut desk),
-            ["stopped", "✓ make   x", "✗ delete a.txt, to the trash"]
+            [
+                "Changes to ~/p: stopped",
+                "✓ make   x",
+                "✗ delete a.txt, to the trash"
+            ]
         );
         type_keys(&mut desk, "q");
         assert!(!desk.explorer(PaneId(2)).unwrap().editing());
@@ -9973,7 +10365,11 @@ mod tests {
         command(&mut desk, "w");
         assert_eq!(
             explorer_rows(&mut desk),
-            ["to do", "  move   src/main.rs to main.rs"]
+            [
+                "Changes to ~/p",
+                "  move   src/main.rs to main.rs",
+                "Apply this change?  y yes · n no"
+            ]
         );
         type_keys(&mut desk, "y");
         let moved = FileOp::Move {
@@ -10075,10 +10471,14 @@ mod tests {
         assert_eq!(listing_shown(&desk), ["src/", "..", "a.txt"]);
         type_keys(&mut desk, "2dd");
         command(&mut desk, "w");
-        assert_eq!(note(&desk), "make this change? (y/n)");
+        assert_eq!(note(&desk), "1 change to make");
         assert_eq!(
             explorer_rows(&mut desk),
-            ["to do", "  delete a.txt, to the trash"]
+            [
+                "Changes to ~/p",
+                "  delete a.txt, to the trash",
+                "Apply this change?  y yes · n no"
+            ]
         );
     }
 

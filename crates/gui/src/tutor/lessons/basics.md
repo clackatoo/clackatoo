@@ -50,7 +50,7 @@ copied "hello"
 
 ## Split the pane
 
-Type `:|` and press Enter. `:` opens the command line, in the middle of the window, and `|` splits the focused pane, with a new terminal to its right. `:-` would put it below, and `:|<` and `:-^` to the left and above.
+Type `:|` and press Enter. `:` opens the command line, in the middle of the window, and `|` splits the focused pane, with a new terminal to its right. `:-` would put it below, and `:|<` and `:-^` to the left and above. While the command line is open, the bar keeps the mode and the tabs, and the pane's cursor is hollow, as what you type goes to the line, not the pane.
 
 ```check
 panes 3
@@ -58,7 +58,7 @@ panes 3
 
 ## Move between panes
 
-In normal mode, Ctrl+H, Ctrl+J, Ctrl+K and Ctrl+L move to the pane to the left, below, above or right. Ctrl+B and then `h`, `j`, `k` or `l` does the same in either mode, as tmux's prefix does.
+In normal mode, Ctrl+H, Ctrl+J, Ctrl+K and Ctrl+L move to the pane to the left, below, above or right. Ctrl+B and then `h`, `j`, `k` or `l` does the same in either mode, as tmux's prefix does. While Ctrl+B waits, the bar marks it `^B` by the mode, and a panel above the bar lists every key it takes and what each does: Esc puts it away. With two panes or more, each shows its number, for Ctrl+B `p` and the number to go to it.
 
 Go back to the practice terminal, the one you split.
 

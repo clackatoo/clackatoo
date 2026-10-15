@@ -534,6 +534,13 @@ options! {
     /// server is asked what could finish it, so a burst of keys asks once.
     /// 0 asks at every key.
     completedelay("cmpd"): u32 (0..=2000) = 40;
+    /// How long keys that start others wait, in milliseconds, before a
+    /// panel lists what can come next, as which-key.nvim's does, so keys
+    /// typed quickly, as `<Space>pf`, never flash it. Keys held with Ctrl
+    /// or Alt, as Ctrl+B, show it at once, as the window's own prefixes;
+    /// the bar marks the keys waiting at once either way. 0 shows it at
+    /// once for every key.
+    whichkeydelay("wkd"): u32 (0..=5000) = 400;
     /// Which keys accept the item picked in the completion menu, besides
     /// Ctrl+Y, which always does: Enter, once an item has been moved to
     /// with Ctrl+N, Ctrl+P or the arrows; Enter, always; or Ctrl+Y alone,

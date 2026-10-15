@@ -137,6 +137,9 @@ const NO_CHANGES: &str = "nothing's changed since git's index";
 /// The most undos or redos one count makes, as Vim's `undolevels` keeps.
 const MOST_UNDOS: usize = 1000;
 
+/// What the bar says before a new name being typed.
+const RENAME_TO: &str = "rename to: ";
+
 /// ...and when there's none at the cursor's line.
 const NO_CHANGE_HERE: &str = "nothing's changed here since git's index";
 
@@ -1020,6 +1023,17 @@ impl Editor {
             .take_if(|(_, asking)| matches!(asking, Asking::Hover(_) | Asking::Renaming(..)));
     }
 
+    /// The bytes of what the bar says, its [`label`](Self::label), that
+    /// are selected: a new name, while it's still the old one, which the
+    /// first key typed replaces.
+    pub(crate) fn label_selected(&self) -> Option<std::ops::Range<usize>> {
+        let Some(Prompt::Rename { name, .. }) = &self.prompt else {
+            return None;
+        };
+        let selected = name.selection()?;
+        Some(selected.start + RENAME_TO.len()..selected.end + RENAME_TO.len())
+    }
+
     /// What the editor says in the bar until the next key, such as `not
     /// found`, if it's saying anything.
     pub(crate) fn said(&self) -> Option<&str> {
@@ -1033,7 +1047,7 @@ impl Editor {
             Some(Prompt::Search { line, backward }) => {
                 return format!("{}{}", if *backward { '?' } else { '/' }, line.shown());
             }
-            Some(Prompt::Rename { name, .. }) => return format!("rename to: {}", name.shown()),
+            Some(Prompt::Rename { name, .. }) => return format!("{RENAME_TO}{}", name.shown()),
             Some(Prompt::Confirm(confirming)) => return confirming.question(),
             None => {}
         }
@@ -3471,8 +3485,10 @@ impl Editor {
             let (start, end) = word_at(&text, text.byte_at(self.cursor.at));
             text.slice(start, end)
         });
+        // Selected, so a new name is typed over it, and an arrow keeps it
+        // to edit.
         self.prompt = Some(Prompt::Rename {
-            name: Line::new(was.clone()),
+            name: Line::selected(was.clone()),
             was,
         });
     }

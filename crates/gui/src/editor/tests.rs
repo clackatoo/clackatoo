@@ -1228,9 +1228,15 @@ fn grn_asks_in_the_bar_for_a_new_name_and_renames() {
     let mut copy = BufferCopy::new(BufferId(1));
     copy.update(setup.daemon.snapshot());
     setup.keys("jgrn");
-    // Started with the word under the cursor.
+    // Started with the word under the cursor, selected, so the first key
+    // typed replaces it.
     assert_eq!(setup.editor.label(&copy), "rename to: value▏");
-    setup.keys("<C-u>total<CR>");
+    let selected = setup.editor.label_selected().unwrap();
+    assert_eq!(&setup.editor.label(&copy)[selected], "value");
+    setup.keys("total");
+    assert_eq!(setup.editor.label(&copy), "rename to: total▏");
+    assert_eq!(setup.editor.label_selected(), None);
+    setup.keys("<CR>");
     let (asked, at, name) = setup.renames[0].clone();
     assert_eq!((at, name.as_str()), ("let value = 1;\n".len(), "total"));
     // K while the rename is on its way doesn't lose its answer.
@@ -1253,7 +1259,8 @@ fn grn_asks_in_the_bar_for_a_new_name_and_renames() {
     setup.keys("grn<Esc>grn<CR>");
     assert_eq!(setup.editor.status.as_deref(), Some("not renamed"));
     assert_eq!(setup.renames.len(), 1);
-    setup.keys("grnX<BS>s<CR>");
+    // An arrow keeps the old name, to edit.
+    setup.keys("grn<End>X<BS>s<CR>");
     let (asked, _, name) = setup.renames[1].clone();
     assert_eq!(name, "values");
     setup.answer(

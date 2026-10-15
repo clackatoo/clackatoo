@@ -648,6 +648,8 @@ impl App {
                 finder: self.composing_in(picker),
                 scrolls: self.scrolls,
                 messages: None,
+                waiting: None,
+                which_keys: None,
             }
         } else {
             let mut status = self.desk.status();
@@ -680,6 +682,8 @@ impl App {
                 finder,
                 scrolls: self.scrolls,
                 messages: self.desk.messages_listed(),
+                waiting: self.desk.keys_waiting(),
+                which_keys: self.desk.which_keys(),
             }
         };
         let fonts = &mut self.frame.as_mut()?.fonts;
@@ -1882,7 +1886,13 @@ impl App {
             desk.pointed(),
         ));
         fills.extend(chat_paint.fills);
-        let drawings = drawings(desk, self.focused, &placement, &layout_panes, shown.pane);
+        let drawings = drawings(
+            desk,
+            keys_here(desk, self.focused, self.picker.is_some()),
+            &placement,
+            &layout_panes,
+            shown.pane,
+        );
         let images = browser_images(desk, &placement, &layout_panes, geometry.area.cell);
         let focused = drawings.iter().find(|drawing| drawing.focused);
         let cell = geometry.area.cell;
@@ -1996,6 +2006,7 @@ impl App {
             })
             .collect();
         let quoted = self.desk.daemon_has(clackatoo_protocol::wire::COLOURS);
+        let prompting = self.desk.prompt_has_keys() || self.picker.is_some();
         for (terminal, tile, focused) in tiles {
             let Some(pane) = self.desk.pane_mut(terminal).filter(|pane| pane.is_chat()) else {
                 continue;
@@ -2004,8 +2015,8 @@ impl App {
                 chat.set_quoted(quoted);
             }
             // In insert mode, the cursor is in the box; in normal mode, in
-            // the conversation.
-            let caret = focused && self.focused;
+            // the conversation; and while a prompt has the keys, nowhere.
+            let caret = focused && self.focused && !prompting;
             let size = tile.cells_size(cell);
             if let Some(paint) = pane.paint_chat(&mut frame.fonts, tile.origin, size, caret) {
                 all.fills.extend(paint.fills);
@@ -2022,16 +2033,43 @@ impl App {
     }
 }
 
+/// Whether the keys come to the focused pane: the window has the focus,
+/// if `window_focused`, and none of its own prompts has the keys, nor the
+/// picker of a machine, if `picking`.
+fn keys_here(desk: &Desk, window_focused: bool, picking: bool) -> bool {
+    window_focused && !picking && !desk.prompt_has_keys()
+}
+
+/// How the cursor of each of the shown tab's panes is drawn, laid out in
+/// `area`, in a window with the focus, with the picker of a machine open
+/// if `picking`.
+#[cfg(test)]
+pub(crate) fn drawn_cursors(
+    desk: &Desk,
+    area: &crate::layout::Area,
+    picking: bool,
+) -> Vec<Option<CursorStyle>> {
+    let (Some(shown), Some(tab)) = (desk.shown(), desk.shown_tab()) else {
+        return Vec::new();
+    };
+    let placement = Placement::new(&tab.layout, area);
+    let panes = tab.layout.panes();
+    let keys_here = keys_here(desk, true, picking);
+    (drawings(desk, keys_here, &placement, &panes, shown.pane).iter())
+        .map(|drawing| drawing.cursor.map(|cursor| cursor.style))
+        .collect()
+}
+
 /// What a pane always in normal mode draws, such as a board or a review,
-/// in `tile`: `rows`, with its cursor hollow unless it `has_focus` in a
-/// `window_focused`, and `highlights`.
+/// in `tile`: `rows`, with its cursor hollow unless it `has_focus` and
+/// the keys come to it (`keys_here`), and `highlights`.
 fn list_drawing(
     tile: Tile,
     ((rows, mut cursor), highlights): ((Vec<&Row>, Option<SceneCursor>), Vec<Highlight>),
-    (has_focus, window_focused): (bool, bool),
+    (has_focus, keys_here): (bool, bool),
 ) -> Drawing<'_> {
     if let Some(cursor) = &mut cursor
-        && !(has_focus && window_focused)
+        && !(has_focus && keys_here)
     {
         cursor.style = CursorStyle::Hollow;
     }
@@ -2087,15 +2125,17 @@ fn browser_images<'a>(
 }
 
 /// What each of the shown tab's terminals draws, as `placement` lays out
-/// `panes`, `focused` having the focus, and the window having it if
-/// `window_focused`.
+/// `panes`, `focused` having the focus. Its cursor is solid only if
+/// `keys_here`: the window has the focus, and no prompt of its own, such
+/// as the command line, a search or the finder, has the keys, so only one
+/// thing ever looks as if typing goes to it.
 #[allow(
     clippy::too_many_lines,
     reason = "one arm per kind of pane, each short"
 )]
 fn drawings<'a>(
     desk: &'a Desk,
-    window_focused: bool,
+    keys_here: bool,
     placement: &Placement,
     panes: &[LayoutPane],
     focused: PaneId,
@@ -2119,7 +2159,7 @@ fn drawings<'a>(
                 };
                 let (rows, mut cursor) = editor.scene();
                 if let Some(cursor) = &mut cursor
-                    && !(has_focus && window_focused)
+                    && !(has_focus && keys_here)
                 {
                     cursor.style = CursorStyle::Hollow;
                 }
@@ -2141,7 +2181,7 @@ fn drawings<'a>(
                 };
                 let (rows, mut cursor) = explorer.scene();
                 if let Some(cursor) = &mut cursor
-                    && !(has_focus && window_focused)
+                    && !(has_focus && keys_here)
                 {
                     cursor.style = CursorStyle::Hollow;
                 }
@@ -2159,28 +2199,28 @@ fn drawings<'a>(
             Content::Board(_) => {
                 if let Some(board) = desk.board(id) {
                     let shown = (board.scene(), board.highlights());
-                    drawings.push(list_drawing(tile, shown, (has_focus, window_focused)));
+                    drawings.push(list_drawing(tile, shown, (has_focus, keys_here)));
                 }
                 continue;
             }
             Content::Review(_) => {
                 if let Some(review) = desk.review(id) {
                     let shown = (review.scene(), review.highlights());
-                    drawings.push(list_drawing(tile, shown, (has_focus, window_focused)));
+                    drawings.push(list_drawing(tile, shown, (has_focus, keys_here)));
                 }
                 continue;
             }
             Content::Browser(_) => {
                 if let Some(browser) = desk.browser(id) {
                     let shown = ((browser.scene(), None), Vec::new());
-                    drawings.push(list_drawing(tile, shown, (has_focus, window_focused)));
+                    drawings.push(list_drawing(tile, shown, (has_focus, keys_here)));
                 }
                 continue;
             }
             Content::Other { .. } => {
                 if let Some(other) = desk.other(id) {
                     let shown = ((other.scene(), None), Vec::new());
-                    drawings.push(list_drawing(tile, shown, (has_focus, window_focused)));
+                    drawings.push(list_drawing(tile, shown, (has_focus, keys_here)));
                 }
                 continue;
             }
@@ -2193,7 +2233,7 @@ fn drawings<'a>(
         let height = usize::from(tile.rows);
         let (rows, mut cursor) = state.scene(height);
         if let Some(cursor) = &mut cursor
-            && !(has_focus && window_focused)
+            && !(has_focus && keys_here)
         {
             cursor.style = CursorStyle::Hollow;
         }
@@ -3391,6 +3431,7 @@ mod tests {
                         label: None,
                         text: text.into(),
                         choices: Vec::new(),
+                        selected: None,
                         under: None,
                     },
                     buttons: &buttons,
@@ -3401,6 +3442,8 @@ mod tests {
                     finder: None,
                     scrolls: Scrolls::default(),
                     messages: None,
+                    waiting: None,
+                    which_keys: None,
                 },
                 &mut |_, _| 0.0,
             )
@@ -3442,6 +3485,8 @@ mod tests {
                 finder: None,
                 scrolls: Scrolls::default(),
                 messages: None,
+                waiting: None,
+                which_keys: None,
             },
             &mut |_, _| 0.0,
         );

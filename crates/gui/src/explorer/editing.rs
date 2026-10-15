@@ -26,9 +26,9 @@
 use std::collections::HashSet;
 
 use clackatoo_protocol::{
-    Color, Entry, EntryKind, Expect, FileOp, FileOpError, FilesAction, Style,
+    Attributes, Color, Entry, EntryKind, Expect, FileOp, FileOpError, FilesAction, Style,
 };
-use clackatoo_term::RowBuilder;
+use clackatoo_term::{Row, RowBuilder};
 
 use super::listing::{self, Folder, Original, Problem, Step};
 use super::{Ask, Explorer, FENCED, Opening, join, parent_of, under};
@@ -653,7 +653,7 @@ impl Explorer {
     /// it's being done, Esc stops once the step on its way is; once it's
     /// stopped, any other key goes back to the tree.
     pub(super) fn plan_stroke(&mut self, stroke: Stroke) {
-        let height = self.list_height();
+        let height = self.plan_rows();
         let changed = self.listings_changed();
         let Some(editing) = &mut self.editing else {
             return;
@@ -873,9 +873,15 @@ impl Explorer {
         let plan = self.editing.as_ref()?.plan.as_ref()?;
         let count = plan.steps.len();
         Some(match &plan.stage {
+            // In the bar only if the pane has no room to ask under the
+            // steps: one place asks, not two.
+            Stage::Asking if self.plan_rows() == self.list_height() => match count {
+                1 => "apply this change? (y/n)".to_owned(),
+                count => format!("apply {count} changes? (y/n)"),
+            },
             Stage::Asking => match count {
-                1 => "make this change? (y/n)".to_owned(),
-                count => format!("make these {count} changes? (y/n)"),
+                1 => "1 change to make".to_owned(),
+                count => format!("{count} changes to make"),
             },
             Stage::Doing { stopping: false } => {
                 format!(
@@ -902,10 +908,27 @@ impl Explorer {
         })
     }
 
-    /// Lays out what the listings' edits come to, a step a row, each
-    /// marked as done, failed or on its way, below a heading.
-    pub(super) fn settle_plan(&mut self) -> bool {
+    /// How many of the plan's steps show at once: the rows under the
+    /// heading, less the blank one and the question under the steps while
+    /// it asks, if there's room for both.
+    fn plan_rows(&self) -> usize {
         let height = self.list_height();
+        let asking = (self.editing.as_ref())
+            .and_then(|editing| editing.plan.as_ref())
+            .is_some_and(|plan| matches!(plan.stage, Stage::Asking));
+        if asking && height > QUESTION_ROWS {
+            height - QUESTION_ROWS
+        } else {
+            height
+        }
+    }
+
+    /// Lays out what the listings' edits come to, a step a row, each
+    /// marked as done, failed or on its way, below a heading naming the
+    /// root, and while it asks, the question under them, where the eye
+    /// already is: it's the one prompt that deletes files.
+    pub(super) fn settle_plan(&mut self) -> bool {
+        let height = self.plan_rows();
         let Some(plan) = self
             .editing
             .as_ref()
@@ -916,20 +939,21 @@ impl Explorer {
         let mut rows = Vec::with_capacity(self.height);
         let mut header = RowBuilder::new(self.width);
         let heading = colors::heading();
+        let root = &self.name;
         let stage = match &plan.stage {
             Stage::Asking if plan.changed => {
-                "to do (a folder has changed since its listing was made)"
+                format!("Changes to {root} (a folder has changed since its listing was made)")
             }
-            Stage::Asking => "to do",
-            Stage::Doing { .. } => "doing",
-            Stage::Stopped(_) => "stopped",
+            Stage::Asking => format!("Changes to {root}"),
+            Stage::Doing { .. } => format!("Making changes to {root}"),
+            Stage::Stopped(_) => format!("Changes to {root}: stopped"),
         };
         let left_out: usize = (self.editing.iter())
             .flat_map(|editing| &editing.folders)
             .map(|folder| folder.left_out)
             .sum();
         let title = match left_out {
-            0 => stage.to_owned(),
+            0 => stage,
             1 => format!("{stage} (1 name left out)"),
             count => format!("{stage} ({count} names left out)"),
         };
@@ -954,6 +978,10 @@ impl Explorer {
             builder.push(" ", &Style::DEFAULT, true);
             builder.push(&what, &Style::DEFAULT, true);
             rows.push(builder.finish(false));
+        }
+        if matches!(plan.stage, Stage::Asking) {
+            rows.push(RowBuilder::new(self.width).finish(false));
+            rows.push(question(plan.steps.len(), self.width, self.focused));
         }
         while rows.len() < self.height {
             rows.push(RowBuilder::new(self.width).finish(false));
@@ -1004,6 +1032,45 @@ impl Explorer {
             }
         }
     }
+}
+
+/// The rows the question under a plan takes: a blank one, then its own.
+const QUESTION_ROWS: usize = 2;
+
+/// The question under a plan of `count` steps, `width` cells wide:
+/// whether to apply them, then the keys that answer, in bold, if its pane
+/// is `focused`. If it isn't, those keys go elsewhere, so it says to come
+/// back to answer instead.
+fn question(count: usize, width: usize, focused: bool) -> Row {
+    let asked = match count {
+        1 => "Apply this change?".to_owned(),
+        count => format!("Apply {count} changes?"),
+    };
+    if !focused {
+        let mut builder = RowBuilder::new(width);
+        builder.push(&asked, &Style::DEFAULT, true);
+        builder.push(" (focus to answer)", &colors::line_number(false), true);
+        return builder.finish(false);
+    }
+    let key = Style {
+        attributes: Attributes::BOLD,
+        ..Style::DEFAULT
+    };
+    let quiet = colors::line_number(false);
+    let mut builder = RowBuilder::new(width);
+    for (text, style) in [
+        (asked.as_str(), &Style::DEFAULT),
+        ("  ", &Style::DEFAULT),
+        ("y", &key),
+        (" yes ", &Style::DEFAULT),
+        ("·", &quiet),
+        (" ", &Style::DEFAULT),
+        ("n", &key),
+        (" no", &Style::DEFAULT),
+    ] {
+        builder.push(text, style, true);
+    }
+    builder.finish(false)
 }
 
 /// The palette's colour `index`, for a step's verb or mark.

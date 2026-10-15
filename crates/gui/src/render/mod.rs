@@ -240,6 +240,8 @@ pub(crate) enum Ink {
     Link,
     /// In the colour of letters what's typed matched, as in the finder.
     Matched,
+    /// Bold, in clackatoo's own colour, as a key to press is.
+    Key,
     /// Green, for what's added to a file...
     Added,
     /// ...and red, for what's removed.
@@ -369,7 +371,8 @@ pub(crate) enum CursorStyle {
     Underline,
     /// A bar at the cell's left edge.
     Bar,
-    /// An outline of the cell, while the window isn't focused.
+    /// An outline of the cell, while the window isn't focused, or one of
+    /// its own prompts has the keys.
     Hollow,
 }
 
@@ -1015,7 +1018,7 @@ impl Renderer {
             Ink::Muted => self.theme.muted,
             Ink::Warning => self.theme.warning,
             Ink::Caution => self.theme.caution,
-            Ink::Accent => self.theme.accent,
+            Ink::Accent | Ink::Key => self.theme.accent,
             Ink::Link => self.theme.link,
             Ink::Matched => self.theme.matched,
             Ink::Added => self.theme.added,
@@ -1213,7 +1216,7 @@ impl Renderer {
     fn push_text(&mut self, text: &Text<'_>, fonts: &mut Fonts) {
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
-        let bold = matches!(text.ink, Ink::OnColor | Ink::Bold);
+        let bold = matches!(text.ink, Ink::OnColor | Ink::Bold | Ink::Key);
         let color = self.ink(text.ink);
         let [mut pen_x, top] = text.origin;
         match text.font {

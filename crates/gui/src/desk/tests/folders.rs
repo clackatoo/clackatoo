@@ -222,7 +222,7 @@ fn w_and_y_make_a_listings_changes_then_its_folder_is_listed_afresh() {
     type_keys(&mut desk, "jcwlib");
     escape(&mut desk);
     command(&mut desk, "w");
-    assert_eq!(note(&desk), "make this change? (y/n)");
+    assert_eq!(note(&desk), "1 change to make");
     type_keys(&mut desk, "y");
     let moved = FileOp::Move {
         from: "/p/src/main.rs".into(),
@@ -392,7 +392,11 @@ fn browsing_many_folders_keeps_only_those_with_changes_listed() {
     command(&mut desk, "w");
     assert_eq!(
         folder_rows(&mut desk),
-        ["to do", "  rename d49/x.txt to y.txt"]
+        [
+            "Changes to /p",
+            "  rename d49/x.txt to y.txt",
+            "Apply this change?  y yes · n no"
+        ]
     );
 }
 
@@ -403,7 +407,7 @@ fn a_jump_isnt_gone_to_while_a_listings_changes_are_shown_to_be_made() {
     listed(&mut desk, 1, "/p", p());
     type_keys(&mut desk, "jdd");
     command(&mut desk, "w");
-    assert_eq!(note(&desk), "make this change? (y/n)");
+    assert_eq!(note(&desk), "1 change to make");
     ctrl(&mut desk, "o");
     assert!(desk.focused_editor().is_none(), "still the changes");
     assert_eq!(
@@ -482,9 +486,10 @@ fn steps_out_of_the_folder_shown_say_where_they_go_in_full() {
     assert_eq!(
         folder_rows(&mut desk),
         [
-            "to do",
+            "Changes to /p/src",
             "  make   /p/srcx",
-            "  move   main.rs to /p/srcold/main.rs"
+            "  move   main.rs to /p/srcold/main.rs",
+            "Apply 2 changes?  y yes · n no"
         ]
     );
 }
@@ -538,7 +543,7 @@ fn a_folder_with_changes_gone_from_disk_keeps_every_change_from_being_made() {
     };
     desk.files_changed(FilesId(1), gone);
     command(&mut desk, "w");
-    assert_eq!(note(&desk), "make these 2 changes? (y/n)");
+    assert_eq!(note(&desk), "2 changes to make");
     type_keys(&mut desk, "y");
     assert_eq!(file_ops(&mut desk), [], "nothing done");
     assert!(note(&desk).starts_with("nothing was done: a folder changed"));
@@ -577,9 +582,13 @@ fn a_line_yanked_before_its_folder_is_listed_afresh_still_pastes_as_a_copy() {
     type_keys(&mut desk, "pcwz");
     escape(&mut desk);
     command(&mut desk, "w");
-    assert_eq!(note(&desk), "make this change? (y/n)");
+    assert_eq!(note(&desk), "1 change to make");
     assert_eq!(
         folder_rows(&mut desk),
-        ["to do", "  copy   main.rs to z.rs"]
+        [
+            "Changes to /p/src",
+            "  copy   main.rs to z.rs",
+            "Apply this change?  y yes · n no"
+        ]
     );
 }

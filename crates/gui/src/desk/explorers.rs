@@ -227,8 +227,10 @@ impl Desk {
     pub(crate) fn settle_explorers(&mut self) {
         let Some(tab) = self.shown_tab() else { return };
         let shown: Vec<PaneId> = tab.layout.panes().iter().map(|pane| pane.id).collect();
+        let focused = self.shown.map(|shown| shown.pane);
         for pane in shown {
             if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
+                explorer.set_focused(focused == Some(pane));
                 explorer.settle();
             }
         }

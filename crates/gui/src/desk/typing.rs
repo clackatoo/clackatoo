@@ -447,10 +447,13 @@ impl Desk {
             }
             _ => Vec::new(),
         };
+        let selected = (input.line.selection())
+            .map(|selected| selected.start + prefix.len()..selected.end + prefix.len());
         Status::Typing {
             label,
             text: format!("{prefix}{}", input.line.shown()),
             choices,
+            selected,
             under: None,
         }
     }

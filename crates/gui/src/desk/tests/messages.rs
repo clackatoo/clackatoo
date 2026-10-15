@@ -112,13 +112,15 @@ fn a_warning_is_one_until_something_else_is_said_and_shows_whole_for_a_moment() 
 }
 
 #[test]
-fn the_keys_waiting_and_labels_are_notes_of_their_own_kinds() {
+fn the_keys_waiting_leave_the_note_be_and_labels_are_notes_of_their_own_kind() {
     let mut desk = desk(one_tab(pane(1)));
     snapshot(&mut desk, 1);
     normal_mode(&mut desk);
     assert_eq!(noted(&desk), (None, NoteKind::Label));
+    // The keys go in a panel of their own, not the note.
     ctrl_b(&mut desk, "");
-    assert_eq!(noted(&desk).1, NoteKind::Keys);
+    assert_eq!(noted(&desk), (None, NoteKind::Label));
+    assert!(desk.which_keys().is_some());
     assert!(desk.cancel_keys());
     let desk = editing("/p/t.txt", "one\n");
     let (label, kind) = noted(&desk);

@@ -14,6 +14,7 @@
 //! room the tabs leave, cut short if it must be, with the whole of it in a
 //! box raised above the bar when the mouse is over it.
 
+mod keys;
 mod strip;
 
 pub(crate) use strip::{End, Scroll};
@@ -295,6 +296,8 @@ pub(crate) enum Status {
         label: Option<String>,
         text: String,
         choices: Vec<(String, bool)>,
+        /// The bytes of `text` selected, which what's typed first replaces.
+        selected: Option<std::ops::Range<usize>>,
         under: Option<Box<Status>>,
     },
     /// The focused pane's mode, the tabs, and on the right a note (how far
@@ -348,9 +351,6 @@ pub(crate) enum NoteKind {
     /// colour, and if it's cut short, whole in a box above the bar while
     /// `notice` holds, a few seconds.
     Warning { notice: bool },
-    /// The keys that can come next, while Ctrl+B or the like waits: they're
-    /// what's being done, so the tabs make room for them.
-    Keys,
 }
 
 /// Where everything in the window's frame goes.
@@ -363,6 +363,11 @@ pub(crate) struct Chrome {
     pub(crate) status: Status,
     /// The mode's name at the bottom bar's left, and where.
     pub(crate) mode: Option<(ModeName, Rect)>,
+    /// The keys waiting for the rest of a binding, written short after the
+    /// mode, as `^B`, and where.
+    pub(crate) waiting: Option<(String, Rect)>,
+    /// The panel of what can come next, above the bar, while keys wait.
+    pub(crate) keys: Option<keys::KeysPanel>,
     /// Text at the bottom bar's right.
     pub(crate) notes: Vec<Note>,
     /// The counts of workspaces and tabs hidden either way, where the
@@ -430,6 +435,11 @@ pub(crate) struct Contents<'a> {
     /// The messages said lately, oldest first, while `:messages` shows
     /// them.
     pub(crate) messages: Option<&'a [String]>,
+    /// The keys waiting for the rest of a binding, written short, as the
+    /// bar marks them: `^B`.
+    pub(crate) waiting: Option<String>,
+    /// What can come next, while keys wait for the rest of a binding.
+    pub(crate) which_keys: Option<crate::keymap::WhichKeys>,
 }
 
 /// Where the strips of workspaces and of tabs are scrolled to, which the
@@ -511,6 +521,7 @@ impl Chrome {
     /// `measure` says how wide interface text is, bold or not. Where there
     /// are more workspaces or tabs than fit, their strip is scrolled on
     /// from where `contents` says it was, to keep the one shown in view.
+    #[allow(clippy::too_many_lines, reason = "each part of the frame in turn")]
     pub(crate) fn new(
         geometry: Geometry,
         contents: Contents<'_>,
@@ -558,11 +569,15 @@ impl Chrome {
         let status = contents.status;
         let bottom = lay_out_bottom(
             &geometry,
-            &status,
+            (&status, contents.waiting.as_deref()),
             &contents.tabs,
             contents.bottom_shown,
             contents.scrolls.tabs,
         );
+        // Drawn only with the bottom bar, whose mark of the keys it explains.
+        let keys = (contents.which_keys)
+            .filter(|_| contents.bottom_shown)
+            .map(|which| keys::KeysPanel::new(&geometry, which));
         let scrolls = Scrolls {
             workspaces: workspace_strip.scroll,
             tabs: bottom.scroll,
@@ -602,6 +617,8 @@ impl Chrome {
             ),
             status,
             mode: bottom.mode,
+            waiting: bottom.waiting,
+            keys,
             notes: bottom.notes,
             hidden,
             scrolls,
@@ -755,6 +772,15 @@ impl Chrome {
                     font: TextFont::Mono,
                 });
             }
+            // On the bar itself, so it's not taken for a tab.
+            if let Some((waiting, rect)) = &self.waiting {
+                painted.texts.push(Text {
+                    origin: [rect.x + 3.0 * metrics.padding, text_y],
+                    content: waiting,
+                    ink: Ink::Key,
+                    font: TextFont::Mono,
+                });
+            }
             for item in &self.tabs {
                 let hovered = hover == Hit::Tab(item.id);
                 let background = match (item.active, hovered) {
@@ -804,6 +830,9 @@ impl Chrome {
             });
         if let Some(raised) = raised.filter(|_| self.bottom_shown) {
             paint_raised(raised, &self.geometry, &mut painted);
+        }
+        if let Some(keys) = &self.keys {
+            keys.paint(&self.geometry, &mut painted);
         }
         self.paint_palette(&mut painted);
         if let Some((layout, view)) = &self.finder {
@@ -900,6 +929,7 @@ impl Chrome {
                 label,
                 text,
                 choices,
+                selected,
                 ..
             },
         ) = (self.palette, &self.status)
@@ -926,8 +956,24 @@ impl Chrome {
                     font: TextFont::Ui,
                 });
             }
+            let text_y = palette_text_y(rect, metrics);
+            // What's selected, on the selection's colour, as in a pane.
+            if let Some(selected) = selected
+                && let (Some(before), Some(chosen)) =
+                    (text.get(..selected.start), text.get(selected.clone()))
+            {
+                painted.over.push(Fill::solid(
+                    [
+                        self.palette_text_x + mono_width(before, metrics),
+                        text_y,
+                        mono_width(chosen, metrics),
+                        metrics.cell[1],
+                    ],
+                    Paint::Selected,
+                ));
+            }
             painted.over_texts.push(Text {
-                origin: [self.palette_text_x, palette_text_y(rect, metrics)],
+                origin: [self.palette_text_x, text_y],
                 content: text,
                 ink: Ink::Plain,
                 font: TextFont::Mono,
@@ -1090,6 +1136,7 @@ fn count_hidden(
 #[derive(Default)]
 struct Bottom {
     mode: Option<(ModeName, Rect)>,
+    waiting: Option<(String, Rect)>,
     tabs: Vec<Item<TabId>>,
     new_tab: Option<Rect>,
     notes: Vec<Note>,
@@ -1114,23 +1161,24 @@ fn mono_width(text: &str, metrics: Metrics) -> f32 {
 const NOTE_ROOM: (f32, f32, f32) = (16.0, 0.25, 48.0);
 
 /// Lays out the bottom bar, as `status` has it, in the terminal's font, a
-/// cell per character: the mode at its left, then the `tabs`, scrolled
-/// from `scroll`, and if `shown`, a `+`, and at its right the note, how
-/// many panes the tab has, and a hint. While something's typed, what's
-/// under it, if anything.
+/// cell per character: the mode at its left, and after it the keys
+/// `waiting` for the rest of a binding, if any, written short; then the
+/// `tabs`, scrolled from `scroll`, and if `shown`, a `+`, and at its right
+/// the note, how many panes the tab has, and a hint. While something's
+/// typed, what's under it, if anything.
 ///
 /// The tabs come first, with all the bar if they need it. When there are
 /// more than fit, their strip ends short of the bar's end, keeping room for
 /// the note however long or short it is, so they never move as messages
 /// come and go; in a bar too narrow for that, the tab shown shows alone.
 /// The note takes the room the tabs leave: where it needs more, the hint
-/// goes first, then the panes, then it's cut short. Only the keys that can
-/// come next, while Ctrl+B waits, push the tabs aside, and the tabs' scroll
-/// isn't kept from then.
+/// goes first, then the panes, then it's cut short. While keys wait, the
+/// tabs make room for them after the mode, and their scroll isn't kept
+/// from then, so they're as they were once the keys are done.
 #[allow(clippy::too_many_lines)]
 fn lay_out_bottom(
     geometry: &Geometry,
-    status: &Status,
+    (status, waiting): (&Status, Option<&str>),
     tabs: &[(TabId, String, bool)],
     shown: bool,
     scroll: Scroll,
@@ -1175,11 +1223,22 @@ fn lay_out_bottom(
         panes => Some(format!("{panes} panes")),
     };
     let hint = (mode.filter(|_| !typing)).map(|(mode, _)| mode.hint().to_owned());
-    let tabs_start = mode.map_or(0.0, |(_, rect)| rect.x + rect.width);
+    let mode_end = mode.map_or(0.0, |(_, rect)| rect.x + rect.width);
+    let waiting = waiting.map(|waiting| {
+        let rect = Rect {
+            x: mode_end,
+            y: bottom.y,
+            width: (mono(waiting) + 6.0 * padding).round(),
+            height: bottom.height,
+        };
+        (waiting.to_owned(), rect)
+    });
+    let tabs_start = waiting
+        .as_ref()
+        .map_or(mode_end, |(_, rect)| rect.x + rect.width);
     let right = bottom.width - 3.0 * padding;
     let gap = 4.0 * padding;
     let plus = if shown { bottom.height } else { 0.0 };
-    let keys = kind == NoteKind::Keys && note.is_some();
     let cell = metrics.cell[0];
     let full = (tabs_start, (right - plus).max(tabs_start));
     let tab_width = |text: &str| (mono(text) + 6.0 * padding).round();
@@ -1192,19 +1251,16 @@ fn lay_out_bottom(
         .position(|(_, _, active)| *active)
         .map(|index| (index, tabs[index].0.0));
     // The room the note keeps from tabs that overflow, whatever it says:
-    // the keys' own width while they show; otherwise a share of the bar,
-    // within bounds, but never so much the counts and the tab shown can't
-    // fit whole.
+    // a share of the bar, within bounds, but never so much the counts and
+    // the tab shown can't fit whole.
     let (fewest, share, most) = NOTE_ROOM;
-    let span = match &note {
-        Some(keys_text) if keys => (tabs_start, (full.1 - mono(keys_text) - gap).max(tabs_start)),
-        _ if strip::fits_all(tabs.len(), &mut width, full, 0.0) => full,
-        _ => {
-            let kept = (share * bottom.width).clamp(fewest * cell, most * cell);
-            let shown = selected.map_or(least, |(index, _)| width(index).max(least));
-            let end = (full.1 - kept).max(tabs_start + 2.0 * count_width + shown);
-            (tabs_start, end.min(full.1))
-        }
+    let span = if strip::fits_all(tabs.len(), &mut width, full, 0.0) {
+        full
+    } else {
+        let kept = (share * bottom.width).clamp(fewest * cell, most * cell);
+        let shown = selected.map_or(least, |(index, _)| width(index).max(least));
+        let end = (full.1 - kept).max(tabs_start + 2.0 * count_width + shown);
+        (tabs_start, end.min(full.1))
     };
     let room = strip::Room {
         span,
@@ -1244,15 +1300,11 @@ fn lay_out_bottom(
     // The note, the panes and the hint, from the right, in the room left.
     let zone = (strip.end + plus + gap).min(right);
     let ink = match kind {
-        NoteKind::Label | NoteKind::Keys => Ink::Muted,
+        NoteKind::Label => Ink::Muted,
         NoteKind::Message => Ink::Plain,
         NoteKind::Warning { .. } => Ink::Warning,
     };
-    let mut wanted = if keys {
-        vec![(note.clone(), ink)]
-    } else {
-        vec![(note.clone(), ink), (panes, Ink::Muted), (hint, Ink::Muted)]
-    };
+    let mut wanted = vec![(note.clone(), ink), (panes, Ink::Muted), (hint, Ink::Muted)];
     let width = |wanted: &[(Option<String>, Ink)]| {
         let texts = wanted.iter().filter_map(|(text, _)| text.as_deref());
         let (count, total) = texts.fold((0.0, 0.0), |(count, total), text| {
@@ -1304,11 +1356,16 @@ fn lay_out_bottom(
         raised: std::cell::OnceCell::new(),
     });
     Bottom {
+        scroll: if waiting.is_some() {
+            scroll
+        } else {
+            strip.scroll
+        },
         mode,
+        waiting,
         tabs: items,
         new_tab,
         notes,
-        scroll: if keys { scroll } else { strip.scroll },
         strip,
         cut,
     }
@@ -2100,6 +2157,7 @@ pub(crate) enum Hit {
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+    use crate::keymap::WhichKeys;
 
     /// Cells 10 × 20, interface text 16 high, and a padding of 4: names in
     /// the top bar are 24 high, the top bar 36 and the bottom bar 26.
@@ -2151,6 +2209,8 @@ mod tests {
                 finder: None,
                 scrolls: Scrolls::default(),
                 messages: None,
+                waiting: None,
+                which_keys: None,
             },
             &mut measure,
         )
@@ -2176,6 +2236,8 @@ mod tests {
                 finder: None,
                 scrolls: Scrolls::default(),
                 messages: None,
+                waiting: None,
+                which_keys: None,
             },
             &mut measure,
         );
@@ -2322,6 +2384,8 @@ mod tests {
                 finder: None,
                 scrolls: Scrolls::default(),
                 messages: None,
+                waiting: None,
+                which_keys: None,
             },
             &mut measure,
         );
@@ -2374,6 +2438,8 @@ mod tests {
                 finder: None,
                 scrolls: Scrolls::default(),
                 messages: None,
+                waiting: None,
+                which_keys: None,
             };
             let chrome = Chrome::new(Geometry::new([width, 600], METRICS), contents, &mut measure);
             (chrome.workspaces.iter())
@@ -2435,6 +2501,7 @@ mod tests {
                 label: None,
                 text: ":|Terminal".into(),
                 choices: Vec::new(),
+                selected: None,
                 under: None,
             },
             &ButtonLayout::default(),
@@ -2459,6 +2526,7 @@ mod tests {
             label: None,
             text: ":".into(),
             choices: Vec::new(),
+            selected: None,
             under: under(kind),
         };
         let typed = chrome(typing(NoteKind::Label), &ButtonLayout::default());
@@ -2490,6 +2558,18 @@ mod tests {
         (note, kind): (Option<&str>, NoteKind),
         scrolls: Scrolls,
     ) -> Chrome {
+        tabbed_waiting(width, (count, selected), (note, kind), scrolls, None)
+    }
+
+    /// `tabbed`, with keys waiting for the rest of a binding, if `which`
+    /// says so.
+    fn tabbed_waiting(
+        width: u32,
+        (count, selected): (u32, u32),
+        (note, kind): (Option<&str>, NoteKind),
+        scrolls: Scrolls,
+        which: Option<WhichKeys>,
+    ) -> Chrome {
         let buttons = ButtonLayout::default();
         let tabs = (1..=count)
             .map(|id| {
@@ -2519,6 +2599,8 @@ mod tests {
                 finder: None,
                 scrolls,
                 messages: None,
+                waiting: which.as_ref().map(|_| "^B".to_owned()),
+                which_keys: which,
             },
             &mut measure,
         )
@@ -2536,7 +2618,6 @@ mod tests {
             (Some(LONG), NoteKind::Message),
             (Some(LONG), NoteKind::Warning { notice: true }),
             (Some("not found"), NoteKind::Message),
-            (Some(LONG), NoteKind::Keys),
             (None, NoteKind::Label),
         ];
         for width in (300..=2400).step_by(7) {
@@ -2565,18 +2646,16 @@ mod tests {
                         assert!(right <= width as f32, "{at}");
                     }
                     // The tab shown is always in view, cut short if it must
-                    // be, but while the keys waiting push the tabs aside.
-                    if note.1 != NoteKind::Keys {
-                        let active = chrome.tabs.iter().find(|tab| tab.active);
-                        let at = format!("{width} px, {count} tabs, {note:?}");
-                        let active = active.unwrap_or_else(|| panic!("{at}: no tab shown"));
-                        assert!(active.rect.width > 0.0, "{at}");
-                    }
+                    // be.
+                    let active = chrome.tabs.iter().find(|tab| tab.active);
+                    let at = format!("{width} px, {count} tabs, {note:?}");
+                    let active = active.unwrap_or_else(|| panic!("{at}: no tab shown"));
+                    assert!(active.rect.width > 0.0, "{at}");
                     // Tabs that fit the bar all show, keeping no room for a
                     // note: each is 26 characters and their padding.
                     let room = width as f32 - mode.width - 26.0 - 12.0;
                     let needed = count as f32 * (26.0 * 10.0 + 24.0);
-                    if note.1 != NoteKind::Keys && needed <= room {
+                    if needed <= room {
                         assert_eq!(chrome.tabs.len(), count as usize, "{width} px");
                     }
                 }
@@ -2672,14 +2751,184 @@ mod tests {
         }
     }
 
+    /// What Ctrl+B takes, as the window's own keys say it.
+    fn ctrl_b() -> WhichKeys {
+        let rows = [
+            ("1-9", "go to tab"),
+            ("c", "new tab"),
+            ("[", "tab before"),
+            ("]", "next tab"),
+            (",", "rename tab"),
+            ("p", "+pick a pane"),
+            ("h", "pane left"),
+            ("j", "pane below"),
+            ("k", "pane above"),
+            ("l", "pane right"),
+            ("|", "split right"),
+            ("-", "split below"),
+            ("x", "close pane"),
+            ("o", "jump back"),
+            ("i", "jump forward"),
+            ("a", "agent chat"),
+            ("w", "workspaces"),
+            ("r", "connect"),
+            ("^B", "send Ctrl+B"),
+        ];
+        WhichKeys {
+            title: "Ctrl+B".into(),
+            rows: (rows.iter())
+                .map(|&(keys, does)| (keys.to_owned(), does.to_owned()))
+                .collect(),
+        }
+    }
+
     #[test]
-    fn the_keys_waiting_push_the_tabs_aside_but_keep_their_scroll() {
+    fn the_keys_waiting_are_marked_by_the_mode_and_keep_the_tabs_scroll() {
         let plain = tabbed(1000, (15, 8), (None, NoteKind::Label), Scrolls::default());
-        let keys = "tab 1-9 c [ ] ,  pane p h j k l | - x  jump o i  agent a  workspace w";
-        let waiting = tabbed(1000, (15, 8), (Some(keys), NoteKind::Keys), plain.scrolls);
-        assert_eq!(waiting.notes[0].text, keys, "whole");
+        let waiting = tabbed_waiting(
+            1000,
+            (15, 8),
+            (None, NoteKind::Label),
+            plain.scrolls,
+            Some(ctrl_b()),
+        );
+        let mode = waiting.mode.expect("a mode").1;
+        let (mark, rect) = waiting.waiting.clone().expect("the mark");
+        assert_eq!(mark, "^B");
+        assert_eq!(rect.x, mode.x + mode.width, "just after the mode");
+        let first = waiting.tabs.first().expect("tabs").rect;
+        assert!(first.x >= rect.x + rect.width, "the tabs after it");
         assert_eq!(waiting.scrolls, plain.scrolls, "kept for when they go");
-        assert!(waiting.tabs.len() < plain.tabs.len());
+        // The bar's right is as it was: the keys are in a panel.
+        assert_eq!(waiting.notes, plain.notes);
+        assert!(plain.waiting.is_none() && plain.keys.is_none());
+    }
+
+    #[test]
+    fn rows_too_many_to_fit_above_the_bar_take_more_columns_then_say_how_many_more() {
+        // Too short for them all at 2×: as many columns as fit, and a
+        // last row saying how many more there are, none left out unsaid.
+        let double = Metrics {
+            cell: [20.0, 40.0],
+            ui_line: 32.0,
+            padding: 8.0,
+        };
+        for height in [400, 500, 700, 1400] {
+            let chrome = Chrome::new(
+                Geometry::new([1800, height], double),
+                Contents {
+                    workspaces: Vec::new(),
+                    tabs: Vec::new(),
+                    status: Status::tabs(),
+                    buttons: &ButtonLayout::default(),
+                    bottom_shown: true,
+                    menu: None,
+                    alert: None,
+                    rounded: false,
+                    finder: None,
+                    scrolls: Scrolls::default(),
+                    messages: None,
+                    waiting: Some("^B".into()),
+                    which_keys: Some(ctrl_b()),
+                },
+                &mut measure,
+            );
+            let panel = chrome.keys.as_ref().expect("the panel");
+            let rows = panel.rows();
+            let at = format!("{height} px");
+            let shown = match rows.last() {
+                Some(("…", more)) => {
+                    let more: usize = more.trim_end_matches(" more").parse().unwrap();
+                    rows.len() - 1 + more
+                }
+                _ => rows.len(),
+            };
+            assert_eq!(shown, 19, "{at}: {rows:?}");
+            assert!(panel.rect.y >= chrome.geometry.top.height, "{at}");
+            assert!(panel.rect.x + panel.rect.width <= 1800.0, "{at}");
+            // A column more fits them all; then none does.
+            if height == 500 {
+                assert_eq!(rows.len(), 19, "{at}");
+            }
+            if height == 400 {
+                assert_eq!(rows.last().map(|row| row.0), Some("…"), "{at}");
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn the_panel_of_keys_fits_above_the_bar_at_any_width_in_up_to_three_columns() {
+        for width in (300..=2400).step_by(13) {
+            let chrome = tabbed_waiting(
+                width,
+                (4, 1),
+                (None, NoteKind::Label),
+                Scrolls::default(),
+                Some(ctrl_b()),
+            );
+            let panel = chrome.keys.as_ref().expect("the panel");
+            let rect = panel.rect;
+            let at = format!("{width} px");
+            assert!(rect.x >= 0.0 && rect.x + rect.width <= width as f32, "{at}");
+            assert!(rect.y + rect.height <= chrome.geometry.bottom.y, "{at}");
+            assert!(
+                rect.y >= chrome.geometry.top.y + chrome.geometry.top.height,
+                "{at}"
+            );
+            // Every key is listed while there's room for its column.
+            let columns: Vec<f32> =
+                panel
+                    .key_origins()
+                    .iter()
+                    .map(|at| at[0])
+                    .fold(Vec::new(), |mut columns, x| {
+                        if !columns.contains(&x) {
+                            columns.push(x);
+                        }
+                        columns
+                    });
+            assert!((1..=3).contains(&columns.len()), "{at}: {columns:?}");
+            assert_eq!(panel.rows().len(), 19, "{at}");
+            for (keys, does) in panel.rows() {
+                assert!(!keys.is_empty() && !does.is_empty(), "{at}");
+            }
+        }
+        // At a laptop's 900 points, three columns, right-aligned, with
+        // every key and what it does whole.
+        let chrome = tabbed_waiting(
+            900,
+            (4, 1),
+            (None, NoteKind::Label),
+            Scrolls::default(),
+            Some(ctrl_b()),
+        );
+        let panel = chrome.keys.as_ref().unwrap();
+        assert_eq!(panel.rows()[0], ("1-9", "go to tab"));
+        assert_eq!(panel.rows()[18], ("^B", "send Ctrl+B"));
+        assert_eq!(
+            panel.rect.x + panel.rect.width,
+            900.0 - 2.0 * METRICS.padding
+        );
+        let origins = panel.key_origins();
+        assert!(origins[0][0] < origins[7][0] && origins[7][0] < origins[14][0]);
+        assert_eq!(origins[0][1], origins[7][1], "side by side");
+        // Its title, then its keys in bold amber and what they do quietly.
+        let painted = chrome.paint(Hit::Nothing);
+        let ink = |text: &str| {
+            (painted.over_texts.iter())
+                .find(|each| each.content == text)
+                .map(|each| each.ink)
+        };
+        assert_eq!(ink("Ctrl+B"), Some(Ink::Bold));
+        assert_eq!(ink("c"), Some(Ink::Key));
+        assert_eq!(ink("new tab"), Some(Ink::Muted));
+        assert!(
+            painted
+                .texts
+                .iter()
+                .any(|text| text.content == "^B" && text.ink == Ink::Key)
+        );
     }
 
     #[test]
@@ -2755,6 +3004,8 @@ mod tests {
                 finder: None,
                 scrolls: Scrolls::default(),
                 messages: Some(&messages),
+                waiting: None,
+                which_keys: None,
             },
             &mut measure,
         );
@@ -2786,6 +3037,8 @@ mod tests {
                     finder: None,
                     scrolls,
                     messages: None,
+                    waiting: None,
+                    which_keys: None,
                 },
                 &mut measure,
             )
@@ -2833,6 +3086,8 @@ mod tests {
                         finder: None,
                         scrolls: Scrolls::default(),
                         messages: None,
+                        waiting: None,
+                        which_keys: None,
                     },
                     &mut measure,
                 );
@@ -2891,6 +3146,8 @@ mod tests {
                 finder: None,
                 scrolls: Scrolls::default(),
                 messages: None,
+                waiting: None,
+                which_keys: None,
             },
             &mut measure,
         );

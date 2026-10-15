@@ -451,6 +451,8 @@ fn two_pane_window(
             finder: None,
             scrolls: Scrolls::default(),
             messages: None,
+            waiting: None,
+            which_keys: None,
         },
         &mut |text, bold| fonts.ui_width(text, bold),
     );
@@ -627,6 +629,7 @@ fn the_palette_is_drawn_over_the_panes() {
                 ("dotfiles".into(), true),
                 ("homelab".into(), false),
             ],
+            selected: None,
             under: None,
         },
         None,
@@ -2056,6 +2059,8 @@ fn the_finder_is_drawn_over_the_panes_with_a_preview() {
             finder: Some(view),
             scrolls: Scrolls::default(),
             messages: None,
+            waiting: None,
+            which_keys: None,
         },
         &mut |text, bold| fonts.ui_width(text, bold),
     );
@@ -2795,6 +2800,8 @@ fn crowded_bars_at(
             finder: None,
             scrolls: Scrolls::default(),
             messages: None,
+            waiting: None,
+            which_keys: None,
         },
         &mut |text, bold| fonts.ui_width(text, bold),
     );

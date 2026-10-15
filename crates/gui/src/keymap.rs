@@ -248,6 +248,56 @@ impl Chord {
         ))
     }
 
+    /// How the key is said to people, as a panel of keys titles itself:
+    /// `Ctrl+B`, `Space`, `p`.
+    pub(crate) fn spoken(&self) -> String {
+        let mut said = String::new();
+        for (held, name) in [
+            (self.ctrl, "Ctrl+"),
+            (self.alt, "Alt+"),
+            (self.shift, "Shift+"),
+        ] {
+            if held {
+                said.push_str(name);
+            }
+        }
+        match self.base {
+            Base::Char(ch) if self.ctrl || self.alt => said.extend(ch.to_uppercase()),
+            Base::Char(ch) => said.push(ch),
+            Base::Named(Named::F(number)) => {
+                said.push('F');
+                said.push_str(&number.to_string());
+            }
+            Base::Named(named) => said.push_str(match named {
+                Named::Escape => "Esc",
+                Named::Enter => "Enter",
+                Named::Backspace => "Backspace",
+                Named::Delete => "Delete",
+                named => {
+                    let (name, _) = NAMES
+                        .iter()
+                        .find(|(_, each)| *each == named)
+                        .expect("every named key has a name");
+                    name
+                }
+            }),
+        }
+        said
+    }
+
+    /// The key written short, as Vim's `showcmd` writes keys waiting:
+    /// `^B` for Ctrl+B, `␣` for Space, a character as itself, and the rest
+    /// as they're bound.
+    pub(crate) fn short(&self) -> String {
+        match self.base {
+            Base::Char(ch) if self.ctrl && !self.alt && ch.is_ascii_alphabetic() => {
+                format!("^{}", ch.to_ascii_uppercase())
+            }
+            Base::Named(Named::Space) if !(self.ctrl || self.alt || self.shift) => "␣".to_owned(),
+            _ => self.to_string(),
+        }
+    }
+
     /// A character typed with no modifiers, as text a key typed is
     /// recorded in a macro. A space is the space key.
     pub(crate) fn typed(ch: char) -> Self {
@@ -469,6 +519,16 @@ struct Entry<T> {
     order: u64,
 }
 
+/// A key the keys waiting can go on to: the binding it finishes, if it
+/// finishes one, and those it starts the rest of, each with its label and
+/// the key that comes after this one, in the order they were bound.
+#[derive(Debug)]
+pub(crate) struct Next<'a, T> {
+    pub(crate) key: Chord,
+    pub(crate) bound: Option<(&'a T, Option<&'a str>)>,
+    pub(crate) further: Vec<(Chord, &'a T, Option<&'a str>)>,
+}
+
 /// Bindings in each mode, and the keys waiting for the rest of one.
 #[derive(Clone, Debug)]
 pub(crate) struct Keymap<T> {
@@ -476,6 +536,8 @@ pub(crate) struct Keymap<T> {
     waiting: Vec<Chord>,
     /// The mode the keys waiting were started in.
     waiting_mode: KeyMode,
+    /// When the keys waiting started to.
+    since: Option<std::time::Instant>,
     bound: u64,
 }
 
@@ -485,6 +547,7 @@ impl<T> Default for Keymap<T> {
             modes: Default::default(),
             waiting: Vec::new(),
             waiting_mode: KeyMode::Normal,
+            since: None,
             bound: 0,
         }
     }
@@ -537,7 +600,12 @@ impl<T: Clone> Keymap<T> {
             .find(|(keys, _)| **keys != self.waiting)
             .is_some_and(|(keys, _)| keys.starts_with(&self.waiting));
         match (exact, longer) {
-            (_, true) => Pressed::Waiting,
+            (_, true) => {
+                if !had_waiting {
+                    self.since = Some(std::time::Instant::now());
+                }
+                Pressed::Waiting
+            }
             (Some(action), false) => {
                 self.waiting.clear();
                 Pressed::Bound(action)
@@ -566,13 +634,31 @@ impl<T: Clone> Keymap<T> {
         &self.waiting
     }
 
-    /// The bindings the keys waiting can go on to, as each next key, the
-    /// whole binding's action and its label, in the order they were bound.
-    /// A key that goes on to several bindings is listed once, for the
-    /// first of them.
-    pub(crate) fn next_keys(&self) -> Vec<(Chord, T, Option<&str>)> {
+    /// Every binding, in every mode, by its keys, with its label.
+    #[cfg(test)]
+    pub(crate) fn labels(&self) -> Vec<(&[Chord], Option<&str>)> {
+        (self.modes.iter())
+            .flat_map(|mode| mode.iter())
+            .map(|(keys, entry)| (keys.as_slice(), entry.label.as_deref()))
+            .collect()
+    }
+
+    /// When the keys waiting started to, if any are.
+    pub(crate) fn waiting_since(&self) -> Option<std::time::Instant> {
+        self.since.filter(|_| !self.waiting.is_empty())
+    }
+
+    /// The keys waiting, written short, as the bottom bar marks them by
+    /// the mode: `^B`.
+    pub(crate) fn waiting_short(&self) -> Option<String> {
+        (!self.waiting.is_empty()).then(|| self.waiting.iter().map(Chord::short).collect())
+    }
+
+    /// The keys the keys waiting can go on to, each once, in the order
+    /// the first binding each reaches was bound.
+    pub(crate) fn next(&self) -> Vec<Next<'_, T>> {
         let map = &self.modes[self.waiting_mode.index()];
-        let mut next: Vec<(Chord, &Entry<T>)> = Vec::new();
+        let mut next: Vec<(u64, Next<'_, T>)> = Vec::new();
         for (keys, entry) in map.range(self.waiting.clone()..) {
             if !keys.starts_with(&self.waiting) {
                 break;
@@ -580,40 +666,94 @@ impl<T: Clone> Keymap<T> {
             let Some(&key) = keys.get(self.waiting.len()) else {
                 continue;
             };
-            match next.iter_mut().find(|(each, _)| *each == key) {
-                Some(found) if entry.order < found.1.order => found.1 = entry,
-                Some(_) => {}
-                None => next.push((key, entry)),
+            let at = if let Some(at) = next.iter().position(|(_, each)| each.key == key) {
+                at
+            } else {
+                let found = Next {
+                    key,
+                    bound: None,
+                    further: Vec::new(),
+                };
+                next.push((entry.order, found));
+                next.len() - 1
+            };
+            let (first, found) = &mut next[at];
+            *first = (*first).min(entry.order);
+            let label = entry.label.as_deref();
+            match keys.get(self.waiting.len() + 1) {
+                None => found.bound = Some((&entry.action, label)),
+                Some(&after) => found.further.push((after, &entry.action, label)),
             }
         }
-        next.sort_by_key(|(_, entry)| entry.order);
-        next.into_iter()
-            .map(|(key, entry)| (key, entry.action.clone(), entry.label.as_deref()))
-            .collect()
+        next.sort_by_key(|(order, _)| *order);
+        next.into_iter().map(|(_, next)| next).collect()
     }
 
-    /// What the bottom bar says while keys wait: the keys that can come
-    /// next, grouped under their labels, in the order they were bound.
-    /// Unlabelled keys aren't listed.
-    pub(crate) fn hint(&self) -> Option<String> {
+    /// What a panel lists while keys wait, as which-key.nvim does: the
+    /// keys waiting, and a row for each key that can come next, saying
+    /// what it does. That's the label of the binding it finishes; a
+    /// binding with no label is said by `unlabelled`. A key that starts
+    /// others says `+` and the label they share, or else how many keys
+    /// can come after it. Keys that finish bindings labelled the same
+    /// share a row, 1 to 9 written `1-9`; every other key has a row of its
+    /// own.
+    pub(crate) fn which_keys(&self, unlabelled: impl Fn(&T) -> String) -> Option<WhichKeys> {
         if self.waiting.is_empty() {
             return None;
         }
-        let mut groups: Vec<(&str, Vec<String>)> = Vec::new();
-        for (key, _, label) in self.next_keys() {
-            let Some(label) = label else { continue };
-            let key = key.to_string();
-            match groups.iter_mut().find(|(each, _)| *each == label) {
-                Some((_, keys)) => keys.push(key),
-                None => groups.push((label, vec![key])),
+        // Each row's keys, what they do, and whether they share a label.
+        let mut rows: Vec<(Vec<String>, String, bool)> = Vec::new();
+        for next in self.next() {
+            let (does, shares) = match (next.bound, next.further.as_slice()) {
+                (Some((_, Some(label))), _) => (label.to_owned(), true),
+                (Some((action, None)), _) => (unlabelled(action), false),
+                (None, further) => (Self::starts(further, &unlabelled), false),
+            };
+            let joins = shares
+                .then(|| (rows.iter_mut()).find(|(_, each, shares)| *shares && *each == does))
+                .flatten();
+            match joins {
+                Some((keys, _, _)) => keys.push(next.key.short()),
+                None => rows.push((vec![next.key.short()], does, shares)),
             }
         }
-        let groups: Vec<String> = groups
-            .into_iter()
-            .map(|(label, keys)| format!("{label} {}", digits_together(&keys).join(" ")))
-            .collect();
-        Some(groups.join("  "))
+        Some(WhichKeys {
+            title: (self.waiting.iter().map(Chord::spoken))
+                .collect::<Vec<_>>()
+                .join(" "),
+            rows: (rows.into_iter())
+                .map(|(keys, does, _)| (digits_together(&keys).join(" "), does))
+                .collect(),
+        })
     }
+
+    /// What a key that starts the bindings `further` says it does: `+` and
+    /// the label they share, or else how many keys can come after it.
+    fn starts(further: &[(Chord, &T, Option<&str>)], unlabelled: &impl Fn(&T) -> String) -> String {
+        let said = |(_, action, label): &(Chord, &T, Option<&str>)| {
+            label.map_or_else(|| unlabelled(action), str::to_owned)
+        };
+        let first = further.first().map(said);
+        if let Some(first) = first
+            && further.iter().all(|each| said(each) == first)
+        {
+            return format!("+{first}");
+        }
+        let mut after: Vec<Chord> = further.iter().map(|(key, _, _)| *key).collect();
+        after.sort_unstable();
+        after.dedup();
+        format!("+{} keys", after.len())
+    }
+}
+
+/// What a panel of keys shows while keys wait for the rest of a binding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WhichKeys {
+    /// The keys waiting, said in full, as the panel's title: `Ctrl+B`.
+    pub(crate) title: String,
+    /// Each key that can come next, or several that do the same, and what
+    /// it does.
+    pub(crate) rows: Vec<(String, String)>,
 }
 
 /// `keys`, with 1 to 9 written `1-9` if they're all there.
@@ -766,9 +906,16 @@ mod tests {
         );
 
         map.press(KeyMode::Normal, keys("<C-b>")[0]);
-        assert_eq!(map.hint().as_deref(), Some("tab c  pane p"));
+        let rows = |map: &Keymap<&str>| map.which_keys(|_| String::new()).map(|which| which.rows);
+        assert_eq!(
+            rows(&map),
+            Some(vec![
+                ("c".into(), "tab".into()),
+                ("p".into(), "+pane".into())
+            ])
+        );
         assert!(map.cancel());
-        assert_eq!(map.hint(), None);
+        assert_eq!(rows(&map), None);
 
         assert!(map.unbind(&[KeyMode::Insert], &keys("<C-b>c")));
         assert_eq!(
@@ -780,5 +927,84 @@ mod tests {
             [Pressed::Waiting, Pressed::Bound("new tab")],
             "only where it was taken away"
         );
+    }
+
+    #[test]
+    fn which_keys_says_what_each_next_key_does_from_the_bindings() {
+        let mut map = Keymap::default();
+        let n = [KeyMode::Normal];
+        for digit in 1..=9 {
+            map.bind(
+                &n,
+                &keys(&format!("<C-b>{digit}")),
+                "tab",
+                Some("go to tab"),
+            );
+        }
+        map.bind(&n, &keys("<C-b>c"), "new", Some("new tab"));
+        for digit in 1..=9 {
+            map.bind(
+                &n,
+                &keys(&format!("<C-b>p{digit}")),
+                "pane",
+                Some("pick a pane"),
+            );
+        }
+        map.bind(&n, &keys("<C-b>gr"), "review", Some("review"));
+        map.bind(&n, &keys("<C-b>gx"), "reject", Some("reject"));
+        map.bind(&n, &keys("<C-b>hp"), "show", Some("show hunk"));
+        map.bind(&n, &keys("<C-b>hs"), "stage", Some("stage hunk"));
+        map.bind(&n, &keys("<C-b>hsa"), "stage all", Some("stage all"));
+        map.bind(&n, &keys("<C-b>ds"), "problems", Some("problems"));
+        map.bind(&n, &keys("<C-b>z"), "zoom", Some("new tab"));
+        map.bind(&n, &keys("<C-b><C-b>"), "send", None);
+        map.bind(&n, &keys("<C-b>m"), "mine", None);
+        map.bind(&n, &keys("<C-b>n"), "mine", None);
+        map.press(KeyMode::Normal, keys("<C-b>")[0]);
+        let which = map.which_keys(|_| "from your config".into()).unwrap();
+        assert_eq!(
+            (which.title.as_str(), map.waiting_short().as_deref()),
+            ("Ctrl+B", Some("^B"))
+        );
+        assert!(map.waiting_since().is_some());
+        let rows: Vec<(&str, &str)> = (which.rows.iter())
+            .map(|(keys, does)| (keys.as_str(), does.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("1-9", "go to tab"),
+                ("c z", "new tab"),
+                ("p", "+pick a pane"),
+                ("g", "+2 keys"),
+                // `p` and `s` come after `h`: two keys, of three bindings.
+                ("h", "+2 keys"),
+                ("d", "+problems"),
+                // Unlabelled, each is listed: they may do anything.
+                ("^B", "from your config"),
+                ("m", "from your config"),
+                ("n", "from your config"),
+            ]
+        );
+        map.press(KeyMode::Normal, keys("p")[0]);
+        let which = map.which_keys(|_| String::new()).unwrap();
+        assert_eq!(
+            (which.title.as_str(), map.waiting_short().as_deref()),
+            ("Ctrl+B p", Some("^Bp"))
+        );
+        assert_eq!(which.rows, [("1-9".to_owned(), "pick a pane".to_owned())]);
+    }
+
+    #[test]
+    fn keys_are_said_in_full_or_short() {
+        let said = |notation: &str| {
+            let key = keys(notation)[0];
+            (key.spoken(), key.short())
+        };
+        assert_eq!(said("<C-b>"), ("Ctrl+B".into(), "^B".into()));
+        assert_eq!(said("<Space>"), ("Space".into(), "␣".into()));
+        assert_eq!(said("p"), ("p".into(), "p".into()));
+        assert_eq!(said("<CR>"), ("Enter".into(), "<CR>".into()));
+        assert_eq!(said("<A-x>"), ("Alt+X".into(), "<A-x>".into()));
     }
 }

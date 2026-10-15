@@ -247,6 +247,9 @@ pub(crate) struct Explorer {
     fence_name: Option<String>,
     /// Its keys are listed at its foot (`g?`).
     help: bool,
+    /// Its pane has the focus, so keys come to it: a question it asks in
+    /// the pane names the keys that answer only then.
+    focused: bool,
     /// Folders' listings being edited as text, if they are, and one to
     /// show once it's listed.
     editing: Option<editing::Editing>,
@@ -307,6 +310,7 @@ impl Explorer {
             fence: None,
             fence_name: None,
             help: false,
+            focused: false,
             editing: None,
             pending_edit: None,
             folder: false,
@@ -437,6 +441,11 @@ impl Explorer {
         self.expand_to_reveal();
         self.flatten_if_stale();
         self.edit_if_ready();
+    }
+
+    /// Says whether its pane has the focus, before it's settled.
+    pub(crate) fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
     }
 
     /// Whether a search, a name or an answer is being typed, in the bar.

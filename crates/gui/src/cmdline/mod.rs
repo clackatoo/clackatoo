@@ -15,6 +15,12 @@
 //!
 //! Backspace on an empty line closes it, as in Vim; whoever owns the line
 //! sees that as [`Keyed::Emptied`].
+//!
+//! A line can start with all its text selected, as a new name starts with
+//! the old one (see [`Line::selected`]): the first key typed, pasted or
+//! put from a register replaces it, Backspace, Delete and Ctrl+W clear
+//! it, and any other key that edits drops the selection first, so the
+//! arrows, Home and End edit the old text as usual.
 
 pub(crate) mod complete;
 pub(crate) mod nearest;
@@ -97,6 +103,8 @@ pub(crate) struct Line {
     register: bool,
     /// Where Up and Down have gone in the lines typed before.
     walk: Option<recall::Walk>,
+    /// All the text is selected, for what's typed first to replace it.
+    selected: bool,
 }
 
 impl Line {
@@ -110,6 +118,21 @@ impl Line {
         }
     }
 
+    /// A line holding `text`, all of it selected, with the caret at its
+    /// end: the first key typed replaces it, and the arrows keep it.
+    pub(crate) fn selected(text: impl Into<String>) -> Self {
+        let line = Self::new(text);
+        Self {
+            selected: !line.text.is_empty(),
+            ..line
+        }
+    }
+
+    /// The bytes of [`shown`](Self::shown) that are selected, if any are.
+    pub(crate) fn selection(&self) -> Option<std::ops::Range<usize>> {
+        self.selected.then_some(0..self.text.len())
+    }
+
     pub(crate) fn text(&self) -> &str {
         &self.text
     }
@@ -118,6 +141,7 @@ impl Line {
     pub(crate) fn take(&mut self) -> String {
         self.caret = 0;
         self.walk = None;
+        self.selected = false;
         std::mem::take(&mut self.text)
     }
 
@@ -159,6 +183,7 @@ impl Line {
     pub(crate) fn put(&mut self, text: &str) {
         self.register = false;
         self.walk = None;
+        self.replace_selection();
         let text = text.strip_suffix('\n').unwrap_or(text);
         for ch in text.chars() {
             let ch = if ch == '\n' { ' ' } else { ch };
@@ -173,6 +198,7 @@ impl Line {
     /// leaving the caret after it, as completing a word does.
     pub(crate) fn replace_before(&mut self, start: usize, with: &str) {
         self.walk = None;
+        self.selected = false;
         self.text.replace_range(start..self.caret, with);
         self.caret = start + with.len();
     }
@@ -180,6 +206,7 @@ impl Line {
     /// Makes the line `text`, with the caret at its end, keeping where Up
     /// and Down have gone.
     fn set(&mut self, text: &str) {
+        self.selected = false;
         self.text.clear();
         self.text.push_str(text);
         self.caret = self.text.len();
@@ -237,6 +264,15 @@ impl Line {
             return Keyed::Emptied;
         }
         self.walk = None;
+        if matches!(edit, Edit::Backspace | Edit::Delete | Edit::DeleteWord) && self.selected {
+            self.replace_selection();
+            return Keyed::Edited;
+        }
+        // Moving off it, it's text like any other; a register's text
+        // replaces it once it's put.
+        if edit != Edit::Register {
+            self.selected = false;
+        }
         let caret = self.caret;
         match edit {
             Edit::Backspace => {
@@ -266,6 +302,15 @@ impl Line {
             Edit::Register => self.register = true,
         }
         Keyed::Edited
+    }
+
+    /// Clears the text, if it's all selected, for what comes next to take
+    /// its place.
+    fn replace_selection(&mut self) {
+        if std::mem::take(&mut self.selected) {
+            self.text.clear();
+            self.caret = 0;
+        }
     }
 
     /// The byte the character before `at` starts at, or 0.
@@ -363,6 +408,47 @@ mod tests {
             "the blanks and the word"
         );
         assert_eq!(typed("one<C-w><C-w>").shown(), "▏");
+    }
+
+    /// A line starting as `text`, all of it selected, after `strokes`.
+    fn over_selected(text: &str, strokes: &str) -> Line {
+        let mut line = Line::selected(text);
+        for stroke in Stroke::read(strokes) {
+            line.stroke(stroke);
+        }
+        line
+    }
+
+    #[test]
+    fn a_selected_line_is_replaced_by_the_first_key_and_kept_by_the_arrows() {
+        let line = Line::selected("count");
+        assert_eq!(
+            (line.shown(), line.selection()),
+            ("count▏".into(), Some(0..5))
+        );
+        // What's typed first takes its place, and then adds to itself.
+        let line = over_selected("count", "amount");
+        assert_eq!((line.shown(), line.selection()), ("amount▏".into(), None));
+        // Moving keeps it, to edit as any text.
+        assert_eq!(over_selected("count", "<End>er").shown(), "counter▏");
+        assert_eq!(over_selected("count", "<Home>re").shown(), "re▏count");
+        assert_eq!(over_selected("count", "<Left>x").shown(), "counx▏t");
+        // Ctrl+W clears the whole of it, not only its last word.
+        assert_eq!(over_selected("two words", "<C-w>").shown(), "▏");
+        assert_eq!(over_selected("two words", "<C-w>total").shown(), "total▏");
+        // Backspace and Delete clear it, and Backspace again closes it.
+        let mut line = Line::selected("count");
+        assert_eq!(line.stroke(Stroke::Backspace), Keyed::Edited);
+        assert_eq!((line.text(), line.selection()), ("", None));
+        assert_eq!(line.stroke(Stroke::Backspace), Keyed::Emptied);
+        assert_eq!(over_selected("count", "<Del>").text(), "");
+        // A register's text, or a paste, takes its place too.
+        let mut line = over_selected("count", "<C-r>");
+        assert!(line.wants_register());
+        line.put("total");
+        assert_eq!(line.shown(), "total▏");
+        // Nothing to select, nothing is.
+        assert_eq!(Line::selected("").selection(), None);
     }
 
     #[test]

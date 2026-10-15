@@ -413,6 +413,24 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "A new chat says which agent and folder it has, and in normal mode, to press i to write",
     },
+    News {
+        id: "which-key",
+        date: "2026-10-15",
+        lesson: "basics",
+        what: "Ctrl+B lists every key it takes and what each does, in a panel, and the bar marks it ^B",
+    },
+    News {
+        id: "prompt-focus",
+        date: "2026-10-15",
+        lesson: "finder",
+        what: "A prompt leaves the pane's cursor hollow, and a new name starts selected, so typing replaces it",
+    },
+    News {
+        id: "plan-asks-in-place",
+        date: "2026-10-15",
+        lesson: "explorer",
+        what: ":w's changes to a folder are titled with it, and asked about right under them",
+    },
 ];
 
 impl News {

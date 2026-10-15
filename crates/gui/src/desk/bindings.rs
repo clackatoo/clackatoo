@@ -17,8 +17,15 @@
 //! | `r` | Picks a machine to open a new window on, as `:connect` does |
 //! | Ctrl+B | Sends Ctrl+B to the program |
 //!
-//! Esc, or any other key, cancels. While Ctrl+B waits, the bottom bar says
-//! what it takes.
+//! Esc, or any other key, cancels. While Ctrl+B waits, the bottom bar
+//! marks it `^B` by the mode, and a panel above the bar lists the keys it
+//! takes and what each does, as which-key.nvim does. The panel is made from
+//! the bindings themselves: each says what it does in its label, so a key
+//! bound again says so, and keys of the config's own are listed too. The
+//! panes are numbered meanwhile if there are two or more, and always after
+//! `p`. Other keys that start bindings, as Space does, list theirs only
+//! once `whichkeydelay` has passed, so keys typed quickly never flash the
+//! panel; the bar marks them at once.
 //!
 //! In normal and visual mode, Space starts the finder's keys, as a leader
 //! key does in Neovim: `<Space>pf` the project's files, `<Space>pgf` a grep
@@ -41,13 +48,15 @@
 //! and Ctrl+Shift+I go back and forward through all of it, in any mode, a
 //! pane's prompt included.
 
+use std::time::{Duration, Instant};
+
 use clackatoo_protocol::{Side, WorkspaceId};
 
 use super::{Desk, Input, Purpose};
 use crate::command::{Command, Kind, Place, ReviewWhich};
 use crate::editor::HunkAction;
 use crate::finder;
-use crate::keymap::{KeyMode, Keymap, parse_keys, parse_modes};
+use crate::keymap::{KeyMode, Keymap, WhichKeys, parse_keys, parse_modes};
 use crate::layout::Direction;
 
 /// How many choices the palette lists at once: workspaces, or what Tab
@@ -155,69 +164,67 @@ fn defaults() -> Keymap<Binding> {
         let keys = parse_keys(keys).expect("the defaults' keys are valid");
         map.bind(&modes, &keys, Binding::Window(action), label);
     };
-    let tab = Some("tab");
-    let pane = Some("pane");
     for number in 1..=9 {
-        bind("niv", &format!("<C-b>{number}"), Action::Tab(number), tab);
+        let keys = format!("<C-b>{number}");
+        bind("niv", &keys, Action::Tab(number), Some("go to tab"));
     }
-    bind("niv", "<C-b>c", Action::NewTab, tab);
-    bind("niv", "<C-b>[", Action::NextTab(false), tab);
-    bind("niv", "<C-b>]", Action::NextTab(true), tab);
-    bind("niv", "<C-b>,", Action::RenameTab, tab);
+    bind("niv", "<C-b>c", Action::NewTab, Some("new tab"));
+    bind("niv", "<C-b>[", Action::NextTab(false), Some("tab before"));
+    bind("niv", "<C-b>]", Action::NextTab(true), Some("next tab"));
+    bind("niv", "<C-b>,", Action::RenameTab, Some("rename tab"));
     for number in 1..=9 {
-        bind(
-            "niv",
-            &format!("<C-b>p{number}"),
-            Action::Pane(number),
-            pane,
-        );
+        let keys = format!("<C-b>p{number}");
+        bind("niv", &keys, Action::Pane(number), Some("pick a pane"));
     }
-    for (letter, direction) in DIRECTIONS {
-        bind(
-            "niv",
-            &format!("<C-b>{letter}"),
-            Action::Focus(direction),
-            pane,
-        );
+    for (letter, direction, label) in [
+        ('h', Direction::Left, "pane left"),
+        ('j', Direction::Down, "pane below"),
+        ('k', Direction::Up, "pane above"),
+        ('l', Direction::Right, "pane right"),
+    ] {
+        let keys = format!("<C-b>{letter}");
+        bind("niv", &keys, Action::Focus(direction), Some(label));
     }
-    bind(
-        "niv",
-        "<C-b>|",
-        Action::Split(Side::Right, Kind::Terminal),
-        pane,
-    );
-    bind(
-        "niv",
-        "<C-b>-",
-        Action::Split(Side::Below, Kind::Terminal),
-        pane,
-    );
-    bind("niv", "<C-b>x", Action::Close, pane);
+    let terminal = |side| Action::Split(side, Kind::Terminal);
+    bind("niv", "<C-b>|", terminal(Side::Right), Some("split right"));
+    bind("niv", "<C-b>-", terminal(Side::Below), Some("split below"));
+    bind("niv", "<C-b>x", Action::Close, Some("close pane"));
     let jump = |back| Action::Jump {
         back,
         within_tab: true,
     };
-    bind("niv", "<C-b>o", jump(true), Some("jump"));
-    bind("niv", "<C-b>i", jump(false), Some("jump"));
-    bind(
-        "niv",
-        "<C-b>a",
-        Action::Split(Side::Right, Kind::Agent),
-        Some("agent"),
-    );
-    bind("niv", "<C-b>w", Action::PickWorkspace, Some("workspace"));
+    bind("niv", "<C-b>o", jump(true), Some("jump back"));
+    bind("niv", "<C-b>i", jump(false), Some("jump forward"));
+    let agent = Action::Split(Side::Right, Kind::Agent);
+    bind("niv", "<C-b>a", agent, Some("agent chat"));
+    bind("niv", "<C-b>w", Action::PickWorkspace, Some("workspaces"));
     bind("niv", "<C-b>r", Action::Connect, Some("connect"));
-    bind("niv", "<C-b><C-b>", Action::SendCtrlB, None);
+    bind("niv", "<C-b><C-b>", Action::SendCtrlB, Some("send Ctrl+B"));
 
     bind("nv", ":", Action::CommandLine, None);
-    for (keys, kind) in FINDER_KEYS {
-        bind("nv", keys, Action::Find(kind), Some("find"));
+    for (keys, kind, label) in FINDER_KEYS {
+        bind("nv", keys, Action::Find(kind), Some(label));
     }
     // As gitsigns.nvim suggests them.
-    let hunk = Some("hunk");
-    bind("nv", "<Space>hp", Action::Hunk(HunkAction::Preview), hunk);
-    bind("nv", "<Space>hr", Action::Hunk(HunkAction::Reset), hunk);
-    bind("nv", "<Space>hs", Action::Hunk(HunkAction::Stage), hunk);
+    let hunk = |action| Action::Hunk(action);
+    bind(
+        "nv",
+        "<Space>hp",
+        hunk(HunkAction::Preview),
+        Some("show hunk"),
+    );
+    bind(
+        "nv",
+        "<Space>hr",
+        hunk(HunkAction::Reset),
+        Some("reset hunk"),
+    );
+    bind(
+        "nv",
+        "<Space>hs",
+        hunk(HunkAction::Stage),
+        Some("stage hunk"),
+    );
     // As nvim-tree's and neo-tree's are often bound.
     bind("nv", "<Space>e", Action::Explore, Some("explorer"));
     // As kickstart.nvim's `<leader>th`.
@@ -258,14 +265,14 @@ fn defaults() -> Keymap<Binding> {
 
 /// The finder's keys, as jack's Telescope keys are: `p` for the project,
 /// as in `<Space>pf`, and `b` for the buffer, as in `<Space>bs`, its
-/// symbols.
-const FINDER_KEYS: [(&str, finder::Kind); 6] = [
-    ("<Space>pf", finder::Kind::Files),
-    ("<Space>pgf", finder::Kind::Grep),
-    ("<Space>?", finder::Kind::Buffers),
-    ("<Space>ds", finder::Kind::Diagnostics),
-    ("<Space>bs", finder::Kind::Symbols),
-    ("<Space>ps", finder::Kind::ProjectSymbols),
+/// symbols; and what each finds.
+const FINDER_KEYS: [(&str, finder::Kind, &str); 6] = [
+    ("<Space>pf", finder::Kind::Files, "find files"),
+    ("<Space>pgf", finder::Kind::Grep, "grep files"),
+    ("<Space>?", finder::Kind::Buffers, "open files"),
+    ("<Space>ds", finder::Kind::Diagnostics, "problems"),
+    ("<Space>bs", finder::Kind::Symbols, "file symbols"),
+    ("<Space>ps", finder::Kind::ProjectSymbols, "project symbols"),
 ];
 
 /// Binds the keys for reviewing what agents changed in `map`.
@@ -287,8 +294,8 @@ fn bind_review_keys(map: &mut Keymap<Binding>) {
 /// `a`ccept and `x`, Vim's delete; and `c` to comment.
 const REVIEW_KEYS: [(&str, ReviewKey, &str); 4] = [
     ("<Space>gr", ReviewKey::Open, "review"),
-    ("<Space>ga", ReviewKey::Keep, "review"),
-    ("<Space>gx", ReviewKey::Reject, "review"),
+    ("<Space>ga", ReviewKey::Keep, "keep change"),
+    ("<Space>gx", ReviewKey::Reject, "reject change"),
     ("<Space>c", ReviewKey::Comment, "comment"),
 ];
 
@@ -301,12 +308,62 @@ const DIRECTIONS: [(char, Direction); 4] = [
 ];
 
 impl Desk {
-    /// Whether the panes are numbered on screen, while keys wait for a
-    /// pane's number, as after Ctrl+B p.
+    /// Whether the panes are numbered on screen: while keys wait for a
+    /// pane's number, as after Ctrl+B p, or for keys that lead to one, as
+    /// after Ctrl+B, if there are two or more panes to tell apart.
     pub(crate) fn numbering_panes(&self) -> bool {
-        !self.keymap.waiting().is_empty()
-            && (self.keymap.next_keys().iter())
-                .any(|(_, binding, _)| matches!(binding, Binding::Window(Action::Pane(_))))
+        let pane = |binding: &Binding| matches!(binding, Binding::Window(Action::Pane(_)));
+        if self.keymap.waiting().is_empty() {
+            return false;
+        }
+        let next = self.keymap.next();
+        let picks = |next: &crate::keymap::Next<'_, Binding>| {
+            next.bound.is_some_and(|(binding, _)| pane(binding))
+        };
+        if !next.is_empty() && next.iter().all(picks) {
+            return true;
+        }
+        let leads_to_one =
+            (next.iter()).any(|next| next.further.iter().any(|(_, binding, _)| pane(binding)));
+        leads_to_one
+            && self
+                .shown_tab()
+                .is_some_and(|tab| tab.layout.panes().len() >= 2)
+    }
+
+    /// When the panel of keys is due, while keys wait for the rest of a
+    /// binding: at once after a key held with Ctrl or Alt, as the window's
+    /// own Ctrl+B, and otherwise once `whichkeydelay` has passed, so keys
+    /// typed quickly, as `<Space>pf`, never flash it.
+    pub(super) fn which_keys_due(&self) -> Option<Instant> {
+        let since = self.keymap.waiting_since()?;
+        let first = self.keymap.waiting().first()?;
+        let delay = if first.ctrl || first.alt {
+            0
+        } else {
+            self.options.whichkeydelay
+        };
+        Some(since + Duration::from_millis(u64::from(delay)))
+    }
+
+    /// The keys waiting for the rest of a binding, written short, as the
+    /// bottom bar marks them by the mode, at once: `^B`.
+    pub(crate) fn keys_waiting(&self) -> Option<String> {
+        self.keymap.waiting_short()
+    }
+
+    /// What the panel of keys shows while keys wait for the rest of a
+    /// binding, as after Ctrl+B or Space, once it's due (see
+    /// [`Desk::which_keys_due`]).
+    pub(crate) fn which_keys(&self) -> Option<WhichKeys> {
+        if self.which_keys_due()? > Instant::now() {
+            return None;
+        }
+        self.keymap.which_keys(|binding| match binding {
+            Binding::Keys(keys) => format!("types {}", crate::keymap::display(keys)),
+            // The window's own are all labelled, so it's the config's.
+            Binding::Lua(_) | Binding::Window(_) => "from your config".to_owned(),
+        })
     }
 
     /// Stops waiting for the rest of a binding's keys, as when the mouse
