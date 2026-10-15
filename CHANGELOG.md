@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.38 (2026-10-15)
+
+### Speed
+
+- **remote:** pace forwarded ports as background traffic, so a download never fills a slow link's queue ahead of keys (f61fe7a)
+
 ## 2026.10.37 (2026-10-15)
 
 ### Features
