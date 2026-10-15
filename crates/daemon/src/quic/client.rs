@@ -16,6 +16,10 @@
 //! less often, until one opens. If the daemon at the other end is no
 //! longer the one the connection was made to, because it was upgraded or
 //! restarted, the connection is over, and says so.
+//!
+//! The thread also takes the connections made to the ports the window
+//! forwards, each on a stream of its own (see [`forward`](super::forward)),
+//! after the client's messages and the daemon's each time round.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -39,12 +43,14 @@ use rustls::crypto::{self, WebPkiSupportedAlgorithms};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{self, DigitallySignedStruct, SignatureScheme};
 
+use super::forward::{self, Local};
 use super::path::{Action, Path, Route, Sending};
 use super::{
-    CarrierId, IDLE_TIMEOUT, KEEP_ALIVE, Loss, SERVER_NAME, STATS_EVERY, carrier_address, describe,
-    frame_packet, transport,
+    CARRIER_BACKLOG, CarrierId, IDLE_TIMEOUT, KEEP_ALIVE, Loss, SERVER_NAME, STATS_EVERY,
+    carrier_address, describe, frame_packet, transport,
 };
 use crate::client::{ClientError, open_carrier};
+use crate::forward::{Command, Forwarder};
 use crate::remote::Ssh;
 
 const CARRIER: Token = Token(0);
@@ -127,6 +133,10 @@ pub(crate) struct Carried {
     contact: Contact,
     /// Why the connection ended, once it has.
     ended: Arc<Mutex<Option<String>>>,
+    /// Where the thread is told which ports to forward, and what wakes it
+    /// to look.
+    forwards: mpsc::Sender<Command>,
+    waker: Arc<Waker>,
 }
 
 /// Whether a daemon on another machine is in contact, for a window to show
@@ -218,6 +228,12 @@ impl Carried {
         }
     }
 
+    /// A way to hand the thread ports to forward, for a connection at
+    /// protocol `wire`.
+    pub(crate) fn forwarder(&self, wire: u32) -> Forwarder {
+        Forwarder::new(self.forwards.clone(), Arc::clone(&self.waker), wire)
+    }
+
     /// Why the connection ended, in words for whoever uses it, once it has.
     pub(crate) fn ended(&self) -> Option<String> {
         self.ended
@@ -262,6 +278,8 @@ pub(crate) fn carry(
     let mut driver = Driver::new(carrier, local, certificate, udp, ssh, redial)?;
     let on_udp = Arc::clone(&driver.on_udp);
     let contact = driver.contact.clone();
+    let forwards = driver.forward_commands.clone();
+    let waker = Arc::clone(&driver.waker);
     let ended = Arc::new(Mutex::new(None));
     let thread = {
         let ended = Arc::clone(&ended);
@@ -290,6 +308,8 @@ pub(crate) fn carry(
             on_udp,
             contact,
             ended,
+            forwards,
+            waker,
         },
     ))
 }
@@ -427,6 +447,11 @@ struct Driver {
     waker: Arc<Waker>,
     /// Why the connection ended, once it has, in words for the client.
     ended: Option<String>,
+    /// The ports the window forwards, and their connections.
+    forwards: Local,
+    /// What the window says to forward.
+    forward_told: mpsc::Receiver<Command>,
+    forward_commands: mpsc::Sender<Command>,
 }
 
 /// A client's socket for UDP, and where the daemon takes packets.
@@ -451,6 +476,7 @@ impl Driver {
         let poll = Poll::new()?;
         let waker = Arc::new(Waker::new(poll.registry(), DIALED)?);
         let (dialed_sender, dialed) = mpsc::channel();
+        let (forward_commands, forward_told) = mpsc::channel();
         let mut carrier = mio::net::UnixStream::from_std(carrier);
         let mut local = mio::net::UnixStream::from_std(local);
         // Edge-triggered, and everything is tried after any wakeup, so
@@ -512,6 +538,9 @@ impl Driver {
             dialed_sender,
             waker,
             ended: None,
+            forwards: Local::default(),
+            forward_told,
+            forward_commands,
         })
     }
 
@@ -552,6 +581,8 @@ impl Driver {
             }
             self.pass_to_daemon(now)?;
             self.pass_to_client()?;
+            // After the keys and the views, which go first.
+            self.forward();
             self.transmit(now)?;
             let on_udp = self.path.route() == Route::Udp;
             if self.on_udp.swap(on_udp, Ordering::Relaxed) != on_udp {
@@ -587,10 +618,21 @@ impl Driver {
                 .chain(redial)
                 .min()
                 .map(|due| due.saturating_duration_since(Instant::now()));
+            // Forwarded bytes left for next time round don't wait.
+            let timeout = if self.forwards.busy() && self.stream.is_some() {
+                Some(Duration::ZERO)
+            } else {
+                timeout
+            };
             match self.poll.poll(&mut events, timeout) {
                 Ok(()) => {}
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
                 Err(err) => return Err(err),
+            }
+            for event in &events {
+                if event.token().0 >= forward::FIRST {
+                    self.forwards.event(event.token());
+                }
             }
         }
     }
@@ -846,7 +888,16 @@ impl Driver {
                         self.readable.push(stream);
                     }
                 }
+                Event::Stream(StreamEvent::Readable { id } | StreamEvent::Writable { id })
+                    if self.forwards.stream_event(id, false) => {}
+                Event::Stream(StreamEvent::Finished { id })
+                    if self.forwards.stream_event(id, true) => {}
+                Event::Stream(StreamEvent::Stopped { id, .. })
+                    if self.forwards.stream_ended(id) => {}
                 Event::Stream(StreamEvent::Readable { id }) => self.readable.push(id),
+                Event::Stream(StreamEvent::Available { dir: Dir::Bi }) => {
+                    self.forwards.streams_available();
+                }
                 Event::ConnectionLost { reason } => {
                     log::info!(
                         "the QUIC connection {} closed: {reason}; {}",
@@ -939,7 +990,15 @@ impl Driver {
     /// says.
     fn transmit(&mut self, now: Instant) -> io::Result<()> {
         self.loss.update(&self.connection, now);
+        // A carrier backed up already gets no packets made for it, but for
+        // the one saying the connection is closed.
+        let backed_up = self.path.send() == Sending::Carrier
+            && self.to_carrier.len() >= CARRIER_BACKLOG
+            && !self.connection.is_closed();
         loop {
+            if backed_up {
+                break;
+            }
             self.buffer.clear();
             let Some(transmit) = self.connection.poll_transmit(now, 1, &mut self.buffer) else {
                 break;
@@ -948,8 +1007,17 @@ impl Driver {
             self.path.sent(now);
             match (self.path.send(), &self.udp) {
                 (Sending::Carrier, _) => {
-                    if self.carrier.is_some() {
+                    if let Some(carrier) = &mut self.carrier {
                         frame_packet(packet, &mut self.to_carrier);
+                        // Backed up: the rest waits in QUIC, in order of
+                        // priority, rather than here in order of making.
+                        // A failure is found by the write after.
+                        if self.to_carrier.len() >= CARRIER_BACKLOG {
+                            let _ = write_some(carrier, &mut self.to_carrier);
+                            if self.to_carrier.len() >= CARRIER_BACKLOG {
+                                break;
+                            }
+                        }
                     }
                 }
                 (Sending::Udp, Some(udp)) => {
@@ -997,9 +1065,26 @@ impl Driver {
         self.act(action)
     }
 
+    /// Does what the window says of the ports it forwards, and moves
+    /// their connections' bytes, within a budget.
+    fn forward(&mut self) {
+        while let Ok(command) = self.forward_told.try_recv() {
+            self.forwards
+                .command(command, &mut self.connection, self.poll.registry());
+        }
+        self.forwards.run(
+            &mut self.connection,
+            self.poll.registry(),
+            self.stream.is_some(),
+            &mut self.read_buffer,
+        );
+    }
+
     /// Tells the client the connection has ended, after anything the
-    /// daemon sent that it can still take.
+    /// daemon sent that it can still take. The connections it forwarded
+    /// are reset.
     fn hang_up(&mut self) {
+        self.forwards.end();
         let _ = write_some(&mut self.local, &mut self.to_local);
         let _ = self.local.shutdown(Shutdown::Both);
     }

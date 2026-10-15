@@ -26,6 +26,7 @@
 //! by a thread of its own ([`carry`]).
 
 mod client;
+mod forward;
 mod path;
 mod server;
 
@@ -40,7 +41,7 @@ use quinn_proto::{TransportConfig, VarInt};
 pub(crate) use client::{Carried, carry};
 pub use client::{Contact, Redial, Redialed};
 pub use path::Route;
-pub(crate) use server::{QuicEvent, QuicServer, Received};
+pub(crate) use server::{Forwarded, QuicEvent, QuicServer, Received};
 
 /// The name the daemon's certificate is for. Nothing checks it: the client
 /// pins the certificate itself.
@@ -187,6 +188,36 @@ impl Loss {
     }
 }
 
+/// How much of a stream's data either end takes before it has read it,
+/// and so how much the other end may have sent on it and not had
+/// acknowledged: quinn's own default, 100 ms at 100 Mbit/s, written out
+/// for [`send_window`] to count with.
+const STREAM_WINDOW: u32 = 1_250_000;
+
+/// How much one end may have sent on all its streams together and not
+/// had acknowledged, before writing to any of them waits: eight streams'
+/// worth, quinn's own default, while no ports are forwarded.
+const SEND_WINDOW: u64 = 8 * STREAM_WINDOW as u64;
+
+/// The most connections a window may forward at once, over all its
+/// forwards: a stream each, beside the one it talks over. Each holds at
+/// most [`STREAM_WINDOW`] at either end that the other hasn't read.
+pub(crate) const MOST_FORWARDED: u32 = 64;
+
+/// What a forwarded connection's streams send with: less than
+/// everything else, which sends with 0, so a download through a forward
+/// only ever takes what's left after terminals' updates, answers and keys.
+pub(crate) const FORWARD_PRIORITY: i32 = -1;
+
+/// The send window for a connection with `forwarded` connections going
+/// through it. Each can fill only its own stream's window, so growing the
+/// send window by that much for each leaves the rest of it to everything
+/// else: forwards never make writing a terminal's update wait.
+pub(crate) fn send_window(forwarded: usize) -> u64 {
+    let forwarded = u64::try_from(forwarded).unwrap_or(u64::MAX);
+    SEND_WINDOW.saturating_add(forwarded.saturating_mul(u64::from(STREAM_WINDOW)))
+}
+
 /// How both ends' connections behave.
 fn transport() -> TransportConfig {
     let mut transport = TransportConfig::default();
@@ -206,7 +237,12 @@ fn transport() -> TransportConfig {
         .min_mtu(PACKET_SIZE)
         .mtu_discovery_config(None)
         // A stream for each terminal a client follows.
-        .max_concurrent_uni_streams(VarInt::from_u32(1024));
+        .max_concurrent_uni_streams(VarInt::from_u32(1024))
+        // The one a client talks over, and one for each connection it
+        // forwards.
+        .max_concurrent_bidi_streams(VarInt::from_u32(1 + MOST_FORWARDED))
+        .stream_receive_window(VarInt::from_u32(STREAM_WINDOW))
+        .send_window(SEND_WINDOW);
     transport
 }
 
@@ -298,6 +334,13 @@ pub(crate) fn probe(key: &[u8; 16], nonce: u64) -> [u8; PROBE_LEN] {
 pub(crate) fn is_probe(datagram: &[u8], key: &[u8; 16]) -> bool {
     datagram.len() == PROBE_LEN && datagram[..8] == *PROBE && datagram[8..24] == *key
 }
+
+/// The most of a carrier's packets left unwritten, for its socket to
+/// take, before no more are made for the connections on it until it has
+/// taken them. Whatever waits there waits in order, a key's echo behind a
+/// download through a forwarded port; whatever QUIC hasn't made into
+/// packets yet still goes in order of priority.
+pub(crate) const CARRIER_BACKLOG: usize = 64 * 1024;
 
 /// Appends `packet` to `out`, framed for a carrier.
 pub(crate) fn frame_packet(packet: &[u8], out: &mut Vec<u8>) {

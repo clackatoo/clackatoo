@@ -28,6 +28,12 @@
 //! deny` turns down those asking, `Devices revoke N` unpairs one, and
 //! `Devices unlock` lets devices pair with the password again, after too
 //! many wrong ones locked it.
+//! `PortForward 8080`, in a window on another machine, forwards that port
+//! here to the same port there, as `ssh -L` does; `PortForward 3000:8080`
+//! forwards port 3000 here to 8080 there, and `PortForward
+//! 3000:somehost:8080` to a machine the daemon's reaches. `PortForward`
+//! alone lists the forwards, and `PortForward! 8080` stops one, or with no
+//! port, all of them.
 //! `Board NAME` opens the board called that, made if there's none, in a
 //! tab or with a mark beside; `Board` alone, or `Boards`, picks one in
 //! the finder. `Browser` opens the focused chat's page in clackatoo's
@@ -46,6 +52,7 @@
 //! `&`, `~`, `g`, `v`, `d`, `y`, `m`, `t` and `normal`, is the focused
 //! editor's (see `editor::ex`).
 
+use clackatoo_daemon::forward::Spec;
 use clackatoo_protocol::{ReviewScope, Side};
 
 use crate::editor::HunkAction;
@@ -172,6 +179,23 @@ pub(crate) enum Command {
     Browser(Place),
     /// `:Devices`: the devices paired with the web app, or this, to them.
     Devices(DevicesCommand),
+    /// `:PortForward`: forwarding ports from this machine to the daemon's.
+    PortForward(Forwarding),
+}
+
+/// What `:PortForward` does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Forwarding {
+    /// Lists the forwards.
+    List,
+    /// Forwards a port, as this says.
+    Add(Spec),
+    /// The same, asked by the config's `client.forward`: in a window on
+    /// this machine, which has nothing to forward, nothing is said, as the
+    /// config runs in every window.
+    Config(Spec),
+    /// `!`: stops forwarding this port here, or with none, every port.
+    Stop(Option<u16>),
 }
 
 /// What `:Devices` does.
@@ -247,7 +271,8 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, registers, marks, \
                         update, connect, w, q, e, s, g, v, d, y, m, t, normal, Format, Files, Grep, \
                         Buffers, Diagnostics, Boards, Browser, Gitsigns, Explore, AgentUndo, AgentRedo, \
-                        Review, ReviewKeep, ReviewReject, ReviewSend, Blame and Devices";
+                        Review, ReviewKeep, ReviewReject, ReviewSend, Blame, Devices and \
+                        PortForward";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -274,6 +299,9 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "connect" => return Ok(Command::Connect(argument.map(str::to_owned))),
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
         "Devices" => return devices_command(argument).map(Command::Devices),
+        "PortForward" | "PortForward!" => {
+            return forwarding(word.ends_with('!'), argument).map(Command::PortForward);
+        }
         _ => {}
     }
     let command = (file_command(word, argument))
@@ -364,6 +392,20 @@ fn devices_command(argument: Option<&str>) -> Result<DevicesCommand, String> {
         }),
         _ => Err(format!("no such thing to do to devices: {usage}")),
     }
+}
+
+/// `:PortForward`, or with `stop`, `:PortForward!`, with what `argument`
+/// says: a forward, or which port here to stop.
+fn forwarding(stop: bool, argument: Option<&str>) -> Result<Forwarding, String> {
+    let spec = argument
+        .map(str::parse::<Spec>)
+        .transpose()
+        .map_err(|why| format!("{why}: PortForward takes PORT, LOCAL:PORT or LOCAL:HOST:PORT"))?;
+    Ok(match (stop, spec) {
+        (false, None) => Forwarding::List,
+        (false, Some(spec)) => Forwarding::Add(spec),
+        (true, spec) => Forwarding::Stop(spec.map(|spec| spec.local)),
+    })
 }
 
 /// `:Gitsigns`, with what to do to the hunk at the cursor, as `argument`
@@ -826,6 +868,34 @@ mod tests {
         assert_eq!(
             parse("update desk ").unwrap(),
             Command::Update(Some("desk".into()))
+        );
+    }
+
+    #[test]
+    fn port_forward_adds_lists_and_stops() {
+        assert_eq!(
+            parse("PortForward").unwrap(),
+            Command::PortForward(Forwarding::List)
+        );
+        assert_eq!(
+            parse("PortForward 3000:8080").unwrap(),
+            Command::PortForward(Forwarding::Add(Spec {
+                local: 3000,
+                host: "localhost".into(),
+                port: 8080,
+            }))
+        );
+        assert_eq!(
+            parse("PortForward! 3000").unwrap(),
+            Command::PortForward(Forwarding::Stop(Some(3000)))
+        );
+        assert_eq!(
+            parse("PortForward!").unwrap(),
+            Command::PortForward(Forwarding::Stop(None))
+        );
+        assert_eq!(
+            parse("PortForward eighty").unwrap_err(),
+            "\"eighty\" isn't a port: PortForward takes PORT, LOCAL:PORT or LOCAL:HOST:PORT"
         );
     }
 

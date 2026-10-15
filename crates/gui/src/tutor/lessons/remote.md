@@ -28,6 +28,12 @@ Once connected, the connection moves out of ssh onto UDP if it can, so it carrie
 
 When the other machine stops answering, a red notice in the top bar counts the seconds. Editors go on editing, and what you type in them is sent once the connection's back; keys for terminals are turned down, with "not connected: keys aren't sent", rather than reach a shell long after you meant them. If the connection drops, as when the daemon there is upgraded, the window connects again by itself, keeping its panes and what you typed into editors, with "Reconnecting" in the top bar meanwhile. Nothing on the other machine stops.
 
+## Forwarding a port
+
+A dev server on the other machine that listens on `localhost:8080` can't be reached from this machine's browser. `:PortForward 8080` forwards it: this machine's `localhost:8080` then reaches the other machine's, through the window's own connection, so it survives the network changing as the window does. `:PortForward 3000:8080` uses port 3000 here, as when 8080 is taken here, which the bar says, suggesting a free port; `:PortForward 3000:box:8080` reaches a machine the other one can, as `box:8080`. Only this machine can connect to the ports forwarded.
+
+`:PortForward` alone lists the forwards and how many connections each has open, and `:PortForward! 8080` stops one, or with no port, all of them. They're kept while the window is open: when the connection drops, or the daemon there is upgraded, connections open through them are cut off, and new ones wait until the window has connected again. If nothing listens at the other end, the bar says so once, not for every try. `client.forward(8080)` in your config forwards a port whenever the window opens.
+
 ## From your phone
 
 The daemon can serve a web app, for your phone or any browser: your chats by workspace, with those that need you first, and each chat as a window shows it, with its questions, the box to send a message, Stop, the model, mode and effort menus, and the cards of the chats its agent started. It's off until `~/.config/clackatoo/daemon/web.toml` says `mode = "tailscale"`, which listens on a socket only you can reach, `~/.local/share/clackatoo/web/web.sock`, for `tailscale serve --bg unix:` and that path to give your tailnet, over HTTPS; `mode = "public"` serves it to the network, with your own certificate and a password.

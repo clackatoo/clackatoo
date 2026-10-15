@@ -30,6 +30,7 @@ mod editor;
 mod explorer;
 mod finder;
 mod fonts;
+mod forwards;
 mod glyphs;
 mod history;
 pub mod hosts;

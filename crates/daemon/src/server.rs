@@ -65,6 +65,7 @@ mod edit_log;
 mod explorers;
 mod finder;
 mod fits;
+mod forwards;
 mod groups;
 mod hover;
 mod language;
@@ -199,6 +200,9 @@ enum Source {
     Tools(crate::mcp::Connection),
     /// A connection to the web app, while it's HTTP.
     Web(Box<crate::web::HttpConn>),
+    /// A connection a window on another machine forwards: its socket, if
+    /// one is being made, and its QUIC stream.
+    Forward(forwards::Pipe),
 }
 
 /// What a terminal is: a program on a PTY, or a chat with an agent, which
@@ -819,6 +823,8 @@ pub struct Daemon {
     chat_watch: web::ChatWatch,
     /// Web connections with more to read or answer than one turn takes.
     web_unread: Vec<Token>,
+    /// Connections windows on other machines forward.
+    forwards: forwards::Forwards,
 }
 
 /// Stops a running [`Daemon`] from another thread.
@@ -927,6 +933,7 @@ impl Daemon {
             web: None,
             chat_watch: web::ChatWatch::default(),
             web_unread: Vec::new(),
+            forwards: forwards::Forwards::default(),
         })
         .map(|mut daemon| {
             daemon.start_web();
@@ -1147,6 +1154,7 @@ impl Daemon {
             let tools_unread = self.tools_unread();
             let web_unread = !self.web_unread.is_empty();
             let timeout = if self.unread.is_empty()
+                && !self.forwards_ready()
                 && !self.views_pending
                 && self.waiting.is_empty()
                 && !agent_unread
@@ -1176,6 +1184,7 @@ impl Daemon {
                     .chain(self.next_agent_due())
                     .chain(self.next_web_due())
                     .chain(self.next_fit_due())
+                    .chain(self.next_forward_due())
                     .chain(self.upgrade_to.as_ref().map(|upgrading| upgrading.until))
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
@@ -1229,6 +1238,8 @@ impl Daemon {
             self.time_out_clipboard_asks();
             self.lapse_fits();
             self.time_out_tools();
+            self.take_lookups();
+            self.time_out_forwards();
             self.relay_chats();
             self.take_browser();
             self.web_chores();
@@ -1237,11 +1248,14 @@ impl Daemon {
             self.send_reviews();
             self.send_view_updates();
             self.transmit_quic();
-            // Floods last, once this turn's updates have gone out.
-            // Updates for what they showed go next turn, which doesn't wait
-            // for an event while there are any; what else they sent over
-            // QUIC, such as a copy to a remote window's clipboard, goes now.
-            if self.read_floods() {
+            // Floods last, once this turn's updates have gone out, and
+            // forwarded connections with them. Updates for what floods
+            // showed go next turn, which doesn't wait for an event while
+            // there are any; what else they sent over QUIC, such as a copy
+            // to a remote window's clipboard, goes now, as do the bytes of
+            // forwarded connections.
+            let flooded = self.read_floods();
+            if self.move_forwarded() || flooded {
                 self.transmit_quic();
             }
         }
@@ -1408,6 +1422,7 @@ impl Daemon {
                 Some(Source::Carrier(_)) => self.serve_carrier(token, event),
                 Some(Source::Tools(_)) => self.serve_tools(token, event),
                 Some(Source::Web(_)) => self.serve_web(token),
+                Some(Source::Forward(_)) => self.queue_forward(token),
                 None => {}
             },
         }
@@ -2468,6 +2483,9 @@ impl Daemon {
             Request::RevokeDevice { device } => self.revoke_device(device),
             Request::AnswerPairing { code } => self.answer_pairing(token, code.as_deref()),
             Request::UnlockPairing => self.unlock_pairing(token),
+            Request::Forward(_) => Err(Error::Forward(clackatoo_protocol::ForwardFailure::Other(
+                "a forwarded connection asks on a QUIC stream of its own".into(),
+            ))),
             request @ (Request::Install { .. } | Request::Decline { .. }) => {
                 self.respond_about_installs(token, request);
                 Ok(Response::Done)
@@ -2781,10 +2799,11 @@ impl Daemon {
             self.forget_stages(token, None);
             self.forget_piece_questions(token, None);
             self.forget_listings(token);
-            if let Link::Quic(handle) = client.link
-                && let Some(quic) = self.quic.as_mut()
-            {
-                quic.close(handle, Instant::now(), why);
+            if let Link::Quic(handle) = client.link {
+                self.abandon_forwards(Some(handle));
+                if let Some(quic) = self.quic.as_mut() {
+                    quic.close(handle, Instant::now(), why);
+                }
             }
             if let Some(web) = self.web.as_mut() {
                 web.conns.retain(|&conn| conn != token);
@@ -3024,6 +3043,11 @@ impl Daemon {
                             slot.typist.take_if(|typist| *typist == token);
                         }
                     }
+                    QuicEvent::Forwarded(handle, stream) => self.forwarded(handle, stream),
+                    QuicEvent::ForwardReady(handle, stream) => self.forward_ready(handle, stream),
+                    QuicEvent::ForwardEnded(handle, stream, acked) => {
+                        self.forward_ended(handle, stream, acked);
+                    }
                 }
             }
         }
@@ -3063,6 +3087,9 @@ impl Daemon {
         };
         let started = Instant::now();
         quic.close_all(started, reason);
+        // Their sockets are reset rather than left to close as the
+        // daemon's do.
+        self.abandon_forwards(None);
         let deadline = started + CLOSING_WAIT;
         let mut events = Events::with_capacity(64);
         loop {
@@ -3122,29 +3149,51 @@ impl Daemon {
             return;
         };
         let mut carriers = Vec::new();
-        quic.transmit(Instant::now(), |address, packet| {
-            match quic::carrier_id(address) {
-                Some(CarrierId { key, generation }) => {
-                    if let Some(Source::Carrier(carrier)) = self.sources.get_mut(key)
-                        && carrier.generation == generation
-                    {
-                        quic::frame_packet(packet, &mut carrier.outgoing);
-                        if !carriers.contains(&key) {
-                            carriers.push(key);
-                        }
-                    }
+        let registry = self.poll.registry();
+        // Carriers backed up already get no packets made for them.
+        let full: Vec<usize> = (self.sources.iter())
+            .filter(|(_, source)| {
+                matches!(source, Source::Carrier(carrier)
+                    if carrier.outgoing.len() >= quic::CARRIER_BACKLOG)
+            })
+            .map(|(key, _)| key)
+            .collect();
+        let backed_up =
+            |address| quic::carrier_id(address).is_some_and(|id| full.contains(&id.key));
+        quic.transmit(Instant::now(), backed_up, |address, packet| {
+            let Some(CarrierId { key, generation }) = quic::carrier_id(address) else {
+                // A packet the socket has no room for is as good as lost,
+                // and QUIC sends it again.
+                if let Some(udp) = &self.udp
+                    && let Err(err) = udp.send_to(packet, address)
+                    && err.kind() != io::ErrorKind::WouldBlock
+                {
+                    log::debug!("UDP send to {address} failed: {err}");
                 }
-                // A packet the socket has no room for is as good as lost, and
-                // QUIC sends it again.
-                None => {
-                    if let Some(udp) = &self.udp
-                        && let Err(err) = udp.send_to(packet, address)
-                        && err.kind() != io::ErrorKind::WouldBlock
-                    {
-                        log::debug!("UDP send to {address} failed: {err}");
-                    }
+                return true;
+            };
+            if let Some(Source::Carrier(carrier)) = self.sources.get_mut(key)
+                && carrier.generation == generation
+            {
+                quic::frame_packet(packet, &mut carrier.outgoing);
+                if !carriers.contains(&key) {
+                    carriers.push(key);
+                }
+                // Backed up: written now, and if its socket won't take it,
+                // the rest waits in QUIC, in order of priority. A failure
+                // is found by the flush after.
+                if carrier.outgoing.len() >= quic::CARRIER_BACKLOG {
+                    let _ = write_out(
+                        registry,
+                        &mut carrier.stream,
+                        Token(key),
+                        &mut carrier.outgoing,
+                        &mut carrier.wants_writable,
+                    );
+                    return carrier.outgoing.len() < quic::CARRIER_BACKLOG;
                 }
             }
+            true
         });
         for key in carriers {
             self.flush_carrier(Token(key));

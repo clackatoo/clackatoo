@@ -68,6 +68,9 @@ pub(crate) enum SessionEvent {
         /// The protocol version the connection runs at: the daemon's, if
         /// it's older than the window.
         wire: u32,
+        /// Where the window's forwards go, for a daemon on another
+        /// machine.
+        forwarder: Option<clackatoo_daemon::forward::Forwarder>,
     },
     /// A daemon on another machine went out of contact, or came back.
     Contact,
@@ -128,6 +131,9 @@ pub(crate) enum SessionEvent {
     /// Machines to connect to, for the picker of one. Sent from a thread
     /// finding them, not the session's (see [`crate::connect::gather`]).
     Hosts(crate::connect::Found),
+    /// A port forwarded ran into something to say. Sent from the QUIC
+    /// connection's thread (see [`crate::forwards`]).
+    Forwards,
 }
 
 /// What the window tells the session thread.
@@ -332,6 +338,7 @@ fn run(
         }
     };
     let contact = client.contact();
+    let forwarder = client.forwarder();
     let wire = client.wire();
     if let Some(contact) = &contact {
         let proxy = proxy.clone();
@@ -345,6 +352,7 @@ fn run(
                 contact,
                 daemon_version,
                 wire,
+                forwarder,
             };
             if proxy.send_event(connected).is_err() {
                 return;

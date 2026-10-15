@@ -708,6 +708,70 @@ fn a_flood_down_a_narrow_link_skips_to_the_latest_screen() {
     );
 }
 
+#[test]
+#[ignore = "slow: typing while a forwarded port downloads down a narrow link"]
+fn typing_while_a_forwarded_port_downloads_down_a_narrow_link_stays_quick() {
+    use std::io::{Read, Write};
+
+    let daemon = TestDaemon::start();
+    // 20 Mbit/s with 20 ms each way, and a router's queue of 100 ms.
+    let network = Network::new(Conditions::both(Impairment {
+        delay: Duration::from_millis(20),
+        rate: Some(20_000_000 / 8),
+        queue: Duration::from_millis(100),
+        ..Impairment::default()
+    }));
+    let mut session = Session::open(&daemon, &network);
+    wait_for_route(&mut session, Route::Udp, ON_UDP_LIMIT);
+    session.type_for(Duration::from_secs(5), TYPING);
+    session.report("before the download");
+    let before = session.echoes.percentile(0.5);
+    session.echoes = Latencies::new();
+
+    // A server on the daemon's machine sending as fast as it can, and a
+    // browser on the window's reading it all, through a forward.
+    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = server.accept() {
+            let block = vec![b'x'; 64 * 1024];
+            while stream.write_all(&block).is_ok() {}
+        }
+    });
+    let mut forwards = clackatoo_daemon::forward::Forwards::new(|| {});
+    let spec = clackatoo_daemon::forward::Spec {
+        local: 0,
+        host: "localhost".into(),
+        port,
+    };
+    let local = forwards.add(spec).unwrap().local;
+    assert!(forwards.attach(session.client.forwarder().unwrap()));
+    let read = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counted = Arc::clone(&read);
+    let mut browser = std::net::TcpStream::connect(("127.0.0.1", local)).unwrap();
+    std::thread::spawn(move || {
+        let mut buffer = vec![0; 64 * 1024];
+        while let Ok(n @ 1..) = browser.read(&mut buffer) {
+            counted.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+    let started = Instant::now();
+    session.type_for(Duration::from_secs(10), TYPING);
+    let rate = read.load(std::sync::atomic::Ordering::Relaxed) / started.elapsed().as_secs();
+    session.report("while a forwarded port downloads");
+    eprintln!("NETEM   the download went at {} kB/s", rate / 1000);
+    let during = session.echoes.percentile(0.5);
+    assert!(rate > 500_000, "the download crawled at {rate} B/s");
+    // A guard on how it goes today, not where it should be: the download
+    // fills the router's queue, which echoes then wait in, as they would
+    // behind any download. Pacing forwards as background traffic would
+    // keep it near empty.
+    assert!(
+        during < before + Duration::from_millis(150),
+        "echoes went from {before:?} to {during:?}"
+    );
+}
+
 /// Attaches to `terminal` and takes its first view, whatever it shows.
 fn attach_any(client: &mut Client, terminal: TerminalId) -> View {
     client.attach(terminal).unwrap();

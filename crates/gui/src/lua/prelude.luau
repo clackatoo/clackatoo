@@ -182,6 +182,12 @@ local client = {
 	cmd = function(line)
 		call(core.command, line)
 	end,
+	-- Forwards a port from this machine to the daemon's, when the window
+	-- is on another machine's, as `:PortForward` does:
+	-- `client.forward(8080)`, `client.forward("3000:8080")`.
+	forward = function(spec)
+		call(core.forward, tostring(spec))
+	end,
 	-- The options, by name or short name, as Vim's `vim.opt`:
 	-- `client.opt.number = false`.
 	opt = setmetatable({}, {

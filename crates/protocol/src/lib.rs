@@ -38,7 +38,9 @@
 //! machine reaches the daemon over SSH, and the stream is a QUIC stream:
 //! its connection to the daemon's socket turns into a carrier of QUIC
 //! packets with [`Request::CarryQuic`], and the client then opens a QUIC
-//! connection through it, whose first stream it talks over as usual.
+//! connection through it, whose first stream it talks over as usual. Each
+//! two-way stream it opens after that carries a connection it forwards to
+//! the daemon's machine (see [`Forward`]).
 //!
 //! A phone, or any browser, reaches the daemon through its web app, which
 //! the daemon serves: the byte stream is then a WebSocket, each of whose
@@ -58,6 +60,7 @@ pub mod corpus;
 mod devices;
 mod files;
 mod find;
+mod forward;
 pub mod frame;
 mod review;
 mod view;
@@ -99,6 +102,7 @@ pub use files::{
     GitMark, OpenFiles,
 };
 pub use find::{Done, Found, FoundBuffer, FoundLine, FoundSymbol, Search};
+pub use forward::{Forward, ForwardFailure};
 pub use review::{
     ChatName, CommentPlace, Hunks, Made, NewReview, ReviewAction, ReviewChat, ReviewComment,
     ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
@@ -114,7 +118,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 81;
+pub const PROTOCOL_VERSION: u32 = 82;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -879,6 +883,14 @@ pub enum Request {
         /// size is left as it is.
         renew: bool,
     },
+    /// Connects to where this says, on the daemon's machine, for a port
+    /// a window on another machine forwards (see [`Forward`]). Sent only
+    /// as the first message on a QUIC stream of its own, never on the one
+    /// the client talks over; the stream then carries the connection.
+    /// Answered with [`Response::Done`] once connected, or
+    /// [`Error::Forward`]. New in protocol 82: a client asks
+    /// [`wire::daemon_has`] with [`wire::FORWARDS`] before sending it.
+    Forward(Forward),
 }
 
 /// How to start a terminal.
@@ -1156,6 +1168,10 @@ pub enum Error {
     /// protocol 75.
     #[error("terminal {0} isn't fitted to this client any more")]
     NotFitted(TerminalId),
+    /// A forwarded connection couldn't be made, and why
+    /// ([`Request::Forward`]). New in protocol 82.
+    #[error("{0}")]
+    Forward(ForwardFailure),
 }
 
 /// Identifies a terminal within one daemon. IDs are never reused while

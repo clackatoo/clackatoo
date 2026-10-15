@@ -351,6 +351,9 @@ pub(crate) struct Desk {
     /// Whether `:connect` asked for the picker of a machine, waiting for
     /// the window to open it.
     connect_asked: bool,
+    /// What `:PortForward` asked for, waiting for the window to do it, as
+    /// the window keeps the forwards (see [`crate::forwards`]).
+    forwards_asked: Vec<crate::command::Forwarding>,
     /// The tutor's lessons, and the lesson open.
     tutor: lessons::Tutor,
     /// The window's mode, as last taken from a pane that has one (see
@@ -2215,6 +2218,7 @@ impl Desk {
             Command::Set(words) => return self.run_set(&words),
             Command::Update(host) => return self.ask_update(host),
             Command::Connect(host) => return self.ask_connect(host),
+            Command::PortForward(forwarding) => return self.forwards_asked.push(forwarding),
             _ => {}
         }
         let Some(shown) = self.shown else { return };
@@ -2314,7 +2318,11 @@ impl Desk {
             Command::Board { place, name } => self.open_board(name, place),
             Command::Browser(place) => self.open_browser(place),
             Command::Review(review) => self.run_review(review),
-            Command::Reload | Command::Set(_) | Command::Update(_) | Command::Connect(_) => {}
+            Command::Reload
+            | Command::Set(_)
+            | Command::Update(_)
+            | Command::Connect(_)
+            | Command::PortForward(_) => {}
         }
     }
 
@@ -7163,6 +7171,40 @@ mod tests {
         command(&mut desk, "connect server");
         assert!(!desk.take_connect_asked());
         assert!(note(&desk).starts_with("bringing server's workspaces in here isn't built yet"));
+    }
+
+    #[test]
+    fn port_forward_is_left_to_the_window() {
+        use crate::command::Forwarding;
+        let mut desk = desk(one_tab(pane(1)));
+        answer_all(&mut desk);
+        normal_mode(&mut desk);
+        command(&mut desk, "PortForward 8080");
+        command(&mut desk, "PortForward! 8080");
+        let asked = desk.take_forwards_asked();
+        assert!(matches!(
+            asked[..],
+            [Forwarding::Add(_), Forwarding::Stop(Some(8080))]
+        ));
+        assert!(desk.take_forwards_asked().is_empty(), "once");
+        // The window does it: nothing goes to the daemon.
+        assert_eq!(answer_all(&mut desk), []);
+        // From the config, it's the config's, which a window on this
+        // machine passes over without a word.
+        desk.lua_from(r#"client.forward(8080) client.forward("3000:box:80")"#);
+        let asked = desk.take_forwards_asked();
+        assert!(
+            matches!(&asked[..], [Forwarding::Config(a), Forwarding::Config(b)]
+                if a.local == 8080 && b.host == "box"),
+            "{asked:?}"
+        );
+        desk.lua_from(r#"client.forward("eighty")"#);
+        assert!(desk.take_forwards_asked().is_empty());
+        assert!(
+            (desk.message.as_deref()).is_some_and(|message| message.contains("client.forward")),
+            "{:?}",
+            desk.message
+        );
     }
 
     #[test]

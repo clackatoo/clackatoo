@@ -27,7 +27,7 @@ use clackatoo_text::{
 
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
-    EXITED, FALLBACKS, HOVER, INLAY_HINTS, LIMITS, PHONE_TERMINALS, SYMBOLS, USES, WORDS,
+    EXITED, FALLBACKS, FORWARDS, HOVER, INLAY_HINTS, LIMITS, PHONE_TERMINALS, SYMBOLS, USES, WORDS,
 };
 use crate::{
     AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
@@ -45,10 +45,11 @@ use crate::{
     Answer, BoardAction, BoardAuthor, BoardEntry, BoardLink, BoardScope, BoardSummary, BoardUpdate,
     BrowserFrame, BrowserStatus, BrowserUpdate, ChatChoices, ChatSummary, CodeAction, CommentPlace,
     CompletionItem, Device, Done, Entry, EntryKind, Expect, FileLocation, FileOp, FileOpError,
-    FileStamp, FilesAction, FilesUpdate, Found, FoundLine, FoundSymbol, GitMark, Hunks, InlayHint,
-    InlayHintKind, Made, OpenBoard, OpenFile, OpenFiles, PairingAsk, PairingState, PostKind, Query,
-    ReviewAction, ReviewChat, ReviewComment, ReviewFile, ReviewHunk, ReviewList, ReviewScope,
-    Search, ServerFeatures, Symbol, TextChange, Trigger, Udp, Use, UseKind,
+    FileStamp, FilesAction, FilesUpdate, Forward, ForwardFailure, Found, FoundLine, FoundSymbol,
+    GitMark, Hunks, InlayHint, InlayHintKind, Made, OpenBoard, OpenFile, OpenFiles, PairingAsk,
+    PairingState, PostKind, Query, ReviewAction, ReviewChat, ReviewComment, ReviewFile, ReviewHunk,
+    ReviewList, ReviewScope, Search, ServerFeatures, Symbol, TextChange, Trigger, Udp, Use,
+    UseKind,
 };
 
 /// One sample: a message either side sends.
@@ -717,6 +718,34 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             })))]),
         })),
     ));
+    samples.extend(forwards().into_iter().map(|sample| (FORWARDS, sample)));
+    samples
+}
+
+/// Samples of protocol 82: a forwarded connection asked for, made, and
+/// failed for each reason.
+fn forwards() -> Vec<Sample> {
+    use Sample::{Client, Server};
+    let mut samples = vec![
+        Client(ClientMessage::Request(Request::Forward(Forward {
+            host: "localhost".into(),
+            port: 8080,
+        }))),
+        Server(ServerMessage::Response(Response::Done)),
+    ];
+    samples.extend(
+        [
+            ForwardFailure::Refused,
+            ForwardFailure::NoSuchHost,
+            ForwardFailure::TimedOut,
+            ForwardFailure::Other("no route to host".into()),
+        ]
+        .map(|why| {
+            Server(ServerMessage::Response(Response::Error(Error::Forward(
+                why,
+            ))))
+        }),
+    );
     samples
 }
 

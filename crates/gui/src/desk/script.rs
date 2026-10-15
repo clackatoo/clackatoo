@@ -364,6 +364,10 @@ impl Desk {
                 Ok(command) => self.run(command),
                 Err(message) => self.message = Some(message),
             },
+            FromLua::Forward(spec) => {
+                self.forwards_asked
+                    .push(crate::command::Forwarding::Config(spec));
+            }
             FromLua::Set { option, value } => self.config_sets(option, value),
             FromLua::Error(text) => {
                 log::warn!("config: {text}");

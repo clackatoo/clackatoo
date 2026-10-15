@@ -564,6 +564,19 @@ fn acting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    let s = state.clone();
+    core.set(
+        "forward",
+        lua.create_function(move |_, spec: String| {
+            let spec = spec.parse().map_err(|why: String| {
+                mlua::Error::runtime(format!(
+                    "{why}: client.forward takes PORT, LOCAL:PORT or LOCAL:HOST:PORT"
+                ))
+            })?;
+            s.tell(FromLua::Forward(spec));
+            Ok(())
+        })?,
+    )?;
     Ok(())
 }
 

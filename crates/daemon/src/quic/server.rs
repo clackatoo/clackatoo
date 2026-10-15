@@ -2,6 +2,9 @@
 //!
 //! Each connection is one client, talking over the first stream it opens.
 //! The daemon opens more, one-way, to send it each terminal's view on.
+//! Every two-way stream the client opens after the first is a connection
+//! it forwards (see [`clackatoo_protocol::Forward`]), which the event loop
+//! hears of and serves.
 //! The event loop hands this the packets its carriers receive, and the
 //! timeouts it waited for. In return, it gets [`QuicEvent`]s to act on, and
 //! packets to send, each addressed to a carrier.
@@ -36,6 +39,16 @@ pub(crate) enum QuicEvent {
     /// Nothing has been heard from the client for a while: it may be
     /// gone, so it shouldn't be asked anything that waits on it.
     Silent(Token),
+    /// The connection opened another two-way stream, for a connection
+    /// its client forwards. The event loop serves it, or
+    /// [`abandon`](QuicServer::abandon)s it.
+    Forwarded(ConnectionHandle, StreamId),
+    /// A forwarded connection's stream may have more to read, have room
+    /// to write, or have been reset by the client.
+    ForwardReady(ConnectionHandle, StreamId),
+    /// Everything sent on a forwarded connection's stream has been
+    /// acknowledged (`true`), or the client stopped it (`false`).
+    ForwardEnded(ConnectionHandle, StreamId, bool),
 }
 
 /// How long a client may go unheard before it counts as
@@ -50,6 +63,19 @@ pub(crate) enum Received {
     /// Everything it will ever send: it finished or abandoned the stream,
     /// or the connection closed.
     Ended,
+}
+
+/// What reading a forwarded connection's stream found.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Forwarded {
+    /// Everything that had arrived, or as much as there was room for:
+    /// `full` says which.
+    Open { full: bool },
+    /// The client finished its side: nothing more will come.
+    Finished,
+    /// The client abandoned the stream, as its connection was reset, or
+    /// the stream or the connection is gone.
+    Gone,
 }
 
 /// The daemon's QUIC endpoint and its connections.
@@ -317,6 +343,11 @@ impl QuicServer {
         }
     }
 
+    /// The client the connection with `handle` is, once given one.
+    pub(crate) fn client_of(&self, handle: ConnectionHandle) -> Option<Token> {
+        self.connections.get(&handle)?.client
+    }
+
     /// Reads what the client on `handle` has sent into `decoder`.
     pub(crate) fn read(
         &mut self,
@@ -391,6 +422,130 @@ impl QuicServer {
         }
     }
 
+    /// Reads what the client has sent on `stream`, a forwarded
+    /// connection's, onto the end of `into`, while it holds less than
+    /// `most`. What's left stays with QUIC, which tells the client it may
+    /// send more only as it's read: so a connection the daemon's end
+    /// can't keep up with holds the client back.
+    pub(crate) fn read_forwarded(
+        &mut self,
+        handle: ConnectionHandle,
+        stream: StreamId,
+        into: &mut Vec<u8>,
+        most: usize,
+    ) -> Forwarded {
+        let Some(remote) = self.connections.get_mut(&handle) else {
+            return Forwarded::Gone;
+        };
+        let mut receiving = remote.connection.recv_stream(stream);
+        let Ok(mut chunks) = receiving.read(true) else {
+            return Forwarded::Gone;
+        };
+        let read = loop {
+            let room = most.saturating_sub(into.len());
+            if room == 0 {
+                break Forwarded::Open { full: true };
+            }
+            match chunks.next(room) {
+                Ok(Some(chunk)) => into.extend_from_slice(&chunk.bytes),
+                Ok(None) => break Forwarded::Finished,
+                Err(ReadError::Blocked) => break Forwarded::Open { full: false },
+                Err(ReadError::Reset(_)) => break Forwarded::Gone,
+            }
+        };
+        // Credit for the client to send more goes out with the next
+        // transmit.
+        let _ = chunks.finalize();
+        read
+    }
+
+    /// Writes what `stream`, a forwarded connection's, takes of `data`,
+    /// returning how much: none while it has no room, as when the client
+    /// hasn't read what it was sent. `None` if the client stopped it, or
+    /// it or the connection is gone.
+    pub(crate) fn write_forwarded(
+        &mut self,
+        handle: ConnectionHandle,
+        stream: StreamId,
+        data: &[u8],
+    ) -> Option<usize> {
+        let remote = self.connections.get_mut(&handle)?;
+        match remote.connection.send_stream(stream).write(data) {
+            Ok(written) => Some(written),
+            Err(WriteError::Blocked) => Some(0),
+            Err(_) => None,
+        }
+    }
+
+    /// Abandons `stream`, a forwarded connection's, both ways, as when the
+    /// connection it's for was reset or couldn't be made: the client
+    /// resets its own.
+    pub(crate) fn abandon(&mut self, handle: ConnectionHandle, stream: StreamId) {
+        if let Some(remote) = self.connections.get_mut(&handle) {
+            let _ = remote
+                .connection
+                .send_stream(stream)
+                .reset(VarInt::from_u32(0));
+            let _ = remote
+                .connection
+                .recv_stream(stream)
+                .stop(VarInt::from_u32(0));
+        }
+    }
+
+    /// Whether the client stopped `stream`, a forwarded connection's: it
+    /// won't read what's sent on it.
+    pub(crate) fn forward_stopped(&mut self, handle: ConnectionHandle, stream: StreamId) -> bool {
+        let Some(remote) = self.connections.get_mut(&handle) else {
+            return true;
+        };
+        matches!(remote.connection.send_stream(stream).stopped(), Ok(Some(_)))
+    }
+
+    /// Whether the client abandoned `stream`, a forwarded connection's,
+    /// stopping it or, unless it has `finished` its side, resetting it, or
+    /// the connection is gone.
+    pub(crate) fn forward_gone(
+        &mut self,
+        handle: ConnectionHandle,
+        stream: StreamId,
+        finished: bool,
+    ) -> bool {
+        if self.forward_stopped(handle, stream) {
+            return true;
+        }
+        let Some(remote) = self.connections.get_mut(&handle) else {
+            return true;
+        };
+        !finished
+            && !matches!(
+                remote.connection.recv_stream(stream).received_reset(),
+                Ok(None)
+            )
+    }
+
+    /// Tells the client to send no more on `stream`, a forwarded
+    /// connection's, which the daemon has given up on.
+    pub(crate) fn stop_reading(&mut self, handle: ConnectionHandle, stream: StreamId) {
+        if let Some(remote) = self.connections.get_mut(&handle) {
+            let _ = remote
+                .connection
+                .recv_stream(stream)
+                .stop(VarInt::from_u32(0));
+        }
+    }
+
+    /// Notes that `forwarded` connections now go through the connection
+    /// with `handle`, which sizes its send window (see
+    /// [`send_window`](super::send_window)).
+    pub(crate) fn set_forwarded(&mut self, handle: ConnectionHandle, forwarded: usize) {
+        if let Some(remote) = self.connections.get_mut(&handle) {
+            remote
+                .connection
+                .set_send_window(super::send_window(forwarded));
+        }
+    }
+
     /// Closes the connection with `handle`, telling the client why.
     pub(crate) fn close(&mut self, handle: ConnectionHandle, now: Instant, reason: &str) {
         if let Some(remote) = self.connections.get_mut(&handle) {
@@ -447,13 +602,25 @@ impl QuicServer {
         self.connections.values().any(|remote| remote.closing)
     }
 
-    /// Hands each packet ready to go to `send`, with where it goes.
-    pub(crate) fn transmit(&mut self, now: Instant, mut send: impl FnMut(SocketAddr, &[u8])) {
+    /// Hands each packet ready to go to `send`, with where it goes. None is
+    /// made for a connection whose way to its client is `full`, as a
+    /// carrier whose socket is backed up, and no more once `send` says the
+    /// way has filled; but for the packet saying a connection is closed,
+    /// which always goes.
+    pub(crate) fn transmit(
+        &mut self,
+        now: Instant,
+        full: impl Fn(SocketAddr) -> bool,
+        mut send: impl FnMut(SocketAddr, &[u8]) -> bool,
+    ) {
         for (address, packet) in self.answers.drain(..) {
             send(address, &packet);
         }
         for remote in self.connections.values_mut() {
             remote.loss.update(&remote.connection, now);
+            if !remote.closing && full(remote.connection.remote_address()) {
+                continue;
+            }
             loop {
                 self.buffer.clear();
                 let Some(transmit) = remote.connection.poll_transmit(now, 1, &mut self.buffer)
@@ -461,7 +628,7 @@ impl QuicServer {
                     break;
                 };
                 let packet = &self.buffer[..transmit.size];
-                send(transmit.destination, packet);
+                let room = send(transmit.destination, packet) || remote.closing;
                 // Once closed, all a connection sends is the packet saying
                 // so, but for a check of a new path it had waiting, which
                 // goes to another address: only a packet to the client's
@@ -476,12 +643,21 @@ impl QuicServer {
                 {
                     send(transmit.destination, packet);
                 }
+                if !room {
+                    break;
+                }
             }
         }
     }
 }
 
 impl Remote {
+    /// Whether `stream` is a forwarded connection's: one of the client's
+    /// two-way streams, but the one it talks over.
+    fn forwards(&self, stream: StreamId) -> bool {
+        stream.dir() == Dir::Bi && Some(stream) != self.stream
+    }
+
     fn event(&mut self, handle: ConnectionHandle, event: Event, events: &mut Vec<QuicEvent>) {
         let id = handle.0;
         match event {
@@ -491,16 +667,27 @@ impl Remote {
                         self.stream = Some(stream);
                         events.push(QuicEvent::Opened(handle));
                     } else {
-                        // A client talks over one stream.
-                        let _ = self
-                            .connection
-                            .recv_stream(stream)
-                            .stop(VarInt::from_u32(0));
+                        // Below everything else, before anything is
+                        // written to it.
+                        let _ = (self.connection.send_stream(stream))
+                            .set_priority(super::FORWARD_PRIORITY);
+                        events.push(QuicEvent::Forwarded(handle, stream));
                     }
                 }
             }
             Event::Stream(StreamEvent::Readable { id }) if Some(id) == self.stream => {
                 events.extend(self.client.map(QuicEvent::Readable));
+            }
+            Event::Stream(StreamEvent::Readable { id } | StreamEvent::Writable { id })
+                if self.forwards(id) =>
+            {
+                events.push(QuicEvent::ForwardReady(handle, id));
+            }
+            Event::Stream(StreamEvent::Finished { id }) if self.forwards(id) => {
+                events.push(QuicEvent::ForwardEnded(handle, id, true));
+            }
+            Event::Stream(StreamEvent::Stopped { id, .. }) if self.forwards(id) => {
+                events.push(QuicEvent::ForwardEnded(handle, id, false));
             }
             Event::Stream(StreamEvent::Writable { .. }) => {
                 events.extend(self.client.map(QuicEvent::Writable));
@@ -576,8 +763,14 @@ mod tests {
                 }
                 self.server.events(&mut self.events);
                 let mut replies = Vec::new();
-                self.server
-                    .transmit(now, |_, packet| replies.push(packet.to_vec()));
+                self.server.transmit(
+                    now,
+                    |_| false,
+                    |_, packet| {
+                        replies.push(packet.to_vec());
+                        true
+                    },
+                );
                 for packet in replies {
                     moved = true;
                     let mut response = Vec::new();
@@ -687,8 +880,14 @@ mod tests {
         let mut pair = Pair::connect(start);
         pair.server.close_all(start, "the daemon is upgrading");
         let mut packets = Vec::new();
-        pair.server
-            .transmit(start, |_, packet| packets.push(packet.to_vec()));
+        pair.server.transmit(
+            start,
+            |_| false,
+            |_, packet| {
+                packets.push(packet.to_vec());
+                true
+            },
+        );
         for packet in packets {
             let mut response = Vec::new();
             if let Some(DatagramEvent::ConnectionEvent(_, event)) = pair.client.handle(

@@ -144,6 +144,10 @@ gates! {
     /// An account's limits, as its agent says them: `Usage`'s `five_hour`
     /// and `weekly` (`Limit`).
     LIMITS = 81,
+    /// Forwarding a port from a window's machine to the daemon's:
+    /// `Request::Forward` (`Forward`), on a QUIC stream of its own, and
+    /// `Error::Forward` (`ForwardFailure`).
+    FORWARDS = 82,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -458,6 +462,7 @@ impl Since for Error {
             | Self::SessionOpen(_) => EARLIER,
             Self::Unsupported | Self::Other(_) => FALLBACKS,
             Self::NotFollowing(_) | Self::NotFitted(_) => PHONE_TERMINALS,
+            Self::Forward(_) => FORWARDS,
         }
     }
 }

@@ -299,6 +299,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "mouse",
         what: "gv selects the last selection again, and the dot command makes a change made in visual mode again on as much text",
     },
+    News {
+        id: "port-forward",
+        date: "2026-10-15",
+        lesson: "remote",
+        what: ":PortForward 8080 lets a browser here reach port 8080 on a remote window's machine",
+    },
 ];
 
 impl News {

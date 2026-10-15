@@ -188,6 +188,17 @@ impl Client {
         self.carried.as_ref().map(Carried::contact)
     }
 
+    /// A way to forward ports from this machine to the daemon's, over
+    /// the connection: see [`crate::forward`]. `None` for a daemon on this
+    /// machine, which needs none. The handle outlives a
+    /// [`split`](Self::split), and does nothing once the connection ends.
+    #[must_use]
+    pub fn forwarder(&self) -> Option<crate::forward::Forwarder> {
+        self.carried
+            .as_ref()
+            .map(|carried| carried.forwarder(self.wire))
+    }
+
     /// How the connection reaches a daemon on another machine: through
     /// SSH, or straight over UDP. `None` for a daemon on this one.
     #[must_use]

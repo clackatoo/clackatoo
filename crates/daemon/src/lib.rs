@@ -23,6 +23,7 @@ mod chat;
 pub mod client;
 mod explorer;
 mod find;
+pub mod forward;
 mod git;
 mod group;
 mod handoff;

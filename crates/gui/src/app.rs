@@ -7,11 +7,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
 use arboard::{GetExtLinux, LinuxClipboardKind, SetExtLinux};
+use clackatoo_daemon::forward::{Forwarder, Forwards};
 use clackatoo_daemon::launch;
 use clackatoo_daemon::{Contact, Sender};
 use clackatoo_protocol::{
     Axis, Content, Event, Layout, PROTOCOL_VERSION, Pane as LayoutPane, PaneId, ServerMessage,
-    Size, TabId, TerminalId, WorkspaceId,
+    Size, TabId, TerminalId, WorkspaceId, wire,
 };
 use clackatoo_term::Row;
 use clackatoo_term::mouse::MouseAction;
@@ -25,11 +26,13 @@ use winit::window::{CursorIcon, ImePurpose, ResizeDirection, Window, WindowAttri
 use crate::GraphicsApi;
 use crate::chat::{ChatPaint, Pointer};
 use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, Status};
+use crate::command::Forwarding;
 use crate::connect::{self, HostPicker, Purpose};
 use crate::desk::{Desk, TextTarget};
 use crate::desktop::{Button, ButtonLayout, Desktop};
 use crate::finder::view::FinderView;
 use crate::fonts::{CellMetrics, Fonts};
+use crate::forwards;
 use crate::ime::{InputMethod, Preedit};
 use crate::input;
 use crate::layout::{Placement, Tile};
@@ -391,6 +394,9 @@ pub(crate) struct App {
     /// The shell command that runs clackatoo on another machine, for one
     /// picked.
     remote_command: String,
+    /// The ports forwarded to the daemon's machine, kept through every
+    /// reconnection (see [`crate::forwards`]).
+    forwards: Forwards,
     /// Why the window closed, if something went wrong.
     pub(crate) result: anyhow::Result<()>,
 }
@@ -403,6 +409,8 @@ impl App {
         session: Session,
         remote_command: String,
     ) -> Self {
+        let proxy = session.proxy();
+        let forwards = Forwards::new(move || drop(proxy.send_event(SessionEvent::Forwards)));
         Self {
             started,
             startup: Some(Startup { fonts, gpu }),
@@ -437,6 +445,7 @@ impl App {
             pickers: 0,
             picked: None,
             remote_command,
+            forwards,
             result: Ok(()),
         }
     }
@@ -852,6 +861,36 @@ impl App {
         self.send_outbox();
     }
 
+    /// Carries out what `:PortForward` asked for, if it was typed, or
+    /// run from the config.
+    fn forward_ports(&mut self) {
+        let asked = self.desk.take_forwards_asked();
+        if asked.is_empty() {
+            return;
+        }
+        for forwarding in asked {
+            let adding = matches!(forwarding, Forwarding::Add(_) | Forwarding::Config(_));
+            if adding
+                && self.session.host().is_some()
+                && !self.desk.needs_daemon(":PortForward", wire::FORWARDS)
+            {
+                continue;
+            }
+            if let Some(said) = forwards::run(&mut self.forwards, forwarding, self.session.host()) {
+                self.desk.say(said);
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Hands the forwards to the connection just made, which `forwarder`
+    /// reaches, unless its daemon is too old for them, which the bar says.
+    fn attach_forwards(&mut self, forwarder: Forwarder) {
+        if !self.forwards.attach(forwarder) && !self.forwards.is_empty() {
+            self.desk.needs_daemon(":PortForward", wire::FORWARDS);
+        }
+    }
+
     /// Puts what the window knows of releases in the bar, and says `news`
     /// until the next key.
     fn tell_updates(&mut self, news: Option<String>) {
@@ -1130,6 +1169,7 @@ impl App {
         };
         self.open_links();
         self.update();
+        self.forward_ports();
         if self.desk.take_connect_asked() {
             self.open_picker(Purpose::NewWindow, None);
         }
@@ -2729,6 +2769,7 @@ impl App {
                 contact,
                 daemon_version,
                 wire,
+                forwarder,
             } => {
                 let tries = self.reconnecting.take().map_or(0, |reconnecting| {
                     log::info!(
@@ -2749,6 +2790,9 @@ impl App {
                 let remote = self.session.host().is_some();
                 self.desk.daemon_is(wire, daemon_version.clone());
                 self.desk.daemon_at(self.session.host());
+                if let Some(forwarder) = forwarder {
+                    self.attach_forwards(forwarder);
+                }
                 self.desk.connected(workspaces, remote);
                 let host = self.session.host();
                 let news = self.updates.daemon_is(daemon_version.as_deref(), host);
@@ -2895,6 +2939,14 @@ impl App {
                     self.update_title();
                     self.request_redraw();
                 }
+                self.forward_ports();
+            }
+            SessionEvent::Forwards => {
+                let machine = self.session.host().unwrap_or("the daemon's machine");
+                for report in self.forwards.take_reports() {
+                    self.desk.say(forwards::report(&report, machine));
+                }
+                self.request_redraw();
             }
             SessionEvent::Hosts(found) => {
                 if let Some(picker) = &mut self.picker
@@ -2913,6 +2965,7 @@ impl App {
         let was_connected = self.sender.take().is_some();
         self.desk.lost();
         self.contact = None;
+        self.forwards.detach();
         // A machine picked for this window that couldn't be reached: the
         // picker opens again, saying why, to pick another.
         if self.picked.take().is_some() {

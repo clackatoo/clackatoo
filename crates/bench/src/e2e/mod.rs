@@ -19,11 +19,16 @@ mod pty;
 mod report;
 mod window;
 
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use clackatoo_daemon::forward::{Forwards, Spec};
 use clackatoo_daemon::{Client, remote};
 use clackatoo_protocol::{Event, NewTerminal, Size, TerminalId, View, ViewUpdate};
 
@@ -381,7 +386,99 @@ fn latency(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
         Unit::Seconds,
         &during,
     );
+
+    forwarding_latency(&mut client, terminal, &mut view, report)
+}
+
+/// Times keys typed into `terminal`, whose view `client` follows, through
+/// the bridge, while a download as fast as it goes passes through a port
+/// forwarded on the same connection, which must not hold them up either.
+fn forwarding_latency(
+    client: &mut Client,
+    terminal: TerminalId,
+    view: &mut View,
+    report: &mut Report,
+) -> anyhow::Result<()> {
+    let download = Download::start(client)?;
+    let during = view_latency(client, terminal, view, KEYPRESSES / 4)?;
+    let rate = download.stop();
+    report.record(
+        "latency/view-bridge-forward",
+        "keypress to view update, through the bridge, while a forwarded port downloads",
+        Unit::Seconds,
+        &during,
+    );
+    report.record(
+        "throughput/forward",
+        "a forwarded port's download, through the bridge, while keys are typed",
+        Unit::BytesPerSecond,
+        &[rate],
+    );
     Ok(())
+}
+
+/// A download as fast as it goes through a port forwarded over a client's
+/// connection: a server sending without end, on the daemon's side, and a
+/// reader taking it all, on the window's.
+struct Download {
+    _forwards: Forwards,
+    stop: Arc<AtomicBool>,
+    reader: std::thread::JoinHandle<u64>,
+    started: Instant,
+}
+
+impl Download {
+    fn start(client: &Client) -> anyhow::Result<Self> {
+        let server = TcpListener::bind("127.0.0.1:0")?;
+        let port = server.local_addr()?.port();
+        std::thread::spawn(move || {
+            for stream in server.incoming() {
+                let Ok(mut stream) = stream else { return };
+                std::thread::spawn(move || {
+                    let block = vec![b'x'; 64 * 1024];
+                    while stream.write_all(&block).is_ok() {}
+                });
+            }
+        });
+        let mut forwards = Forwards::new(|| {});
+        let spec = Spec {
+            local: 0,
+            host: "localhost".into(),
+            port,
+        };
+        let local = forwards.add(spec)?.local;
+        let forwarder = client.forwarder().context("the bridge's client forwards")?;
+        anyhow::ensure!(forwards.attach(forwarder), "the daemon forwards ports");
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let mut stream = TcpStream::connect(("127.0.0.1", local))?;
+        // Under way before any key is typed.
+        let mut buffer = vec![0; 64 * 1024];
+        stream.read_exact(&mut buffer)?;
+        let reader = std::thread::spawn(move || {
+            let mut read = 0;
+            while !stopping.load(Ordering::Relaxed) {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => read += n as u64,
+                }
+            }
+            read
+        });
+        Ok(Self {
+            _forwards: forwards,
+            stop,
+            reader,
+            started: Instant::now(),
+        })
+    }
+
+    /// Stops reading, returning how fast it went, in bytes a second.
+    fn stop(self) -> f64 {
+        self.stop.store(true, Ordering::Relaxed);
+        let read = self.reader.join().unwrap_or(0);
+        read as f64 / self.started.elapsed().as_secs_f64()
+    }
 }
 
 /// Follows `terminal`'s view, returning the first snapshot.
