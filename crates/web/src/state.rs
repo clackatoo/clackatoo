@@ -6,9 +6,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use clackatoo_protocol::{
-    ChatAction, ChatPatch, ChatSummary, ClientMessage, Content, Event, PROTOCOL_VERSION, Patch,
-    Request, Response, ServerMessage, Size, TerminalId, TerminalInfo, View, ViewUpdate, Workspace,
-    WorkspaceId, Workspaces,
+    ChatAction, ChatNode, ChatPatch, ChatSummary, ClientMessage, Content, Event, PROTOCOL_VERSION,
+    Patch, Request, Response, ServerMessage, Size, TerminalId, TerminalInfo, View, ViewUpdate,
+    Workspace, WorkspaceId, Workspaces,
 };
 
 use crate::keys::{self, Key, Modifiers};
@@ -353,7 +353,15 @@ impl State {
                 for patch in &patches {
                     mark(&mut self.dirty, patch);
                 }
+                let asking = |view: &View| view.chat().is_some_and(ChatNode::asking);
+                let was_asking = asking(view);
                 view.apply(ViewUpdate::Patch(patches));
+                // The line the turn going folds its work under says
+                // whether the agent waits for you.
+                if asking(view) != was_asking {
+                    let going = view.chat().and_then(|chat| chat.turns.len().checked_sub(1));
+                    self.dirty.turns.extend(going);
+                }
             }
             (None, ViewUpdate::Patch(_)) => {}
         }
@@ -893,6 +901,33 @@ mod tests {
         assert_eq!(state.take_outbox().len(), 1);
         state.drawn();
         assert!(state.take_outbox().is_empty(), "acknowledged once");
+    }
+
+    #[test]
+    fn a_question_coming_or_going_redraws_the_turn_going() {
+        use clackatoo_protocol::Question;
+
+        let mut state = State::default();
+        state.connected();
+        state.open_chat(TerminalId(4));
+        state.receive(snapshot(vec![turn("a"), turn("b")]));
+        state.drawn();
+        let question = Question {
+            id: 1,
+            title: "Write notes.txt".into(),
+            choices: Vec::new(),
+            own: false,
+        };
+        state.receive(patch(vec![ChatPatch::Question(Some(question.clone()))]));
+        assert_eq!(state.dirty.turns, BTreeSet::from([1]), "its line says so");
+        assert!(state.dirty.footer);
+        state.drawn();
+        // The same question again changes nothing in the turns.
+        state.receive(patch(vec![ChatPatch::Question(Some(question))]));
+        assert!(state.dirty.turns.is_empty());
+        state.drawn();
+        state.receive(patch(vec![ChatPatch::Question(None)]));
+        assert_eq!(state.dirty.turns, BTreeSet::from([1]));
     }
 
     #[test]

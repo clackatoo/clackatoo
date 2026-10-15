@@ -331,7 +331,10 @@ impl Desk {
         let lesson_file = scratch.join(format!("{id}.txt"));
         let rendered = lesson.render();
         let io = &mut self.tutor.io;
+        // Its folder is made afresh, whether or not the lesson has files to
+        // write in it, as its practice terminal starts there.
         io.push(Io::Remove(dir.clone()));
+        io.push(Io::MakeDir(dir.clone()));
         for (index, (name, text)) in lesson.files.iter().enumerate() {
             // The practice file as the step starts.
             let text = if index == 0 && !lesson.terminal() {

@@ -1025,20 +1025,26 @@ impl ChatNode {
     }
 
     /// Whether the agent is at work: starting, or answering a message.
-    /// Not while it asks the user something, as then it waits for them,
-    /// nor once it couldn't start. The daemon's own question while it
-    /// answers, which only suggests installing the agent it runs another
-    /// way meanwhile, doesn't stop it.
+    /// Not while it's [asking](Self::asking) the user something, as then
+    /// it waits for them, nor once it couldn't start.
     #[must_use]
     pub fn working(&self) -> bool {
-        let asking = (self.question.as_ref())
-            .is_some_and(|question| !(question.own && self.state == ChatState::Answering));
-        !asking
+        !self.asking()
             && match self.state {
                 ChatState::Starting => true,
                 ChatState::Answering => self.going().is_some(),
                 ChatState::Ready | ChatState::Failed(_) => false,
             }
+    }
+
+    /// Whether the agent waits for the user to answer its question, and
+    /// does nothing meanwhile. The daemon's own question while it
+    /// answers, which only suggests installing the agent it runs another
+    /// way, isn't waited on: the agent goes on with its work.
+    #[must_use]
+    pub fn asking(&self) -> bool {
+        (self.question.as_ref())
+            .is_some_and(|question| !(question.own && self.state == ChatState::Answering))
     }
 
     /// When the turn whose seconds clients count, while the agent works,
@@ -1356,8 +1362,9 @@ mod tests {
             choices: Vec::new(),
             own: false,
         });
-        assert!(!chat.working() && chat.doing().is_none());
+        assert!(chat.asking() && !chat.working() && chat.doing().is_none());
         chat.question = None;
+        assert!(!chat.asking());
         // Done.
         chat.turns.last_mut().unwrap().end = Some(TurnEnd {
             at: 1,
@@ -1400,11 +1407,11 @@ mod tests {
             choices: Vec::new(),
             own: true,
         });
-        assert!(chat.working());
+        assert!(chat.working() && !chat.asking());
         assert_eq!(chat.doing().as_deref(), Some("Working…"));
         // Its own question while starting, as whether to install, does.
         chat.state = ChatState::Starting;
-        assert!(!chat.working());
+        assert!(!chat.working() && chat.asking());
         // Ready, with a turn not yet ended: not working.
         chat.question = None;
         chat.state = ChatState::Ready;

@@ -182,6 +182,7 @@ a { color: var(--accent); }
 details > summary { cursor: pointer; list-style: none; }
 details > summary::-webkit-details-marker { display: none; }
 .work > summary { color: var(--muted); font-size: 14px; padding: 4px 0; }
+.work > summary.waiting { color: var(--accent); }
 .work > summary::after { content: " ›"; }
 .work[open] > summary::after { content: " ⌄"; }
 .work[open] { border-left: 2px solid var(--line); padding-left: 10px; margin-bottom: 10px; }

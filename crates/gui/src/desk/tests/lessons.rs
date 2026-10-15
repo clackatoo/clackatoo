@@ -1,7 +1,7 @@
 //! The tutor's lessons, driven through the desk as a window would drive
 //! it, with the daemon played by the test.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clackatoo_protocol::{Answer, Block, BufferUpdate, Construct, Piece, Query, Which, Workspace};
 
@@ -15,6 +15,11 @@ const STATE: &str = "/state/tutor";
 /// A desk whose tutor starts remembering `state`, then connects to
 /// `workspaces`, as a window opens.
 fn tutored(workspaces: Workspaces, state: Option<State>) -> Desk {
+    tutored_in(workspaces, state, Path::new(SCRATCH))
+}
+
+/// As [`tutored`], with its scratch directory at `scratch`.
+fn tutored_in(workspaces: Workspaces, state: Option<State>, scratch: &Path) -> Desk {
     let mut desk = Desk::default();
     desk.set_area(Some(Area {
         rect: crate::layout::Rect {
@@ -30,7 +35,7 @@ fn tutored(workspaces: Workspaces, state: Option<State>) -> Desk {
     desk.start_tutor(Start {
         state,
         state_path: Some(STATE.into()),
-        scratch: Some(SCRATCH.into()),
+        scratch: Some(scratch.into()),
         ..Start::default()
     });
     desk.connected(workspaces, false);
@@ -140,6 +145,56 @@ fn all_finder_rows(desk: &mut Desk) -> Vec<String> {
     view.rows.into_iter().map(|row| row.text).collect()
 }
 
+// --- Every lesson opens --------------------------------------------------
+
+#[test]
+// The Basics once couldn't open: its practice terminal starts in its
+// folder, which only writing practice files made, and it has none.
+fn every_lesson_opens_with_its_folder_there_for_its_practice_pane() {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut desk = tutored_in(
+        workspaces(vec![workspace(1, "w", vec![tab(1, pane(1))])]),
+        Some(seen_everything()),
+        scratch.path(),
+    );
+    snapshot(&mut desk, 1);
+    normal_mode(&mut desk);
+    take_requests(&mut desk);
+    for lesson in tutor::lessons() {
+        let id = lesson.id;
+        desk.message = None;
+        command(&mut desk, &format!("Tutor {id}"));
+        assert_eq!(desk.message, None, "{id}");
+        // The window does the tutor's files before it sends the request.
+        for io in desk.take_tutor_io() {
+            io.run();
+        }
+        let dir = scratch.path().join(id);
+        assert!(dir.is_dir(), "{id}");
+        assert!(scratch.path().join(format!("{id}.txt")).is_file(), "{id}");
+        let asked = take_requests(&mut desk);
+        let [Request::NewTab { terminal, .. }] = &asked[..] else {
+            panic!("{id}: {asked:?}");
+        };
+        match terminal {
+            PaneTerminal::New(new) => {
+                assert!(lesson.terminal(), "{id}");
+                let cwd = new.cwd.as_deref().expect("the lesson's folder");
+                assert_eq!(Path::new(cwd), dir, "{id}");
+                // A program starts there, as the daemon's shell would.
+                let started = std::process::Command::new("true").current_dir(cwd).status();
+                assert!(started.is_ok_and(|status| status.success()), "{id}");
+            }
+            PaneTerminal::File(file) => {
+                let (name, _) = lesson.practice_file().expect("a practice file");
+                assert_eq!(Path::new(&file.path), dir.join(name), "{id}");
+                assert!(Path::new(&file.path).is_file(), "{id}");
+            }
+            other => panic!("{id}: {other:?}"),
+        }
+    }
+}
+
 // --- The basics, through to the end ---------------------------------------
 
 #[test]
@@ -151,6 +206,7 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     // Its scratch directory is made afresh, with the lesson's text.
     let io = desk.take_tutor_io();
     assert_eq!(io[0], Io::Remove(PathBuf::from("/scratch/1/basics")));
+    assert_eq!(io[1], Io::MakeDir(PathBuf::from("/scratch/1/basics")));
     assert!(io.contains(&Io::Write {
         path: "/scratch/1/basics.txt".into(),
         text: rendered("basics"),

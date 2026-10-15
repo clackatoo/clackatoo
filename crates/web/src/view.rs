@@ -403,11 +403,15 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
     if answer > 0 || running {
         let key = format!("t{index}");
         let opened = open.folds.get(&key).copied().unwrap_or(running);
-        let label = fold_label(turn);
+        let asking = running && node.asking();
+        let mut summary = el("summary").text(fold_label(turn, asking));
+        if asking {
+            summary = summary.class("waiting");
+        }
         let mut work = el("details")
             .class("work")
             .attr("data-fold", key)
-            .child(el("summary").text(label));
+            .child(summary);
         if opened {
             work = work.attr("open", "");
         }
@@ -450,12 +454,18 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
 }
 
 /// What the line a turn's work folds under says: how long it took, or
-/// while it goes, that it's going. What it's doing, and for how long, is
-/// said just above the box (see [`working`]), which is always in view and
+/// while it goes, that it's going, or that it waits for you, if it's
+/// `asking` you something. What it's doing, and for how long, is said
+/// just above the box (see [`working`]), which is always in view and
 /// counts the seconds without the turn being drawn again.
-fn fold_label(turn: &Turn) -> String {
+fn fold_label(turn: &Turn, asking: bool) -> String {
     let Some(end) = &turn.end else {
-        return "Working…".to_owned();
+        let going = if asking {
+            "Waiting for you"
+        } else {
+            "Working…"
+        };
+        return going.to_owned();
     };
     if turn.sent == 0 {
         return "Worked".to_owned();
@@ -1502,7 +1512,28 @@ mod tests {
             own: false,
         });
         assert_eq!(said(&node, 13_400), None);
+        // The turn's own line says so instead, in the accent colour.
+        let section = turn(&node, &open(), 0, 13_400);
+        let work = &section.find_all("data-fold")[0];
+        assert!(
+            work.all_text().starts_with("Waiting for you"),
+            "{}",
+            work.all_text()
+        );
+        let waiting = |section: &Element| {
+            (section.find_all("class").into_iter())
+                .filter(|element| element.get("class") == Some("waiting"))
+                .count()
+        };
+        assert_eq!(waiting(&section), 1, "{section:?}");
         node.question = None;
+        let section = turn(&node, &open(), 0, 13_400);
+        assert!(
+            section.find_all("data-fold")[0]
+                .all_text()
+                .starts_with("Working…")
+        );
+        assert_eq!(waiting(&section), 0);
         // Starting, before any message: no seconds.
         let starting = ChatNode {
             agent: "Claude Code".into(),

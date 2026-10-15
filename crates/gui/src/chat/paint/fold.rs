@@ -123,17 +123,20 @@ impl ChatView {
             if !shape.fold {
                 continue;
             }
-            let label = fold_label(turn, shape.open);
+            let asking = turn.end.is_none() && self.node.asking();
+            let label = fold_label(turn, shape.open, asking);
             let fresh = (self.cache.turns.get(index))
                 .and_then(|slot| slot.header.as_ref())
                 .is_none_or(|laid| laid.source != label);
             if fresh && index < self.cache.turns.len() {
+                // Waiting for you, it stands out, as the question does.
+                let tone = if asking { Tone::Accent } else { Tone::Muted };
                 let laid = lay_out(
                     &mut self.layout_cx,
                     fonts,
                     m,
                     &label,
-                    Look::Plain(Tone::Muted),
+                    Look::Plain(tone),
                     f32::INFINITY,
                 );
                 self.cache.turns[index].header = Some(laid);
@@ -183,13 +186,19 @@ impl ChatView {
 }
 
 /// What the line `turn` folds its work under says, `open` or not: how
-/// long it took, or while it goes, that it's going. What it's doing, and
-/// for how long, is said on the line above the box (see `working.rs`),
-/// which is always in view.
-fn fold_label(turn: &Turn, open: bool) -> String {
+/// long it took, or while it goes, that it's going, or that it waits for
+/// you, if it's `asking` you something. What it's doing, and for how
+/// long, is said on the line above the box (see `working.rs`), which is
+/// always in view.
+fn fold_label(turn: &Turn, open: bool, asking: bool) -> String {
     let chevron = if open { "⌄" } else { "›" };
     let Some(end) = &turn.end else {
-        return format!("Working…  {chevron}");
+        let going = if asking {
+            "Waiting for you"
+        } else {
+            "Working…"
+        };
+        return format!("{going}  {chevron}");
     };
     // A turn from before turns said when they were sent can't say how
     // long it took.
@@ -203,14 +212,15 @@ fn fold_label(turn: &Turn, open: bool) -> String {
 #[cfg(test)]
 mod tests {
     use clackatoo_protocol::{
-        ChatNode, ChatPatch, ChatState, Item, Outcome, Patch, Tool, ToolKind, ToolStatus, Turn,
-        TurnEnd, ViewUpdate,
+        ChatNode, ChatPatch, ChatState, Item, Outcome, Patch, Question, Tool, ToolKind, ToolStatus,
+        Turn, TurnEnd, ViewUpdate,
     };
+    use parley::PositionedLayoutItem;
 
     use super::super::{FOLD, ITEMS, PROMPT};
     use super::duration;
     use crate::chat::fixtures::{fonts, paint};
-    use crate::chat::{ChatView, Hit};
+    use crate::chat::{ChatView, Hit, Tone};
 
     fn tool(title: &str, status: ToolStatus) -> Item {
         Item::Tool(Tool {
@@ -292,6 +302,60 @@ mod tests {
         assert_eq!(pieces(&chat, 0), [PROMPT, FOLD, ITEMS + 2]);
         assert_eq!(pieces(&chat, 1), [PROMPT, FOLD, ITEMS]);
         // The window wakes to count.
+        assert!(chat.live().is_some());
+    }
+
+    /// The colours of the line turn `turn`'s work folds under, each once.
+    fn tones(chat: &ChatView, turn: usize) -> Vec<Tone> {
+        let header = chat.cache.turns[turn].header.as_ref().expect("a line");
+        let lines = (header.blocks.iter()).flat_map(|block| block.layout.lines());
+        let mut tones: Vec<Tone> = lines
+            .flat_map(|line| line.items().collect::<Vec<_>>())
+            .filter_map(|item| match item {
+                PositionedLayoutItem::GlyphRun(run) => Some(run.style().brush.tone),
+                PositionedLayoutItem::InlineBox(_) => None,
+            })
+            .collect();
+        tones.dedup();
+        tones
+    }
+
+    #[test]
+    fn a_turn_waiting_on_your_answer_says_so_in_the_accent_colour() {
+        let mut fonts = fonts();
+        let mut chat = ChatView::new(String::new(), working());
+        chat.set_clock(400_000 + 12_400);
+        paint(&mut chat, &mut fonts);
+        assert_eq!(tones(&chat, 1), [Tone::Muted]);
+        let question = |own| Question {
+            id: 1,
+            title: "Write notes.txt".into(),
+            choices: Vec::new(),
+            own,
+        };
+        chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Question(
+            Some(question(false)),
+        ))]));
+        paint(&mut chat, &mut fonts);
+        assert_eq!(label(&chat, 1).as_deref(), Some("Waiting for you  ⌄"));
+        assert_eq!(tones(&chat, 1), [Tone::Accent]);
+        assert_eq!(label(&chat, 0).as_deref(), Some("Worked for 4m 58s  ›"));
+        // Nothing is said above the box, and nothing moves.
+        assert_eq!(chat.working_said(chat.now()), None);
+        assert!(chat.live().is_none());
+        // The daemon's own suggestion while it answers doesn't stop it.
+        chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Question(
+            Some(question(true)),
+        ))]));
+        paint(&mut chat, &mut fonts);
+        assert_eq!(label(&chat, 1).as_deref(), Some("Working…  ⌄"));
+        // Answered, it works on.
+        chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Question(
+            None,
+        ))]));
+        paint(&mut chat, &mut fonts);
+        assert_eq!(label(&chat, 1).as_deref(), Some("Working…  ⌄"));
+        assert_eq!(tones(&chat, 1), [Tone::Muted]);
         assert!(chat.live().is_some());
     }
 

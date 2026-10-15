@@ -72,6 +72,8 @@ pub(crate) fn lesson(id: &str) -> Option<&'static Lesson> {
 /// Something for the window to do to files, which the desk can't.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Io {
+    /// Makes a directory, and the directories it's in, unless it's there.
+    MakeDir(PathBuf),
     /// Writes a file, making the directories it's in.
     Write { path: PathBuf, text: String },
     /// Removes a file, or a directory and everything in it, if it's there.
@@ -89,6 +91,7 @@ impl Io {
     /// window may only read.
     pub(crate) fn run(&self) {
         let done = match self {
+            Self::MakeDir(path) => std::fs::create_dir_all(path),
             Self::Write { path, text } => (path.parent())
                 .map_or(Ok(()), std::fs::create_dir_all)
                 .and_then(|()| std::fs::write(path, text)),
@@ -383,6 +386,12 @@ mod tests {
         Io::Remove(dir.clone()).run();
         assert!(!dir.exists());
         // Removing what isn't there is no mistake.
+        Io::Remove(dir.clone()).run();
+        // A directory is made with those it's in, and making it again is
+        // no mistake either.
+        Io::MakeDir(dir.join("c/d")).run();
+        Io::MakeDir(dir.join("c/d")).run();
+        assert!(dir.join("c/d").is_dir());
         Io::Remove(dir).run();
     }
 
