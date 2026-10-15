@@ -30,6 +30,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # crates.io has been unreachable for a minute at a time on the
+  # runners; cargo's default three tries gave up and failed a release.
+  CARGO_NET_RETRY: 10
   RUST_VERSION: "1.96.0"
 
 jobs:
