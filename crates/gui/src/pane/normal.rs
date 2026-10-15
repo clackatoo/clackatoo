@@ -10,6 +10,7 @@
 //! and the window only the lines it has shown.
 
 use clackatoo_protocol::{Match, Position, Request};
+use clackatoo_term::{MOST_LINES, MOST_TEXT};
 use winit::keyboard::{Key, NamedKey};
 
 use super::{
@@ -18,7 +19,7 @@ use super::{
 };
 use crate::cmdline::{Keyed, Line};
 use crate::input::KeyPress;
-use crate::motion::{Cursor, Motion, Point, count_with, multiplied};
+use crate::motion::{Block, Cursor, Motion, Point, count_with, multiplied, start_of_cell};
 use crate::objects::Object;
 
 /// A search being typed.
@@ -91,12 +92,9 @@ impl Pane {
                 self.send_keyed(vec![0x03]);
                 return false;
             }
-            // Ctrl+V would select a block of columns, as in Vim. Ctrl+Shift+V
+            // Ctrl+V selects a block of columns, as in Vim. Ctrl+Shift+V
             // pastes, and never comes here.
-            (_, Some('v')) if ctrl => {
-                self.status = Some(super::NO_BLOCK_SELECTION.into());
-                return true;
-            }
+            (_, Some('v')) if ctrl => return self.toggle_visual(Selection::Block),
             (Key::Named(NamedKey::Escape), _) => {
                 if visual {
                     self.leave_visual();
@@ -126,7 +124,10 @@ impl Pane {
             (_, Some('v')) if after_g => return self.reselect(),
             (_, Some('v')) => return self.toggle_visual(Selection::Characters),
             (_, Some('V')) => return self.toggle_visual(Selection::Lines),
-            (_, Some('o')) if visual => {
+            (_, Some('O')) if self.mode == Mode::Visual(Selection::Block) => {
+                return self.other_corner();
+            }
+            (_, Some('o' | 'O')) if visual => {
                 if let (Some(anchor), Some(cursor)) = (self.anchor, self.cursor) {
                     self.anchor = Some(cursor.at);
                     self.cursor = Some(Cursor::new(anchor));
@@ -233,11 +234,19 @@ impl Pane {
     }
 
     /// Takes in what the daemon answered a copy or a search with.
-    pub(super) fn copied(&mut self, text: String, to: Copy) {
+    /// What `asked` lines asked for was cut short by the daemon, as it cuts
+    /// any copy at [`MOST_TEXT`] and [`MOST_LINES`], it's said, wherever
+    /// it went.
+    pub(super) fn copied(&mut self, text: String, to: Copy, asked: u64) {
+        let lines = text.lines().count().max(1);
+        let cut = asked > MOST_LINES || text.len() + 4 > MOST_TEXT;
         // Selecting with the mouse copies to the primary selection all the
         // time, which isn't worth a message.
-        if to == Copy::Clipboard {
-            let lines = text.lines().count().max(1);
+        if cut {
+            self.status = Some(format!(
+                "copied {lines} lines, cut short: a copy stops at {MOST_LINES} lines or 4 MiB"
+            ));
+        } else if to == Copy::Clipboard {
             self.status = Some(if lines == 1 {
                 "copied".into()
             } else {
@@ -275,12 +284,20 @@ impl Pane {
     }
 
     /// The characters of a visual selection on each line, as the start and
-    /// end of the selected range, ends included.
+    /// end of the selected range, ends included: for a block, its top left
+    /// and bottom right corners, the last at `usize::MAX` after `$`.
     pub(super) fn selection(&self) -> Option<(Point, Point, Selection)> {
         let Mode::Visual(kind) = self.mode else {
             return None;
         };
-        let (anchor, cursor) = (self.anchor?, self.cursor?.at);
+        let (anchor, cursor) = (self.anchor?, self.cursor?);
+        if kind == Selection::Block {
+            let to_end = cursor.want() == usize::MAX;
+            let block = Block::between(anchor, cursor.at, to_end, &Document(self));
+            let (start, end) = super::corners(block);
+            return Some((start, end, kind));
+        }
+        let cursor = cursor.at;
         let (start, end) = if anchor <= cursor {
             (anchor, cursor)
         } else {
@@ -349,6 +366,28 @@ impl Pane {
                 self.anchor = self.cursor.map(|cursor| cursor.at);
             }
         }
+        true
+    }
+
+    /// `O` in a block: the cursor goes to the other corner on its line,
+    /// and the selection's start to the other on its, as in Vim.
+    fn other_corner(&mut self) -> bool {
+        let (Some(anchor), Some(cursor)) = (self.anchor, self.cursor) else {
+            return false;
+        };
+        let document = Document(self);
+        let block = Block::between(anchor, cursor.at, false, &document);
+        let at = |line, col| Point {
+            line,
+            col: start_of_cell(document.row(line), col),
+        };
+        let (mut head, mut tail) = (at(cursor.at.line, block.right), at(anchor.line, block.left));
+        if head.col == cursor.at.col {
+            (head, tail) = (at(cursor.at.line, block.left), at(anchor.line, block.right));
+        }
+        self.anchor = Some(tail);
+        self.cursor = Some(Cursor::new(head));
+        self.follow_cursor();
         true
     }
 

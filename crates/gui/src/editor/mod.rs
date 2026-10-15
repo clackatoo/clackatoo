@@ -40,6 +40,7 @@
 
 mod actions;
 mod bench;
+mod block;
 mod case;
 mod complete;
 mod copy;
@@ -108,12 +109,12 @@ use crate::colors;
 use crate::input::KeyPress;
 use crate::keymap::Chord;
 use crate::motion::{
-    Class, Cursor, Lines, Motion, Point, Reach, RowAt, Words, before, class_at, last_row, row_at,
-    rows_down, rows_up,
+    Block, Class, Cursor, Lines, Motion, Point, Reach, RowAt, Words, before, class_at, last_row,
+    row_at, rows_down, rows_up,
 };
 use crate::objects::Object;
 use crate::options::{Case, CompleteAccept, Options};
-use crate::pane::{Mode, NO_BLOCK_SELECTION, Selection, enters_normal_mode};
+use crate::pane::{Mode, Selection, corners, enters_normal_mode};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 
 /// How long text copied stays highlighted, as in a terminal's normal mode.
@@ -649,6 +650,8 @@ pub(crate) struct Editor {
     /// What `.` puts over the selection it made: what the change it makes
     /// again put.
     put_again: Option<std::rc::Rc<Register>>,
+    /// What's kept of block visual mode (see [`block`]).
+    blocks: block::Blocks,
 }
 
 /// How a lesson's text is drawn, as the tutor marks it: its titles, and
@@ -690,6 +693,7 @@ pub(crate) struct Lit {
 }
 
 impl Editor {
+    #[allow(clippy::too_many_lines, reason = "a field a line")]
     pub(crate) fn new(buffer: BufferId, options: &Options) -> Self {
         Self {
             buffer,
@@ -790,6 +794,7 @@ impl Editor {
             selecting: false,
             repeat_selection: false,
             put_again: None,
+            blocks: block::Blocks::default(),
         }
     }
 
@@ -1543,7 +1548,7 @@ impl Editor {
             }
             Action::Repeat => return self.repeat(command.count, copy, shared),
             Action::Visual { lines } => self.visual(lines),
-            Action::BlockVisual => self.status = Some(NO_BLOCK_SELECTION.into()),
+            Action::BlockVisual => self.block_visual(),
             Action::Search { backward } => self.prompt = Some(Prompt::search(backward)),
             Action::SearchAgain { reverse } => self.search_again(reverse, copy, shared),
             Action::SearchWord { backward } => self.search_word(backward, copy, shared),
@@ -1566,12 +1571,8 @@ impl Editor {
                 self.language_server(command.action, copy);
             }
             Action::Reselect => self.reselect(copy, &mut shared.marks),
-            Action::OtherEnd => {
-                if let Some(anchor) = self.anchor {
-                    self.anchor = Some(self.cursor.at);
-                    self.cursor = Cursor::new(anchor);
-                }
-            }
+            Action::OtherEnd => self.other_end(),
+            Action::OtherCorner => self.other_corner(copy),
             Action::Piece {
                 construct,
                 backward,
@@ -1609,7 +1610,13 @@ impl Editor {
     /// takes (see [`visual`]).
     fn start_change(&mut self, command: Command, copy: &BufferCopy) {
         let visual = matches!(self.mode, Mode::Visual(_));
-        if command.action.changes() && (!visual || command.action.on_selection()) {
+        // In a block, `I`, `A`, `D` and `C` act on it too.
+        let on_block = self.mode == Mode::Visual(Selection::Block)
+            && matches!(
+                command.action,
+                Action::Insert(Entry::LineStart | Entry::LineEnd) | Action::DeleteToEnd { .. }
+            );
+        if command.action.changes() && (!visual || command.action.on_selection() || on_block) {
             let extent = visual.then(|| self.extent(copy)).flatten();
             self.changing = Some(Change {
                 command,
@@ -1656,6 +1663,19 @@ impl Editor {
                 }
             }
             Action::DeleteChars { before } => self.delete_chars(before, times, copy, registers),
+            // `D` and `C` in a block take each line from its left edge on.
+            Action::DeleteToEnd { change } if let Some(block) = self.selected_block(copy) => {
+                let operator = if change {
+                    Operator::Change
+                } else {
+                    Operator::Delete
+                };
+                let block = Block {
+                    right: Block::TO_END,
+                    ..block
+                };
+                self.operate_block(operator, block, times, copy, registers);
+            }
             Action::DeleteToEnd { change } => self.delete_to_end(change, times, copy, registers),
             Action::Substitute => {
                 self.delete_chars(false, times, copy, registers);
@@ -1850,6 +1870,12 @@ impl Editor {
             // As the grammar answered, for the lines it found.
             return self.reindent(copy);
         }
+        if target == Target::Selection
+            && let Some(block) = self.selected_block(copy)
+        {
+            self.operate_block(operator, block, times, copy, (registers, name));
+            return true;
+        }
         let span = match target {
             Target::Mark { mark, exact } => self.mark_span(mark, exact, copy, marks),
             _ => self.span(operator, target, times, copy),
@@ -1923,7 +1949,7 @@ impl Editor {
                 history: !small || far,
             }
         };
-        registers.wrote(name, Register { text, lines }, wrote);
+        registers.wrote(name, Register::new(text, lines), wrote);
         match operator {
             Operator::Yank => self.yanked(span, copy),
             Operator::Delete => self.delete_span(span, copy),
@@ -2359,6 +2385,25 @@ impl Editor {
             }
             register
         };
+        // Not over a listing's `..`, which whatever's put would make name
+        // something.
+        let block = self.selected_block(copy);
+        let first = block.map_or_else(
+            || {
+                (self.anchor).map_or(self.cursor.at.line, |anchor| {
+                    anchor.line.min(self.cursor.at.line)
+                })
+            },
+            |block| block.first,
+        );
+        if self.hide.is_some() && self.kept_line(&self.text(copy), first) {
+            self.refuse(block::ON_PARENT);
+            return;
+        }
+        if let Some(block) = block {
+            self.put_over_block(before, times, block, &register, copy, registers);
+            return;
+        }
         let Some(span) = self.span(Operator::Delete, Target::Selection, 1, copy) else {
             return;
         };
@@ -2381,7 +2426,7 @@ impl Editor {
                 small,
                 history: !small,
             };
-            registers.wrote(None, Register { text: taken, lines }, wrote);
+            registers.wrote(None, Register::new(taken, lines), wrote);
         }
         match (lines, register.lines) {
             // Lines in place of characters go between the two halves of the
@@ -2417,6 +2462,9 @@ impl Editor {
     ) {
         if register.text.is_empty() {
             return;
+        }
+        if register.block.is_some() {
+            return self.put_block(before, times, register, copy);
         }
         let text = self.text(copy);
         let len = text.rope().len_bytes();
@@ -2522,6 +2570,11 @@ impl Editor {
     // --- Insert mode --------------------------------------------------------
 
     fn insert(&mut self, entry: Entry, times: usize, copy: &mut BufferCopy) {
+        // `I` and `A` in a block type on every line of it.
+        if let (Entry::LineStart | Entry::LineEnd, Some(block)) = (entry, self.selected_block(copy))
+        {
+            return self.insert_block(entry == Entry::LineEnd, times, block, copy);
+        }
         let text = self.text(copy);
         let at = self.cursor.at;
         let laid = text.laid(at.line);
@@ -2565,6 +2618,7 @@ impl Editor {
     fn enter_insert(&mut self, times: usize) {
         self.mode = Mode::Insert;
         self.anchor = None;
+        self.blocks.spread = None;
         self.insert_times = times.max(1);
         self.word_run = 0;
     }
@@ -2585,6 +2639,9 @@ impl Editor {
             }
         }
         self.insert_times = 1;
+        // What was typed on a block's first line goes on its others, in
+        // the same undo step.
+        let back_to = self.spread(copy);
         // A line just typed as `end` is indented as one. Only a word typed
         // just now: so the indent joins the change that typed it.
         let at = self.insert_byte(copy);
@@ -2600,7 +2657,7 @@ impl Editor {
         // As in Vim, the cursor steps back onto the character before.
         let mut cursor = self.cursor;
         cursor.apply(Motion::Left, &self.text(copy));
-        self.cursor = Cursor::new(cursor.at);
+        self.cursor = Cursor::new(back_to.unwrap_or(cursor.at));
         self.normal_cursor(copy);
     }
 
@@ -2802,6 +2859,9 @@ impl Editor {
     fn make(&mut self, edit: Edit, copy: &mut BufferCopy) {
         let grows = self.grows(copy);
         self.edited(&edit, grows);
+        if let Some(spread) = &mut self.blocks.spread {
+            spread.made(&edit);
+        }
         // A macro's edits to a file, however many, are one undo step, as
         // in Vim, which its first starts.
         let step = if self.replaying {
@@ -3331,6 +3391,7 @@ impl Editor {
             self.mode = Mode::Normal;
         }
         self.anchor = None;
+        self.blocks.repeat = None;
     }
 
     /// The search or the new name being typed in the bar, if one is, and
@@ -3414,8 +3475,11 @@ impl Editor {
             (self.cursor.at, anchor)
         };
         let text = self.text(copy);
+        // A block's lines: a server formats no less.
         let range = match selection {
-            Selection::Lines => (text.line_start(first.line), text.line_end(last.line)),
+            Selection::Lines | Selection::Block => {
+                (text.line_start(first.line), text.line_end(last.line))
+            }
             Selection::Characters => (text.byte_at(first), text.char_end(last)),
         };
         drop(text);
@@ -3447,7 +3511,10 @@ impl Editor {
                 match selection {
                     // To the last line's end, not into the line after.
                     Selection::Lines => (text.line_start(first.line), text.line_end(last.line)),
-                    Selection::Characters => (text.byte_at(first), text.char_end(last)),
+                    // A block's corners, as Neovim asks.
+                    Selection::Characters | Selection::Block => {
+                        (text.byte_at(first), text.char_end(last))
+                    }
                 }
             }
             _ => (cursor, cursor),
@@ -3863,6 +3930,9 @@ impl Editor {
         if let Some(Prompt::Confirm(confirming)) = &mut self.prompt {
             confirming.edited(edit);
         }
+        if let Some(spread) = &mut self.blocks.spread {
+            spread.follow(edit);
+        }
         if let Some((cursor, anchor)) = &mut self.held {
             *cursor = edit.map(*cursor, Bias::Before);
             if let Some(anchor) = anchor {
@@ -3881,6 +3951,7 @@ impl Editor {
         self.clicked = None;
         self.corrections.clear();
         self.held = None;
+        self.blocks.spread = None;
         // What `:s///c` was asking about is gone.
         if matches!(self.prompt, Some(Prompt::Confirm(_))) {
             self.prompt = None;
@@ -4681,6 +4752,8 @@ impl Editor {
         // kept for its rows after the first.
         let mut wrong: (Option<u64>, Vec<&Diagnostic>, Option<&Diagnostic>) =
             (None, Vec::new(), None);
+        let mut shown_cells = std::mem::take(&mut self.blocks.cells);
+        shown_cells.clear();
         for shown in &self.shown {
             let line = shown.line;
             let mut builder = RowBuilder::new(self.width);
@@ -4702,9 +4775,11 @@ impl Editor {
             }
             // The line after the last line break, while typed on, is empty.
             let Some(laid) = text.laid(line) else {
+                shown_cells.push(0);
                 rows.push(builder.finish(false));
                 continue;
             };
+            shown_cells.push(laid.cells());
             let room = width.saturating_sub(shown.indent);
             let cells = shown
                 .next
@@ -4763,11 +4838,14 @@ impl Editor {
         }
         self.styling.code_lit = self.code_in_view(&text);
         self.rows = rows;
+        self.blocks.cells = shown_cells;
         if let Some(preview) = &mut self.preview {
             preview.light(&text);
         }
         self.place_panels(&text);
+        drop(text);
         self.place_uses(copy);
+        self.blocks.shown = self.selected_block(copy);
     }
 
     /// The styles of the editor's own the line from byte `start` to
@@ -5050,13 +5128,23 @@ impl Editor {
             let kind = Selection::Characters;
             self.highlight(start, last, kind, HighlightKind::Code, &mut highlights);
         }
-        if let (Some(anchor), Mode::Visual(kind)) = (self.anchor, self.mode) {
-            let (start, last) = if anchor <= self.cursor.at {
-                (anchor, self.cursor.at)
-            } else {
-                (self.cursor.at, anchor)
-            };
-            self.highlight(start, last, kind, HighlightKind::Selection, &mut highlights);
+        match (self.anchor, self.mode) {
+            (Some(_), Mode::Visual(Selection::Block)) => {
+                if let Some(block) = self.blocks.shown {
+                    let (start, last) = corners(block);
+                    let kind = Selection::Block;
+                    self.highlight(start, last, kind, HighlightKind::Selection, &mut highlights);
+                }
+            }
+            (Some(anchor), Mode::Visual(kind)) => {
+                let (start, last) = if anchor <= self.cursor.at {
+                    (anchor, self.cursor.at)
+                } else {
+                    (self.cursor.at, anchor)
+                };
+                self.highlight(start, last, kind, HighlightKind::Selection, &mut highlights);
+            }
+            _ => {}
         }
         // A snippet's place gone to, whose text typing replaces.
         if let Some((start, last)) = self.snippet_lit.filter(|_| self.mode == Mode::Insert) {
@@ -5090,7 +5178,9 @@ impl Editor {
     }
 
     /// Highlights from `start` to `last`, as `why` says, on the rows shown.
-    /// Where it goes on past a row's end, it's lit to the pane's edge.
+    /// Where it goes on past a row's end, it's lit to the pane's edge; but
+    /// a block, from the top left corner `start` to the bottom right
+    /// `last`, is lit only over each line's text, as Vim draws it.
     fn highlight(
         &self,
         start: Point,
@@ -5107,6 +5197,19 @@ impl Editor {
             }
             let (from, to) = match kind {
                 Selection::Lines => (0, usize::MAX),
+                Selection::Block => {
+                    let block = Block {
+                        first: start.line,
+                        last: last.line,
+                        left: start.col,
+                        right: last.col,
+                    };
+                    let cells = self.blocks.cells.get(row).copied().unwrap_or(0);
+                    let Some(cols) = block.on(cells) else {
+                        continue;
+                    };
+                    (cols.start, cols.end)
+                }
                 Selection::Characters => (
                     if line == start.line { start.col } else { 0 },
                     if line == last.line {

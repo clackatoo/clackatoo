@@ -1317,10 +1317,17 @@ impl Desk {
     /// The mouse button went down at `cell` of the editor `pane`, the
     /// `clicks`th time in a row: the cursor goes there, or a word or line
     /// is selected, and the drag that follows is the editor's until
-    /// [`editor_released`](Self::editor_released). In a folder's listing,
-    /// a double click opens what's clicked, as Enter does, as the
+    /// [`editor_released`](Self::editor_released), selecting a block if
+    /// `block`, as Alt held, with Ctrl or not, asks. In a folder's
+    /// listing, a double click opens what's clicked, as Enter does, as the
     /// explorer's does.
-    pub(super) fn editor_press(&mut self, pane: PaneId, [line, col]: [i64; 2], clicks: u8) -> bool {
+    pub(super) fn editor_press(
+        &mut self,
+        pane: PaneId,
+        [line, col]: [i64; 2],
+        clicks: u8,
+        block: bool,
+    ) -> bool {
         if clicks == 2 && self.is_explorer(pane) {
             return self.listing_enter(pane);
         }
@@ -1334,7 +1341,7 @@ impl Desk {
         let (Ok(line), Ok(col)) = (usize::try_from(line), usize::try_from(col)) else {
             return false;
         };
-        editor.press((line, col), clicks, copy);
+        editor.press_with((line, col), clicks, block, copy);
         // What it ended or began is the file's selection, for `gv`.
         editor.note_selection(copy, &mut editors.shared.marks);
         self.editor_drag = Some(pane);

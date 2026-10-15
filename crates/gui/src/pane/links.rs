@@ -52,7 +52,9 @@ impl Pane {
     /// Whether a click with `modifiers` held would open the link under it:
     /// Ctrl is held, and the mouse is clackatoo's, not the program's.
     pub(crate) fn link_opens(&self, modifiers: Modifiers) -> bool {
+        // Ctrl and Alt drag a block.
         modifiers.ctrl
+            && !modifiers.alt
             && self.chat.is_none()
             && self.screen.is_some()
             && !self.reports_mouse(modifiers.shift)
@@ -381,6 +383,7 @@ mod tests {
             pixel: [0.0; 2],
             clicks: 1,
             modifiers,
+            block: modifiers.alt,
         });
     }
 

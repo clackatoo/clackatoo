@@ -164,6 +164,8 @@ gates! {
     /// directory, for windows to write paths from `~` by: `Workspaces`'
     /// `home`.
     BLOCK_MARKS = 86,
+    /// Copying a block of a terminal's columns: `Request::BlockText`.
+    BLOCKS = 87,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

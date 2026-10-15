@@ -605,6 +605,14 @@ impl Cells for Laid {
         let col = self.cells.checked_sub(1).map(|last| col.min(last));
         Scan::new(self, col, false)
     }
+
+    fn extent(&self, col: usize) -> (usize, usize) {
+        if col >= self.cells {
+            return (col, col);
+        }
+        let (cell, next, _) = self.piece(self.piece_at(col));
+        (cell, next.max(cell + 1) - 1)
+    }
 }
 
 /// Cell `col` of character `ch`, which takes the cells from `cell` to

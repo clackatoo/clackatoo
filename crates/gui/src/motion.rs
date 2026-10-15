@@ -76,6 +76,18 @@ pub(crate) trait Cells {
     /// The cells from `col` back to the first, with their columns, from the
     /// last if `col` is past it.
     fn back_from(&self, col: usize) -> impl Iterator<Item = (usize, Spot)>;
+
+    /// The first and last cells of the character in cell `col`: both `col`
+    /// for most, both halves of a wide character, and past the last cell,
+    /// `col` itself. A file's line has tabs too, which take several.
+    fn extent(&self, col: usize) -> (usize, usize)
+    where
+        Self: Sized,
+    {
+        let start = start_of_cell(Some(self), col);
+        let wide = self.cell(start).is_some_and(|spot| spot.wide);
+        (start, start + usize::from(wide))
+    }
 }
 
 impl Cells for Row {
@@ -288,6 +300,64 @@ pub(crate) fn rows_up(from: RowAt, mut n: u64, first: u64, lines: &impl Lines) -
         n -= at.row as u64 + 1;
         at.line -= 1;
         at.row = lines.screen_rows(at.line).len() - 1;
+    }
+}
+
+/// A block of columns, as Ctrl+V selects one, Vim's blockwise visual
+/// mode: on each line from `first` to `last`, the cells from `left` to
+/// `right`, both in it, or to the line's end if `right` is
+/// [`TO_END`](Self::TO_END), as after `$`. Columns are cells as drawn, so
+/// a tab or a wide character can be cut by its edges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Block {
+    pub(crate) first: u64,
+    pub(crate) last: u64,
+    pub(crate) left: usize,
+    pub(crate) right: usize,
+}
+
+impl Block {
+    /// The `right` of a block that goes to each line's end.
+    pub(crate) const TO_END: usize = usize::MAX;
+
+    /// The block with corners at `anchor` and `cursor`, as Vim finds it:
+    /// from the first cell either corner's character takes to the last,
+    /// so a tab or a wide character at a corner is in it whole; to each
+    /// line's end if `to_end`.
+    pub(crate) fn between(anchor: Point, cursor: Point, to_end: bool, lines: &impl Lines) -> Self {
+        let extent = |at: Point| {
+            lines
+                .row(at.line)
+                .map_or((at.col, at.col), |row| row.extent(at.col))
+        };
+        let (anchor_cells, cursor_cells) = (extent(anchor), extent(cursor));
+        Self {
+            first: anchor.line.min(cursor.line),
+            last: anchor.line.max(cursor.line),
+            left: anchor_cells.0.min(cursor_cells.0),
+            right: if to_end {
+                Self::TO_END
+            } else {
+                anchor_cells.1.max(cursor_cells.1)
+            },
+        }
+    }
+
+    /// Whether it goes to each line's end.
+    pub(crate) fn to_end(self) -> bool {
+        self.right == Self::TO_END
+    }
+
+    /// How many columns wide it is, if it doesn't go to each line's end.
+    pub(crate) fn width(self) -> Option<usize> {
+        (!self.to_end()).then(|| self.right + 1 - self.left)
+    }
+
+    /// The cells it takes of a line `cells` wide, from the first to just
+    /// after the last: none past the line's end.
+    pub(crate) fn on(self, cells: usize) -> Option<std::ops::Range<usize>> {
+        let end = self.right.saturating_add(1).min(cells);
+        (self.left < end).then_some(self.left..end)
     }
 }
 

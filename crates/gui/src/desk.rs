@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use clackatoo_protocol::{
     Axis, BufferId, ClientMessage, Content, FileLocation, Layout, NewAgent, NewTerminal, PaneId,
     PaneKind, PaneTerminal, Request, Response, Side, Size, Tab, TabId, TerminalId, ViewUpdate,
-    WorkspaceId, Workspaces,
+    WorkspaceId, Workspaces, wire,
 };
 use clackatoo_term::mouse::{MouseAction, MouseButton};
 use winit::keyboard::{Key, NamedKey};
@@ -1605,10 +1605,25 @@ impl Desk {
     /// pane's.
     pub(crate) fn take_outbox(&mut self) -> Vec<ClientMessage> {
         let mut messages = std::mem::take(&mut self.outbox);
+        let blocks = self.daemon_has(wire::BLOCKS);
+        let mut copied_across = false;
         for (&terminal, pane) in &mut self.panes {
-            for message in pane.take_outbox() {
+            for mut message in pane.take_outbox() {
                 if !self.connected {
                     continue;
+                }
+                // A daemon too old to copy a block copies from one corner
+                // to the other, as `v` would, and the bar says why.
+                if let ClientMessage::Request(Request::BlockText { terminal, from, to }) = message
+                    && !blocks
+                {
+                    message = ClientMessage::Request(Request::Text {
+                        terminal,
+                        from,
+                        to,
+                        whole_lines: false,
+                    });
+                    copied_across = true;
                 }
                 if matches!(message, ClientMessage::Request(_)) {
                     self.asked.push_back(Asker::Pane(terminal));
@@ -1616,6 +1631,12 @@ impl Desk {
                 }
                 messages.push(message);
             }
+        }
+        if copied_across {
+            self.needs_daemon(
+                "copied from corner to corner: copying a block",
+                wire::BLOCKS,
+            );
         }
         messages.extend(self.take_buffer_outbox());
         messages.extend(self.take_explorer_outbox());
@@ -1788,11 +1809,27 @@ impl Desk {
         if self.stop_recording_in_terminal(press) {
             return true;
         }
+        if self.block_needs_daemon(press) {
+            return true;
+        }
         let redraw = self.focused_pane().is_some_and(|pane| pane.key(press));
         if let Some(terminal) = self.focused_terminal() {
             self.open_pane_link(terminal);
         }
         redraw || had_message
+    }
+
+    /// Whether `press` is Ctrl+V in a terminal's normal or visual mode,
+    /// which selects a block, from a daemon too old to copy one: the bar
+    /// says so, and the key goes no further.
+    fn block_needs_daemon(&mut self, press: &KeyPress<'_>) -> bool {
+        let ctrl_v = press.modifiers.ctrl
+            && !press.modifiers.shift
+            && matches!(press.key, Key::Character(text) if text.eq_ignore_ascii_case("v"));
+        let terminal = self.focused_pane().is_some_and(|pane| {
+            !pane.is_chat() && matches!(pane.mode, Mode::Normal | Mode::Visual(_))
+        });
+        ctrl_v && terminal && !self.needs_daemon("block selection", wire::BLOCKS)
     }
 
     /// Drops the answer the focused chat armed, if it did, as a key that
@@ -1889,6 +1926,7 @@ impl Desk {
     /// `point`: `clicks` is 2 for a double click and 3 for a triple. A
     /// press focuses the pane it's in, and that pane gets the drag that
     /// follows, wherever it goes.
+    #[allow(clippy::too_many_lines, reason = "a short route for each kind of pane")]
     pub(crate) fn mouse(
         &mut self,
         point: [f32; 2],
@@ -1912,7 +1950,8 @@ impl Desk {
         {
             outcome.redraw |= self.mouse_left();
             if let MouseAction::Press(MouseButton::Left) = action {
-                outcome.redraw = self.focus_at(point) | self.editor_press(pane, cell, clicks);
+                outcome.redraw =
+                    self.focus_at(point) | self.editor_press(pane, cell, clicks, modifiers.alt);
             }
             return outcome;
         }
@@ -1982,6 +2021,7 @@ impl Desk {
             outcome.redraw |= self.mouse_left();
         }
         self.mouse_cell = Some((terminal, cell));
+        let block = modifiers.alt && self.daemon_has(wire::BLOCKS);
         let Some(pane) = self.panes.get_mut(&terminal) else {
             return outcome;
         };
@@ -1999,6 +2039,7 @@ impl Desk {
             pixel,
             clicks,
             modifiers,
+            block,
         };
         outcome.redraw |= pane.mouse(&event);
         self.open_pane_link(terminal);
@@ -2502,6 +2543,7 @@ fn editor_mode_name(editor: &crate::editor::Editor) -> ModeName {
     match mode_name(editor.mode) {
         ModeName::Visual if editor.visual_from_insert() => ModeName::InsertVisual,
         ModeName::VisualLine if editor.visual_from_insert() => ModeName::InsertVisualLine,
+        ModeName::VisualBlock if editor.visual_from_insert() => ModeName::InsertVisualBlock,
         name => name,
     }
 }
@@ -2513,6 +2555,7 @@ fn mode_name(mode: Mode) -> ModeName {
         Mode::Normal => ModeName::Normal,
         Mode::Visual(Selection::Characters) => ModeName::Visual,
         Mode::Visual(Selection::Lines) => ModeName::VisualLine,
+        Mode::Visual(Selection::Block) => ModeName::VisualBlock,
     }
 }
 
@@ -3101,6 +3144,60 @@ mod tests {
         assert!(
             !(desk.take_outbox().iter())
                 .any(|message| matches!(message, ClientMessage::Colour { .. }))
+        );
+    }
+
+    #[test]
+    fn ctrl_v_in_a_terminal_needs_a_daemon_that_can_copy_a_block() {
+        let mut desk = three_tabs();
+        let focused = desk.focused_terminal().unwrap().0;
+        snapshot(&mut desk, focused);
+        normal_mode(&mut desk);
+        desk.daemon_is(wire::BLOCKS - 1, None);
+        ctrl(&mut desk, "v");
+        assert_eq!(
+            desk.focused_pane().map(|pane| pane.mode),
+            Some(Mode::Normal)
+        );
+        assert!(
+            (desk.message.as_deref())
+                .is_some_and(|message| message.starts_with("block selection needs a newer daemon")),
+            "{:?}",
+            desk.message
+        );
+        desk.daemon_is(wire::BLOCKS, None);
+        ctrl(&mut desk, "v");
+        assert_eq!(
+            desk.focused_pane().map(|pane| pane.mode),
+            Some(Mode::Visual(Selection::Block))
+        );
+        // A block selected before the daemon went back to an older one is
+        // copied from corner to corner, never asked of it as a block.
+        desk.take_outbox();
+        desk.daemon_is(wire::BLOCKS - 1, None);
+        type_keys(&mut desk, "y");
+        let sent = desk.take_outbox();
+        assert!(sent.iter().any(|message| matches!(
+            message,
+            ClientMessage::Request(Request::Text {
+                whole_lines: false,
+                ..
+            })
+        )));
+        assert!(
+            !sent.iter().any(|message| matches!(
+                message,
+                ClientMessage::Request(Request::BlockText { .. })
+            ))
+        );
+        assert!(
+            (desk.message.as_deref()).is_some_and(|message| {
+                message.starts_with(
+                    "copied from corner to corner: copying a block needs a newer daemon",
+                )
+            }),
+            "{:?}",
+            desk.message
         );
     }
 

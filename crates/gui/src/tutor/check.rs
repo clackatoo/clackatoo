@@ -8,7 +8,7 @@
 //! | `at "TEXT"` | The focused editor's cursor is in TEXT, on its line. |
 //! | `register R "TEXT"` | Register R holds TEXT, exactly. |
 //! | `copied "TEXT"` | What was last copied to the clipboard has TEXT in it. |
-//! | `mode MODE` | The focused pane is in `normal`, `insert`, `visual` or `visual-line` mode. |
+//! | `mode MODE` | The focused pane is in `normal`, `insert`, `visual`, `visual-line` or `visual-block` mode. |
 //! | `pane KIND` | The lesson's tab has a pane of KIND: `terminal`, `editor`, `folder` (an editor showing a folder), `explorer`, `chat` or `board`. |
 //! | `panes N` | The lesson's tab has N panes. |
 //! | `focused WHAT` | The focused pane is the `lesson` pane, the `practice` pane, or one of KIND. |
@@ -65,6 +65,7 @@ pub(crate) enum Mode {
     Insert,
     Visual,
     VisualLine,
+    VisualBlock,
 }
 
 /// A kind of pane.
@@ -181,6 +182,7 @@ impl Check {
                 "insert" => Mode::Insert,
                 "visual" => Mode::Visual,
                 "visual-line" => Mode::VisualLine,
+                "visual-block" => Mode::VisualBlock,
                 other => return Err(format!("`{other}` isn't a mode")),
             }),
             ["pane", kind] => Self::Pane(kind_of(kind)?),

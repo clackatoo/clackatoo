@@ -27,8 +27,8 @@ use clackatoo_text::{
 
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
-    BLOCK_MARKS, COLOURS, EXITED, FALLBACKS, FORWARD_PACE, FORWARDS, HOVER, INLAY_HINTS, LIMITS,
-    PHONE_TERMINALS, PREVIEW_COLOURS, SYMBOLS, USES, WORDS,
+    BLOCK_MARKS, BLOCKS, COLOURS, EXITED, FALLBACKS, FORWARD_PACE, FORWARDS, HOVER, INLAY_HINTS,
+    LIMITS, PHONE_TERMINALS, PREVIEW_COLOURS, SYMBOLS, USES, WORDS,
 };
 use crate::{
     AgentSession, AgentTools, Author, Axis, BlockMarks, BoardId, BufferId, BufferSnapshot,
@@ -830,6 +830,18 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             }))),
         ),
     ]);
+    // A block of a terminal's columns copied, to each line's end.
+    samples.push((
+        BLOCKS,
+        Client(ClientMessage::Request(Request::BlockText {
+            terminal,
+            from: Position { line: 3, col: 2 },
+            to: Position {
+                line: 7,
+                col: usize::MAX,
+            },
+        })),
+    ));
     samples
 }
 

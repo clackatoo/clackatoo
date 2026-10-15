@@ -1196,6 +1196,7 @@ impl Facts for DeskFacts<'_> {
             Mode::Insert => check::Mode::Insert,
             Mode::Visual(Selection::Characters) => check::Mode::Visual,
             Mode::Visual(Selection::Lines) => check::Mode::VisualLine,
+            Mode::Visual(Selection::Block) => check::Mode::VisualBlock,
         })
     }
 

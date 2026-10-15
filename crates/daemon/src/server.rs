@@ -2549,6 +2549,9 @@ impl Daemon {
             } => self
                 .grid(terminal)
                 .map(|grid| Response::Text(grid.text(from, to, whole_lines))),
+            Request::BlockText { terminal, from, to } => self
+                .grid(terminal)
+                .map(|grid| Response::Text(grid.block_text(from, to))),
             Request::Search {
                 terminal,
                 query,

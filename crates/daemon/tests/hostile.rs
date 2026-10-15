@@ -501,6 +501,16 @@ fn far_in_terminal(terminal: clackatoo_protocol::TerminalId) -> Vec<ClientMessag
             },
             whole_lines: false,
         }),
+        request(Request::BlockText {
+            terminal,
+            from: start,
+            to: far,
+        }),
+        request(Request::BlockText {
+            terminal,
+            from: far,
+            to: far,
+        }),
         request(Request::Search {
             terminal,
             query: "é".to_owned(),

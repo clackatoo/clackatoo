@@ -351,7 +351,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "terminal-counts",
         date: "2026-10-15",
         lesson: "basics",
-        what: "A terminal's normal mode takes counts, as 5k, 3w, 10G and 3yy, and Ctrl+V says block selection isn't here yet",
+        what: "A terminal's normal mode takes counts, as 5k, 3w, 10G and 3yy",
     },
     News {
         id: "lessons-read-well",
@@ -460,6 +460,18 @@ pub(crate) const NEWS: &[News] = &[
         date: "2026-10-15",
         lesson: "shell",
         what: "A terminal's tab with no title is named after its shell's folder, ~ for home",
+    },
+    News {
+        id: "block-visual",
+        date: "2026-10-15",
+        lesson: "blocks",
+        what: "Ctrl+V selects a block of columns, as in Vim: I and A type on every line of it; Alt+drag selects one too",
+    },
+    News {
+        id: "copy-limits",
+        date: "2026-10-15",
+        lesson: "basics",
+        what: "Copying from a terminal stops at 100,000 lines or 4 MiB, and says so, so a huge history never holds it up",
     },
 ];
 

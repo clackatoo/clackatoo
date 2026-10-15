@@ -1216,14 +1216,9 @@ impl Editor {
             small: false,
             history: true,
         };
-        shared.registers.wrote(
-            register,
-            Register {
-                text: block,
-                lines: true,
-            },
-            history,
-        );
+        shared
+            .registers
+            .wrote(register, Register::new(block, true), history);
         let span = super::Span {
             start,
             end,
@@ -1242,14 +1237,9 @@ impl Editor {
         shared: &mut Shared,
     ) {
         let (block, ..) = self.lines_text(lines, copy);
-        shared.registers.wrote(
-            register,
-            Register {
-                text: block,
-                lines: true,
-            },
-            Wrote::Yank,
-        );
+        shared
+            .registers
+            .wrote(register, Register::new(block, true), Wrote::Yank);
         self.report_lines(lines, "lines yanked");
     }
 

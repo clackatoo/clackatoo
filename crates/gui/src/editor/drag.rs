@@ -1,8 +1,8 @@
 //! Selecting with the mouse, as Neovim does with `mouse=a`: dragging
 //! selects characters in visual mode, from where the button went down to
-//! where the mouse is; a double click selects a word, and dragging after
-//! it whole words; a triple click selects the line, and dragging after it
-//! whole lines. Letting go leaves the selection for `y`, `d`, `c`, `>` and
+//! where the mouse is, or with Alt held, a block of columns; a double
+//! click selects a word, and dragging after it whole words; a triple click
+//! selects the line, and dragging after it whole lines. Letting go leaves the selection for `y`, `d`, `c`, `>` and
 //! the rest. A plain click puts the cursor there and ends a selection,
 //! which `gv` selects again, as one made with keys: the desk notes it as
 //! the button goes down and comes up (see [`super::visual`]).
@@ -92,6 +92,9 @@ pub(super) struct Drag {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum By {
     Characters,
+    /// A block of columns, with Alt held, from the character clicked to
+    /// the one under the mouse.
+    Block,
     /// Whole words, from the word clicked twice: the bytes of its first
     /// and last characters.
     Words(usize, usize),
@@ -99,12 +102,25 @@ enum By {
 }
 
 impl Editor {
+    /// As [`press_with`](Self::press_with), with no block.
+    #[cfg(test)]
+    pub(crate) fn press(&mut self, at: (usize, usize), clicks: u8, copy: &mut BufferCopy) {
+        self.press_with(at, clicks, false, copy);
+    }
+
     /// The mouse button went down at row `line` and column `col` of the
     /// pane, the `clicks`th time in a row: once puts the cursor there,
-    /// ending a selection, twice selects the word there and three times
-    /// the line. A drag follows (see [`drag_to`](Self::drag_to)) until
-    /// [`release`](Self::release).
-    pub(crate) fn press(&mut self, (line, col): (usize, usize), clicks: u8, copy: &mut BufferCopy) {
+    /// ending a selection, and a drag from it selects characters, or a
+    /// block if `block`, as with Alt held; twice selects the word there and
+    /// three times the line. A drag follows (see
+    /// [`drag_to`](Self::drag_to)) until [`release`](Self::release).
+    pub(crate) fn press_with(
+        &mut self,
+        (line, col): (usize, usize),
+        clicks: u8,
+        block: bool,
+        copy: &mut BufferCopy,
+    ) {
         self.panel = None;
         self.actions = None;
         self.close_completion();
@@ -136,7 +152,7 @@ impl Editor {
             (1, _) => {
                 self.place_click(at, copy);
                 self.clicked = Some(at_byte);
-                By::Characters
+                if block { By::Block } else { By::Characters }
             }
             (_, Some((first, last))) => {
                 self.select_between(first, last, Selection::Characters, copy);
@@ -151,7 +167,7 @@ impl Editor {
         self.drag = Some(Drag {
             origin,
             by,
-            started: by != By::Characters,
+            started: !matches!(by, By::Characters | By::Block),
             cell: (to_i64(line), to_i64(col)),
             edge: None,
             word: None,
@@ -392,8 +408,9 @@ impl Editor {
         let (anchor, head, kind) = match drag.by {
             // Until the mouse leaves the character clicked, nothing is
             // selected.
-            By::Characters if !drag.started && at == origin => return false,
+            By::Characters | By::Block if !drag.started && at == origin => return false,
             By::Characters => (origin, at, Selection::Characters),
+            By::Block => (origin, at, Selection::Block),
             // Forwards from the word clicked, to the end of the word the
             // mouse is in; backwards, from its end to that word's start.
             By::Words(first, last) => {
@@ -462,10 +479,13 @@ impl Editor {
         } else {
             (at, anchor)
         };
+        if kind == Selection::Block {
+            return Some(self.block_text(self.selected_block(copy)?, copy));
+        }
         let text = self.text(copy);
         let (start, end) = match kind {
             Selection::Lines => (text.line_start(first.line), text.line_start(last.line + 1)),
-            Selection::Characters => (text.byte_at(first), text.char_end(last)),
+            Selection::Characters | Selection::Block => (text.byte_at(first), text.char_end(last)),
         };
         Some(text.slice(start, end))
     }

@@ -279,8 +279,7 @@ pub(crate) enum Action {
     Visual {
         lines: bool,
     },
-    /// Ctrl+V, which would select a block of columns, as Vim's does, and
-    /// says it can't yet.
+    /// Ctrl+V: select a block of columns, as Vim's does.
     BlockVisual,
     /// `/`, or `?` if `backward`.
     Search {
@@ -339,6 +338,9 @@ pub(crate) enum Action {
     FormatSelection,
     /// `o` in visual mode: to the other end of the selection.
     OtherEnd,
+    /// `O` in visual mode: in a block, to the other corner on the same
+    /// line; otherwise, as `o`.
+    OtherCorner,
     /// `gv`: selects again what was selected last, as it was selected; in
     /// visual mode, swapping it with what's selected now.
     Reselect,
@@ -659,6 +661,7 @@ impl Reader<'_> {
                 }
             }
             'o' if visual => Action::OtherEnd,
+            'O' if visual => Action::OtherCorner,
             'q' | '@' | 'm' | '\'' | '`' => self.macro_or_mark(ch)?,
             'x' => Action::DeleteChars { before: false },
             'X' => Action::DeleteChars { before: true },

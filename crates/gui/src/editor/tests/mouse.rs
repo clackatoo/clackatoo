@@ -96,6 +96,24 @@ fn dragging_selects_from_the_press_to_the_mouse_either_way() {
 }
 
 #[test]
+fn dragging_with_alt_selects_a_block_whose_rows_go_to_the_primary_selection() {
+    let mut setup = Setup::new("hello world\nsecond line\nthird\n");
+    setup.editor.settle(&setup.copy);
+    let now = Instant::now();
+    let at = |value: i64| usize::try_from(value).unwrap();
+    (setup.editor).press_with((0, at(1 + GUTTER)), 1, true, &mut setup.copy);
+    assert_eq!(setup.selected(), None, "a press selects nothing");
+    assert!(setup.drag(2, 3, now));
+    assert_eq!(setup.selected(), Some(((0, 1), (2, 3), Selection::Block)));
+    // The same columns of each line, as many as it has.
+    assert_eq!(setup.release().as_deref(), Some("ell\neco\nhir"));
+    assert_eq!(setup.selected(), Some(((0, 1), (2, 3), Selection::Block)));
+    // `d` takes it, as from keys.
+    setup.keys("d");
+    assert_eq!(setup.text(), "ho world\nsnd line\ntd\n");
+}
+
+#[test]
 fn a_plain_click_moves_the_cursor_and_ends_a_selection() {
     let mut setup = Setup::new("hello world\nsecond line\n");
     setup.editor.settle(&setup.copy);

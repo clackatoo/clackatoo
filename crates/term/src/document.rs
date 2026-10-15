@@ -20,6 +20,15 @@ pub struct Position {
     pub col: usize,
 }
 
+/// The most text one copy gives, in bytes: more is cut to this, back to
+/// where a character starts, so a copy of a huge history neither holds
+/// the daemon up nor makes a message too big to send.
+pub const MOST_TEXT: usize = 4 << 20;
+
+/// The most lines one copy reads, for the same reason: a history of blank
+/// lines makes little text but takes as long to read.
+pub const MOST_LINES: u64 = 100_000;
+
 /// Where a search found its text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -62,20 +71,45 @@ impl Terminal {
         }
     }
 
+    /// The document's lines from `first` to `last`, both included, that it
+    /// has, in order, with their numbers, but no more than [`MOST_LINES`]:
+    /// history's read in one pass, as reading it a line at a time would go
+    /// through its pages again for each.
+    fn lines_between(&self, first: u64, last: u64) -> impl Iterator<Item = (u64, Cow<'_, Row>)> {
+        let (lowest, highest) = self.document_bounds();
+        let (first, last) = (first.max(lowest), last.min(highest));
+        let end = self.primary().scrollback_end();
+        let history = (first < end && first <= last)
+            .then(|| {
+                self.primary()
+                    .scrollback_lines(first..last.min(end - 1) + 1)
+            })
+            .into_iter()
+            .flatten()
+            .map(|(line, row)| (line, Cow::Owned(row)));
+        let screen = (first.max(end)..=last).filter_map(move |line| {
+            let row = usize::try_from(line - end).ok()?;
+            Some((line, Cow::Borrowed(self.grid().row(row))))
+        });
+        history
+            .chain(screen)
+            .take(usize::try_from(MOST_LINES).unwrap_or(usize::MAX))
+    }
+
     /// The text from `from` to `to`, both included, as it would be typed:
     /// lines end in newlines unless they wrapped onto the next, and blanks
     /// at the ends of lines are left out (blanks before more text on the
     /// line are kept). With `whole_lines`, every line is
-    /// taken whole.
+    /// taken whole. No more than [`MOST_TEXT`] and [`MOST_LINES`].
     #[must_use]
     pub fn text(&self, from: Position, to: Position, whole_lines: bool) -> String {
         let (from, to) = if from <= to { (from, to) } else { (to, from) };
-        let (first, last) = self.document_bounds();
+        let last = to.line.min(self.document_bounds().1);
         let mut text = String::new();
-        for line in from.line.max(first)..=to.line.min(last) {
-            let Some(row) = self.document_line(line) else {
-                continue;
-            };
+        for (line, row) in self.lines_between(from.line, to.line) {
+            if text.len() > MOST_TEXT {
+                break;
+            }
             let start = if whole_lines || line != from.line {
                 0
             } else {
@@ -96,12 +130,53 @@ impl Terminal {
                 if end >= row.text_end() {
                     text.truncate(at + text[at..].trim_end_matches(' ').len());
                 }
-                if line != to.line.min(last) {
+                if line != last {
                     text.push('\n');
                 }
             }
         }
-        text
+        cut_to_most(text)
+    }
+
+    /// The text of the block of columns with corners at `from` and `to`, as
+    /// block visual mode copies it: on each line between, the cells from
+    /// the lesser column to the greater, both included, or to the line's
+    /// end if the greater is `usize::MAX`. A line for each, joined with
+    /// newlines whether or not they wrapped, and blanks up to the end of a
+    /// line's text left out, as [`text`](Self::text) leaves them. Half a
+    /// wide character an edge cuts is a space, as an editor's block takes
+    /// it; a client takes one at a corner in whole. No more than
+    /// [`MOST_TEXT`] and [`MOST_LINES`].
+    #[must_use]
+    pub fn block_text(&self, from: Position, to: Position) -> String {
+        let (left, right) = (from.col.min(to.col), from.col.max(to.col));
+        let mut text = String::new();
+        let lines = self.lines_between(from.line.min(to.line), from.line.max(to.line));
+        for (index, (_, row)) in lines.enumerate() {
+            if text.len() > MOST_TEXT {
+                break;
+            }
+            if index > 0 {
+                text.push('\n');
+            }
+            let at = text.len();
+            let end = right.saturating_add(1).min(row.width());
+            let start = left.min(end);
+            for (col, cell) in (start..end).zip(&row.cells()[start..end]) {
+                let cut_left = col == left && cell.is_wide_spacer();
+                let cut_right = col + 1 == end && cell.is_wide() && end < row.width();
+                if cut_left || cut_right {
+                    text.push(' ');
+                } else {
+                    row.push_text(col, &mut text);
+                }
+            }
+            // Blanks up to the end of the line aren't text.
+            if end >= row.text_end() {
+                text.truncate(at + text[at..].trim_end_matches(' ').len());
+            }
+        }
+        cut_to_most(text)
     }
 
     /// The next place `query` appears after `from`, or before it if
@@ -185,8 +260,23 @@ fn matches_in(row: &Row, query: &[char], exact: bool) -> Vec<(usize, usize)> {
     found
 }
 
+/// `text`, cut to [`MOST_TEXT`] bytes, back to where a character starts,
+/// if it's longer.
+fn cut_to_most(mut text: String) -> String {
+    if text.len() > MOST_TEXT {
+        let at = (0..=MOST_TEXT)
+            .rev()
+            .find(|&at| text.is_char_boundary(at))
+            .unwrap_or(0);
+        text.truncate(at);
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use crate::{Config, Size, Terminal};
 
     use super::*;
@@ -223,6 +313,71 @@ mod tests {
         // Blanks are text, unless only blanks follow them.
         assert_eq!(t.text(at(0, 0), at(0, 5), false), "hello ");
         assert_eq!(t.text(at(2, 0), at(2, 8), false), "second");
+    }
+
+    #[test]
+    fn a_block_takes_the_same_columns_of_each_line_without_their_end_blanks() {
+        let t = terminal("abcdef\r\nabc\r\nabc  defg");
+        assert_eq!(t.block_text(at(0, 1), at(1, 4)), "bcde\nbc");
+        // Either corner first, and backwards across.
+        assert_eq!(t.block_text(at(1, 4), at(0, 1)), "bcde\nbc");
+        assert_eq!(t.block_text(at(0, 4), at(1, 1)), "bcde\nbc");
+        // Blanks before more text on the line are kept.
+        assert_eq!(t.block_text(at(2, 1), at(2, 3)), "bc ");
+        assert_eq!(t.block_text(at(2, 2), at(2, 6)), "c  de");
+        // To each line's end, and a line wrapped onto the next stays apart.
+        assert_eq!(
+            t.block_text(at(0, 2), at(2, usize::MAX)),
+            "cdef\nc\nc  defg"
+        );
+        let t = terminal("hello there\r\nx");
+        assert_eq!(t.block_text(at(0, 0), at(2, 1)), "he\ne\nx");
+    }
+
+    #[test]
+    fn a_block_puts_a_space_for_half_a_wide_character_an_edge_cuts() {
+        let t = terminal("a字b\r\nabcd");
+        assert_eq!(t.block_text(at(0, 2), at(1, 3)), " b\ncd");
+        assert_eq!(t.block_text(at(0, 0), at(1, 1)), "a \nab");
+        assert_eq!(t.block_text(at(0, 1), at(1, 2)), "字\nbc");
+    }
+
+    #[test]
+    fn a_copy_of_a_huge_history_reads_it_once_and_stops_at_the_most() {
+        let config = Config {
+            scrollback_lines: 300_000,
+            ..Config::default()
+        };
+        let mut t = Terminal::new(Size::new(10, 3).unwrap(), &config);
+        let lines = MOST_LINES + 1000;
+        let mut output = String::new();
+        for line in 0..lines {
+            let _ = write!(output, "{line}\r\n");
+        }
+        t.advance(output.as_bytes());
+        let far = at(u64::MAX, usize::MAX);
+        let started = std::time::Instant::now();
+        let text = t.text(at(0, 0), far, true);
+        let block = t.block_text(at(0, 0), far);
+        // Once through history: a line at a time took seconds.
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        for copied in [&text, &block] {
+            let got: Vec<&str> = copied.lines().collect();
+            assert_eq!(got.len() as u64, MOST_LINES, "no more lines than the most");
+            assert_eq!((got[0], got[got.len() - 1]), ("0", "99999"));
+        }
+        // From some way in, the same lines as reading them one by one.
+        assert_eq!(t.text(at(5000, 0), at(5002, 9), false), "5000\n5001\n5002");
+        assert_eq!(t.block_text(at(5000, 2), at(5002, 3)), "00\n01\n02");
+    }
+
+    #[test]
+    fn a_copy_is_cut_to_the_most_text_where_a_character_starts() {
+        let long = "é".repeat(MOST_TEXT);
+        let cut = cut_to_most(long);
+        assert!(cut.len() <= MOST_TEXT && cut.len() > MOST_TEXT - 4);
+        assert!(cut.chars().all(|ch| ch == 'é'));
+        assert_eq!(cut_to_most("short".into()), "short");
     }
 
     #[test]

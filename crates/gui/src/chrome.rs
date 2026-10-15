@@ -155,10 +155,12 @@ pub(crate) enum ModeName {
     Normal,
     Visual,
     VisualLine,
+    VisualBlock,
     /// Visual mode the mouse started from insert mode, which goes back
     /// there once it ends, as Neovim's "(insert) VISUAL".
     InsertVisual,
     InsertVisualLine,
+    InsertVisualBlock,
 }
 
 impl ModeName {
@@ -172,8 +174,10 @@ impl ModeName {
             Self::Normal => "NORMAL",
             Self::Visual => "VISUAL",
             Self::VisualLine => "V-LINE",
+            Self::VisualBlock => "V-BLOCK",
             Self::InsertVisual => "(insert) VISUAL",
             Self::InsertVisualLine => "(insert) V-LINE",
+            Self::InsertVisualBlock => "(insert) V-BLOCK",
         }
     }
 
@@ -190,7 +194,12 @@ impl ModeName {
         match self {
             Self::Insert => 0,
             Self::Normal => 1,
-            Self::Visual | Self::VisualLine | Self::InsertVisual | Self::InsertVisualLine => 2,
+            Self::Visual
+            | Self::VisualLine
+            | Self::VisualBlock
+            | Self::InsertVisual
+            | Self::InsertVisualLine
+            | Self::InsertVisualBlock => 2,
         }
     }
 
@@ -201,8 +210,10 @@ impl ModeName {
             Self::Normal
             | Self::Visual
             | Self::VisualLine
+            | Self::VisualBlock
             | Self::InsertVisual
-            | Self::InsertVisualLine => ": command",
+            | Self::InsertVisualLine
+            | Self::InsertVisualBlock => ": command",
         }
     }
 }

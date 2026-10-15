@@ -323,7 +323,8 @@ impl ChatView {
         };
         let bounds = match picked.how {
             How::Mouse => (start, end),
-            How::Visual(Selection::Characters) => {
+            // A chat has no block selection: Ctrl+V does nothing there.
+            How::Visual(Selection::Characters | Selection::Block) => {
                 let past = self
                     .text(end.text)
                     .map_or(end.byte, |text| after(text.text, end.byte));

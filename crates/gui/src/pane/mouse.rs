@@ -12,15 +12,18 @@
 //! normal mode a click also moves the cursor. The selection stays shown
 //! until the next key or click.
 //!
+//! With Alt held, or Ctrl and Alt, dragging selects a block of columns,
+//! as Ctrl+V does, which letting go copies as one, a line for each row.
+//!
 //! With Ctrl held, the link under the mouse is underlined, and a click
-//! opens it instead (see [`super::links`]).
+//! opens it instead (see [`super::links`]), but not with Alt too.
 
 use clackatoo_term::Row;
 use clackatoo_term::mouse::{self, MouseAction, MouseButton, MouseEvent, MouseTracking};
 
 use super::{Document, Mode, Pane, Pending, Selection};
 use crate::input::Modifiers;
-use crate::motion::{Cursor, Point};
+use crate::motion::{Block, Cursor, Point};
 
 /// A mouse event over a pane.
 #[derive(Clone, Copy, Debug)]
@@ -37,6 +40,9 @@ pub(crate) struct PaneMouse {
     /// 1 for a click, 2 for a double click and 3 for a triple.
     pub(crate) clicks: u8,
     pub(crate) modifiers: Modifiers,
+    /// Dragging selects a block of columns: Alt is held, with Ctrl or
+    /// not, and the daemon can copy one.
+    pub(crate) block: bool,
 }
 
 /// Where a selected piece of text goes.
@@ -194,7 +200,11 @@ impl Pane {
             1 => MouseSelection {
                 anchor: at,
                 head: at,
-                kind: Selection::Characters,
+                kind: if event.block {
+                    Selection::Block
+                } else {
+                    Selection::Characters
+                },
                 started: false,
                 dragging: true,
             },
@@ -263,10 +273,7 @@ impl Pane {
     /// Copies the mouse selection, if there is one, to `to`. Returns
     /// whether there was one.
     pub(super) fn copy_mouse_selection(&mut self, to: Copy) -> bool {
-        let Some((start, end, kind)) = self.mouse_selection.and_then(|selection| {
-            let (start, end) = ordered(selection.anchor, selection.head);
-            selection.started.then_some((start, end, selection.kind))
-        }) else {
+        let Some((start, end, kind)) = self.mouse_selected() else {
             return false;
         };
         self.copy(start, end, kind, to);
@@ -274,15 +281,28 @@ impl Pane {
     }
 
     /// The mouse selection, if anything is selected, as its first and last
-    /// characters.
+    /// characters, or a block's top left and bottom right corners.
     pub(super) fn mouse_selected(&self) -> Option<(Point, Point, Selection)> {
         let selection = self.mouse_selection.filter(|selection| selection.started)?;
-        let (start, end) = ordered(selection.anchor, selection.head);
+        let (start, end) = match selection.kind {
+            Selection::Block => {
+                let document = Document(self);
+                super::corners(Block::between(
+                    selection.anchor,
+                    selection.head,
+                    false,
+                    &document,
+                ))
+            }
+            Selection::Characters | Selection::Lines => ordered(selection.anchor, selection.head),
+        };
         Some((start, end, selection.kind))
     }
 
     /// Asks the daemon for the text from `start` to `end`, for `to`. Text
     /// for the clipboard is highlighted for a moment, to show what went.
+    /// A block goes from its top left corner, `start`, to its bottom right,
+    /// `end`.
     pub(super) fn copy(&mut self, start: Point, end: Point, kind: Selection, to: Copy) {
         if to == Copy::Clipboard {
             self.flash = Some(super::Flash {
@@ -292,15 +312,22 @@ impl Pane {
                 until: std::time::Instant::now() + super::FLASH,
             });
         }
-        self.request(
-            clackatoo_protocol::Request::Text {
+        let (from, to_place) = (super::normal::position(start), super::normal::position(end));
+        let request = match kind {
+            Selection::Block => clackatoo_protocol::Request::BlockText {
                 terminal: self.terminal,
-                from: super::normal::position(start),
-                to: super::normal::position(end),
+                from,
+                to: to_place,
+            },
+            Selection::Characters | Selection::Lines => clackatoo_protocol::Request::Text {
+                terminal: self.terminal,
+                from,
+                to: to_place,
                 whole_lines: kind == Selection::Lines,
             },
-            Pending::Text(to),
-        );
+        };
+        let lines = end.line.abs_diff(start.line) + 1;
+        self.request(request, Pending::Text(to, lines));
     }
 }
 

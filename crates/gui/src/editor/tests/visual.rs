@@ -443,7 +443,7 @@ fn a_files_editors_share_its_last_selection_and_each_file_keeps_its_own() {
 
 /// A folder's listing, as the explorer makes one to edit: a line without
 /// a mark, as `..` is, then three entries, each line's mark hidden.
-fn listing() -> (Setup, [String; 3]) {
+pub(super) fn listing() -> (Setup, [String; 3]) {
     use crate::explorer::listing::{mark, mark_len};
     let marks = [mark(1, 0), mark(1, 1), mark(1, 2)];
     let [one, two, three] = &marks;

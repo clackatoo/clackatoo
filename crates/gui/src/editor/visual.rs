@@ -32,6 +32,9 @@
 //! `>` keeps them selected. And `.` after `p` over a selection puts the
 //! same text over as much again, where Vim's only deletes it.
 //!
+//! A block of columns, as Ctrl+V selects, is the same, but for what's
+//! done to one, which is in [`super::block`].
+//!
 //! A folder's listing hides each line's mark, which says what entry it
 //! is: `r` leaves the marks as they are, and a change that would take
 //! one with the text before it, joining lines, is refused, as `J` is. Its
@@ -69,6 +72,9 @@ pub(super) enum Extent {
     /// Characters over `lines` lines, to column `to` of the last, or to its
     /// end if `usize::MAX`.
     Down { lines: u64, to: usize },
+    /// A block of `lines` lines, `cols` columns wide, or to each line's end
+    /// if `None` (see [`super::block`]).
+    Block { lines: u64, cols: Option<usize> },
 }
 
 /// What `.` makes again of a change made in visual mode, besides its
@@ -173,8 +179,10 @@ impl Editor {
             (at, anchor)
         };
         let lines = end.line - start.line + 1;
-        if kind == Selection::Lines {
-            return Some(Extent::Lines(lines));
+        match kind {
+            Selection::Lines => return Some(Extent::Lines(lines)),
+            Selection::Block => return self.selected_block(copy).map(Editor::block_extent),
+            Selection::Characters => {}
         }
         let to_end = self.cursor.want() == usize::MAX;
         let last = if to_end {
@@ -194,6 +202,9 @@ impl Editor {
     /// the column the cursor is drawn at, a tab's last, as in Vim. The
     /// selection goes once the change is done.
     pub(super) fn select_extent(&mut self, extent: Extent, copy: &BufferCopy) {
+        if let Extent::Block { lines, cols } = extent {
+            return self.select_block_extent(lines, cols, copy);
+        }
         let text = self.text(copy);
         let at = self.cursor.at;
         let down =
@@ -218,6 +229,7 @@ impl Editor {
                     col: to,
                 },
             ),
+            Extent::Block { .. } => return,
         };
         let head = on_character(head, &text);
         drop(text);
@@ -225,6 +237,14 @@ impl Editor {
         self.anchor = Some(at);
         self.cursor = Cursor::new(head);
         self.repeat_selection = true;
+    }
+
+    /// `o`: the cursor goes to the selection's other end.
+    pub(super) fn other_end(&mut self) {
+        if let Some(anchor) = self.anchor {
+            self.anchor = Some(self.cursor.at);
+            self.cursor = Cursor::new(anchor);
+        }
     }
 
     /// Ends the selection `.` made from the cursor, once its change is
@@ -269,6 +289,9 @@ impl Editor {
     /// mode with the cursor at the selection's start, as Vim's does. Only
     /// what's replaced changes, so marks between stay put.
     pub(super) fn replace_selection(&mut self, ch: char, copy: &mut BufferCopy) {
+        if let Some(block) = self.selected_block(copy) {
+            return self.replace_block(ch, block, copy);
+        }
         let Some(span) = self.span(Operator::Delete, Target::Selection, 1, copy) else {
             return;
         };

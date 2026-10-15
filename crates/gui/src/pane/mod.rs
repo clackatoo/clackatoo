@@ -25,7 +25,7 @@ use crate::chat::{ChatPaint, ChatView};
 use crate::fonts::Fonts;
 use crate::history::History;
 use crate::input::{self, KeyPress};
-use crate::motion::{Cursor, Lines, Point};
+use crate::motion::{Block, Cursor, Lines, Point};
 use crate::options::{BlockMarks, Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 use crate::screen::Screen;
@@ -88,12 +88,10 @@ pub(crate) enum Selection {
     Characters,
     /// Whole lines.
     Lines,
+    /// A block of columns, from one corner to the other, as Ctrl+V selects
+    /// (see [`crate::motion::Block`]).
+    Block,
 }
-
-/// What Ctrl+V says in normal and visual mode, in terminals and editors
-/// alike, until selecting a block of columns is built: better than doing
-/// nothing.
-pub(crate) const NO_BLOCK_SELECTION: &str = "block selection isn't here yet";
 
 /// The fewest rows a pane shows the pill saying it's scrolled back in:
 /// fewer, and it would cover too much of what's being read.
@@ -114,8 +112,8 @@ enum Pending {
     /// History lines, the range asked for and the history's generation
     /// then.
     History(Range<u64>, u64),
-    /// Text to copy, and where to.
-    Text(Copy),
+    /// Text to copy, where to, and how many lines were asked for.
+    Text(Copy, u64),
     /// A search, from where, and whether it went backward.
     Search(Point, bool),
     /// A block, and what for.
@@ -738,8 +736,8 @@ impl Pane {
                 self.fetch_history();
                 true
             }
-            (Some(Pending::Text(to)), Response::Text(text)) => {
-                self.copied(text, to);
+            (Some(Pending::Text(to, lines)), Response::Text(text)) => {
+                self.copied(text, to, lines);
                 true
             }
             (Some(Pending::Search(from, backward)), Response::Found(found)) => {
@@ -877,6 +875,7 @@ impl Pane {
                     pixel: [0.0; 2],
                     clicks: 1,
                     modifiers,
+                    block: false,
                 });
             }
             return false;
@@ -1031,6 +1030,20 @@ impl Pane {
             let width = row.map_or(0, Row::width);
             let cols = match kind {
                 Selection::Lines => 0..width,
+                // From the top left corner to the bottom right, over each
+                // line's text.
+                Selection::Block => {
+                    let block = Block {
+                        first: start.line,
+                        last: end.line,
+                        left: start.col,
+                        right: end.col,
+                    };
+                    match block.on(row.map_or(0, Row::text_end)) {
+                        Some(cols) => cols,
+                        None => continue,
+                    }
+                }
                 Selection::Characters => {
                     let from = if line == start.line { start.col } else { 0 };
                     let to = if line == end.line {
@@ -1305,6 +1318,21 @@ fn folder_name<'a>(cwd: &'a str, home: Option<&str>) -> &'a str {
 /// Where a selection going on past `row`'s end stops: a cell after its
 /// last that isn't blank, for its line break, or the row's width if it
 /// goes on over the next.
+/// The top left and bottom right corners of `block`, as the window
+/// highlights and copies a block.
+pub(crate) fn corners(block: Block) -> (Point, Point) {
+    (
+        Point {
+            line: block.first,
+            col: block.left,
+        },
+        Point {
+            line: block.last,
+            col: block.right,
+        },
+    )
+}
+
 fn past_text(row: &Row) -> usize {
     if row.is_wrapped() {
         return row.width();
@@ -1446,6 +1474,9 @@ mod tests {
                     whole_lines,
                     ..
                 }) => Response::Text(terminal.text(from, to, whole_lines)),
+                ClientMessage::Request(Request::BlockText { from, to, .. }) => {
+                    Response::Text(terminal.block_text(from, to))
+                }
                 ClientMessage::Request(Request::Search {
                     query,
                     from,
@@ -2147,8 +2178,23 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_v_says_block_selection_isnt_here_and_insert_mode_sends_it() {
+    fn a_copy_the_daemon_cut_short_says_so() {
         let terminal = terminal("one");
+        let mut pane = pane(&terminal);
+        pane.copied("a\nb".into(), Copy::Clipboard, 2);
+        assert_eq!(pane.label().as_deref(), Some("copied 2 lines"));
+        pane.copied("a\nb".into(), Copy::Primary, clackatoo_term::MOST_LINES + 1);
+        assert!(
+            pane.label()
+                .is_some_and(|label| label.contains("cut short")),
+            "{:?}",
+            pane.label()
+        );
+    }
+
+    #[test]
+    fn ctrl_v_selects_a_block_and_insert_mode_sends_it() {
+        let terminal = terminal("abcdef\r\nab\r\nabc  defg");
         let mut pane = pane(&terminal);
         let ctrl = Modifiers {
             ctrl: true,
@@ -2162,9 +2208,44 @@ mod tests {
             )
         });
         assert!(sent, "the program's in insert mode");
+        pane.answered(Response::Done);
         normal_mode(&mut pane);
+        keys(&mut pane, "gg0l");
         press(&mut pane, Key::Character("v".into()), ctrl);
-        assert_eq!(pane.label().as_deref(), Some(NO_BLOCK_SELECTION));
+        assert_eq!(pane.mode, Mode::Visual(Selection::Block));
+        keys(&mut pane, "jjll");
+        // Over each line's text, the short one's as far as it goes.
+        let lit: Vec<_> = (pane.highlights(5).into_iter())
+            .filter(|highlight| highlight.kind == HighlightKind::Selection)
+            .map(|highlight| (highlight.line, highlight.cols))
+            .collect();
+        assert_eq!(lit, [(0, 1..4), (1, 1..2), (2, 1..4)]);
+        // Copied a line for each row, by the daemon, the cursor to the top
+        // left. Blanks before more text are kept.
+        assert_eq!(
+            yanked(&mut pane, &terminal, "y").as_deref(),
+            Some("bcd\nb\nbc ")
+        );
+        assert_eq!(pane.mode, Mode::Normal);
+        assert_eq!(
+            pane.cursor.map(|cursor| cursor.at),
+            Some(Point { line: 0, col: 1 })
+        );
+        // `$` takes each to its end; `O` goes to the other corner.
+        press(&mut pane, Key::Character("v".into()), ctrl);
+        assert_eq!(
+            yanked(&mut pane, &terminal, "jj$y").as_deref(),
+            Some("bcdef\nb\nbc  defg")
+        );
+        press(&mut pane, Key::Character("v".into()), ctrl);
+        keys(&mut pane, "jjllO");
+        assert_eq!(
+            pane.cursor.map(|cursor| cursor.at),
+            Some(Point { line: 2, col: 1 })
+        );
+        assert_eq!(pane.anchor, Some(Point { line: 0, col: 3 }));
+        // Ctrl+V again ends it.
+        press(&mut pane, Key::Character("v".into()), ctrl);
         assert_eq!(pane.mode, Mode::Normal);
     }
 
@@ -2313,6 +2394,7 @@ mod mouse_tests {
             col,
             clicks,
             modifiers,
+            block: modifiers.alt,
         })
     }
 
@@ -2338,12 +2420,51 @@ mod mouse_tests {
             }) = message
             {
                 pane.answered(Response::Text(terminal.text(from, to, whole_lines)));
+            } else if let ClientMessage::Request(Request::BlockText { from, to, .. }) = message {
+                pane.answered(Response::Text(terminal.block_text(from, to)));
             }
         }
         pane.take_yanked()
     }
 
     const LEFT: MouseButton = MouseButton::Left;
+
+    #[test]
+    fn alt_drags_a_block_and_letting_go_copies_it() {
+        let terminal = terminal("abcdef\r\nab\r\nabc  defg");
+        let mut pane = pane(&terminal);
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        mouse_with(&mut pane, MouseAction::Press(LEFT), [0, 1], 1, alt);
+        mouse_with(&mut pane, MouseAction::Motion(Some(LEFT)), [2, 3], 1, alt);
+        let lit: Vec<_> = (pane.highlights(5).into_iter())
+            .map(|highlight| (highlight.line, highlight.cols))
+            .collect();
+        assert_eq!(lit, [(0, 1..4), (1, 1..2), (2, 1..4)]);
+        mouse_with(&mut pane, MouseAction::Release(LEFT), [2, 3], 1, alt);
+        assert_eq!(
+            copied(&mut pane, &terminal),
+            Some(("bcd\nb\nbc ".into(), Copy::Primary))
+        );
+        // Ctrl and Alt drag one too, and open no link.
+        let ctrl_alt = Modifiers { ctrl: true, ..alt };
+        assert!(!pane.link_opens(ctrl_alt));
+        mouse_with(&mut pane, MouseAction::Press(LEFT), [2, 3], 1, ctrl_alt);
+        mouse_with(
+            &mut pane,
+            MouseAction::Motion(Some(LEFT)),
+            [0, 2],
+            1,
+            ctrl_alt,
+        );
+        mouse_with(&mut pane, MouseAction::Release(LEFT), [0, 2], 1, ctrl_alt);
+        assert_eq!(
+            copied(&mut pane, &terminal),
+            Some(("cd\n\nc ".into(), Copy::Primary))
+        );
+    }
 
     #[test]
     fn a_program_that_asks_gets_clicks_drags_and_the_wheel() {

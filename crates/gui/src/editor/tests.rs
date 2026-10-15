@@ -16,6 +16,7 @@ use crate::options::{CompleteAccept, Options};
 use crate::pane::Selection;
 use crate::render::{HighlightKind, Ink};
 
+mod block;
 mod hints;
 mod indent;
 mod mouse;
@@ -1595,24 +1596,6 @@ fn braces_go_to_the_blank_lines_round_paragraphs() {
     assert_eq!(short.cursor(), (1, 0));
     short.keys("gg2}");
     assert_eq!(short.cursor(), (3, 0));
-}
-
-#[test]
-fn ctrl_v_says_block_selection_isnt_here_yet() {
-    let mut setup = Setup::new("one\ntwo\n");
-    setup.keys("<C-v>");
-    assert_eq!(
-        setup.editor.status.as_deref(),
-        Some(crate::pane::NO_BLOCK_SELECTION)
-    );
-    assert_eq!(setup.editor.mode, Mode::Normal);
-    // In visual mode too, which goes on.
-    setup.keys("vl<C-v>");
-    assert!(matches!(setup.editor.mode, Mode::Visual(_)));
-    assert_eq!(
-        setup.editor.status.as_deref(),
-        Some(crate::pane::NO_BLOCK_SELECTION)
-    );
 }
 
 #[test]

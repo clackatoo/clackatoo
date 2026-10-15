@@ -119,7 +119,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 86;
+pub const PROTOCOL_VERSION: u32 = 87;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -556,7 +556,9 @@ pub enum Request {
     },
     /// Asks for the text between two places in the terminal's document:
     /// its history, then its screen (see [`HistoryLines`] for how lines are
-    /// numbered). Answered with [`Response::Text`].
+    /// numbered). Answered with [`Response::Text`]: of no more than
+    /// 100,000 lines, cut to 4 MiB, back to where a character starts
+    /// (`clackatoo_term::MOST_LINES` and `MOST_TEXT`).
     Text {
         /// The terminal.
         terminal: TerminalId,
@@ -916,6 +918,22 @@ pub enum Request {
     /// [`Error::Forward`]. New in protocol 82: a client asks
     /// [`wire::daemon_has`] with [`wire::FORWARDS`] before sending it.
     Forward(Forward),
+    /// Asks for the text of a block of columns of the terminal's document,
+    /// as block visual mode copies it: from one corner to the other, on
+    /// each line between, the cells from the lesser column to the greater,
+    /// both included, or to the line's end if the greater is `usize::MAX`.
+    /// A line for each, without the blanks at their ends, half a wide
+    /// character an edge cuts a space. Answered with [`Response::Text`],
+    /// cut short as [`Request::Text`]'s is. New in protocol 87: a client asks
+    /// [`wire::daemon_has`] with [`wire::BLOCKS`] before sending it.
+    BlockText {
+        /// The terminal.
+        terminal: TerminalId,
+        /// One corner.
+        from: Position,
+        /// The other.
+        to: Position,
+    },
 }
 
 /// How to start a terminal.

@@ -656,6 +656,47 @@ fn the_text_objects_lesson_is_done_from_start_to_end_with_the_grammar_answering(
     assert_eq!(daemon.text().to_string(), editor_text(&desk));
 }
 
+#[test]
+fn the_blocks_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
+    let mut desk = one_terminal(Some(seen_everything()));
+    open(&mut desk, "blocks", file_pane(2, 7));
+    let lesson = tutor::lesson("blocks").unwrap();
+    let (name, practice) = lesson.practice_file().unwrap();
+    load(&mut desk, 7, &format!("{SCRATCH}/blocks/{name}"), practice);
+    let mut daemon = Daemon::new(practice);
+    // Ctrl+V and Esc as `^V` and `Esc`, typing as `>` and the text.
+    let mut keys = |desk: &mut Desk, parts: &[&str]| {
+        for &part in parts {
+            match part {
+                "^V" => ctrl(desk, "v"),
+                "Esc" => escape(desk),
+                part => match part.strip_prefix('>') {
+                    Some(text) => type_text(desk, text),
+                    None => type_keys(desk, part),
+                },
+            }
+        }
+        serve_lesson(desk, &mut daemon);
+    };
+    keys(&mut desk, &["^V", "3jl"]);
+    assert_eq!(step(&desk), 1);
+    keys(&mut desk, &["U"]);
+    assert_eq!(step(&desk), 2, "{}", editor_text(&desk));
+    keys(&mut desk, &["^V", "3jI", ">- ", "Esc"]);
+    assert_eq!(step(&desk), 3, "{}", editor_text(&desk));
+    keys(&mut desk, &["^V", "3j$A", ">;", "Esc"]);
+    assert_eq!(step(&desk), 4, "{}", editor_text(&desk));
+    keys(&mut desk, &["0", "^V", "3jld"]);
+    assert_eq!(step(&desk), 5, "{}", editor_text(&desk));
+    keys(&mut desk, &["P"]);
+    assert_eq!(step(&desk), 6, "{}", editor_text(&desk));
+    assert_eq!(
+        editor_text(&desk),
+        "- APple;\n- BAnana;\n- CHerry;\n- DAmson;\n"
+    );
+    assert_eq!(daemon.text().to_string(), editor_text(&desk));
+}
+
 // --- Steps --------------------------------------------------------------------
 
 #[test]

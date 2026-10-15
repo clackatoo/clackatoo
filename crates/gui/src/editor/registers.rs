@@ -29,31 +29,73 @@
 //! or the primary selection, as Neovim's `unnamedplus` and `unnamed` do:
 //! what's yanked or deleted goes there too, and `p` puts what's there.
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::keymap::{Chord, read_macro, write_macro};
 use crate::options::Clipboard;
 use crate::pane::Copy;
 
 /// Text kept to put back with `p`: what was copied or deleted, by
-/// characters, or whole lines.
+/// characters, whole lines, or a block of columns.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Register {
     pub(crate) text: String,
     pub(crate) lines: bool,
+    /// A block's width, in columns, for a block of columns: its rows are
+    /// the text's lines, which `p` puts one under another, each padded to
+    /// it where text follows, as Vim's blockwise registers are.
+    pub(crate) block: Option<usize>,
 }
 
 impl Register {
     /// `text`, by characters.
     pub(crate) fn chars(text: String) -> Self {
-        Self { text, lines: false }
+        Self {
+            text,
+            lines: false,
+            block: None,
+        }
+    }
+
+    /// `text`, whole lines if `lines`.
+    pub(crate) fn new(text: String, lines: bool) -> Self {
+        Self {
+            text,
+            lines,
+            block: None,
+        }
+    }
+
+    /// `rows`, a block of columns `width` wide, one under another.
+    pub(crate) fn block(rows: &[String], width: usize) -> Self {
+        Self {
+            text: rows.join("\n"),
+            lines: false,
+            block: Some(width),
+        }
     }
 
     /// Adds `more` to the end, as `"A` does: whole lines if either is,
-    /// with a line break between.
+    /// with a line break between; rows of a block, as wide as the wider,
+    /// if either is one.
     fn append(&mut self, more: Register) {
         if self.text.is_empty() {
             *self = more;
             return;
         }
+        if !self.lines && !more.lines && (self.block.is_some() || more.block.is_some()) {
+            let width = |register: &Register| {
+                (register.block).unwrap_or_else(|| {
+                    let widths = register.text.lines().map(UnicodeWidthStr::width);
+                    widths.max().unwrap_or(0)
+                })
+            };
+            self.block = Some(width(self).max(width(&more)));
+            self.text.push('\n');
+            self.text.push_str(&more.text);
+            return;
+        }
+        self.block = None;
         if self.lines || more.lines {
             if !self.text.ends_with('\n') {
                 self.text.push('\n');
@@ -274,10 +316,8 @@ impl Registers {
     fn take_in(&mut self, copy: Copy, text: String) {
         let register = &mut self.system[system_index(copy)];
         if register.text != text {
-            *register = Register {
-                lines: text.ends_with('\n'),
-                text,
-            };
+            let lines = text.ends_with('\n');
+            *register = Register::new(text, lines);
         }
     }
 
@@ -333,7 +373,7 @@ impl Registers {
         };
         recorded.truncate(before);
         let text = write_macro(&recorded);
-        self.set(name, Register { text, lines: false });
+        self.set(name, Register::chars(text));
     }
 
     /// The keys the register `name` holds, to type as a macro: `@` is the
@@ -352,7 +392,8 @@ impl Registers {
     }
 
     /// The registers that hold something, a line for each as `:registers`
-    /// lists them, as Neovim does: `l` for lines or `c` for characters, the
+    /// lists them, as Neovim does: `l` for lines, `b` for a block or `c` for
+    /// characters, the
     /// name, and the start of the text, with line breaks and other control
     /// characters as `^J` and the like. Unnamed first, then numbered,
     /// named, small, clipboard and primary.
@@ -364,7 +405,11 @@ impl Registers {
         names
             .filter_map(|name| {
                 let register = self.get(Some(name))?;
-                let kind = if register.lines { 'l' } else { 'c' };
+                let kind = match (register.lines, register.block) {
+                    (true, _) => 'l',
+                    (false, Some(_)) => 'b',
+                    (false, None) => 'c',
+                };
                 Some(format!("{kind}  \"{name}   {}", shown(&register.text)))
             })
             .collect()
@@ -405,17 +450,11 @@ mod tests {
     use super::*;
 
     fn chars(text: &str) -> Register {
-        Register {
-            text: text.into(),
-            lines: false,
-        }
+        Register::chars(text.into())
     }
 
     fn lines(text: &str) -> Register {
-        Register {
-            text: text.into(),
-            lines: true,
-        }
+        Register::new(text.into(), true)
     }
 
     fn text_of(registers: &Registers, name: char) -> Option<&str> {
