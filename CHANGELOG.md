@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.43 (2026-10-15)
+
+### Features
+
+- **gui:** errors that say "did you mean", and a finder that colours what it shows (f1f049d)
+
 ## 2026.10.42 (2026-10-15)
 
 ### Features
