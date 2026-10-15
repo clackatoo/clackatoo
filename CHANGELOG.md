@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.47 (2026-10-15)
+
+### Features
+
+- **gui:** failed commands marked, a scrollback pill, and tabs named after their folders (d10749a)
+
 ## 2026.10.46 (2026-10-15)
 
 ### Features
