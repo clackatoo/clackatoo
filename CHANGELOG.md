@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.35 (2026-10-15)
+
+### Fixes
+
+- **daemon:** read a language server or agent whose input broke until it exits (b9cdb2d)
+
 ## 2026.10.34 (2026-10-15)
 
 ### Speed
