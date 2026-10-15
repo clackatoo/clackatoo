@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.31 (2026-10-15)
+
+### Speed
+
+- **daemon:** parse and free big agent and language-server messages off the event loop (d9edded)
+
 ## 2026.10.30 (2026-10-15)
 
 ### Features
