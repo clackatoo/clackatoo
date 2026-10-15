@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.46 (2026-10-15)
+
+### Features
+
+- **gui:** completion under the word, coloured previews of unopened files, and a first chat without a pause (df93ef9)
+
 ## 2026.10.45 (2026-10-15)
 
 ### Features
