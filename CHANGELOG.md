@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.32 (2026-10-15)
+
+### Speed
+
+- **daemon:** pick the best completion items without reading or sorting them all (b892de8)
+
 ## 2026.10.31 (2026-10-15)
 
 ### Speed
