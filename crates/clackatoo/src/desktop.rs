@@ -7,6 +7,14 @@
 //! the entry names goes in the hicolor theme beside it. Both files are
 //! built into the program, so any build can install them.
 //!
+//! The entry says clackatoo reports its startup (`StartupNotify=true`):
+//! the launcher hands a window a token, which the window opens with to
+//! take focus and end the launcher's spinner (see the gui crate's
+//! `launch`). Entries written before it said so gain the line from the
+//! next `clackatoo update`, whose build takes the token; a window's
+//! `desktop refresh-hosts` keeps the program the entry starts, which may
+//! not, so it leaves the line out of an entry that lacks it.
+//!
 //! Files clackatoo writes say so: `X-Clackatoo-Managed=true` in the entry,
 //! a comment in the icon. Only those are replaced or removed without
 //! `--force`, so an entry someone wrote by hand stays theirs.
@@ -244,7 +252,7 @@ fn refresh(paths: &Paths, program: &Path, hosts: &[String]) -> anyhow::Result<bo
 /// starting the program it starts now, whichever build asks: a build being
 /// tried out mustn't take the launcher over by connecting to a machine.
 /// Says whether it changed anything; an entry offering them already isn't
-/// written again.
+/// written again. It says `StartupNotify=true` only if it did before.
 fn refresh_hosts(paths: &Paths, hosts: &[String]) -> anyhow::Result<bool> {
     let path = paths.entry();
     let text = match fs::read_to_string(&path) {
@@ -263,7 +271,13 @@ fn refresh_hosts(paths: &Paths, hosts: &[String]) -> anyhow::Result<bool> {
     else {
         return Ok(false);
     };
-    let rewritten = entry(Path::new(&program), hosts)?;
+    let mut rewritten = entry(Path::new(&program), hosts)?;
+    // The program may be a build from before windows took the launcher's
+    // token, which would show a busy cursor until the desktop gave up on
+    // it: only `refresh`, run by the build being installed, adds the line.
+    if !text.lines().any(|line| line.starts_with("StartupNotify=")) {
+        rewritten = rewritten.replace("\nStartupNotify=true\n", "\n");
+    }
     if rewritten == text {
         return Ok(false);
     }
@@ -595,6 +609,7 @@ mod tests {
         );
         assert_eq!(values(&entry, "TryExec"), [PROGRAM]);
         assert_eq!(values(&entry, "StartupWMClass"), ["clackatoo"]);
+        assert_eq!(values(&entry, "StartupNotify"), ["true"]);
         assert_eq!(values(&entry, "Icon"), ["clackatoo"]);
         // Marked, in the main group.
         let action = entry.find("[Desktop Action").unwrap();
@@ -781,6 +796,35 @@ mod tests {
         assert!(!entry_is_ours(ENTRY));
         assert!(ENTRY.starts_with("[Desktop Entry]\n"));
         assert_eq!(values(ENTRY, "Actions"), ["new-window;connect;"]);
+        // In the main group only: the window ends the launcher's spinner.
+        assert_eq!(values(ENTRY, "StartupNotify"), ["true"]);
+        let action = ENTRY.find("[Desktop Action").unwrap();
+        assert!(ENTRY[..action].contains("\nStartupNotify=true\n"));
+    }
+
+    #[test]
+    fn an_entry_from_before_startup_notify_gains_it_only_from_update() {
+        let (_data, paths) = setup();
+        let without = |text: &str| text.replace("StartupNotify=true\n", "");
+        let older = without(&entry(Path::new(PROGRAM), &[]).unwrap());
+        assert!(values(&older, "StartupNotify").is_empty());
+
+        // By `clackatoo update`'s refresh.
+        write(&paths.entry(), &older).unwrap();
+        assert!(refresh(&paths, Path::new(PROGRAM), &[]).unwrap());
+        assert_eq!(values(&read(&paths.entry()), "StartupNotify"), ["true"]);
+
+        // Not by a window's, whose build may be newer than the program
+        // the entry starts: the same machines leave it as it is, and new
+        // ones are added without it.
+        write(&paths.entry(), &older).unwrap();
+        assert!(!refresh_hosts(&paths, &[]).unwrap());
+        assert_eq!(read(&paths.entry()), older);
+        assert!(refresh_hosts(&paths, &hosts(&["desktop"])).unwrap());
+        assert_eq!(
+            read(&paths.entry()),
+            without(&entry(Path::new(PROGRAM), &hosts(&["desktop"])).unwrap())
+        );
     }
 
     fn hosts(list: &[&str]) -> Vec<String> {

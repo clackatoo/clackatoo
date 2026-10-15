@@ -21,7 +21,9 @@ use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, OwnedDisplayHandle};
 use winit::keyboard::{Key, KeyLocation, NamedKey};
-use winit::window::{CursorIcon, ImePurpose, ResizeDirection, Window, WindowAttributes, WindowId};
+use winit::window::{
+    ActivationToken, CursorIcon, ImePurpose, ResizeDirection, Window, WindowAttributes, WindowId,
+};
 
 use crate::GraphicsApi;
 use crate::chat::{ChatPaint, Pointer};
@@ -35,6 +37,7 @@ use crate::fonts::{CellMetrics, Fonts};
 use crate::forwards;
 use crate::ime::{InputMethod, Preedit};
 use crate::input;
+use crate::launch::LaunchToken;
 use crate::layout::{Placement, Tile};
 use crate::pane::{Copy, Mode};
 use crate::render::{
@@ -289,11 +292,14 @@ impl Gpu {
     }
 }
 
-/// Work started before the window opened.
+/// Work started before the window opened, and what the window opens
+/// with.
 #[derive(Debug)]
-struct Startup {
-    fonts: JoinHandle<anyhow::Result<(Fonts, Desktop)>>,
-    gpu: JoinHandle<anyhow::Result<Gpu>>,
+pub(crate) struct Startup {
+    pub(crate) fonts: JoinHandle<anyhow::Result<(Fonts, Desktop)>>,
+    pub(crate) gpu: JoinHandle<anyhow::Result<Gpu>>,
+    /// The token the desktop launched the window with, if it did.
+    pub(crate) launch: LaunchToken,
 }
 
 /// The open window and what draws into it.
@@ -404,8 +410,7 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn new(
         started: Instant,
-        fonts: JoinHandle<anyhow::Result<(Fonts, Desktop)>>,
-        gpu: JoinHandle<anyhow::Result<Gpu>>,
+        startup: Startup,
         session: Session,
         remote_command: String,
     ) -> Self {
@@ -413,7 +418,7 @@ impl App {
         let forwards = Forwards::new(move || drop(proxy.send_event(SessionEvent::Forwards)));
         Self {
             started,
-            startup: Some(Startup { fonts, gpu }),
+            startup: Some(startup),
             frame: None,
             desk: Desk::default(),
             buttons: ButtonLayout::default(),
@@ -470,7 +475,8 @@ impl App {
         #[allow(clippy::cast_possible_truncation)]
         let [width, height] = Geometry::window_size(cols, rows, metrics(&fonts, PADDING as f32));
         let size = LogicalSize::new(f64::from(width), f64::from(height));
-        let window = Arc::new(event_loop.create_window(window_attributes(size))?);
+        let token = startup.launch.for_window(is_wayland(event_loop));
+        let window = Arc::new(event_loop.create_window(window_attributes(size, token))?);
         window.set_ime_purpose(ImePurpose::Terminal);
         log::debug!(
             "asked for a {size:?} window; got {:?} at scale {}",
@@ -2437,10 +2443,16 @@ fn wrap(text: &str, width: usize, indent: &str) -> Vec<String> {
     lines
 }
 
-/// The new window's title, size and app ID. Desktops find the window's
-/// icon through the app ID, matching it to `clackatoo.desktop`. The window
-/// draws its own frame (see [`chrome`]), so it asks for none.
-fn window_attributes(size: LogicalSize<f64>) -> WindowAttributes {
+/// Whether the window opens on Wayland, rather than X11.
+fn is_wayland(event_loop: &ActiveEventLoop) -> bool {
+    winit::platform::wayland::ActiveEventLoopExtWayland::is_wayland(event_loop)
+}
+
+/// The new window's title, size and app ID, and the token the desktop
+/// launched it with, if any (see [`crate::launch`]). Desktops find the
+/// window's icon through the app ID, matching it to `clackatoo.desktop`.
+/// The window draws its own frame (see [`chrome`]), so it asks for none.
+fn window_attributes(size: LogicalSize<f64>, token: Option<ActivationToken>) -> WindowAttributes {
     let attributes = Window::default_attributes()
         .with_title("clackatoo")
         .with_inner_size(size)
@@ -2448,11 +2460,16 @@ fn window_attributes(size: LogicalSize<f64>) -> WindowAttributes {
         .with_transparent(true);
     #[cfg(target_os = "linux")]
     let attributes = {
+        use winit::platform::startup_notify::WindowAttributesExtStartupNotify;
         use winit::platform::wayland::WindowAttributesExtWayland;
         use winit::platform::x11::WindowAttributesExtX11;
         let attributes =
             WindowAttributesExtWayland::with_name(attributes, "clackatoo", "clackatoo");
-        WindowAttributesExtX11::with_name(attributes, "clackatoo", "clackatoo")
+        let attributes = WindowAttributesExtX11::with_name(attributes, "clackatoo", "clackatoo");
+        match token {
+            Some(token) => attributes.with_activation_token(token),
+            None => attributes,
+        }
     };
     attributes
 }

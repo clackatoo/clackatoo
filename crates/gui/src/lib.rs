@@ -37,6 +37,7 @@ pub mod hosts;
 mod ime;
 mod input;
 mod keymap;
+mod launch;
 mod layout;
 mod links;
 mod lua;
@@ -125,8 +126,23 @@ pub enum GraphicsApi {
     OpenGl,
 }
 
+/// Takes the token the desktop launched this process with out of its
+/// environment, as a window does as it starts, so nothing it starts
+/// inherits it. For the daemon: one started from a launcher, or by a
+/// window from before windows took it, has it still, and keeps it through
+/// every upgrade, and its shells would inherit a token long spent.
+///
+/// Changing the environment is only safe while no other thread could be
+/// reading it, so this must come before the process starts any thread.
+pub fn forget_launch_token() {
+    launch::LaunchToken::take();
+}
+
 /// Opens a window on the daemon's workspaces, making one if there are none,
 /// and runs until the window closes or every workspace has.
+///
+/// It takes the desktop's launch token out of the environment first, so
+/// it must be called before this process starts any thread.
 ///
 /// # Errors
 ///
@@ -134,6 +150,9 @@ pub enum GraphicsApi {
 /// the daemon fails.
 pub fn run(options: Options) -> anyhow::Result<()> {
     let started = Instant::now();
+    // First, while this is the only thread: nothing started from here on
+    // inherits the desktop's token, the daemon included.
+    let launch = launch::LaunchToken::take();
     let start = options::Options::drawing_with(&options.font);
     let fonts = {
         let options = start.font_options();
@@ -186,7 +205,12 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         session::Session::start(location, &options.runtime, proxy)
     };
     updates::after_opening(event_loop.create_proxy());
-    let mut app = app::App::new(started, fonts, gpu, session, options.remote_command);
+    let mut app = app::App::new(
+        started,
+        app::Startup { fonts, gpu, launch },
+        session,
+        options.remote_command,
+    );
     // Before config runs, which starts from them.
     app.start_options(start, options.font_fixed.options());
     if options.pick_remote {

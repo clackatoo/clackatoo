@@ -305,6 +305,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: ":PortForward 8080 lets a browser here reach port 8080 on a remote window's machine",
     },
+    News {
+        id: "launch-focus",
+        date: "2026-10-15",
+        lesson: "basics",
+        what: "Opened from your app launcher, the window takes focus and the launcher stops spinning",
+    },
 ];
 
 impl News {

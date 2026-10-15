@@ -531,6 +531,9 @@ fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
         println!("{}", upgrade::versions_answer());
         return Ok(());
     }
+    // Before any thread starts, so its shells don't inherit a launcher's
+    // spent token.
+    clackatoo_gui::forget_launch_token();
     logs::daemon();
     let runtime = RuntimeDir::for_current_user();
     let mut config = DaemonConfig::from_env();

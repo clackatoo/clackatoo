@@ -10,6 +10,7 @@ Icon=clackatoo
 Terminal=false
 Categories=System;TerminalEmulator;
 StartupWMClass=clackatoo
+StartupNotify=true
 Actions=new-window;connect;
 
 [Desktop Action new-window]
