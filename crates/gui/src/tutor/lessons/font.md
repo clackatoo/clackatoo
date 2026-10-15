@@ -29,4 +29,6 @@ client.opt.font = "JetBrains Mono"
 client.opt.fontsize = 12
 ```
 
+The window's own text, in its top bar, menus, finder and chats, is in your desktop's interface font. If the desktop names one that isn't installed, it's your system's sans-serif font, as fontconfig picks it, or else the first installed of Noto Sans, Cantarell, Inter, DejaVu Sans, Liberation Sans and Roboto.
+
 `--font` and `--font-size` on the command line, or `CLACKATOO_FONT` and `CLACKATOO_FONT_SIZE` in the environment, outdo what `init.lua` sets as it runs, for that window. What's set after, by `:set` or a key your config binds, changes it still.

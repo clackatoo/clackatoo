@@ -832,8 +832,25 @@ fn diagnostics_are_written_after_lines_numbered_and_gone_to() {
     assert_eq!(rows[1].text(), "  1 let x = y;  ■ cannot find `y`");
     assert_eq!(rows[3].text(), "  3 z;  ■ a hint");
     let fg = |row: &clackatoo_term::Row, col: usize| row.style(row.cells()[col]).fg;
-    assert_eq!(fg(rows[1], 16), crate::colors::diagnostic(Severity::Error));
-    // Its number in the same colour, but the cursor's line's.
+    // In each severity's colour, toned down: as it's drawn, readable at a
+    // glance but quieter than the code, and not the number's full red.
+    let theme = crate::colors::Theme::default();
+    let drawn = |row: &clackatoo_term::Row, col: usize| {
+        let said = theme.cell(row.style(row.cells()[col])).foreground;
+        crate::colors::contrast(said, theme.background)
+    };
+    let code = crate::colors::contrast(theme.foreground, theme.background);
+    for (row, col, severity) in [(rows[1], 16, Severity::Error), (rows[3], 8, Severity::Hint)] {
+        assert_eq!(fg(row, col), crate::colors::virtual_text(severity).fg);
+        assert!(fg(row, col) != crate::colors::diagnostic(severity));
+        let contrast = drawn(row, col);
+        assert!(
+            contrast >= 4.5 && contrast < code / 2.0,
+            "{severity:?}: {contrast}"
+        );
+    }
+    assert_ne!(fg(rows[1], 16), fg(rows[3], 8), "a hint isn't an error");
+    // Its number in the full colour, but the cursor's line's.
     assert_eq!(fg(rows[1], 2), crate::colors::diagnostic(Severity::Error));
     assert_eq!(fg(rows[0], 2), crate::colors::line_number(true).fg);
     assert_eq!(fg(rows[2], 2), crate::colors::line_number(false).fg);

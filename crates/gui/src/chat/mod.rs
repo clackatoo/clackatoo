@@ -89,6 +89,11 @@ enum Input {
     CopyText(String),
     /// Asks this of the daemon.
     Act(ChatAction),
+    /// Answers the question numbered so, if it's still the one asked.
+    Answer {
+        question: u64,
+        pick: Pick,
+    },
 }
 
 /// What settling the chat's queue came to.
@@ -304,6 +309,45 @@ pub(crate) struct ChatView {
     /// Where the meter was drawn, for its detail to open from, while
     /// drawing: its right, and the box's top.
     detail_anchor: Option<[f32; 2]>,
+    /// When the agent's question came, or the focus arrived at the chat
+    /// while it asked, as turns count time: for [`ANSWER_PAUSE`] after
+    /// either, its answers' numbers don't answer it, as they may have been
+    /// meant for what was there before.
+    asked_at: Option<u64>,
+    /// The answer a number picked in normal mode, by its index, and when,
+    /// as turns count time, until the same number again or Enter gives it,
+    /// or any other key, a click, the wheel or the window losing the focus
+    /// drops it.
+    armed: Option<(usize, u64)>,
+}
+
+/// How long, in milliseconds, after a number arms an answer in normal mode
+/// before the same number again, or Enter, gives it, and how long after
+/// it no longer does, only arming it again: a count such as `22j` or
+/// `2⏎`, typed in one go, never answers, and nor does an answer armed and
+/// forgotten.
+pub(crate) const ARMED_FOR: std::ops::Range<u64> = 300..5_000;
+
+/// How long after a question comes, or the focus arrives at a chat asking
+/// one, before a number answers it, in milliseconds: long enough for keys
+/// typed for what was there before to have stopped, short enough not to
+/// be felt.
+pub(crate) const ANSWER_PAUSE: u64 = 500;
+
+/// An answer to the question asked, picked by a key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pick {
+    /// The answer of this index.
+    Choice(usize),
+    /// No, as Esc says.
+    Refuse,
+}
+
+/// The answer the number `text` names, from 1 to 9, by its index, if it's
+/// one.
+fn numbered(text: Option<&str>) -> Option<usize> {
+    let number = text?.parse::<usize>().ok()?;
+    (1..=9).contains(&number).then(|| number - 1)
 }
 
 impl std::fmt::Debug for ChatView {
@@ -319,7 +363,7 @@ impl std::fmt::Debug for ChatView {
 
 impl ChatView {
     pub(crate) fn new(title: String, node: ChatNode) -> Self {
-        Self {
+        let mut view = Self {
             node,
             title,
             editor: PlainEditor::new(16.0),
@@ -365,12 +409,20 @@ impl ChatView {
             column_right: 0.0,
             detail: None,
             detail_anchor: None,
+            asked_at: None,
+            armed: None,
+        };
+        // A chat first seen asking may be arrived at already.
+        if view.node.question.is_some() {
+            view.asked_at = Some(view.now());
         }
+        view
     }
 
     /// Applies an update from the daemon.
     pub(crate) fn apply(&mut self, update: &ViewUpdate) {
         self.heard = Some(self.now());
+        let asked = self.node.question.as_ref().map(|question| question.id);
         match update {
             ViewUpdate::Snapshot(view) => {
                 if let Some(chat) = view.chat() {
@@ -420,6 +472,15 @@ impl ChatView {
                         | clackatoo_protocol::Patch::Cwd(_) => {}
                     }
                 }
+            }
+        }
+        // A question that's just come waits a moment for its answer, and
+        // an answer armed for the one before is no answer to it.
+        let asking = self.node.question.as_ref().map(|question| question.id);
+        if asking != asked {
+            self.armed = None;
+            if asking.is_some() {
+                self.asked_at = Some(self.now());
             }
         }
         // A chat that moved to another agent has nothing to say in detail
@@ -487,6 +548,12 @@ impl ChatView {
 
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) {
         self.said = None;
+        // An answer to the question asked waits as one, so if the question
+        // has gone by the time it's settled, it's dropped, not typed.
+        if let Some((question, pick)) = self.pick_of(press) {
+            self.queued.push(Input::Answer { question, pick });
+            return;
+        }
         self.queued.push(Input::Key {
             key: press.key.clone(),
             text: press.text.map(str::to_owned),
@@ -500,6 +567,8 @@ impl ChatView {
 
     /// A mouse button went down at `at`, from the pane's top left.
     pub(crate) fn press(&mut self, at: [f32; 2], clicks: u8, shift: bool) {
+        // Clicking drops an answer armed, as a key does.
+        self.armed = None;
         self.queued.push(Input::Press { at, clicks, shift });
     }
 
@@ -696,6 +765,8 @@ impl ChatView {
                     if self.node.question.is_none() {
                         let text = text.replace("\r\n", "\n");
                         self.drive(fonts, |driver| driver.insert_or_replace_selection(&text));
+                    } else {
+                        self.typed_while_asking();
                     }
                 }
                 Input::Press { at, clicks, shift } => {
@@ -735,6 +806,7 @@ impl ChatView {
                     settled.copied.push((text, to));
                 }
                 Input::CopyText(text) => settled.copied.push((text, Copy::Clipboard)),
+                Input::Answer { question, pick } => self.pick(question, pick, &mut settled),
                 Input::Act(action) => settled.actions.push(action),
                 Input::Compose(Some((text, cursor))) => {
                     self.drive(fonts, |driver| driver.set_compose(&text, cursor));
@@ -882,8 +954,11 @@ impl ChatView {
         settled.actions.push(ChatAction::Send(text));
     }
 
-    /// A key while the agent waits for an answer to its question: an
-    /// answer's number picks it, and Esc says no.
+    /// A key typed while the agent waits for an answer to its question,
+    /// past [`pick_of`](Self::pick_of), as when the menu was open: an
+    /// answer's number picks it, Esc says no, and Ctrl+C stops the agent.
+    /// Any other key says in the bar which keys answer it, rather than
+    /// going nowhere unseen.
     fn answer_key(
         &mut self,
         key: &Key,
@@ -891,28 +966,107 @@ impl ChatView {
         modifiers: Modifiers,
         settled: &mut Settled,
     ) {
-        let Some(question) = &self.node.question else {
+        let Some(question) = self.node.question.as_ref().map(|question| question.id) else {
             return;
         };
-        let picked = match key {
-            Key::Named(NamedKey::Escape) => Some(self.refusal()),
+        let pick = match key {
             Key::Character(character) if modifiers.ctrl && character.eq_ignore_ascii_case("c") => {
                 settled.actions.push(ChatAction::Stop);
-                None
+                return;
             }
-            _ => text
-                .and_then(|text| text.chars().next())
-                .and_then(|ch| ch.to_digit(10))
-                .and_then(|digit| usize::try_from(digit).ok())
-                .and_then(|digit| digit.checked_sub(1))
-                .and_then(|index| question.choices.get(index))
-                .map(|choice| Some(choice.id.clone())),
+            Key::Named(NamedKey::Escape) => Some(Pick::Refuse),
+            _ if modifiers.ctrl || modifiers.alt => None,
+            _ => numbered(text).map(Pick::Choice),
         };
-        if let Some(option) = picked {
-            settled.actions.push(ChatAction::Answer {
-                question: question.id,
-                option,
-            });
+        match pick {
+            Some(pick) => self.pick(question, pick, settled),
+            None => self.typed_while_asking(),
+        }
+    }
+
+    /// What insert mode typed while a question waits went nowhere: the bar
+    /// says which numbers answer it, and they wait a moment again, as one
+    /// typed among words, meant for the message, mustn't answer it.
+    fn typed_while_asking(&mut self) {
+        self.asked_at = Some(self.now());
+        self.say(self.answer_hint());
+    }
+
+    /// The answer `press`, typed in insert mode, gives the question asked,
+    /// and that question's number: an answer's number, or Esc for no.
+    /// While the menu is open, it has the keys first.
+    fn pick_of(&self, press: &KeyPress<'_>) -> Option<(u64, Pick)> {
+        let question = self
+            .node
+            .question
+            .as_ref()
+            .filter(|_| self.menu.is_none())?;
+        if press.modifiers.ctrl || press.modifiers.alt {
+            return None;
+        }
+        let pick = match press.key {
+            Key::Named(NamedKey::Escape) => Pick::Refuse,
+            _ => Pick::Choice(numbered(press.text)?),
+        };
+        Some((question.id, pick))
+    }
+
+    /// Answers question `question` with `pick`, if it's still the one
+    /// asked; one gone by is dropped. A number pressed as the question
+    /// came, or as the focus arrived, says to press it again (see
+    /// [`ANSWER_PAUSE`]); saying no never waits.
+    fn pick(&mut self, question: u64, pick: Pick, settled: &mut Settled) {
+        let Some(asked) = (self.node.question.as_ref()).filter(|asked| asked.id == question) else {
+            return;
+        };
+        let option = match pick {
+            Pick::Refuse => self.refusal(),
+            Pick::Choice(index) => {
+                let Some(id) = asked.choices.get(index).map(|choice| choice.id.clone()) else {
+                    self.typed_while_asking();
+                    return;
+                };
+                if self.just_asked() {
+                    self.say(format!(
+                        "a question just came: press {} again to answer it",
+                        index + 1
+                    ));
+                    return;
+                }
+                Some(id)
+            }
+        };
+        settled
+            .actions
+            .push(ChatAction::Answer { question, option });
+    }
+
+    /// Whether the question came, or the focus arrived at it, too short
+    /// a time ago for a number to answer it (see [`ANSWER_PAUSE`]). Should
+    /// the clock go back, it's long enough.
+    fn just_asked(&self) -> bool {
+        (self.asked_at)
+            .and_then(|at| self.now().checked_sub(at))
+            .is_some_and(|since| since < ANSWER_PAUSE)
+    }
+
+    /// What the bar says to a key that doesn't answer the question asked:
+    /// which keys do, as they do in either mode.
+    fn answer_hint(&self) -> String {
+        let choices = (self.node.question.as_ref()).map_or(0, |question| question.choices.len());
+        match choices {
+            0 => "a question waits".to_owned(),
+            1 => "a question waits: 1 answers it".to_owned(),
+            count => format!("a question waits: 1–{} answer it", count.min(9)),
+        }
+    }
+
+    /// The focus has arrived at the chat: if it's asking something, its
+    /// answers' numbers wait a moment before they answer it, as they may
+    /// have been typed for the pane that had the focus before.
+    pub(crate) fn arrived(&mut self) {
+        if self.node.question.is_some() {
+            self.asked_at = Some(self.now());
         }
     }
 
@@ -1570,25 +1724,46 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_question_is_answered_by_number_or_turned_down_with_esc() {
-        let mut fonts = fonts();
-        let mut node = ChatNode::default();
+    /// When the tests' clock starts, in milliseconds.
+    const START: u64 = 1_000_000;
+
+    /// A chat asking whether to run `ls`, yes or no, on the tests' clock,
+    /// asked long enough ago for a number to answer it.
+    fn asking() -> ChatView {
         let choice = |id: &str, kind| Choice {
             id: id.into(),
             name: id.into(),
             kind,
         };
-        node.question = Some(Question {
-            id: 4,
-            title: "run ls".into(),
-            choices: vec![
-                choice("yes", ChoiceKind::AllowOnce),
-                choice("no", ChoiceKind::RejectOnce),
-            ],
-            own: false,
-        });
+        let node = ChatNode {
+            question: Some(Question {
+                id: 4,
+                title: "run ls".into(),
+                choices: vec![
+                    choice("yes", ChoiceKind::AllowOnce),
+                    choice("no", ChoiceKind::RejectOnce),
+                ],
+                own: false,
+            }),
+            ..ChatNode::default()
+        };
         let mut view = ChatView::new(String::new(), node);
+        view.set_clock(START);
+        view.asked_at = Some(START - ANSWER_PAUSE);
+        view
+    }
+
+    fn answer(option: &str) -> ChatAction {
+        ChatAction::Answer {
+            question: 4,
+            option: Some(option.into()),
+        }
+    }
+
+    #[test]
+    fn a_question_is_answered_by_number_or_turned_down_with_esc() {
+        let mut fonts = fonts();
+        let mut view = asking();
         typed(&mut view, "1");
         press(
             &mut view,
@@ -1599,19 +1774,293 @@ mod tests {
         typed(&mut view, "7");
         assert_eq!(
             view.settle(&mut fonts).actions,
-            [
-                ChatAction::Answer {
-                    question: 4,
-                    option: Some("yes".into()),
-                },
-                ChatAction::Answer {
-                    question: 4,
-                    option: Some("no".into()),
-                },
-            ]
+            [answer("yes"), answer("no")]
         );
-        // Typing went to the answer, not the message.
+        // Typing went to the answer, not the message, and a number no
+        // answer has says which do.
         assert_eq!(view.editor.raw_text(), "");
+        assert_eq!(
+            view.label().as_deref(),
+            Some("a question waits: 1–2 answer it")
+        );
+    }
+
+    /// `key`, typing `text`, pressed in normal mode: whether the chat must
+    /// be redrawn, and whether it goes to insert mode.
+    fn read(view: &mut ChatView, key: &Key, text: Option<&str>) -> (bool, bool) {
+        view.read_key(&KeyPress {
+            key,
+            text,
+            location: winit::keyboard::KeyLocation::Standard,
+            code: None,
+            modifiers: Modifiers::default(),
+        })
+    }
+
+    /// `keys` pressed in normal mode, each a character, or `⏎` for Enter.
+    fn read_keys(view: &mut ChatView, keys: &str) {
+        for ch in keys.chars() {
+            if ch == '⏎' {
+                read(view, &Key::Named(NamedKey::Enter), None);
+            } else {
+                let text = ch.to_string();
+                read(view, &Key::Character(text.as_str().into()), Some(&text));
+            }
+        }
+    }
+
+    /// Moves the chat's clock on `ms` milliseconds.
+    fn step(view: &mut ChatView, ms: u64) {
+        let now = view.now();
+        view.set_clock(now + ms);
+    }
+
+    #[test]
+    fn in_normal_mode_a_number_arms_its_answer_and_again_or_enter_gives_it() {
+        let mut fonts = fonts();
+        let mut view = asking();
+        let two = Key::Character("2".into());
+        assert_eq!(read(&mut view, &two, Some("2")), (true, false));
+        assert_eq!(view.armed(), Some(1));
+        assert!(!view.unsettled(), "armed, not answered");
+        assert_eq!(view.label().as_deref(), Some("2 no · 2 again or Enter"));
+        // `2j`, a count from habit, answers nothing: `j` drops it and
+        // moves, as ever.
+        read_keys(&mut view, "j");
+        assert_eq!(view.armed(), None);
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        // The same number again, or Enter, a moment later gives it.
+        read_keys(&mut view, "2");
+        step(&mut view, ARMED_FOR.start);
+        read_keys(&mut view, "2");
+        assert_eq!(view.settle(&mut fonts).actions, [answer("no")]);
+        read_keys(&mut view, "1");
+        step(&mut view, ARMED_FOR.start);
+        read_keys(&mut view, "⏎");
+        assert_eq!(view.settle(&mut fonts).actions, [answer("yes")]);
+        // As late as it can be.
+        read_keys(&mut view, "2");
+        step(&mut view, ARMED_FOR.end - 1);
+        read_keys(&mut view, "2");
+        assert_eq!(view.settle(&mut fonts).actions, [answer("no")]);
+        // Another number arms that one instead.
+        read_keys(&mut view, "1");
+        step(&mut view, ARMED_FOR.start);
+        read_keys(&mut view, "2");
+        assert_eq!(view.armed(), Some(1));
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        // Esc, pressed from habit, drops it and leaves the question be.
+        read(&mut view, &Key::Named(NamedKey::Escape), None);
+        assert_eq!(view.armed(), None);
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        // A number no answer has says which do; `0` and `j` read.
+        read_keys(&mut view, "7");
+        assert_eq!(
+            view.label().as_deref(),
+            Some("a question waits: 1–2 answer it")
+        );
+        read_keys(&mut view, "0j");
+        assert!(!view.unsettled());
+        // And `i` still goes to type.
+        assert_eq!(
+            read(&mut view, &Key::Character("i".into()), Some("i")),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn a_count_typed_in_one_go_never_answers() {
+        let mut fonts = fonts();
+        let mut view = asking();
+        // Too soon after the number, the same again or Enter leaves it
+        // armed, and the key after drops it.
+        for keys in ["22j", "2⏎k", "11G", "22", "2⏎"] {
+            read_keys(&mut view, keys);
+            assert!(view.settle(&mut fonts).actions.is_empty(), "{keys}");
+            read_keys(&mut view, "j");
+            assert_eq!(view.armed(), None, "{keys}");
+        }
+        // Still armed when the moment comes, it gives it then.
+        read_keys(&mut view, "22");
+        step(&mut view, ARMED_FOR.start);
+        read_keys(&mut view, "2");
+        assert_eq!(view.settle(&mut fonts).actions, [answer("no")]);
+    }
+
+    #[test]
+    fn an_answer_armed_and_forgotten_is_only_armed_again() {
+        let mut fonts = fonts();
+        let mut view = asking();
+        read_keys(&mut view, "1");
+        step(&mut view, ARMED_FOR.end);
+        read_keys(&mut view, "1");
+        assert!(view.settle(&mut fonts).actions.is_empty(), "armed again");
+        assert_eq!(view.armed(), Some(0));
+        step(&mut view, ARMED_FOR.start);
+        read_keys(&mut view, "⏎");
+        assert_eq!(view.settle(&mut fonts).actions, [answer("yes")]);
+        // A click, the wheel, or the window losing the focus drops it.
+        read_keys(&mut view, "1");
+        view.press([0.0; 2], 1, false);
+        assert_eq!(view.armed(), None);
+        read_keys(&mut view, "1");
+        assert!(view.disarm());
+        assert_eq!(view.armed(), None);
+        assert!(!view.disarm());
+    }
+
+    #[test]
+    fn the_answer_armed_is_ringed_on_the_card() {
+        let mut fonts = fonts();
+        let mut view = asking();
+        let ringed = |view: &mut ChatView, fonts: &mut Fonts| {
+            let paint = view.paint(fonts, [0.0; 2], [720.0, 640.0], true);
+            (paint.fills.iter())
+                .filter(|fill| matches!(fill.border, Some((_, crate::render::Paint::Ink))))
+                .count()
+        };
+        assert_eq!(ringed(&mut view, &mut fonts), 0);
+        read_keys(&mut view, "2");
+        assert_eq!(ringed(&mut view, &mut fonts), 1);
+        read_keys(&mut view, "k");
+        assert_eq!(ringed(&mut view, &mut fonts), 0);
+    }
+
+    #[test]
+    fn numbers_as_a_question_comes_or_the_focus_arrives_at_it_dont_answer_it() {
+        let mut fonts = fonts();
+        let mut view = asking();
+        view.arrived();
+        // In insert mode, a number says to press it again; Esc still says
+        // no at once.
+        typed(&mut view, "1");
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert_eq!(
+            view.label().as_deref(),
+            Some("a question just came: press 1 again to answer it")
+        );
+        press(
+            &mut view,
+            &Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(view.settle(&mut fonts).actions, [answer("no")]);
+        // In normal mode, it stays armed until the moment's past.
+        read_keys(&mut view, "1");
+        step(&mut view, ARMED_FOR.start);
+        read_keys(&mut view, "1");
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert_eq!(
+            view.label().as_deref(),
+            Some("a question just came: press 1 again or Enter to answer it")
+        );
+        assert_eq!(view.armed(), Some(0));
+        view.set_clock(START + ANSWER_PAUSE);
+        read_keys(&mut view, "1");
+        assert_eq!(view.settle(&mut fonts).actions, [answer("yes")]);
+        // A question that comes waits too.
+        let mut next = asking().node;
+        if let Some(question) = &mut next.question {
+            question.id = 5;
+        }
+        view.apply(&ViewUpdate::Snapshot(clackatoo_protocol::View {
+            title: String::new(),
+            cwd: None,
+            root: clackatoo_protocol::Node::Chat(Box::new(next)),
+        }));
+        typed(&mut view, "1");
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        step(&mut view, ANSWER_PAUSE);
+        typed(&mut view, "1");
+        assert_eq!(view.settle(&mut fonts).actions.len(), 1);
+    }
+
+    #[test]
+    fn letters_typed_while_a_question_waits_make_numbers_wait_again() {
+        let mut fonts = fonts();
+        let mut view = asking();
+        view.asked_at = Some(START);
+        step(&mut view, 500);
+        typed(&mut view, "ab");
+        view.settle(&mut fonts);
+        // 600 ms after the question, but 100 after the last letter.
+        step(&mut view, 100);
+        typed(&mut view, "1");
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        step(&mut view, ANSWER_PAUSE);
+        typed(&mut view, "1");
+        assert_eq!(view.settle(&mut fonts).actions, [answer("yes")]);
+        // So does a paste.
+        view.paste("words");
+        view.settle(&mut fonts);
+        step(&mut view, 100);
+        typed(&mut view, "1");
+        assert!(view.settle(&mut fonts).actions.is_empty());
+    }
+
+    #[test]
+    fn a_chat_first_seen_asking_waits_a_moment_too() {
+        let mut fonts = fonts();
+        let node = asking().node;
+        let mut view = ChatView::new(String::new(), node);
+        let asked = view.asked_at.expect("the moment it was seen");
+        view.set_clock(asked + ANSWER_PAUSE - 1);
+        typed(&mut view, "1");
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        view.set_clock(asked + ANSWER_PAUSE);
+        typed(&mut view, "1");
+        assert_eq!(view.settle(&mut fonts).actions, [answer("yes")]);
+    }
+
+    #[test]
+    fn an_answer_waiting_when_the_question_goes_is_dropped_not_typed() {
+        let mut fonts = fonts();
+        let answered = || {
+            ViewUpdate::Snapshot(clackatoo_protocol::View {
+                title: String::new(),
+                cwd: None,
+                root: clackatoo_protocol::Node::Chat(Box::default()),
+            })
+        };
+        let mut view = asking();
+        typed(&mut view, "1");
+        view.apply(&answered());
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert_eq!(view.editor.raw_text(), "", "never typed");
+        // So too one given in normal mode.
+        let mut view = asking();
+        read_keys(&mut view, "1");
+        step(&mut view, ARMED_FOR.start);
+        read_keys(&mut view, "1");
+        assert!(view.unsettled(), "given");
+        view.apply(&answered());
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert_eq!(view.editor.raw_text(), "");
+    }
+
+    #[test]
+    fn what_typing_does_while_a_question_waits_is_said_in_the_bar() {
+        let mut fonts = fonts();
+        let mut view = asking();
+        typed(&mut view, "x");
+        view.settle(&mut fonts);
+        assert_eq!(view.editor.raw_text(), "");
+        assert_eq!(
+            view.label().as_deref(),
+            Some("a question waits: 1–2 answer it")
+        );
+        // Until the next key.
+        typed(&mut view, "1");
+        assert_eq!(view.label(), None);
+        view.settle(&mut fonts);
+        view.paste("pasted");
+        view.settle(&mut fonts);
+        assert_eq!(view.editor.raw_text(), "");
+        assert!(
+            view.label()
+                .is_some_and(|said| said.contains("1–2 answer it"))
+        );
     }
 
     fn with_settings() -> ChatView {

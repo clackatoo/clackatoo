@@ -165,6 +165,10 @@ pub(crate) enum Paint {
     Picked,
     /// ...and its edge, in the top bar.
     PickedEdge,
+    /// Behind the row picked in a list raised over the panes: the
+    /// finder's, and the line its preview is of, a menu's, a chat's
+    /// settings', the command line's or a completion menu's.
+    Chosen,
     /// The dot by a workspace's name, by its place in the list.
     Workspace(u8),
     /// clackatoo's own colour, for what it shows over the panes.

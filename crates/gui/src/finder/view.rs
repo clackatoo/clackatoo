@@ -25,6 +25,9 @@ pub(crate) struct FinderView {
     /// Which of them is picked.
     pub(crate) selected: Option<usize>,
     pub(crate) preview: Option<PreviewView>,
+    /// What the list says, quietly in its middle, when there's nothing
+    /// in it: that nothing matches what's typed.
+    pub(crate) empty: Option<String>,
 }
 
 /// One line of text, in runs of ink.
@@ -151,6 +154,29 @@ pub(crate) fn fit(text: &str, inks: &[Ink], cols: usize, keep_end: bool) -> Row 
     row
 }
 
+/// `text` in at most `cols` cells of the terminal's font, a wide character
+/// two: cut short with `…` at its end if it's wider.
+pub(crate) fn cut(text: &str, cols: usize) -> String {
+    use crate::render::{mono_cells, mono_width};
+    if mono_width(text) <= cols {
+        return text.to_owned();
+    }
+    let mut cut = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        // Room is kept for the `…`.
+        width += mono_cells(ch);
+        if width + 1 > cols {
+            break;
+        }
+        cut.push(ch);
+    }
+    if cols > 0 {
+        cut.push('…');
+    }
+    cut
+}
+
 /// Where the finder's parts go, in a window of one size.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Layout {
@@ -158,7 +184,7 @@ pub(crate) struct Layout {
     /// The line what's typed goes on.
     prompt: Rect,
     /// Where the list goes.
-    list: Rect,
+    pub(crate) list: Rect,
     /// Where the preview goes, if there's room for one.
     preview: Option<Rect>,
     /// How tall a row of the list is.
@@ -321,12 +347,30 @@ impl Layout {
             if view.selected == Some(index) {
                 painted.over.push(Fill::rounded(
                     [self.list.x, y, self.list.width, self.row_height],
-                    Paint::Picked,
+                    Paint::Chosen,
                     (1.5 * padding).round(),
                 ));
             }
             let origin = [self.list.x + 2.0 * padding, (y + padding / 2.0).round()];
             push_row(row, origin, cell_width, painted);
+        }
+        // Nothing listed says why, in the middle of where the list goes,
+        // and the preview, which has nothing to show either.
+        if let Some(empty) = view.empty.as_deref().filter(|_| view.rows.is_empty()) {
+            let width = crate::render::mono_width(empty) as f32 * cell_width;
+            let room = match (self.preview, &view.preview) {
+                (Some(area), None) => area.x + area.width - self.list.x,
+                _ => self.list.width,
+            };
+            painted.over_texts.push(Text {
+                origin: [
+                    (self.list.x + (room - width).max(0.0) / 2.0).round(),
+                    (self.list.y + (self.list.height - cell_height) / 2.0).round(),
+                ],
+                content: empty,
+                ink: Ink::Muted,
+                font: TextFont::Mono,
+            });
         }
 
         let (Some(area), Some(preview)) = (self.preview, &view.preview) else {
@@ -341,7 +385,7 @@ impl Layout {
             if preview.at == Some(index) {
                 painted.over.push(Fill::solid(
                     [area.x, y, area.width, self.row_height],
-                    Paint::Hover,
+                    Paint::Chosen,
                 ));
             }
             let origin = [area.x + 2.0 * padding, (y + padding / 2.0).round()];
@@ -430,5 +474,43 @@ mod tests {
         let preview = PreviewView::new(0, &lines, None, (3, 8));
         assert_eq!(preview.lines[0].text, " 1     …");
         assert_eq!(preview.at, None);
+    }
+
+    #[test]
+    fn nothing_listed_says_why_quietly_in_the_middle_of_the_list() {
+        let metrics = crate::chrome::Metrics {
+            cell: [10.0, 20.0],
+            ui_line: 16.0,
+            padding: 4.0,
+        };
+        let geometry = Geometry::new([1600, 900], metrics);
+        let layout = Layout::new(&geometry);
+        let why = "Nothing matches ‘zz’";
+        let mut view = FinderView {
+            title: "Files",
+            place: None,
+            query: "zz▏".into(),
+            count: "0 / 2".into(),
+            rows: Vec::new(),
+            selected: None,
+            preview: None,
+            empty: Some(why.into()),
+        };
+        let mut painted = Painted::default();
+        layout.paint(&view, &geometry, &mut painted);
+        let said = (painted.over_texts.iter())
+            .find(|text| text.content == why)
+            .expect("why it's empty");
+        assert_eq!(said.ink, Ink::Muted);
+        // In the middle of the panel, as there's no preview either.
+        let middle = said.origin[0] + 20.0 * 10.0 / 2.0;
+        let panel = layout.panel;
+        assert!((middle - (panel.x + panel.width / 2.0)).abs() <= 6.0);
+        assert!(said.origin[1] > layout.list.y + layout.row_height);
+        // With rows to show, it isn't said.
+        view.rows = vec![fit("README", &[Ink::Plain; 6], 10, true)];
+        let mut painted = Painted::default();
+        layout.paint(&view, &geometry, &mut painted);
+        assert!(painted.over_texts.iter().all(|text| text.content != why));
     }
 }

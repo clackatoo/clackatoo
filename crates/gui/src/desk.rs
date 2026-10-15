@@ -538,6 +538,18 @@ impl Desk {
             .is_some_and(|(_, _, pane)| matches!(pane.content, Content::Buffer(_)))
     }
 
+    /// Whether `press` would go to the focused chat's question, as one of
+    /// the keys that answer it (see [`Pane::answers_question`]), which a
+    /// key held down mustn't repeat.
+    pub(crate) fn answers_question(&self, press: &KeyPress<'_>) -> bool {
+        if self.input.is_some() || self.finder.is_some() || self.start.is_some() {
+            return false;
+        }
+        (self.focused_terminal())
+            .and_then(|terminal| self.panes.get(&terminal))
+            .is_some_and(|pane| pane.answers_question(press))
+    }
+
     /// Turns down a key that can't reach the daemon in time: says so, and
     /// lights the focused pane up for a moment.
     pub(crate) fn refuse_offline(&mut self) {
@@ -2055,6 +2067,10 @@ impl Desk {
             self.editor_drag_lost();
         }
         if let Some(pane) = self.focused_pane() {
+            // An answer armed in a chat waits for no one away.
+            if !focused {
+                pane.disarm();
+            }
             pane.focus_changed(focused);
         }
     }

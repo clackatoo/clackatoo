@@ -25,6 +25,7 @@
 //! | `u`, Ctrl+R | Undo what the turn changed in files, or redo it; with nothing there, the last turn's, or the first's undone |
 //! | `K` | Show how much context the chat fills, and its account's limits, or hide it again |
 //! | `i` `a` `I` `A` `o`, Enter | Type a message |
+//! | `1`–`9`, then the same again or Enter | While the agent asks something, pick an answer, then give it; Esc leaves it be |
 
 use clackatoo_protocol::{ChatAction, ChatNode, Item};
 use winit::keyboard::{Key, NamedKey};
@@ -70,11 +71,25 @@ impl ChatView {
     }
 
     /// Ends what was half done in reading as the focus leaves the chat: a
-    /// visual selection, and a two-key command half typed. The cursor
-    /// stays where it is.
+    /// visual selection, a two-key command half typed, and an answer
+    /// armed. The cursor stays where it is.
     pub(crate) fn leave(&mut self) {
         self.leave_visual();
         self.read_prefix = None;
+        self.armed = None;
+    }
+
+    /// The answer a number armed in normal mode, by its index, which the
+    /// question's card picks out.
+    pub(super) fn armed(&self) -> Option<usize> {
+        self.armed.map(|(index, _)| index)
+    }
+
+    /// Drops the answer armed, if one is, as a click, the wheel or the
+    /// window losing the focus does. Returns whether one was, so the card
+    /// must be drawn again.
+    pub(crate) fn disarm(&mut self) -> bool {
+        self.armed.take().is_some()
     }
 
     /// A key in normal or visual mode. Returns whether the chat must be
@@ -82,9 +97,14 @@ impl ChatView {
     /// message.
     pub(crate) fn read_key(&mut self, press: &KeyPress<'_>) -> (bool, bool) {
         // What the window said of the chat lasts until the next key, as
-        // does the meter's detail `K` showed, which `K` hides.
+        // does the meter's detail `K` showed, which `K` hides, and an
+        // answer armed, which the key may give.
         let unsaid = self.unsay();
         let detail = self.hide_detail();
+        let disarmed = self.armed.is_some();
+        if self.question_key(press) {
+            return (true, false);
+        }
         let k = matches!(press.key, Key::Character(text) if text == "K");
         if detail && k && self.visual().is_none() {
             // A two-key command half typed is over, as with any other key.
@@ -92,7 +112,76 @@ impl ChatView {
             return (true, false);
         }
         let (redraw, insert) = self.read(press);
-        (redraw || unsaid || detail, insert)
+        (redraw || unsaid || detail || disarmed, insert)
+    }
+
+    /// A key in normal or visual mode while the agent asks something. A
+    /// number arms its answer, which the card picks out and the bar names,
+    /// and the same number again, or Enter, gives it, if it comes in
+    /// [`ARMED_FOR`](super::ARMED_FOR) after: one key mustn't answer, nor
+    /// a count typed in one go, as Vim's habits press numbers for counts,
+    /// and `2j` or `22j` would say "Always allow". Too soon, it stays
+    /// armed; too late, it's armed again. Any other key drops what's
+    /// armed, and reads as ever. Returns whether it took the key.
+    fn question_key(&mut self, press: &KeyPress<'_>) -> bool {
+        let armed = self.armed.take();
+        let Some(question) = &self.node.question else {
+            return false;
+        };
+        let modifiers = press.modifiers;
+        if modifiers.ctrl || modifiers.alt || self.read_prefix.is_some() {
+            return false;
+        }
+        let number = match press.key {
+            Key::Character(text) => super::numbered(Some(text.as_str())),
+            _ => None,
+        };
+        let enter = *press.key == Key::Named(NamedKey::Enter);
+        let index = match (number, armed) {
+            (Some(index), _) => index,
+            (None, Some((armed, _))) if enter => armed,
+            _ => return false,
+        };
+        let Some(choice) = question.choices.get(index) else {
+            self.say(self.answer_hint());
+            return true;
+        };
+        let (id, number) = (question.id, index + 1);
+        let armed_said = format!("{number} {} · {number} again or Enter", choice.name);
+        let now = self.now();
+        // How long ago this answer was armed, if it was; or none, should
+        // the clock have gone back.
+        let since = armed
+            .filter(|&(armed, _)| armed == index)
+            .map(|(_, at)| now.checked_sub(at));
+        match since {
+            // Another, or none, armed; or this one armed so long ago, or
+            // in a time gone back, that it's armed again.
+            None | Some(None) => {
+                self.armed = Some((index, now));
+                self.say(armed_said);
+            }
+            Some(Some(since)) if since >= super::ARMED_FOR.end => {
+                self.armed = Some((index, now));
+                self.say(armed_said);
+            }
+            // Typed in one go with the number: it stays armed, as it was.
+            Some(Some(since)) if since < super::ARMED_FOR.start => {
+                self.armed = armed;
+                self.say(armed_said);
+            }
+            Some(Some(_)) if self.just_asked() => {
+                self.armed = armed;
+                self.say(format!(
+                    "a question just came: press {number} again or Enter to answer it"
+                ));
+            }
+            Some(Some(_)) => self.queued.push(Input::Answer {
+                question: id,
+                pick: super::Pick::Choice(index),
+            }),
+        }
+        true
     }
 
     /// A key in normal or visual mode, as [`read_key`](Self::read_key)

@@ -130,14 +130,15 @@ impl ChatView {
         };
         let width = context.map_or(m.em(BAR_ALONE), |context| context.width);
         let left = right - width;
-        // The text, with the bar under it, in the row's middle.
-        let text_height = context.map_or(0.0, |context| context.height + below);
-        let text_top = top + (size - text_height - bar) / 2.0;
+        // The text in the row's middle, on the chips' line, with the bar
+        // under it; or the bar alone there.
+        let text_top = top + (size - context.map_or(bar, |context| context.height)) / 2.0;
         if let Some(context) = context {
             draw_laid(canvas, m, context, [left, text_top], width);
         }
         if let Some(percent) = percent {
-            let y = (text_top + text_height).round();
+            let under = context.map_or(0.0, |context| context.height + below);
+            let y = (text_top + under).round();
             let track = [left, y, width, bar];
             canvas.fill(Fill::rounded(track, Paint::Divider, bar / 2.0));
             let filled = (width * f32::from(percent) / 100.0).round();

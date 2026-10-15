@@ -1265,6 +1265,10 @@ impl App {
             self.notice_key(press, repeat);
             return;
         }
+        // A key held down answers a chat's question once at most.
+        if repeat && self.desk.answers_question(press) {
+            return;
+        }
         if !self.desk.takes_keys_offline() && self.out_of_touch() {
             self.desk.refuse_offline();
             self.request_redraw();

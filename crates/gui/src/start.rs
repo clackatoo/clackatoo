@@ -600,6 +600,7 @@ impl StartPage {
             selected: Some(self.selected - self.top),
             rows: shown,
             preview,
+            empty: None,
         }
     }
 

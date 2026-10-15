@@ -422,6 +422,7 @@ impl HostPicker {
             selected: (count > 0).then(|| self.error_rows + self.selected - self.top),
             rows: shown,
             preview: None,
+            empty: None,
         }
     }
 }

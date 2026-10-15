@@ -23,8 +23,10 @@
 //! opened or closed from one, by a key, a click or a command, leaves the
 //! window in normal mode, as the bar said. An editor showing a folder's
 //! listing is an editor, and follows the mode. So does a chat, but in
-//! normal mode while it asks something, so a key can't answer it by
-//! chance.
+//! normal mode while it asks something, so typing can't answer it by
+//! chance; an answer's number, pressed twice, answers it there, but only
+//! a moment after the focus arrives, so keys meant for the pane before
+//! don't.
 //!
 //! An editor whose text hasn't come stays in normal mode until it has,
 //! and then goes to insert mode, if it still has the focus. Meanwhile
@@ -286,6 +288,7 @@ impl Desk {
         else {
             return;
         };
+        found.arrived();
         if insert && found.asking() {
             found.enter_normal_mode();
             self.held_normal = Some(pane);

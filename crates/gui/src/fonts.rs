@@ -320,28 +320,34 @@ impl Fonts {
         Ok(fonts)
     }
 
-    /// Loads the interface font: `family`, or the system's sans-serif font,
-    /// at `points`. Without either, the terminal's font stays in its place.
+    /// Loads the interface font at `points`: `family`, or if it isn't
+    /// installed, as when the desktop names one it doesn't have, the first
+    /// of the [`ui_families`] that is. Without any, the terminal's font
+    /// stays in its place.
     pub(crate) fn load_ui(&mut self, family: Option<&str>, points: f32, scale: f64) {
-        let family = match family {
-            Some(name) => QueryFamily::Named(name),
-            None => QueryFamily::Generic(GenericFamily::SansSerif),
-        };
-        let mut load = |variant| {
-            let face = query(
-                &mut self.font_cx.collection,
-                &mut self.font_cx.source_cache,
-                family,
-                variant,
-            )?;
-            Some(push_face(&mut self.faces, face))
-        };
-        let (Some(regular), bold) = (load(Variant::Regular), load(Variant::Bold)) else {
-            log::warn!("no interface font found for {family:?}");
+        let mut found = None;
+        for family in ui_families(family) {
+            let mut load = |variant| {
+                query(
+                    &mut self.font_cx.collection,
+                    &mut self.font_cx.source_cache,
+                    family,
+                    variant,
+                )
+            };
+            if let Some(regular) = load(Variant::Regular) {
+                found = Some((family, regular, load(Variant::Bold)));
+                break;
+            }
+            log::info!("no interface font {family:?}; trying the next");
+        }
+        let Some((family, regular, bold)) = found else {
+            log::warn!("no interface font found, not even a sans-serif one");
             return;
         };
+        let regular = push_face(&mut self.faces, regular);
         self.ui.regular = regular;
-        self.ui.bold = bold.unwrap_or(regular);
+        self.ui.bold = bold.map_or(regular, |bold| push_face(&mut self.faces, bold));
         self.ui.stand_in = false;
         self.ui_family = family_name(family);
         self.ui.points = points;
@@ -659,6 +665,30 @@ fn query(
     found
 }
 
+/// Common sans-serif families, for the interface when neither the family
+/// the desktop names nor the system's sans-serif font can be found: GNOME's
+/// and KDE's, and those most distributions install.
+const SANS_FAMILIES: [&str; 6] = [
+    "Noto Sans",
+    "Cantarell",
+    "Inter",
+    "DejaVu Sans",
+    "Liberation Sans",
+    "Roboto",
+];
+
+/// The families to try for the interface, best first: `named`, if given,
+/// then the system's sans-serif font, as fontconfig chooses it, so the
+/// bars match the chat, which falls back to it too; then common sans-serif
+/// families by name, in case the system says of none.
+fn ui_families(named: Option<&str>) -> impl Iterator<Item = QueryFamily<'_>> {
+    named
+        .map(QueryFamily::Named)
+        .into_iter()
+        .chain([QueryFamily::Generic(GenericFamily::SansSerif)])
+        .chain(SANS_FAMILIES.map(QueryFamily::Named))
+}
+
 /// The name of `family`, if it's named, rather than generic.
 fn family_name(family: QueryFamily<'_>) -> Option<String> {
     match family {
@@ -690,5 +720,54 @@ fn measure(face: &Face, ppem: f32) -> CellMetrics {
         underline_offset: (-metrics.underline_offset).max(1.0).round(),
         strikeout_offset: metrics.strikeout_offset.round(),
         stroke: metrics.stroke_size.max(1.0).round(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_interface_tries_the_family_named_then_the_systems_sans_then_common_ones() {
+        let tried: Vec<QueryFamily<'_>> = ui_families(Some("Adwaita Sans")).collect();
+        assert_eq!(tried[0], QueryFamily::Named("Adwaita Sans"));
+        assert_eq!(tried[1], QueryFamily::Generic(GenericFamily::SansSerif));
+        assert_eq!(tried[2..], SANS_FAMILIES.map(QueryFamily::Named));
+        // With none named, the system's comes first.
+        let tried: Vec<QueryFamily<'_>> = ui_families(None).collect();
+        assert_eq!(tried[0], QueryFamily::Generic(GenericFamily::SansSerif));
+    }
+
+    #[test]
+    fn a_family_not_installed_falls_back_to_a_sans_serif_one_not_the_terminals() {
+        let mut fonts = Fonts::load(&FontOptions::default(), 1.0).expect("a monospace font");
+        // Only a machine with no sans-serif font at all has nothing but
+        // the terminal's to stand in.
+        let any_sans = ui_families(None).any(|family| {
+            query(
+                &mut fonts.font_cx.collection,
+                &mut fonts.font_cx.source_cache,
+                family,
+                Variant::Regular,
+            )
+            .is_some()
+        });
+        if !any_sans {
+            eprintln!("no sans-serif font installed; skipping");
+            return;
+        }
+        fonts.load_ui(Some("No Such Family Anywhere"), 11.0, 1.0);
+        assert!(!fonts.ui.stand_in, "a sans-serif font stands in");
+        assert_ne!(fonts.ui.regular, fonts.primary[0]);
+        // The system's own, which the chat takes too, or one named.
+        let family = fonts.ui_family.as_deref();
+        assert!(
+            family.is_none_or(|family| SANS_FAMILIES.contains(&family)),
+            "{family:?}"
+        );
+        // Proportional, as the terminal's isn't: an i narrower than an m.
+        let advance = |fonts: &mut Fonts, ch| fonts.ui_glyph(ch, false).expect("a glyph").advance;
+        assert!(advance(&mut fonts, 'i') < advance(&mut fonts, 'm'));
+        assert!(fonts.ui.height > 1.0);
     }
 }

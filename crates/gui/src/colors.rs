@@ -31,6 +31,10 @@ pub(crate) struct Theme {
     pub(crate) picked: Rgba,
     /// ...and its edge, in the top bar.
     pub(crate) picked_edge: Rgba,
+    /// Behind the row picked in a list over the palette's background,
+    /// such as the finder's: lighter than what's picked in the bars, as
+    /// the palette is lighter than they are.
+    pub(crate) chosen: Rgba,
     /// Under the mouse.
     pub(crate) hover: Rgba,
     /// Text that matters less, such as the names in the bars not shown.
@@ -97,6 +101,7 @@ impl Default for Theme {
             divider: hex_rgba(0x25_26_2c),
             picked: hex_rgba(0x1f_20_27),
             picked_edge: hex_rgba(0x2e_2f_36),
+            chosen: hex_rgba(0x2f_33_3d),
             hover: hex_rgba(0x19_1b_20),
             muted: hex_rgba(0x8a_90_99),
             palette_background: hex_rgba(0x16_18_1c),
@@ -178,14 +183,42 @@ pub(crate) const fn diagnostic(severity: Severity) -> Color {
     })
 }
 
+/// How far what's wrong with a line, written after its end, stands from
+/// the background, as contrast is counted (see [`contrast`]): readable at
+/// a glance, past the 4.5:1 the Web's guidelines ask of text, but well
+/// short of code's, which is nearer 15:1.
+const VIRTUAL_TEXT_CONTRAST: f32 = 5.2;
+
 /// How what's wrong with a line is written after its end: in the colour
-/// of how much it matters, dimmed, so it's read when looked for rather
-/// than shouting over the code.
+/// [`Theme::virtual_text`] gives how much it matters, the theme's worked
+/// out once, as rows carry their colours in styles.
 #[must_use]
-pub(crate) const fn virtual_text(severity: Severity) -> Style {
+pub(crate) fn virtual_text(severity: Severity) -> Style {
+    static COLORS: std::sync::LazyLock<[Color; 4]> = std::sync::LazyLock::new(|| {
+        let theme = Theme::default();
+        let color = |severity| {
+            let [r, g, b, _] = theme.virtual_text(severity).map(|channel| {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let byte = (channel * 255.0).round() as u8;
+                byte
+            });
+            Color::Rgb(r, g, b)
+        };
+        [
+            color(Severity::Error),
+            color(Severity::Warning),
+            color(Severity::Info),
+            color(Severity::Hint),
+        ]
+    });
+    let index = match severity {
+        Severity::Error => 0,
+        Severity::Warning => 1,
+        Severity::Info => 2,
+        Severity::Hint => 3,
+    };
     Style {
-        fg: diagnostic(severity),
-        attributes: Attributes::DIM,
+        fg: COLORS[index],
         ..Style::DEFAULT
     }
 }
@@ -331,6 +364,7 @@ impl Theme {
             Paint::Accent => self.accent,
             Paint::Picked => self.picked,
             Paint::PickedEdge => self.picked_edge,
+            Paint::Chosen => self.chosen,
             Paint::Workspace(index) => self.workspaces[usize::from(index) % self.workspaces.len()],
             Paint::Mode(mode) => self.modes[mode.colour()],
             Paint::Hover => self.hover,
@@ -396,6 +430,27 @@ impl Theme {
         }
     }
 
+    /// The colour what's wrong with a line is written in after its end,
+    /// for a diagnostic of `severity`: its colour, the palette's red,
+    /// yellow, blue or cyan, taken towards the background a hundredth at a
+    /// time while it stays [`VIRTUAL_TEXT_CONTRAST`]:1 from it, so each is
+    /// as quiet as the others. One no further than that already stays as
+    /// it is: dimming all alike took the red, darkest of them, to 2.6:1.
+    pub(crate) fn virtual_text(&self, severity: Severity) -> Rgba {
+        let full = self
+            .resolve(diagnostic(severity))
+            .unwrap_or(self.foreground);
+        let mut kept = full;
+        for step in 1..=100_u8 {
+            let toned = mix(full, self.background, f32::from(step) / 100.0);
+            if contrast(toned, self.background) < VIRTUAL_TEXT_CONTRAST {
+                break;
+            }
+            kept = toned;
+        }
+        kept
+    }
+
     /// A program's colour, or `None` for the default.
     pub(crate) fn resolve(&self, color: Color) -> Option<Rgba> {
         match color {
@@ -425,6 +480,23 @@ fn mix(a: Rgba, b: Rgba, amount: f32) -> Rgba {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * amount)
 }
 
+/// How much lighter `a` is than `b`, or `b` than `a`, as the Web's
+/// guidelines on contrast count it: from 1 to 21.
+pub(crate) fn contrast(a: Rgba, b: Rgba) -> f32 {
+    let luminance = |rgba: Rgba| {
+        let linear = |c: f32| {
+            if c <= 0.040_45 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(rgba[0]) + 0.7152 * linear(rgba[1]) + 0.0722 * linear(rgba[2])
+    };
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
 #[cfg(test)]
 // The colours compared are computed exactly, from the same bytes.
 #[allow(clippy::float_cmp)]
@@ -442,6 +514,46 @@ mod tests {
         let colors = theme.cell(&style);
         assert_eq!(colors.foreground, theme.background);
         assert_eq!(colors.background, Some(theme.palette[1]));
+    }
+
+    #[test]
+    fn whats_wrong_after_a_line_is_readable_but_quieter_than_code() {
+        let theme = Theme::default();
+        let code = contrast(theme.foreground, theme.background);
+        for severity in [
+            Severity::Error,
+            Severity::Warning,
+            Severity::Info,
+            Severity::Hint,
+        ] {
+            let said = theme.cell(&virtual_text(severity)).foreground;
+            let against = contrast(said, theme.background);
+            assert!(against >= 4.5, "{severity:?} at {against}:1");
+            assert!(against < code / 2.0, "{severity:?} at {against}:1");
+            // Its colour is the severity's, as its underline is, taken
+            // only as far towards the background as reaches 5.2:1.
+            let full = theme.resolve(diagnostic(severity)).unwrap();
+            let kept: Vec<f32> = (0..3)
+                .map(|i| (said[i] - theme.background[i]) / (full[i] - theme.background[i]))
+                .collect();
+            assert!(
+                kept.iter().all(|share| (share - kept[0]).abs() < 0.03),
+                "{severity:?}: {kept:?}"
+            );
+            if contrast(full, theme.background) >= VIRTUAL_TEXT_CONTRAST {
+                assert!(
+                    (against - VIRTUAL_TEXT_CONTRAST).abs() < 0.15,
+                    "{severity:?}"
+                );
+            }
+        }
+        // Dimming alike, as before, took the red to 2.6:1.
+        let dimmed = theme.cell(&Style {
+            fg: diagnostic(Severity::Error),
+            attributes: Attributes::DIM,
+            ..Style::DEFAULT
+        });
+        assert!(contrast(dimmed.foreground, theme.background) < 3.0);
     }
 
     #[test]

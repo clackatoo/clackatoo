@@ -2103,6 +2103,25 @@ fn the_finder_is_drawn_over_the_panes_with_a_preview() {
     };
     let pixels = draw(&gpu, size, &picture, &mut fonts);
     save("finder", size, &pixels);
+    // The row picked stands out from the panel, in the colour every list
+    // over the panes picks in; the next row doesn't.
+    let at = |x: f32, y: f32| {
+        let index = (y as usize * size[0] as usize + x as usize) * 4;
+        [pixels[index], pixels[index + 1], pixels[index + 2]]
+    };
+    let theme = crate::colors::Theme::default();
+    let rgb = |rgba: crate::colors::Rgba| rgba.map(|c| (c * 255.0).round() as u8);
+    let [chosen, palette] = [theme.chosen, theme.palette_background].map(rgb);
+    let right = finder.list.x + finder.list.width - 6.0;
+    let row_height = (1..200)
+        .map(|dy| first_row[1] + dy as f32)
+        .find(|&y| finder.row_at([first_row[0], y], 3) == Some(1))
+        .expect("a second row")
+        - first_row[1];
+    let picked = at(right, first_row[1] + row_height / 2.0);
+    let next = at(right, first_row[1] + row_height * 1.5);
+    assert_eq!(picked[..], chosen[..3]);
+    assert_eq!(next[..], palette[..3]);
 }
 
 /// What a grep's finder shows, laid out as `layout` says, with three lines

@@ -29,7 +29,7 @@ finder files
 
 ## Pick one
 
-What you type matches as fzf's does: letters in order, `'word` exactly, `^word` at the start, `word$` at the end, and `!word` leaves out. Down and Up, or Ctrl+N and Ctrl+P, pick. Enter opens it in place of the focused pane's file, Ctrl+V and Ctrl+X beside or below, and Ctrl+T in a new tab. Esc closes the finder.
+What you type matches as fzf's does: letters in order, `'word` exactly, `^word` at the start, `word$` at the end, and `!word` leaves out. When nothing matches, the list says so. Down and Up, or Ctrl+N and Ctrl+P, pick. Enter opens it in place of the focused pane's file, Ctrl+V and Ctrl+X beside or below, and Ctrl+T in a new tab. Esc closes the finder.
 
 Type `bet`, and press Enter.
 

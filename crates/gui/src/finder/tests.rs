@@ -75,6 +75,54 @@ fn root(finder: &mut Finder) {
 }
 
 #[test]
+fn nothing_matching_says_so_once_its_sure() {
+    let empty = |finder: &mut Finder| finder.view((10, 60), None).empty;
+    let mut finder = Finder::new(Kind::Files, String::new(), Case::default());
+    finder.searching(1);
+    files(&mut finder, &["src/main.rs", "README"]);
+    type_text(&mut finder, "zz");
+    assert_eq!(empty(&mut finder), None, "still looking");
+    finder.found(Found::Done(Done::All));
+    assert_eq!(empty(&mut finder).as_deref(), Some("Nothing matches ‘zz’"));
+    // Not with nothing typed, nor once something matches.
+    ctrl(&mut finder, "u");
+    assert_eq!(empty(&mut finder), None);
+    type_text(&mut finder, "main");
+    assert_eq!(empty(&mut finder), None);
+    // A long pattern is cut short, in cells, a wide character two, to fit
+    // the list: here 60 wide, or at most 40 of what's typed.
+    ctrl(&mut finder, "u");
+    type_text(&mut finder, &"x".repeat(50));
+    let said = empty(&mut finder).expect("nothing matches");
+    assert!(said.ends_with("x…’"), "{said}");
+    ctrl(&mut finder, "u");
+    type_text(&mut finder, &"字".repeat(30));
+    let narrow = finder.view((10, 30), None).empty.expect("nothing matches");
+    assert!(narrow.ends_with("字…’"), "{narrow}");
+    assert!(crate::render::mono_width(&narrow) <= 30, "{narrow}");
+    // Looking that failed says why in the count instead.
+    let mut failed = Finder::new(Kind::Grep, "zz".into(), Case::default());
+    failed.searching(2);
+    failed.found(Found::Done(Done::Failed("no such place".into())));
+    assert_eq!(empty(&mut failed), None);
+    // And a list cut short of all there was may have missed a match.
+    let mut cut = Finder::new(Kind::Files, "zz".into(), Case::default());
+    cut.searching(3);
+    files(&mut cut, &["README"]);
+    cut.found(Found::Done(Done::CutShort));
+    assert_eq!(empty(&mut cut), None);
+}
+
+#[test]
+fn what_doesnt_fit_is_cut_short_by_cells() {
+    assert_eq!(view::cut("abc", 3), "abc");
+    assert_eq!(view::cut("abcd", 3), "ab…");
+    assert_eq!(view::cut("字字字", 5), "字字…");
+    assert_eq!(view::cut("字字字", 4), "字…");
+    assert_eq!(view::cut("abc", 0), "");
+}
+
+#[test]
 fn files_streaming_in_are_ranked_and_filtered_as_typed() {
     let mut finder = Finder::new(Kind::Files, String::new(), Case::default());
     finder.searching(1);

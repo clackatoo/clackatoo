@@ -323,6 +323,24 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: ":PortForward downloads no longer delay your keys on a slow link (:set noforwardpace)",
     },
+    News {
+        id: "answer-in-normal",
+        date: "2026-10-15",
+        lesson: "agents",
+        what: "A chat's question is answered in normal mode too: its number, then the same again or Enter",
+    },
+    News {
+        id: "interface-font-fallback",
+        date: "2026-10-15",
+        lesson: "font",
+        what: "With the desktop's interface font missing, the bars and finder use your sans-serif font, as chats do",
+    },
+    News {
+        id: "finder-nothing-matches",
+        date: "2026-10-15",
+        lesson: "finder",
+        what: "The finder says when nothing matches, and the row picked in lists and menus stands out",
+    },
 ];
 
 impl News {

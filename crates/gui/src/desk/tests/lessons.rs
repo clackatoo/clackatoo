@@ -141,7 +141,7 @@ fn open(desk: &mut Desk, id: &str, practice: Layout) -> Vec<Request> {
 
 /// The text of each row the finder shows, as many as there are.
 fn all_finder_rows(desk: &mut Desk) -> Vec<String> {
-    let view = desk.finder_view((50, 120), None).expect("the finder");
+    let view = desk.finder_view((200, 120), None).expect("the finder");
     view.rows.into_iter().map(|row| row.text).collect()
 }
 

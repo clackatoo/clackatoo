@@ -1184,3 +1184,102 @@ fn a_chat_asking_something_arrives_in_normal_mode_and_keeps_the_windows() {
     ctrl_b(&mut desk, "h");
     assert_eq!(mode(&desk, 2), Mode::Normal);
 }
+
+#[test]
+fn a_chat_asking_something_is_answered_from_normal_mode_once_its_arrived() {
+    use clackatoo_protocol::{ChatAction, ChatNode, Choice, ChoiceKind, Node, Question};
+    let mut desk = desk(one_tab(side_by_side(vec![pane(2), pane(1)])));
+    snapshot(&mut desk, 2);
+    let node = ChatNode {
+        question: Some(Question {
+            id: 1,
+            title: "Write notes.txt".into(),
+            choices: vec![Choice {
+                id: "allow".into(),
+                name: "Allow".into(),
+                kind: ChoiceKind::AllowOnce,
+            }],
+            own: false,
+        }),
+        ..ChatNode::default()
+    };
+    desk.view_changed(
+        TerminalId(1),
+        &ViewUpdate::Snapshot(View {
+            title: "chat".into(),
+            cwd: None,
+            root: Node::Chat(Box::new(node)),
+        }),
+    );
+    let mut fonts = crate::chat::fixtures::fonts();
+    let answers = |desk: &mut Desk| {
+        (answer_all(desk).into_iter())
+            .filter(|request| {
+                matches!(
+                    request,
+                    Request::Chat {
+                        action: ChatAction::Answer { .. },
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    let set_clock = |desk: &mut Desk, now| {
+        let pane = desk.pane_mut(TerminalId(1)).unwrap();
+        pane.chat_mut().unwrap().set_clock(now);
+    };
+    // Asked long since, but only now arrived at.
+    let later = u64::MAX / 2;
+    set_clock(&mut desk, later);
+    ctrl_b(&mut desk, "l");
+    answer_all(&mut desk);
+    assert_eq!(mode(&desk, 1), Mode::Normal);
+    // Its numbers are the question's: held down, they don't repeat.
+    let answers_question = |desk: &Desk, text: &str| {
+        desk.answers_question(&KeyPress {
+            key: &Key::Character(text.into()),
+            text: Some(text),
+            location: winit::keyboard::KeyLocation::Standard,
+            code: None,
+            modifiers: Modifiers::default(),
+        })
+    };
+    assert!(answers_question(&desk, "1"));
+    assert!(!answers_question(&desk, "j"));
+    assert!(!answers_question(&desk, "0"));
+    // A number then `j`, as a count, answers nothing.
+    key(&mut desk, "1j");
+    desk.settle_chats(&mut fonts);
+    assert_eq!(answers(&mut desk), 0);
+    // Typed in one go, a number and the same again answer nothing.
+    key(&mut desk, "11");
+    desk.settle_chats(&mut fonts);
+    assert_eq!(answers(&mut desk), 0);
+    // Nor, a moment apart, as the focus has only just arrived.
+    set_clock(&mut desk, later + crate::chat::ARMED_FOR.start);
+    key(&mut desk, "1");
+    desk.settle_chats(&mut fonts);
+    assert_eq!(answers(&mut desk), 0);
+    assert!(note(&desk).contains("press 1 again"), "{}", note(&desk));
+    // The window losing the focus drops what's armed.
+    desk.window_focus(false);
+    desk.window_focus(true);
+    set_clock(&mut desk, later + crate::chat::ANSWER_PAUSE);
+    key(&mut desk, "1");
+    desk.settle_chats(&mut fonts);
+    assert_eq!(answers(&mut desk), 0, "armed again, not given");
+    // A moment later, it does, and the chat stays in normal mode.
+    set_clock(
+        &mut desk,
+        later + crate::chat::ANSWER_PAUSE + crate::chat::ARMED_FOR.start,
+    );
+    key(&mut desk, "1");
+    desk.settle_chats(&mut fonts);
+    assert_eq!(answers(&mut desk), 1);
+    assert_eq!(mode(&desk, 1), Mode::Normal);
+    // Nor do they when the finder has the keys.
+    key(&mut desk, " pf");
+    assert!(desk.finding());
+    assert!(!answers_question(&desk, "1"));
+}

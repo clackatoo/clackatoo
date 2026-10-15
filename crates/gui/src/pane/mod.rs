@@ -426,8 +426,10 @@ impl Pane {
 
     /// A key in a chat: in insert mode, it edits the message, and in
     /// normal or visual mode, it reads the conversation (see
-    /// [`ChatView::read_key`]). Esc goes to normal mode, as there's no
-    /// program to need it, unless the agent is asking something.
+    /// [`ChatView::read_key`]), where an answer's number, pressed twice
+    /// or with Enter, answers what the agent asks. Esc goes to normal
+    /// mode, as there's no program to need it, unless the agent is asking
+    /// something.
     fn chat_key(&mut self, press: &KeyPress<'_>) -> bool {
         let Some(chat) = self.chat.as_mut() else {
             return false;
@@ -472,6 +474,45 @@ impl Pane {
         if self.mode == Mode::Insert {
             self.enter_normal();
         }
+    }
+
+    /// The focus has arrived at the pane: a chat asking something waits
+    /// a moment before keys answer it (see [`ChatView::arrived`]).
+    pub(crate) fn arrived(&mut self) {
+        if let Some(chat) = &mut self.chat {
+            chat.arrived();
+        }
+    }
+
+    /// Drops the answer its chat armed, if one did, as the window losing
+    /// the focus does.
+    pub(crate) fn disarm(&mut self) {
+        if let Some(chat) = &mut self.chat {
+            chat.disarm();
+        }
+    }
+
+    /// The chat it shows, if it shows one, for tests.
+    #[cfg(test)]
+    pub(crate) fn chat_mut(&mut self) -> Option<&mut ChatView> {
+        self.chat.as_deref_mut()
+    }
+
+    /// Whether `press` is one of the keys that answer the question its
+    /// chat asks, if it asks one: a number, Enter or Esc. Held down, such
+    /// a key repeats, and its repeats are dropped, so one held can't wait
+    /// out the pause after the question comes, or arm and give an answer.
+    pub(crate) fn answers_question(&self, press: &KeyPress<'_>) -> bool {
+        let answer_key = match press.key {
+            Key::Named(NamedKey::Enter | NamedKey::Escape) => true,
+            Key::Character(text) => {
+                text.len() == 1
+                    && text.as_str() != "0"
+                    && text.chars().all(|ch| ch.is_ascii_digit())
+            }
+            _ => false,
+        };
+        answer_key && self.asking()
     }
 
     /// Whether it shows a chat whose agent is asking something, which
@@ -733,8 +774,10 @@ impl Pane {
     /// them. Returns whether the pane must be redrawn.
     pub(crate) fn wheel(&mut self, lines: i64, at: [i64; 2], modifiers: input::Modifiers) -> bool {
         if let Some(chat) = &mut self.chat {
+            // The wheel drops an answer armed, as a key does.
+            let disarmed = chat.disarm();
             #[allow(clippy::cast_precision_loss)]
-            return chat.scroll_lines(lines as f32 * 3.0);
+            return chat.scroll_lines(lines as f32 * 3.0) || disarmed;
         }
         if self.reports_mouse(modifiers.shift) {
             let button = if lines > 0 {

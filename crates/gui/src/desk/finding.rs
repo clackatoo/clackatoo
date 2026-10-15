@@ -327,7 +327,12 @@ impl Desk {
             return Some(page.view(list, preview));
         }
         self.grep_if_due(Instant::now());
-        let view = self.finder.as_mut()?.view(list, preview);
+        let mut view = self.finder.as_mut()?.view(list, preview);
+        // What's typed hasn't been looked for yet, as a grep waits for
+        // typing to pause: nothing's sure not to match it.
+        if self.grep_at.is_some() {
+            view.empty = None;
+        }
         if preview.is_some() {
             self.ask_preview();
         }

@@ -1148,6 +1148,7 @@ impl ChatView {
                 at: [x, rows - height],
                 width,
                 primary,
+                armed: self.armed() == Some(index),
             });
             x += width + gap;
         }
@@ -1176,10 +1177,17 @@ impl ChatView {
                 button.width,
                 m.em(2.0),
             ];
-            canvas.fill(if button.primary {
+            let fill = if button.primary {
                 Fill::rounded(rect, Paint::Accent, m.em(1.0))
             } else {
                 Fill::rounded(rect, Paint::Hover, m.em(1.0)).bordered(1.0, Paint::RaisedEdge)
+            };
+            // Armed, it's ringed in the text's colour, which shows round
+            // the accent's too.
+            canvas.fill(if button.armed {
+                fill.bordered((m.em * 0.12).round().max(2.0), Paint::Ink)
+            } else {
+                fill
             });
             let text_top = rect[1] + (rect[3] - button.laid.height) / 2.0;
             draw_laid(
@@ -1422,7 +1430,7 @@ impl ChatView {
         (lit, column): (bool, f32),
     ) {
         if lit {
-            canvas.fill(Fill::rounded(rect, Paint::Hover, m.em(0.5)));
+            canvas.fill(Fill::rounded(rect, Paint::Chosen, m.em(0.5)));
         }
         let mark = m.em(1.6);
         let mut x = rect[0] + m.em(0.4);
@@ -1708,7 +1716,7 @@ impl ChatView {
                 }
                 MenuRow::Slider { row, reset } => {
                     if menu.highlighted.as_ref() == Some(&Spot::Slider(row.setting.clone())) {
-                        canvas.fill(Fill::rounded(rect, Paint::Hover, m.em(0.5)));
+                        canvas.fill(Fill::rounded(rect, Paint::Chosen, m.em(0.5)));
                     }
                     self.draw_slider(&mut canvas, m, place, rect, &row, reset.as_ref());
                 }
@@ -1846,6 +1854,9 @@ struct Button {
     width: f32,
     /// It's the one to press, in the accent colour.
     primary: bool,
+    /// A number pressed in normal mode picked it, to give with the number
+    /// again or Enter: it's ringed.
+    armed: bool,
 }
 
 /// `bounds`, as parley gives them, as a rectangle from `origin`: left,

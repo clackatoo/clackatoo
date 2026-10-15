@@ -105,6 +105,10 @@ impl Kind {
 /// along a file's places mostly needs no more.
 pub(crate) const PREVIEW_LINES: u16 = 160;
 
+/// How many cells of what's typed the list quotes at most when nothing
+/// matches it.
+const QUOTED: usize = 40;
+
 /// Something to pick: its file, and the place in it, if it's a line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Entry {
@@ -692,7 +696,27 @@ impl Finder {
             selected: (count > 0).then(|| self.selected - self.top),
             rows: shown,
             preview,
+            empty: self.nothing_matches(cols),
         }
+    }
+
+    /// What a list `cols` cells wide says when nothing matches what's
+    /// typed, once it's sure: not while it's still looking, not when
+    /// looking failed, which the count says, and not when it stopped short
+    /// of all there was, where more might.
+    fn nothing_matches(&self, cols: usize) -> Option<String> {
+        let looking = self.search.or(self.asking).is_some();
+        let unsure = matches!(self.done, Some(Done::Failed(_) | Done::CutShort));
+        if self.query.is_empty() || self.ranking.len() > 0 || looking || unsure {
+            return None;
+        }
+        // What's typed, cut short to the room the words leave.
+        let words = crate::render::mono_width("Nothing matches ‘’");
+        let room = cols.saturating_sub(words).min(QUOTED);
+        Some(format!(
+            "Nothing matches ‘{}’",
+            view::cut(&self.query, room)
+        ))
     }
 
     /// How many things match, of how many, or why there are none.

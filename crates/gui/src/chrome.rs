@@ -821,7 +821,7 @@ impl Chrome {
             if hover == Hit::Menu(index) {
                 painted.over.push(Fill::rounded(
                     item.to_array(),
-                    Paint::Picked,
+                    Paint::Chosen,
                     (1.5 * metrics.padding).round(),
                 ));
             }
@@ -922,7 +922,7 @@ impl Chrome {
                 if *picked {
                     painted.over.push(Fill::rounded(
                         row.to_array(),
-                        Paint::Picked,
+                        Paint::Chosen,
                         (1.5 * metrics.padding).round(),
                     ));
                 }
@@ -1940,7 +1940,7 @@ pub(crate) fn paint_panel<'a>(
                     rect.width - 2.0 * geometry.edge,
                     cell_height,
                 ],
-                Paint::Picked,
+                Paint::Chosen,
                 metrics.padding,
             ));
         }
@@ -2090,6 +2090,19 @@ mod tests {
         ui_line: 16.0,
         padding: 4.0,
     };
+
+    #[test]
+    // Whole numbers, compared exactly.
+    #[allow(clippy::float_cmp)]
+    fn lines_between_panes_grow_with_the_screens_scale_in_whole_pixels() {
+        // The padding is 4 points, in pixels at 1×, 1.25×, 1.5× and 2×.
+        for (padding, line) in [(4.0, 1.0), (5.0, 1.0), (6.0, 2.0), (8.0, 2.0)] {
+            let metrics = Metrics { padding, ..METRICS };
+            let geometry = Geometry::new([800, 600], metrics);
+            assert_eq!(geometry.edge, line, "a padding of {padding}");
+            assert_eq!(geometry.area.gap, line);
+        }
+    }
 
     /// Every character 8 wide.
     fn measure(text: &str, _bold: bool) -> f32 {

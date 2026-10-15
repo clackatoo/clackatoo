@@ -52,7 +52,7 @@ When a message was sent more than half an hour after the turn before it ended, a
 
 ## What it can show you
 
-Each agent is given clackatoo's own tools, so it can show you things rather than only tell you: open a file in an editor beside the chat, run a command in a terminal you can watch, read a terminal, wait for its command to finish, open a file explorer, point out a pane, and say what the language servers say is wrong. Before it runs a command or types into a terminal, it asks: Allow, Always allow, or Reject.
+Each agent is given clackatoo's own tools, so it can show you things rather than only tell you: open a file in an editor beside the chat, run a command in a terminal you can watch, read a terminal, wait for its command to finish, open a file explorer, point out a pane, and say what the language servers say is wrong. Before it runs a command or types into a terminal, it asks: Allow, Always allow, or Reject. In insert mode, press an answer's number to give it, or Esc to turn it down. In normal mode, a number picks its answer out, and the bar says what it is: the same number again, or Enter, a moment later and within five seconds, gives it, so a count such as `2j` or `22j` can't answer by chance, and Esc, a click or the wheel drops it. A number pressed just as the question comes, or just as you arrive at its chat, or just after other keys typed while it asks, doesn't answer it, as it was likely meant for what was there before; the bar says to press it again.
 
 ## Its edits land in your editor
 
