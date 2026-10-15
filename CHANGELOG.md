@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.29 (2026-10-15)
+
+### Fixes
+
+- **editor:** > and < are refused in a folder's listing, and a double click from visual mode keeps the last selection for gv (5ca4bbe)
+
 ## 2026.10.28 (2026-10-14)
 
 ### Features
