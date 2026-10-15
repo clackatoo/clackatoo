@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.50 (2026-10-15)
+
+### Fixes
+
+- **daemon:** gone servers and agents refused at once, and waits that survive clear (1452afe)
+
 ## 2026.10.49 (2026-10-15)
 
 ### Features
