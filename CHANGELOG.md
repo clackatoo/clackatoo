@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.42 (2026-10-15)
+
+### Features
+
+- **gui:** chat tables, coloured code, one left edge, a solid cursor, and faster typing (e587466)
+
 ## 2026.10.41 (2026-10-15)
 
 ### Features
