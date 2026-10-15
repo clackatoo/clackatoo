@@ -9,7 +9,7 @@
 //! | `wait` | Nothing until the message is cancelled |
 //! | `busy` | Starts running a command, which goes on until the message is cancelled |
 //! | `exit` | Exits, as if it crashed |
-//! | `hang-up` | Closes its input, then asks to read `/dev/null` through the daemon, so answering fails; then, 300 ms later, says `still here`, and ends |
+//! | `hang-up` | Closes its input, then asks to read `/dev/null` through the daemon, so answering fails, and asks again 300 ms later; then, 300 ms after that, says `still here`, ends its turn, and waits, still running, until it's stopped |
 //! | `settings` | Its mode and model, as `mode model` |
 //! | `limits` | Says its account's limits as Claude Code's adapter does, in `usage_update`'s `_meta`: five hours' 42% used, the week's reached, with a nonsense time |
 //! | `read PATH` | Reads the file through the daemon, and says `read:` and its text |
@@ -863,16 +863,26 @@ impl Fake {
             "hang-up" => {
                 // Nothing reads what the daemon writes from now on, so its
                 // answer fails. Then a pause, as if thinking: an empty pipe
-                // isn't the end of what it says.
+                // isn't the end of what it says. It asks twice, a pause
+                // apart: a program another thread of a test is starting
+                // may hold its input open a moment, until it runs, and the
+                // first answer then goes through.
                 let nothing = std::fs::File::open("/dev/null").unwrap();
                 rustix::stdio::dup2_stdin(&nothing).unwrap();
-                send(
-                    &json!({ "jsonrpc": "2.0", "id": "f1", "method": "fs/read_text_file",
-                              "params": { "sessionId": session, "path": "/dev/null" } }),
-                );
-                std::thread::sleep(std::time::Duration::from_millis(300));
+                for asked in ["f1", "f2"] {
+                    send(
+                        &json!({ "jsonrpc": "2.0", "id": asked, "method": "fs/read_text_file",
+                                  "params": { "sessionId": session, "path": "/dev/null" } }),
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
                 say(&session, "still here\n");
                 done(&id, "end_turn");
+                // Still running, so it's found to have gone only because
+                // answering it failed, not because it exited.
+                loop {
+                    std::thread::park();
+                }
             }
             "tools" => {
                 let tools = self.tools.get(&session).cloned().unwrap_or_default();

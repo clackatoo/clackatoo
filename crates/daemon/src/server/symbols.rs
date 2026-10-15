@@ -71,7 +71,10 @@ impl Daemon {
             return self.symbols_failed(token, id, "this file has no language server".into());
         };
         let project = self.project(pane);
-        let Some(running) = self.servers.slots.get_mut(&server) else {
+        // One that has gone can't be asked: it would never hear.
+        let running =
+            (self.servers.slots.get_mut(&server)).filter(|running| !running.server.has_gone());
+        let Some(running) = running else {
             let why = "its language server has stopped";
             return self.symbols_failed(token, id, why.into());
         };
@@ -134,7 +137,7 @@ impl Daemon {
         self.servers.symbol_retries = waiting;
         for (_, mut search) in due {
             let Some(running) = (self.servers.slots.get_mut(&search.server))
-                .filter(|running| running.server.ready())
+                .filter(|running| running.server.ready() && !running.server.has_gone())
             else {
                 let why = "its language server has stopped";
                 self.symbols_failed(search.token, search.id, why.into());

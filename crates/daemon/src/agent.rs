@@ -494,6 +494,11 @@ impl Agent {
         self.peer.gone_due()
     }
 
+    /// What it's called in the log.
+    pub(crate) fn name(&self) -> &str {
+        self.peer.name()
+    }
+
     /// Whether messages are waiting for the pipe to take them.
     pub(crate) fn has_outgoing(&self) -> bool {
         self.peer.has_outgoing()

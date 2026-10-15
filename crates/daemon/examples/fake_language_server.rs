@@ -81,7 +81,7 @@
 //! | `--big-hints FILE` | Answers what to write inline with as many bytes of hints, all at the file's start, as FILE says when asked, in one write |
 //! | `--exit-after-hints` | Exits, as if it crashed, as soon as it has sent its first answer of what to write inline |
 //! | `--filler-before-hints` | Sends a notification of exactly 64 MiB, the most its client takes, just before each answer of `--big-hints`: as much as its client lets wait for parsing |
-//! | `--hang-up-before-hints` | Closes its input as it answers what to write inline with `--big-hints`, then, in the same write as the answer, asks its client for its settings, sends 200 KB it takes no notice of, and asks again, so answering the second time fails |
+//! | `--hang-up-before-hints` | Closes its input as it answers what to write inline with `--big-hints`, and asks its client for its settings; once its input has ended, in the same write as the answer, sends 200 KB it takes no notice of and asks again, so answering then fails, if answering the first time didn't; with `--pause-before-hints`, it asks a third time with the answer |
 //! | `--pause-before-hints` | Waits 300 ms between what it sends just before an answer of `--big-hints` and the answer, so its client finds its pipe empty for a while |
 //! | `--refresh-hints` | Asks its client to ask for inlay hints again, fifty times at once, after it's answered the first question of them |
 //! | `--format-error` | Answers formatting a file, or part of one, with an error, `RequestFailed`, as `gcsl lsp` does for a file with a syntax error |
@@ -119,6 +119,10 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 
 use serde_json::{Value, json};
+
+/// Whether the thread reading its input has read it to the end, and so
+/// no longer holds the pipe open.
+static INPUT_ENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[allow(clippy::too_many_lines, reason = "a line for each flag, most short")]
 fn main() {
@@ -213,6 +217,7 @@ fn main() {
                 return;
             }
         }
+        INPUT_ENDED.store(true, std::sync::atomic::Ordering::Release);
     });
     loop {
         match messages.recv_timeout(std::time::Duration::from_millis(5)) {
@@ -404,9 +409,8 @@ fn read(input: &mut impl BufRead) -> Option<Value> {
 /// many bytes of hints as the file at `size` says, all at the file's
 /// start: built as text and sent in one write, so that even a debug build
 /// sends tens of megabytes quickly. What's in `before`, framed, goes in
-/// the same write, first; or, if `pause` isn't zero, in a write of its
-/// own, and the answer that long after.
-fn big_hints(message: &Value, size: &str, before: Vec<u8>, pause: std::time::Duration) {
+/// the same write, first.
+fn big_hints(message: &Value, size: &str, before: Vec<u8>) {
     let size: usize = (std::fs::read_to_string(size).ok())
         .and_then(|size| size.trim().parse().ok())
         .unwrap_or(0);
@@ -422,12 +426,6 @@ fn big_hints(message: &Value, size: &str, before: Vec<u8>, pause: std::time::Dur
     body.push_str("]}");
     let mut framed = before;
     let mut out = std::io::stdout().lock();
-    if !pause.is_zero() {
-        out.write_all(&framed).unwrap();
-        out.flush().unwrap();
-        std::thread::sleep(pause);
-        framed.clear();
-    }
     write!(framed, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
     framed.extend_from_slice(body.as_bytes());
     out.write_all(&framed).unwrap();
@@ -652,18 +650,42 @@ impl Fake {
                 if self.hang_up_before_hints {
                     // The thread reading its input, waiting in a read, holds
                     // the pipe open until something comes: the answer to the
-                    // first question. Answering the second, past a filler
-                    // that takes a while to read, fails.
+                    // first question. Once that thread has read its input to
+                    // the end, nothing holds the pipe, and answering the
+                    // second, past a filler that takes a while to read,
+                    // fails, however slowly each side runs.
                     let nothing = std::fs::File::open("/dev/null").unwrap();
                     rustix::stdio::dup2_stdin(&nothing).unwrap();
-                    before.extend(ask_settings("settings 1"));
+                    let mut out = std::io::stdout().lock();
+                    out.write_all(&ask_settings("settings 1")).unwrap();
+                    out.flush().unwrap();
+                    drop(out);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    while !INPUT_ENDED.load(std::sync::atomic::Ordering::Acquire)
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
                     before.extend(filler(200_000));
                     before.extend(ask_settings("settings 2"));
                 }
+                if self.pause_before_hints {
+                    let mut out = std::io::stdout().lock();
+                    out.write_all(&before).unwrap();
+                    out.flush().unwrap();
+                    drop(out);
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    before.clear();
+                    if self.hang_up_before_hints {
+                        // Once more, with the answer: a program another
+                        // thread of a test is starting may have held the
+                        // pipe open a moment, until it ran, so that
+                        // answering the second time went through.
+                        before.extend(ask_settings("settings 3"));
+                    }
+                }
                 let size = self.big_hints.as_deref().unwrap_or_default();
-                let pause = if self.pause_before_hints { 300 } else { 0 };
-                let pause = std::time::Duration::from_millis(pause);
-                big_hints(message, size, before, pause);
+                big_hints(message, size, before);
                 if self.exit_after_hints {
                     if let Some(file) = &self.chatty {
                         // Its pipe full when it exits, and kept full.

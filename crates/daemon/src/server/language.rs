@@ -781,10 +781,12 @@ impl Daemon {
         let Some(slot) = self.servers.slots.get_mut(&id) else {
             return;
         };
-        if slot.server.has_gone() {
+        if slot.server.has_gone() || !slot.server.has_outgoing() {
             return;
         }
-        if slot.server.has_outgoing() && slot.server.flush().is_err() {
+        if let Err(err) = slot.server.flush() {
+            let name = format!("{}, for {}", slot.command.join(" "), slot.root.display());
+            log::info!("{name}: its input broke, so it has gone: {err}");
             slot.server.gone();
             self.queue_flood(Flood::Server(id));
         }
@@ -1173,8 +1175,10 @@ impl Daemon {
         if matches!(ask, Ask::Query(query) if query.formats()) && self.servers.formatting(buffer) {
             return Err("it's being formatted already");
         }
-        let running =
-            (self.servers.slots.get(&opened.server)).ok_or("its language server has stopped")?;
+        // One that has gone can't be asked: it would never hear.
+        let running = (self.servers.slots.get(&opened.server))
+            .filter(|running| !running.server.has_gone())
+            .ok_or("its language server has stopped")?;
         if !running.server.ready() {
             return Err("its language server is still starting");
         }

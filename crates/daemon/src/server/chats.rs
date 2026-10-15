@@ -474,10 +474,23 @@ impl Daemon {
 
     /// Asks the chat's agent for its session, starting the agent if it
     /// isn't running, or offering to install it if it isn't installed.
+    /// One that has gone, though still running, would never hear: the
+    /// chat fails to connect at once, and can try again once it's been let
+    /// go. Another isn't started beside it, as chats know their agent by
+    /// its name, and letting the old one go would cut off the new one's
+    /// chats as well.
     fn connect(&mut self, id: TerminalId) {
         let Some(chat) = self.chat(id) else { return };
         let name = chat.agent().to_owned();
         let agent = self.agents.named(&name);
+        let gone = |slot: &AgentSlot| slot.agent.has_gone();
+        if agent.is_some_and(|agent| self.agents.running.get(&agent).is_some_and(gone)) {
+            if let Some(chat) = self.chat(id) {
+                chat.failed_to_connect("it's stopping: try again in a moment");
+            }
+            self.collect_damage(id);
+            return;
+        }
         let Some(agent) = agent.or_else(|| self.start_agent_for(id, &name)) else {
             self.collect_damage(id);
             return;
@@ -719,10 +732,14 @@ impl Daemon {
         let Some(slot) = self.agents.running.get_mut(&id) else {
             return;
         };
-        if slot.agent.has_gone() {
+        if slot.agent.has_gone() || !slot.agent.has_outgoing() {
             return;
         }
-        if slot.agent.has_outgoing() && slot.agent.flush().is_err() {
+        if let Err(err) = slot.agent.flush() {
+            log::info!(
+                "{}: its input broke, so it has gone: {err}",
+                slot.agent.name()
+            );
             slot.agent.gone();
             self.queue_flood(Flood::Agent(id));
         }

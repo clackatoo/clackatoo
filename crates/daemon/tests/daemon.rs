@@ -2190,15 +2190,72 @@ fn when_the_agent_stops_the_next_message_starts_it_again() {
 
 #[test]
 fn what_an_agent_says_a_while_after_it_hangs_up_still_comes() {
-    let daemon = TestDaemon::start();
+    fake_server_logged();
+    // Named for this test alone, as what it logs is looked for.
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent("hanging", vec![fake_agent().into()])];
+    });
     let mut client = daemon.client();
-    let chat = start_chat(&mut client);
+    client
+        .new_workspace(None, new_chat_with(Some("hanging")))
+        .unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
     // Answering what it asks fails, as it has closed its input, and its
     // pipe is then empty for a while. It's still running, though, and
     // what it says after that still comes.
     let node = ask(&mut client, chat, "hang-up");
     assert_eq!(last_words(&node), "still here\n");
     assert_eq!(last_outcome(&node), Some(&Outcome::Done));
+    // So it came after writing to it failed, not only as it exited.
+    wait_for_fake_server_logged("agent hanging: its input broke");
+}
+
+#[test]
+fn a_chat_opened_while_its_agent_is_going_fails_at_once_then_starts_it_again() {
+    fake_server_logged();
+    // Named for this test alone, as what it logs is looked for.
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent("going", vec![fake_agent().into()])];
+    });
+    let mut client = daemon.client();
+    let first = (client.new_workspace(None, new_chat_with(Some("going")))).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
+    // Once writing to it has failed, it's kept a while for what else it
+    // says: a new chat with it meanwhile isn't asked of it, as it would
+    // never hear, and it fails at once rather than when it's let go.
+    client
+        .chat(chat, ChatAction::Send("hang-up".to_owned()))
+        .unwrap();
+    wait_for_fake_server_logged("agent going: its input broke");
+    let opened = Instant::now();
+    client
+        .split_pane(first, Side::Right, new_chat_with(Some("going")))
+        .unwrap();
+    let chats = client.watch_workspaces().unwrap().list[0].terminals();
+    let second = *chats.iter().find(|&&id| id != chat).unwrap();
+    let node = wait_for_chat(&mut client, second, |node| {
+        matches!(node.state, ChatState::Failed(_) | ChatState::Ready)
+    });
+    assert!(
+        matches!(&node.state, ChatState::Failed(why) if why.contains("stopping")),
+        "{:?}, {:?} after the agent was found gone",
+        node.state,
+        opened.elapsed()
+    );
+    // Once it's been let go, a message starts it again.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // Its words may go to the first chat, as the fake agent numbers its
+    // sessions from one, so the first chat's session has the same name.
+    for tries in 0.. {
+        let node = ask(&mut client, second, &format!("back {tries}"));
+        if last_outcome(&node) == Some(&Outcome::Done) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never started again: {node:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 #[test]
@@ -4372,7 +4429,8 @@ fn a_language_server_says_whats_wrong_as_a_buffer_changes() {
 
 /// What the daemon logs about language servers tests start, as they read
 /// it: each line, from debug level, that names the fake language server,
-/// whose name in the log is its program's path, or gcsl's.
+/// whose name in the log is its program's path, or gcsl's; and each that
+/// says a program's input broke, an agent's too.
 fn fake_server_logged() -> Vec<String> {
     use std::sync::{Mutex, Once};
     static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -4385,7 +4443,10 @@ fn fake_server_logged() -> Vec<String> {
         fn log(&self, record: &log::Record<'_>) {
             if self.enabled(record.metadata()) {
                 let line = record.args().to_string();
-                if line.contains("fake_language_server") || line.starts_with("gcsl") {
+                if line.contains("fake_language_server")
+                    || line.starts_with("gcsl")
+                    || line.contains("its input broke")
+                {
                     LOGGED.lock().unwrap().push(line);
                 }
             }
@@ -6624,8 +6685,8 @@ fn a_huge_answer_sent_just_before_its_server_stops_still_comes() {
 
 /// A daemon whose fake language server, run with `args` too, answers what
 /// to write inline with about `size` bytes, then exits; and whether that
-/// answer comes.
-fn hints_come_from_a_server_that_exits(size: usize, args: &[&str]) {
+/// answer comes. Returns the daemon, for what it logged.
+fn hints_come_from_a_server_that_exits(size: usize, args: &[&str]) -> TestDaemon {
     let daemon = with_fake_language_server(|dir| {
         let size = dir.join("size").display().to_string();
         let args = args.iter().map(|&arg| arg.to_owned());
@@ -6644,6 +6705,15 @@ fn hints_come_from_a_server_that_exits(size: usize, args: &[&str]) {
     let (id, answer) = next_answer(&mut client);
     assert_eq!(id, 1);
     assert!(matches!(answer, Answer::InlayHints { .. }), "{answer:?}");
+    daemon
+}
+
+/// Waits for `daemon` to log that its fake language server's input broke:
+/// so the answer came that way, not only as the server exited, as it may
+/// on a busy machine if writing to it never failed.
+fn wait_for_server_input_broken(daemon: &TestDaemon) {
+    let root = daemon.dir.path().join("app").canonicalize().unwrap();
+    wait_for_fake_server_logged(&format!("for {}: its input broke", root.display()));
 }
 
 #[test]
@@ -6660,7 +6730,9 @@ fn an_answer_sent_as_its_server_hangs_up_still_comes() {
     // The server closes its input, then asks for settings in the same
     // write as the answer: answering fails, but what it sent is read to
     // the end before it's let go.
-    hints_come_from_a_server_that_exits(200_000, &["--hang-up-before-hints"]);
+    fake_server_logged();
+    let daemon = hints_come_from_a_server_that_exits(200_000, &["--hang-up-before-hints"]);
+    wait_for_server_input_broken(&daemon);
 }
 
 #[test]
@@ -6668,8 +6740,45 @@ fn an_answer_sent_a_while_after_its_server_hangs_up_still_comes() {
     // As above, but it pauses between asking again and answering: its
     // pipe is empty for a while once answering has failed, which isn't its
     // end, as it's still running.
+    fake_server_logged();
     let args = ["--hang-up-before-hints", "--pause-before-hints"];
-    hints_come_from_a_server_that_exits(200_000, &args);
+    let daemon = hints_come_from_a_server_that_exits(200_000, &args);
+    wait_for_server_input_broken(&daemon);
+}
+
+#[test]
+fn a_question_for_a_server_that_has_hung_up_fails_at_once() {
+    fake_server_logged();
+    let daemon = with_fake_language_server(|dir| {
+        let size = dir.join("size").display().to_string();
+        let args = [
+            "--exit-after-hints",
+            "--hang-up-before-hints",
+            "--pause-before-hints",
+        ];
+        let args = args.iter().map(|&arg| arg.to_owned());
+        ["--big-hints".to_owned(), size]
+            .into_iter()
+            .chain(args)
+            .collect()
+    });
+    std::fs::write(daemon.dir.path().join("size"), "200000").unwrap();
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    ask_hints(&mut client, buffer, 1, (0, 3));
+    // Once writing to it has failed, it's still read, but not asked
+    // anything, as it would never hear: the question fails at once, not
+    // when it's let go.
+    wait_for_server_input_broken(&daemon);
+    client.query(buffer, 2, (0, 0), Query::Definition).unwrap();
+    let answers = [next_answer(&mut client), next_answer(&mut client)];
+    let failed = Answer::Failed("its language server has stopped".to_owned());
+    assert!(answers.contains(&(2, failed)), "{answers:?}");
+    assert!(
+        answers
+            .iter()
+            .any(|(id, answer)| *id == 1 && matches!(answer, Answer::InlayHints { .. })),
+        "{answers:?}"
+    );
 }
 
 #[test]
