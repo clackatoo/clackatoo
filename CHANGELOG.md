@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.54 (2026-10-16)
+
+### Features
+
+- **daemon,term:** offer a restored command only from the shell integration's own mark (39670b1)
+
 ## 2026.10.53 (2026-10-16)
 
 ### Features
