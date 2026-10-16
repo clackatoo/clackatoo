@@ -11,6 +11,29 @@
 # Commands are quoted so that aliases can't change them.
 
 'builtin' 'typeset' -g __clackatoo_zsh=$ZDOTDIR/clackatoo.zsh
+
+# Before anything else runs, the user's .zshenv included: the secret
+# clackatoo gave this terminal, which the C mark carries to say it's the
+# shell's and not something a program printed. It's in a file only
+# clackatoo and this user can read, named in the environment. It's read
+# once and the file removed at once, and the name taken out of the
+# environment, so no program zsh runs from now on can learn it. Never
+# traced, which would print it.
+if [[ -n ${CLACKATOO_SECRET_FILE-} ]]; then
+    () {
+        'builtin' 'setopt' local_options no_xtrace
+        'builtin' 'typeset' -g __clackatoo_secret=
+        if [[ -r $CLACKATOO_SECRET_FILE ]]; then
+            IFS= 'builtin' 'read' -r __clackatoo_secret <$CLACKATOO_SECRET_FILE
+        fi
+        'command' 'rm' -f -- $CLACKATOO_SECRET_FILE 2>/dev/null
+        'builtin' 'unset' CLACKATOO_SECRET_FILE
+        if [[ ! -o interactive || ${#__clackatoo_secret} != 32 ||
+            $__clackatoo_secret == *[^0-9a-f]* ]]; then
+            'builtin' 'unset' __clackatoo_secret
+        fi
+    }
+fi
 if [[ -n ${CLACKATOO_ZSH_ZDOTDIR+set} ]]; then
     ZDOTDIR=$CLACKATOO_ZSH_ZDOTDIR
     'builtin' 'unset' CLACKATOO_ZSH_ZDOTDIR

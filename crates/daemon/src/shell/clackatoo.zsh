@@ -69,12 +69,29 @@ __clackatoo_mark_prompt() {
 
 # Last of the hooks run before a command: its output starts here. The
 # command goes with it, its bytes percent-encoded but for letters, digits
-# and `/._~-`.
+# and `/._~-`, and the secret clackatoo gave this terminal (read by
+# .zshenv), which says it's the shell's mark, not a program's. Never
+# traced, which would print the secret.
+#
+# A line the user's `zshaddhistory` hooks keep out of the history (any
+# status but 0) goes without the command, so it's never offered to run
+# again. They're asked in a subshell, with the user's own options, so
+# nothing they do happens twice.
 __clackatoo_preexec() {
-    emulate -L zsh -o extended_glob
-    local LC_ALL=C
-    print -rnu $__clackatoo_fd -- \
-        $'\e]133;C;cmdline_url='${1//(#m)[^A-Za-z0-9\/._~-]/%${(l:2::0:)$(( [##16] #MATCH ))}}$'\a'
+    setopt local_options no_xtrace
+    local hook line=$1
+    for hook in zshaddhistory $zshaddhistory_functions; do
+        if functions -- $hook >/dev/null 2>&1 && ! ( $hook "$1"$'\n' ) >/dev/null 2>&1; then
+            line=
+            break
+        fi
+    done
+    emulate -L zsh -o extended_glob -o no_xtrace
+    local LC_ALL=C mark=${__clackatoo_secret:+clackatoo=$__clackatoo_secret}
+    if [[ -n $line ]]; then
+        mark+=${mark:+;}cmdline_url=${line//(#m)[^A-Za-z0-9\/._~-]/%${(l:2::0:)$(( [##16] #MATCH ))}}
+    fi
+    print -rnu $__clackatoo_fd -- $'\e]133;C;'$mark$'\a'
 }
 
 # Adds the hooks. A .zshrc may set the hooks' lists afresh, so this waits

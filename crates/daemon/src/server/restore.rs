@@ -380,15 +380,11 @@ impl Daemon {
                         cwd: (terminal.own_directory())
                             .or_else(|| emulator.cwd().map(str::to_owned)),
                         // An offer still open stays open after a restart.
-                        // Otherwise, what the shell said it runs, if what's
-                        // in front of it is that, never what a program
-                        // printed.
-                        ran: (restored.and_then(|restored| restored.ran.clone())).or_else(|| {
-                            emulator
-                                .running_command()
-                                .and_then(kept_command)
-                                .filter(|command| terminal.runs_in_front(command))
-                        }),
+                        // Otherwise, what the shell's integration said it
+                        // runs, with the terminal's secret, never what a
+                        // program printed.
+                        ran: (restored.and_then(|restored| restored.ran.clone()))
+                            .or_else(|| emulator.trusted_running_command().and_then(kept_command)),
                     })
                 }
                 Hosted::Chat(chat) => Some(Pane::Chat {

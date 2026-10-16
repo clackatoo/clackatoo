@@ -429,6 +429,23 @@ impl Terminal {
         self.emulator.link_count()
     }
 
+    /// Says the shell's integration adds `secret` to the `C` marks it
+    /// makes, as `clackatoo=SECRET`, or that it adds none. A command
+    /// marked with it is the shell's for certain (see
+    /// [`trusted_running_command`](Self::trusted_running_command)): no
+    /// program the shell runs is told the secret. It's compared, and
+    /// never kept anywhere else.
+    pub fn expect_secret(&mut self, secret: Option<&str>) {
+        self.emulator.secret = secret.map(|secret| secret.as_bytes().into());
+    }
+
+    /// Takes block `block`'s command to be the shell's, as a
+    /// [`trusted_block`](Self::trusted_block) of the terminal this one
+    /// was restored from said.
+    pub fn trust_block(&mut self, block: u32) {
+        self.emulator.blocks.trust(block);
+    }
+
     /// The printing state the screen doesn't show: the cursor's position and
     /// pending wrap, and the character REP would repeat.
     #[cfg(test)]
@@ -713,6 +730,9 @@ pub(crate) struct Emulator {
     cwd: Option<String>,
     /// The commands the shell marked (see [`crate::blocks`]).
     blocks: Blocks,
+    /// The secret clackatoo's own shell integration adds to its marks in
+    /// this terminal, if it has one (see [`Terminal::expect_secret`]).
+    secret: Option<Box<[u8]>>,
     /// What the links cells are part of point to (see [`crate::links`]).
     links: Links,
     /// The cursor shape the program asked for.
@@ -756,6 +776,7 @@ impl Emulator {
             title: String::new(),
             cwd: None,
             blocks: Blocks::default(),
+            secret: None,
             links: Links::default(),
             cursor_shape: CursorShape::Default,
             replies: Vec::new(),
@@ -1497,7 +1518,10 @@ impl Emulator {
         let next_block = self.blocks.next();
         let renumbered = self.blocks.renumbered() + u64::from(next_block.is_none());
         let next_block = next_block.unwrap_or(0);
+        let secret = self.secret.take();
         *self = Self::new(self.size, &self.config);
+        // The shell, which knows it, outlives the reset.
+        self.secret = secret;
         self.replies = replies;
         self.clipboard = clipboard;
         // Link IDs are never reused (see crate::links), nor are block
@@ -1566,6 +1590,7 @@ impl Emulator {
             return;
         }
         match kind {
+            b"C" if self.carries_secret(options) => self.trusted_command(options),
             // A prompt while a command runs is the command's output, not
             // the shell's: a program printing marks of its own, or a
             // shell nested inside it, such as one over ssh. So is a
@@ -1584,11 +1609,7 @@ impl Emulator {
             }
             b"B" => self.blocks.typing(),
             b"C" => {
-                let command = options
-                    .iter()
-                    .find_map(|option| option.strip_prefix(b"cmdline_url="))
-                    .map(blocks::percent_decode);
-                let block = self.blocks.command(command, self.cwd.clone());
+                let block = (self.blocks).command(cmdline(options), self.cwd.clone(), false);
                 self.mark_cursor_row(block, true);
             }
             b"D" => {
@@ -1599,6 +1620,39 @@ impl Emulator {
             }
             _ => {}
         }
+    }
+
+    /// Whether `options`, a `C` mark's, carry the secret clackatoo's own
+    /// shell integration was given for this terminal. Compared in time
+    /// that doesn't depend on where they differ.
+    fn carries_secret(&self, options: &[&[u8]]) -> bool {
+        let Some(secret) = &self.secret else {
+            return false;
+        };
+        (options.iter())
+            .filter_map(|option| option.strip_prefix(b"clackatoo="))
+            .any(|given| {
+                given.len() == secret.len()
+                    && (given.iter().zip(secret.iter())).fold(0, |differ, (a, b)| differ | (a ^ b))
+                        == 0
+            })
+    }
+
+    /// A `C` mark carrying the secret: clackatoo's own shell integration
+    /// says a command has started. fish marks the start itself first, so
+    /// a command already running is the one this says it is; otherwise
+    /// it starts here.
+    fn trusted_command(&mut self, options: &[&[u8]]) {
+        let command = cmdline(options);
+        if self.blocks.running() {
+            self.blocks.trust_running(command);
+            return;
+        }
+        if self.blocks.run_out() {
+            self.renumber_blocks();
+        }
+        let block = self.blocks.command(command, self.cwd.clone(), true);
+        self.mark_cursor_row(block, true);
     }
 
     /// Numbers blocks from 0 again, once they've run out, forgetting every
@@ -1668,4 +1722,12 @@ impl Emulator {
     pub(crate) fn reply(&mut self, bytes: &[u8]) {
         self.replies.extend_from_slice(bytes);
     }
+}
+
+/// The command a `C` mark's `options` say started, from its
+/// `cmdline_url=`.
+fn cmdline(options: &[&[u8]]) -> Option<String> {
+    (options.iter())
+        .find_map(|option| option.strip_prefix(b"cmdline_url="))
+        .map(blocks::percent_decode)
 }

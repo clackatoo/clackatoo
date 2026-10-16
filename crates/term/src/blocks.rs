@@ -13,6 +13,15 @@
 //!
 //! OSC 7 (`file://host/path`) reports the working directory.
 //!
+//! Any program can print these marks, so what they say is only taken as
+//! the shell's when the shell is the one that could have printed them.
+//! clackatoo's own integration knows a secret the daemon gives each
+//! terminal (see [`Terminal::expect_secret`]), and adds it to its `C` as
+//! `clackatoo=SECRET`. A command marked so is the shell's for certain,
+//! and only such a command is offered to run again after a restart. The
+//! secret is checked and dropped as the mark is read: it's never kept,
+//! and never reaches the screen.
+//!
 //! A mark goes on the row the cursor is on, and moves with it: into
 //! history, through rewrapping on resize, and away when the row is
 //! erased or evicted. What the shell said about each block (its command,
@@ -65,6 +74,10 @@ pub(crate) struct Entry {
     pub(crate) phase: Phase,
     /// Its exit status, once finished, if the shell said.
     pub(crate) exit: Option<i32>,
+    /// Whether clackatoo's own shell integration said what the command is,
+    /// with the terminal's secret: then the command is the shell's, not
+    /// something a program printed.
+    pub(crate) trusted: bool,
 }
 
 /// How far a block has got.
@@ -208,26 +221,65 @@ impl Blocks {
     }
 
     /// `command` has started running in `cwd`: the number of its block.
-    pub(crate) fn command(&mut self, command: Option<String>, cwd: Option<String>) -> u32 {
+    /// It's `trusted` if clackatoo's own shell integration said so.
+    pub(crate) fn command(
+        &mut self,
+        command: Option<String>,
+        cwd: Option<String>,
+        trusted: bool,
+    ) -> u32 {
         self.marks_commands = true;
         let running = Entry {
             command,
             cwd,
             phase: Phase::Running,
             exit: None,
+            trusted,
         };
         match self.entries.back_mut() {
             Some(last) if last.phase == Phase::Prompt => {
                 *last = running;
                 self.last()
             }
+            _ if trusted => self.push(running),
             // The shell didn't mark a prompt: whatever printed this, it
-            // isn't known to be the shell, so what it says ran isn't kept,
-            // as it's offered to run again after a restart.
+            // isn't known to be the shell, so what it says ran isn't kept.
             _ => self.push(Entry {
                 command: None,
                 ..running
             }),
+        }
+    }
+
+    /// clackatoo's own shell integration says the running command is
+    /// `command`: fish marks the command's start itself, then runs the
+    /// integration's hook, which marks it again with the secret.
+    pub(crate) fn trust_running(&mut self, command: Option<String>) {
+        if let Some(last) = self.entries.back_mut()
+            && last.phase == Phase::Running
+        {
+            last.command = command;
+            last.trusted = true;
+        }
+    }
+
+    /// The number of the latest block, if clackatoo's own shell
+    /// integration said what its command is.
+    pub(crate) fn trusted(&self) -> Option<u32> {
+        let last = self.entries.back()?;
+        last.trusted.then(|| self.last())
+    }
+
+    /// Takes block `block`'s command to be what clackatoo's own shell
+    /// integration said, as the build that handed this terminal over
+    /// knew it was.
+    pub(crate) fn trust(&mut self, block: u32) {
+        let entry = block
+            .checked_sub(self.first)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| self.entries.get_mut(index));
+        if let Some(entry) = entry {
+            entry.trusted = true;
         }
     }
 
@@ -376,7 +428,8 @@ impl Terminal {
 
     /// The command the shell's latest block is running, if one is and
     /// the shell said what it is: what a list of terminals says each is
-    /// doing.
+    /// doing. Any program could have printed it: see
+    /// [`trusted_running_command`](Self::trusted_running_command).
     #[must_use]
     pub fn running_command(&self) -> Option<&str> {
         let last = self.emulator_blocks().parts().1.back()?;
@@ -384,6 +437,27 @@ impl Terminal {
             return None;
         }
         last.command.as_deref()
+    }
+
+    /// The command the shell's latest block is running, if one is and
+    /// clackatoo's own shell integration said what it is, with the
+    /// terminal's secret (see [`expect_secret`](Self::expect_secret)):
+    /// what the shell ran, never what a program printed.
+    #[must_use]
+    pub fn trusted_running_command(&self) -> Option<&str> {
+        let last = self.emulator_blocks().parts().1.back()?;
+        if last.phase != Phase::Running || !last.trusted {
+            return None;
+        }
+        last.command.as_deref()
+    }
+
+    /// The number of the shell's latest block, if clackatoo's own shell
+    /// integration said what its command is: for the next build to know,
+    /// with [`trust_block`](Self::trust_block), as snapshots don't say.
+    #[must_use]
+    pub fn trusted_block(&self) -> Option<u32> {
+        self.emulator_blocks().trusted()
     }
 
     /// How far block `block` has got, while it's still known: until no
@@ -651,6 +725,130 @@ mod tests {
         t.advance(b"]133;D;0]133;C;cmdline_url=rm%20-rf%20~");
         assert_eq!(t.latest_block().map(|(_, at)| at), Some(Progress::Running));
         assert_eq!(t.running_command(), None);
+    }
+
+    const SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn only_a_command_marked_with_the_secret_is_trusted() {
+        let mut t = terminal(60, 10, 100);
+        t.expect_secret(Some(SECRET));
+        t.advance(PROMPT.as_bytes());
+        // As bash and zsh mark it, through clackatoo's integration.
+        t.advance(
+            format!("sleep 9\r\n\x1b]133;C;clackatoo={SECRET};cmdline_url=sleep%209\x07")
+                .as_bytes(),
+        );
+        assert_eq!(t.trusted_running_command(), Some("sleep 9"));
+        let (block, _) = t.latest_block().unwrap();
+        assert_eq!(t.trusted_block(), Some(block));
+        // What it prints, with a wrong secret or none, changes nothing.
+        t.advance(b"\x1b]133;C;clackatoo=0123;cmdline_url=rm%20-rf%20~\x07");
+        t.advance(b"\x1b]133;C;cmdline_url=rm%20-rf%20~\x07");
+        assert_eq!(t.trusted_running_command(), Some("sleep 9"));
+        // Nor does a forged end, prompt and start: the command it starts
+        // is said, but isn't trusted, whatever's in front.
+        t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]133;B\x07");
+        t.advance(
+            format!(
+                "\x1b]133;C;clackatoo={}x;cmdline_url=sleep%20-rf\x07",
+                &SECRET[1..]
+            )
+            .as_bytes(),
+        );
+        assert_eq!(t.running_command(), Some("sleep -rf"));
+        assert_eq!(t.trusted_running_command(), None);
+        assert_eq!(t.trusted_block(), None);
+        // Nor does one with the secret cut short, or carried too far.
+        t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07");
+        t.advance(format!("\x1b]133;C;clackatoo={}\x07", &SECRET[..31]).as_bytes());
+        t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07");
+        t.advance(format!("\x1b]133;C;clackatoo={SECRET}0;cmdline_url=x\x07").as_bytes());
+        assert_eq!(t.trusted_running_command(), None);
+        // The secret never reaches the screen or the title.
+        t.advance(b"\x1b]133;D;0\x07\r\n");
+        assert!(
+            !text(&t, 0, 20).contains("0123456789"),
+            "{}",
+            text(&t, 0, 20)
+        );
+        assert!(!t.title().contains("0123456789"));
+    }
+
+    #[test]
+    fn a_terminal_expecting_no_secret_trusts_nothing() {
+        let mut t = terminal(60, 10, 100);
+        t.advance(PROMPT.as_bytes());
+        t.advance(format!("ls\r\n\x1b]133;C;clackatoo={SECRET};cmdline_url=ls\x07").as_bytes());
+        assert_eq!(t.running_command(), Some("ls"));
+        assert_eq!(t.trusted_running_command(), None);
+        t.advance(b"\x1b]133;D;0\x07");
+        t.expect_secret(Some(SECRET));
+        t.advance(PROMPT.as_bytes());
+        t.advance(b"ls\r\n\x1b]133;C;clackatoo=;cmdline_url=ls\x07");
+        assert_eq!(t.trusted_running_command(), None, "an empty secret");
+    }
+
+    #[test]
+    fn fish_marks_the_command_then_the_integration_trusts_it_in_the_same_block() {
+        let mut t = terminal(60, 10, 100);
+        t.expect_secret(Some(SECRET));
+        t.advance(PROMPT.as_bytes());
+        t.advance(b"sleep 9\r\n\x1b]133;C;cmdline_url=sleep%209\x07");
+        let (block, _) = t.latest_block().unwrap();
+        assert_eq!(t.trusted_running_command(), None);
+        t.advance(format!("\x1b]133;C;cmdline_url=sleep%209;clackatoo={SECRET}\x07").as_bytes());
+        assert_eq!(t.trusted_running_command(), Some("sleep 9"));
+        assert_eq!(t.latest_block(), Some((block, Progress::Running)));
+        t.advance(b"done\r\n\x1b]133;D;0\x07");
+        t.advance(PROMPT.as_bytes());
+        // One block, with its output marked once, on the line it starts.
+        let marks: Vec<(u64, u32, bool, bool)> = (t.primary().marks())
+            .map(|(line, mark)| (line, mark.block, mark.prompt, mark.output))
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                (0, block, true, false),
+                (1, block, false, true),
+                (2, block + 1, true, false)
+            ]
+        );
+        assert_eq!(at(&t, 0).unwrap().1, Some(1));
+        assert_eq!(t.latest_block(), Some((block + 1, Progress::Prompt)));
+    }
+
+    #[test]
+    fn a_trusted_command_needs_no_prompt_and_survives_a_reset() {
+        let mut t = terminal(60, 10, 100);
+        t.expect_secret(Some(SECRET));
+        t.advance(format!("\x1b]133;C;clackatoo={SECRET};cmdline_url=top\x07").as_bytes());
+        assert_eq!(t.trusted_running_command(), Some("top"));
+        t.advance(b"\x1b]133;D;0\x07\x1bc");
+        t.advance(PROMPT.as_bytes());
+        t.advance(format!("\x1b]133;C;clackatoo={SECRET};cmdline_url=vi\x07").as_bytes());
+        assert_eq!(
+            t.trusted_running_command(),
+            Some("vi"),
+            "RIS kept the secret"
+        );
+    }
+
+    #[test]
+    fn trust_is_put_back_by_block_number() {
+        let mut t = terminal(60, 10, 100);
+        t.expect_secret(Some(SECRET));
+        t.advance(PROMPT.as_bytes());
+        t.advance(format!("make\r\n\x1b]133;C;clackatoo={SECRET};cmdline_url=make\x07").as_bytes());
+        let block = t.trusted_block().unwrap();
+        let mut restored = Terminal::restore(&t.snapshot(), &Config::default()).unwrap();
+        restored.restore_blocks(&t.blocks_snapshot());
+        assert_eq!(restored.running_command(), Some("make"));
+        assert_eq!(restored.trusted_running_command(), None);
+        restored.trust_block(block + 1);
+        assert_eq!(restored.trusted_running_command(), None);
+        restored.trust_block(block);
+        assert_eq!(restored.trusted_running_command(), Some("make"));
     }
 
     #[test]
@@ -941,22 +1139,22 @@ mod tests {
         let mut blocks = Blocks::default();
         assert_eq!(blocks.prompt(), 0);
         assert_eq!(blocks.prompt(), 0);
-        assert_eq!(blocks.command(Some("ls".to_owned()), None), 0);
+        assert_eq!(blocks.command(Some("ls".to_owned()), None, false), 0);
         blocks.finished(Some(2));
         assert_eq!(blocks.get(0).unwrap().exit, Some(2));
         assert_eq!(blocks.prompt(), 1);
         // A command without a prompt mark starts a block of its own.
         blocks.finished(Some(1));
-        assert_eq!(blocks.command(None, None), 1);
+        assert_eq!(blocks.command(None, None, false), 1);
         blocks.finished(None);
-        assert_eq!(blocks.command(None, None), 2);
+        assert_eq!(blocks.command(None, None, false), 2);
     }
 
     #[test]
     fn forgetting_keeps_the_numbering() {
         let mut blocks = Blocks::default();
         for _ in 0..3 {
-            blocks.command(None, None);
+            blocks.command(None, None, false);
             blocks.finished(Some(0));
         }
         blocks.forget_before(2);

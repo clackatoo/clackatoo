@@ -509,6 +509,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "shell",
         what: "Workspaces, tabs and panes come back after a restart; R puts what a terminal ran at its prompt",
     },
+    News {
+        id: "rerunbash",
+        date: "2026-10-16",
+        lesson: "shell",
+        what: "bash too offers what it was running after a restart, and only the shell's own marks count",
+    },
 ];
 
 impl News {

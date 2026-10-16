@@ -70,6 +70,8 @@ struct Setup {
     server: Option<Vec<String>>,
     /// The fake agent's arguments, if chats are to have it.
     agent: Option<Vec<String>>,
+    /// The user's shell, if not `/bin/sh`.
+    shell: Option<&'static str>,
 }
 
 /// A daemon in a process of its own, in a directory of its own, which is
@@ -172,7 +174,7 @@ fn spawn(root: &Path, setup: &Setup, nohup: bool, args: &[&str]) -> Child {
         .env("XDG_DATA_HOME", root.join("data"))
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_STATE_HOME", root.join("state"))
-        .env("SHELL", "/bin/sh")
+        .env("SHELL", setup.shell.unwrap_or("/bin/sh"))
         .env("CLACKATOO_BOARDS", root.join("boards"))
         .env("CLACKATOO_BROWSER", "off")
         .env("CLACKATOO_UDP_PORTS", "off")
@@ -349,6 +351,7 @@ fn clackatoo_stop_has_the_daemon_stop_everything_it_started_and_exit_cleanly() {
             "--grandchild".into(),
             agent_child.display().to_string(),
         ]),
+        shell: None,
     };
     let mut daemon = Process::start(&setup);
     let mut client = daemon.client();
@@ -411,6 +414,7 @@ fn ctrl_c_stops_the_daemon_and_a_second_signal_changes_nothing() {
             server_log.display().to_string(),
         ]),
         agent: None,
+        shell: None,
     };
     let mut daemon = Process::start(&setup);
     let mut client = daemon.client();
@@ -570,6 +574,7 @@ fn a_signal_that_comes_as_the_daemon_upgrades_stops_the_next_build() {
             server_log.display().to_string(),
         ]),
         agent: None,
+        shell: None,
     };
     let mut daemon = Process::start(&setup);
     let mut client = daemon.client();
@@ -624,6 +629,7 @@ fn a_signal_that_comes_as_the_daemon_goes_back_to_a_build_from_before_signals_st
             server_log.display().to_string(),
         ]),
         agent: None,
+        shell: None,
     };
     let mut daemon = Process::start(&setup);
     let mut client = daemon.client();
@@ -858,4 +864,70 @@ fn workspaces_come_back_as_the_daemon_starts_again_but_not_twice_after_an_upgrad
     assert_eq!(workspace_names(&mut daemon.client()), ["kept", "after"]);
     let log = daemon.log();
     assert!(log.contains("made again"), "{log}");
+}
+
+/// bash marks what it runs with its terminal's secret, which an upgrade
+/// carries over, with which command it marked: what it was running when
+/// the upgrade came is still offered after a restart, and so is what it
+/// runs after.
+#[test]
+fn what_bash_runs_is_offered_after_a_restart_whether_it_started_before_an_upgrade_or_after() {
+    if !Path::new("/bin/bash").exists() {
+        eprintln!("/bin/bash isn't installed: skipped");
+        return;
+    }
+    let setup = Setup {
+        shell: Some("/bin/bash"),
+        ..Setup::default()
+    };
+    let mut daemon = Process::start(&setup);
+    let mut client = daemon.client();
+    let shell = || {
+        PaneTerminal::New(NewTerminal {
+            size: Size::new(80, 10).unwrap(),
+            command: None,
+            cwd: None,
+            record_to: None,
+        })
+    };
+    client.new_workspace(None, shell()).unwrap();
+    let terminal = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let kept = daemon.root().join("state/clackatoo/workspaces");
+    let says = |what: &str| {
+        std::fs::read_to_string(&kept)
+            .unwrap_or_default()
+            .contains(what)
+    };
+    eventually("bash shows its prompt", || {
+        client.capture(terminal).is_ok_and(|view| {
+            let lines = &view.grid().expect("a grid").lines;
+            lines.iter().any(|line| line.text().contains('$'))
+        })
+    });
+    client.send_input(terminal, b"sleep 600\r").unwrap();
+    eventually("sleep 600 is kept", || says("\"ran\": \"sleep 600\""));
+    drop(client);
+
+    let (_bin, next) = next_build("daemon-next");
+    upgrade(&daemon.socket(), &next);
+    daemon.becomes(&next);
+    let mut client = daemon.client();
+    // Kept again by the new build, which knows the command was marked.
+    client.new_workspace(Some("after".into()), shell()).unwrap();
+    eventually("the change is kept", || says("\"after\""));
+    assert!(says("\"ran\": \"sleep 600\""));
+    // And knows the secret.
+    client.send_input(terminal, b"\x03").unwrap();
+    eventually("sleep 600 goes", || !says("\"ran\": \"sleep 600\""));
+    client.send_input(terminal, b"sleep 601\r").unwrap();
+    eventually("sleep 601 is kept", || says("\"ran\": \"sleep 601\""));
+    drop(client);
+
+    daemon.signal(Signal::TERM);
+    daemon.start_again(&[]);
+    let restored = daemon.client().watch_workspaces().unwrap().restored;
+    let offered: Vec<Option<&str>> = (restored.iter())
+        .map(|restored| restored.ran.as_deref())
+        .collect();
+    assert_eq!(offered, [Some("sleep 601")]);
 }

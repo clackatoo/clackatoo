@@ -232,7 +232,7 @@ fn serve_signalled(
     };
     daemon.set_upgrade_args(args);
     // Once the lock is held: the directory is ours.
-    daemon.install_shell_integration(runtime.path().join("shell"));
+    daemon.install_shell_integration(runtime.path().join("shell"), afresh);
     // Once the shells it starts are marked: an upgrade carried everything
     // over itself.
     if afresh && restore {
@@ -258,7 +258,7 @@ fn serve_signalled(
         handover.state.lock = None;
         daemon = Daemon::resume(handover, config.clone()).map_err(io::Error::other)?;
         daemon.set_upgrade_args(args);
-        daemon.install_shell_integration(runtime.path().join("shell"));
+        daemon.install_shell_integration(runtime.path().join("shell"), false);
     }
     Ok(())
 }

@@ -835,7 +835,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let flagless = script(
         bin.path(),
         "flagless",
-        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19"#,
+        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20"#,
     );
     not_upgrading(ask_to_upgrade(runtime.path(), &flagless), "can't take over");
     // Failed after everything was handed over: it says it can take over,
@@ -844,7 +844,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let vanishing = script(
         bin.path(),
         "vanishing",
-        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; rm -- "$0";; esac"#,
+        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; rm -- "$0";; esac"#,
     );
     not_upgrading(
         ask_to_upgrade(runtime.path(), &vanishing),
@@ -1032,6 +1032,219 @@ fn shells_mark_their_commands() {
             assert_eq!(ran.command.as_deref(), Some("echo one; echo two; false"));
         }
     }
+}
+
+/// The shells installed here that get clackatoo's integration with a
+/// secret: bash, fish from version 4, and zsh, each as found, with what a
+/// home's `.zshenv` needs for each to run. zsh is also taken from
+/// `CLACKATOO_TEST_ZSH`, with its modules from `CLACKATOO_TEST_ZSH_MODULES`,
+/// as when it's unpacked from a package rather than installed (`apt-get
+/// download zsh`, `dpkg-deb -x`): zsh never takes its modules' folder from
+/// the environment.
+fn integrated_shells() -> Vec<(std::path::PathBuf, String)> {
+    let mut shells = Vec::new();
+    for shell in ["bash", "fish", "zsh"] {
+        let unpacked = (shell == "zsh")
+            .then(|| std::env::var_os("CLACKATOO_TEST_ZSH"))
+            .flatten();
+        let Some(path) = unpacked.map(Into::into).or_else(|| on_path(shell)) else {
+            eprintln!("{shell} isn't on PATH: skipped");
+            continue;
+        };
+        if shell == "fish" {
+            let version = stdout(&Command::new(&path).arg("--version").output().unwrap());
+            if !version.contains("version 4") && !version.contains("version 5") {
+                eprintln!("{} is before 4: skipped", version.trim());
+                continue;
+            }
+        }
+        let zshenv = std::env::var("CLACKATOO_TEST_ZSH_MODULES")
+            .ok()
+            .filter(|_| shell == "zsh")
+            .map(|modules| format!("module_path=('{modules}')\n"))
+            .unwrap_or_default();
+        shells.push((path, zshenv));
+    }
+    shells
+}
+
+impl UserShell {
+    /// Starts `shell` as [`start`](Self::start) does, keeping the
+    /// workspaces in `kept`, and moves to a shell in a pane of a
+    /// workspace, as only panes are kept, once it shows a prompt.
+    fn start_in_pane(shell: &Path, home: &Path, kept: &Path) -> Self {
+        let mut user = Self::start(shell, home, &[("CLACKATOO_WORKSPACES", kept)]);
+        let pane = clackatoo_protocol::PaneTerminal::New(clackatoo_protocol::NewTerminal {
+            size: clackatoo_protocol::Size::new(120, 20).unwrap(),
+            command: None,
+            cwd: None,
+            record_to: None,
+        });
+        user.client.new_workspace(None, pane).unwrap();
+        user.terminal = user.client.watch_workspaces().unwrap().list[0].terminals()[0];
+        user.until("shows a prompt", |client, terminal| {
+            let prompt = clackatoo_protocol::Which::Before;
+            (client.block(terminal, u64::MAX, prompt).unwrap()).is_some()
+        });
+        user
+    }
+
+    /// Types `keys`.
+    fn type_in(&mut self, keys: &[u8]) {
+        self.client.send_input(self.terminal, keys).unwrap();
+    }
+
+    /// Waits until `kept` says `what`, or until it doesn't if not
+    /// `wanted`.
+    fn wait_kept(&mut self, kept: &Path, what: &str, wanted: bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while kept_says(kept, what) != wanted {
+            if Instant::now() > deadline {
+                let screen = self.screen();
+                panic!(
+                    "{}: {what} never {}: {}\n{screen}",
+                    self.shell,
+                    if wanted { "kept" } else { "went" },
+                    std::fs::read_to_string(kept).unwrap_or_default(),
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Waits until a command has started, then long enough for what's
+    /// kept to have been written, and checks it offers nothing.
+    fn offers_nothing(&mut self, kept: &Path) {
+        self.until("runs a command", |client, terminal| {
+            let last = clackatoo_protocol::Which::Before;
+            let block = client.block(terminal, u64::MAX, last).unwrap();
+            block.is_some_and(|block| block.running)
+        });
+        std::thread::sleep(Duration::from_millis(1500));
+        let text = std::fs::read_to_string(kept).unwrap_or_default();
+        assert!(!text.contains("\"ran\": \""), "{}: {text}", self.shell);
+    }
+
+    /// The terminal's text, history and screen.
+    fn text(&mut self) -> String {
+        use clackatoo_protocol::{Position, Request, Response};
+        let request = Request::Text {
+            terminal: self.terminal,
+            from: Position { line: 0, col: 0 },
+            to: Position {
+                line: u64::MAX,
+                col: 0,
+            },
+            whole_lines: true,
+        };
+        match self.client.request(&request).unwrap() {
+            Response::Text(text) => text,
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+/// Whether the workspaces kept in `kept` say `what`.
+fn kept_says(kept: &Path, what: &str) -> bool {
+    std::fs::read_to_string(kept)
+        .unwrap_or_default()
+        .contains(what)
+}
+
+/// The command a real shell was running is offered after a restart, as
+/// its integration marked it with the terminal's secret; the secret never
+/// shows in the terminal's text, traced or not, nor reaches what the
+/// shell runs, and its file is gone by the first prompt. A command
+/// starting with a space isn't offered.
+#[test]
+fn shells_mark_what_they_run_with_a_secret_no_program_they_run_learns() {
+    for (shell, zshenv) in integrated_shells() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(".zshenv"), zshenv).unwrap();
+        let kept = home.path().join("workspaces");
+        let mut user = UserShell::start_in_pane(&shell, home.path(), &kept);
+        let secrets = user.runtime.path().join("clackatoo/shell");
+        let left: Vec<_> = (std::fs::read_dir(&secrets).unwrap())
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with("secret."))
+            .collect();
+        assert!(left.is_empty(), "{}: {left:?}", shell.display());
+        // Traced from now on, which mustn't print the secret.
+        let name = shell.file_name().unwrap().to_string_lossy().into_owned();
+        user.run(match name.as_str() {
+            "fish" => "set -g fish_trace 1",
+            "zsh" => "setopt xtrace",
+            _ => "set -x",
+        });
+        user.run("env > env.txt; echo ran");
+        let env = std::fs::read_to_string(home.path().join("env.txt")).unwrap();
+        assert!(!env.contains("CLACKATOO_SECRET"), "{name}: {env}");
+        assert!(env.contains("HOME="), "{name}: {env}");
+
+        user.type_in(b"sleep 600\r");
+        user.wait_kept(&kept, "\"ran\": \"sleep 600\"", true);
+        // Stopped, it's no longer offered; and one starting with a space
+        // never is.
+        user.type_in(b"\x03");
+        user.wait_kept(&kept, "\"ran\": \"", false);
+        user.type_in(b" sleep 601\r");
+        user.offers_nothing(&kept);
+        // Nor is one the shell's own history settings turn away.
+        user.type_in(b"\x03");
+        user.wait_kept(&kept, "\"ran\": \"", false);
+        user.run(match name.as_str() {
+            "fish" => {
+                "function fish_should_add_to_history; not string match -q '*nope*' -- $argv; end"
+            }
+            "zsh" => "zshaddhistory() { [[ $1 != *nope* ]] }",
+            _ => "HISTIGNORE='*nope*'",
+        });
+        user.type_in(b"nope=1 sleep 603\r");
+        user.offers_nothing(&kept);
+
+        let text = user.text();
+        assert!(text.contains("sleep 600"), "{name}: {text}");
+        assert!(!text.contains("clackatoo="), "{name}: {text}");
+        let hex = |ch: char| ch.is_ascii_hexdigit();
+        let longest_hex = (text.split(|ch: char| !hex(ch)))
+            .map(str::len)
+            .max()
+            .unwrap_or(0);
+        assert!(longest_hex < 32, "{name}: {text}");
+    }
+}
+
+/// bash sharing its history with other terminals, which each prompt
+/// reads in, never takes another terminal's line for one kept out of its
+/// own history: only a line with the number the prompt was to give it is
+/// offered.
+#[test]
+fn bash_sharing_its_history_offers_only_its_own_lines() {
+    let Some(bash) = on_path("bash") else {
+        eprintln!("bash isn't on PATH: skipped");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    let rc = "HISTCONTROL=ignoreboth\nHISTFILE=~/.hist\n\
+              PROMPT_COMMAND='history -a; history -c; history -r'\n";
+    std::fs::write(home.path().join(".bashrc"), rc).unwrap();
+    let kept = home.path().join("workspaces");
+    let mut user = UserShell::start_in_pane(&bash, home.path(), &kept);
+    user.run("echo one");
+    // Another terminal adds a line, which the next prompt reads in.
+    let mut history = std::fs::OpenOptions::new()
+        .append(true)
+        .open(home.path().join(".hist"))
+        .unwrap();
+    history.write_all(b"sleep 700\n").unwrap();
+    user.type_in(b"\r");
+    user.type_in(b" sleep 701\r");
+    user.offers_nothing(&kept);
+    // Its own lines are still offered.
+    user.type_in(b"\x03");
+    user.wait_kept(&kept, "\"ran\": \"", false);
+    user.type_in(b"sleep 702\r");
+    user.wait_kept(&kept, "\"ran\": \"sleep 702\"", true);
 }
 
 /// `program`, if it's on `PATH`.

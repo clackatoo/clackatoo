@@ -214,6 +214,9 @@ impl BlocksSnapshot {
                     Phase::Finished => LivePhase::Finished,
                 },
                 exit: entry.exit,
+                // Snapshots don't say: the daemon hands over which is
+                // trusted on its own (see `Terminal::trust_block`).
+                trusted: false,
             })
             .collect();
         (marks, Blocks::from_parts(self.first, entries))

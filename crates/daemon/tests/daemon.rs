@@ -16520,66 +16520,138 @@ fn workspaces_that_cant_be_read_are_set_aside_and_the_daemon_starts_with_none() 
     }
 }
 
+/// A shell for tests, called `zsh` so it's given its secret, that marks
+/// its prompts and commands as clackatoo's integration marks bash's and
+/// zsh's: each command with the secret it reads from the file the daemon
+/// names, which it removes. It writes the secret to `seen` too, for the
+/// test to look for it, and anything not typed but `ignore` is eval'd as
+/// a command.
+fn secret_shell(seen: &Path) -> String {
+    format!(
+        "#!/bin/sh
+secret=$(cat \"$CLACKATOO_SECRET_FILE\")
+rm -f \"$CLACKATOO_SECRET_FILE\"
+unset CLACKATOO_SECRET_FILE
+printf '%s\\n' \"$secret\" >> '{}'
+while :; do
+  printf '\\033]133;A\\007$ '
+  IFS= read -r line || exit 0
+  url=$(printf '%s' \"$line\" | sed 's/%/%25/g; s/;/%3B/g; s/ /%20/g')
+  printf '\\033]133;C;clackatoo=%s;cmdline_url=%s\\007' \"$secret\" \"$url\"
+  eval \"$line\"
+  printf '\\033]133;D;%s\\007' \"$?\"
+done
+",
+        seen.display()
+    )
+}
+
+impl TestDaemon {
+    /// A daemon keeping its workspaces in `file`, whose shell is
+    /// [`secret_shell`], writing the secrets it's given to `seen`.
+    fn keeping_with_secret_shell(file: &Path, seen: &Path) -> Self {
+        let script = secret_shell(seen);
+        Self::start_with_restoring(
+            |dir, config| {
+                let bin = dir.join("bin");
+                std::fs::create_dir(&bin).unwrap();
+                let shell = bin.join("zsh");
+                std::fs::write(&shell, script).unwrap();
+                std::fs::set_permissions(
+                    &shell,
+                    std::os::unix::fs::PermissionsExt::from_mode(0o755),
+                )
+                .unwrap();
+                config.shell = shell.into();
+                let integration = dir.join("integration");
+                std::fs::create_dir(&integration).unwrap();
+                config.shell_integration = Some(integration);
+                config.workspaces = Some(file.to_owned());
+            },
+            true,
+        )
+    }
+}
+
+/// Checks each of `terminals`' shells had a secret of its own, written to
+/// `seen`, which went nowhere: not into `kept`, the workspaces as kept,
+/// nor any terminal's text, nor the directory the shells were told to
+/// read it from.
+fn secrets_went_nowhere(
+    daemon: &TestDaemon,
+    client: &mut Client,
+    seen: &Path,
+    terminals: &[TerminalId],
+    kept: &str,
+) {
+    let secrets = std::fs::read_to_string(seen).unwrap();
+    let secrets: Vec<&str> = secrets.lines().collect();
+    assert_eq!(secrets.len(), terminals.len(), "{secrets:?}");
+    assert!(secrets.iter().all(|secret| secret.len() == 32));
+    let mut unique = secrets.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), secrets.len());
+    for &terminal in terminals {
+        let words = client.request(&Request::Text {
+            terminal,
+            from: clackatoo_protocol::Position { line: 0, col: 0 },
+            to: clackatoo_protocol::Position {
+                line: u64::MAX,
+                col: 0,
+            },
+            whole_lines: true,
+        });
+        let Ok(Response::Text(words)) = words else {
+            panic!("{words:?}");
+        };
+        assert!(words.contains('$'), "{words}");
+        assert!(secrets.iter().all(|secret| !words.contains(secret)));
+    }
+    assert!(secrets.iter().all(|secret| !kept.contains(secret)));
+    let integration = daemon.dir.path().join("integration");
+    assert_eq!(std::fs::read_dir(integration).unwrap().count(), 0);
+}
+
 #[test]
 fn a_command_a_shell_was_running_is_offered_once_after_a_restart_never_run() {
     let kept = tempfile::tempdir().unwrap();
     let file = kept.path().join("workspaces");
+    let seen = kept.path().join("seen");
     let dir = kept.path();
-    // Typed into a shell, which runs what's after the marks in front of
-    // itself, in a process group of its own: as fish and zsh mark what
-    // they run.
-    let marked = |command: &str, then: &str| {
-        let url = command.replace(' ', "%%20");
-        format!("printf '\\033]133;A\\007\\033]133;C;cmdline_url={url}\\007'; {then}\r")
+    // What a program prints, claiming to be the shell's: a finished
+    // command, a prompt, and a command starting, its first word what's
+    // running in front, marked with `secret`.
+    let forged = |secret: &str, then: &str| {
+        format!(
+            "printf '\\033]133;D;0\\007\\033]133;A\\007\\033]133;B\\007\
+             \\033]133;C;{secret}cmdline_url={}\\007'; {then}\r",
+            then.replace(' ', "%%20")
+        )
     };
     {
-        let daemon = TestDaemon::keeping(&file);
+        let daemon = TestDaemon::keeping_with_secret_shell(&file, &seen);
         let mut client = daemon.client();
         let first = client.new_workspace(None, shell_in(dir)).unwrap();
         let second = (client.split_pane(first, Side::Right, shell_in(dir))).unwrap();
-        // A command whose first two words name the program, as `cargo
-        // watch` runs `cargo-watch`; and a script an interpreter runs, as
-        // node runs npm. Linked, not written: see `example`.
-        // Python, which minds nothing of the name it was run by, unlike
-        // the coreutils here.
-        std::os::unix::fs::symlink("/usr/bin/python3", dir.join("zz-cat")).unwrap();
-        std::fs::write(dir.join("zztool"), "sleep \"$1\"\n").unwrap();
-        let joined = (client.split_pane(second, Side::Below, shell_in(dir))).unwrap();
-        let script = (client.split_pane(joined, Side::Below, shell_in(dir))).unwrap();
         // A command starting with a space, which shells keep out of their
         // history.
         let private = (client.split_pane(second, Side::Right, shell_in(dir))).unwrap();
-        // What a program prints claims to be the shell's: it's running
-        // `sh`, which plants another command as it goes, and then a
-        // finished command, a prompt and the start of a forged one.
-        let planted = (client.split_pane(private, Side::Below, shell_in(dir))).unwrap();
-        let forged = (client.split_pane(planted, Side::Below, shell_in(dir))).unwrap();
-        // A program run as the terminal's own, with no shell, printing
-        // marks of its own.
+        let unmarked = (client.split_pane(private, Side::Below, shell_in(dir))).unwrap();
+        let wrong = (client.split_pane(unmarked, Side::Below, shell_in(dir))).unwrap();
+        // A program run as the terminal's own, with no shell and no
+        // secret, printing marks of its own.
         let own = "printf '\\033]133;A\\007\\033]133;C;cmdline_url=sleep%%2060\\007'; sleep 60";
-        (client.split_pane(forged, Side::Below, running_in(dir, own))).unwrap();
+        (client.split_pane(wrong, Side::Below, running_in(dir, own))).unwrap();
         let workspaces = client.watch_workspaces().unwrap();
         let typed = [
-            (first, marked("sleep 60", "sleep 60")),
-            (second, marked("sleep 61", "sleep 61")),
+            (first, "sleep 60\r".to_owned()),
+            (second, "sleep 61\r".to_owned()),
+            (private, " sleep 62\r".to_owned()),
+            (unmarked, forged("", "sleep 63")),
             (
-                joined,
-                marked("zz cat 64", "./zz-cat -c 'import time; time.sleep(64)'"),
-            ),
-            (script, marked("zztool 65", "sh ./zztool 65")),
-            (private, marked(" sleep 62", "sleep 62")),
-            (
-                planted,
-                marked(
-                    "sh",
-                    "sh -c 'printf \"\\033]133;C;cmdline_url=sleep%%2099\\007\"; exec sleep 99'",
-                ),
-            ),
-            (
-                forged,
-                "printf '\\033]133;D;0\\007\\033]133;A\\007\\033]133;B\\007\
-                 \\033]133;C;cmdline_url=rm%%20-rf%%20x\\007'; sleep 63\r"
-                    .to_owned(),
+                wrong,
+                forged("clackatoo=0123456789abcdef0123456789abcdef;", "sleep 64"),
             ),
         ];
         for (pane, line) in &typed {
@@ -16587,39 +16659,35 @@ fn a_command_a_shell_was_running_is_offered_once_after_a_restart_never_run() {
             client.send_input(terminal, line.as_bytes()).unwrap();
         }
         wait_for_kept(&file, |kept| {
-            ["sleep 60", "sleep 61", "zz cat 64", "zztool 65"]
+            ["sleep 60", "sleep 61"]
                 .iter()
                 .all(|ran| kept.contains(&format!("\"ran\": \"{ran}\"")))
         });
         // Long enough for the rest to have been seen, and passed over.
         std::thread::sleep(Duration::from_millis(1500));
         let text = std::fs::read_to_string(&file).unwrap();
-        assert_eq!(text.matches("\"ran\": \"").count(), 4, "{text}");
+        assert_eq!(text.matches("\"ran\": \"").count(), 2, "{text}");
+        let terminals: Vec<TerminalId> = (typed.iter())
+            .map(|(pane, _)| terminal_of(&workspaces, *pane))
+            .collect();
+        secrets_went_nowhere(&daemon, &mut client, &seen, &terminals, &text);
     }
-    let daemon = TestDaemon::keeping(&file);
+    let daemon = TestDaemon::keeping_with_secret_shell(&file, &seen);
     let mut client = daemon.client();
     let workspaces = client.watch_workspaces().unwrap();
     let panes = workspaces.list[0].tabs[0].layout.panes();
     let offered: Vec<Option<&str>> = (workspaces.restored.iter())
         .map(|restored| restored.ran.as_deref())
         .collect();
-    assert_eq!(
-        offered,
-        [
-            Some("sleep 60"),
-            Some("sleep 61"),
-            Some("zz cat 64"),
-            Some("zztool 65")
-        ]
-    );
+    assert_eq!(offered, [Some("sleep 60"), Some("sleep 61")]);
     let offered: Vec<PaneId> = (workspaces.restored.iter())
         .map(|restored| restored.pane)
         .collect();
-    assert_eq!(offered[0], panes[0].id);
+    assert_eq!(offered, [panes[0].id, panes[1].id]);
     // Dismissed, it goes, and the new shell runs nothing of it.
     client.dismiss(offered[0]).unwrap();
     wait_for_workspaces(&mut client, |workspaces| {
-        workspaces.restored.len() == 3 && workspaces.restored[0].pane == offered[1]
+        workspaces.restored.len() == 1 && workspaces.restored[0].pane == offered[1]
     });
     let first = terminal_of(&workspaces, offered[0]);
     client.send_input(first, b"echo ready\r").unwrap();
@@ -16631,16 +16699,65 @@ fn a_command_a_shell_was_running_is_offered_once_after_a_restart_never_run() {
     let second = terminal_of(&workspaces, offered[1]);
     client.send_input(second, b"\x1b[I\x1b[O").unwrap();
     std::thread::sleep(Duration::from_millis(200));
-    assert_eq!(client.watch_workspaces().unwrap().restored.len(), 3);
+    assert_eq!(client.watch_workspaces().unwrap().restored.len(), 1);
     client.send_input(second, b"ec").unwrap();
-    let left = wait_for_workspaces(&mut client, |workspaces| workspaces.restored.len() < 3);
-    assert_eq!(left.restored.len(), 2, "{left:#?}");
-    assert_eq!(left.restored[0].pane, offered[2]);
+    let left = wait_for_workspaces(&mut client, |workspaces| workspaces.restored.is_empty());
+    assert!(left.restored.is_empty(), "{left:#?}");
     drop(client);
     drop(daemon);
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(!text.contains("sleep 6"), "{text}");
-    assert_eq!(text.matches("\"ran\": \"").count(), 2, "{text}");
+    assert_eq!(text.matches("\"ran\": \"").count(), 0, "{text}");
+}
+
+#[test]
+fn a_secret_file_the_shell_leaves_is_removed_once_it_marks_anything_or_goes() {
+    // A shell that reads nothing, and marks a prompt only once told to.
+    let script = "#!/bin/sh\nread -r line\nprintf '\\033]133;A\\007$ '\nexec cat\n";
+    let daemon = with_integrated_shell(script, Duration::from_secs(5));
+    let integration = daemon.dir.path().join("integration");
+    std::fs::create_dir(&integration).unwrap();
+    let mut client = daemon.client();
+    let marking = client
+        .new_workspace(None, shell_in(daemon.dir.path()))
+        .unwrap();
+    let silent = (client.split_pane(marking, Side::Right, shell_in(daemon.dir.path()))).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let files = || -> Vec<String> {
+        let mut files: Vec<String> = (std::fs::read_dir(&integration).unwrap())
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+        files
+    };
+    let (marking, silent) = (
+        terminal_of(&workspaces, marking),
+        terminal_of(&workspaces, silent),
+    );
+    assert_eq!(
+        files(),
+        [
+            format!("secret.{}", marking.0),
+            format!("secret.{}", silent.0)
+        ]
+    );
+    let wait_for_files = |left: &[String]| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while files() != left {
+            assert!(
+                Instant::now() < deadline,
+                "the secrets' files: {:?}",
+                files()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    client.send_input(marking, b"go\r").unwrap();
+    wait_for_screen(&mut client, marking, |text| text.contains("\n$"));
+    wait_for_files(&[format!("secret.{}", silent.0)]);
+    let panes = workspaces.list[0].tabs[0].layout.panes();
+    client.close_pane(panes[1].id).unwrap();
+    wait_for_files(&[]);
 }
 
 #[test]

@@ -44,6 +44,9 @@
 //!     an explorer's root, handed over with the other explorers.
 //! 19. The lock on the recovery files, so no other daemon takes them
 //!     while the next build starts.
+//! 20. Each terminal's shell's secret (see `crate::shell`), the file it's
+//!     read from if the shell hasn't yet, and which block's command the
+//!     shell's integration marked with it.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -56,11 +59,11 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 19;
+pub(crate) const VERSION: u32 = 20;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, VERSION,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -138,6 +141,9 @@ pub(crate) struct State {
     /// The lock on the recovery files, if the daemon keeps them (see
     /// `crate::recovery`). Since version 19.
     pub(crate) recovery_lock: Option<u32>,
+    /// The secrets of the terminals' shells that have one. Since version
+    /// 20; before, no shell had one.
+    pub(crate) shells: Vec<Shell>,
 }
 
 /// What agents changed in files, hunk by hunk, whether the user has
@@ -296,6 +302,20 @@ pub(crate) struct Terminal {
     pub(crate) screen: Snapshot,
     pub(crate) blocks: BlocksSnapshot,
     pub(crate) links: LinksSnapshot,
+}
+
+/// A terminal's shell's secret, which its integration adds to its marks
+/// (see `crate::shell`). Since version 20.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Shell {
+    pub(crate) terminal: u32,
+    pub(crate) secret: String,
+    /// The file the shell reads it from, if it's still there, for the next
+    /// build to remove once the shell has read it.
+    pub(crate) file: Option<Vec<u8>>,
+    /// The latest block, if the integration marked its command with the
+    /// secret: the terminal's blocks don't say.
+    pub(crate) trusted: Option<u32>,
 }
 
 /// A chat with an agent. The agent isn't handed over: the next build
@@ -724,8 +744,60 @@ impl State {
             // then without folders' panes, which go on the end of
             // `Layout`, so they read as it does.
             16..=18 => Ok(postcard::from_bytes::<v18::State>(body)?.into()),
+            19 => Ok(postcard::from_bytes::<v19::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
+        }
+    }
+}
+
+/// Version 19, as the builds that wrote it wrote it: no shells' secrets.
+mod v19 {
+    use serde::Deserialize;
+
+    use super::{Applied, Buffer, Chat, EditLog, Files, Process, Reviews, Terminal, Workspaces};
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+        edits: EditLog,
+        applied: Vec<Applied>,
+        daemon: u64,
+        reviews: Reviews,
+        recovery_lock: Option<u32>,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: state.recovery_lock,
+                shells: Vec::new(),
+            }
         }
     }
 }
@@ -775,6 +847,7 @@ mod v18 {
                 daemon: state.daemon,
                 reviews: state.reviews,
                 recovery_lock: None,
+                shells: Vec::new(),
             }
         }
     }
@@ -1290,6 +1363,7 @@ mod v7 {
                 daemon: 0,
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
+                shells: Vec::new(),
             }
         }
     }
@@ -1364,6 +1438,7 @@ mod v8 {
                 daemon: 0,
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
+                shells: Vec::new(),
             }
         }
     }
@@ -1408,6 +1483,7 @@ mod v9 {
                 daemon: 0,
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
+                shells: Vec::new(),
             }
         }
     }
@@ -1454,6 +1530,7 @@ mod v11 {
                 daemon: 0,
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
+                shells: Vec::new(),
             }
         }
     }
@@ -1549,6 +1626,7 @@ mod v15 {
                 daemon: state.daemon,
                 reviews: state.reviews,
                 recovery_lock: None,
+                shells: Vec::new(),
             }
         }
     }
@@ -1598,6 +1676,7 @@ mod v14 {
                 daemon: state.daemon,
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
+                shells: Vec::new(),
             }
         }
     }
@@ -1645,6 +1724,7 @@ mod v13 {
                 daemon: 0,
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
+                shells: Vec::new(),
             }
         }
     }
@@ -1734,6 +1814,7 @@ mod v12 {
                 daemon: 0,
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
+                shells: Vec::new(),
             }
         }
     }
@@ -1821,6 +1902,7 @@ mod v10 {
                 daemon: 0,
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
+                shells: Vec::new(),
             }
         }
     }
@@ -1983,6 +2065,12 @@ mod tests {
             daemon: 0xd43,
             reviews: reviews(),
             recovery_lock: Some(3),
+            shells: vec![Shell {
+                terminal: 1,
+                secret: "0123456789abcdef0123456789abcdef".to_owned(),
+                file: Some(b"/run/clackatoo/shell/secret.1".to_vec()),
+                trusted: Some(4),
+            }],
         }
     }
 
@@ -2183,13 +2271,32 @@ mod tests {
     }
 
     #[test]
-    fn version_19_is_read_with_the_lock_on_the_recovery_files() {
+    fn version_20_is_read_with_the_shells_secrets() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v20.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        let shell = &state.shells[0];
+        assert_eq!(
+            (shell.terminal, shell.secret.as_str(), shell.trusted),
+            (1, "0123456789abcdef0123456789abcdef", Some(4))
+        );
+        assert_eq!(
+            shell.file.as_deref(),
+            Some(&b"/run/clackatoo/shell/secret.1"[..])
+        );
+        assert_eq!(state.recovery_lock, Some(3));
+    }
+
+    #[test]
+    fn version_19_is_read_with_the_lock_on_the_recovery_files_and_no_secrets() {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v19.bin"))
             .unwrap();
         let state = State::read(&mut file).unwrap();
         assert_eq!(state.recovery_lock, Some(3));
         assert_eq!(state.daemon, 0xd43);
+        assert!(state.shells.is_empty());
     }
 
     #[test]
@@ -2292,11 +2399,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v19.bin"]
+    #[ignore = "writes tests/fixtures/handover-v20.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v19.bin"
+            "/tests/fixtures/handover-v20.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();

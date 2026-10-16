@@ -1,9 +1,11 @@
 //! A terminal the daemon is running: the emulator, plus the PTY and process
 //! behind it.
 
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::ffi::OsStringExt as _;
 use std::path::Path;
 
 use clackatoo_protocol::{
@@ -49,6 +51,9 @@ pub(crate) struct HostedTerminal {
     /// the PTY hasn't accepted yet.
     input: Vec<u8>,
     recording: Option<BufWriter<File>>,
+    /// The secret the shell's integration adds to its marks, if it has
+    /// one (see [`shell`]).
+    secret: Option<shell::Secret>,
 }
 
 impl HostedTerminal {
@@ -68,8 +73,9 @@ impl HostedTerminal {
             None => None,
         };
 
-        // The user's own shell gets its integration, if it has one.
-        let integration = match (&request.command, &config.shell_integration) {
+        // The user's own shell gets its integration, if it has one, and
+        // a secret for it, if the integration takes one.
+        let mut integration = match (&request.command, &config.shell_integration) {
             (None, Some(scripts)) => shell::integration(
                 &config.shell,
                 scripts,
@@ -77,6 +83,16 @@ impl HostedTerminal {
             ),
             _ => shell::Integration::default(),
         };
+        let secret = (config.shell_integration.as_deref())
+            .filter(|_| !integration.is_empty() && shell::takes_secret(&config.shell))
+            .and_then(|scripts| {
+                shell::Secret::new(scripts, id.0)
+                    .map_err(|err| log::warn!("terminal {id}: its shell has no secret: {err}"))
+                    .ok()
+            });
+        if let Some(file) = secret.as_ref().and_then(|secret| secret.file.as_ref()) {
+            integration.tell_secret(file.path());
+        }
         let (path, args) = match request.command.as_deref() {
             Some([program, args @ ..]) => (program.as_ref(), args),
             Some([]) => return Err(Error::SpawnFailed("the command is empty".to_owned())),
@@ -97,26 +113,36 @@ impl HostedTerminal {
         let pid = spawned.process.pid().as_raw_pid().cast_unsigned();
         log::info!("terminal {id} started: pid {pid}");
 
+        let mut emulator = Terminal::new(request.size, &config.terminal);
+        emulator.expect_secret(secret.as_ref().map(|secret| secret.text.as_str()));
         Ok(Self {
             id,
-            emulator: Terminal::new(request.size, &config.terminal),
+            emulator,
             pty: Some(spawned.pty),
             pid,
             process: Some(spawned.process),
             status: TerminalStatus::Running,
             input: Vec::new(),
             recording,
+            secret,
         })
     }
 
-    /// Hands the terminal over to the next build, adding its fds to `fds`.
-    /// A recording stops: the next build can't know where it was.
-    pub(crate) fn hand_over(self, fds: &mut Fds) -> handover::Terminal {
+    /// Hands the terminal over to the next build, adding its fds to `fds`,
+    /// with its shell's secret, if it has one. A recording stops: the next
+    /// build can't know where it was.
+    pub(crate) fn hand_over(self, fds: &mut Fds) -> (handover::Terminal, Option<handover::Shell>) {
         if self.recording.is_some() {
             log::info!("terminal {}: recording stopped by the upgrade", self.id);
         }
+        let shell = self.secret.map(|secret| handover::Shell {
+            terminal: self.id.0,
+            secret: secret.text,
+            file: (secret.file).map(|file| file.keep().into_os_string().into_vec()),
+            trusted: self.emulator.trusted_block(),
+        });
         let (screen, links) = self.emulator.snapshot_with_links();
-        handover::Terminal {
+        let terminal = handover::Terminal {
             id: self.id.0,
             process: self.process.map(|process| {
                 let (pid, pidfd) = process.into_parts();
@@ -136,15 +162,25 @@ impl HostedTerminal {
             screen,
             blocks: self.emulator.blocks_snapshot(),
             links,
-        }
+        };
+        (terminal, shell)
     }
 
-    /// A terminal the last build handed over, taking its fds from `fds`.
+    /// A terminal the last build handed over, with its shell's secret if
+    /// it had one, taking its fds from `fds`.
     pub(crate) fn resume(
         terminal: &handover::Terminal,
+        shell: Option<&handover::Shell>,
         fds: &mut Fds,
         config: &DaemonConfig,
     ) -> Result<Self, HandoverError> {
+        // First, so a file the shell hasn't read is removed if the rest
+        // fails.
+        let secret = shell.map(|shell| shell::Secret {
+            text: shell.secret.clone(),
+            file: (shell.file.clone())
+                .map(|file| shell::SecretFile::kept(OsString::from_vec(file).into())),
+        });
         let process = terminal
             .process
             .as_ref()
@@ -157,6 +193,10 @@ impl HostedTerminal {
         let mut emulator =
             Terminal::restore_with_links(&terminal.screen, &terminal.links, &config.terminal)?;
         emulator.restore_blocks(&terminal.blocks);
+        emulator.expect_secret(secret.as_ref().map(|secret| secret.text.as_str()));
+        if let Some(block) = shell.and_then(|shell| shell.trusted) {
+            emulator.trust_block(block);
+        }
         Ok(Self {
             id: TerminalId(terminal.id),
             emulator,
@@ -170,6 +210,7 @@ impl HostedTerminal {
             },
             input: terminal.input.clone(),
             recording: None,
+            secret,
         })
     }
 
@@ -206,48 +247,6 @@ impl HostedTerminal {
     pub(crate) fn own_directory(&self) -> Option<String> {
         let cwd = std::fs::read_link(format!("/proc/{}/cwd", self.pid)).ok()?;
         cwd.into_os_string().into_string().ok()
-    }
-
-    /// Whether `command`, which the shell's marks say it's running, is
-    /// what's in front of it: a process group other than the shell's own,
-    /// whose first process's program is named as the command's first
-    /// word is; or, as `cargo watch` runs `cargo-watch`, as its first two
-    /// joined with `-`; or whose first argument is, as an interpreter runs
-    /// a script, as node runs npm. Anything a program prints could say
-    /// it's running anything: this says only that the shell started what
-    /// it said. The program's arguments are compared, never kept.
-    pub(crate) fn runs_in_front(&self, command: &str) -> bool {
-        let Some(front) = self.pty.as_ref().and_then(Pty::foreground) else {
-            return false;
-        };
-        let front = front.as_raw_nonzero().get();
-        if u32::try_from(front).is_ok_and(|front| front == self.pid) {
-            return false;
-        }
-        let Ok(arguments) = std::fs::read(format!("/proc/{front}/cmdline")) else {
-            return false;
-        };
-        let mut arguments = arguments.split(|&byte| byte == 0);
-        let program = arguments.next().unwrap_or_default();
-        let script = arguments.next().unwrap_or_default();
-        let name = |path: &[u8]| -> Vec<u8> {
-            (path.rsplit(|&byte| byte == b'/').next())
-                .unwrap_or_default()
-                .to_vec()
-        };
-        let mut words = command.split_whitespace();
-        let first = name(words.next().unwrap_or_default().as_bytes());
-        if first.is_empty() || program.is_empty() {
-            return false;
-        }
-        let joined = words.next().map(|second| {
-            let mut joined = first.clone();
-            joined.push(b'-');
-            joined.extend_from_slice(second.as_bytes());
-            joined
-        });
-        let program = name(program);
-        program == first || Some(&program) == joined.as_ref() || name(script) == first
     }
 
     pub(crate) fn view(&self) -> View {
@@ -344,6 +343,14 @@ impl HostedTerminal {
         {
             log::warn!("terminal {}: recording stopped: {err}", self.id);
             self.recording = None;
+        }
+        // The shell has read its secret, if it was going to, by the time
+        // it marks anything: its integration reads it first thing.
+        if let Some(secret) = &mut self.secret
+            && secret.file.is_some()
+            && self.emulator.latest_block().is_some()
+        {
+            secret.file = None;
         }
         if outcome == ReadOutcome::Closed {
             log::info!("terminal {}: PTY closed", self.id);
@@ -443,6 +450,9 @@ impl HostedTerminal {
                 };
                 log::info!("terminal {}: program {}", self.id, self.status);
                 self.process = None;
+                if let Some(secret) = &mut self.secret {
+                    secret.file = None;
+                }
                 true
             }
             Ok(None) => false,

@@ -1061,7 +1061,8 @@ impl Daemon {
 
         for terminal in &state.terminals {
             let id = TerminalId(terminal.id);
-            let resumed = HostedTerminal::resume(terminal, fds, &daemon.config)
+            let shell = (state.shells.iter()).find(|shell| shell.terminal == terminal.id);
+            let resumed = HostedTerminal::resume(terminal, shell, fds, &daemon.config)
                 .map_err(|err| err.to_string())
                 .and_then(|terminal| daemon.add_terminal(terminal).map_err(|err| err.to_string()));
             if let Err(err) = resumed {
@@ -1140,9 +1141,11 @@ impl Daemon {
 
     /// Writes the shell integration scripts into `dir`, for the shells
     /// this daemon starts from now on. If that fails, they start as they
-    /// are.
-    pub fn install_shell_integration(&mut self, dir: PathBuf) {
-        self.config.shell_integration = crate::shell::install(dir)
+    /// are. A daemon started `afresh` removes the shells' secrets a
+    /// daemon that crashed left there; one that took over from an upgrade
+    /// keeps its terminals'.
+    pub fn install_shell_integration(&mut self, dir: PathBuf, afresh: bool) {
+        self.config.shell_integration = crate::shell::install(dir, afresh)
             .map_err(|err| log::warn!("shells won't mark their commands: {err}"))
             .ok();
     }
@@ -1158,12 +1161,17 @@ impl Daemon {
         let mut fds = Fds::default();
         let listener = fds.add(self.listener.as_fd().try_clone_to_owned()?);
         let mut terminals = Vec::new();
+        let mut shells = Vec::new();
         let mut chats = Vec::new();
         self.abandon_clipboard_asks();
         self.put_back_fits();
         for slot in std::mem::take(&mut self.terminals).into_values() {
             match slot.terminal {
-                Hosted::Pty(terminal) => terminals.push(terminal.hand_over(&mut fds)),
+                Hosted::Pty(terminal) => {
+                    let (terminal, shell) = terminal.hand_over(&mut fds);
+                    terminals.push(terminal);
+                    shells.extend(shell);
+                }
                 Hosted::Chat(chat) => chats.push(chat.hand_over()),
             }
         }
@@ -1220,6 +1228,7 @@ impl Daemon {
                 daemon: self.id,
                 reviews: self.hand_over_reviews(),
                 recovery_lock,
+                shells,
             },
             fds,
         })

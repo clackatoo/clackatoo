@@ -450,7 +450,7 @@ fn start_daemon(project: &Path, kept: Option<&str>) -> anyhow::Result<Running> {
     config.mcp = Some(vec![agent.into(), "mcp".into()]);
     config.languages = Some(languages(&home.join("languages"))?);
     let mut daemon = Daemon::bind(&runtime.socket_path(), config)?;
-    daemon.install_shell_integration(runtime.path().join("shell"));
+    daemon.install_shell_integration(runtime.path().join("shell"), true);
     if kept.is_some() {
         daemon.restore_workspaces();
     }
