@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.52 (2026-10-16)
+
+### Features
+
+- **daemon,gui:** changes not written outlive a crash or a stop, and :recover shows them (a1bbebd)
+
 ## 2026.10.51 (2026-10-15)
 
 ### Features
