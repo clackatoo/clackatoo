@@ -169,6 +169,7 @@ impl TestDaemon {
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             fit_lasts: clackatoo_daemon::DEFAULT_FIT_LASTS,
             boards: None,
+            recovery: None,
             browser: None,
             web: None,
         };

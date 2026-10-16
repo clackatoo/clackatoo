@@ -144,6 +144,11 @@ pub(crate) enum Command {
     /// `:e!`: throw away the focused pane's file's changes that aren't
     /// saved.
     Discard,
+    /// `:recover`: take the focused file's changes not saved that were set
+    /// aside as the daemon started, its file having changed since they were
+    /// kept, or if `drop`, throw them away; or else show the next buffer
+    /// whose changes came back that no pane shows.
+    Recover { drop: bool },
     /// `:Format`: format the focused pane's file, as its language server
     /// does.
     Format,
@@ -313,6 +318,16 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "registers" | "reg" | "display" | "di" => return Ok(Command::Registers),
         "marks" => return Ok(Command::Marks),
         "messages" | "mes" => return Ok(Command::Messages),
+        "recover" | "rec" | "recover!" | "rec!" => {
+            return match argument {
+                Some(argument) => Err(format!(
+                    "recover takes nothing after it, but has {argument:?}"
+                )),
+                None => Ok(Command::Recover {
+                    drop: word.ends_with('!'),
+                }),
+            };
+        }
         "update" => return Ok(Command::Update(argument.map(str::to_owned))),
         "connect" => return Ok(Command::Connect(argument.map(str::to_owned))),
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
@@ -636,6 +651,7 @@ pub(crate) const NAMES: &[&str] = &[
     "registers",
     "marks",
     "messages",
+    "recover",
     "update",
     "connect",
     "quit",
@@ -793,6 +809,8 @@ mod tests {
         ("marks", ""),
         ("messages", ""),
         ("mes", "messages"),
+        ("recover", ""),
+        ("rec", "recover"),
         ("Explore", ""),
         ("Ex", "Explore"),
         ("update", ""),
@@ -1152,6 +1170,9 @@ mod tests {
         assert_eq!(parse("set nowrap"), Ok(Command::Set("nowrap".into())));
         assert_eq!(parse("marks"), Ok(Command::Marks));
         assert_eq!(parse("messages"), Ok(Command::Messages));
+        assert_eq!(parse("recover"), Ok(Command::Recover { drop: false }));
+        assert_eq!(parse("rec!"), Ok(Command::Recover { drop: true }));
+        assert!(parse("recover a.txt").is_err());
         assert_eq!(parse("mes"), Ok(Command::Messages));
         assert_eq!(parse("Devices"), Ok(Command::Devices(DevicesCommand::List)));
         assert_eq!(

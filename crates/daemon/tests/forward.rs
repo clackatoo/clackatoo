@@ -57,6 +57,7 @@ impl TestDaemon {
             fit_lasts: clackatoo_daemon::DEFAULT_FIT_LASTS,
             rename_gate: None,
             boards: None,
+            recovery: None,
             browser: None,
             web: None,
             trash: None,

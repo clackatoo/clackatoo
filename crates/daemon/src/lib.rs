@@ -36,6 +36,7 @@ mod memory;
 mod profiles;
 mod pty;
 mod quic;
+mod recovery;
 pub mod remote;
 mod rpc;
 mod runtime;
@@ -48,7 +49,7 @@ mod workspaces;
 
 use std::ffi::OsString;
 use std::ops::RangeInclusive;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use agents::{AgentConfig, CustomAgent};
 pub use browser::{BrowserConfig, check_browser, snap_of};
@@ -142,6 +143,9 @@ pub struct DaemonConfig {
     /// to the next (see `boards::disk`). `None` keeps none: there are no
     /// boards.
     pub boards: Option<PathBuf>,
+    /// How buffers' changes that aren't saved are kept on disk, to outlive
+    /// a crash or a stop (see `recovery`). `None` keeps none.
+    pub recovery: Option<RecoveryConfig>,
     /// The browser agents drive for chats whose Browser setting is on
     /// (see `browser`). `None` gives them none.
     pub browser: Option<BrowserConfig>,
@@ -149,6 +153,42 @@ pub struct DaemonConfig {
     /// [`web`]).
     pub web: Option<web::WebConfig>,
 }
+
+/// How buffers' changes that aren't saved are kept on disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryConfig {
+    /// The directory they're kept in, a file per buffer.
+    pub dir: PathBuf,
+    /// How long after its last change a buffer's file is written: one
+    /// write for a burst of typing.
+    pub after: std::time::Duration,
+    /// The longest a change waits to be written while changes keep coming.
+    pub most: std::time::Duration,
+    /// For tests: a file the thread writing them waits for before each
+    /// write, so a test can act while one is held up. `None`, but in tests.
+    pub gate: Option<PathBuf>,
+}
+
+impl RecoveryConfig {
+    /// Kept in `dir`, written as usual.
+    #[must_use]
+    pub fn in_dir(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            after: DEFAULT_RECOVERY_AFTER,
+            most: DEFAULT_RECOVERY_MOST,
+            gate: None,
+        }
+    }
+}
+
+/// How long after its last change a buffer's changes not saved are
+/// written to its recovery file, unless told otherwise.
+pub const DEFAULT_RECOVERY_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The longest changes not saved wait to be written to their recovery file
+/// while changes keep coming, unless told otherwise.
+pub const DEFAULT_RECOVERY_MOST: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// How long a language server is kept with no files open in it, unless
 /// told otherwise.
@@ -194,7 +234,9 @@ pub const DEFAULT_UDP_PORTS: RangeInclusive<u16> = 60000..=61000;
 impl DaemonConfig {
     /// Defaults taken from the environment: `$CLACKATOO_BOARDS`, where
     /// boards are kept, or `off` for none (or else `clackatoo/boards` in
-    /// the data directory), `$SHELL` (or `/bin/sh`),
+    /// the data directory), `$CLACKATOO_RECOVERY`, where changes not saved
+    /// are kept, or `off` for nowhere (or else `recovery` in
+    /// [`state_dir`]), `$SHELL` (or `/bin/sh`),
     /// `$HOME` (or `/`), `$CLACKATOO_AGENT`: the command of the agent a
     /// chat gets when it asks for none, split at spaces (or else Claude
     /// Code's adapter), `$CLACKATOO_UDP_PORTS`: a port, a range such as
@@ -271,6 +313,22 @@ impl DaemonConfig {
                 Some(dir) => Some(PathBuf::from(dir)),
                 None => data_dir().map(|dir| dir.join("clackatoo/boards")),
             },
+            recovery: match non_empty("CLACKATOO_RECOVERY") {
+                Some(off) if off == "off" => None,
+                // Only from somewhere in particular, as a relative path would
+                // be from wherever the daemon happened to start.
+                Some(dir) if Path::new(&dir).is_absolute() => {
+                    Some(RecoveryConfig::in_dir(PathBuf::from(dir)))
+                }
+                Some(dir) => {
+                    log::warn!(
+                        "CLACKATOO_RECOVERY isn't an absolute path or `off`: {}",
+                        dir.display()
+                    );
+                    state_dir().map(|dir| RecoveryConfig::in_dir(dir.join("recovery")))
+                }
+                None => state_dir().map(|dir| RecoveryConfig::in_dir(dir.join("recovery"))),
+            },
             browser: match non_empty("CLACKATOO_BROWSER") {
                 Some(off) if off == "off" => None,
                 program => Some(BrowserConfig {
@@ -310,10 +368,19 @@ fn data_dir() -> Option<PathBuf> {
 /// `$XDG_STATE_HOME`, or else in `~/.local/state`.
 #[must_use]
 pub fn state_dir() -> Option<PathBuf> {
-    let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
-    let state = non_empty("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".local/state")))?;
+    state_dir_from(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
+}
+
+/// clackatoo's state directory, given `$XDG_STATE_HOME` and `$HOME`: a
+/// relative `$XDG_STATE_HOME` is ignored, as the XDG spec says, since it
+/// would be from wherever the program happened to start.
+fn state_dir_from(state: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let state = (state.map(PathBuf::from))
+        .filter(|state| state.is_absolute())
+        .or_else(|| {
+            (home.filter(|home| !home.is_empty()))
+                .map(|home| PathBuf::from(home).join(".local/state"))
+        })?;
     Some(state.join("clackatoo"))
 }
 
@@ -338,6 +405,24 @@ fn parse_ports(ports: &str) -> Option<RangeInclusive<u16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relative_state_home_is_ignored() {
+        let dir = |state: Option<&str>, home: Option<&str>| {
+            state_dir_from(state.map(OsString::from), home.map(OsString::from))
+        };
+        assert_eq!(
+            dir(Some("/s"), Some("/h")),
+            Some(PathBuf::from("/s/clackatoo"))
+        );
+        for state in [None, Some(""), Some("state"), Some("./s")] {
+            assert_eq!(
+                dir(state, Some("/h")),
+                Some(PathBuf::from("/h/.local/state/clackatoo"))
+            );
+        }
+        assert_eq!(dir(Some("rel"), None), None);
+    }
 
     #[test]
     fn udp_ports_are_one_or_a_range() {

@@ -11,6 +11,7 @@ const BINARY: &str = env!("CARGO_BIN_EXE_clackatoo");
 fn clackatoo(runtime: &Path, args: &[&str]) -> Output {
     Command::new(BINARY)
         .env("CLACKATOO_BOARDS", "off")
+        .env("CLACKATOO_RECOVERY", "off")
         .args(args)
         .env("XDG_RUNTIME_DIR", runtime)
         .output()
@@ -27,6 +28,7 @@ fn daemon(runtime: &Path) -> Child {
 fn daemon_with(runtime: &Path, args: &[&str]) -> Child {
     let child = Command::new(BINARY)
         .env("CLACKATOO_BOARDS", "off")
+        .env("CLACKATOO_RECOVERY", "off")
         .arg("daemon")
         .args(args)
         .env("XDG_RUNTIME_DIR", runtime)
@@ -143,6 +145,7 @@ fn remote(runtime: &Path, ssh: &Path, remote_command: &str, args: &[&str]) -> Ou
     };
     Command::new(BINARY)
         .env("CLACKATOO_BOARDS", "off")
+        .env("CLACKATOO_RECOVERY", "off")
         .args(args)
         .args(["--remote", "box", "--remote-command", remote_command])
         .args(command)
@@ -259,6 +262,7 @@ fn the_bridge_relays_over_pipes() {
     // sshd gives the bridge pipes, between which a careless relay stalls.
     let mut bridge = Command::new(BINARY)
         .env("CLACKATOO_BOARDS", "off")
+        .env("CLACKATOO_RECOVERY", "off")
         .arg("bridge")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .stdin(std::process::Stdio::piped())
@@ -340,6 +344,7 @@ fn config_sets_shows_and_unsets_settings() {
     let config = |args: &[&str]| {
         Command::new(BINARY)
             .env("CLACKATOO_BOARDS", "off")
+            .env("CLACKATOO_RECOVERY", "off")
             .arg("config")
             .args(args)
             .env("XDG_CONFIG_HOME", home.path())
@@ -371,6 +376,7 @@ fn edit_shows_a_folder_as_its_listing_and_the_current_one_with_no_path() {
     let edit = |args: &[&str]| {
         Command::new(BINARY)
             .env("CLACKATOO_BOARDS", "off")
+            .env("CLACKATOO_RECOVERY", "off")
             .arg("edit")
             .args(args)
             .env("XDG_RUNTIME_DIR", runtime.path())
@@ -516,6 +522,7 @@ fn upgrading_keeps_terminals_and_their_programs_running() {
     std::fs::hard_link(BINARY, &next).unwrap();
     let upgraded = Command::new(&next)
         .env("CLACKATOO_BOARDS", "off")
+        .env("CLACKATOO_RECOVERY", "off")
         .arg("upgrade")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
@@ -597,6 +604,7 @@ fn upgrading_puts_a_fit_back_at_the_size_last_asked_for() {
     std::fs::hard_link(BINARY, &next).unwrap();
     let upgraded = Command::new(&next)
         .env("CLACKATOO_BOARDS", "off")
+        .env("CLACKATOO_RECOVERY", "off")
         .arg("upgrade")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
@@ -620,6 +628,7 @@ fn upgrading_keeps_chats_and_reaps_their_agent() {
     // start. Enough to have an agent to hand over.
     let daemon = Command::new(BINARY)
         .env("CLACKATOO_BOARDS", "off")
+        .env("CLACKATOO_RECOVERY", "off")
         .arg("daemon")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env("CLACKATOO_AGENT", "cat")
@@ -678,6 +687,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
     // `cat` for the agent, as above: the chat only needs to exist.
     let daemon = Command::new(BINARY)
         .env("CLACKATOO_BOARDS", "off")
+        .env("CLACKATOO_RECOVERY", "off")
         .arg("daemon")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env("CLACKATOO_AGENT", "cat")
@@ -703,6 +713,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
 
     let mut mcp = Command::new(BINARY)
         .env("CLACKATOO_BOARDS", "off")
+        .env("CLACKATOO_RECOVERY", "off")
         .args(["mcp", "--chat", &chat.0.to_string()])
         .env("XDG_RUNTIME_DIR", runtime.path())
         .stdin(std::process::Stdio::piped())
@@ -728,6 +739,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
     // A terminal is no chat, and has no tools.
     let refused = Command::new(BINARY)
         .env("CLACKATOO_BOARDS", "off")
+        .env("CLACKATOO_RECOVERY", "off")
         .args(["mcp", "--chat", "99"])
         .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
@@ -810,7 +822,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let flagless = script(
         bin.path(),
         "flagless",
-        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18"#,
+        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19"#,
     );
     not_upgrading(ask_to_upgrade(runtime.path(), &flagless), "can't take over");
     // Failed after everything was handed over: it says it can take over,
@@ -819,7 +831,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let vanishing = script(
         bin.path(),
         "vanishing",
-        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18; rm -- "$0";; esac"#,
+        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; rm -- "$0";; esac"#,
     );
     not_upgrading(
         ask_to_upgrade(runtime.path(), &vanishing),
@@ -855,6 +867,7 @@ impl UserShell {
         let runtime = Runtime::new();
         let daemon = Command::new(BINARY)
             .env("CLACKATOO_BOARDS", "off")
+            .env("CLACKATOO_RECOVERY", "off")
             .arg("daemon")
             .env("XDG_RUNTIME_DIR", runtime.path())
             .env("SHELL", shell)

@@ -119,7 +119,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 88;
+pub const PROTOCOL_VERSION: u32 = 89;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -966,6 +966,24 @@ pub enum Request {
         path: String,
         /// Write over a file that's there.
         force: bool,
+    },
+    /// Deals with buffers' changes not saved that came back from recovery
+    /// files as the daemon started, after a crash or a stop. If `pane`
+    /// shows a file that changed on disk since its changes were kept, so
+    /// they were set aside, takes them, as an edit by the user, which can
+    /// be undone, or with `drop`, throws them away: answered with
+    /// [`Response::Text`], saying which. Otherwise shows the next buffer
+    /// that came back that no pane shows, such as one with no file yet: in
+    /// `pane`, if it shows a file or a folder, as [`Request::OpenHere`]
+    /// does, answered with [`Response::Done`], or else in a new tab beside
+    /// it, answered with [`Response::PaneCreated`]. New in protocol 89: a
+    /// client asks [`wire::daemon_has`] with [`wire::RECOVER`] before
+    /// sending it.
+    Recover {
+        /// The pane.
+        pane: PaneId,
+        /// Throw the changes set aside away, rather than take them.
+        drop: bool,
     },
 }
 

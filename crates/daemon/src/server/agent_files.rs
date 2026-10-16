@@ -922,6 +922,7 @@ pub(super) mod tests {
             rename_gate: None,
             trash: Some(dir.join("Trash")),
             boards: None,
+            recovery: None,
             browser: None,
             web: None,
         };

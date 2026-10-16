@@ -108,6 +108,9 @@ enum Asked {
     Lesson(lessons::Serial, lessons::LessonAsked),
     /// Something asked of reviewing, whose answer is said in the bar.
     Reviewed,
+    /// `:recover`, whose answer is said in the bar, or is a new tab's
+    /// pane, to switch to.
+    Recovered,
     /// Something asked about the devices paired with the web app, whose
     /// answer is said in the bar.
     Devices,
@@ -1538,6 +1541,15 @@ impl Desk {
                 }
                 true
             }
+            Some(Asker::Window(Asked::Recovered)) => {
+                match response {
+                    Response::Text(said) => self.say(said),
+                    Response::PaneCreated(pane) => self.show_pane(pane),
+                    Response::Error(err) => self.warn(err.to_string()),
+                    _ => {}
+                }
+                true
+            }
             Some(Asker::Window(Asked::Devices)) => self.devices_answered(response),
             Some(Asker::Window(Asked::ChatChoices)) => self.chat_choices(response),
             Some(Asker::Window(Asked::Chats)) => self.chats_answered(response),
@@ -2480,6 +2492,7 @@ impl Desk {
             Command::Tutor(topic) => self.tutor(topic.as_deref()),
             Command::Write { force, quit, name } => self.write_file(force, quit, name),
             Command::Discard => self.discard_changes(),
+            Command::Recover { drop } => self.recover(drop),
             Command::Format => self.format_file(),
             Command::Find { kind, query } => self.open_finder(kind, query),
             Command::Hunk(action) => self.editor_hunk(action),

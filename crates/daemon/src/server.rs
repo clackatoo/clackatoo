@@ -71,6 +71,7 @@ mod hover;
 mod language;
 mod offers;
 mod pieces;
+mod recovery;
 mod rename;
 mod review;
 mod signs;
@@ -890,6 +891,8 @@ pub struct Daemon {
     web_unread: Vec<Token>,
     /// Connections windows on other machines forward.
     forwards: forwards::Forwards,
+    /// Buffers' recovery files, written as their changes are made.
+    recovery: recovery::Recovery,
 }
 
 /// Stops a running [`Daemon`] from another thread.
@@ -924,7 +927,10 @@ impl Daemon {
         }
         let listener = UnixListener::bind(socket_path)?;
         log::info!("listening on {}", socket_path.display());
-        Self::listening(listener, config)
+        let mut daemon = Self::listening(listener, config)?;
+        // What the daemons before it kept of buffers' changes not saved.
+        daemon.start_recovery(None);
+        Ok(daemon)
     }
 
     /// A daemon with no terminals, listening on `listener`.
@@ -1006,6 +1012,7 @@ impl Daemon {
             chat_watch: web::ChatWatch::default(),
             web_unread: Vec::new(),
             forwards: forwards::Forwards::default(),
+            recovery: recovery::Recovery::default(),
         })
         .map(|mut daemon| {
             daemon.start_web();
@@ -1086,6 +1093,16 @@ impl Daemon {
         daemon.resume_reviews(reviews);
         daemon.learn_from_chats();
         daemon.refresh_all_files();
+        // After the buffers, whose files it has, with the lock the build
+        // before held.
+        let lock = (state.recovery_lock)
+            .map(|lock| fds.take(lock))
+            .transpose()
+            .unwrap_or_else(|err| {
+                log::error!("the recovery files' lock couldn't be taken over: {err}");
+                None
+            });
+        daemon.start_recovery(lock);
         for orphan in &state.orphans {
             match Orphan::resume(orphan, fds) {
                 Ok(orphan) => daemon.watch_orphan(orphan),
@@ -1147,6 +1164,7 @@ impl Daemon {
         self.wait_for_stopping(servers_until);
         self.stop_browser();
         self.stop_boards();
+        let recovery_lock = self.stop_recovery().map(|lock| fds.add(lock));
         let orphan_tokens: Vec<usize> = (self.sources.iter())
             .filter(|(_, source)| matches!(source, Source::Orphan(_)))
             .map(|(key, _)| key)
@@ -1186,6 +1204,7 @@ impl Daemon {
                     .collect(),
                 daemon: self.id,
                 reviews: self.hand_over_reviews(),
+                recovery_lock,
             },
             fds,
         })
@@ -1263,6 +1282,7 @@ impl Daemon {
                     .chain(self.next_web_due())
                     .chain(self.next_fit_due())
                     .chain(self.next_forward_due())
+                    .chain(self.next_recovery_due())
                     .chain(self.upgrade_to.as_ref().map(|upgrading| upgrading.until))
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
@@ -1308,6 +1328,7 @@ impl Daemon {
             // After what the daemon's own threads wrote has been taken, so
             // it isn't taken for a change from outside.
             self.check_disk();
+            self.keep_for_recovery();
             self.stop_idle_servers();
             self.let_gone_servers_go();
             self.let_gone_agents_go();
@@ -1373,6 +1394,7 @@ impl Daemon {
         self.stop_servers();
         self.stop_agents();
         self.begin_stopping_boards();
+        self.begin_stopping_recovery();
         self.begin_stopping_browser();
         self.abandon_renames();
         self.close_web("the daemon stopped");
@@ -1380,6 +1402,7 @@ impl Daemon {
         self.wait_for_stopping(servers_until);
         self.wait_for_file_ops(until);
         self.finish_stopping_boards(until);
+        drop(self.finish_stopping_recovery(until));
         self.stop_browser();
         log::info!("stopped in {} ms", started.elapsed().as_millis());
     }
@@ -2623,6 +2646,7 @@ impl Daemon {
             Request::DetachBoard { board } => Ok(self.detach_board(token, board)),
             Request::Discard { buffer } => self.discard_buffer(buffer),
             Request::Reload { buffer } => self.reload_buffer(buffer),
+            Request::Recover { pane, drop } => self.recover_here(pane, drop),
             Request::AttachReview { review } => self.attach_review(token, review),
             Request::DetachReview { review } => Ok(self.detach_review(token, review)),
             Request::AttachBrowser {

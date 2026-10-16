@@ -89,6 +89,9 @@ impl TestDaemon {
             rename_gate: None,
             trash: Some(root.join("trash")),
             boards: Some(root.join("boards")),
+            recovery: Some(clackatoo_daemon::RecoveryConfig::in_dir(
+                root.join("recovery"),
+            )),
             browser: None,
             web: None,
         };

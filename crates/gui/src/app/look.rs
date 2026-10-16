@@ -773,6 +773,7 @@ mod tests {
             declined: None,
             lsp_trace: None,
             boards: None,
+            recovery: None,
             browser: None,
             web: None,
             trash: None,

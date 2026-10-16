@@ -1,5 +1,6 @@
 //! `:e` alone: an explorer of the focused pane's folder beside a buffer
-//! with no file yet, and `:w NAME`, which names one, driven through the
+//! with no file yet, `:w NAME`, which names one, and `:recover`, which
+//! shows one that came back from a recovery file, driven through the
 //! desk as a window would drive it, with the daemon played by the test.
 
 use clackatoo_protocol::{BufferUpdate, FilesAction, FilesId, OpenBlank, OpenFiles};
@@ -388,4 +389,42 @@ fn w_name_in_a_files_editor_is_refused_as_it_has_one() {
     command(&mut desk, "w b.txt");
     assert_eq!(asked(&mut desk), []);
     assert!(said(&desk, "this is ‘a.txt’"), "{:?}", desk.message);
+}
+
+#[test]
+fn recover_leaves_it_to_the_daemon_and_says_or_shows_what_it_answers() {
+    let mut desk = desk(one_tab(file_pane(1, 7)));
+    loaded(&mut desk, 7, "/p/a.txt", "theirs\n", false);
+    normal_mode(&mut desk);
+    answer_all(&mut desk);
+    // Changes set aside are taken, as the daemon says.
+    command(&mut desk, "recover");
+    let recover = |drop| Request::Recover {
+        pane: PaneId(1),
+        drop,
+    };
+    assert_eq!(asked(&mut desk), [recover(false)]);
+    desk.answered(Response::Text(
+        "a.txt: the changes kept from before taken".into(),
+    ));
+    assert!(said(&desk, "taken"));
+    // Or dropped, or not, as it says why.
+    command(&mut desk, "recover!");
+    assert_eq!(asked(&mut desk), [recover(true)]);
+    let none = "no changes are set aside for this file";
+    desk.answered(Response::Error(clackatoo_protocol::Error::Other(
+        none.into(),
+    )));
+    assert!(said(&desk, none));
+    // A buffer that came back, shown in a new tab, is switched to.
+    command(&mut desk, "rec");
+    assert_eq!(asked(&mut desk), [recover(false)]);
+    let both = workspaces(vec![workspace(
+        1,
+        "w",
+        vec![tab(1, file_pane(1, 7)), tab(2, file_pane(5, 9))],
+    )]);
+    desk.workspaces_changed(both);
+    desk.answered(Response::PaneCreated(PaneId(5)));
+    assert_eq!(shown_pane(&desk), PaneId(5));
 }

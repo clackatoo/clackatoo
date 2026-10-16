@@ -1845,6 +1845,24 @@ impl Desk {
         }
     }
 
+    /// `:recover`: takes the focused file's changes not saved that were
+    /// set aside as the daemon started, its file having changed since they
+    /// were kept, or with `drop`, throws them away. Otherwise shows the
+    /// next buffer whose changes came back that no pane shows, such as one
+    /// with no file yet: in place of the focused editor's file, or in a new
+    /// tab beside anything else. The daemon decides which, and says.
+    pub(super) fn recover(&mut self, drop: bool) {
+        let Some(shown) = self.shown else { return };
+        if !self.needs_daemon(":recover", wire::RECOVER) {
+            return;
+        }
+        let request = Request::Recover {
+            pane: shown.pane,
+            drop,
+        };
+        self.request(request, Asked::Recovered);
+    }
+
     /// The daemon's answer to a save of `buffer`.
     pub(super) fn saved(
         &mut self,

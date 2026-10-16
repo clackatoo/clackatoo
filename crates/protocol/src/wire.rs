@@ -169,6 +169,9 @@ gates! {
     /// Buffers with no file yet: `PaneTerminal::Blank` (`OpenBlank`),
     /// `Request::BlankHere`, and `Request::SaveAs`, which names one.
     BLANK = 88,
+    /// Buffers' changes not saved that came back from recovery files:
+    /// `Request::Recover`.
+    RECOVER = 89,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

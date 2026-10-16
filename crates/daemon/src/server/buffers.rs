@@ -15,6 +15,7 @@ use clackatoo_text::{AgentHunks, Highlights, Hunks, Maker, Rope, Span};
 use mio::Token;
 
 use super::language::Opened;
+use super::recovery::Recovered;
 use super::{Daemon, Source};
 use crate::buffer::{Buffer, DiskStamp, Made, Restamp};
 
@@ -60,6 +61,9 @@ pub(super) struct BufferSlot {
     /// of its changes arrived (see
     /// [`BufferSnapshot::applied`](clackatoo_protocol::BufferSnapshot)).
     pub(super) applied: HashMap<u64, WindowChange>,
+    /// What came back to it from a recovery file as the daemon started,
+    /// while that's still to be dealt with.
+    pub(super) recovered: Recovered,
 }
 
 /// The last change a window sent a buffer that the daemon dealt with.
@@ -98,6 +102,7 @@ impl BufferSlot {
             outside: None,
             unreadable: None,
             applied: HashMap::new(),
+            recovered: Recovered::default(),
         }
     }
 
@@ -320,6 +325,7 @@ impl Daemon {
             self.tell_viewers(id, None, &BufferUpdate::Modified(modified));
         }
         self.files_written(&to);
+        self.recovery_touched(id);
         // As a file opened is, now it has one.
         self.opened_in_review(id);
         self.parse_buffer(id);
@@ -360,6 +366,7 @@ impl Daemon {
         self.send_snapshot(token, id, resume);
         self.offer_install(token, id);
         self.tell_if_changed_on_disk(token, id);
+        self.tell_recovered(token, id);
         Ok(())
     }
 
@@ -544,6 +551,7 @@ impl Daemon {
         }
         log::info!("buffer {id} saved");
         self.files_written(&path);
+        self.recovery_touched(id);
         // Its directory may be new.
         self.watch_buffer(id);
         self.saved_in_server(id);
@@ -698,6 +706,8 @@ impl Daemon {
         self.parse_buffer(id);
         self.open_in_server(id);
         self.compare_buffer(id);
+        // Its recovery file names its file.
+        self.recovery_moved(id);
     }
 
     /// Has the panes showing buffer `old`, whose file buffer `new` has just
@@ -730,13 +740,15 @@ impl Daemon {
     }
 
     /// Closes `buffer` if no pane shows it and it has no changes to save.
-    /// One with changes waits, unseen, to be opened again. One with no file
+    /// One with changes waits, unseen, to be opened again, as does one
+    /// with changes set aside from a recovery file. One with no file
     /// yet couldn't be, so closing or replacing the last pane showing it
     /// with changes is refused first (see [`loses_blank`](Self::loses_blank)):
     /// it goes once they're thrown away, as `:q!` does.
     pub(super) fn close_if_unwanted(&mut self, buffer: BufferId) {
         let unwanted = !self.workspaces.shows(buffer)
-            && (self.buffers.get(&buffer)).is_some_and(|slot| !slot.buffer.modified());
+            && (self.buffers.get(&buffer))
+                .is_some_and(|slot| !slot.buffer.modified() && slot.recovered.aside.is_none());
         if unwanted {
             // What agents changed in it outlives it, in the log, and its
             // agent hunks in the reviews.
@@ -753,6 +765,7 @@ impl Daemon {
             self.closed_in_server(slot.buffer.path(), slot.server);
             self.closed_in_git(buffer, slot.git_dir);
             self.unwatch_buffer(buffer);
+            self.recovery_forget(buffer);
         }
     }
 
@@ -901,6 +914,8 @@ impl Daemon {
         if let Some(modified) = slot.buffer.check_modified() {
             self.tell_viewers(id, None, &BufferUpdate::Modified(modified));
         }
+        // After every change: its recovery file is written soon, or goes.
+        self.recovery_touched(id);
     }
 
     /// Sends `update` about buffer `id` to every client following it, but

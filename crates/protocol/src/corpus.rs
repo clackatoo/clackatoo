@@ -28,7 +28,7 @@ use clackatoo_text::{
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
     BLANK, BLOCK_MARKS, BLOCKS, COLOURS, EXITED, FALLBACKS, FORWARD_PACE, FORWARDS, HOVER,
-    INLAY_HINTS, LIMITS, PHONE_TERMINALS, PREVIEW_COLOURS, SYMBOLS, USES, WORDS,
+    INLAY_HINTS, LIMITS, PHONE_TERMINALS, PREVIEW_COLOURS, RECOVER, SYMBOLS, USES, WORDS,
 };
 use crate::{
     AgentSession, AgentTools, Author, Axis, BlockMarks, BoardId, BufferId, BufferSnapshot,
@@ -867,6 +867,24 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 buffer: BufferId(4),
                 path: "notes.md".into(),
                 force: true,
+            })),
+        ),
+    ]);
+    // Changes not saved that came back from recovery files, taken or
+    // shown, and dropped.
+    samples.extend([
+        (
+            RECOVER,
+            Client(ClientMessage::Request(Request::Recover {
+                pane: PaneId(3),
+                drop: false,
+            })),
+        ),
+        (
+            RECOVER,
+            Client(ClientMessage::Request(Request::Recover {
+                pane: PaneId(5),
+                drop: true,
             })),
         ),
     ]);

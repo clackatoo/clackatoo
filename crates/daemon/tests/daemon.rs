@@ -10,7 +10,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use clackatoo_daemon::{
-    AgentConfig, Client, ClientError, CustomAgent, Daemon, DaemonConfig, ShutdownHandle,
+    AgentConfig, Client, ClientError, CustomAgent, Daemon, DaemonConfig, RecoveryConfig,
+    ShutdownHandle,
 };
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::wire;
@@ -80,6 +81,7 @@ impl TestDaemon {
             fit_lasts: clackatoo_daemon::DEFAULT_FIT_LASTS,
             rename_gate: None,
             boards: None,
+            recovery: None,
             browser: None,
             web: None,
             trash: Some(dir.path().join("trash")),
@@ -15807,4 +15809,431 @@ fn a_session_open_in_another_workspaces_chat_isnt_moved_here() {
     let workspaces = client.watch_workspaces().unwrap();
     let (_, _, pane) = workspaces.find_pane(pane).unwrap();
     assert_eq!(pane.content.terminal(), Some(kid));
+}
+
+/// A daemon keeping changes not saved in `dir`, writing each buffer's
+/// recovery file 50 ms after its last change, unless `change` says
+/// otherwise.
+fn recovering(dir: &Path, change: impl FnOnce(&mut RecoveryConfig)) -> TestDaemon {
+    TestDaemon::start_with(|_, config| {
+        let mut recovery = RecoveryConfig::in_dir(dir.to_owned());
+        recovery.after = Duration::from_millis(50);
+        change(&mut recovery);
+        config.recovery = Some(recovery);
+    })
+}
+
+/// A daemon keeping changes not saved in `dir` again, as `recovering`
+/// starts one, once the daemon before has let go of the folder's lock: a
+/// program another test is starting holds a copy of it until it execs, as
+/// it holds every file the test process has open.
+fn restarted(dir: &Path) -> TestDaemon {
+    let lock = std::fs::File::open(dir.join(".lock")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
+        assert!(Instant::now() < deadline, "the lock is still held");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(lock);
+    recovering(dir, |_| {})
+}
+
+/// The recovery files in `dir`, by name, in order.
+fn recovery_files(dir: &Path) -> Vec<String> {
+    let mut files: Vec<String> = (std::fs::read_dir(dir).into_iter().flatten().flatten())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.ends_with(".recover"))
+        .collect();
+    files.sort();
+    files
+}
+
+/// The recovery files in `dir` once `done` says they're as they should
+/// be, failing after a few seconds.
+fn wait_for_recovery_files(dir: &Path, done: impl Fn(&[String]) -> bool) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let files = recovery_files(dir);
+        if done(&files) {
+            return files;
+        }
+        assert!(Instant::now() < deadline, "the recovery files: {files:?}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The text the recovery file `name` in `dir` keeps, after its header.
+fn recovered_text(dir: &Path, name: &str) -> String {
+    String::from_utf8_lossy(&std::fs::read(dir.join(name)).unwrap()).into_owned()
+}
+
+/// Waits for the daemon to answer `client`'s change numbered `seq`.
+fn wait_for_ack(client: &mut Client, seq: u64) {
+    loop {
+        match next_buffer_update(client) {
+            BufferUpdate::Acked { seq: acked, .. } if acked == seq => return,
+            BufferUpdate::Edited {
+                answers: Some(answered),
+                ..
+            } if answered == seq => return,
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn changes_not_saved_outlive_the_daemon_and_come_back_as_they_were() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().canonicalize().unwrap();
+    let kept = root.join("state/recovery");
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    let before = {
+        let daemon = recovering(&kept, |_| {});
+        let mut client = daemon.client();
+        client.watch_workspaces().unwrap();
+        let pane = client
+            .new_workspace(None, open_file(&root, "a.txt"))
+            .unwrap();
+        let a = buffer_in(&mut client, pane);
+        attach_buffer(&mut client, a);
+        send_change(&mut client, a, 1, insert(4, 4, "two\n", 0));
+        let other = client.split_pane(pane, Side::Right, blank(&root)).unwrap();
+        let b = buffer_in(&mut client, other);
+        attach_buffer(&mut client, b);
+        send_change(&mut client, b, 1, insert(0, 0, "draft\n", 0));
+        let files = wait_for_recovery_files(&kept, |files| files.len() == 2);
+        // They hold what was typed, for the user alone.
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().mode() & 0o777;
+        assert_eq!(mode(&kept), 0o700);
+        for file in &files {
+            assert_eq!(mode(&kept.join(file)), 0o600);
+        }
+        files
+        // Stopped, it keeps them.
+    };
+    assert_eq!(recovery_files(&kept), before);
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one\n"
+    );
+
+    let daemon = restarted(&kept);
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    // Opening the file finds its changes, as changes not saved, and says
+    // so, and that a buffer no pane shows came back too.
+    let pane = client
+        .new_workspace(None, open_file(&root, "a.txt"))
+        .unwrap();
+    let a = buffer_in(&mut client, pane);
+    let snapshot = attach_buffer(&mut client, a);
+    assert_eq!(snapshot.text, "one\ntwo\n");
+    assert!(snapshot.modified);
+    let notice = next_notice(&mut client);
+    assert!(notice.contains("came back"), "{notice}");
+    assert!(notice.contains("1 more waiting"), "{notice}");
+    // Each buffer has a file of this daemon's in place of the one it came
+    // back from.
+    wait_for_recovery_files(&kept, |files| {
+        files.len() == 2 && files.iter().all(|file| !before.contains(file))
+    });
+
+    // `:recover` shows the buffer with no file yet, which no pane shows,
+    // as it was.
+    let other = client
+        .split_pane(pane, Side::Right, open_file(&root, "b.txt"))
+        .unwrap();
+    buffer_in(&mut client, other);
+    let shown = client.request(&Request::Recover {
+        pane: other,
+        drop: false,
+    });
+    assert_eq!(shown.unwrap(), Response::Done);
+    let b = buffer_in(&mut client, other);
+    let snapshot = attach_buffer(&mut client, b);
+    assert_eq!(
+        (snapshot.path.as_str(), snapshot.text.as_str()),
+        ("", "draft\n")
+    );
+    assert!(snapshot.modified);
+    let nothing = client.request(&Request::Recover {
+        pane: other,
+        drop: false,
+    });
+    assert!(
+        matches!(&nothing, Ok(Response::Error(Error::Other(why))) if why.contains("no changes")),
+        "{nothing:?}"
+    );
+    // The file on disk was never written.
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one\n"
+    );
+}
+
+#[test]
+fn changes_kept_for_a_file_changed_on_disk_since_are_set_aside_beside_it() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().canonicalize().unwrap();
+    let kept = root.join("recovery");
+    for name in ["a.txt", "b.txt"] {
+        std::fs::write(root.join(name), "one\n").unwrap();
+    }
+    {
+        let daemon = recovering(&kept, |_| {});
+        let mut client = daemon.client();
+        client.watch_workspaces().unwrap();
+        let pane = client
+            .new_workspace(None, open_file(&root, "a.txt"))
+            .unwrap();
+        let a = buffer_in(&mut client, pane);
+        attach_buffer(&mut client, a);
+        send_change(&mut client, a, 1, insert(4, 4, "mine\n", 0));
+        let other = client
+            .split_pane(pane, Side::Right, open_file(&root, "b.txt"))
+            .unwrap();
+        let b = buffer_in(&mut client, other);
+        attach_buffer(&mut client, b);
+        send_change(&mut client, b, 1, insert(4, 4, "mine\n", 0));
+        wait_for_recovery_files(&kept, |files| files.len() == 2);
+    }
+    // Both files change meanwhile.
+    for name in ["a.txt", "b.txt"] {
+        std::fs::write(root.join(name), "theirs\n").unwrap();
+    }
+    let before = recovery_files(&kept);
+
+    let daemon = restarted(&kept);
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    // Each opens as it is on disk, saying its changes were set aside.
+    let pane = client
+        .new_workspace(None, open_file(&root, "a.txt"))
+        .unwrap();
+    let a = buffer_in(&mut client, pane);
+    let snapshot = attach_buffer(&mut client, a);
+    assert_eq!(snapshot.text, "theirs\n");
+    assert!(!snapshot.modified);
+    let notice = next_notice(&mut client);
+    assert!(
+        notice.contains("changed on disk") && notice.contains("`:recover`"),
+        "{notice}"
+    );
+    // Nothing is written until `:recover` says what to do, so the files
+    // they were kept in stay.
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(recovery_files(&kept), before);
+
+    // Taken, the changes are an edit that can be undone, and the file on
+    // disk is still as it was.
+    let taken = client.request(&Request::Recover { pane, drop: false });
+    assert!(
+        matches!(&taken, Ok(Response::Text(said)) if said.contains("taken")),
+        "{taken:?}"
+    );
+    let mut text = snapshot.text.clone();
+    loop {
+        match next_buffer_update(&mut client) {
+            BufferUpdate::Edited { edit, .. } => text = edit.apply_to(&text).unwrap(),
+            BufferUpdate::Modified(true) => break,
+            _ => {}
+        }
+    }
+    assert_eq!(text, "one\nmine\n");
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "theirs\n"
+    );
+    send_change(&mut client, a, 1, Change::Undo);
+    loop {
+        match next_buffer_update(&mut client) {
+            BufferUpdate::Edited { edit, .. } => text = edit.apply_to(&text).unwrap(),
+            BufferUpdate::Modified(false) => break,
+            _ => {}
+        }
+    }
+    assert_eq!(text, "theirs\n");
+
+    // Dropped, they're gone, file and all.
+    let other = client
+        .split_pane(pane, Side::Right, open_file(&root, "b.txt"))
+        .unwrap();
+    let b = buffer_in(&mut client, other);
+    attach_buffer(&mut client, b);
+    let dropped = client.request(&Request::Recover {
+        pane: other,
+        drop: true,
+    });
+    assert!(
+        matches!(&dropped, Ok(Response::Text(said)) if said.contains("dropped")),
+        "{dropped:?}"
+    );
+    let again = client.request(&Request::Recover {
+        pane: other,
+        drop: true,
+    });
+    assert!(
+        matches!(&again, Ok(Response::Error(Error::Other(_)))),
+        "{again:?}"
+    );
+    wait_for_recovery_files(&kept, <[String]>::is_empty);
+    for name in ["a.txt", "b.txt"] {
+        assert_eq!(
+            std::fs::read_to_string(root.join(name)).unwrap(),
+            "theirs\n"
+        );
+    }
+}
+
+#[test]
+fn a_recovery_file_goes_once_its_changes_are_saved_thrown_away_or_undone() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().canonicalize().unwrap();
+    let kept = root.join("recovery");
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    let daemon = recovering(&kept, |_| {});
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = client
+        .new_workspace(None, open_file(&root, "a.txt"))
+        .unwrap();
+    let a = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, a);
+    let some = |files: &[String]| files.len() == 1;
+
+    send_change(&mut client, a, 1, insert(4, 4, "two\n", 0));
+    let files = wait_for_recovery_files(&kept, some);
+    assert!(recovered_text(&kept, &files[0]).ends_with("one\ntwo\n"));
+    let saved = client.request(&Request::Save {
+        buffer: a,
+        force: false,
+    });
+    assert_eq!(saved.unwrap(), Response::Done);
+    wait_for_recovery_files(&kept, <[String]>::is_empty);
+
+    send_change(&mut client, a, 2, insert(8, 0, "x", 1));
+    wait_for_recovery_files(&kept, some);
+    let discarded = client.request(&Request::Discard { buffer: a });
+    assert_eq!(discarded.unwrap(), Response::Done);
+    wait_for_recovery_files(&kept, <[String]>::is_empty);
+
+    send_change(&mut client, a, 3, insert(8, 0, "y", 3));
+    wait_for_recovery_files(&kept, some);
+    send_change(&mut client, a, 4, Change::Undo);
+    wait_for_recovery_files(&kept, <[String]>::is_empty);
+}
+
+#[test]
+fn recovery_files_wait_for_typing_to_rest_and_never_hold_up_the_loop() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().canonicalize().unwrap();
+    let kept = root.join("recovery");
+    let gate = root.join("gate");
+    std::fs::write(&gate, "").unwrap();
+    std::fs::write(root.join("a.txt"), "").unwrap();
+    let daemon = recovering(&kept, |recovery| {
+        recovery.after = Duration::from_secs(2);
+        recovery.most = Duration::from_secs(3);
+        recovery.gate = Some(gate.clone());
+    });
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = client
+        .new_workspace(None, open_file(&root, "a.txt"))
+        .unwrap();
+    let a = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, a);
+    let (mut seq, mut len) = (0, 0);
+    let mut type_one = |client: &mut Client| {
+        seq += 1;
+        send_change(client, a, seq, insert(len, len, "x", seq - 1));
+        wait_for_ack(client, seq);
+        len += 1;
+    };
+
+    // Nothing is written while typing goes on, then all of it once it
+    // rests.
+    for _ in 0..6 {
+        type_one(&mut client);
+        assert!(recovery_files(&kept).is_empty());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let files = wait_for_recovery_files(&kept, |files| files.len() == 1);
+    assert!(recovered_text(&kept, &files[0]).ends_with("xxxxxx"));
+
+    // Typing that never rests is written every so often all the same.
+    let started = Instant::now();
+    let before = recovered_text(&kept, &files[0]);
+    let mut rewritten = false;
+    while started.elapsed() < Duration::from_secs(10) && !rewritten {
+        type_one(&mut client);
+        std::thread::sleep(Duration::from_millis(100));
+        rewritten = recovered_text(&kept, &files[0]) != before;
+    }
+    assert!(rewritten, "never written while typing went on");
+
+    // With the thread held up writing, edits are answered as ever.
+    std::fs::remove_file(&gate).unwrap();
+    // Any write already under way has gone through.
+    std::thread::sleep(Duration::from_millis(100));
+    let before = recovered_text(&kept, &files[0]);
+    type_one(&mut client);
+    std::thread::sleep(Duration::from_millis(2500));
+    let asked = Instant::now();
+    type_one(&mut client);
+    assert!(
+        asked.elapsed() < Duration::from_millis(200),
+        "{:?}",
+        asked.elapsed()
+    );
+    assert_eq!(recovered_text(&kept, &files[0]), before);
+    std::fs::write(&gate, "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while recovered_text(&kept, &files[0]) == before {
+        assert!(Instant::now() < deadline, "never written once let go");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_daemon_that_cant_keep_changes_not_saved_says_so_once_they_are_made() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().canonicalize().unwrap();
+    let kept = root.join("recovery");
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    let _first = recovering(&kept, |_| {});
+    // A second daemon on the same folder, as one started by hand would be.
+    let second = recovering(&kept, |_| {});
+    let mut client = second.client();
+    client.watch_workspaces().unwrap();
+    let pane = client
+        .new_workspace(None, open_file(&root, "a.txt"))
+        .unwrap();
+    let a = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, a);
+    send_change(&mut client, a, 1, insert(4, 4, "two\n", 0));
+    let notice = next_notice(&mut client);
+    assert!(
+        notice.contains("won't outlive a crash") && notice.contains("another clackatoo daemon"),
+        "{notice}"
+    );
+    // Once.
+    send_change(&mut client, a, 2, insert(8, 8, "three\n", 1));
+    wait_for_ack(&mut client, 2);
+    client
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    while let Ok(event) = client.next_event() {
+        assert!(
+            !matches!(
+                event,
+                Event::Buffer {
+                    update: BufferUpdate::Notice(_),
+                    ..
+                }
+            ),
+            "{event:?}"
+        );
+    }
+    assert!(recovery_files(&kept).is_empty());
 }

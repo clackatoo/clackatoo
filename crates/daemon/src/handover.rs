@@ -42,6 +42,8 @@
 //!     page an agent opens.
 //! 18. Panes showing a folder in an editor, as its listing. The folder is
 //!     an explorer's root, handed over with the other explorers.
+//! 19. The lock on the recovery files, so no other daemon takes them
+//!     while the next build starts.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -54,11 +56,11 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 18;
+pub(crate) const VERSION: u32 = 19;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, VERSION,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -133,6 +135,9 @@ pub(crate) struct State {
     pub(crate) daemon: u64,
     /// What agents changed that the user hasn't reviewed, and reviews.
     pub(crate) reviews: Reviews,
+    /// The lock on the recovery files, if the daemon keeps them (see
+    /// `crate::recovery`). Since version 19.
+    pub(crate) recovery_lock: Option<u32>,
 }
 
 /// What agents changed in files, hunk by hunk, whether the user has
@@ -715,11 +720,62 @@ impl State {
             13 => Ok(postcard::from_bytes::<v13::State>(body)?.into()),
             14 => Ok(postcard::from_bytes::<v14::State>(body)?.into()),
             15 => Ok(postcard::from_bytes::<v15::State>(body)?.into()),
-            // Versions 16 and 17 are this one without browser panes, then
-            // without folders' panes, which go on the end of `Layout`, so
-            // they read as this one does.
-            16 | 17 | VERSION => Ok(postcard::from_bytes(body)?),
+            // Versions 16 and 17 are version 18 without browser panes,
+            // then without folders' panes, which go on the end of
+            // `Layout`, so they read as it does.
+            16..=18 => Ok(postcard::from_bytes::<v18::State>(body)?.into()),
+            VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
+        }
+    }
+}
+
+/// Version 18, as the builds that wrote it wrote it: no lock on the
+/// recovery files.
+mod v18 {
+    use serde::Deserialize;
+
+    use super::{Applied, Buffer, Chat, EditLog, Files, Process, Reviews, Terminal, Workspaces};
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+        edits: EditLog,
+        applied: Vec<Applied>,
+        daemon: u64,
+        reviews: Reviews,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: None,
+            }
         }
     }
 }
@@ -1233,6 +1289,7 @@ mod v7 {
                 applied: Vec::new(),
                 daemon: 0,
                 reviews: super::Reviews::default(),
+                recovery_lock: None,
             }
         }
     }
@@ -1306,6 +1363,7 @@ mod v8 {
                 applied: Vec::new(),
                 daemon: 0,
                 reviews: super::Reviews::default(),
+                recovery_lock: None,
             }
         }
     }
@@ -1349,6 +1407,7 @@ mod v9 {
                 applied: Vec::new(),
                 daemon: 0,
                 reviews: super::Reviews::default(),
+                recovery_lock: None,
             }
         }
     }
@@ -1394,6 +1453,7 @@ mod v11 {
                 applied: Vec::new(),
                 daemon: 0,
                 reviews: super::Reviews::default(),
+                recovery_lock: None,
             }
         }
     }
@@ -1488,6 +1548,7 @@ mod v15 {
                 applied: state.applied,
                 daemon: state.daemon,
                 reviews: state.reviews,
+                recovery_lock: None,
             }
         }
     }
@@ -1536,6 +1597,7 @@ mod v14 {
                 applied: state.applied,
                 daemon: state.daemon,
                 reviews: super::Reviews::default(),
+                recovery_lock: None,
             }
         }
     }
@@ -1582,6 +1644,7 @@ mod v13 {
                 applied: Vec::new(),
                 daemon: 0,
                 reviews: super::Reviews::default(),
+                recovery_lock: None,
             }
         }
     }
@@ -1670,6 +1733,7 @@ mod v12 {
                 applied: Vec::new(),
                 daemon: 0,
                 reviews: super::Reviews::default(),
+                recovery_lock: None,
             }
         }
     }
@@ -1756,6 +1820,7 @@ mod v10 {
                 applied: Vec::new(),
                 daemon: 0,
                 reviews: super::Reviews::default(),
+                recovery_lock: None,
             }
         }
     }
@@ -1917,6 +1982,7 @@ mod tests {
             }],
             daemon: 0xd43,
             reviews: reviews(),
+            recovery_lock: Some(3),
         }
     }
 
@@ -2117,6 +2183,16 @@ mod tests {
     }
 
     #[test]
+    fn version_19_is_read_with_the_lock_on_the_recovery_files() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v19.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        assert_eq!(state.recovery_lock, Some(3));
+        assert_eq!(state.daemon, 0xd43);
+    }
+
+    #[test]
     fn version_18_is_read_with_panes_showing_folders() {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v18.bin"))
@@ -2216,11 +2292,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v18.bin"]
+    #[ignore = "writes tests/fixtures/handover-v19.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v18.bin"
+            "/tests/fixtures/handover-v19.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();

@@ -165,6 +165,7 @@ impl TestDaemon {
             rename_gate: None,
             trash: None,
             boards: None,
+            recovery: None,
             browser: None,
             web: Some(web),
         };

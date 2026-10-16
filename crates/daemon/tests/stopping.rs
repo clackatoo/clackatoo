@@ -12,8 +12,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use clackatoo_daemon::{Client, ClientError, RuntimeDir, launch};
 use clackatoo_protocol::{
-    AgentTools, BoardAction, NewAgent, NewTerminal, OpenBoard, OpenFile, PaneTerminal, PostKind,
-    ServerMessage, Size, TerminalId,
+    AgentTools, BoardAction, BufferId, BufferSnapshot, BufferUpdate, Change, Edit, Event, NewAgent,
+    NewTerminal, OpenBoard, OpenFile, PaneTerminal, PostKind, ServerMessage, Size, TerminalId,
 };
 use rustix::process::{Pid, Signal};
 
@@ -91,61 +91,7 @@ impl Process {
     fn start_with(setup: &Setup, nohup: bool) -> Self {
         // A short path: socket paths are limited to about 100 bytes.
         let dir = tempfile::Builder::new().prefix("ck").tempdir().unwrap();
-        let root = dir.path();
-        if let Some(args) = &setup.server {
-            let pack = root.join("data/clackatoo/languages/fake");
-            std::fs::create_dir_all(&pack).unwrap();
-            let server: Vec<String> =
-                std::iter::once(example("fake_language_server").display().to_string())
-                    .chain(args.iter().cloned())
-                    .map(|arg| format!("{arg:?}"))
-                    .collect();
-            let language = format!(
-                "grammar = \"fake\"\nextensions = [\"fk\"]\nserver = [{}]\nroots = [\"project\"]\n",
-                server.join(", ")
-            );
-            std::fs::write(pack.join("language.toml"), language).unwrap();
-            std::fs::create_dir_all(root.join("app")).unwrap();
-            std::fs::write(root.join("app/project"), "").unwrap();
-            std::fs::write(root.join("app/a.fk"), "bad\n").unwrap();
-        }
-        let agent = (setup.agent.iter())
-            .map(|args| {
-                let mut command = vec![example("fake_agent").display().to_string()];
-                command.extend(args.iter().cloned());
-                command.join(" ")
-            })
-            .next();
-        let log = std::fs::File::create(root.join("daemon.log")).unwrap();
-        let mut command = if nohup {
-            let mut command = Command::new("nohup");
-            command.arg(example("daemon"));
-            command
-        } else {
-            Command::new(example("daemon"))
-        };
-        command
-            // As `clackatoo daemon` is run: an upgrade runs the next build
-            // with the same arguments, and there must be some.
-            .arg("daemon")
-            .env("HOME", root)
-            .env("XDG_RUNTIME_DIR", root)
-            .env("XDG_DATA_HOME", root.join("data"))
-            .env("XDG_CONFIG_HOME", root.join("config"))
-            .env("XDG_STATE_HOME", root.join("state"))
-            .env("SHELL", "/bin/sh")
-            .env("CLACKATOO_BOARDS", root.join("boards"))
-            .env("CLACKATOO_BROWSER", "off")
-            .env("CLACKATOO_UDP_PORTS", "off")
-            .env_remove("CLACKATOO_LSP_TRACE")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(log);
-        match agent {
-            Some(agent) => command.env("CLACKATOO_AGENT", agent),
-            None => command.env_remove("CLACKATOO_AGENT"),
-        };
-        let child = command.spawn().unwrap();
+        let child = spawn(dir.path(), setup, nohup);
         let process = Self { dir, child };
         eventually("the daemon answers", || {
             Client::connect(&process.socket()).is_ok()
@@ -153,6 +99,83 @@ impl Process {
         process
     }
 
+    /// Kills the daemon, as a crash would, giving it no chance to stop as
+    /// it does, then starts it again as `setup` says, in the same
+    /// directories, and waits until it answers.
+    fn kill_and_start_again(&mut self, setup: &Setup) {
+        self.signal(Signal::KILL);
+        self.child.wait().unwrap();
+        self.child = spawn(self.root(), setup, false);
+        eventually("the daemon answers again", || {
+            Client::connect(&self.socket()).is_ok()
+        });
+    }
+}
+
+/// Starts a daemon set up as `setup` says, in `root`, ignoring SIGHUP if
+/// `nohup`, as `nohup` runs it.
+fn spawn(root: &Path, setup: &Setup, nohup: bool) -> Child {
+    if let Some(args) = &setup.server {
+        let pack = root.join("data/clackatoo/languages/fake");
+        std::fs::create_dir_all(&pack).unwrap();
+        let server: Vec<String> =
+            std::iter::once(example("fake_language_server").display().to_string())
+                .chain(args.iter().cloned())
+                .map(|arg| format!("{arg:?}"))
+                .collect();
+        let language = format!(
+            "grammar = \"fake\"\nextensions = [\"fk\"]\nserver = [{}]\nroots = [\"project\"]\n",
+            server.join(", ")
+        );
+        std::fs::write(pack.join("language.toml"), language).unwrap();
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::write(root.join("app/project"), "").unwrap();
+        std::fs::write(root.join("app/a.fk"), "bad\n").unwrap();
+    }
+    let agent = (setup.agent.iter())
+        .map(|args| {
+            let mut command = vec![example("fake_agent").display().to_string()];
+            command.extend(args.iter().cloned());
+            command.join(" ")
+        })
+        .next();
+    // Added to, by a daemon started again.
+    let log = (std::fs::OpenOptions::new().create(true).append(true))
+        .open(root.join("daemon.log"))
+        .unwrap();
+    let mut command = if nohup {
+        let mut command = Command::new("nohup");
+        command.arg(example("daemon"));
+        command
+    } else {
+        Command::new(example("daemon"))
+    };
+    command
+        // As `clackatoo daemon` is run: an upgrade runs the next build
+        // with the same arguments, and there must be some.
+        .arg("daemon")
+        .env("HOME", root)
+        .env("XDG_RUNTIME_DIR", root)
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("SHELL", "/bin/sh")
+        .env("CLACKATOO_BOARDS", root.join("boards"))
+        .env("CLACKATOO_BROWSER", "off")
+        .env("CLACKATOO_UDP_PORTS", "off")
+        .env_remove("CLACKATOO_LSP_TRACE")
+        .env_remove("CLACKATOO_RECOVERY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log);
+    match agent {
+        Some(agent) => command.env("CLACKATOO_AGENT", agent),
+        None => command.env_remove("CLACKATOO_AGENT"),
+    };
+    command.spawn().unwrap()
+}
+
+impl Process {
     fn root(&self) -> &Path {
         self.dir.path()
     }
@@ -642,4 +665,106 @@ fn a_daemon_started_with_nohup_outlives_a_hang_up_before_and_after_an_upgrade() 
     assert!(status.success(), "{status:?}: {log}");
     assert!(!log.contains("SIGHUP"), "{log}");
     assert!(log.contains("SIGTERM: asked to stop"), "{log}");
+}
+
+/// Opens `a.txt` in `root` in a new workspace, and attaches to its buffer,
+/// returning it and its snapshot.
+fn open_a(client: &mut Client, root: &Path) -> (BufferId, BufferSnapshot) {
+    let file = PaneTerminal::File(OpenFile {
+        path: "a.txt".to_owned(),
+        cwd: Some(root.display().to_string()),
+    });
+    let pane = client.new_workspace(None, file).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let (_, _, pane) = workspaces.find_pane(pane).unwrap();
+    let buffer = pane.content.buffer().expect("a buffer");
+    client.attach_buffer(buffer).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    loop {
+        if let Event::Buffer {
+            update: BufferUpdate::Snapshot(snapshot),
+            ..
+        } = client.next_event().unwrap()
+        {
+            return (buffer, snapshot);
+        }
+    }
+}
+
+/// The text the one recovery file in `dir` keeps, after its header, once
+/// there's one.
+fn kept_text(dir: &Path) -> String {
+    let mut text = String::new();
+    eventually("a recovery file is written", || {
+        let files: Vec<_> = (std::fs::read_dir(dir).into_iter().flatten().flatten())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "recover")
+            })
+            .collect();
+        if let [file] = &files[..] {
+            text = String::from_utf8_lossy(&std::fs::read(file).unwrap()).into_owned();
+        }
+        files.len() == 1
+    });
+    text
+}
+
+#[test]
+fn changes_not_saved_outlive_an_upgrade_and_then_the_daemon_being_killed() {
+    let mut daemon = Process::start(&Setup::default());
+    let root = daemon.root().to_owned();
+    let kept = root.join("state/clackatoo/recovery");
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    let mut client = daemon.client();
+    let (buffer, _) = open_a(&mut client, &root);
+    let typed = |client: &mut Client, seq, at, text: &str, base| {
+        let edit = Edit::replace(at, at, "", text);
+        let change = Change::Edit {
+            edit,
+            base,
+            step: true,
+        };
+        client.edit(buffer, seq, change).unwrap();
+    };
+    typed(&mut client, 1, 4, "two\n", 0);
+    eventually("its changes are kept", || {
+        kept_text(&kept).ends_with("one\ntwo\n")
+    });
+    drop(client);
+
+    // Carried through an upgrade, the buffer's file is still kept, by the
+    // next build, as it's changed, holding the lock the build before held,
+    // which no other daemon could take between them.
+    let (_bin, next) = next_build("daemon-next");
+    upgrade(&daemon.socket(), &next);
+    daemon.becomes(&next);
+    eventually("the next build takes over the lock", || {
+        daemon
+            .log()
+            .contains("the recovery files' lock taken over from the build before")
+    });
+    let mut client = daemon.client();
+    let (buffer_now, snapshot) = open_a(&mut client, &root);
+    assert_eq!((buffer_now, snapshot.text.as_str()), (buffer, "one\ntwo\n"));
+    typed(&mut client, 2, 8, "three\n", snapshot.version);
+    eventually("its new changes are kept", || {
+        kept_text(&kept).ends_with("one\ntwo\nthree\n")
+    });
+    drop(client);
+
+    // Killed, with no chance to stop as it does, it starts again with
+    // them, as changes not saved, and the file as it was.
+    daemon.kill_and_start_again(&Setup::default());
+    let mut client = daemon.client();
+    let (_, snapshot) = open_a(&mut client, &root);
+    assert_eq!(snapshot.text, "one\ntwo\nthree\n");
+    assert!(snapshot.modified, "{}", daemon.log());
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one\n"
+    );
 }

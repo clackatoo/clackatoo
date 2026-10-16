@@ -497,6 +497,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "explorer",
         what: ":e alone opens the explorer at the folder you're in beside an empty file, which :w NAME names",
     },
+    News {
+        id: "recovery",
+        date: "2026-10-16",
+        lesson: "explorer",
+        what: "Changes not written, [No Name]'s too, outlive a crash or a stop, and :recover shows them",
+    },
 ];
 
 impl News {

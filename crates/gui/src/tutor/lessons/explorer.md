@@ -171,3 +171,5 @@ listed "later.txt"
 `x` or `y` cuts or copies what's at the cursor, and `p` moves or copies it into the folder at the cursor. `.` shows hidden files, `/` searches the names shown, `R` lists everything again, and `q` closes the explorer. `g?` lists the explorer's keys at its foot, and again hides them; the bar says so while they're hidden.
 
 Beside each file is what git says of it: `M` changed, `A` added, `?` untracked, `D` deleted, `!` in conflict. The daemon watches the folders open in the tree, so a file a terminal or an agent makes shows at once.
+
+Changes not written, `[No Name]`'s too, are kept on disk a moment after you make them, so they outlive the daemon crashing, being killed or stopping, as Vim's swap files do. Next time, a file whose changes were kept comes back with them, not written yet, and says so: `:w` keeps them, `:e!` drops them, and `u` puts the file's text back. If the file changed on disk meanwhile, it opens as it is now, with its changes set aside: `:recover` takes them, or opens them beside it if you've changed it since, and `:recover!` drops them. A `[No Name]` that came back, or a file no pane shows, is shown by `:recover`.
