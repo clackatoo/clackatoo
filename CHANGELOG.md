@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.53 (2026-10-16)
+
+### Features
+
+- **daemon,gui:** workspaces, tabs and panes come back after a restart (4b37b19)
+
 ## 2026.10.52 (2026-10-16)
 
 ### Features
