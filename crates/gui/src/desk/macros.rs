@@ -451,6 +451,11 @@ impl Desk {
         self.macros.waiting()
     }
 
+    /// Whether a macro or a binding is being typed, or waits to go on.
+    pub(super) fn frames_typing(&self) -> bool {
+        !self.macros.frames.is_empty()
+    }
+
     /// Whether the key being handled comes from a macro or a binding
     /// being typed: an Esc among them doesn't stop what waits, as one
     /// pressed does.

@@ -349,6 +349,7 @@ mod tests {
         World {
             workspaces: Workspaces {
                 home: None,
+                restored: Vec::new(),
                 active: Some(WorkspaceId(1)),
                 list: vec![Workspace {
                     id: WorkspaceId(1),

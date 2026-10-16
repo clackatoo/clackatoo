@@ -73,6 +73,7 @@ mod offers;
 mod pieces;
 mod recovery;
 mod rename;
+mod restore;
 mod review;
 mod signs;
 mod stopping;
@@ -893,6 +894,8 @@ pub struct Daemon {
     forwards: forwards::Forwards,
     /// Buffers' recovery files, written as their changes are made.
     recovery: recovery::Recovery,
+    /// Keeping the workspaces from one run of the daemon to the next.
+    keeping: restore::Keeping,
 }
 
 /// Stops a running [`Daemon`] from another thread.
@@ -927,14 +930,20 @@ impl Daemon {
         }
         let listener = UnixListener::bind(socket_path)?;
         log::info!("listening on {}", socket_path.display());
-        let mut daemon = Self::listening(listener, config)?;
+        let mut daemon = Self::listening(listener, config, true)?;
         // What the daemons before it kept of buffers' changes not saved.
         daemon.start_recovery(None);
         Ok(daemon)
     }
 
-    /// A daemon with no terminals, listening on `listener`.
-    fn listening(mut listener: UnixListener, config: DaemonConfig) -> io::Result<Self> {
+    /// A daemon with no terminals, listening on `listener`: starting
+    /// afresh, it waits a moment for the lock on the workspaces it keeps
+    /// if it's held (see [`saved::lock`](crate::saved::lock)).
+    fn listening(
+        mut listener: UnixListener,
+        config: DaemonConfig,
+        afresh: bool,
+    ) -> io::Result<Self> {
         let poll = Poll::new()?;
         poll.registry()
             .register(&mut listener, LISTENER, Interest::READABLE)?;
@@ -954,6 +963,7 @@ impl Daemon {
             })
         };
         let boards = boards::BoardState::start(config.boards.clone(), &waker);
+        let keeping = restore::Keeping::new(&config, afresh);
         Ok(Self {
             poll,
             listener,
@@ -1013,6 +1023,7 @@ impl Daemon {
             web_unread: Vec::new(),
             forwards: forwards::Forwards::default(),
             recovery: recovery::Recovery::default(),
+            keeping,
         })
         .map(|mut daemon| {
             daemon.start_web();
@@ -1040,7 +1051,7 @@ impl Daemon {
         let state = &handover.state;
         let fds = &mut handover.fds;
         let listener = std::os::unix::net::UnixListener::from(fds.take(state.listener)?);
-        let mut daemon = Self::listening(UnixListener::from_std(listener), config)?;
+        let mut daemon = Self::listening(UnixListener::from_std(listener), config, false)?;
         daemon.next_id = state.next_terminal;
         daemon.workspaces = WorkspaceState::resume(&state.workspaces).unwrap_or_else(|err| {
             log::error!("the workspaces couldn't be taken over: {err}");
@@ -1103,6 +1114,7 @@ impl Daemon {
                 None
             });
         daemon.start_recovery(lock);
+        daemon.keep_places_kept();
         for orphan in &state.orphans {
             match Orphan::resume(orphan, fds) {
                 Ok(orphan) => daemon.watch_orphan(orphan),
@@ -1140,6 +1152,9 @@ impl Daemon {
     /// is shared: closing this daemon's copy leaves it open. Language
     /// servers are waited for until `servers_until`.
     fn hand_over(&mut self, servers_until: Instant) -> io::Result<Handover> {
+        // Written, for the next build to keep on from, before anything
+        // goes over to it.
+        self.keep_last();
         let mut fds = Fds::default();
         let listener = fds.add(self.listener.as_fd().try_clone_to_owned()?);
         let mut terminals = Vec::new();
@@ -1284,6 +1299,7 @@ impl Daemon {
                     .chain(self.next_forward_due())
                     .chain(self.next_recovery_due())
                     .chain(self.upgrade_to.as_ref().map(|upgrading| upgrading.until))
+                    .chain(self.keeping.due())
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
@@ -1321,6 +1337,7 @@ impl Daemon {
             self.take_renames();
             if self.take_boards() {
                 self.boards_read();
+                self.close_missing_boards();
             }
             self.ask_again();
             self.take_found();
@@ -1347,6 +1364,7 @@ impl Daemon {
             self.send_clipboard_writes();
             self.send_browser_frames();
             self.send_reviews();
+            self.keep_if_due();
             self.send_view_updates();
             self.transmit_quic();
             // Floods last, once this turn's updates have gone out, and
@@ -1383,6 +1401,8 @@ impl Daemon {
     fn stop(&mut self) {
         log::info!("shutting down");
         let started = Instant::now();
+        // As they are, before anything closes.
+        self.keep_last();
         let servers_until = started + stopping::STOP_WAIT;
         let until = started + STOPPING_WAIT;
         // A client waiting for an upgrade hears why there won't be one.
@@ -1688,6 +1708,7 @@ impl Daemon {
         self.schedule_compaction(id);
         self.collect_damage(id);
         self.terminal_moved_on(id);
+        self.note_shell(id);
     }
 
     /// Hands the lines the terminal changed to each client following it.
@@ -2161,6 +2182,8 @@ impl Daemon {
     /// client whose request changed them hears before the request's answer,
     /// which is queued after this.
     fn workspaces_changed(&mut self) {
+        self.workspaces.sweep_restored();
+        self.keep_soon();
         // A chat agents started may have come out of the background, or
         // gone back.
         self.note_subagents();
@@ -2333,7 +2356,9 @@ impl Daemon {
                     | ClientMessage::FileOp { .. }
                     | ClientMessage::Board { .. }
                     | ClientMessage::ListSessions { .. }
-                    | ClientMessage::Colour { .. }),
+                    | ClientMessage::Colour { .. }
+                    | ClientMessage::Place { .. }
+                    | ClientMessage::Dismiss { .. }),
                 ) => {
                     self.serve_unanswered(token, message);
                     continue;
@@ -2406,6 +2431,8 @@ impl Daemon {
                 self.list_sessions(token, id, &agent, &cwd);
             }
             ClientMessage::Colour { id, code } => self.colour_code(token, id, code),
+            ClientMessage::Place { pane, place } => self.serve_place(pane, place),
+            ClientMessage::Dismiss { pane } => self.serve_dismiss(pane),
             other => log::error!("{other:?} is answered"),
         }
     }
@@ -2807,6 +2834,7 @@ impl Daemon {
         self.views_pending = true;
         if chat {
             self.attached_to_chat(token, id);
+            self.show_restored_chat(id);
         }
         Ok(())
     }
@@ -2836,6 +2864,7 @@ impl Daemon {
         if let Some(terminal) = slot.terminal.pty() {
             terminal.send_input(bytes)?;
             slot.typist = Some(token);
+            self.typed_into(id, bytes);
             self.typed = Some((id, Instant::now()));
             self.update_pty_interest(id);
             self.note_device_typing(token, id);

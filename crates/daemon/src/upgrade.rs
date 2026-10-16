@@ -166,7 +166,9 @@ pub enum ServeError {
 ///
 /// With `resume`, this process was exec'd by an older build, and its
 /// handover is on stdin. If it can't be read, the terminals are lost (their
-/// programs are hung up), and the daemon starts afresh.
+/// programs are hung up), and the daemon starts afresh. A daemon starting
+/// afresh makes the workspaces kept from its last run again, with
+/// `restore` (see [`Daemon::restore_workspaces`]).
 ///
 /// # Errors
 ///
@@ -176,13 +178,14 @@ pub fn serve(
     runtime: &RuntimeDir,
     config: &DaemonConfig,
     resume: bool,
+    restore: bool,
     args: &[OsString],
 ) -> Result<(), ServeError> {
     // First of all, before any thread starts: a signal held back by the
     // build before, as it upgraded, is taken now, and the daemon stops as
     // soon as it's running.
     crate::signals::install()?;
-    serve_signalled(runtime, config, resume, args)
+    serve_signalled(runtime, config, resume, restore, args)
 }
 
 /// For tests: runs the daemon as [`serve`] does, but as a build from
@@ -197,9 +200,10 @@ pub fn serve_catching_no_signals(
     runtime: &RuntimeDir,
     config: &DaemonConfig,
     resume: bool,
+    restore: bool,
     args: &[OsString],
 ) -> Result<(), ServeError> {
-    serve_signalled(runtime, config, resume, args)
+    serve_signalled(runtime, config, resume, restore, args)
 }
 
 /// Runs the daemon as [`serve`] does, once the signals asking it to stop
@@ -208,6 +212,7 @@ fn serve_signalled(
     runtime: &RuntimeDir,
     config: &DaemonConfig,
     resume: bool,
+    restore: bool,
     args: &[OsString],
 ) -> Result<(), ServeError> {
     let resumed = if resume {
@@ -218,6 +223,7 @@ fn serve_signalled(
     } else {
         None
     };
+    let afresh = resumed.is_none();
     let (lock, mut daemon) = if let Some(resumed) = resumed {
         resumed
     } else {
@@ -227,6 +233,11 @@ fn serve_signalled(
     daemon.set_upgrade_args(args);
     // Once the lock is held: the directory is ours.
     daemon.install_shell_integration(runtime.path().join("shell"));
+    // Once the shells it starts are marked: an upgrade carried everything
+    // over itself.
+    if afresh && restore {
+        daemon.restore_workspaces();
+    }
 
     while let Some(Upgrade {
         executable,

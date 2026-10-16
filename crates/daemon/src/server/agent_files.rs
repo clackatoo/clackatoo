@@ -920,6 +920,8 @@ pub(super) mod tests {
             park_after: crate::DEFAULT_PARK_AFTER,
             fit_lasts: crate::DEFAULT_FIT_LASTS,
             rename_gate: None,
+            workspaces: None,
+            keep_gate: None,
             trash: Some(dir.join("Trash")),
             boards: None,
             recovery: None,

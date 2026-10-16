@@ -488,7 +488,7 @@ impl Daemon {
     /// Another isn't started beside it, as chats know their agent by its
     /// name, and letting the old one go would cut off the new one's chats
     /// as well.
-    fn connect(&mut self, id: TerminalId) {
+    pub(super) fn connect(&mut self, id: TerminalId) {
         let Some(chat) = self.chat(id) else { return };
         let name = chat.agent().to_owned();
         let agent = self.agents.named(&name);
@@ -1140,6 +1140,8 @@ impl Daemon {
                 let actions = chat.connected(opened);
                 self.act(terminal, actions);
                 self.note_settings(terminal);
+                // Its session may be a new one.
+                self.keep_soon();
             }
             // The session it had is gone, as one closed long ago may be: it
             // starts a new one, which hears the whole conversation.

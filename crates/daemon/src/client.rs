@@ -10,9 +10,9 @@ use clackatoo_protocol::frame::{self, FrameDecoder, FrameError, Head};
 use clackatoo_protocol::wire;
 use clackatoo_protocol::{
     Block, BufferId, Change, ChatAction, ClientMessage, Code, Error, Event, FileOp, FilesAction,
-    FilesId, HistoryLines, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal, Query, Request,
-    Response, Search, ServerMessage, Side, Size, TerminalId, TerminalInfo, Udp, View, Which,
-    WorkspaceId, Workspaces,
+    FilesId, HistoryLines, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal, Place, Query,
+    Request, Response, Search, ServerMessage, Side, Size, TerminalId, TerminalInfo, Udp, View,
+    Which, WorkspaceId, Workspaces,
 };
 
 use crate::quic::{self, Carried, Contact, Redial, Route};
@@ -564,6 +564,26 @@ impl Client {
     /// If the connection fails.
     pub fn colour(&mut self, id: u64, code: Vec<Code>) -> Result<(), ClientError> {
         self.send(&ClientMessage::Colour { id, code })
+    }
+
+    /// Tells the daemon where editor `pane`'s cursor and view are, to keep
+    /// for a restart.
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn place(&mut self, pane: PaneId, place: Place) -> Result<(), ClientError> {
+        self.send(&ClientMessage::Place { pane, place })
+    }
+
+    /// Dismisses the offer to run again the command `pane`'s terminal was
+    /// running when the daemon last stopped.
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn dismiss(&mut self, pane: PaneId) -> Result<(), ClientError> {
+        self.send(&ClientMessage::Dismiss { pane })
     }
 
     /// Limits how long [`next_event`](Self::next_event) and requests wait.

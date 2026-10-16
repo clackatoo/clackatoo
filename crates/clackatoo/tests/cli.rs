@@ -10,6 +10,7 @@ const BINARY: &str = env!("CARGO_BIN_EXE_clackatoo");
 /// Runs `clackatoo` with `args`, against the daemon in `runtime`.
 fn clackatoo(runtime: &Path, args: &[&str]) -> Output {
     Command::new(BINARY)
+        .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .args(args)
@@ -27,6 +28,7 @@ fn daemon(runtime: &Path) -> Child {
 /// answers.
 fn daemon_with(runtime: &Path, args: &[&str]) -> Child {
     let child = Command::new(BINARY)
+        .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .arg("daemon")
@@ -144,6 +146,7 @@ fn remote(runtime: &Path, ssh: &Path, remote_command: &str, args: &[&str]) -> Ou
         None => (args, &[][..]),
     };
     Command::new(BINARY)
+        .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .args(args)
@@ -261,6 +264,7 @@ fn the_bridge_relays_over_pipes() {
     let runtime = Runtime::new();
     // sshd gives the bridge pipes, between which a careless relay stalls.
     let mut bridge = Command::new(BINARY)
+        .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .arg("bridge")
@@ -343,6 +347,7 @@ fn config_sets_shows_and_unsets_settings() {
     let home = tempfile::tempdir().unwrap();
     let config = |args: &[&str]| {
         Command::new(BINARY)
+            .env("CLACKATOO_WORKSPACES", "off")
             .env("CLACKATOO_BOARDS", "off")
             .env("CLACKATOO_RECOVERY", "off")
             .arg("config")
@@ -375,6 +380,7 @@ fn edit_shows_a_folder_as_its_listing_and_the_current_one_with_no_path() {
     std::fs::create_dir(project.path().join("src")).unwrap();
     let edit = |args: &[&str]| {
         Command::new(BINARY)
+            .env("CLACKATOO_WORKSPACES", "off")
             .env("CLACKATOO_BOARDS", "off")
             .env("CLACKATOO_RECOVERY", "off")
             .arg("edit")
@@ -427,6 +433,7 @@ fn web_password_keeps_only_a_hash_of_a_long_enough_password() {
     let home = tempfile::tempdir().unwrap();
     let password = |input: &str| {
         let mut child = Command::new(BINARY)
+            .env("CLACKATOO_WORKSPACES", "off")
             .args(["web", "password"])
             .env("XDG_CONFIG_HOME", home.path())
             .stdin(std::process::Stdio::piped())
@@ -521,6 +528,7 @@ fn upgrading_keeps_terminals_and_their_programs_running() {
     let next = bin.path().join("clackatoo-next");
     std::fs::hard_link(BINARY, &next).unwrap();
     let upgraded = Command::new(&next)
+        .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .arg("upgrade")
@@ -603,6 +611,7 @@ fn upgrading_puts_a_fit_back_at_the_size_last_asked_for() {
     let next = bin.path().join("clackatoo-next");
     std::fs::hard_link(BINARY, &next).unwrap();
     let upgraded = Command::new(&next)
+        .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .arg("upgrade")
@@ -627,6 +636,7 @@ fn upgrading_keeps_chats_and_reaps_their_agent() {
     // refuses its own requests, sent back, and the chat says it couldn't
     // start. Enough to have an agent to hand over.
     let daemon = Command::new(BINARY)
+        .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .arg("daemon")
@@ -686,6 +696,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
     let runtime = Runtime::new();
     // `cat` for the agent, as above: the chat only needs to exist.
     let daemon = Command::new(BINARY)
+        .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .arg("daemon")
@@ -712,6 +723,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
     let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
 
     let mut mcp = Command::new(BINARY)
+        .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .args(["mcp", "--chat", &chat.0.to_string()])
@@ -738,6 +750,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
 
     // A terminal is no chat, and has no tools.
     let refused = Command::new(BINARY)
+        .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .args(["mcp", "--chat", "99"])
@@ -866,6 +879,7 @@ impl UserShell {
 
         let runtime = Runtime::new();
         let daemon = Command::new(BINARY)
+            .env("CLACKATOO_WORKSPACES", "off")
             .env("CLACKATOO_BOARDS", "off")
             .env("CLACKATOO_RECOVERY", "off")
             .arg("daemon")

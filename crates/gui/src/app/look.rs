@@ -777,6 +777,8 @@ mod tests {
             browser: None,
             web: None,
             trash: None,
+            workspaces: None,
+            keep_gate: None,
             ..DaemonConfig::from_env()
         };
         let mut daemon = Daemon::bind(&runtime.socket_path(), config).unwrap();

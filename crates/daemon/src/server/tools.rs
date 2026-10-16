@@ -1311,6 +1311,7 @@ impl Daemon {
             let commanded = self.tools.commanded.entry(terminal).or_default();
             commanded.typed(pty.emulator());
         }
+        self.typed_into(terminal, bytes);
         self.update_pty_interest(terminal);
         Ok(())
     }
@@ -1793,7 +1794,7 @@ pub(super) fn homely(path: &Path, home: &Path) -> String {
 
 /// Whether `ch` shows nothing itself but changes how what's around it
 /// shows: zero-width characters, and the marks that reorder text.
-fn invisible(ch: char) -> bool {
+pub(super) fn invisible(ch: char) -> bool {
     matches!(
         u32::from(ch),
         0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F

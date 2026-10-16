@@ -81,6 +81,37 @@ impl HostedChat {
         wanted.model = Some(model);
     }
 
+    /// It was made again as the daemon started, from the workspaces kept
+    /// from the last run (see `server::restore`): it doesn't ask its agent
+    /// for its session until it's shown, or sent a message, so starting
+    /// the daemon starts no agent.
+    pub(crate) fn wait_to_be_shown(&mut self) {
+        self.link = Link::Closed;
+    }
+
+    /// It's being shown: if it was made again as the daemon started and
+    /// hasn't asked for the session it goes on with yet, it does now, so
+    /// the conversation so far is told as it's looked at. Returns whether
+    /// it's to be connected.
+    pub(crate) fn opens_when_shown(&mut self) -> bool {
+        let waiting = self.link == Link::Closed
+            && self.told.load
+            && !self.told.skip
+            && self.node.turns.is_empty();
+        if waiting {
+            self.link = Link::Opening;
+            self.set_state(ChatState::Starting);
+        }
+        waiting
+    }
+
+    /// The model it's on, by its value, as its agent last said.
+    pub(crate) fn model(&self) -> Option<&str> {
+        let setting = (self.node.settings.iter())
+            .find(|setting| setting.kind == clackatoo_protocol::SettingKind::Model)?;
+        Some(&setting.value)
+    }
+
     /// Whether its session is to be loaded as it opens, telling the
     /// conversation so far: what its agent says of the session until it
     /// opens is that conversation, to [`replay`](Self::replay).

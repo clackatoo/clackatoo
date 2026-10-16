@@ -479,6 +479,7 @@ impl Daemon {
         let old = explorer.repo.take();
         let nested = std::mem::take(&mut explorer.nested);
         let viewers = explorer.viewers.clone();
+        self.keep_soon();
         self.forget_repo_unless_used(old);
         for nested in nested {
             self.forget_repo_unless_used(Some(nested));

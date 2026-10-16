@@ -2032,6 +2032,50 @@ pub(crate) fn paint_pill<'a>(
     (fill, texts)
 }
 
+/// The offer to run again what a terminal ran before a restart, over
+/// `tile`'s last row, where [`Offer`](crate::desk::Offer) lays it out by
+/// its cells, so a click lands on what it's drawn over: raised as the
+/// palette is, the command in the text colour and the rest muted, in the
+/// terminal's font.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn paint_offer<'a>(
+    geometry: &Geometry,
+    tile: &Tile,
+    offer: &'a crate::desk::Offer,
+) -> (Fill, Vec<Text<'a>>) {
+    let metrics = geometry.metrics;
+    let [cell_width, cell_height] = metrics.cell;
+    let x = (tile.origin[0] + f32::from(offer.col) * cell_width).round();
+    let y = (tile.origin[1] + f32::from(offer.row) * cell_height).round();
+    let width = (f32::from(offer.width()) * cell_width).round();
+    // As tall as the pill, around the row's text.
+    let top = (y - metrics.padding / 2.0).round();
+    let height = (cell_height + metrics.padding).round();
+    let fill = Fill::rounded([x, top, width, height], Paint::Palette, geometry.radius)
+        .bordered(geometry.edge, Paint::PaletteEdge);
+    let left = x + cell_width;
+    let text = offer.text.as_str();
+    let parts = [
+        (&text[..offer.command.start], Ink::Muted),
+        (&text[offer.command.clone()], Ink::Plain),
+        (&text[offer.command.end..], Ink::Muted),
+    ];
+    let mut cells = 0;
+    let texts = (parts.into_iter())
+        .map(|(content, ink)| {
+            let origin = [left + cells as f32 * cell_width, y];
+            cells += crate::render::mono_width(content);
+            Text {
+                origin,
+                content,
+                ink,
+                font: TextFont::Mono,
+            }
+        })
+        .collect();
+    (fill, texts)
+}
+
 /// An editor's panel by its cursor, as `view` places it in the pane whose
 /// cells start at `origin`: raised over the panes as the palette is, with
 /// its text in the terminal's font, code on a faint band or box, and a

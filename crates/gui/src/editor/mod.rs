@@ -4283,6 +4283,38 @@ impl Editor {
         self.follow(copy);
     }
 
+    /// Where its cursor and view are, for the daemon to keep for a
+    /// restart: the cursor's line and its byte in it, and the line at the
+    /// top of the view.
+    pub(crate) fn place(&self, copy: &BufferCopy) -> clackatoo_protocol::Place {
+        let text = self.text(copy);
+        let at = self.cursor.at;
+        let column = text.byte_at(at).saturating_sub(text.line_start(at.line));
+        clackatoo_protocol::Place {
+            line: at.line,
+            column: column as u64,
+            top: self.top.line,
+        }
+    }
+
+    /// Where its cursor and view are, as it keeps them: cheap to compare,
+    /// to see whether [`place`](Self::place) has changed.
+    pub(crate) fn spot(&self) -> (Point, u64) {
+        (self.cursor.at, self.top.line)
+    }
+
+    /// Puts its cursor and view back where `place` says they were, before
+    /// a restart, as far as the text goes now.
+    pub(crate) fn put_back(&mut self, place: clackatoo_protocol::Place, copy: &BufferCopy) {
+        self.top = Top {
+            line: place.top,
+            cell: 0,
+        };
+        let column = usize::try_from(place.column).unwrap_or(usize::MAX);
+        // Scrolls on from that top only as far as the cursor needs.
+        self.go_to(place.line, column, copy);
+    }
+
     /// Puts the cursor at the start of `line`, and that line at the top of
     /// the view, as `zt` does, as a lesson's next step is shown.
     pub(crate) fn go_to_top(&mut self, line: u64, copy: &BufferCopy) {
@@ -4298,7 +4330,7 @@ impl Editor {
         let (start, end) = (text.line_start(line), text.line_end(line));
         // Back to a character's start, from inside one.
         let rope = text.rope();
-        let at = rope.char_to_byte(rope.byte_to_char((start + col).min(end)));
+        let at = rope.char_to_byte(rope.byte_to_char(start.saturating_add(col).min(end)));
         text.point_of(at)
     }
 

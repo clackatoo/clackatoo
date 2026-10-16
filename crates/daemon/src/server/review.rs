@@ -1401,6 +1401,16 @@ impl Daemon {
         Some(&self.reviews.list.get(&review)?.root)
     }
 
+    /// What review `review` is of, to make it again: its chat, what it
+    /// lists, and its project's directory.
+    pub(super) fn review_of(
+        &self,
+        review: ReviewId,
+    ) -> Option<(Option<TerminalId>, ReviewScope, &Path)> {
+        let review = self.reviews.list.get(&review)?;
+        Some((review.chat, review.scope, &review.root))
+    }
+
     /// Sends the reviews' lists again, if they may have changed, to every
     /// client following them.
     pub(super) fn send_reviews(&mut self) {

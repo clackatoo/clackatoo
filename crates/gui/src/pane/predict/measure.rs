@@ -160,6 +160,8 @@ impl TestDaemon {
             lsp_trace: None,
             server_idle: Duration::ZERO,
             rename_gate: None,
+            workspaces: None,
+            keep_gate: None,
             trash: None,
             mcp: None,
             prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,

@@ -38,6 +38,7 @@
 //! | `file PATH` | Makes an empty file in the project, the folder the first shell starts in |
 //! | `file PATH <<END`, lines, `END` | Makes a file of those lines |
 //! | `config <<END`, lines, `END` | Makes the window's `init.lua` of those lines, which it runs as it opens |
+//! | `kept <<END`, lines, `END` | The workspaces a daemon kept (see `clackatoo_daemon`'s `saved`), with `$PROJECT` for the project's folder: the daemon makes them again as it starts, in place of a shell in the project |
 //! | `open PATH` | Opens the project's file in an editor, from normal mode: `<C-;>:Editor PATH<CR>` |
 //! | `keys KEYS` | Presses keys, in Vim's notation: `:Explore<CR>`, `<Space>ff`, `<C-w>v` |
 //! | `type TEXT` | Types the text, a key a character |
@@ -232,6 +233,7 @@ enum Command {
     Theme,
     File(PathBuf, String),
     Config(String),
+    Kept(String),
     Open(String),
     Keys(String),
     Type(String),
@@ -290,7 +292,7 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
             ),
             "theme" if rest == "dark" => Command::Theme,
             "theme" => bail!("line {line_number}: the window has only the dark theme so far"),
-            "file" | "config" => {
+            "file" | "config" | "kept" => {
                 let (path, until) = match rest.split_once("<<") {
                     Some((path, until)) => (path.trim(), Some(until.trim())),
                     None => (rest, None),
@@ -308,11 +310,15 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
                         contents.push('\n');
                     }
                 }
-                if word == "config" {
+                if word == "config" || word == "kept" {
                     if !path.is_empty() || until.is_none() {
-                        bail!("line {line_number}: `config` takes its lines: `config <<END`");
+                        bail!("line {line_number}: `{word}` takes its lines: `{word} <<END`");
                     }
-                    Command::Config(contents)
+                    if word == "kept" {
+                        Command::Kept(contents)
+                    } else {
+                        Command::Config(contents)
+                    }
                 } else {
                     let path = PathBuf::from(path);
                     if path.is_absolute() || path.components().any(|part| part.as_os_str() == "..")
@@ -406,8 +412,9 @@ fn example(name: &str) -> anyhow::Result<PathBuf> {
 
 /// Starts a daemon in the runtime directory the environment names, with
 /// the fake agent and the fake language server, and a workspace with a
-/// shell in `project`.
-fn start_daemon(project: &Path) -> anyhow::Result<Running> {
+/// shell in `project`, or else the workspaces `kept`, made again as a
+/// daemon starting afresh makes those it kept.
+fn start_daemon(project: &Path, kept: Option<&str>) -> anyhow::Result<Running> {
     let runtime = RuntimeDir::for_current_user();
     let lock = runtime.lock()?;
     let home = PathBuf::from(std::env::var_os("HOME").context("no HOME")?);
@@ -415,6 +422,19 @@ fn start_daemon(project: &Path) -> anyhow::Result<Running> {
     let mut config = DaemonConfig::from_env();
     config.udp_ports = None;
     config.web = None;
+    config.workspaces = match kept {
+        Some(kept) => {
+            let dir = clackatoo_daemon::state_dir().context("no state directory")?;
+            std::fs::create_dir_all(&dir)?;
+            let file = dir.join("workspaces");
+            std::fs::write(
+                &file,
+                kept.replace("$PROJECT", &project.display().to_string()),
+            )?;
+            Some(file)
+        }
+        None => None,
+    };
     config.browser = None;
     config.servers = None;
     config.agents.custom = vec![CustomAgent {
@@ -431,6 +451,9 @@ fn start_daemon(project: &Path) -> anyhow::Result<Running> {
     config.languages = Some(languages(&home.join("languages"))?);
     let mut daemon = Daemon::bind(&runtime.socket_path(), config)?;
     daemon.install_shell_integration(runtime.path().join("shell"));
+    if kept.is_some() {
+        daemon.restore_workspaces();
+    }
     let shutdown = daemon.shutdown_handle();
     let thread = std::thread::Builder::new()
         .name("daemon".into())
@@ -444,6 +467,9 @@ fn start_daemon(project: &Path) -> anyhow::Result<Running> {
         thread: Some(thread),
         _lock: lock,
     };
+    if kept.is_some() {
+        return Ok(running);
+    }
     // The window opens on this workspace, rather than make one with a
     // shell at home.
     let mut client = Client::connect(&runtime.socket_path())?;
@@ -560,7 +586,8 @@ impl Look {
                     window.rescale(*scale);
                 }
             }
-            Command::Theme => timed = false,
+            // The workspaces kept were made again as the daemon started.
+            Command::Theme | Command::Kept(_) => timed = false,
             Command::File(path, contents) => {
                 timed = false;
                 let path = self.project.join(path);
@@ -699,7 +726,11 @@ fn run_script(script: &Path, out: &Path) -> anyhow::Result<()> {
     let project = home.join(script.file_stem().context("a script with no name")?);
     std::fs::create_dir_all(&project)?;
     std::fs::create_dir_all(out)?;
-    let daemon = start_daemon(&project)?;
+    let kept = steps.iter().find_map(|step| match &step.command {
+        Command::Kept(kept) => Some(kept.as_str()),
+        _ => None,
+    });
+    let daemon = start_daemon(&project, kept)?;
     let mut look = Look {
         size: [1280, 800],
         scale: 1.0,

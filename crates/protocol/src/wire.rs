@@ -172,6 +172,10 @@ gates! {
     /// Buffers' changes not saved that came back from recovery files:
     /// `Request::Recover`.
     RECOVER = 89,
+    /// Workspaces kept from one run of the daemon to the next:
+    /// `Workspaces`' `restored` (`Restored`, `Place`), and
+    /// `ClientMessage::Place` and `ClientMessage::Dismiss`.
+    RESTORED = 90,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

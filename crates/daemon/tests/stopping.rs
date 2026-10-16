@@ -13,7 +13,8 @@ use std::time::{Duration, Instant, SystemTime};
 use clackatoo_daemon::{Client, ClientError, RuntimeDir, launch};
 use clackatoo_protocol::{
     AgentTools, BoardAction, BufferId, BufferSnapshot, BufferUpdate, Change, Edit, Event, NewAgent,
-    NewTerminal, OpenBoard, OpenFile, PaneTerminal, PostKind, ServerMessage, Size, TerminalId,
+    NewTerminal, OpenBoard, OpenFile, PaneTerminal, Place, PostKind, ServerMessage, Size,
+    TerminalId,
 };
 use rustix::process::{Pid, Signal};
 
@@ -91,7 +92,7 @@ impl Process {
     fn start_with(setup: &Setup, nohup: bool) -> Self {
         // A short path: socket paths are limited to about 100 bytes.
         let dir = tempfile::Builder::new().prefix("ck").tempdir().unwrap();
-        let child = spawn(dir.path(), setup, nohup);
+        let child = spawn(dir.path(), setup, nohup, &[]);
         let process = Self { dir, child };
         eventually("the daemon answers", || {
             Client::connect(&process.socket()).is_ok()
@@ -105,7 +106,18 @@ impl Process {
     fn kill_and_start_again(&mut self, setup: &Setup) {
         self.signal(Signal::KILL);
         self.child.wait().unwrap();
-        self.child = spawn(self.root(), setup, false);
+        self.child = spawn(self.root(), setup, false, &[]);
+        eventually("the daemon answers again", || {
+            Client::connect(&self.socket()).is_ok()
+        });
+    }
+
+    /// Starts the daemon again, as set up by default, in the same
+    /// directories, with `args` after `daemon`, once the last one has
+    /// exited, and waits until it answers.
+    fn start_again(&mut self, args: &[&str]) {
+        self.exits_within(Duration::from_secs(5));
+        self.child = spawn(self.root(), &Setup::default(), false, args);
         eventually("the daemon answers again", || {
             Client::connect(&self.socket()).is_ok()
         });
@@ -113,8 +125,8 @@ impl Process {
 }
 
 /// Starts a daemon set up as `setup` says, in `root`, ignoring SIGHUP if
-/// `nohup`, as `nohup` runs it.
-fn spawn(root: &Path, setup: &Setup, nohup: bool) -> Child {
+/// `nohup`, as `nohup` runs it, with `args` after `daemon`.
+fn spawn(root: &Path, setup: &Setup, nohup: bool, args: &[&str]) -> Child {
     if let Some(args) = &setup.server {
         let pack = root.join("data/clackatoo/languages/fake");
         std::fs::create_dir_all(&pack).unwrap();
@@ -154,6 +166,7 @@ fn spawn(root: &Path, setup: &Setup, nohup: bool) -> Child {
         // As `clackatoo daemon` is run: an upgrade runs the next build
         // with the same arguments, and there must be some.
         .arg("daemon")
+        .args(args)
         .env("HOME", root)
         .env("XDG_RUNTIME_DIR", root)
         .env("XDG_DATA_HOME", root.join("data"))
@@ -767,4 +780,82 @@ fn changes_not_saved_outlive_an_upgrade_and_then_the_daemon_being_killed() {
         std::fs::read_to_string(root.join("a.txt")).unwrap(),
         "one\n"
     );
+}
+
+/// The names of the workspaces of the daemon `client` is connected to.
+fn workspace_names(client: &mut Client) -> Vec<String> {
+    let workspaces = client.watch_workspaces().unwrap();
+    (workspaces.list.into_iter())
+        .map(|workspace| workspace.name)
+        .collect()
+}
+
+#[test]
+fn workspaces_come_back_as_the_daemon_starts_again_but_not_twice_after_an_upgrade_nor_with_fresh() {
+    let mut daemon = Process::start(&Setup::default());
+    let mut client = daemon.client();
+    let shell = PaneTerminal::New(NewTerminal {
+        size: Size::new(40, 10).unwrap(),
+        command: None,
+        cwd: None,
+        record_to: None,
+    });
+    let pane = client.new_workspace(Some("kept".into()), shell).unwrap();
+    // An editor in a tab no window shows, where a window last said it was.
+    let notes = daemon.root().join("notes.txt");
+    std::fs::write(&notes, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+    let workspace = client.watch_workspaces().unwrap().list[0].id;
+    let file = PaneTerminal::File(OpenFile {
+        path: notes.display().to_string(),
+        cwd: None,
+    });
+    let editor = client.new_tab(workspace, file).unwrap();
+    let place = Place {
+        line: 4,
+        column: 2,
+        top: 1,
+    };
+    client.place(editor, place).unwrap();
+    client.focus(pane).unwrap();
+    let kept = daemon.root().join("state/clackatoo/workspaces");
+    let says = |what: &[&str]| {
+        let text = std::fs::read_to_string(&kept).unwrap_or_default();
+        what.iter().all(|what| text.contains(what))
+    };
+    eventually("the editor's place is kept", || says(&["\"line\": 4"]));
+    drop(client);
+
+    // An upgrade carries the workspace over itself: it isn't made again.
+    let (_bin, next) = next_build("daemon-next");
+    upgrade(&daemon.socket(), &next);
+    daemon.becomes(&next);
+    let mut client = daemon.client();
+    assert_eq!(workspace_names(&mut client), ["kept"]);
+    // The editor's place, which no window has said again, is kept on.
+    let other = PaneTerminal::New(NewTerminal {
+        size: Size::new(40, 10).unwrap(),
+        command: None,
+        cwd: None,
+        record_to: None,
+    });
+    client.new_workspace(Some("after".into()), other).unwrap();
+    eventually("the change is kept", || says(&["\"after\"", "\"line\": 4"]));
+    drop(client);
+
+    // Stopped, the daemon writes them; started again, it makes them.
+    daemon.signal(Signal::TERM);
+    daemon.start_again(&[]);
+    assert_eq!(workspace_names(&mut daemon.client()), ["kept", "after"]);
+    assert!(says(&["\"kept\""]));
+
+    // Started `--fresh`, it has none, this once, and leaves the file as it
+    // is while nothing changes.
+    daemon.signal(Signal::TERM);
+    daemon.start_again(&["--fresh"]);
+    assert_eq!(workspace_names(&mut daemon.client()), Vec::<String>::new());
+    daemon.signal(Signal::TERM);
+    daemon.start_again(&[]);
+    assert_eq!(workspace_names(&mut daemon.client()), ["kept", "after"]);
+    let log = daemon.log();
+    assert!(log.contains("made again"), "{log}");
 }

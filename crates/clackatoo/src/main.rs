@@ -230,6 +230,13 @@ struct DaemonArgs {
     /// is fastest but takes about 8 bytes per column for every line.
     #[arg(long, value_name = "WHEN", default_value = "lazy")]
     scrollback_compaction: Compaction,
+    /// Start with no workspaces, this once, rather than making again the
+    /// workspaces, tabs and panes kept from the daemon's last run (in
+    /// `workspaces`, in clackatoo's state directory). That file is left as
+    /// it is until something changes; from then on, what this daemon has
+    /// is kept instead.
+    #[arg(long)]
+    fresh: bool,
 }
 
 /// [`clackatoo_term::Compaction`], as the command line spells it.
@@ -542,12 +549,13 @@ fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
     if let Some(web) = &mut config.web {
         web.assets = web_app::ASSETS;
     }
-    // An upgrade runs the next build with the same arguments.
+    // An upgrade runs the next build with the same arguments, but for
+    // `--fresh`, which was for this start alone.
     let rerun: Vec<OsString> = std::env::args_os()
         .skip(1)
-        .filter(|arg| arg != upgrade::RESUME_FLAG)
+        .filter(|arg| arg != upgrade::RESUME_FLAG && arg != "--fresh")
         .collect();
-    upgrade::serve(&runtime, &config, args.resume, &rerun)
+    upgrade::serve(&runtime, &config, args.resume, !args.fresh, &rerun)
         .with_context(|| format!("could not serve {}", runtime.socket_path().display()))
 }
 

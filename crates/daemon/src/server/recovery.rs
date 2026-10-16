@@ -841,7 +841,6 @@ impl Daemon {
     /// The buffer the recovery file named `key` came back as, as the
     /// daemon started: how a saved session finds a buffer with no file
     /// yet again, having kept its [`recovery_key`](Self::recovery_key).
-    #[allow(dead_code, reason = "for restoring saved sessions (CLACKA-114)")]
     pub(super) fn recovered_from(&self, key: &str) -> Option<BufferId> {
         self.recovery.from.get(key).copied()
     }
@@ -849,7 +848,6 @@ impl Daemon {
     /// The name buffer `id`'s recovery file has, or would have: what a
     /// saved session keeps to find it again after a crash, with
     /// [`recovered_from`](Self::recovered_from).
-    #[allow(dead_code, reason = "for restoring saved sessions (CLACKA-114)")]
     pub(super) fn recovery_key(&self, id: BufferId) -> String {
         recovery::key(self.id, id.0)
     }

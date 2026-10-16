@@ -29,7 +29,7 @@ const HEADER_LEN: usize = 4;
 
 /// How many kinds of [`ClientMessage`](crate::ClientMessage) this build
 /// has: a newer client's begin at this number.
-const CLIENT_MESSAGES: u32 = 17;
+const CLIENT_MESSAGES: u32 = 19;
 
 /// Serializes `message` into a complete frame, as a build of protocol
 /// `wire` would: downgraded first, for a peer older than this build (see
@@ -561,6 +561,7 @@ mod tests {
             }],
             active: None,
             home: None,
+            restored: Vec::new(),
         }));
         let mut frames: Vec<_> = client
             .iter()
@@ -785,9 +786,8 @@ mod tests {
     fn a_head_knows_the_kinds_of_message_this_build_has() {
         let head = |bytes: Vec<u8>| Head::of(&bytes[HEADER_LEN..]);
         // The last kind of client message is known; the next isn't.
-        let last = ClientMessage::Colour {
-            id: 1,
-            code: Vec::new(),
+        let last = ClientMessage::Dismiss {
+            pane: crate::PaneId(1),
         };
         let last = head(encode(PROTOCOL_VERSION, &last).unwrap());
         assert_eq!(last.get(0), Some(CLIENT_MESSAGES - 1));
@@ -803,6 +803,7 @@ mod tests {
             list: Vec::new(),
             active: None,
             home: None,
+            restored: Vec::new(),
         }));
         assert!(head(encode(PROTOCOL_VERSION, &workspaces).unwrap()).is_workspaces());
         let response = ServerMessage::Response(crate::Response::Done);

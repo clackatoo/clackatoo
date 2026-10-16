@@ -52,7 +52,18 @@ pub(super) struct Editors {
     held: VecDeque<Held>,
     /// The number the window attaches to buffers as.
     pub(super) window: WindowNumber,
+    /// Where editors the daemon made again as it started were, which their
+    /// cursors and views go back to once their files' text has come (see
+    /// [`Workspaces::restored`](clackatoo_protocol::Workspaces)).
+    put_back: HashMap<PaneId, clackatoo_protocol::Place>,
+    /// Where each editor was when the daemon was last told, for it to keep
+    /// for a restart, as [`Editor::spot`] has it, and when that was.
+    told: HashMap<PaneId, (crate::motion::Point, u64)>,
+    told_at: Option<Instant>,
 }
+
+/// How often, at most, the daemon is told where editors are.
+const TELL_PLACES: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The number a window attaches to buffers as: chosen at random when it
 /// starts, and the same on every connection, so the daemon can say which
@@ -274,13 +285,23 @@ impl Desk {
         editors
             .landings
             .retain(|pane, _| anywhere.contains_key(pane));
+        editors
+            .put_back
+            .retain(|pane, _| anywhere.contains_key(pane));
+        editors.told.retain(|pane, _| anywhere.contains_key(pane));
         self.drop_held_for_none();
         let (editors, options) = (&mut self.editors, &self.options);
         for &(pane, buffer) in &shown {
-            editors
-                .panes
-                .entry(pane)
-                .or_insert_with(|| Editor::new(buffer, options));
+            if let std::collections::hash_map::Entry::Vacant(entry) = editors.panes.entry(pane) {
+                entry.insert(Editor::new(buffer, options));
+                // Made again as the daemon started: where it was, it goes.
+                let restored = (self.workspaces.restored.iter())
+                    .find(|restored| restored.pane == pane)
+                    .and_then(|restored| restored.place);
+                if let Some(place) = restored {
+                    editors.put_back.insert(pane, place);
+                }
+            }
             editors
                 .buffers
                 .entry(buffer)
@@ -336,6 +357,21 @@ impl Desk {
     /// the pane has opened, or failed to.
     fn land(&mut self) {
         let editors = &mut self.editors;
+        editors.put_back.retain(|pane, place| {
+            if editors.opening.contains_key(pane) {
+                return true;
+            }
+            let Some(editor) = editors.panes.get_mut(pane) else {
+                return true;
+            };
+            match editors.buffers.get(&editor.buffer()) {
+                Some(copy) if copy.loaded() => {
+                    editor.put_back(*place, copy);
+                    false
+                }
+                _ => true,
+            }
+        });
         editors.landings.retain(|pane, place| {
             if editors.opening.contains_key(pane) {
                 return true;
@@ -1625,6 +1661,69 @@ impl Desk {
             .chain(self.macro_gives_up())
             .chain(self.insert_gives_up())
             .min()
+    }
+
+    /// When the daemon is next to be told where editors are, if any has
+    /// moved since it was last told: at once, or a moment after it last
+    /// was, so it's told at most once every [`TELL_PLACES`].
+    pub(crate) fn places_to_tell(&self) -> Option<Instant> {
+        if !self.connected || !self.daemon_has(wire::RESTORED) {
+            return None;
+        }
+        let editors = &self.editors;
+        // As the window wakes: compared, not worked out.
+        let moved = (editors.panes.iter()).any(|(pane, editor)| {
+            let copy = editors.buffers.get(&editor.buffer());
+            copy.is_some_and(|copy| {
+                copy.loaded()
+                    && !copy.is_scratch()
+                    && editors.told.get(pane) != Some(&editor.spot())
+            })
+        });
+        moved.then(|| {
+            editors
+                .told_at
+                .map_or_else(Instant::now, |at| at + TELL_PLACES)
+        })
+    }
+
+    /// Tells the daemon where each editor that has moved since it was last
+    /// told is, if it's time to, for it to keep for a restart. Returns
+    /// whether it did: there's nothing to draw for it.
+    pub(crate) fn tell_places(&mut self, now: Instant) -> bool {
+        if !self.connected || !self.daemon_has(wire::RESTORED) {
+            return false;
+        }
+        let editors = &mut self.editors;
+        if editors.told_at.is_some_and(|at| now < at + TELL_PLACES) {
+            return false;
+        }
+        let mut told = false;
+        for (&pane, editor) in &editors.panes {
+            let Some(copy) = editors.buffers.get(&editor.buffer()) else {
+                continue;
+            };
+            if !copy.loaded() || copy.is_scratch() {
+                continue;
+            }
+            let spot = editor.spot();
+            if editors.told.insert(pane, spot) != Some(spot) {
+                let place = editor.place(copy);
+                self.outbox.push(ClientMessage::Place { pane, place });
+                told = true;
+            }
+        }
+        if told {
+            editors.told_at = Some(now);
+        }
+        told
+    }
+
+    /// A new connection, to a daemon that may know nothing of where
+    /// editors are, as one just upgraded: it's told each again.
+    pub(super) fn tell_places_again(&mut self) {
+        self.editors.told.clear();
+        self.editors.told_at = None;
     }
 
     /// The soonest an editor's highlight on text just copied goes.

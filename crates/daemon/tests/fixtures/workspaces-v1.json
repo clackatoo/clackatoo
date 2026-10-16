@@ -1,0 +1,170 @@
+{
+  "clackatoo_workspaces": 1,
+  "workspaces": [
+    {
+      "name": "clackatoo",
+      "tabs": [
+        {
+          "name": null,
+          "layout": {
+            "split": {
+              "left_to_right": true,
+              "parts": [
+                {
+                  "pane": {
+                    "explorer": {
+                      "root": "/src/clackatoo"
+                    }
+                  }
+                },
+                {
+                  "split": {
+                    "left_to_right": false,
+                    "parts": [
+                      {
+                        "pane": {
+                          "editor": {
+                            "path": "/src/clackatoo/README.md",
+                            "place": {
+                              "line": 12,
+                              "column": 4,
+                              "top": 3
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "pane": {
+                          "terminal": {
+                            "cwd": "/src/clackatoo",
+                            "ran": "cargo watch"
+                          }
+                        }
+                      }
+                    ],
+                    "shares": [
+                      700,
+                      300
+                    ]
+                  }
+                }
+              ],
+              "shares": [
+                1,
+                3
+              ]
+            }
+          },
+          "focused": 1
+        },
+        {
+          "name": "agents",
+          "layout": {
+            "split": {
+              "left_to_right": true,
+              "parts": [
+                {
+                  "pane": {
+                    "chat": {
+                      "id": 7,
+                      "agent": "claude",
+                      "session": "5f0c",
+                      "title": "Fix the parser",
+                      "cwd": "/src/clackatoo",
+                      "model": "haiku",
+                      "tools": "allow",
+                      "task": false,
+                      "browser": true
+                    }
+                  }
+                },
+                {
+                  "pane": {
+                    "review": {
+                      "chat": 7,
+                      "scope": "base",
+                      "root": "/src/clackatoo"
+                    }
+                  }
+                },
+                {
+                  "pane": {
+                    "board": {
+                      "id": 2
+                    }
+                  }
+                }
+              ],
+              "shares": [
+                1,
+                1,
+                1
+              ]
+            }
+          },
+          "focused": 0
+        }
+      ],
+      "active_tab": 1
+    },
+    {
+      "name": "notes",
+      "tabs": [
+        {
+          "name": null,
+          "layout": {
+            "split": {
+              "left_to_right": false,
+              "parts": [
+                {
+                  "pane": {
+                    "folder": {
+                      "root": "/home/jack/notes"
+                    }
+                  }
+                },
+                {
+                  "pane": {
+                    "terminal": {
+                      "cwd": "/home/jack",
+                      "ran": null
+                    }
+                  }
+                },
+                {
+                  "pane": {
+                    "review": {
+                      "chat": null,
+                      "scope": {
+                        "turn": 3
+                      },
+                      "root": "/home/jack/notes"
+                    }
+                  }
+                },
+                {
+                  "pane": {
+                    "review": {
+                      "chat": null,
+                      "scope": "chat",
+                      "root": "/home/jack/notes"
+                    }
+                  }
+                }
+              ],
+              "shares": [
+                1,
+                1,
+                1,
+                1
+              ]
+            }
+          },
+          "focused": 0
+        }
+      ],
+      "active_tab": 0
+    }
+  ],
+  "active": 0
+}

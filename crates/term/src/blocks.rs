@@ -221,8 +221,13 @@ impl Blocks {
                 *last = running;
                 self.last()
             }
-            // The shell didn't mark a prompt.
-            _ => self.push(running),
+            // The shell didn't mark a prompt: whatever printed this, it
+            // isn't known to be the shell, so what it says ran isn't kept,
+            // as it's offered to run again after a restart.
+            _ => self.push(Entry {
+                command: None,
+                ..running
+            }),
         }
     }
 
@@ -627,6 +632,25 @@ mod tests {
         t.advance(PROMPT.as_bytes());
         t.advance(b"sleep 1\r\n\x1b]133;C\x07");
         assert_eq!(t.running_command(), None, "running, but not said what");
+    }
+
+    #[test]
+    fn a_program_cant_say_what_runs_while_a_command_does_or_with_no_prompt() {
+        let mut t = terminal(40, 10, 100);
+        t.advance(PROMPT.as_bytes());
+        t.advance(
+            b"make
+]133;C;cmdline_url=make",
+        );
+        let (block, _) = t.latest_block().unwrap();
+        // What make prints, marks and all, isn't the shell's.
+        t.advance(b"]133;C;cmdline_url=rm%20-rf%20~");
+        assert_eq!(t.running_command(), Some("make"));
+        assert_eq!(t.latest_block(), Some((block, Progress::Running)));
+        // A command with no prompt before it says nothing of what it is.
+        t.advance(b"]133;D;0]133;C;cmdline_url=rm%20-rf%20~");
+        assert_eq!(t.latest_block().map(|(_, at)| at), Some(Progress::Running));
+        assert_eq!(t.running_command(), None);
     }
 
     #[test]

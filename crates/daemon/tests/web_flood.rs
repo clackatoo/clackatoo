@@ -59,6 +59,8 @@ fn pipelined_requests_arent_answered_past_what_the_client_reads() {
         park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
         fit_lasts: clackatoo_daemon::DEFAULT_FIT_LASTS,
         rename_gate: None,
+        workspaces: None,
+        keep_gate: None,
         trash: None,
         boards: None,
         recovery: None,

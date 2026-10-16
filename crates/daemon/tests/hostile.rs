@@ -87,6 +87,8 @@ impl TestDaemon {
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             fit_lasts: clackatoo_daemon::DEFAULT_FIT_LASTS,
             rename_gate: None,
+            workspaces: None,
+            keep_gate: None,
             trash: Some(root.join("trash")),
             boards: Some(root.join("boards")),
             recovery: Some(clackatoo_daemon::RecoveryConfig::in_dir(

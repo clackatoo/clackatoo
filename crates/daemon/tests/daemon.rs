@@ -21,11 +21,11 @@ use clackatoo_protocol::{
     Edit, Error, Event, FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesId,
     FilesUpdate, Found, FoundBuffer, FoundLine, FoundSymbol, GitMark, InlayHint, InlayHintKind,
     Item, Kind, Layout, Limit, Location, NewAgent, NewTerminal, OpenBlank, OpenFile, OpenFiles,
-    Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, ProviderModels, Query, Request,
-    Response, Resume, Search, Selection, ServerFeatures, ServerMessage, Side, Size, Span,
-    SubagentStatus, Symbol, TerminalId, TerminalStatus, TextChange, Tool, ToolContent, ToolKind,
-    ToolStatus, Trigger, TurnFiles, TurnFilesState, Usage, Use, UseKind, View, ViewUpdate,
-    Workspaces,
+    Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, Place, ProviderModels, Query,
+    Request, Response, Restored, Resume, Search, Selection, ServerFeatures, ServerMessage, Side,
+    Size, Span, SubagentStatus, Symbol, TerminalId, TerminalStatus, TextChange, Tool, ToolContent,
+    ToolKind, ToolStatus, Trigger, TurnFiles, TurnFilesState, Usage, Use, UseKind, View,
+    ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -58,6 +58,31 @@ impl TestDaemon {
 
     /// A daemon with its config changed by `change`, given its directory.
     fn start_with(change: impl FnOnce(&Path, &mut DaemonConfig)) -> Self {
+        Self::start_with_restoring(change, false)
+    }
+
+    /// A daemon keeping its workspaces in `file`, as `clackatoo daemon`
+    /// keeps them in its state directory, and making those kept there
+    /// again as it starts afresh. Its chats talk to the fake agent, which
+    /// logs to `agent.log` in its directory.
+    fn keeping(file: &Path) -> Self {
+        Self::start_with_restoring(
+            |dir, config| {
+                let agent = vec![
+                    fake_agent().into(),
+                    "--log".into(),
+                    dir.join("agent.log").into(),
+                ];
+                config.agents.custom = vec![custom_agent("claude", agent)];
+                config.workspaces = Some(file.to_owned());
+            },
+            true,
+        )
+    }
+
+    /// A daemon with its config changed by `change`, given its directory,
+    /// making the workspaces it keeps again as it starts if `restore`.
+    fn start_with_restoring(change: impl FnOnce(&Path, &mut DaemonConfig), restore: bool) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut config = DaemonConfig {
             terminal: clackatoo_term::Config::default(),
@@ -80,6 +105,8 @@ impl TestDaemon {
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             fit_lasts: clackatoo_daemon::DEFAULT_FIT_LASTS,
             rename_gate: None,
+            workspaces: None,
+            keep_gate: None,
             boards: None,
             recovery: None,
             browser: None,
@@ -88,6 +115,9 @@ impl TestDaemon {
         };
         change(dir.path(), &mut config);
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
+        if restore {
+            daemon.restore_workspaces();
+        }
         let shutdown = daemon.shutdown_handle();
         let thread = std::thread::spawn(move || drop(daemon.run().expect("daemon failed")));
         Self {
@@ -16236,4 +16266,780 @@ fn a_daemon_that_cant_keep_changes_not_saved_says_so_once_they_are_made() {
         );
     }
     assert!(recovery_files(&kept).is_empty());
+}
+
+// --- Workspaces kept across restarts ---------------------------------------
+
+/// Waits until the workspaces kept in `file` satisfy `done`, as text,
+/// failing after a few seconds, and returns them.
+fn wait_for_kept(file: &Path, done: impl Fn(&str) -> bool) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let kept = std::fs::read_to_string(file).unwrap_or_default();
+        if done(&kept) {
+            return kept;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never kept; the file was:\n{kept}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Waits until the daemon's workspaces satisfy `done`, failing after a
+/// few seconds, and returns them.
+fn wait_for_workspaces(client: &mut Client, done: impl Fn(&Workspaces) -> bool) -> Workspaces {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let workspaces = client.watch_workspaces().unwrap();
+        if done(&workspaces) {
+            return workspaces;
+        }
+        assert!(Instant::now() < deadline, "never: {workspaces:#?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A shell in `dir`.
+fn shell_in(dir: &Path) -> PaneTerminal {
+    PaneTerminal::New(NewTerminal {
+        size: Size::new(60, 10).unwrap(),
+        command: None,
+        cwd: Some(dir.display().to_string()),
+        record_to: None,
+    })
+}
+
+/// `command`, run in a new terminal in `dir`.
+fn running_in(dir: &Path, command: &str) -> PaneTerminal {
+    PaneTerminal::New(NewTerminal {
+        size: Size::new(60, 10).unwrap(),
+        command: Some(vec!["sh".into(), "-c".into(), command.into()]),
+        cwd: Some(dir.display().to_string()),
+        record_to: None,
+    })
+}
+
+/// The terminal pane `pane` shows.
+fn terminal_of(workspaces: &Workspaces, pane: PaneId) -> TerminalId {
+    match workspaces.find_pane(pane).expect("the pane").2.content {
+        Content::Terminal(terminal) => terminal,
+        other => panic!("pane {pane} shows {other:?}"),
+    }
+}
+
+/// Waits until `terminal`'s shell, asked, says it's in `dir`.
+fn wait_for_pwd(client: &mut Client, terminal: TerminalId, dir: &Path) {
+    let dir = dir.canonicalize().unwrap().display().to_string();
+    client.send_input(terminal, b"pwd\r").unwrap();
+    // The answer may come after a prompt drawn late.
+    wait_for_screen(client, terminal, |text| {
+        text.lines()
+            .any(|line| line.trim_start_matches("$ ") == dir)
+    });
+}
+
+#[test]
+#[allow(clippy::too_many_lines, reason = "one restart, before and after")]
+fn workspaces_tabs_and_panes_come_back_after_a_restart_as_they_were() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("state/clackatoo/workspaces");
+    let project = kept.path().join("project");
+    std::fs::create_dir_all(project.join("sub")).unwrap();
+    let notes = project.join("notes.txt");
+    std::fs::write(&notes, "one\ntwo\nthree\n").unwrap();
+    let elsewhere = kept.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+
+    let first = {
+        let daemon = TestDaemon::keeping(&file);
+        let mut client = daemon.client();
+        let shell = client
+            .new_workspace(Some("work".into()), shell_in(&project))
+            .unwrap();
+        let open = OpenFile {
+            path: notes.display().to_string(),
+            cwd: None,
+        };
+        let editor = (client.split_pane(shell, Side::Right, PaneTerminal::File(open))).unwrap();
+        let files = OpenFiles {
+            dir: Some(project.join("sub").display().to_string()),
+        };
+        client
+            .split_pane(editor, Side::Below, PaneTerminal::Files(files))
+            .unwrap();
+        let tab = client.watch_workspaces().unwrap().list[0].tabs[0].id;
+        let resize = Request::ResizeSplit {
+            tab,
+            split: vec![],
+            shares: vec![1, 3],
+        };
+        assert_eq!(client.request(&resize).unwrap(), Response::Done);
+        let rename = Request::RenameTab {
+            tab,
+            name: "main".into(),
+        };
+        assert_eq!(client.request(&rename).unwrap(), Response::Done);
+        let place = Place {
+            line: 2,
+            column: 1,
+            top: 1,
+        };
+        client.place(editor, place).unwrap();
+        client
+            .new_workspace(Some("other".into()), shell_in(&elsewhere))
+            .unwrap();
+        client.focus(editor).unwrap();
+        // Written as it changes, well before the daemon stops.
+        wait_for_kept(&file, |kept| {
+            kept.contains("\"other\"") && kept.contains("\"line\": 2") && kept.contains("sub")
+        });
+        std::fs::read_to_string(&file).unwrap()
+    };
+    // As it stopped, nothing more had changed.
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), first);
+
+    let daemon = TestDaemon::keeping(&file);
+    let mut client = daemon.client();
+    let workspaces = client.watch_workspaces().unwrap();
+    let names: Vec<&str> = (workspaces.list.iter())
+        .map(|workspace| workspace.name.as_str())
+        .collect();
+    assert_eq!(names, ["work", "other"]);
+    let work = &workspaces.list[0];
+    assert_eq!(workspaces.active, Some(work.id));
+    let tab = &work.tabs[0];
+    assert_eq!(tab.name.as_deref(), Some("main"));
+    let Layout::Split {
+        axis: Axis::LeftToRight,
+        parts,
+        shares,
+    } = &tab.layout
+    else {
+        panic!("not side by side: {:?}", tab.layout);
+    };
+    assert_eq!(shares, &[1, 3]);
+    let panes = tab.layout.panes();
+    assert!(matches!(panes[0].content, Content::Terminal(_)));
+    assert!(matches!(panes[1].content, Content::Buffer(_)));
+    assert!(matches!(panes[2].content, Content::Files(_)));
+    assert!(matches!(
+        &parts[1],
+        Layout::Split {
+            axis: Axis::TopToBottom,
+            ..
+        }
+    ));
+    assert_eq!(tab.focused, panes[1].id);
+    // The editor's place, for windows to put it back.
+    assert_eq!(
+        workspaces.restored,
+        [Restored {
+            pane: panes[1].id,
+            ran: None,
+            place: Some(Place {
+                line: 2,
+                column: 1,
+                top: 1
+            }),
+        }]
+    );
+    // Each terminal is a new shell, where the last one was.
+    wait_for_pwd(&mut client, terminal_of(&workspaces, panes[0].id), &project);
+    let other = workspaces.list[1].tabs[0].layout.panes()[0].id;
+    wait_for_pwd(&mut client, terminal_of(&workspaces, other), &elsewhere);
+    drop(client);
+    drop(daemon);
+    // Kept again just as it was: the explorer at its root, the editor's
+    // place, which no window took, and the rest.
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), first);
+    // What was read is kept aside too, as what can't be made again, as on
+    // a disk not mounted, would be left out of the next write.
+    let previous = file.with_file_name("workspaces.previous");
+    assert_eq!(std::fs::read_to_string(previous).unwrap(), first);
+}
+
+#[test]
+fn a_terminal_whose_folder_has_gone_comes_back_at_home_and_a_file_gone_is_left_out() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let gone = kept.path().join("gone");
+    let json = serde_json::json!({
+        "clackatoo_workspaces": 1,
+        "workspaces": [{
+            "name": "w",
+            "tabs": [{"layout": {"split": {
+                "left_to_right": true,
+                "parts": [
+                    {"pane": {"editor": {"path": gone.join("notes.txt")}}},
+                    {"pane": {"terminal": {"cwd": gone}}},
+                ],
+                "shares": [1, 1],
+            }}}],
+        }],
+    });
+    std::fs::write(&file, json.to_string()).unwrap();
+    let daemon = TestDaemon::keeping(&file);
+    let mut client = daemon.client();
+    let workspaces = client.watch_workspaces().unwrap();
+    let tab = &workspaces.list[0].tabs[0];
+    // The split, with one part left, is that part.
+    let Layout::Pane(pane) = tab.layout else {
+        panic!("{:?}", tab.layout);
+    };
+    assert_eq!(tab.focused, pane.id);
+    wait_for_pwd(
+        &mut client,
+        terminal_of(&workspaces, pane.id),
+        daemon.dir.path(),
+    );
+}
+
+#[test]
+fn workspaces_that_cant_be_read_are_set_aside_and_the_daemon_starts_with_none() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let aside = kept.path().join("workspaces.unreadable");
+    for damaged in [
+        "{\"clackatoo_workspaces\": 1, \"workspaces\": [{\"na",
+        "{\"clackatoo_workspaces\": 2, \"from\": \"a newer build\"}",
+        "\u{0}\u{1}not even text",
+    ] {
+        std::fs::write(&file, damaged).unwrap();
+        let daemon = TestDaemon::keeping(&file);
+        let mut client = daemon.client();
+        assert!(client.watch_workspaces().unwrap().list.is_empty());
+        assert!(!file.exists());
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), damaged);
+        // It keeps what it has from then on.
+        client
+            .new_workspace(Some("new".into()), shell_in(kept.path()))
+            .unwrap();
+        wait_for_kept(&file, |kept| kept.contains("\"new\""));
+    }
+}
+
+#[test]
+fn a_command_a_shell_was_running_is_offered_once_after_a_restart_never_run() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let dir = kept.path();
+    // Typed into a shell, which runs what's after the marks in front of
+    // itself, in a process group of its own: as fish and zsh mark what
+    // they run.
+    let marked = |command: &str, then: &str| {
+        let url = command.replace(' ', "%%20");
+        format!("printf '\\033]133;A\\007\\033]133;C;cmdline_url={url}\\007'; {then}\r")
+    };
+    {
+        let daemon = TestDaemon::keeping(&file);
+        let mut client = daemon.client();
+        let first = client.new_workspace(None, shell_in(dir)).unwrap();
+        let second = (client.split_pane(first, Side::Right, shell_in(dir))).unwrap();
+        // A command whose first two words name the program, as `cargo
+        // watch` runs `cargo-watch`; and a script an interpreter runs, as
+        // node runs npm. Linked, not written: see `example`.
+        // Python, which minds nothing of the name it was run by, unlike
+        // the coreutils here.
+        std::os::unix::fs::symlink("/usr/bin/python3", dir.join("zz-cat")).unwrap();
+        std::fs::write(dir.join("zztool"), "sleep \"$1\"\n").unwrap();
+        let joined = (client.split_pane(second, Side::Below, shell_in(dir))).unwrap();
+        let script = (client.split_pane(joined, Side::Below, shell_in(dir))).unwrap();
+        // A command starting with a space, which shells keep out of their
+        // history.
+        let private = (client.split_pane(second, Side::Right, shell_in(dir))).unwrap();
+        // What a program prints claims to be the shell's: it's running
+        // `sh`, which plants another command as it goes, and then a
+        // finished command, a prompt and the start of a forged one.
+        let planted = (client.split_pane(private, Side::Below, shell_in(dir))).unwrap();
+        let forged = (client.split_pane(planted, Side::Below, shell_in(dir))).unwrap();
+        // A program run as the terminal's own, with no shell, printing
+        // marks of its own.
+        let own = "printf '\\033]133;A\\007\\033]133;C;cmdline_url=sleep%%2060\\007'; sleep 60";
+        (client.split_pane(forged, Side::Below, running_in(dir, own))).unwrap();
+        let workspaces = client.watch_workspaces().unwrap();
+        let typed = [
+            (first, marked("sleep 60", "sleep 60")),
+            (second, marked("sleep 61", "sleep 61")),
+            (
+                joined,
+                marked("zz cat 64", "./zz-cat -c 'import time; time.sleep(64)'"),
+            ),
+            (script, marked("zztool 65", "sh ./zztool 65")),
+            (private, marked(" sleep 62", "sleep 62")),
+            (
+                planted,
+                marked(
+                    "sh",
+                    "sh -c 'printf \"\\033]133;C;cmdline_url=sleep%%2099\\007\"; exec sleep 99'",
+                ),
+            ),
+            (
+                forged,
+                "printf '\\033]133;D;0\\007\\033]133;A\\007\\033]133;B\\007\
+                 \\033]133;C;cmdline_url=rm%%20-rf%%20x\\007'; sleep 63\r"
+                    .to_owned(),
+            ),
+        ];
+        for (pane, line) in &typed {
+            let terminal = terminal_of(&workspaces, *pane);
+            client.send_input(terminal, line.as_bytes()).unwrap();
+        }
+        wait_for_kept(&file, |kept| {
+            ["sleep 60", "sleep 61", "zz cat 64", "zztool 65"]
+                .iter()
+                .all(|ran| kept.contains(&format!("\"ran\": \"{ran}\"")))
+        });
+        // Long enough for the rest to have been seen, and passed over.
+        std::thread::sleep(Duration::from_millis(1500));
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(text.matches("\"ran\": \"").count(), 4, "{text}");
+    }
+    let daemon = TestDaemon::keeping(&file);
+    let mut client = daemon.client();
+    let workspaces = client.watch_workspaces().unwrap();
+    let panes = workspaces.list[0].tabs[0].layout.panes();
+    let offered: Vec<Option<&str>> = (workspaces.restored.iter())
+        .map(|restored| restored.ran.as_deref())
+        .collect();
+    assert_eq!(
+        offered,
+        [
+            Some("sleep 60"),
+            Some("sleep 61"),
+            Some("zz cat 64"),
+            Some("zztool 65")
+        ]
+    );
+    let offered: Vec<PaneId> = (workspaces.restored.iter())
+        .map(|restored| restored.pane)
+        .collect();
+    assert_eq!(offered[0], panes[0].id);
+    // Dismissed, it goes, and the new shell runs nothing of it.
+    client.dismiss(offered[0]).unwrap();
+    wait_for_workspaces(&mut client, |workspaces| {
+        workspaces.restored.len() == 3 && workspaces.restored[0].pane == offered[1]
+    });
+    let first = terminal_of(&workspaces, offered[0]);
+    client.send_input(first, b"echo ready\r").unwrap();
+    wait_for_screen(&mut client, first, |text| text.contains("\nready"));
+    assert!(!screen_text(&client.capture(first).unwrap()).contains("sleep"));
+    // A window saying it has the focus types nothing; anything typed
+    // into the terminal takes it away, so it's never put after half a
+    // line.
+    let second = terminal_of(&workspaces, offered[1]);
+    client.send_input(second, b"\x1b[I\x1b[O").unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(client.watch_workspaces().unwrap().restored.len(), 3);
+    client.send_input(second, b"ec").unwrap();
+    let left = wait_for_workspaces(&mut client, |workspaces| workspaces.restored.len() < 3);
+    assert_eq!(left.restored.len(), 2, "{left:#?}");
+    assert_eq!(left.restored[0].pane, offered[2]);
+    drop(client);
+    drop(daemon);
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(!text.contains("sleep 6"), "{text}");
+    assert_eq!(text.matches("\"ran\": \"").count(), 2, "{text}");
+}
+
+#[test]
+fn a_chat_keeps_its_session_and_goes_on_with_it_once_shown_after_a_restart() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let project = kept.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    {
+        let daemon = TestDaemon::keeping(&file);
+        let mut client = daemon.client();
+        let chat = PaneTerminal::Agent(NewAgent {
+            size: Size::new(40, 10).unwrap(),
+            cwd: Some(project.display().to_string()),
+            agent: None,
+            tools: AgentTools::Allow,
+            task: false,
+            browser: false,
+            model: None,
+            resume: Some(clackatoo_protocol::ResumeSession {
+                session: "past-1".to_owned(),
+                title: "Fix the parser".to_owned(),
+            }),
+        });
+        let pane = client.new_workspace(None, chat).unwrap();
+        let workspaces = client.watch_workspaces().unwrap();
+        let shown = terminal_of(&workspaces, pane);
+        wait_for_chat(&mut client, shown, |node| node.state == ChatState::Ready);
+        wait_for_kept(&file, |kept| {
+            kept.contains("\"session\": \"past-1\"")
+                && kept.contains("\"tools\": \"allow\"")
+                && kept.contains("\"model\": \"haiku\"")
+        });
+    }
+    let daemon = TestDaemon::keeping(&file);
+    let mut client = daemon.client();
+    let workspaces = client.watch_workspaces().unwrap();
+    let pane = workspaces.list[0].tabs[0].layout.panes()[0].id;
+    let restored = terminal_of(&workspaces, pane);
+    let info = client.list_terminals().unwrap();
+    assert_eq!(info[0].title, "Fix the parser");
+    // No agent starts with the daemon.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(child_processes_in(daemon.dir.path()).is_empty());
+    assert_eq!(agent_log(&daemon, "agent.log"), "");
+
+    // Shown, it loads its session, which tells the conversation so far,
+    // none of which acts now.
+    client.attach(restored).unwrap();
+    wait_for_log(&daemon, "agent.log", "told past-1");
+    let node = wait_for_chat(&mut client, restored, |node| {
+        node.state == ChatState::Ready && !node.turns.is_empty()
+    });
+    assert!(!project.join("a.txt").exists(), "{node:#?}");
+    let node = ask(&mut client, restored, "settings");
+    assert!(last_words(&node).contains("haiku"), "{node:#?}");
+    assert_eq!(
+        agent_log(&daemon, "agent.log")
+            .matches("loaded past-1")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_chat_not_shown_goes_on_with_its_session_when_sent_a_message() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let json = serde_json::json!({
+        "clackatoo_workspaces": 1,
+        "workspaces": [{"name": "w", "tabs": [{"layout": {"pane": {"chat": {
+            "id": 9,
+            "agent": "claude",
+            "session": "past-2",
+            "title": "Write the docs",
+            "cwd": kept.path(),
+        }}}}]}],
+    });
+    std::fs::write(&file, json.to_string()).unwrap();
+    let daemon = TestDaemon::keeping(&file);
+    let mut client = daemon.client();
+    let chat = client.list_terminals().unwrap()[0].id;
+    let node = ask(&mut client, chat, "cwd");
+    assert!(
+        last_words(&node).contains(&kept.path().display().to_string()),
+        "{node:#?}"
+    );
+    wait_for_log(&daemon, "agent.log", "told past-2");
+}
+
+#[test]
+fn workspaces_are_written_a_moment_after_they_change_off_the_loop() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let gate = kept.path().join("gate");
+    std::fs::write(&gate, "").unwrap();
+    let daemon = TestDaemon::start_with_restoring(
+        |_, config| {
+            config.workspaces = Some(file.clone());
+            config.keep_gate = Some(gate.clone());
+        },
+        true,
+    );
+    let mut client = daemon.client();
+    let changed = Instant::now();
+    let pane = client
+        .new_workspace(Some("w".into()), shell_in(kept.path()))
+        .unwrap();
+    let tab = client.watch_workspaces().unwrap().list[0].tabs[0].id;
+    let rename = |client: &mut Client, name: &str| {
+        let rename = Request::RenameTab {
+            tab,
+            name: name.into(),
+        };
+        assert_eq!(client.request(&rename).unwrap(), Response::Done);
+    };
+    rename(&mut client, "renamed");
+    // Not at once: a moment later, both changes together.
+    std::thread::sleep(Duration::from_millis(300));
+    if changed.elapsed() < Duration::from_millis(800) {
+        assert!(!file.exists());
+    }
+    wait_for_kept(&file, |kept| kept.contains("\"renamed\""));
+
+    // A write that can't finish, as to a disk that's stuck, holds up
+    // nothing: the daemon answers, and changes go on.
+    std::fs::remove_file(&gate).unwrap();
+    client
+        .split_pane(pane, Side::Below, shell_in(kept.path()))
+        .unwrap();
+    // Long enough for the write to have begun, and be held.
+    std::thread::sleep(Duration::from_millis(1500));
+    for round in 0..3 {
+        let asked = Instant::now();
+        client.list_terminals().unwrap();
+        rename(&mut client, &format!("stuck {round}"));
+        assert!(
+            asked.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            asked.elapsed()
+        );
+    }
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(!text.contains("stuck"), "{text}");
+    // Let it go: the newest of what came meanwhile is written.
+    std::fs::write(&gate, "").unwrap();
+    wait_for_kept(&file, |kept| kept.contains("\"stuck 2\""));
+}
+
+#[test]
+fn boards_come_back_and_a_pane_whose_board_has_gone_closes_once_theyre_read() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let boards = kept.path().join("boards");
+    let start = || {
+        let (file, boards) = (file.clone(), boards.clone());
+        TestDaemon::start_with_restoring(
+            move |_, config| {
+                config.workspaces = Some(file);
+                config.boards = Some(boards);
+            },
+            true,
+        )
+    };
+    {
+        let daemon = start();
+        let mut client = daemon.client();
+        let board = PaneTerminal::Board(clackatoo_protocol::OpenBoard::Named("plan".into()));
+        client.new_workspace(None, board).unwrap();
+        wait_for_kept(&file, |kept| kept.contains("\"board\""));
+    }
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let board = state["workspaces"][0]["tabs"][0]["layout"]["pane"].take();
+    let id = board["board"]["id"].as_u64().unwrap();
+    // Beside it, a pane showing a board since deleted.
+    state["workspaces"][0]["tabs"][0]["layout"] = serde_json::json!({"split": {
+        "left_to_right": true,
+        "parts": [{"pane": board}, {"pane": {"board": {"id": id + 1}}}],
+        "shares": [1, 1],
+    }});
+    std::fs::write(&file, state.to_string()).unwrap();
+    let daemon = start();
+    let mut client = daemon.client();
+    let workspaces = wait_for_workspaces(&mut client, |workspaces| {
+        workspaces.list[0].tabs[0].layout.panes().len() == 1
+    });
+    let left = workspaces.list[0].tabs[0].layout.panes()[0];
+    assert_eq!(
+        left.content,
+        Content::Board(clackatoo_protocol::BoardId(u32::try_from(id).unwrap()))
+    );
+}
+
+#[test]
+fn a_review_comes_back_of_the_chat_it_was_of() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let json = serde_json::json!({
+        "clackatoo_workspaces": 1,
+        "workspaces": [{"name": "w", "tabs": [{"layout": {"split": {
+            "left_to_right": true,
+            "parts": [
+                {"pane": {"review": {"chat": 9, "scope": "base", "root": kept.path()}}},
+                {"pane": {"chat": {"id": 9, "agent": "claude", "cwd": kept.path()}}},
+                // The same chat again, as only a file mended by hand has.
+                {"pane": {"chat": {"id": 9, "agent": "claude", "cwd": kept.path()}}},
+            ],
+            "shares": [1, 1, 1],
+        }}}]}],
+    });
+    std::fs::write(&file, json.to_string()).unwrap();
+    let daemon = TestDaemon::keeping(&file);
+    let mut client = daemon.client();
+    let workspaces = client.watch_workspaces().unwrap();
+    let panes = workspaces.list[0].tabs[0].layout.panes();
+    assert_eq!(panes.len(), 2, "a chat is in one pane at most");
+    assert_eq!(client.list_terminals().unwrap().len(), 1);
+    assert!(matches!(panes[0].content, Content::Review(_)));
+    let chat = terminal_of(&workspaces, panes[1].id);
+    drop(client);
+    drop(daemon);
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let parts = &state["workspaces"][0]["tabs"][0]["layout"]["split"]["parts"];
+    assert_eq!(parts[0]["pane"]["review"]["chat"], chat.0);
+    assert_eq!(parts[0]["pane"]["review"]["scope"], "base");
+    assert_eq!(parts[1]["pane"]["chat"]["id"], chat.0);
+    // A chat that never opened a session keeps none.
+    assert_eq!(parts[1]["pane"]["chat"]["session"], serde_json::Value::Null);
+}
+
+#[test]
+fn no_more_than_512_panes_are_made_again_and_a_layout_nested_too_deep_is_set_aside() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    // Boards, as they start nothing; this daemon keeps none, so none is
+    // closed for not being there.
+    let boards: Vec<serde_json::Value> = (0..600)
+        .map(|id| serde_json::json!({"pane": {"board": {"id": id}}}))
+        .collect();
+    let json = serde_json::json!({
+        "clackatoo_workspaces": 1,
+        "workspaces": [{"name": "w", "tabs": [{"layout": {"split": {
+            "left_to_right": true,
+            "shares": vec![1; boards.len()],
+            "parts": boards,
+        }}}]}],
+    });
+    std::fs::write(&file, json.to_string()).unwrap();
+    {
+        let daemon = TestDaemon::keeping(&file);
+        let mut client = daemon.client();
+        let workspaces = client.watch_workspaces().unwrap();
+        assert_eq!(workspaces.list[0].tabs[0].layout.panes().len(), 512);
+    }
+
+    // Splits in splits, far deeper than any window reads.
+    let mut layout = serde_json::json!({"pane": {"board": {"id": 1}}});
+    for _ in 0..300 {
+        layout = serde_json::json!({"split": {
+            "left_to_right": true,
+            "parts": [layout, {"pane": {"board": {"id": 2}}}],
+            "shares": [1, 1],
+        }});
+    }
+    let json = serde_json::json!({
+        "clackatoo_workspaces": 1,
+        "workspaces": [{"name": "w", "tabs": [{"layout": layout}]}],
+    });
+    std::fs::write(&file, json.to_string()).unwrap();
+    let daemon = TestDaemon::keeping(&file);
+    let mut client = daemon.client();
+    assert!(client.watch_workspaces().unwrap().list.is_empty());
+    assert!(kept.path().join("workspaces.unreadable").exists());
+}
+
+#[test]
+fn an_editors_place_comes_back_within_its_file_as_it_is_now() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let notes = kept.path().join("notes.txt");
+    std::fs::write(&notes, "one\ntwo\nlonger line\n").unwrap();
+    let json = serde_json::json!({
+        "clackatoo_workspaces": 1,
+        "workspaces": [{"name": "w", "tabs": [{"layout": {"split": {
+            "left_to_right": true,
+            "parts": [
+                {"pane": {"editor": {"path": notes, "place": {"line": 999, "column": 999, "top": 500}}}},
+                {"pane": {"editor": {"path": notes, "place": {"line": 1, "column": 999, "top": 0}}}},
+            ],
+            "shares": [1, 1],
+        }}}]}],
+    });
+    std::fs::write(&file, json.to_string()).unwrap();
+    let daemon = TestDaemon::keeping(&file);
+    let mut client = daemon.client();
+    let workspaces = client.watch_workspaces().unwrap();
+    let places: Vec<Place> = (workspaces.restored.iter())
+        .filter_map(|restored| restored.place)
+        .collect();
+    assert_eq!(
+        places,
+        [
+            // The line after the last line break, empty.
+            Place {
+                line: 3,
+                column: 0,
+                top: 3
+            },
+            Place {
+                line: 1,
+                column: 3,
+                top: 0
+            },
+        ]
+    );
+}
+
+#[test]
+fn an_editor_of_changes_not_saved_comes_back_showing_them() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().canonicalize().unwrap();
+    let recovery = root.join("recovery");
+    let file = root.join("workspaces");
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    let start = || {
+        let (recovery, file) = (recovery.clone(), file.clone());
+        TestDaemon::start_with_restoring(
+            move |_, config| {
+                let mut kept = RecoveryConfig::in_dir(recovery);
+                kept.after = Duration::from_millis(50);
+                config.recovery = Some(kept);
+                config.workspaces = Some(file);
+            },
+            true,
+        )
+    };
+    {
+        let daemon = start();
+        let mut client = daemon.client();
+        client.watch_workspaces().unwrap();
+        // A buffer with no file yet, and a file, each with changes.
+        let pane = client.new_workspace(None, blank(&root)).unwrap();
+        let b = buffer_in(&mut client, pane);
+        attach_buffer(&mut client, b);
+        send_change(&mut client, b, 1, insert(0, 0, "draft\n", 0));
+        let other = (client.split_pane(pane, Side::Right, open_file(&root, "a.txt"))).unwrap();
+        let a = buffer_in(&mut client, other);
+        attach_buffer(&mut client, a);
+        send_change(&mut client, a, 1, insert(4, 4, "two\n", 0));
+        wait_for_recovery_files(&recovery, |files| files.len() == 2);
+        wait_for_kept(&file, |kept| kept.matches("\"recovery\"").count() == 2);
+    }
+    let lock = std::fs::File::open(recovery.join(".lock")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
+        assert!(Instant::now() < deadline, "the lock is still held");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(lock);
+    let daemon = start();
+    let mut client = daemon.client();
+    let workspaces = client.watch_workspaces().unwrap();
+    let panes = workspaces.list[0].tabs[0].layout.panes();
+    assert_eq!(panes.len(), 2, "{workspaces:#?}");
+    let texts: Vec<(String, String, bool)> = (panes.iter())
+        .map(|pane| {
+            let Content::Buffer(buffer) = pane.content else {
+                panic!("{pane:?}");
+            };
+            let snapshot = attach_buffer(&mut client, buffer);
+            (snapshot.path, snapshot.text, snapshot.modified)
+        })
+        .collect();
+    let a = root.join("a.txt").display().to_string();
+    assert_eq!(
+        texts,
+        [
+            (String::new(), "draft\n".to_owned(), true),
+            (a, "one\ntwo\n".to_owned(), true),
+        ]
+    );
+}
+
+#[test]
+fn a_folder_named_for_the_workspaces_is_left_as_it_is() {
+    use std::os::unix::fs::PermissionsExt;
+    let kept = tempfile::tempdir().unwrap();
+    let shared = kept.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let file = shared.join("ws.json");
+    let daemon = TestDaemon::keeping(&file);
+    let mut client = daemon.client();
+    client
+        .new_workspace(Some("w".into()), shell_in(kept.path()))
+        .unwrap();
+    wait_for_kept(&file, |kept| kept.contains("\"w\""));
+    let mode = std::fs::metadata(&shared).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755, "as it was");
 }

@@ -1106,6 +1106,7 @@ mod tests {
         let mut state = State::default();
         state.workspaces = Workspaces {
             home: None,
+            restored: Vec::new(),
             list: vec![Workspace {
                 id: WorkspaceId(1),
                 name: "clackatoo".into(),
@@ -1408,6 +1409,7 @@ mod tests {
         let mut state = State::default();
         state.workspaces = Workspaces {
             home: None,
+            restored: Vec::new(),
             list: vec![Workspace {
                 id: WorkspaceId(1),
                 name: "clackatoo".into(),

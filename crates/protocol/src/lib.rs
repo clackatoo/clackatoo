@@ -113,13 +113,13 @@ pub use view::{
     Links, Node, NodeId, Patch, Run, View, ViewUpdate,
 };
 pub use workspace::{
-    Axis, Content, Layout, MAX_NESTING, Pane, PaneId, PaneKind, PaneTerminal, Side, Tab, TabId,
-    Workspace, WorkspaceId, Workspaces,
+    Axis, Content, Layout, MAX_NESTING, Pane, PaneId, PaneKind, PaneTerminal, Place, Restored,
+    Side, Tab, TabId, Workspace, WorkspaceId, Workspaces,
 };
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 89;
+pub const PROTOCOL_VERSION: u32 = 90;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -314,6 +314,26 @@ pub enum ClientMessage {
         /// The blocks of code. The daemon colours no more than 64 of them,
         /// nor more than 256 KiB of code in all.
         code: Vec<Code>,
+    },
+    /// Where the cursor and view of an editor pane are, for the daemon to
+    /// keep, so that a restart puts them back. A window says so for each
+    /// editor it shows that has moved since it last said, at most once a
+    /// second, and for every one again on each new connection, as the
+    /// daemon may be another build by then. Not answered. Only to a daemon of protocol 90 or later: a client asks
+    /// [`wire::daemon_has`] with [`wire::RESTORED`] before sending it.
+    Place {
+        /// The pane.
+        pane: PaneId,
+        /// Where they are.
+        place: Place,
+    },
+    /// Dismisses what a pane made again as the daemon started had to show
+    /// for it ([`Workspaces::restored`]): the offer of the command its
+    /// terminal was running, to put at its prompt. Not answered. Only to a daemon of
+    /// protocol 90 or later, as [`ClientMessage::Place`].
+    Dismiss {
+        /// The pane.
+        pane: PaneId,
     },
 }
 

@@ -28,7 +28,7 @@ use clackatoo_text::{
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
     BLANK, BLOCK_MARKS, BLOCKS, COLOURS, EXITED, FALLBACKS, FORWARD_PACE, FORWARDS, HOVER,
-    INLAY_HINTS, LIMITS, PHONE_TERMINALS, PREVIEW_COLOURS, RECOVER, SYMBOLS, USES, WORDS,
+    INLAY_HINTS, LIMITS, PHONE_TERMINALS, PREVIEW_COLOURS, RECOVER, RESTORED, SYMBOLS, USES, WORDS,
 };
 use crate::{
     AgentSession, AgentTools, Author, Axis, BlockMarks, BoardId, BufferId, BufferSnapshot,
@@ -48,9 +48,9 @@ use crate::{
     CompletionItem, Device, Done, Entry, EntryKind, Expect, FileLocation, FileOp, FileOpError,
     FileStamp, FilesAction, FilesUpdate, Forward, ForwardFailure, Found, FoundLine, FoundSymbol,
     GitMark, Hunks, InlayHint, InlayHintKind, Made, OpenBlank, OpenBoard, OpenFile, OpenFiles,
-    PairingAsk, PairingState, PostKind, Query, ReviewAction, ReviewChat, ReviewComment, ReviewFile,
-    ReviewHunk, ReviewList, ReviewScope, Search, ServerFeatures, Symbol, TextChange, Trigger, Udp,
-    Use, UseKind,
+    PairingAsk, PairingState, Place, PostKind, Query, Restored, ReviewAction, ReviewChat,
+    ReviewComment, ReviewFile, ReviewHunk, ReviewList, ReviewScope, Search, ServerFeatures, Symbol,
+    TextChange, Trigger, Udp, Use, UseKind,
 };
 
 /// One sample: a message either side sends.
@@ -559,6 +559,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 }],
                 active: None,
                 home: None,
+                restored: Vec::new(),
             }))),
         ),
         (
@@ -887,6 +888,42 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 drop: true,
             })),
         ),
+    ]);
+    // Workspaces made again as the daemon started: a terminal's command to
+    // offer to run again, and an editor's place, which windows say and
+    // dismiss.
+    let place = Place {
+        line: 120,
+        column: 8,
+        top: 101,
+    };
+    samples.extend([
+        (
+            RESTORED,
+            Server(ServerMessage::Event(Event::Workspaces(Workspaces {
+                restored: vec![
+                    Restored {
+                        pane: PaneId(1),
+                        ran: Some("cargo watch -x test".into()),
+                        place: None,
+                    },
+                    Restored {
+                        pane: PaneId(2),
+                        ran: None,
+                        place: Some(place),
+                    },
+                ],
+                ..workspaces()
+            }))),
+        ),
+        (
+            RESTORED,
+            Client(ClientMessage::Place {
+                pane: PaneId(2),
+                place,
+            }),
+        ),
+        (RESTORED, Client(ClientMessage::Dismiss { pane: PaneId(1) })),
     ]);
     samples
 }
@@ -1887,6 +1924,7 @@ fn workspaces() -> Workspaces {
         }],
         active: Some(WorkspaceId(1)),
         home: None,
+        restored: Vec::new(),
     }
 }
 

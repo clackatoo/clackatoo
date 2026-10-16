@@ -163,6 +163,8 @@ impl TestDaemon {
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             fit_lasts: clackatoo_daemon::DEFAULT_FIT_LASTS,
             rename_gate: None,
+            workspaces: None,
+            keep_gate: None,
             trash: None,
             boards: None,
             recovery: None,
@@ -1509,10 +1511,10 @@ fn the_list_says_where_each_terminal_is_and_what_it_runs() {
     let terminal = shell_in_a_workspace(&mut window);
     let cookie = daemon.pair();
     let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
-    // As a shell with clackatoo's integration says where it is, and what
-    // it starts.
-    let typed = "printf '\\033]7;file://desk/tmp/place\\007\\033]133;C;cmdline_url=sleep%%2030\\007'; \
-                 sleep 30\r";
+    // As a shell with clackatoo's integration says where it is, and, at
+    // its prompt, what it starts.
+    let typed = "printf '\\033]7;file://desk/tmp/place\\007\\033]133;A\\007\
+                 \\033]133;C;cmdline_url=sleep%%2030\\007'; sleep 30\r";
     window.send_input(terminal, typed.as_bytes()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let info = loop {

@@ -321,6 +321,7 @@ impl Daemon {
         log::info!("buffer {id}: named {}", to.display());
         let shown = to.display().to_string();
         self.tell_viewers(id, None, &BufferUpdate::Moved(shown));
+        self.keep_soon();
         if let Some(modified) = saved {
             self.tell_viewers(id, None, &BufferUpdate::Modified(modified));
         }
@@ -703,6 +704,7 @@ impl Daemon {
         for update in &unsaid {
             self.tell_viewers(id, None, update);
         }
+        self.keep_soon();
         self.parse_buffer(id);
         self.open_in_server(id);
         self.compare_buffer(id);

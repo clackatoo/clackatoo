@@ -1971,6 +1971,13 @@ impl App {
                 Some((drawing.tile, pill))
             })
             .collect();
+        let offers: Vec<(Tile, crate::desk::Offer)> = (drawings.iter())
+            .filter_map(|drawing| {
+                let offer =
+                    desk.ran_offer(drawing.terminal?, drawing.tile.cols, drawing.tile.rows)?;
+                Some((drawing.tile, offer))
+            })
+            .collect();
         let mut texts = painted.texts;
         texts.extend(painted.over_texts);
         let mut over: Vec<Fill> = Vec::new();
@@ -1997,6 +2004,13 @@ impl App {
                 let (fill, pill_texts) = chrome::paint_pill(geometry, tile, pill);
                 over.push(fill);
                 texts.extend(pill_texts);
+            }
+            // And the offer to run again what a terminal ran before a
+            // restart, at its bottom right.
+            for (tile, offer) in &offers {
+                let (fill, offer_texts) = chrome::paint_offer(geometry, tile, offer);
+                over.push(fill);
+                texts.extend(offer_texts);
             }
         }
         // Ctrl+B p: each pane's number, over it, to pick it by.
@@ -2904,6 +2918,11 @@ impl App {
             self.send_outbox();
             self.request_redraw();
         }
+        // Where editors are, for the daemon to keep for a restart, if
+        // they've moved: nothing to draw.
+        if self.desk.tell_places(Instant::now()) {
+            self.send_outbox();
+        }
         // A terminal's guess at the echo of a key may have waited long
         // enough to be taken as wrong.
         if self.desk.tick_panes(Instant::now()) {
@@ -2933,6 +2952,7 @@ impl App {
             .chain(self.desk.grep_at())
             .chain(self.desk.format_at())
             .chain(self.desk.editor_wakes())
+            .chain(self.desk.places_to_tell())
             .chain(self.desk.chat_wakes())
             .chain(self.desk.pane_wakes())
             .chain(self.desk.config_ends())

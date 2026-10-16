@@ -503,6 +503,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "explorer",
         what: "Changes not written, [No Name]'s too, outlive a crash or a stop, and :recover shows them",
     },
+    News {
+        id: "restore",
+        date: "2026-10-16",
+        lesson: "shell",
+        what: "Workspaces, tabs and panes come back after a restart; R puts what a terminal ran at its prompt",
+    },
 ];
 
 impl News {

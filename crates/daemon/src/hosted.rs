@@ -201,6 +201,55 @@ impl HostedTerminal {
         cwd.into_os_string().into_string().ok()
     }
 
+    /// The directory the terminal's own program is in: for a shell, where
+    /// it last changed to, whatever runs in front of it.
+    pub(crate) fn own_directory(&self) -> Option<String> {
+        let cwd = std::fs::read_link(format!("/proc/{}/cwd", self.pid)).ok()?;
+        cwd.into_os_string().into_string().ok()
+    }
+
+    /// Whether `command`, which the shell's marks say it's running, is
+    /// what's in front of it: a process group other than the shell's own,
+    /// whose first process's program is named as the command's first
+    /// word is; or, as `cargo watch` runs `cargo-watch`, as its first two
+    /// joined with `-`; or whose first argument is, as an interpreter runs
+    /// a script, as node runs npm. Anything a program prints could say
+    /// it's running anything: this says only that the shell started what
+    /// it said. The program's arguments are compared, never kept.
+    pub(crate) fn runs_in_front(&self, command: &str) -> bool {
+        let Some(front) = self.pty.as_ref().and_then(Pty::foreground) else {
+            return false;
+        };
+        let front = front.as_raw_nonzero().get();
+        if u32::try_from(front).is_ok_and(|front| front == self.pid) {
+            return false;
+        }
+        let Ok(arguments) = std::fs::read(format!("/proc/{front}/cmdline")) else {
+            return false;
+        };
+        let mut arguments = arguments.split(|&byte| byte == 0);
+        let program = arguments.next().unwrap_or_default();
+        let script = arguments.next().unwrap_or_default();
+        let name = |path: &[u8]| -> Vec<u8> {
+            (path.rsplit(|&byte| byte == b'/').next())
+                .unwrap_or_default()
+                .to_vec()
+        };
+        let mut words = command.split_whitespace();
+        let first = name(words.next().unwrap_or_default().as_bytes());
+        if first.is_empty() || program.is_empty() {
+            return false;
+        }
+        let joined = words.next().map(|second| {
+            let mut joined = first.clone();
+            joined.push(b'-');
+            joined.extend_from_slice(second.as_bytes());
+            joined
+        });
+        let program = name(program);
+        program == first || Some(&program) == joined.as_ref() || name(script) == first
+    }
+
     pub(crate) fn view(&self) -> View {
         View::capture(&self.emulator)
     }

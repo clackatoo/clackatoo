@@ -40,6 +40,7 @@ mod recovery;
 pub mod remote;
 mod rpc;
 mod runtime;
+mod saved;
 mod server;
 mod shell;
 mod signals;
@@ -135,6 +136,15 @@ pub struct DaemonConfig {
     /// in place, so a test can act while it's under way. `None`, but in
     /// tests.
     pub rename_gate: Option<PathBuf>,
+    /// The file the workspaces are kept in from one run of the daemon to
+    /// the next: written as they change, and read by
+    /// [`Daemon::restore_workspaces`] as a daemon starts afresh. `None`
+    /// keeps none.
+    pub workspaces: Option<PathBuf>,
+    /// For tests: a file the thread writing the workspaces waits for
+    /// before each write, so a test can hold it up, as a stuck disk would.
+    /// `None`, but in tests.
+    pub keep_gate: Option<PathBuf>,
     /// The home trash, as the freedesktop.org trash spec has it, where
     /// files deleted on its file system go. `None` has none: files there
     /// can only be deleted for good.
@@ -236,6 +246,8 @@ impl DaemonConfig {
     /// boards are kept, or `off` for none (or else `clackatoo/boards` in
     /// the data directory), `$CLACKATOO_RECOVERY`, where changes not saved
     /// are kept, or `off` for nowhere (or else `recovery` in
+    /// [`state_dir`]), `$CLACKATOO_WORKSPACES`, the file the workspaces are
+    /// kept in, or `off` for none (or else `workspaces` in
     /// [`state_dir`]), `$SHELL` (or `/bin/sh`),
     /// `$HOME` (or `/`), `$CLACKATOO_AGENT`: the command of the agent a
     /// chat gets when it asks for none, split at spaces (or else Claude
@@ -307,6 +319,12 @@ impl DaemonConfig {
             park_after: DEFAULT_PARK_AFTER,
             fit_lasts: DEFAULT_FIT_LASTS,
             rename_gate: None,
+            workspaces: match non_empty("CLACKATOO_WORKSPACES") {
+                Some(off) if off == "off" => None,
+                Some(path) => Some(PathBuf::from(path)),
+                None => state_dir().map(|dir| dir.join("workspaces")),
+            },
+            keep_gate: None,
             trash: data_dir().map(|dir| dir.join("Trash")),
             boards: match non_empty("CLACKATOO_BOARDS") {
                 Some(off) if off == "off" => None,

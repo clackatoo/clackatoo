@@ -63,6 +63,50 @@ pub struct Workspaces {
         deserialize_with = "wire::since::<{ wire::BLOCK_MARKS }, _, _>"
     )]
     pub home: Option<String>,
+    /// What panes the daemon made again from the workspaces it kept, as
+    /// it started, still have to show for it: a command a terminal was
+    /// running, to offer to put at its new shell's prompt, and where an
+    /// editor was. Each goes once a window has done with it: a terminal's
+    /// once it's dismissed
+    /// ([`ClientMessage::Dismiss`](crate::ClientMessage::Dismiss)),
+    /// anything is typed into it, its shell runs a command, or the pane
+    /// closes; an editor's once a window
+    /// says where it is ([`ClientMessage::Place`](crate::ClientMessage::Place)),
+    /// or the pane shows another file. Empty from a daemon older than
+    /// protocol 90.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::RESTORED }, _>",
+        deserialize_with = "wire::since::<{ wire::RESTORED }, _, _>"
+    )]
+    pub restored: Vec<Restored>,
+}
+
+/// What a pane made again as the daemon started still has to show for
+/// it: see [`Workspaces::restored`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restored {
+    /// The pane.
+    pub pane: PaneId,
+    /// For a terminal: the command line its shell was running when the
+    /// daemon last stopped, as the shell said, which windows offer to put
+    /// at the new shell's prompt, typed as if by the user, without Enter:
+    /// never run by themselves. Always one line, with no control
+    /// characters or runs of spaces.
+    pub ran: Option<String>,
+    /// For an editor: where its cursor and view were.
+    pub place: Option<Place>,
+}
+
+/// Where an editor's cursor and view are in its file, kept from one run
+/// of the daemon to the next.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Place {
+    /// The cursor's line, from 0.
+    pub line: u64,
+    /// The cursor's column, in bytes from the line's start.
+    pub column: u64,
+    /// The line at the top of the view, from 0.
+    pub top: u64,
 }
 
 /// A piece of distinct work, such as a project: its tabs.

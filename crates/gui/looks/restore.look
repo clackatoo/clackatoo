@@ -1,0 +1,37 @@
+# Workspaces made again after a restart: each terminal that was running
+# a command offers to put it at its new shell's prompt.
+size 1400x860
+kept <<END
+{
+  "clackatoo_workspaces": 1,
+  "workspaces": [{
+    "name": "restore",
+    "tabs": [{
+      "layout": {"split": {
+        "left_to_right": true,
+        "parts": [
+          {"pane": {"terminal": {"cwd": "$PROJECT", "ran": "cargo watch -x test"}}},
+          {"split": {
+            "left_to_right": false,
+            "parts": [
+              {"pane": {"terminal": {"cwd": "$PROJECT", "ran": "cargo test --workspace -- --test-threads 1 workspaces_tabs_and_panes_come_back"}}},
+              {"pane": {"terminal": {"cwd": "$PROJECT", "ran": "htop"}}}
+            ],
+            "shares": [1, 1]
+          }}
+        ],
+        "shares": [3, 2]
+      }}
+    }]
+  }]
+}
+END
+sleep 1500
+shot offered
+# R puts it at the prompt, to read before Enter.
+keys <C-;>R
+shot at-the-prompt
+# Esc dismisses another.
+keys <C-l>
+keys <Esc>
+shot dismissed

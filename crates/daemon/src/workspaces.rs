@@ -6,8 +6,8 @@
 //! makes the change, which can't fail.
 
 use clackatoo_protocol::{
-    Axis, BoardId, BufferId, Content, Error, FilesId, Layout, MAX_NESTING, Pane, PaneId, ReviewId,
-    Side, Tab, TabId, TerminalId, Workspace, WorkspaceId, Workspaces,
+    Axis, BoardId, BufferId, Content, Error, FilesId, Layout, MAX_NESTING, Pane, PaneId, Restored,
+    ReviewId, Side, Tab, TabId, TerminalId, Workspace, WorkspaceId, Workspaces,
 };
 
 use crate::handover::{self, HandoverError};
@@ -202,6 +202,7 @@ impl WorkspaceState {
                 list,
                 active,
                 home: None,
+                restored: Vec::new(),
             },
             next_workspace: handed.next_workspace,
             next_tab: handed.next_tab,
@@ -372,7 +373,12 @@ impl WorkspaceState {
             .flat_map(|workspace| &mut workspace.tabs)
             .find_map(|tab| pane_mut(&mut tab.layout, pane))
             .ok_or(Error::NoSuchPane(pane))?;
-        Ok(std::mem::replace(&mut found.content, content))
+        let old = std::mem::replace(&mut found.content, content);
+        // What it had to show for a restart was for what it showed.
+        self.workspaces
+            .restored
+            .retain(|restored| restored.pane != pane);
+        Ok(old)
     }
 
     /// Has every pane showing buffer `old` show buffer `new`. Returns
@@ -503,6 +509,131 @@ impl WorkspaceState {
             self.workspaces.active = list.get(index.saturating_sub(1)).map(|w| w.id);
         }
         true
+    }
+
+    /// A pane showing `content`, with an ID of its own, to put in a layout
+    /// made for [`add_restored`](Self::add_restored).
+    pub(crate) fn fresh_pane(&mut self, content: Content) -> Pane {
+        self.pane(content)
+    }
+
+    /// Adds a workspace made again from the workspaces kept from the last
+    /// run of the daemon, called `name` unless that's taken or no name,
+    /// with `tabs`: each one's name, its layout of panes from
+    /// [`fresh_pane`](Self::fresh_pane), which it tidies, and its focused
+    /// pane, or else its first. Tab `active_tab`, by its place, is shown,
+    /// or the first if there's no such tab. `tabs` mustn't be empty.
+    pub(crate) fn add_restored(
+        &mut self,
+        name: &str,
+        tabs: Vec<(Option<String>, Layout, Option<PaneId>)>,
+        active_tab: usize,
+    ) -> WorkspaceId {
+        let name = (self.name_for_new(Some(name)))
+            .or_else(|_| self.name_for_new(None))
+            .expect("some number is free");
+        let tabs: Vec<Tab> = (tabs.into_iter())
+            .map(|(name, mut layout, focused)| {
+                // Shares are kept as they were unless the layout breaks
+                // its rules, which tidying puts right.
+                if untidy(&layout) {
+                    tidy(&mut layout);
+                }
+                if layout.depth() > MAX_NESTING {
+                    within(&mut layout, MAX_NESTING);
+                    tidy(&mut layout);
+                }
+                let id = TabId(self.next_tab);
+                self.next_tab += 1;
+                Tab {
+                    id,
+                    focused: (focused.filter(|&focused| layout.contains(focused)))
+                        .unwrap_or_else(|| layout.panes()[0].id),
+                    layout,
+                    name: name.filter(|name| {
+                        !name.trim().is_empty() && !name.chars().any(char::is_control)
+                    }),
+                }
+            })
+            .collect();
+        let id = WorkspaceId(self.next_workspace);
+        self.next_workspace += 1;
+        self.workspaces.list.push(Workspace {
+            id,
+            name,
+            active_tab: tabs.get(active_tab).unwrap_or(&tabs[0]).id,
+            tabs,
+        });
+        id
+    }
+
+    /// Makes `workspace` the one last switched to, for new windows.
+    pub(crate) fn set_active(&mut self, workspace: WorkspaceId) {
+        if self.workspaces.get(workspace).is_some() {
+            self.workspaces.active = Some(workspace);
+        }
+    }
+
+    /// Sets what panes made again as the daemon started have to show for
+    /// it (see [`Workspaces::restored`](clackatoo_protocol::Workspaces)).
+    pub(crate) fn set_restored(&mut self, restored: Vec<Restored>) {
+        self.workspaces.restored = restored;
+    }
+
+    /// What `pane`, made again as the daemon started, still has to show
+    /// for it, if anything.
+    pub(crate) fn restored(&self, pane: PaneId) -> Option<&Restored> {
+        (self.workspaces.restored.iter()).find(|restored| restored.pane == pane)
+    }
+
+    /// Forgets the command `pane`'s terminal was running, which was to be
+    /// offered to run again. Returns whether there was one.
+    pub(crate) fn forget_ran(&mut self, pane: PaneId) -> bool {
+        self.forget_restored(pane, |restored| restored.ran.take().is_some())
+    }
+
+    /// Forgets where editor `pane` was. Returns whether that was kept.
+    pub(crate) fn forget_place(&mut self, pane: PaneId) -> bool {
+        self.forget_restored(pane, |restored| restored.place.take().is_some())
+    }
+
+    /// Takes something away from what `pane` has to show for a restart,
+    /// with `take`, which says whether there was that, and forgets the
+    /// pane once it has nothing left. Returns what `take` said.
+    fn forget_restored(&mut self, pane: PaneId, take: impl FnOnce(&mut Restored) -> bool) -> bool {
+        let list = &mut self.workspaces.restored;
+        let Some(index) = list.iter().position(|restored| restored.pane == pane) else {
+            return false;
+        };
+        let taken = take(&mut list[index]);
+        if list[index].ran.is_none() && list[index].place.is_none() {
+            list.remove(index);
+        }
+        taken
+    }
+
+    /// Forgets what panes that have closed had to show for a restart, and
+    /// what panes have that's no longer for what they show: a command to
+    /// run again only in a terminal, a place only in an editor.
+    pub(crate) fn sweep_restored(&mut self) {
+        if self.workspaces.restored.is_empty() {
+            return;
+        }
+        let panes: Vec<Pane> = (self.workspaces.list.iter())
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| tab.layout.panes())
+            .collect();
+        self.workspaces.restored.retain_mut(|restored| {
+            let content = panes.iter().find(|pane| pane.id == restored.pane);
+            let content = content.map(|pane| pane.content);
+            if !matches!(content, Some(Content::Terminal(_))) {
+                restored.ran = None;
+            }
+            if !matches!(content, Some(Content::Buffer(_))) {
+                restored.place = None;
+            }
+            restored.ran.is_some() || restored.place.is_some()
+        });
     }
 
     fn check_name(&self, name: &str, renaming: Option<WorkspaceId>) -> Result<String, Error> {
@@ -797,6 +928,26 @@ fn remove_from(layout: &mut Layout, pane: PaneId) {
             remove_from(part, pane);
         }
     }
+}
+
+/// Whether `layout` breaks [`Layout`]'s rules: a split with fewer than two
+/// parts, shares that don't fit them, or a split inside another along the
+/// same axis.
+fn untidy(layout: &Layout) -> bool {
+    let Layout::Split {
+        axis,
+        parts,
+        shares,
+    } = layout
+    else {
+        return false;
+    };
+    parts.len() < 2
+        || shares.len() != parts.len()
+        || shares.contains(&0)
+        || (parts.iter()).any(|part| {
+            matches!(part, Layout::Split { axis: inner, .. } if inner == axis) || untidy(part)
+        })
 }
 
 /// Restores [`Layout`]'s rules after a pane was removed: a split left with

@@ -1568,8 +1568,9 @@ impl Emulator {
         match kind {
             // A prompt while a command runs is the command's output, not
             // the shell's: a program printing marks of its own, or a
-            // shell nested inside it, such as one over ssh.
-            b"A" if self.blocks.running() => {}
+            // shell nested inside it, such as one over ssh. So is a
+            // command's start: what runs is what started first.
+            b"A" | b"C" if self.blocks.running() => {}
             b"A" | b"C" if self.blocks.run_out() => {
                 self.renumber_blocks();
                 self.shell_mark(kind, options);

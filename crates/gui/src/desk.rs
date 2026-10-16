@@ -166,6 +166,8 @@ mod macros;
 mod messages;
 mod mode;
 mod offers;
+mod restored;
+pub(crate) use restored::Offer;
 mod reviews;
 mod script;
 mod settings;
@@ -1275,6 +1277,7 @@ impl Desk {
         self.remote = remote;
         self.own_home = std::env::var("HOME").ok().filter(|home| !home.is_empty());
         self.forget_asked();
+        self.tell_places_again();
         for pane in self.panes.values_mut() {
             pane.reconnected();
             pane.set_remote(remote);
@@ -1863,6 +1866,10 @@ impl Desk {
         if self.block_needs_daemon(press) {
             return true;
         }
+        // The offer to run again what a terminal ran before a restart.
+        if self.ran_key(press) {
+            return true;
+        }
         let redraw = self.focused_pane().is_some_and(|pane| pane.key(press));
         if let Some(terminal) = self.focused_terminal() {
             self.open_pane_link(terminal);
@@ -2045,6 +2052,16 @@ impl Desk {
             outcome.redraw |= self.mouse_left();
             return outcome;
         };
+        // A click on the offer to run again what the terminal ran before a
+        // restart is the offer's, not the program's.
+        if dragging.is_none()
+            && action == MouseAction::Press(MouseButton::Left)
+            && self.ran_click(terminal, cell)
+        {
+            self.focus_at(point);
+            outcome.redraw = true;
+            return outcome;
+        }
         let action = match action {
             MouseAction::Press(button) => {
                 outcome.redraw = self.focus_at(point);
@@ -2632,6 +2649,7 @@ mod tests {
     mod messages;
     mod mode;
     mod mouse;
+    mod restored;
     mod typing;
 
     use clackatoo_protocol::{ChatState, ChatSummary, Layout, Pane as LayoutPane, View, Workspace};
@@ -2682,6 +2700,7 @@ mod tests {
             active: Some(list[0].id),
             list,
             home: None,
+            restored: Vec::new(),
         }
     }
 
@@ -2727,6 +2746,8 @@ mod tests {
                 | ClientMessage::Present { .. }
                 | ClientMessage::ListSessions { .. }
                 | ClientMessage::Colour { .. }
+                | ClientMessage::Place { .. }
+                | ClientMessage::Dismiss { .. }
                 | ClientMessage::Upgrade { .. } => None,
             })
             .collect();
