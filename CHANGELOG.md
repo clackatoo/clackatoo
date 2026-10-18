@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.58 (2026-10-18)
+
+### Features
+
+- **daemon,protocol,gui:** a pane on another machine in your own workspace, and new workspaces there (b92b62c)
+
 ## 2026.10.57 (2026-10-18)
 
 ### Features
