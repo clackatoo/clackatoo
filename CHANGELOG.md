@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.57 (2026-10-18)
+
+### Features
+
+- **daemon,protocol,gui:** everything in another machine's workspaces works through the daemon, editors to port forwards (68e2db4)
+
 ## 2026.10.56 (2026-10-18)
 
 ### Features
