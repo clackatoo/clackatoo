@@ -521,6 +521,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: ":connect HOST brings another machine's workspaces, terminals and chats into your bar",
     },
+    News {
+        id: "relayed",
+        date: "2026-10-18",
+        lesson: "remote",
+        what: "In another machine's workspaces, editors, explorers, the finder, reviews, boards and :PortForward work too",
+    },
 ];
 
 impl News {

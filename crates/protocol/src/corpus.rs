@@ -28,8 +28,8 @@ use clackatoo_text::{
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
     BLANK, BLOCK_MARKS, BLOCKS, COLOURS, EXITED, FALLBACKS, FEDERATION, FORWARD_PACE, FORWARDS,
-    HOVER, INLAY_HINTS, LIMITS, PHONE_TERMINALS, PREVIEW_COLOURS, RECOVER, RESTORED, SYMBOLS, USES,
-    WORDS,
+    HOVER, INLAY_HINTS, LIMITS, PHONE_TERMINALS, PREVIEW_COLOURS, RECOVER, RELAY, RESTORED,
+    SYMBOLS, USES, WORDS,
 };
 use crate::{
     AgentSession, AgentTools, Author, Axis, BlockMarks, BoardId, BufferId, BufferSnapshot,
@@ -48,11 +48,11 @@ use crate::{
     BrowserFrame, BrowserStatus, BrowserUpdate, ChatChoices, ChatSummary, CodeAction, CommentPlace,
     CompletionItem, Connection, ConnectionState, Device, Done, Entry, EntryKind, Expect,
     FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesUpdate, Forward,
-    ForwardFailure, Found, FoundLine, FoundSymbol, GitMark, Hunks, InlayHint, InlayHintKind,
-    Machine, MachineId, Made, OpenBlank, OpenBoard, OpenFile, OpenFiles, PairingAsk, PairingState,
-    Place, PostKind, Query, Restored, ReviewAction, ReviewChat, ReviewComment, ReviewFile,
-    ReviewHunk, ReviewList, ReviewScope, Search, Secret, ServerFeatures, Symbol, TextChange,
-    Trigger, Udp, Use, UseKind,
+    ForwardFailure, Forwarding, Found, FoundLine, FoundSymbol, GitMark, Hunks, InlayHint,
+    InlayHintKind, Machine, MachineId, Made, OpenBlank, OpenBoard, OpenFile, OpenFiles, PairingAsk,
+    PairingState, Place, PostKind, Query, Restored, ReviewAction, ReviewChat, ReviewComment,
+    ReviewFile, ReviewHunk, ReviewList, ReviewScope, Search, Secret, ServerFeatures, Symbol,
+    TextChange, Trigger, Udp, Use, UseKind,
 };
 
 /// One sample: a message either side sends.
@@ -931,7 +931,70 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         (RESTORED, Client(ClientMessage::Dismiss { pane: PaneId(1) })),
     ]);
     samples.extend(federation().into_iter().map(|sample| (FEDERATION, sample)));
+    samples.extend(relay().into_iter().map(|sample| (RELAY, sample)));
     samples
+}
+
+/// Samples of protocol 92: a daemon saying it relays, a workspace from
+/// another machine with panes of every kind, a file operation asked from
+/// one of its panes, an offer to install a language there answered both
+/// ways, and ports forwarded there, listed, stopped and told of.
+fn relay() -> Vec<Sample> {
+    use Sample::{Client, Server};
+    let desktop = MachineId([7; 16]);
+    let mut workspaces = workspaces();
+    workspaces.list[0].home = Some(desktop);
+    for tab in &mut workspaces.list[0].tabs {
+        tab.layout
+            .for_each_pane_mut(&mut |pane| pane.home = Some(desktop));
+    }
+    let buffer = Some(BufferId(3));
+    let forwards = |forwarding| {
+        Client(ClientMessage::Request(Request::Forwards {
+            pane: PaneId(2),
+            forwarding,
+        }))
+    };
+    vec![
+        Client(ClientMessage::Request(Request::Relay)),
+        Server(ServerMessage::Event(Event::Workspaces(workspaces))),
+        Client(ClientMessage::FileOp {
+            id: 10,
+            op: FileOp::Create {
+                path: "/home/jack/notes".into(),
+                dir: true,
+            },
+            pane: Some(PaneId(3)),
+        }),
+        Client(ClientMessage::Request(Request::Install {
+            language: "rust".into(),
+            grammar: true,
+            server: Some("rust-analyzer".into()),
+            buffer,
+        })),
+        Client(ClientMessage::Request(Request::Decline {
+            language: "rust".into(),
+            buffer,
+        })),
+        forwards(Forwarding::List),
+        forwards(Forwarding::Add {
+            local: 3000,
+            host: "localhost".into(),
+            port: 8080,
+        }),
+        forwards(Forwarding::Stop(Some(3000))),
+        forwards(Forwarding::Stop(None)),
+        Server(ServerMessage::Response(Response::Text(
+            "Forwarding port 3000 here to localhost:8080 on desk".into(),
+        ))),
+        Server(ServerMessage::Event(Event::Forwarded(
+            "nothing is listening at localhost:8080 on desk".into(),
+        ))),
+        Server(ServerMessage::Event(Event::Buffer {
+            buffer: BufferId(3),
+            update: BufferUpdate::Reattach,
+        })),
+    ]
 }
 
 /// Samples of protocol 91: a daemon saying which it is, workspaces and
@@ -1699,7 +1762,13 @@ fn more() -> Vec<Sample> {
             },
         ]
         .into_iter()
-        .map(|op| Client(ClientMessage::FileOp { id: 9, op })),
+        .map(|op| {
+            Client(ClientMessage::FileOp {
+                id: 9,
+                op,
+                pane: None,
+            })
+        }),
     );
     samples.extend([
         event(Event::FileOp {

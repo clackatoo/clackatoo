@@ -9,7 +9,7 @@
 
 use std::fmt::Write as _;
 
-use clackatoo_daemon::forward::{AddError, Forwards, Report, Spec};
+use clackatoo_daemon::forward::{Forwards, Report, Spec, refusal};
 
 use crate::command::Forwarding;
 
@@ -97,35 +97,6 @@ fn host(spec: &Spec) -> String {
         format!("[{}]", spec.host)
     } else {
         spec.host.clone()
-    }
-}
-
-/// Why `asked` couldn't be forwarded, and what to do instead.
-fn refusal(err: &AddError, asked: &Spec) -> String {
-    let there = if asked.host == "localhost" {
-        asked.port.to_string()
-    } else {
-        format!("{}:{}", host(asked), asked.port)
-    };
-    let instead = |free: Option<u16>| match free {
-        Some(free) => format!(": :PortForward {free}:{there} forwards port {free} instead"),
-        None => format!(": :PortForward LOCAL:{there} forwards another"),
-    };
-    match err {
-        AddError::InUse { port, free } => {
-            format!("Port {port} is in use on this machine{}", instead(*free))
-        }
-        AddError::Privileged(port) => {
-            format!("Only root may listen on port {port} here{}", instead(None))
-        }
-        AddError::Forwarded(port) => {
-            format!("Port {port} is forwarded already: :PortForward! {port} stops it")
-        }
-        AddError::Io { .. } => {
-            let mut said = err.to_string();
-            said.replace_range(..1, "C");
-            said
-        }
     }
 }
 

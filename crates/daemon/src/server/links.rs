@@ -147,6 +147,21 @@ pub(super) struct Links {
     /// The workspace from another machine a client last switched to, the
     /// active one, if that's the last a client switched to.
     pub(super) active: Option<WorkspaceId>,
+    /// The window this daemon is to the daemons it's connected to, as it
+    /// attaches to their buffers for its clients (see
+    /// [`Request::AttachBuffer`](clackatoo_protocol::Request)): chosen at
+    /// random as it starts, so its changes' numbers, counted from 1, are
+    /// never taken for a run's before.
+    pub(super) window: u64,
+    /// The number the next board shown from another machine gets.
+    pub(super) next_board: u32,
+    /// How many changes to other machines' buffers have been sent, which
+    /// numbers each: never the same twice for the window this daemon is
+    /// to them, whatever connections are ended and made again.
+    pub(super) changes: u64,
+    /// Set by the threads of ports forwarded to other machines when they
+    /// have something to tell (see [`relay::forwards`](super::relay::forwards)).
+    pub(super) forward_news: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for Links {
@@ -165,6 +180,10 @@ impl Default for Links {
             ending: Vec::new(),
             tickets: 0,
             active: None,
+            window: crate::client::random_window(),
+            next_board: super::relay::MIRRORED_BOARDS,
+            changes: 0,
+            forward_news: Arc::default(),
         }
     }
 }
@@ -1342,6 +1361,35 @@ impl Daemon {
         linked.machine = Some(machine.clone());
         self.links.list.push(linked);
         let at = self.links.list.len() - 1;
+        let workspaces = Workspaces {
+            machine: Some(machine),
+            ..Workspaces::default()
+        };
+        self.made(
+            at,
+            Made {
+                stream: ours,
+                decoder: FrameDecoder::new(),
+                wire: clackatoo_protocol::PROTOCOL_VERSION,
+                carried: None,
+                workspaces,
+            },
+        );
+        let token = self.links.list[at].connected.unwrap().0;
+        theirs.set_nonblocking(true).unwrap();
+        (token, theirs)
+    }
+
+    /// Makes the connection at `at`, lost, again, to `machine`, over a
+    /// socket pair whose other end is returned for the test to play the
+    /// daemon there at, as [`linked_for_test`](Self::linked_for_test) does.
+    #[cfg(test)]
+    pub(super) fn relinked_for_test(
+        &mut self,
+        at: usize,
+        machine: Machine,
+    ) -> (Token, std::os::unix::net::UnixStream) {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
         let workspaces = Workspaces {
             machine: Some(machine),
             ..Workspaces::default()

@@ -145,22 +145,28 @@ fn follow_places(
     // A folder's listing isn't a file places are kept in, but for its
     // selections, for `gv`.
     if copy.is_scratch() {
-        marks.edited_selections(copy.path(), made, copy.text());
+        marks.edited_selections(copy.file(), made, copy.text());
         return;
     }
-    let (path, text) = (copy.path(), copy.text());
-    jumps.edited(path, made, text);
-    marks.edited(path, made, text);
+    let (file, text) = (copy.file(), copy.text());
+    jumps.edited(file, made, text);
+    marks.edited(file, made, text);
     if ours
         && let Some(last) = made.last().map(Borrow::borrow)
         && let Some((at, _, _)) = last.changes().last()
     {
         let at = last.map(at, clackatoo_text::Bias::Before);
-        marks.set('.', FilePlace::at(path, text, at));
+        marks.set('.', FilePlace::at(file, text, at));
     }
 }
 
 impl Desk {
+    /// The machine `pane` is on, if it's another than the daemon's: one of
+    /// a workspace `:connect` brought in.
+    pub(super) fn pane_machine(&self, pane: PaneId) -> Option<clackatoo_protocol::MachineId> {
+        (self.workspaces.find_pane(pane)).and_then(|(_, _, pane)| pane.home)
+    }
+
     /// The editor `pane` is, if it's one.
     pub(crate) fn editor(&self, pane: PaneId) -> Option<&Editor> {
         self.editors.panes.get(&pane)
@@ -302,10 +308,12 @@ impl Desk {
                     editors.put_back.insert(pane, place);
                 }
             }
+            let machine = (self.workspaces.find_pane(pane)).and_then(|(_, _, pane)| pane.home);
             editors
                 .buffers
                 .entry(buffer)
-                .or_insert_with(|| BufferCopy::new(buffer));
+                .or_insert_with(|| BufferCopy::new(buffer))
+                .set_machine(machine);
         }
         let wanted: HashSet<BufferId> = editors.panes.values().map(Editor::buffer).collect();
         editors.buffers.retain(|buffer, _| wanted.contains(buffer));
@@ -580,10 +588,17 @@ impl Desk {
         if byte.is_none()
             && let Some(place) = editors.landings.get(&pane)
         {
+            let machine = self.pane_machine(pane);
             let text = (editors.buffers.values())
-                .find(|copy| copy.loaded() && copy.path() == place.path)
+                .find(|copy| {
+                    copy.loaded() && copy.machine() == machine && copy.path() == place.path
+                })
                 .map(BufferCopy::text);
-            let file = FilePlace::at_line(&place.path, place.line, place.col, text);
+            let landing = crate::editor::File {
+                machine,
+                path: &place.path,
+            };
+            let file = FilePlace::at_line(landing, place.line, place.col, text);
             return Some(Jump {
                 pane,
                 file: Some(file),
@@ -596,7 +611,7 @@ impl Desk {
             .filter(|(_, copy)| copy.loaded() && !copy.is_scratch() && !copy.is_blank())
             .map(|(editor, copy)| {
                 let byte = byte.unwrap_or_else(|| editor.cursor_byte(copy));
-                FilePlace::at(copy.path(), copy.text(), byte)
+                FilePlace::at(copy.file(), copy.text(), byte)
             });
         let folder = self.folder_place(pane);
         Some(Jump { pane, file, folder })
@@ -607,6 +622,12 @@ impl Desk {
     /// shows another, or is about to.
     pub(super) fn show_file_place(&mut self, pane: PaneId, place: &FilePlace) {
         if !self.editors.panes.contains_key(&pane) {
+            return;
+        }
+        // Not a file on another machine than the pane's, where the same
+        // path is another file, if there's one.
+        if place.machine != self.pane_machine(pane) {
+            self.say("that place is in a file on another machine".into());
             return;
         }
         // Not into a folder's listing that won't leave, having changes.
@@ -647,10 +668,16 @@ impl Desk {
                 language,
                 grammar,
                 server,
-            } => self.offered(language, grammar, server),
+            } => self.offered(buffer, language, grammar, server),
             BufferUpdate::Notice(notice) => {
                 self.say(notice);
                 true
+            }
+            // Attached again, as after a lost connection, keeping what's
+            // waiting.
+            BufferUpdate::Reattach => {
+                self.reattach_buffer(buffer);
+                false
             }
             BufferUpdate::ChangedOnDisk => self.changed_on_disk(buffer),
             update => self.copy_changed(buffer, update),
@@ -700,17 +727,17 @@ impl Desk {
                 follow_places(&mut self.jumps, marks, copy, made, ours);
                 // Moved too, while disconnected.
                 if copy.path() != was {
-                    self.jumps.moved(&was, copy.path());
-                    marks.moved(&was, copy.path());
+                    self.jumps.moved(copy.machine(), &was, copy.path());
+                    marks.moved(copy.machine(), &was, copy.path());
                 }
             }
             Heard::Replaced => {
-                self.jumps.replaced(copy.path(), copy.text());
-                marks.replaced(copy.path(), copy.text());
+                self.jumps.replaced(copy.file(), copy.text());
+                marks.replaced(copy.file(), copy.text());
             }
             Heard::Moved { from } => {
-                self.jumps.moved(from, copy.path());
-                marks.moved(from, copy.path());
+                self.jumps.moved(copy.machine(), from, copy.path());
+                marks.moved(copy.machine(), from, copy.path());
             }
             Heard::Kept { .. } | Heard::Rejoined => {
                 match kept_across_a_reconnect(&heard, copy.path()) {
@@ -1315,15 +1342,23 @@ impl Desk {
             return;
         };
         let path = copy.path().to_owned();
+        let machine = copy.machine();
         let editors = &self.editors;
         let line_of = |place: &FilePlace| -> Option<String> {
             let copy = (editors.buffers.values())
-                .find(|copy| copy.loaded() && copy.path() == place.path)?;
+                .find(|copy| copy.loaded() && place.is_in(copy.file()))?;
             let line = usize::try_from(place.line).ok()?;
             let text = copy.text().get_line(line)?.to_string();
             Some(text.trim().to_owned())
         };
-        let found: Vec<FileLocation> = (editors.shared.marks.of(&path).into_iter())
+        let here = crate::editor::File {
+            machine,
+            path: &path,
+        };
+        // Those in files on another machine than this file's can't be gone
+        // to from here.
+        let found: Vec<FileLocation> = (editors.shared.marks.of(here).into_iter())
+            .filter(|(_, place)| place.machine == machine)
             .map(|(mark, place)| FileLocation {
                 path: place.path.clone(),
                 line: place.line,
@@ -2015,6 +2050,34 @@ impl Desk {
         if !missing && !copy.missed() {
             return;
         }
+        self.attach_again_from(buffer);
+    }
+
+    /// Attaches to `buffer` again, as after a lost connection, keeping what
+    /// its copy has waiting, as a daemon relaying another machine's buffer
+    /// asks ([`BufferUpdate::Reattach`]): however often it asks, as each
+    /// time its copy would otherwise drift from the text there. Nothing it
+    /// says of the buffer is taken in until what that brings has come.
+    fn reattach_buffer(&mut self, buffer: BufferId) {
+        if !self.connected || !self.editors.attached.contains(&buffer) {
+            return;
+        }
+        let Some(copy) = self.editors.buffers.get_mut(&buffer) else {
+            return;
+        };
+        // Attaching again already: what that brings is what's asked for.
+        if copy.is_missing() || !copy.missed() {
+            return;
+        }
+        self.attach_again_from(buffer);
+    }
+
+    /// Asks for `buffer` again, from what its copy knew, as after a lost
+    /// connection, its editors' questions given up on.
+    fn attach_again_from(&mut self, buffer: BufferId) {
+        let Some(copy) = self.editors.buffers.get(&buffer) else {
+            return;
+        };
         let resume = copy.resume();
         for editor in self.editors.panes.values_mut() {
             if editor.buffer() == buffer {

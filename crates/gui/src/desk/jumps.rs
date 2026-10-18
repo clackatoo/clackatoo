@@ -22,10 +22,11 @@
 //!
 //! The list is the window's own: each window has its own history.
 
-use clackatoo_protocol::PaneId;
+use clackatoo_protocol::{MachineId, PaneId};
 use clackatoo_text::{Edit, Rope};
 
 use super::Desk;
+use crate::editor::File;
 pub(super) use crate::editor::FilePlace;
 
 /// How many places are remembered.
@@ -76,7 +77,7 @@ impl Jump {
     pub(super) fn same(&self, other: &Self) -> bool {
         let files = match (&self.file, &other.file) {
             (None, None) => true,
-            (Some(mine), Some(theirs)) => mine.path == theirs.path && mine.line == theirs.line,
+            (Some(mine), Some(theirs)) => mine.file() == theirs.file() && mine.line == theirs.line,
             _ => false,
         };
         self.pane == other.pane && files && self.folder == other.folder
@@ -151,38 +152,39 @@ impl Jumps {
         Some(self.list[found].clone())
     }
 
-    /// Moves the places in the file at `path` through `edits`, made to it
-    /// in turn, which leave its text as `text`. Text put in where a place
+    /// Moves the places in `file` through `edits`, made to it in turn,
+    /// which leave its text as `text`. Text put in where a place
     /// is goes before it, so a line opened above a place's line takes the
     /// place down with its line.
     pub(super) fn edited(
         &mut self,
-        path: &str,
+        file: File<'_>,
         edits: &[impl std::borrow::Borrow<Edit>],
         text: &Rope,
     ) {
         if edits.is_empty() {
             return;
         }
-        for place in self.places_in(path) {
+        for place in self.places_in(file) {
             place.edited(edits, text);
         }
     }
 
-    /// The text of the file at `path` is new, as when it's opened again:
-    /// its places go to their lines and columns in it.
-    pub(super) fn replaced(&mut self, path: &str, text: &Rope) {
-        for place in self.places_in(path) {
+    /// The text of `file` is new, as when it's opened again: its places go
+    /// to their lines and columns in it.
+    pub(super) fn replaced(&mut self, file: File<'_>, text: &Rope) {
+        for place in self.places_in(file) {
             place.find_byte(text);
         }
     }
 
-    /// The file or directory at `from` has moved to `to`: places in it,
-    /// or anything in it, go with it.
-    pub(super) fn moved(&mut self, from: &str, to: &str) {
+    /// The file or directory at `from` on `machine`, the daemon's own if
+    /// `None`, has moved to `to`: places in it, or anything in it, go with
+    /// it. A folder's places, kept by their panes, go wherever they are.
+    pub(super) fn moved(&mut self, machine: Option<MachineId>, from: &str, to: &str) {
         for jump in &mut self.list {
             if let Some(place) = &mut jump.file {
-                place.moved(from, to);
+                place.moved(machine, from, to);
             }
             if let Some(place) = &mut jump.folder {
                 place.moved(from, to);
@@ -190,10 +192,10 @@ impl Jumps {
         }
     }
 
-    fn places_in<'a>(&'a mut self, path: &'a str) -> impl Iterator<Item = &'a mut FilePlace> {
+    fn places_in<'a>(&'a mut self, file: File<'a>) -> impl Iterator<Item = &'a mut FilePlace> {
         (self.list.iter_mut())
             .filter_map(|jump| jump.file.as_mut())
-            .filter(move |place| place.path == path)
+            .filter(move |place| place.is_in(file))
     }
 }
 
@@ -353,9 +355,9 @@ mod tests {
         assert_eq!(jumps.list.len(), 2);
         assert!(!in_folder("/p", None).same(&at(1)));
         // A folder moved takes its places, and its entries', with it.
-        jumps.moved("/p/src", "/p/lib");
+        jumps.moved(None, "/p/src", "/p/lib");
         assert_eq!(jumps.list[1], in_folder("/p/lib", Some("/p/lib/b.rs")));
-        jumps.moved("/p/lib/a.rs", "/p/lib/c.rs");
+        jumps.moved(None, "/p/lib/a.rs", "/p/lib/c.rs");
         assert_eq!(jumps.list[0], in_folder("/p/lib", Some("/p/lib/c.rs")));
     }
 
@@ -365,7 +367,7 @@ mod tests {
         let mut jumps = Jumps::default();
         let mut jump = at(1);
         // On "three"'s "r".
-        jump.file = Some(FilePlace::at("/f", &text, 10));
+        jump.file = Some(FilePlace::at(File::here("/f"), &text, 10));
         jumps.left(jump.clone());
         let place = |jumps: &Jumps| {
             let file = jumps.list[0].file.as_ref().unwrap();
@@ -375,13 +377,13 @@ mod tests {
         // A line put in above takes it down.
         let edit = Edit::replace(14, 0, "", "zero\n");
         let text = Rope::from_str("zero\none\ntwo\nthree\n");
-        jumps.edited("/f", std::slice::from_ref(&edit), &text);
-        jumps.edited("/other", std::slice::from_ref(&edit), &text);
+        jumps.edited(File::here("/f"), std::slice::from_ref(&edit), &text);
+        jumps.edited(File::here("/other"), std::slice::from_ref(&edit), &text);
         assert_eq!(place(&jumps), (3, 2));
         // Shorter text: as far as it goes, at its last line's end.
-        jumps.replaced("/f", &Rope::from_str("zero\nx\n"));
+        jumps.replaced(File::here("/f"), &Rope::from_str("zero\nx\n"));
         assert_eq!(place(&jumps), (1, 1));
-        jumps.replaced("/f", &Rope::from_str(""));
+        jumps.replaced(File::here("/f"), &Rope::from_str(""));
         assert_eq!(place(&jumps), (0, 0));
     }
 }

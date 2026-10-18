@@ -106,18 +106,18 @@ impl Setup {
     /// Moves the marks through the edits just made, as the desk does.
     fn follow_marks(&mut self) {
         let made = self.copy.take_made();
-        (self.shared.marks).edited(self.copy.path(), &made, self.copy.text());
+        (self.shared.marks).edited(self.copy.file(), &made, self.copy.text());
     }
 
     /// Moves the marks through an edit the copy heard of, an undo or
     /// another's, as the desk does.
     fn heard_marks(&mut self, heard: &super::Heard) {
-        let (path, text) = (self.copy.path(), self.copy.text());
+        let (file, text) = (self.copy.file(), self.copy.text());
         match heard {
             super::Heard::Edited(edit) | super::Heard::Reversed(edit) => {
-                (self.shared.marks).edited(path, std::slice::from_ref(edit), text);
+                (self.shared.marks).edited(file, std::slice::from_ref(edit), text);
             }
-            super::Heard::Replaced => self.shared.marks.replaced(path, text),
+            super::Heard::Replaced => self.shared.marks.replaced(file, text),
             _ => {}
         }
     }
@@ -2852,7 +2852,7 @@ fn marks_go_to_their_place_or_line_and_operators_act_up_to_them() {
     assert_eq!(setup.editor.status.as_deref(), Some("mark z isn't set"));
     // A mark in another file is said to be there.
     let text = clackatoo_text::Rope::from_str("x");
-    let elsewhere = super::FilePlace::at("/src/other.rs", &text, 0);
+    let elsewhere = super::FilePlace::at(super::File::here("/src/other.rs"), &text, 0);
     setup.shared.marks.set('Q', elsewhere);
     setup.keys("d'Q");
     assert_eq!(

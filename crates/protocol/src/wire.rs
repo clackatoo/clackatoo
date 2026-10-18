@@ -185,6 +185,16 @@ gates! {
     /// it logs in, `Event::Login`, answered with `ClientMessage::Login`
     /// (`Secret`).
     FEDERATION = 91,
+    /// Everything of another machine's working through the daemon:
+    /// `Request::Relay`, which a daemon relaying for its own clients
+    /// sends; the pane `ClientMessage::FileOp` is asked from, and the
+    /// buffer `Request::Install` and `Request::Decline` answer an offer
+    /// of, which say on which machine; `Request::Forwards` (`Forwarding`),
+    /// with `Event::Forwarded`; and panes other than terminals from
+    /// another machine in the workspaces, which an older peer is sent as
+    /// `Content::Other`, as it would do what's asked of them on the
+    /// daemon's own machine; and `BufferUpdate::Reattach`.
+    RELAY = 92,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -374,6 +384,7 @@ impl Since for BufferUpdate {
             | Self::Agents { .. } => EARLIER,
             Self::Coloured { .. } => HOVER,
             Self::Language { .. } => WORDS,
+            Self::Reattach => RELAY,
         }
     }
 }
@@ -475,6 +486,7 @@ impl Since for Event {
             Self::Exited { .. } => EXITED,
             Self::Coloured { .. } => COLOURS,
             Self::Connections(_) | Self::Login { .. } => FEDERATION,
+            Self::Forwarded(_) => RELAY,
         }
     }
 }
@@ -581,7 +593,60 @@ fn newest_in_workspaces(workspaces: &Workspaces) -> u32 {
     } else {
         EARLIER
     };
-    contents.max(homes)
+    // A pane from another machine that isn't a terminal, which a peer
+    // from before the relay would act on as the daemon's own.
+    let relayed = if (workspaces.list.iter())
+        .flat_map(|workspace| &workspace.tabs)
+        .flat_map(|tab| tab.layout.panes())
+        .any(|pane| relayed_elsewhere(&pane))
+    {
+        RELAY
+    } else {
+        EARLIER
+    };
+    contents.max(homes).max(relayed)
+}
+
+/// Whether `pane` is on another machine than the daemon's, and shows what
+/// only a peer of the relay's version or later asks about as it should:
+/// anything but a terminal, or a pane already shown as one to come.
+fn relayed_elsewhere(pane: &crate::Pane) -> bool {
+    pane.home.is_some() && !matches!(pane.content, Content::Terminal(_) | Content::Other { .. })
+}
+
+/// `message`, if it's the workspaces and some of their panes from other
+/// machines aren't terminals, with those shown as panes to come
+/// ([`Content::Other`], naming their kind): what a peer from before the
+/// relay is sent. It would otherwise ask, of a file explorer there, to
+/// move or delete files with no word of the pane, which the daemon would
+/// do on its own machine, and answer offers to install a language there
+/// on it too.
+fn with_placeholders(message: &ServerMessage) -> Option<ServerMessage> {
+    let (ServerMessage::Event(Event::Workspaces(workspaces))
+    | ServerMessage::Response(Response::Workspaces(workspaces))) = message
+    else {
+        return None;
+    };
+    let mut shown = workspaces.clone();
+    let mut changed = false;
+    for tab in shown
+        .list
+        .iter_mut()
+        .flat_map(|workspace| &mut workspace.tabs)
+    {
+        tab.layout.for_each_pane_mut(&mut |pane| {
+            if relayed_elsewhere(pane) {
+                pane.content = Content::Other {
+                    kind: crate::PaneKind::new(pane.content.kind_name()),
+                };
+                changed = true;
+            }
+        });
+    }
+    changed.then_some(match message {
+        ServerMessage::Event(_) => ServerMessage::Event(Event::Workspaces(shown)),
+        _ => ServerMessage::Response(Response::Workspaces(shown)),
+    })
 }
 
 /// `message`, if it's the workspaces and some are from other machines,
@@ -717,7 +782,13 @@ impl Downgrade for ServerMessage {
     /// plain. And `Event::Connections` and `Event::Login`, which go only
     /// to a client that asked for them, which an older one never does.
     /// The workspaces leave out those from other machines for a peer from
-    /// before federation, which would take them for the daemon's own.
+    /// before federation, which would take them for the daemon's own; and
+    /// for a peer from before the relay, show their panes that aren't
+    /// terminals as panes to come, as it would act on them as the daemon's
+    /// own. `Event::Forwarded` is dropped, as it goes only to a client
+    /// that asked for forwards, which an older one never does; and so is
+    /// `BufferUpdate::Reattach`, as only another machine's buffers are
+    /// attached again so, which an older peer isn't shown.
     /// A new answer, or a new kind of thing found, only ever answers what
     /// a newer window asked; should one reach an older peer all the same,
     /// it's told its question failed, rather than wait for ever.
@@ -733,14 +804,26 @@ impl Downgrade for ServerMessage {
                 downgraded => downgraded,
             };
         }
+        if wire < RELAY
+            && let Some(shown) = with_placeholders(self)
+        {
+            return match shown.downgrade(wire) {
+                Downgraded::AsIs => Downgraded::To(shown),
+                downgraded => downgraded,
+            };
+        }
         match self {
             Self::Event(
                 Event::Exited { .. }
                 | Event::Coloured { .. }
                 | Event::Connections(_)
                 | Event::Login { .. }
+                | Event::Forwarded(_)
                 | Event::Buffer {
-                    update: BufferUpdate::Coloured { .. } | BufferUpdate::Language { .. },
+                    update:
+                        BufferUpdate::Coloured { .. }
+                        | BufferUpdate::Language { .. }
+                        | BufferUpdate::Reattach,
                     ..
                 },
             ) => Downgraded::Dropped,
@@ -940,8 +1023,9 @@ mod tests {
         // And a hover's colours: without them, its code is plain. And
         // what a buffer's words are made of: without it, they're plain
         // text's. And the colours of a chat's code: without them, it's
-        // plain. And the connections, and ssh's questions for them, which
-        // only a client that asked for them is sent.
+        // plain. And the connections, and ssh's questions for them, and
+        // what's said of ports forwarded through them, which only a client
+        // that asked for them is sent.
         matches!(
             message,
             ServerMessage::Event(
@@ -949,8 +1033,11 @@ mod tests {
                     | Event::Coloured { .. }
                     | Event::Connections(_)
                     | Event::Login { .. }
+                    | Event::Forwarded(_)
                     | Event::Buffer {
-                        update: BufferUpdate::Coloured { .. } | BufferUpdate::Language { .. },
+                        update: BufferUpdate::Coloured { .. }
+                            | BufferUpdate::Language { .. }
+                            | BufferUpdate::Reattach,
                         ..
                     }
             )

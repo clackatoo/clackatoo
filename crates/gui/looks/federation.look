@@ -1,0 +1,45 @@
+# Another machine's editors, explorers and finder, through :connect
+# (CLACKA-117, phase 3): a file on desk edited and saved here, its
+# language server's diagnostics and hover, desk's explorer, and the
+# finder grepping desk's files from one of its panes.
+size 1280x800
+file notes.txt <<END
+Notes kept on desk.
+END
+file app/project
+file app/main.fk <<END
+fn main() {
+    let x = bad;
+}
+END
+machine desk notes+notes.txt code+app/main.fk
+keys <C-;>:connect desk<CR>
+wait-for notes
+keys <C-;>:workspace notes<CR>
+wait-for Notes kept on desk.
+shot editor
+# Into the editor, beside the shell, and typed into.
+keys <C-;><C-w>l
+keys Goedited here, made on desk<C-;>
+wait-for edited here, made on desk
+keys :w<CR>
+shot typed
+keys <C-;>:workspace code<CR>
+wait-for let x
+keys <C-;><C-w>l
+keys /bad<CR>
+sleep 1500
+shot diagnostics
+keys K
+sleep 1500
+shot hover
+keys <Esc><C-;>
+# Desk's explorer, of the project the editor's file is in.
+keys <Space>e
+wait-for main.fk
+shot explorer
+# The finder greps desk, as the focused pane is desk's.
+keys <C-;><C-w>l<C-;><Space>pgf
+type bad
+wait-for main.fk:2
+shot grep

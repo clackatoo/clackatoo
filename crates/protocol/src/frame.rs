@@ -94,17 +94,70 @@ pub fn reframe(payload: &[u8]) -> Vec<u8> {
 /// frame would be too big.
 #[must_use]
 pub fn renumber_view(payload: &[u8], terminal: TerminalId) -> Option<Vec<u8>> {
-    let (3, rest) = varint(payload)? else {
+    (Head::of(payload).view().is_some())
+        .then(|| renumber_event(payload, u64::from(terminal.0)))
+        .flatten()
+}
+
+/// `payload`, a frame's holding an event whose first field is a number
+/// (`ServerMessage::Event`, of a variant such as `Buffer`, `Files`,
+/// `Board`, `Review` or `Browser`, whose first field names what it's
+/// about, or `Found` or `FileOp`, whose first is the client's number for
+/// what it asked), as a whole frame with `number` there instead, and the
+/// rest of its bytes as they were: as a daemon passes on another daemon's
+/// events under numbers of its own, never decoding them. A number of 32
+/// bits in the message must be given one that fits. `None` if the payload
+/// isn't an event, or the frame would be too big.
+#[must_use]
+pub fn renumber_event(payload: &[u8], number: u64) -> Option<Vec<u8>> {
+    let [3, _, _] = leading::<3>(payload)? else {
         return None;
     };
-    let (0, rest) = varint(rest)? else {
-        return None;
-    };
-    let (_, update) = varint(rest)?;
+    renumber_leading(payload, &[(2, number)])
+}
+
+/// The first `N` numbers `payload`, a frame's, starts with, each as one of
+/// postcard's variable-length numbers, as far as it does: which say what
+/// the message is, as [`Head`] does, and the numbers among its first
+/// fields, such as `ServerMessage::Event(Event::Buffer { buffer, update:
+/// BufferUpdate::Acked { version, seq } })`'s `[3, 2, buffer, 2, version,
+/// seq]`.
+#[must_use]
+pub fn leading<const N: usize>(payload: &[u8]) -> Option<[u64; N]> {
+    let mut numbers = [0; N];
+    let mut rest = payload;
+    for number in &mut numbers {
+        let (value, after) = varint64(rest)?;
+        *number = value;
+        rest = after;
+    }
+    Some(numbers)
+}
+
+/// `payload`, a frame's, as a whole frame with each of its leading numbers
+/// (see [`leading`]) at an index `changes` names given the value with it,
+/// and the rest of its bytes as they were: as a daemon passing on another
+/// daemon's messages gives what they number numbers of its own, without
+/// decoding them. `None` if it doesn't start with that many numbers, or
+/// the frame would be too big.
+#[must_use]
+pub fn renumber_leading(payload: &[u8], changes: &[(usize, u64)]) -> Option<Vec<u8>> {
+    let count = changes
+        .iter()
+        .map(|&(index, _)| index + 1)
+        .max()
+        .unwrap_or(0);
     let mut frame = vec![0; HEADER_LEN];
-    frame.extend_from_slice(&[3, 0]);
-    put_varint(&mut frame, terminal.0);
-    frame.extend_from_slice(update);
+    let mut rest = payload;
+    for index in 0..count {
+        let (value, after) = varint64(rest)?;
+        let value = (changes.iter())
+            .find(|&&(at, _)| at == index)
+            .map_or(value, |&(_, changed)| changed);
+        put_varint64(&mut frame, value);
+        rest = after;
+    }
+    frame.extend_from_slice(rest);
     let len = frame.len() - HEADER_LEN;
     if len > MAX_FRAME_LEN {
         return None;
@@ -113,9 +166,126 @@ pub fn renumber_view(payload: &[u8], terminal: TerminalId) -> Option<Vec<u8>> {
     Some(frame)
 }
 
+/// What a snapshot of a buffer says after its text, read where it lies,
+/// as a daemon passing another's snapshots on reads it, never decoding the
+/// text (see [`BufferSnapshot`](crate::BufferSnapshot)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SnapshotTail {
+    /// The text's version.
+    pub version: u64,
+    /// The number of the attaching window's last change dealt with.
+    pub applied: Option<u64>,
+    /// The version that change made.
+    pub landed: Option<u64>,
+    /// The daemon's own number.
+    pub daemon: u64,
+    /// Where `applied` starts in the payload.
+    at: usize,
+}
+
+/// What `payload`, a frame's holding a snapshot of a buffer
+/// (`ServerMessage::Event(Event::Buffer { buffer, update:
+/// BufferUpdate::Snapshot(snapshot) })`), says after its text, if it holds
+/// one.
+#[must_use]
+pub fn buffer_snapshot(payload: &[u8]) -> Option<SnapshotTail> {
+    let [3, 2, _, 0] = leading::<4>(payload)? else {
+        return None;
+    };
+    let mut rest = payload;
+    for _ in 0..4 {
+        rest = varint64(rest)?.1;
+    }
+    // The path, then the text, each its length and its bytes.
+    for _ in 0..2 {
+        let (len, after) = varint64(rest)?;
+        rest = after.get(usize::try_from(len).ok()?..)?;
+    }
+    let (version, after) = varint64(rest)?;
+    let (&modified, after) = after.split_first()?;
+    if modified > 1 {
+        return None;
+    }
+    let at = payload.len() - after.len();
+    let (applied, after) = optional(after)?;
+    let (landed, after) = optional(after)?;
+    let (daemon, after) = varint64(after)?;
+    after.is_empty().then_some(SnapshotTail {
+        version,
+        applied,
+        landed,
+        daemon,
+        at,
+    })
+}
+
+/// `payload`, a frame's holding a snapshot of a buffer, as [`buffer_snapshot`]
+/// read it to say `tail`, as a whole frame about buffer `buffer` instead,
+/// for the window whose last change dealt with is `applied`, having made
+/// `landed`: the same bytes but for those, as a daemon passing another's
+/// snapshot on to one of its clients sends it.
+#[must_use]
+pub fn snapshot_for(
+    payload: &[u8],
+    tail: &SnapshotTail,
+    buffer: u32,
+    (applied, landed): (Option<u64>, Option<u64>),
+) -> Option<Vec<u8>> {
+    let mut frame = renumber_leading(payload.get(..tail.at)?, &[(2, u64::from(buffer))])?;
+    for value in [applied, landed] {
+        match value {
+            None => frame.push(0),
+            Some(value) => {
+                frame.push(1);
+                put_varint64(&mut frame, value);
+            }
+        }
+    }
+    put_varint64(&mut frame, tail.daemon);
+    let len = frame.len() - HEADER_LEN;
+    if len > MAX_FRAME_LEN {
+        return None;
+    }
+    frame[..HEADER_LEN].copy_from_slice(&header(len));
+    Some(frame)
+}
+
+/// Reads an `Option<u64>` as postcard writes one: 0 for `None`, or 1 and
+/// the number.
+fn optional(bytes: &[u8]) -> Option<(Option<u64>, &[u8])> {
+    match bytes.split_first()? {
+        (0, rest) => Some((None, rest)),
+        (1, rest) => varint64(rest).map(|(value, rest)| (Some(value), rest)),
+        _ => None,
+    }
+}
+
+/// The folder a change to a file explorer is about, if `payload`, a
+/// frame's, holds one (`ServerMessage::Event(Event::Files { files, update
+/// })` with `FilesUpdate::Listed` or `FilesUpdate::Unlisted`, whose first
+/// field is the folder): read where it lies, as a daemon passing another's
+/// on sends it only to the clients that opened that folder, never decoding
+/// the listing.
+#[must_use]
+pub fn files_dir(payload: &[u8]) -> Option<&str> {
+    let (3, rest) = varint(payload)? else {
+        return None;
+    };
+    let (7, rest) = varint(rest)? else {
+        return None;
+    };
+    let (_, rest) = varint(rest)?;
+    let (1 | 2, rest) = varint(rest)? else {
+        return None;
+    };
+    let (len, rest) = varint64(rest)?;
+    let len = usize::try_from(len).ok()?;
+    std::str::from_utf8(rest.get(..len)?).ok()
+}
+
 /// Writes `value` as one of postcard's variable-length numbers, as
-/// [`varint`] reads them.
-fn put_varint(out: &mut Vec<u8>, mut value: u32) {
+/// [`varint64`] reads them.
+fn put_varint64(out: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
         #[allow(clippy::cast_possible_truncation, reason = "the low seven bits")]
         out.push((value as u8 & 0x7f) | 0x80);
@@ -342,6 +512,13 @@ impl Head {
         self.buffer().is_some() && matches!(self.get(3), Some(0 | 1))
     }
 
+    /// Of the daemon's message: which variant of `Event` it was, by its
+    /// number, if it was one.
+    #[must_use]
+    pub fn event_kind(&self) -> Option<u32> {
+        (self.get(0) == Some(3)).then(|| self.get(1)).flatten()
+    }
+
     /// The first number in an event of the daemon's that's variant
     /// `variant` of `Event`.
     fn event(&self, variant: u32) -> Option<u32> {
@@ -361,6 +538,23 @@ fn varint(bytes: &[u8]) -> Option<(u32, &[u8])> {
             return None;
         }
         value |= u32::from(byte & 0x7f) << (7 * index);
+        if byte & 0x80 == 0 {
+            return Some((value, &bytes[index + 1..]));
+        }
+    }
+    None
+}
+
+/// Reads one of postcard's variable-length numbers of 64 bits from the
+/// front of `bytes`, as [`varint`] does one of 32.
+fn varint64(bytes: &[u8]) -> Option<(u64, &[u8])> {
+    let mut value: u64 = 0;
+    for (index, &byte) in bytes.iter().enumerate().take(10) {
+        // The tenth byte holds the top bit, and says no more follow.
+        if index == 9 && byte > 0x01 {
+            return None;
+        }
+        value |= u64::from(byte & 0x7f) << (7 * index);
         if byte & 0x80 == 0 {
             return Some((value, &bytes[index + 1..]));
         }
@@ -1038,5 +1232,115 @@ mod tests {
             })
             .max();
         assert_eq!(last, Some(CLIENT_MESSAGES - 1));
+    }
+
+    /// The payload of `message`, encoded as this build does.
+    fn payload(message: &ServerMessage) -> Vec<u8> {
+        encode(PROTOCOL_VERSION, message).unwrap()[HEADER_LEN..].to_vec()
+    }
+
+    #[test]
+    fn numbers_at_the_front_are_given_others_and_the_rest_left_as_it_was() {
+        use crate::{BufferId, BufferUpdate, Event};
+        let acked = |buffer, seq| {
+            ServerMessage::Event(Event::Buffer {
+                buffer: BufferId(buffer),
+                update: BufferUpdate::Acked { version: 300, seq },
+            })
+        };
+        let came = payload(&acked(3, 9));
+        assert_eq!(leading::<6>(&came), Some([3, 2, 3, 2, 300, 9]));
+        // Numbers of other lengths than they had.
+        let renumbered = renumber_leading(&came, &[(2, 70_000), (5, 1 << 40)]).unwrap();
+        assert_eq!(
+            renumbered,
+            encode(PROTOCOL_VERSION, &acked(70_000, 1 << 40)).unwrap()
+        );
+        assert_eq!(
+            renumber_leading(&came[..3], &[(5, 1)]),
+            None,
+            "too few numbers"
+        );
+        let found = |id| {
+            ServerMessage::Event(Event::Found {
+                id,
+                found: crate::Found::Files(vec!["a".into()]),
+            })
+        };
+        assert_eq!(
+            renumber_event(&payload(&found(u64::MAX)), 4).unwrap(),
+            encode(PROTOCOL_VERSION, &found(4)).unwrap()
+        );
+        let response = ServerMessage::Response(crate::Response::Done);
+        assert_eq!(renumber_event(&payload(&response), 4), None);
+    }
+
+    #[test]
+    fn a_snapshots_tail_is_read_and_written_where_it_lies() {
+        use crate::{BufferId, BufferSnapshot, BufferUpdate, Event};
+        let snapshot = |buffer, applied, landed| {
+            ServerMessage::Event(Event::Buffer {
+                buffer: BufferId(buffer),
+                update: BufferUpdate::Snapshot(BufferSnapshot {
+                    path: "/src/main.rs".into(),
+                    text: "fn main() {}\n".repeat(20),
+                    version: 1234,
+                    modified: true,
+                    applied,
+                    landed,
+                    daemon: u64::MAX - 3,
+                }),
+            })
+        };
+        let came = payload(&snapshot(3, Some(17), None));
+        let tail = buffer_snapshot(&came).unwrap();
+        assert_eq!(
+            (tail.version, tail.applied, tail.landed, tail.daemon),
+            (1234, Some(17), None, u64::MAX - 3)
+        );
+        let sent = snapshot_for(&came, &tail, 900, (Some(5), Some(1230))).unwrap();
+        assert_eq!(
+            sent,
+            encode(PROTOCOL_VERSION, &snapshot(900, Some(5), Some(1230))).unwrap()
+        );
+        let sent = snapshot_for(&came, &tail, 900, (None, None)).unwrap();
+        assert_eq!(
+            sent,
+            encode(PROTOCOL_VERSION, &snapshot(900, None, None)).unwrap()
+        );
+        // Cut short, or another update, is no snapshot.
+        assert_eq!(buffer_snapshot(&came[..came.len() - 1]), None);
+        let modified = ServerMessage::Event(Event::Buffer {
+            buffer: BufferId(3),
+            update: BufferUpdate::Modified(true),
+        });
+        assert_eq!(buffer_snapshot(&payload(&modified)), None);
+    }
+
+    #[test]
+    fn the_folder_a_listing_is_of_is_read_where_it_lies() {
+        use crate::{Event, FilesId, FilesUpdate};
+        let listed = ServerMessage::Event(Event::Files {
+            files: FilesId(300),
+            update: FilesUpdate::Listed {
+                dir: "/home/jack/src".into(),
+                entries: Vec::new(),
+                cut_short: false,
+            },
+        });
+        assert_eq!(files_dir(&payload(&listed)), Some("/home/jack/src"));
+        let unlisted = ServerMessage::Event(Event::Files {
+            files: FilesId(3),
+            update: FilesUpdate::Unlisted {
+                dir: "/root".into(),
+                reason: "no".into(),
+            },
+        });
+        assert_eq!(files_dir(&payload(&unlisted)), Some("/root"));
+        let git = ServerMessage::Event(Event::Files {
+            files: FilesId(3),
+            update: FilesUpdate::NoGit("not a repository".into()),
+        });
+        assert_eq!(files_dir(&payload(&git)), None);
     }
 }

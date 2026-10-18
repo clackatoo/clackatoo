@@ -512,7 +512,9 @@ impl Daemon {
                     change.landed = Some(version);
                 }
                 self.edited(id, version, &edit, None);
-                let answer = if acked {
+                // A daemon relaying for its own clients is told the edit
+                // too, for those of them that didn't make it.
+                let answer = if acked && !self.relays(token) {
                     BufferUpdate::Acked { version, seq }
                 } else {
                     BufferUpdate::Edited {

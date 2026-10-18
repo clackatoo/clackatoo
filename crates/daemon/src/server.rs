@@ -394,6 +394,10 @@ struct Client {
     /// The window the client is, as it said when attaching to a buffer:
     /// see [`Request::AttachBuffer`].
     window: Option<u64>,
+    /// The client is a daemon on another machine, relaying for clients of
+    /// its own (see [`Request::Relay`]): its edits are answered with the
+    /// edit made, and its questions never go for later ones.
+    relays: bool,
     /// Whether the client is told when the chats change.
     watching_chats: bool,
     /// Whether the client is told when the connections to other daemons
@@ -634,6 +638,7 @@ impl Client {
             clipboard: clipboard::Unsent::default(),
             browser_frames: BTreeMap::new(),
             window: None,
+            relays: false,
             watching_chats: false,
             watching_connections: false,
             present_until: None,
@@ -1440,6 +1445,7 @@ impl Daemon {
             self.time_out_forwards();
             self.take_link_news();
             self.time_out_relays();
+            self.tell_forward_reports();
             self.retry_links();
             self.relay_chats();
             self.take_browser();
@@ -2446,7 +2452,9 @@ impl Daemon {
                     | ClientMessage::Dismiss { .. }
                     | ClientMessage::Login { .. }),
                 ) => {
-                    self.serve_unanswered(token, message);
+                    if let Some(message) = self.route_message(token, message) {
+                        self.serve_unanswered(token, message);
+                    }
                     continue;
                 }
             };
@@ -2519,7 +2527,7 @@ impl Daemon {
                 }
             }
             ClientMessage::Files { files, action } => self.serve_files(token, files, action),
-            ClientMessage::FileOp { id, op } => self.serve_file_op(token, id, op),
+            ClientMessage::FileOp { id, op, pane: _ } => self.serve_file_op(token, id, op),
             ClientMessage::Board { board, action } => self.serve_board(token, board, action),
             ClientMessage::ListSessions { id, agent, cwd } => {
                 self.list_sessions(token, id, &agent, &cwd);
@@ -2803,6 +2811,11 @@ impl Daemon {
                 self.respond_about_installs(token, request);
                 Ok(Response::Done)
             }
+            Request::Relay => self.relaying(token),
+            // One for a pane on another machine is the relay's.
+            Request::Forwards { .. } => Err(Error::Other(
+                "this daemon's own ports are this machine's: there's nothing to forward".into(),
+            )),
         };
         response.unwrap_or_else(Response::Error)
     }

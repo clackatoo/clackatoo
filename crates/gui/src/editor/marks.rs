@@ -14,12 +14,37 @@
 //! [`FilePlace`]): edits made above it, by anyone, take it down with them,
 //! and one on a character put back in other words, as when its case is
 //! changed, stays on it. Marks are the window's own, kept until it closes.
+//!
+//! A file is its path on the machine it's on: the daemon's own, or another
+//! machine whose workspaces `:connect` brought in, where the same path may
+//! well be another file. Marks and places are kept by both.
 
 use std::borrow::Borrow;
 
+use clackatoo_protocol::MachineId;
 use clackatoo_text::{Bias, Edit, Rope};
 
 use crate::pane::Selection;
+
+/// A file, as places are kept in it: its path, on the machine it's on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct File<'a> {
+    /// The machine, if it's another than the daemon's.
+    pub(crate) machine: Option<MachineId>,
+    /// Its path there, made absolute, as the daemon gives it.
+    pub(crate) path: &'a str,
+}
+
+#[cfg(test)]
+impl<'a> File<'a> {
+    /// The file at `path` on the daemon's own machine.
+    pub(crate) fn here(path: &'a str) -> Self {
+        Self {
+            machine: None,
+            path,
+        }
+    }
+}
 
 /// A place in a file.
 ///
@@ -32,6 +57,8 @@ use crate::pane::Selection;
 pub(crate) struct FilePlace {
     /// The file's path, made absolute, as the daemon gives it.
     pub(crate) path: String,
+    /// The machine the file is on, if it's another than the daemon's.
+    pub(crate) machine: Option<MachineId>,
     /// The line, from 0, and the column, in bytes from its start.
     pub(crate) line: u64,
     pub(crate) col: usize,
@@ -40,10 +67,11 @@ pub(crate) struct FilePlace {
 }
 
 impl FilePlace {
-    /// The place at `byte` of `text`, the file at `path`.
-    pub(crate) fn at(path: &str, text: &Rope, byte: usize) -> Self {
+    /// The place at `byte` of `text`, of `file`.
+    pub(crate) fn at(file: File<'_>, text: &Rope, byte: usize) -> Self {
         let mut place = Self {
-            path: path.to_owned(),
+            path: file.path.to_owned(),
+            machine: file.machine,
             line: 0,
             col: 0,
             byte,
@@ -52,9 +80,26 @@ impl FilePlace {
         place
     }
 
-    /// The file or directory at `from` has moved to `to`: if the place is
-    /// in it, or anything in it, it goes with it.
-    pub(crate) fn moved(&mut self, from: &str, to: &str) {
+    /// The file it's in.
+    pub(crate) fn file(&self) -> File<'_> {
+        File {
+            machine: self.machine,
+            path: &self.path,
+        }
+    }
+
+    /// Whether it's in `file`.
+    pub(crate) fn is_in(&self, file: File<'_>) -> bool {
+        self.file() == file
+    }
+
+    /// The file or directory at `from` on `machine`, the daemon's own if
+    /// `None`, has moved to `to`: if the place is in it, or anything in
+    /// it, it goes with it.
+    pub(crate) fn moved(&mut self, machine: Option<MachineId>, from: &str, to: &str) {
+        if machine != self.machine {
+            return;
+        }
         let rest =
             (self.path.strip_prefix(from)).filter(|rest| rest.is_empty() || rest.starts_with('/'));
         if let Some(rest) = rest {
@@ -62,12 +107,13 @@ impl FilePlace {
         }
     }
 
-    /// The place on `line`, `col` bytes into it, of the file at `path`,
-    /// kept within its `text` if the window has it. If not, its byte is
-    /// worked out when the file's text comes.
-    pub(crate) fn at_line(path: &str, line: u64, col: usize, text: Option<&Rope>) -> Self {
+    /// The place on `line`, `col` bytes into it, of `file`, kept within
+    /// its `text` if the window has it. If not, its byte is worked out
+    /// when the file's text comes.
+    pub(crate) fn at_line(file: File<'_>, line: u64, col: usize, text: Option<&Rope>) -> Self {
         let mut place = Self {
-            path: path.to_owned(),
+            path: file.path.to_owned(),
+            machine: file.machine,
             line,
             col,
             byte: 0,
@@ -155,10 +201,10 @@ pub(crate) struct Selected {
 }
 
 impl Selected {
-    /// The selection of `path` from byte `start` to just before byte
+    /// The selection of `file` from byte `start` to just before byte
     /// `end` of `text`.
-    fn new(path: &str, text: &Rope, (start, end): (usize, usize), shape: Shape) -> Self {
-        let place = |byte| FilePlace::at(path, text, byte);
+    fn new(file: File<'_>, text: &Rope, (start, end): (usize, usize), shape: Shape) -> Self {
+        let place = |byte| FilePlace::at(file, text, byte);
         let mut selected = Self {
             start: place(start),
             end: place(end),
@@ -229,14 +275,14 @@ impl Selected {
         }
     }
 
-    fn moved(&mut self, from: &str, to: &str) {
+    fn moved(&mut self, machine: Option<MachineId>, from: &str, to: &str) {
         for place in [&mut self.start, &mut self.end, &mut self.last] {
-            place.moved(from, to);
+            place.moved(machine, from, to);
         }
     }
 
-    fn path(&self) -> &str {
-        &self.start.path
+    fn file(&self) -> File<'_> {
+        self.start.file()
     }
 }
 
@@ -277,32 +323,32 @@ impl Marks {
             return;
         }
         self.list
-            .retain(|(set, at)| *set != mark || (local && at.path != place.path));
+            .retain(|(set, at)| *set != mark || (local && !at.is_in(place.file())));
         self.list.push((mark, place));
     }
 
-    /// Where `mark` is, for the file at `path`: its own `a` to `z`, or
-    /// `A` to `Z` in any file.
-    pub(crate) fn get(&self, mark: char, path: &str) -> Option<&FilePlace> {
+    /// Where `mark` is, for `file`: its own `a` to `z`, or `A` to `Z` in
+    /// any file.
+    pub(crate) fn get(&self, mark: char, file: File<'_>) -> Option<&FilePlace> {
         match mark {
-            '<' => return self.selected(path).map(|selected| &selected.start),
-            '>' => return self.selected(path).map(|selected| &selected.last),
+            '<' => return self.selected(file).map(|selected| &selected.start),
+            '>' => return self.selected(file).map(|selected| &selected.last),
             _ => {}
         }
         let local = local(mark);
         (self.list.iter())
-            .find(|(set, at)| *set == mark && (!local || at.path == path))
+            .find(|(set, at)| *set == mark && (!local || at.is_in(file)))
             .map(|(_, at)| at)
     }
 
-    /// The marks the file at `path` can go to, its own and then the
-    /// others, each in order.
-    pub(crate) fn of(&self, path: &str) -> Vec<(char, &FilePlace)> {
+    /// The marks `file` can go to, its own and then the others, each in
+    /// order.
+    pub(crate) fn of(&self, file: File<'_>) -> Vec<(char, &FilePlace)> {
         let mut marks: Vec<(char, &FilePlace)> = (self.list.iter())
-            .filter(|(mark, at)| !local(*mark) || at.path == path)
+            .filter(|(mark, at)| !local(*mark) || at.is_in(file))
             .map(|(mark, at)| (*mark, at))
             .collect();
-        if let Some(selected) = self.selected(path) {
+        if let Some(selected) = self.selected(file) {
             marks.extend([('<', &selected.start), ('>', &selected.last)]);
         }
         // As Vim lists them: `'`, `a` to `z`, `.`, then `A` to `Z`.
@@ -310,31 +356,31 @@ impl Marks {
         marks
     }
 
-    /// Moves the marks in the file at `path` through `edits`, made to it in
-    /// turn, which leave its text as `text`.
-    pub(crate) fn edited(&mut self, path: &str, edits: &[impl Borrow<Edit>], text: &Rope) {
+    /// Moves the marks in `file` through `edits`, made to it in turn,
+    /// which leave its text as `text`.
+    pub(crate) fn edited(&mut self, file: File<'_>, edits: &[impl Borrow<Edit>], text: &Rope) {
         if edits.is_empty() {
             return;
         }
-        for (_, place) in self.list.iter_mut().filter(|(_, at)| at.path == path) {
+        for (_, place) in self.list.iter_mut().filter(|(_, at)| at.is_in(file)) {
             place.edited(edits, text);
         }
-        self.edited_selections(path, edits, text);
+        self.edited_selections(file, edits, text);
     }
 
-    /// Moves the selections kept for the file at `path` through `edits`,
+    /// Moves the selections kept for `file` through `edits`,
     /// as [`edited`](Self::edited) does, but no other marks: for a text
     /// that's no file, as a folder's listing is, which keeps them anyway.
     pub(crate) fn edited_selections(
         &mut self,
-        path: &str,
+        file: File<'_>,
         edits: &[impl Borrow<Edit>],
         text: &Rope,
     ) {
         for kept in self
             .selections
             .iter_mut()
-            .filter(|kept| kept.last.path() == path)
+            .filter(|kept| kept.last.file() == file)
         {
             kept.last.edited(edits, text);
             if let Some(before) = &mut kept.before {
@@ -343,19 +389,19 @@ impl Marks {
         }
     }
 
-    /// The last selection in the file at `path`, if it's had one.
-    pub(crate) fn selected(&self, path: &str) -> Option<&Selected> {
+    /// The last selection in `file`, if it's had one.
+    pub(crate) fn selected(&self, file: File<'_>) -> Option<&Selected> {
         (self.selections.iter())
-            .find(|kept| kept.last.path() == path)
+            .find(|kept| kept.last.file() == file)
             .map(|kept| &kept.last)
     }
 
-    /// Notes the selection in the file at `path`, bytes `start` to just
+    /// Notes the selection in `file`, bytes `start` to just
     /// before `end` of its `text`, as its last. If it's `anew`, as visual
     /// mode has just begun, the last is kept as the one before it.
     pub(crate) fn select(
         &mut self,
-        path: &str,
+        file: File<'_>,
         text: &Rope,
         bytes: (usize, usize),
         shape: Shape,
@@ -364,7 +410,7 @@ impl Marks {
         match self
             .selections
             .iter_mut()
-            .find(|kept| kept.last.path() == path)
+            .find(|kept| kept.last.file() == file)
         {
             Some(kept) => {
                 if anew {
@@ -373,55 +419,55 @@ impl Marks {
                 kept.last.place(text, bytes, shape);
             }
             None => self.selections.push(Selections {
-                last: Selected::new(path, text, bytes, shape),
+                last: Selected::new(file, text, bytes, shape),
                 before: None,
             }),
         }
     }
 
-    /// Swaps the last selection in the file at `path` with the one before
-    /// it, as `gv` does in visual mode: the one it selects, if there is
-    /// one.
-    pub(crate) fn swap(&mut self, path: &str) -> Option<Selected> {
+    /// Swaps the last selection in `file` with the one before it, as `gv`
+    /// does in visual mode: the one it selects, if there is one.
+    pub(crate) fn swap(&mut self, file: File<'_>) -> Option<Selected> {
         let kept = self
             .selections
             .iter_mut()
-            .find(|kept| kept.last.path() == path)?;
+            .find(|kept| kept.last.file() == file)?;
         let before = kept.before.take()?;
         kept.before = Some(std::mem::replace(&mut kept.last, before.clone()));
         Some(before)
     }
 
-    /// Forgets the selections kept for `path`, as when a folder's listing
+    /// Forgets the selections kept for `file`, as when a folder's listing
     /// is made afresh.
-    pub(crate) fn forget_selections(&mut self, path: &str) {
-        self.selections.retain(|kept| kept.last.path() != path);
+    pub(crate) fn forget_selections(&mut self, file: File<'_>) {
+        self.selections.retain(|kept| kept.last.file() != file);
     }
 
-    /// The file or directory at `from` has moved to `to`: marks in it, or
-    /// anything in it, go with it.
-    pub(crate) fn moved(&mut self, from: &str, to: &str) {
+    /// The file or directory at `from` on `machine`, the daemon's own if
+    /// `None`, has moved to `to`: marks in it, or anything in it, go with
+    /// it.
+    pub(crate) fn moved(&mut self, machine: Option<MachineId>, from: &str, to: &str) {
         for (_, place) in &mut self.list {
-            place.moved(from, to);
+            place.moved(machine, from, to);
         }
         for kept in &mut self.selections {
-            kept.last.moved(from, to);
+            kept.last.moved(machine, from, to);
             if let Some(before) = &mut kept.before {
-                before.moved(from, to);
+                before.moved(machine, from, to);
             }
         }
     }
 
-    /// The text of the file at `path` is new, as when it's opened again:
-    /// its marks go to their lines and columns in it.
-    pub(crate) fn replaced(&mut self, path: &str, text: &Rope) {
-        for (_, place) in self.list.iter_mut().filter(|(_, at)| at.path == path) {
+    /// The text of `file` is new, as when it's opened again: its marks go
+    /// to their lines and columns in it.
+    pub(crate) fn replaced(&mut self, file: File<'_>, text: &Rope) {
+        for (_, place) in self.list.iter_mut().filter(|(_, at)| at.is_in(file)) {
             place.find_byte(text);
         }
         for kept in self
             .selections
             .iter_mut()
-            .filter(|kept| kept.last.path() == path)
+            .filter(|kept| kept.last.file() == file)
         {
             kept.last.replaced(text);
             if let Some(before) = &mut kept.before {
@@ -439,36 +485,66 @@ mod tests {
     fn a_files_own_marks_are_its_and_the_others_anyones() {
         let text = Rope::from_str("one\ntwo\n");
         let mut marks = Marks::default();
-        marks.set('a', FilePlace::at("/x", &text, 1));
-        marks.set('a', FilePlace::at("/y", &text, 5));
-        marks.set('B', FilePlace::at("/x", &text, 4));
-        assert_eq!(marks.get('a', "/x").map(|at| at.col), Some(1));
-        assert_eq!(marks.get('a', "/y").map(|at| at.line), Some(1));
-        assert_eq!(marks.get('B', "/y").map(|at| at.path.as_str()), Some("/x"));
+        marks.set('a', FilePlace::at(File::here("/x"), &text, 1));
+        marks.set('a', FilePlace::at(File::here("/y"), &text, 5));
+        marks.set('B', FilePlace::at(File::here("/x"), &text, 4));
+        assert_eq!(marks.get('a', File::here("/x")).map(|at| at.col), Some(1));
+        assert_eq!(marks.get('a', File::here("/y")).map(|at| at.line), Some(1));
+        assert_eq!(
+            marks.get('B', File::here("/y")).map(|at| at.path.as_str()),
+            Some("/x")
+        );
         // Set again, `B` moves to another file.
-        marks.set('B', FilePlace::at("/y", &text, 0));
-        assert_eq!(marks.get('B', "/x").map(|at| at.path.as_str()), Some("/y"));
-        let names = |path| -> String { marks.of(path).iter().map(|(mark, _)| *mark).collect() };
+        marks.set('B', FilePlace::at(File::here("/y"), &text, 0));
+        assert_eq!(
+            marks.get('B', File::here("/x")).map(|at| at.path.as_str()),
+            Some("/y")
+        );
+        let names = |path| -> String {
+            marks
+                .of(File::here(path))
+                .iter()
+                .map(|(mark, _)| *mark)
+                .collect()
+        };
         assert_eq!(names("/x"), "aB");
-        assert_eq!(marks.get('z', "/x"), None);
+        assert_eq!(marks.get('z', File::here("/x")), None);
+    }
+
+    #[test]
+    fn the_same_path_on_another_machine_is_another_file() {
+        let text = Rope::from_str("one\ntwo\n");
+        let desk = File {
+            machine: Some(MachineId([7; 16])),
+            path: "/x",
+        };
+        let mut marks = Marks::default();
+        marks.set('a', FilePlace::at(File::here("/x"), &text, 1));
+        marks.set('a', FilePlace::at(desk, &text, 5));
+        assert_eq!(marks.get('a', File::here("/x")).map(|at| at.col), Some(1));
+        assert_eq!(marks.get('a', desk).map(|at| at.line), Some(1));
+        // A move there moves only its own.
+        marks.moved(desk.machine, "/x", "/y");
+        assert_eq!(marks.get('a', File::here("/x")).map(|at| at.col), Some(1));
+        assert!(marks.get('a', desk).is_none());
     }
 
     #[test]
     fn marks_follow_edits_and_are_kept_within_new_text() {
         let text = Rope::from_str("one\ntwo\nthree\n");
         let mut marks = Marks::default();
-        marks.set('a', FilePlace::at("/f", &text, 10));
+        marks.set('a', FilePlace::at(File::here("/f"), &text, 10));
         let place = |marks: &Marks| {
-            let at = marks.get('a', "/f").unwrap();
+            let at = marks.get('a', File::here("/f")).unwrap();
             (at.line, at.col)
         };
         assert_eq!(place(&marks), (2, 2));
         let edit = Edit::replace(14, 0, "", "zero\n");
         let text = Rope::from_str("zero\none\ntwo\nthree\n");
-        marks.edited("/f", std::slice::from_ref(&edit), &text);
-        marks.edited("/other", std::slice::from_ref(&edit), &text);
+        marks.edited(File::here("/f"), std::slice::from_ref(&edit), &text);
+        marks.edited(File::here("/other"), std::slice::from_ref(&edit), &text);
         assert_eq!(place(&marks), (3, 2));
-        marks.replaced("/f", &Rope::from_str("zero\nx\n"));
+        marks.replaced(File::here("/f"), &Rope::from_str("zero\nx\n"));
         assert_eq!(place(&marks), (1, 1));
     }
 }

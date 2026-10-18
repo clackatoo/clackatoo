@@ -14,7 +14,7 @@ use crate::options::ShowHost;
 const DESK: MachineId = MachineId([7; 16]);
 
 /// This machine's `notes`, and `desk`'s `notes` and `work`, whose second
-/// tab has an editor, which isn't relayed yet.
+/// tab has an editor, which desk's clackatoo is too old to pass on.
 fn three() -> Workspaces {
     let elsewhere = |mut workspace: Workspace| {
         workspace.home = Some(DESK);
@@ -158,12 +158,15 @@ fn a_dropped_connection_shows_on_its_ring_and_its_panes() {
 }
 
 #[test]
-fn a_pane_not_relayed_yet_says_where_it_is() {
+fn a_pane_not_relayed_says_where_it_is() {
     let mut desk = desk(three());
     desk.connections_changed(to_desk(connected()));
     desk.show_pane(PaneId(4));
     let other = desk.other(PaneId(4)).expect("a pane in its place");
-    assert_eq!(other.title(), "an editor on desk: coming soon");
+    assert_eq!(
+        other.title(),
+        "an editor on desk needs a newer clackatoo there"
+    );
 }
 
 #[test]

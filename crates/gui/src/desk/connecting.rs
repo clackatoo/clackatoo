@@ -18,7 +18,7 @@
 //! `:PortForward` is left to the window too, which keeps the forwards, as
 //! they outlive the connection the desk sees.
 
-use clackatoo_protocol::{Connection, ConnectionState, Request, Workspace, wire};
+use clackatoo_protocol::{Connection, ConnectionState, Forwarding, Request, Workspace, wire};
 
 use super::{Asked, Desk};
 use crate::chrome::Reach;
@@ -318,6 +318,73 @@ impl Desk {
     /// to do.
     pub(crate) fn take_forwards_asked(&mut self) -> Vec<crate::command::Forwarding> {
         std::mem::take(&mut self.forwards_asked)
+    }
+
+    /// What `machine` is called, as its connection names it, or the
+    /// daemon's own machine if `None`.
+    pub(super) fn machine_called(&self, machine: Option<clackatoo_protocol::MachineId>) -> String {
+        let Some(machine) = machine else {
+            return "this machine".to_owned();
+        };
+        (self.connections.iter())
+            .find(|connection| {
+                connection
+                    .machine
+                    .as_ref()
+                    .is_some_and(|known| known.id == machine)
+            })
+            .map_or_else(
+                || machine.to_string()[..8].to_owned(),
+                |connection| connection.host.clone(),
+            )
+    }
+
+    /// The machine the pane shown is on, if it's another than the daemon's,
+    /// in a workspace `:connect` brought in.
+    pub(super) fn shown_elsewhere(&self) -> Option<Elsewhere> {
+        let shown = self.shown?;
+        let workspace = self.workspaces.get(shown.workspace)?;
+        self.elsewhere(workspace)
+    }
+
+    /// Carries out `:PortForward`, as `forwarding` asks: the window forwards
+    /// ports to its daemon's machine itself; in a workspace from another
+    /// machine, the daemon forwards them there, from its own machine, which
+    /// is this window's.
+    pub(super) fn port_forward(&mut self, forwarding: crate::command::Forwarding) {
+        use crate::command::Forwarding as Typed;
+        let Some(elsewhere) = self.shown_elsewhere() else {
+            return self.forwards_asked.push(forwarding);
+        };
+        let host = elsewhere.host;
+        if self.remote {
+            // The daemon's machine isn't this one: its ports aren't the
+            // window's.
+            if !matches!(forwarding, Typed::Config(_)) {
+                self.warn(format!(
+                    "A window on another machine than its daemon can't forward ports to {host} \
+                     yet: :PortForward in one of the daemon's own workspaces forwards to its \
+                     machine"
+                ));
+            }
+            return;
+        }
+        if !self.needs_daemon(":PortForward", wire::RELAY) {
+            return;
+        }
+        let Some(pane) = self.shown.map(|shown| shown.pane) else {
+            return;
+        };
+        let forwarding = match forwarding {
+            Typed::List => Forwarding::List,
+            Typed::Add(spec) | Typed::Config(spec) => Forwarding::Add {
+                local: spec.local,
+                host: spec.host,
+                port: spec.port,
+            },
+            Typed::Stop(local) => Forwarding::Stop(local),
+        };
+        self.request(Request::Forwards { pane, forwarding }, Asked::Forwarded);
     }
 }
 

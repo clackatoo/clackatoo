@@ -190,12 +190,18 @@ impl Daemon {
     /// Acts on an install or a decline from the client at `token`.
     pub(super) fn respond_about_installs(&mut self, token: Token, request: Request) {
         match request {
+            // A buffer on another machine has had its offer answered
+            // there, by the relay: these are this machine's own.
             Request::Install {
                 language,
                 grammar,
                 server,
+                buffer: _,
             } => self.install(token, language, grammar, server),
-            Request::Decline { language } => self.decline(language),
+            Request::Decline {
+                language,
+                buffer: _,
+            } => self.decline(language),
             _ => {}
         }
     }

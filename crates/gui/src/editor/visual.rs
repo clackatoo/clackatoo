@@ -121,7 +121,7 @@ impl Editor {
             self.selecting = false;
             return;
         };
-        marks.select(copy.path(), copy.text(), bytes, shape, !self.selecting);
+        marks.select(copy.file(), copy.text(), bytes, shape, !self.selecting);
         self.selecting = true;
     }
 
@@ -131,9 +131,9 @@ impl Editor {
     /// none.
     pub(super) fn reselect(&mut self, copy: &BufferCopy, marks: &mut Marks) {
         let selected = if matches!(self.mode, Mode::Visual(_)) {
-            marks.swap(copy.path())
+            marks.swap(copy.file())
         } else {
-            marks.selected(copy.path()).cloned()
+            marks.selected(copy.file()).cloned()
         };
         let Some(selected) = selected else {
             self.fail();

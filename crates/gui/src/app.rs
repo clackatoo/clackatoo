@@ -3272,6 +3272,10 @@ impl App {
                 host,
                 question,
             })) => self.daemon_asks(ask, host, question),
+            SessionEvent::Message(ServerMessage::Event(Event::Forwarded(said))) => {
+                self.desk.forwarded(&said);
+                self.request_redraw();
+            }
             SessionEvent::Message(ServerMessage::Event(Event::View { terminal, update })) => {
                 if self.desk.view_changed(terminal, &update) {
                     self.request_redraw();

@@ -1,6 +1,6 @@
 # :connect: another machine's workspaces in the bar, with their ring and
 # what the mouse over it says, `name@host` as showhost says, a terminal
-# typed into through the relay, an editor not relayed yet, a password
+# typed into through the relay, an editor of desk's file, a password
 # asked for, one turned down, and a connection dropped.
 size 1280x800
 file notes.txt <<END
@@ -24,7 +24,7 @@ shell echo typed-on-$((6*7))
 wait-for typed-on-42
 shot relayed
 keys <C-;>:workspace work<CR>
-wait-for coming soon
+wait-for Notes kept on desk.
 shot editor
 keys <C-;>:set showhost=always<CR>
 shot always

@@ -364,6 +364,7 @@ impl Client {
             language: language.to_owned(),
             grammar,
             server: server.map(str::to_owned),
+            buffer: None,
         };
         match self.request(&request)? {
             Response::Done => Ok(()),
@@ -379,6 +380,7 @@ impl Client {
     pub fn decline(&mut self, language: &str) -> Result<(), ClientError> {
         let request = Request::Decline {
             language: language.to_owned(),
+            buffer: None,
         };
         match self.request(&request)? {
             Response::Done => Ok(()),
@@ -532,14 +534,26 @@ impl Client {
         self.send(&ClientMessage::Board { board, action })
     }
 
-    /// Asks the daemon to do `op` to files, numbered `id`. How it went
-    /// comes in an [`Event::FileOp`].
+    /// Asks the daemon to do `op` to files, numbered `id`, on its own
+    /// machine. How it went comes in an [`Event::FileOp`].
     ///
     /// # Errors
     ///
     /// If the connection fails.
     pub fn file_op(&mut self, id: u64, op: FileOp) -> Result<(), ClientError> {
-        self.send(&ClientMessage::FileOp { id, op })
+        self.send(&ClientMessage::FileOp { id, op, pane: None })
+    }
+
+    /// Asks the daemon to do `op` to files, numbered `id`, as asked from
+    /// `pane`, on the machine it's on: the daemon's own, or another the
+    /// daemon is connected to. How it went comes in an [`Event::FileOp`].
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn file_op_from(&mut self, id: u64, op: FileOp, pane: PaneId) -> Result<(), ClientError> {
+        let pane = Some(pane);
+        self.send(&ClientMessage::FileOp { id, op, pane })
     }
 
     /// Asks the agent called `agent` for the sessions it kept that work in

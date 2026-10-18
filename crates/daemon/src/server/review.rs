@@ -103,6 +103,29 @@ pub(super) struct Reviews {
     bases: Option<(Sender<BaseFound>, Receiver<BaseFound>)>,
 }
 
+impl Reviews {
+    /// The number the next review gets.
+    pub(super) fn next_number(&self) -> u32 {
+        self.next
+    }
+
+    /// A number no review has had, for one of another machine's (see
+    /// [`relay`](super::relay)), which its numbers are never given twice
+    /// by: it's asked only while plenty are left.
+    pub(super) fn fresh_number(&mut self) -> u32 {
+        let id = self.next;
+        self.next = self.next.saturating_add(1);
+        id
+    }
+
+    /// A number no agent hunk has had, for one of another machine's.
+    pub(super) fn fresh_hunk(&mut self) -> u64 {
+        let id = self.next_hunk;
+        self.next_hunk = self.next_hunk.saturating_add(1);
+        id
+    }
+}
+
 /// A file not open, and its agent hunks.
 #[derive(Debug)]
 struct Closed {

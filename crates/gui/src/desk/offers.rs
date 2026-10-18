@@ -8,7 +8,7 @@
 //! would have: each window is offered each language once, so the next
 //! window opened asks again.
 
-use clackatoo_protocol::Request;
+use clackatoo_protocol::{BufferId, Request, wire};
 use winit::keyboard::{Key, NamedKey};
 
 use super::{Asked, Desk};
@@ -19,6 +19,8 @@ use crate::options::LanguageInstall;
 /// What the daemon offered to install.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Offer {
+    /// The buffer it was offered for, which says on which machine.
+    buffer: BufferId,
     language: String,
     /// The language's grammar.
     grammar: bool,
@@ -44,11 +46,13 @@ impl Desk {
     /// redrawn.
     pub(super) fn offered(
         &mut self,
+        buffer: BufferId,
         language: String,
         grammar: bool,
         server: Option<String>,
     ) -> bool {
         let offer = Offer {
+            buffer,
             language,
             grammar,
             server,
@@ -69,6 +73,7 @@ impl Desk {
             language: offer.language,
             grammar: offer.grammar,
             server: offer.server,
+            buffer: self.daemon_has(wire::RELAY).then_some(offer.buffer),
         };
         self.request(request, Asked::Command);
     }
@@ -95,8 +100,11 @@ impl Desk {
                 offer.what(),
                 offer.language
             ));
-            let language = offer.language;
-            self.request(Request::Decline { language }, Asked::Quiet);
+            let decline = Request::Decline {
+                language: offer.language,
+                buffer: self.daemon_has(wire::RELAY).then_some(offer.buffer),
+            };
+            self.request(decline, Asked::Quiet);
             return true;
         }
         false

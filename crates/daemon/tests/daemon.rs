@@ -2137,7 +2137,10 @@ fn a_daemon_that_stops_answering_is_out_of_contact_until_it_answers_again() {
     client.frame_done(TerminalId(1)).unwrap();
     notified.recv_timeout(limit).unwrap();
     let silent_since = contact.silent_since().expect("out of contact");
-    assert!(silent_since >= cut_at);
+    // Silent since the first of what went unanswered, which may have gone
+    // just before the cut: a packet unanswered for a second brings a ping.
+    let ping_after = Duration::from_secs(1);
+    assert!(silent_since + ping_after >= cut_at);
     // Not before a relay's stall of a few seconds would be over.
     assert!(cut_at.elapsed() >= Duration::from_secs(5));
 
@@ -4524,7 +4527,8 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Exited { .. }
             | Event::Coloured { .. }
             | Event::Connections(_)
-            | Event::Login { .. }) => {
+            | Event::Login { .. }
+            | Event::Forwarded(_)) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }

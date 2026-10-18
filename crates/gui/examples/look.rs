@@ -502,6 +502,8 @@ impl Machines {
         config.machine = Some(dir.join("machine"));
         config.machine_name = Some(name.to_owned());
         config.workspaces = None;
+        // Its files are read as the window's own daemon reads them.
+        config.languages = Some(languages(&dir.join("languages"))?);
         let daemon = Daemon::bind(&runtime.socket_path(), config)?;
         let running = run(daemon, lock)?;
         let mut client = Client::connect(&runtime.socket_path())?;

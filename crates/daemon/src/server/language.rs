@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 
 use super::buffers::BufferSlot;
 use super::groups::End;
+use super::relay::editors::ASKER_SHIFT;
 use super::rename::{Made, Purpose};
 use super::stopping::{EXIT_WAIT, Stopping};
 use super::watched::{Walking, Wanted};
@@ -1053,7 +1054,7 @@ impl Daemon {
             Ask::Action(action) => {
                 return self.take_action(server, (token, buffer, id), action, &[]);
             }
-            Ask::Query(query) => self.supersede(token, buffer, query, at),
+            Ask::Query(query) => self.supersede((token, id), buffer, query, at),
             Ask::Rename(_) => {}
         }
         let (Some(slot), Some(running)) = (
@@ -1142,7 +1143,10 @@ impl Daemon {
     /// moves or more is typed, and only wants the last answer. The server
     /// is told it needn't answer, and an answer that comes anyway is let
     /// go. No other client was waiting for it: each question is one
-    /// client's, asked of the server on its own.
+    /// client's, asked of the server on its own. A daemon relaying for
+    /// clients of its own says which of them asks in the top bits of the
+    /// question's number `id` (see [`Request::Relay`](clackatoo_protocol::Request::Relay)):
+    /// only a question of the same one's goes.
     ///
     /// Inlay hints asked about from byte `at` take the place only of
     /// those asked about a range they cover, as an editor asks again after
@@ -1150,7 +1154,11 @@ impl Daemon {
     /// own, and neither is left without an answer. Places asked before are
     /// compared as they were counted, which is near enough: a question
     /// left is answered, and its answer is put in its place.
-    fn supersede(&mut self, token: Token, buffer: BufferId, query: Query, at: usize) {
+    fn supersede(&mut self, (token, id): (Token, u64), buffer: BufferId, query: Query, at: usize) {
+        // A daemon relaying asks for several clients of its own, each of
+        // which wants its own answer.
+        let relays = self.relays(token);
+        let same_asker = |asked: u64| !relays || asked >> ASKER_SHIFT == id >> ASKER_SHIFT;
         let same_kind = |asked: Query, asked_at: usize| match (query, asked) {
             (Query::InlayHints { end }, Query::InlayHints { end: asked_end }) => {
                 at <= asked_at && asked_end <= end
@@ -1169,6 +1177,7 @@ impl Daemon {
         self.servers.asked.retain(|asked| {
             let replaced = asked.token == token
                 && asked.buffer == buffer
+                && same_asker(asked.id)
                 && matches!(asked.what, Asking::Query(query) if same_kind(query, asked.at));
             if replaced {
                 cancelled.push((asked.server, asked.request));
@@ -1178,6 +1187,7 @@ impl Daemon {
         self.servers.again.retain(|(_, again)| {
             !(again.token == token
                 && again.buffer == buffer
+                && same_asker(again.place.0)
                 && matches!(again.ask, Ask::Query(query) if same_kind(query, again.place.2)))
         });
         for (server, request) in cancelled {
@@ -1186,8 +1196,9 @@ impl Daemon {
                 self.flush_server(server);
             }
         }
-        // Colours still to come for a hover before are for one gone.
-        if query == Query::Hover {
+        // Colours still to come for a hover before are for one gone, but
+        // for another client's of a daemon relaying, which are kept.
+        if query == Query::Hover && !relays {
             self.forget_colourings(token, Some(buffer));
         }
     }

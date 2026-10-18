@@ -42,7 +42,7 @@ use std::collections::{HashMap, HashSet};
 
 use clackatoo_protocol::{
     BufferId, ClientMessage, Content, Event, FileOp, FileOpError, FilesId, FilesUpdate, OpenFile,
-    OpenFiles, PaneId, PaneTerminal, Request, Side, Size,
+    OpenFiles, PaneId, PaneTerminal, Request, Side, Size, wire,
 };
 
 use super::jumps::FolderPlace;
@@ -71,7 +71,7 @@ pub(super) struct Explorers {
     next_op: u64,
     /// What was cut or copied, to paste: its path, and whether it's to be
     /// moved.
-    clipped: Option<(String, bool)>,
+    clipped: Option<Clipped>,
     /// The panes focused, the latest first.
     recent: Vec<PaneId>,
     /// The editors of the folders' listings explorers are editing, by
@@ -93,6 +93,23 @@ struct Listings {
     buffers: Vec<Option<BufferId>>,
     /// The editors of those not shown, and their copies, by their buffers.
     waiting: HashMap<BufferId, (Editor, BufferCopy)>,
+}
+
+/// What was cut or copied in an explorer, to paste.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Clipped {
+    path: String,
+    /// It's to be moved, not copied.
+    cut: bool,
+    /// The machine it's on, if it's another than the daemon's.
+    machine: Option<clackatoo_protocol::MachineId>,
+}
+
+impl Clipped {
+    /// Whether it's the file at `path` on `machine`.
+    fn is(&self, machine: Option<clackatoo_protocol::MachineId>, path: &str) -> bool {
+        self.machine == machine && self.path == path
+    }
 }
 
 impl Desk {
@@ -304,14 +321,15 @@ impl Desk {
         if outcome.is_ok() {
             match &op {
                 FileOp::Move { from, to, .. } => {
-                    self.jumps.moved(from, to);
-                    self.shared_mut().marks.moved(from, to);
+                    let machine = self.pane_machine(pane);
+                    self.jumps.moved(machine, from, to);
+                    self.shared_mut().marks.moved(machine, from, to);
                     // What was cut has gone where it was put.
                     if self
                         .explorers
                         .clipped
                         .as_ref()
-                        .is_some_and(|(path, _)| path == from)
+                        .is_some_and(|clipped| clipped.is(machine, from))
                     {
                         self.explorers.clipped = None;
                     }
@@ -321,7 +339,7 @@ impl Desk {
                         .explorers
                         .clipped
                         .as_ref()
-                        .is_some_and(|(clipped, _)| clipped == path) =>
+                        .is_some_and(|clipped| clipped.is(self.pane_machine(pane), path)) =>
                 {
                     self.explorers.clipped = None;
                 }
@@ -448,14 +466,32 @@ impl Desk {
                     }
                 }
             }
-            Ask::Keep { path, cut } => self.explorers.clipped = Some((path, cut)),
+            Ask::Keep { path, cut } => {
+                let machine = self.pane_machine(pane);
+                self.explorers.clipped = Some(Clipped { path, cut, machine });
+            }
             Ask::Paste { dir } => {
-                let Some((from, cut)) = self.explorers.clipped.clone() else {
+                let Some(Clipped {
+                    path: from,
+                    cut,
+                    machine,
+                }) = self.explorers.clipped.clone()
+                else {
                     if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
                         explorer.say("nothing's cut or copied: x or y does".to_owned());
                     }
                     return;
                 };
+                // A path is the machine's it was cut on, where the same
+                // path may be another file, or none.
+                if machine != self.pane_machine(pane) {
+                    let host = self.machine_called(machine);
+                    let how = if cut { "cut" } else { "copied" };
+                    if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
+                        explorer.say(format!("{how} on {host}: paste it there"));
+                    }
+                    return;
+                }
                 let name = from.rsplit('/').next().unwrap_or(&from);
                 let to = if dir.ends_with('/') {
                     format!("{dir}{name}")
@@ -533,12 +569,13 @@ impl Desk {
                 }
                 // Changed only once it says something else: not by its
                 // `..` alone.
-                let copy = BufferCopy::scratch_judged(
+                let mut copy = BufferCopy::scratch_judged(
                     buffer,
                     &dir,
                     &as_made.unwrap_or_default(),
                     listing::same_rope,
                 );
+                copy.set_machine(self.pane_machine(pane));
                 let mut editor = Editor::new(buffer, &self.options);
                 editor.hide_starts(listing::mark_len);
                 editor.keep_lines(listing::is_up);
@@ -554,7 +591,13 @@ impl Desk {
         // A selection in the folder's listing before is of no use in a new
         // one.
         if new {
-            self.shared_mut().marks.forget_selections(&dir);
+            let machine = self.pane_machine(pane);
+            self.shared_mut()
+                .marks
+                .forget_selections(crate::editor::File {
+                    machine,
+                    path: &dir,
+                });
         }
         if let Some(size) = size {
             editor.resize(size);
@@ -1108,7 +1151,10 @@ impl Desk {
         let id = self.explorers.next_op;
         self.explorers.next_op += 1;
         self.explorers.ops.insert(id, (pane, op.clone()));
-        self.outbox.push(ClientMessage::FileOp { id, op });
+        // Which machine its paths are on, for a daemon that relays
+        // another's.
+        let pane = self.daemon_has(wire::RELAY).then_some(pane);
+        self.outbox.push(ClientMessage::FileOp { id, op, pane });
         Ok(id)
     }
 

@@ -120,6 +120,20 @@ pub(super) struct Explorers {
 }
 
 impl Explorers {
+    /// The number the next explorer gets.
+    pub(super) fn next_number(&self) -> u32 {
+        self.next
+    }
+
+    /// A number no explorer has had, for one of another machine's (see
+    /// [`relay`](super::relay)), which its numbers are never given twice
+    /// by: it's asked only while plenty are left.
+    pub(super) fn fresh_number(&mut self) -> u32 {
+        let id = self.next;
+        self.next = self.next.saturating_add(1);
+        id
+    }
+
     /// What git says of explorer `files`' files: what its root's
     /// repository says, but for what's in the repositories inside it, and
     /// what they say of themselves. `None` until git has said anything.

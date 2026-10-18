@@ -379,7 +379,7 @@ fn the_selections_marks_stay_on_characters_whose_case_changes() {
     let mut setup = Setup::new(GRID);
     setup.keys("lvl~0");
     let marked = |setup: &Setup, mark| {
-        let place = setup.shared.marks.get(mark, setup.copy.path()).unwrap();
+        let place = setup.shared.marks.get(mark, setup.copy.file()).unwrap();
         (place.line, place.col)
     };
     assert_eq!((marked(&setup, '<'), marked(&setup, '>')), ((0, 1), (0, 2)));
@@ -395,7 +395,7 @@ fn dot_neither_selects_nor_marks() {
     setup.keys("Vj><Esc>j.");
     assert_eq!(setup.text(), "    a\n    b\n    c\n    d\ne\n");
     let line = |setup: &Setup, mark| {
-        let place = setup.shared.marks.get(mark, setup.copy.path()).unwrap();
+        let place = setup.shared.marks.get(mark, setup.copy.file()).unwrap();
         place.line
     };
     assert_eq!((line(&setup, '<'), line(&setup, '>')), (0, 1));

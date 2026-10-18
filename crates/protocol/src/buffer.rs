@@ -325,6 +325,14 @@ pub enum BufferUpdate {
         /// punctuation, each once, or empty.
         word: String,
     },
+    /// Attach to the buffer again, as after a lost connection, from the
+    /// version the window's copy is at ([`Resume`]), keeping its changes
+    /// waiting, to be brought onto what it's sent: nothing more is sent
+    /// about the buffer until then. A daemon relaying another's buffer
+    /// says so when it can't bring the window up to date itself, as when
+    /// its connection to the other was lost and the edits made meanwhile
+    /// are too many, or gone. Only to a client of protocol 92 or later.
+    Reattach,
 }
 
 /// What a buffer's language server does as you type, as it said when it

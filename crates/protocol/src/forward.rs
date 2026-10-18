@@ -46,6 +46,30 @@ pub struct Forward {
     pub unpaced: bool,
 }
 
+/// What a window asks of the ports the daemon forwards from its own
+/// machine to another it's connected to, in
+/// [`Request::Forwards`](crate::Request::Forwards). New in protocol 92.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Forwarding {
+    /// Say which ports are forwarded there, and how many connections each
+    /// has open.
+    List,
+    /// Forward port `local` on the daemon's machine, or any that's free if
+    /// it's 0, to `port` on `host`, as the other machine finds it:
+    /// `localhost` for that machine itself.
+    Add {
+        /// The port here.
+        local: u16,
+        /// The machine there.
+        host: String,
+        /// The port there.
+        port: u16,
+    },
+    /// Stop forwarding port `local` here, or with `None`, every port
+    /// forwarded there.
+    Stop(Option<u16>),
+}
+
 /// Why the daemon couldn't make a forwarded connection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ForwardFailure {

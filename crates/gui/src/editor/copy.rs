@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use clackatoo_protocol::{
     Answer, BufferId, BufferSnapshot, BufferUpdate, Change, ChatName, ClientMessage, Edit,
-    InlayHint, Query, Resume, ServerFeatures, Use,
+    InlayHint, MachineId, Query, Resume, ServerFeatures, Use,
 };
 use clackatoo_text::{
     AgentHunk, AgentHunks, Bias, Diagnostic, Diagnostics, Highlights, Hunk, Hunks, Rope, Span,
@@ -140,6 +140,9 @@ struct Kept {
 pub(crate) struct BufferCopy {
     id: BufferId,
     path: String,
+    /// The machine the file is on, if it's another than the daemon's: a
+    /// buffer of a workspace `:connect` brought in.
+    machine: Option<MachineId>,
     text: Rope,
     /// The daemon's version the copy is made from.
     version: u64,
@@ -218,6 +221,7 @@ impl BufferCopy {
         Self {
             id,
             path: String::new(),
+            machine: None,
             text: Rope::new(),
             version: 0,
             revision: 0,
@@ -415,6 +419,25 @@ impl BufferCopy {
     /// no file yet (see [`is_blank`](Self::is_blank)).
     pub(crate) fn path(&self) -> &str {
         &self.path
+    }
+
+    /// The machine the file is on, if it's another than the daemon's.
+    pub(crate) fn machine(&self) -> Option<MachineId> {
+        self.machine
+    }
+
+    /// Notes that the file is on `machine`, another than the daemon's, as
+    /// the pane showing it is.
+    pub(crate) fn set_machine(&mut self, machine: Option<MachineId>) {
+        self.machine = machine;
+    }
+
+    /// The file, as places are kept in it: its path, on its machine.
+    pub(crate) fn file(&self) -> super::marks::File<'_> {
+        super::marks::File {
+            machine: self.machine,
+            path: &self.path,
+        }
     }
 
     /// The file's name, for titles, or `[No Name]`, as Vim says, for a
@@ -1047,7 +1070,8 @@ impl BufferCopy {
             BufferUpdate::Offer { .. }
             | BufferUpdate::Notice(_)
             | BufferUpdate::ChangedOnDisk
-            | BufferUpdate::Language { .. } => Heard::Nothing,
+            | BufferUpdate::Language { .. }
+            | BufferUpdate::Reattach => Heard::Nothing,
             BufferUpdate::Features(features) => {
                 self.told_features(features);
                 Heard::Nothing

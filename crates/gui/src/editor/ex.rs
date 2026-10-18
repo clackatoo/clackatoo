@@ -444,8 +444,8 @@ impl Editor {
                 };
                 *text = &text[1 + mark.len_utf8()..];
                 let mark = if mark == '`' { '\'' } else { mark };
-                let place = (shared.marks.get(mark, copy.path()))
-                    .filter(|place| place.path == copy.path())
+                let place = (shared.marks.get(mark, copy.file()))
+                    .filter(|place| place.is_in(copy.file()))
                     .ok_or_else(|| format!("mark {mark} isn't set in this file"))?;
                 place.line.cast_signed() + 1
             }

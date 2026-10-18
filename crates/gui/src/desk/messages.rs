@@ -56,6 +56,20 @@ impl Desk {
         self.message = Some(message);
     }
 
+    /// Says `said`, what the daemon says of a port it forwards to another
+    /// machine for the window ([`clackatoo_protocol::Event::Forwarded`]),
+    /// as the window says what its own forwards run into.
+    pub(crate) fn forwarded(&mut self, said: &str) {
+        let mut said: String = (said.chars())
+            .filter(|ch| !ch.is_control())
+            .take(512)
+            .collect();
+        if let Some(first) = said.get(..1) {
+            said.replace_range(..1, &first.to_uppercase());
+        }
+        self.say(said);
+    }
+
     /// Says `message`, of something gone wrong, in the bar until the next
     /// key: in the warning colour, and if it's too long for the bar, whole
     /// above it for a few seconds.

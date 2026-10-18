@@ -1,17 +1,18 @@
 //! A pane of a kind this window can't show: one a newer daemon has, which
 //! it sends as [`Content::Other`](clackatoo_protocol::Content::Other),
 //! naming the kind, or one on another machine, in a workspace `:connect`
-//! brought in, of a kind the daemon doesn't relay yet, such as an editor.
-//! The pane says so, and for the first, how to update; the rest of the
-//! window goes on as usual.
+//! brought in, that doesn't come through: an editor, say, whose machine's
+//! clackatoo is too old to pass it on, or a terminal from yet another
+//! machine. The pane says so, and how to update the one that's too old;
+//! the rest of the window goes on as usual.
 
 use clackatoo_protocol::{Attributes, PaneKind, Size, Style};
 use clackatoo_term::{Row, RowBuilder};
 
 use crate::colors;
 
-/// A pane saying it needs a newer clackatoo, or that it's on another
-/// machine, and not shown here yet.
+/// A pane saying it needs a newer clackatoo, here or on the machine it's
+/// on, or that it's on yet another machine.
 #[derive(Debug)]
 pub(crate) struct OtherPane {
     kind: PaneKind,
@@ -66,9 +67,18 @@ impl OtherPane {
             ..Style::DEFAULT
         };
         let (first_words, second_words) = match &self.host {
+            Some(host) if self.kind.as_str() == "terminal" => (
+                said_elsewhere(self.kind, host),
+                format!(
+                    "Only panes on {host} itself come through in a workspace from {host}, yet."
+                ),
+            ),
             Some(host) => (
                 said_elsewhere(self.kind, host),
-                "Only terminals and chats come through from another machine yet.".to_owned(),
+                format!(
+                    "clackatoo on {host} is from before it passed these on: `clackatoo update` \
+                     there updates it."
+                ),
             ),
             None => (
                 said(self.kind),
@@ -125,7 +135,8 @@ pub(crate) fn said(kind: PaneKind) -> String {
 }
 
 /// What a pane of `kind` on `host`, another machine, says: "an editor on
-/// desk: coming soon".
+/// desk needs a newer clackatoo there", as the daemon says when asked
+/// for one there.
 pub(crate) fn said_elsewhere(kind: PaneKind, host: &str) -> String {
     let what = match kind.as_str() {
         "editor" => "an editor",
@@ -133,10 +144,14 @@ pub(crate) fn said_elsewhere(kind: PaneKind, host: &str) -> String {
         "board" => "a board",
         "review" => "a review",
         "browser" => "a chat's browser",
-        "terminal" => "a terminal from yet another machine",
+        "terminal" => {
+            return format!(
+                "a terminal from yet another machine, in a workspace on {host}: coming soon"
+            );
+        }
         _ => "a pane",
     };
-    format!("{what} on {host}: coming soon")
+    format!("{what} on {host} needs a newer clackatoo there")
 }
 
 #[cfg(test)]
@@ -157,13 +172,23 @@ mod tests {
     }
 
     #[test]
-    fn one_on_another_machine_says_where_and_that_its_coming() {
+    fn one_on_another_machine_says_where_and_that_its_clackatoo_is_too_old() {
         let mut pane = OtherPane::new(PaneKind::new("editor"), Some("desk".into()));
         pane.resize(Size::new(120, 10).unwrap());
         let rows: Vec<String> = pane.scene().iter().map(|row| row.text()).collect();
-        assert_eq!(rows[0].trim_end(), "an editor on desk: coming soon");
+        assert_eq!(
+            rows[0].trim_end(),
+            "an editor on desk needs a newer clackatoo there"
+        );
+        assert!(rows[1].contains("clackatoo update"), "{rows:?}");
         assert!(!rows[1].contains(":update"), "{rows:?}");
-        assert_eq!(pane.title(), "an editor on desk: coming soon");
+        assert_eq!(
+            pane.title(),
+            "an editor on desk needs a newer clackatoo there"
+        );
         assert_eq!(pane.host(), Some("desk"));
+        // A terminal from yet another machine is for later.
+        let pane = OtherPane::new(PaneKind::new("terminal"), Some("desk".into()));
+        assert!(pane.title().ends_with("coming soon"), "{}", pane.title());
     }
 }

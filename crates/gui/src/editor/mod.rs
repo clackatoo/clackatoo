@@ -87,7 +87,7 @@ pub(crate) use hints::HINTS_WAIT;
 use kept::Kept;
 pub(crate) use keys::Stroke;
 use keys::{Action, Command, Entry, Operator, Parsed, Target, ViewAt};
-pub(crate) use marks::{FilePlace, Marks};
+pub(crate) use marks::{File, FilePlace, Marks};
 #[cfg(test)]
 pub(crate) use panel::Line as PanelLine;
 pub(crate) use panel::{BESIDE_GAP, Beside, PanelView};
@@ -4344,7 +4344,7 @@ impl Editor {
             return;
         }
         let byte = self.cursor_byte(copy);
-        marks.set(mark, FilePlace::at(copy.path(), copy.text(), byte));
+        marks.set(mark, FilePlace::at(copy.file(), copy.text(), byte));
     }
 
     /// The command line is opened, with `:`: in visual mode, the
@@ -4409,10 +4409,17 @@ impl Editor {
     /// character that isn't blank. A mark in another file is for the desk
     /// to open, which a macro being typed can't wait for, so it stops.
     fn go_to_mark(&mut self, mark: char, exact: bool, copy: &BufferCopy, marks: &Marks) {
-        if let Some(place) = marks.get(previous(mark), copy.path())
-            && place.path != copy.path()
+        if let Some(place) = marks.get(previous(mark), copy.file())
+            && !place.is_in(copy.file())
             && self.mode == Mode::Normal
         {
+            // A file on another machine than this one's isn't opened here,
+            // where the same path is another file, if there's one.
+            if place.machine != copy.machine() {
+                self.status = Some(format!("mark {mark} is in a file on another machine"));
+                self.fail();
+                return;
+            }
             self.left_from(self.cursor.at, copy);
             self.opening = Some(FileLocation {
                 path: place.path.clone(),
@@ -4441,9 +4448,9 @@ impl Editor {
     /// Where `mark` is in this file, if it's set, and here; if not, says
     /// why.
     fn mark_here(&mut self, mark: char, copy: &BufferCopy, marks: &Marks) -> Option<Point> {
-        let place = marks.get(previous(mark), copy.path());
+        let place = marks.get(previous(mark), copy.file());
         match place {
-            Some(place) if place.path == copy.path() => {
+            Some(place) if place.is_in(copy.file()) => {
                 Some(self.point_at(place.line, place.col, copy))
             }
             Some(place) => {

@@ -327,6 +327,8 @@ impl Desk {
         let takes_host = (self.input.as_ref())
             .and_then(|input| input.line.text().split_whitespace().next())
             .is_some_and(|word| crate::command::takes(word) == crate::command::Takes::Host);
+        // A pane on another machine than the window's has its files there.
+        let remote = self.remote || self.shown_elsewhere().is_some();
         Sources {
             workspaces: (self.workspaces.list.iter())
                 .map(|workspace| self.shown_name(workspace))
@@ -336,8 +338,8 @@ impl Desk {
             } else {
                 Vec::new()
             },
-            folder: (!self.remote).then(|| self.focused_folder()).flatten(),
-            remote: self.remote,
+            folder: (!remote).then(|| self.focused_folder()).flatten(),
+            remote,
         }
     }
 

@@ -151,6 +151,42 @@ pub enum AddError {
     },
 }
 
+/// Why `asked` couldn't be forwarded, and what to do instead, for the
+/// bar.
+#[must_use]
+pub fn refusal(err: &AddError, asked: &Spec) -> String {
+    let host = if asked.host.contains(':') {
+        format!("[{}]", asked.host)
+    } else {
+        asked.host.clone()
+    };
+    let there = if asked.host == "localhost" {
+        asked.port.to_string()
+    } else {
+        format!("{host}:{}", asked.port)
+    };
+    let instead = |free: Option<u16>| match free {
+        Some(free) => format!(": :PortForward {free}:{there} forwards port {free} instead"),
+        None => format!(": :PortForward LOCAL:{there} forwards another"),
+    };
+    match err {
+        AddError::InUse { port, free } => {
+            format!("Port {port} is in use on this machine{}", instead(*free))
+        }
+        AddError::Privileged(port) => {
+            format!("Only root may listen on port {port} here{}", instead(None))
+        }
+        AddError::Forwarded(port) => {
+            format!("Port {port} is forwarded already: :PortForward! {port} stops it")
+        }
+        AddError::Io { .. } => {
+            let mut said = err.to_string();
+            said.replace_range(..1, "C");
+            said
+        }
+    }
+}
+
 /// Something a forward ran into, to tell the user once.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report {

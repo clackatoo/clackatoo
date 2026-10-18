@@ -93,7 +93,11 @@ impl Desk {
             self.show_pane(editor);
             match landing {
                 Some(landing) => {
-                    let place = FilePlace::at_line(&path, landing.line, landing.col, None);
+                    let file = crate::editor::File {
+                        machine: self.pane_machine(editor),
+                        path: &path,
+                    };
+                    let place = FilePlace::at_line(file, landing.line, landing.col, None);
                     self.show_file_place(editor, &place);
                 }
                 None if self.file_in(editor) != Some(path.as_str()) => {

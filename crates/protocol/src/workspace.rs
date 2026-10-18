@@ -445,6 +445,30 @@ impl Content {
             | Self::Other { .. } => None,
         }
     }
+
+    /// What a window calls a pane showing it, for one shown as a pane to
+    /// come ([`Content::Other`]): `editor`, `explorer`, and so on, or the
+    /// name an `Other` gives, as far as it's one of those words.
+    #[must_use]
+    pub fn kind_name(self) -> &'static str {
+        match self {
+            Self::Terminal(_) => "terminal",
+            Self::Buffer(_) | Self::Folder(_) => "editor",
+            Self::Files(_) => "explorer",
+            Self::Board(_) => "board",
+            Self::Review(_) => "review",
+            Self::Browser(_) => "browser",
+            Self::Other { kind } => match kind.as_str() {
+                "terminal" => "terminal",
+                "editor" => "editor",
+                "explorer" => "explorer",
+                "board" => "board",
+                "review" => "review",
+                "browser" => "browser",
+                _ => "pane",
+            },
+        }
+    }
 }
 
 /// Which way a split's parts are side by side.
@@ -633,6 +657,19 @@ impl Layout {
                 Self::Split { parts, .. } => parts.get(usize::from(index))?.at(rest),
                 Self::Pane(_) => None,
             },
+        }
+    }
+
+    /// Calls `each` with each of its panes, left to right and top to
+    /// bottom, to change it.
+    pub fn for_each_pane_mut(&mut self, each: &mut impl FnMut(&mut Pane)) {
+        match self {
+            Self::Pane(pane) => each(pane),
+            Self::Split { parts, .. } => {
+                for part in parts {
+                    part.for_each_pane_mut(each);
+                }
+            }
         }
     }
 

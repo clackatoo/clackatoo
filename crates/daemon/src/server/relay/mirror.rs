@@ -15,16 +15,20 @@
 //! many workspaces, panes and chats are taken in, names are cut short
 //! and made safe to show, and layouts are tidied, so nothing it sends
 //! can break a window that couldn't be broken by connecting to it
-//! directly. Panes of kinds the relay doesn't carry yet, such as editors,
-//! are shown as [`Content::Other`], naming the kind, which a window shows
-//! as such a pane on that machine, to come; a buffer's number would
-//! otherwise name one of this daemon's own buffers.
+//! directly.
+//!
+//! What a pane shows is renumbered too: a buffer, a file explorer, a
+//! board, a review, a chat's page. A daemon too old to relay them (before
+//! protocol 92, [`wire::RELAY`](clackatoo_protocol::wire::RELAY)) has its
+//! panes of those kinds shown as [`Content::Other`], naming the kind,
+//! which a window shows as such a pane on that machine it can't show: a
+//! buffer's number would otherwise name one of this daemon's own buffers.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use clackatoo_protocol::{
-    ChatState, ChatSummary, Content, Layout, Machine, Pane, PaneKind, Tab, TabId, TerminalId,
-    Workspace, WorkspaceId, Workspaces,
+    BoardId, BufferId, ChatState, ChatSummary, Content, FilesId, Layout, Machine, Pane, PaneKind,
+    ReviewId, Tab, TabId, TerminalId, Workspace, WorkspaceId, Workspaces,
 };
 
 /// The most of another daemon's workspaces shown: more than anyone keeps.
@@ -36,6 +40,14 @@ pub(crate) const MOST_PANES: usize = 512;
 
 /// The most of another daemon's chats taken in.
 pub(crate) const MOST_CHATS: usize = 1024;
+
+/// The most of another daemon's boards numbered before those no pane shows
+/// or client follows are forgotten.
+const MOST_BOARDS: usize = 4096;
+
+/// The most agent hunks of another daemon's taken in from one message: a
+/// buffer's, or a review's.
+pub(crate) const MOST_HUNKS: usize = 1 << 16;
 
 /// The longest name of another daemon's kept, in characters: a workspace's,
 /// a tab's, or a chat's title.
@@ -52,31 +64,46 @@ pub(crate) trait Fresh {
     fn tab(&mut self) -> u32;
     fn pane(&mut self) -> u32;
     fn terminal(&mut self) -> u32;
+    fn buffer(&mut self) -> u32;
+    fn files(&mut self) -> u32;
+    fn board(&mut self) -> u32;
+    fn review(&mut self) -> u32;
+    /// An agent hunk's.
+    fn hunk(&mut self) -> u64;
 }
 
 /// One kind of number, the other daemon's each way to this one's.
-#[derive(Debug, Default)]
-pub(crate) struct Numbers {
+#[derive(Debug)]
+pub(crate) struct Numbers<T = u32> {
     /// From the other daemon's to this one's.
-    local: BTreeMap<u32, u32>,
+    local: BTreeMap<T, T>,
     /// From this daemon's to the other's.
-    remote: BTreeMap<u32, u32>,
+    remote: BTreeMap<T, T>,
 }
 
-impl Numbers {
+impl<T> Default for Numbers<T> {
+    fn default() -> Self {
+        Self {
+            local: BTreeMap::new(),
+            remote: BTreeMap::new(),
+        }
+    }
+}
+
+impl<T: Copy + Ord> Numbers<T> {
     /// This daemon's number for the other's `remote`, if it has one.
-    pub(crate) fn local(&self, remote: u32) -> Option<u32> {
+    pub(crate) fn local(&self, remote: T) -> Option<T> {
         self.local.get(&remote).copied()
     }
 
     /// The other daemon's number for this one's `local`, if it's one.
-    pub(crate) fn remote(&self, local: u32) -> Option<u32> {
+    pub(crate) fn remote(&self, local: T) -> Option<T> {
         self.remote.get(&local).copied()
     }
 
     /// This daemon's number for the other's `remote`, a new one from
     /// `fresh` if it has none yet.
-    pub(crate) fn local_or_fresh(&mut self, remote: u32, fresh: impl FnOnce() -> u32) -> u32 {
+    pub(crate) fn local_or_fresh(&mut self, remote: T, fresh: impl FnOnce() -> T) -> T {
         if let Some(local) = self.local(remote) {
             return local;
         }
@@ -87,7 +114,7 @@ impl Numbers {
     }
 
     /// Forgets every number but those of `kept`, the other daemon's.
-    fn keep(&mut self, kept: &BTreeSet<u32>) {
+    pub(crate) fn keep(&mut self, kept: &BTreeSet<T>) {
         let remote = &mut self.remote;
         self.local.retain(|number, local| {
             let keep = kept.contains(number);
@@ -99,7 +126,6 @@ impl Numbers {
     }
 
     /// How many numbers it holds.
-    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.local.len()
     }
@@ -119,12 +145,32 @@ pub(crate) struct Mirror {
     pub(crate) tab_numbers: Numbers,
     pub(crate) pane_numbers: Numbers,
     pub(crate) terminal_numbers: Numbers,
+    pub(crate) buffer_numbers: Numbers,
+    pub(crate) files_numbers: Numbers,
+    /// Boards are numbered for as long as the daemon there runs, never
+    /// forgotten before: few, and named by the finder's lists too.
+    pub(crate) board_numbers: Numbers,
+    pub(crate) review_numbers: Numbers,
+    /// Agent hunks, whose numbers the relay keeps as it says (see
+    /// [`Mirror::keep_hunks`]).
+    pub(crate) hunk_numbers: Numbers<u64>,
     /// The other daemon's numbers of the terminals its workspaces show,
     /// as last said.
     terminals_shown: BTreeSet<u32>,
     /// Its chats as it last said them, as many as are taken in, to be
     /// renumbered again as its workspaces are.
     told_chats: Vec<ChatSummary>,
+}
+
+/// What this daemon's clients follow of another daemon's, by this daemon's
+/// numbers: their numbers are kept while they do, shown or not.
+#[derive(Debug, Default)]
+pub(crate) struct InUse {
+    pub(crate) terminals: BTreeSet<TerminalId>,
+    pub(crate) buffers: BTreeSet<BufferId>,
+    pub(crate) files: BTreeSet<FilesId>,
+    pub(crate) reviews: BTreeSet<ReviewId>,
+    pub(crate) boards: BTreeSet<BoardId>,
 }
 
 /// What taking in another daemon's workspaces came to.
@@ -146,14 +192,17 @@ impl Mirror {
     /// Takes in `remote`, the workspaces the daemon there, `machine`, says
     /// it has: its own, that is, as it may show others' too, which are
     /// left out (passing them on is for later). New ones are numbered from
-    /// `fresh`. Numbers no longer used are forgotten, but for those of the
-    /// terminals in `followed`, this daemon's, which its clients follow.
+    /// `fresh`. Numbers no longer used are forgotten, but for those of
+    /// what's `followed`, this daemon's, which its clients follow. Panes
+    /// other than terminals are shown as they are only if it `relays`
+    /// them, being of protocol 92 or later.
     pub(crate) fn take(
         &mut self,
         remote: &Workspaces,
         machine: &Machine,
         fresh: &mut dyn Fresh,
-        followed: &BTreeSet<TerminalId>,
+        followed: &InUse,
+        relays: bool,
     ) -> Taken {
         let mut taken = Taken::default();
         if self.run.is_some_and(|run| run != machine.run) {
@@ -177,18 +226,31 @@ impl Mirror {
                 break;
             }
             panes += count;
-            if let Some(workspace) = self.renumber(workspace, machine, fresh, &mut kept) {
+            let shown = Shown { machine, relays };
+            if let Some(workspace) = self.renumber(workspace, shown, fresh, &mut kept) {
                 workspaces.push(workspace);
             }
         }
         self.terminals_shown = kept.terminals;
+        self.terminals_shown.extend(kept.chats);
         self.workspace_numbers.keep(&kept.workspaces);
         self.tab_numbers.keep(&kept.tabs);
         self.pane_numbers.keep(&kept.panes);
+        let buffers = followed.buffers.iter().map(|id| id.0);
+        keep_with(&mut self.buffer_numbers, kept.buffers, buffers);
+        let files = followed.files.iter().map(|id| id.0);
+        keep_with(&mut self.files_numbers, kept.files, files);
+        let reviews = followed.reviews.iter().map(|id| id.0);
+        keep_with(&mut self.review_numbers, kept.reviews, reviews);
+        // Boards the finder listed are kept too, while they're few.
+        if self.board_numbers.len() > MOST_BOARDS {
+            let boards = followed.boards.iter().map(|id| id.0);
+            keep_with(&mut self.board_numbers, kept.boards, boards);
+        }
         taken.changed = taken.restarted || workspaces != self.workspaces;
         self.workspaces = workspaces;
         taken.chats = self.renumber_chats(fresh);
-        self.keep_terminals(followed);
+        self.keep_terminals(&followed.terminals);
         taken
     }
 
@@ -272,16 +334,24 @@ impl Mirror {
         self.terminal_numbers.keep(&kept);
     }
 
-    /// `workspace`, one of the other daemon's, `machine`'s, renumbered,
-    /// noting the numbers it used in `kept`; or `None` if nothing of it
-    /// can be shown.
+    /// Keeps the numbers of the agent hunks in `kept`, the other daemon's,
+    /// and forgets the rest: those the buffers and reviews followed told
+    /// last.
+    pub(crate) fn keep_hunks(&mut self, kept: &BTreeSet<u64>) {
+        self.hunk_numbers.keep(kept);
+    }
+
+    /// `workspace`, one of the other daemon's, renumbered, as `shown`
+    /// says, noting the numbers it used in `kept`; or `None` if nothing of
+    /// it can be shown.
     fn renumber(
         &mut self,
         workspace: &Workspace,
-        machine: &Machine,
+        shown: Shown<'_>,
         fresh: &mut dyn Fresh,
         kept: &mut Kept,
     ) -> Option<Workspace> {
+        let machine = shown.machine;
         // A number said twice is the first's: what comes with it again is
         // left out, as a daemon never sends that.
         if kept.workspaces.contains(&workspace.id.0) {
@@ -293,7 +363,7 @@ impl Mirror {
             if kept.tabs.contains(&tab.id.0) {
                 continue;
             }
-            let Some(layout) = self.renumber_layout(&tab.layout, machine, fresh, kept) else {
+            let Some(layout) = self.renumber_layout(&tab.layout, shown, fresh, kept) else {
                 continue;
             };
             kept.tabs.insert(tab.id.0);
@@ -341,7 +411,7 @@ impl Mirror {
     fn renumber_layout(
         &mut self,
         layout: &Layout,
-        machine: &Machine,
+        shown: Shown<'_>,
         fresh: &mut dyn Fresh,
         kept: &mut Kept,
     ) -> Option<Layout> {
@@ -365,8 +435,11 @@ impl Mirror {
                             .local_or_fresh(terminal.0, || fresh.terminal());
                         Content::Terminal(TerminalId(local))
                     }
+                    content if shown.relays && pane.home.is_none() => {
+                        self.renumber_content(content, fresh, kept)
+                    }
                     content => Content::Other {
-                        kind: PaneKind::new(kind_of(content)),
+                        kind: PaneKind::new(content.kind_name()),
                     },
                 };
                 // Whatever it says of the pane's home, it's on the machine
@@ -375,7 +448,7 @@ impl Mirror {
                 Some(Layout::Pane(Pane {
                     id: clackatoo_protocol::PaneId(id),
                     content,
-                    home: Some(machine.id),
+                    home: Some(shown.machine.id),
                 }))
             }
             Layout::Split {
@@ -384,7 +457,7 @@ impl Mirror {
                 shares,
             } => {
                 let mut parts: Vec<Layout> = (parts.iter())
-                    .filter_map(|part| self.renumber_layout(part, machine, fresh, kept))
+                    .filter_map(|part| self.renumber_layout(part, shown, fresh, kept))
                     .collect();
                 match parts.len() {
                     0 => None,
@@ -407,6 +480,67 @@ impl Mirror {
     }
 }
 
+impl Mirror {
+    /// `content`, what one of the other daemon's panes shows, other than a
+    /// terminal, renumbered, noting the numbers it used in `kept`.
+    fn renumber_content(
+        &mut self,
+        content: Content,
+        fresh: &mut dyn Fresh,
+        kept: &mut Kept,
+    ) -> Content {
+        match content {
+            Content::Buffer(buffer) => {
+                kept.buffers.insert(buffer.0);
+                let local = (self.buffer_numbers).local_or_fresh(buffer.0, || fresh.buffer());
+                Content::Buffer(BufferId(local))
+            }
+            Content::Files(files) | Content::Folder(files) => {
+                kept.files.insert(files.0);
+                let local = FilesId((self.files_numbers).local_or_fresh(files.0, || fresh.files()));
+                if content.is_folder() {
+                    Content::Folder(local)
+                } else {
+                    Content::Files(local)
+                }
+            }
+            Content::Board(board) => {
+                kept.boards.insert(board.0);
+                let local = (self.board_numbers).local_or_fresh(board.0, || fresh.board());
+                Content::Board(BoardId(local))
+            }
+            Content::Review(review) => {
+                kept.reviews.insert(review.0);
+                let local = (self.review_numbers).local_or_fresh(review.0, || fresh.review());
+                Content::Review(ReviewId(local))
+            }
+            Content::Browser(chat) => {
+                kept.chats.insert(chat.0);
+                let local = (self.terminal_numbers).local_or_fresh(chat.0, || fresh.terminal());
+                Content::Browser(TerminalId(local))
+            }
+            Content::Terminal(_) | Content::Other { .. } => Content::Other {
+                kind: PaneKind::new(content.kind_name()),
+            },
+        }
+    }
+}
+
+/// Keeps in `numbers` those of `kept`, the other daemon's, and of
+/// `followed`, this daemon's, and forgets the rest.
+fn keep_with(numbers: &mut Numbers, mut kept: BTreeSet<u32>, followed: impl Iterator<Item = u32>) {
+    kept.extend(followed.filter_map(|local| numbers.remote(local)));
+    numbers.keep(&kept);
+}
+
+/// How another daemon's workspaces are shown: from `machine`, and with
+/// panes other than terminals as they are if it `relays` them.
+#[derive(Clone, Copy)]
+struct Shown<'a> {
+    machine: &'a Machine,
+    relays: bool,
+}
+
 /// The other daemon's numbers that what it showed last uses.
 #[derive(Debug, Default)]
 struct Kept {
@@ -414,28 +548,12 @@ struct Kept {
     tabs: BTreeSet<u32>,
     panes: BTreeSet<u32>,
     terminals: BTreeSet<u32>,
-}
-
-/// What a window calls a pane showing `content`, from another machine,
-/// which the relay doesn't carry yet: an editor, an explorer.
-fn kind_of(content: Content) -> &'static str {
-    match content {
-        Content::Buffer(_) | Content::Folder(_) => "editor",
-        Content::Files(_) => "explorer",
-        Content::Board(_) => "board",
-        Content::Review(_) => "review",
-        Content::Browser(_) => "browser",
-        Content::Terminal(_) => "terminal",
-        Content::Other { kind } => match kind.as_str() {
-            // Its own name for it, as far as it's one of these words.
-            "editor" => "editor",
-            "explorer" => "explorer",
-            "board" => "board",
-            "review" => "review",
-            "browser" => "browser",
-            _ => "pane",
-        },
-    }
+    /// The chats whose pages panes show.
+    chats: BTreeSet<u32>,
+    buffers: BTreeSet<u32>,
+    files: BTreeSet<u32>,
+    reviews: BTreeSet<u32>,
+    boards: BTreeSet<u32>,
 }
 
 /// `name`, of another daemon's, as it's shown: on one line, without
@@ -452,7 +570,7 @@ pub(crate) fn shown_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use clackatoo_protocol::{Axis, BufferId, MachineId, PaneId};
+    use clackatoo_protocol::{Axis, MachineId, PaneId};
 
     use super::*;
 
@@ -463,6 +581,7 @@ mod tests {
         tab: u32,
         pane: u32,
         terminal: u32,
+        others: u32,
     }
 
     impl Fresh for Counters {
@@ -481,6 +600,34 @@ mod tests {
         fn terminal(&mut self) -> u32 {
             self.terminal += 1;
             400 + self.terminal
+        }
+        fn buffer(&mut self) -> u32 {
+            self.others += 1;
+            500 + self.others
+        }
+        fn files(&mut self) -> u32 {
+            self.others += 1;
+            600 + self.others
+        }
+        fn board(&mut self) -> u32 {
+            self.others += 1;
+            700 + self.others
+        }
+        fn review(&mut self) -> u32 {
+            self.others += 1;
+            800 + self.others
+        }
+        fn hunk(&mut self) -> u64 {
+            self.others += 1;
+            900 + u64::from(self.others)
+        }
+    }
+
+    /// What's followed: the terminals in `terminals`.
+    fn following(terminals: &[u32]) -> InUse {
+        InUse {
+            terminals: terminals.iter().copied().map(TerminalId).collect(),
+            ..InUse::default()
         }
     }
 
@@ -535,7 +682,7 @@ mod tests {
             shares: vec![1, 2],
         };
         let remote = workspaces(vec![workspace(1, "main", split, 2)]);
-        let taken = mirror.take(&remote, &machine(5), &mut fresh, &BTreeSet::new());
+        let taken = mirror.take(&remote, &machine(5), &mut fresh, &following(&[]), false);
         assert!(taken.changed && !taken.restarted && !taken.cut);
         let shown = &mirror.workspaces[0];
         assert_eq!(
@@ -560,7 +707,7 @@ mod tests {
         assert_eq!(mirror.pane_numbers.local(2), Some(302));
 
         // The same again changes nothing, and keeps every number.
-        let again = mirror.take(&remote, &machine(5), &mut fresh, &BTreeSet::new());
+        let again = mirror.take(&remote, &machine(5), &mut fresh, &following(&[]), false);
         assert!(!again.changed);
         assert_eq!(mirror.workspaces[0].id, WorkspaceId(101));
     }
@@ -573,17 +720,16 @@ mod tests {
             workspace(1, "a", pane(1, Content::Terminal(TerminalId(1))), 1),
             workspace(2, "b", pane(2, Content::Terminal(TerminalId(2))), 2),
         ]);
-        mirror.take(&two, &machine(5), &mut fresh, &BTreeSet::new());
-        let followed = BTreeSet::from([TerminalId(401)]);
+        mirror.take(&two, &machine(5), &mut fresh, &following(&[]), false);
         let none = workspaces(Vec::new());
-        mirror.take(&none, &machine(5), &mut fresh, &followed);
+        mirror.take(&none, &machine(5), &mut fresh, &following(&[401]), false);
         assert_eq!(mirror.workspace_numbers.len(), 0);
         assert_eq!(mirror.pane_numbers.len(), 0);
         assert_eq!(mirror.terminal_numbers.remote(401), Some(1), "followed");
         assert_eq!(mirror.terminal_numbers.remote(402), None);
         // A workspace coming back is numbered anew, as numbers aren't used
         // twice.
-        mirror.take(&two, &machine(5), &mut fresh, &BTreeSet::new());
+        mirror.take(&two, &machine(5), &mut fresh, &following(&[]), false);
         assert_eq!(mirror.workspaces[1].id, WorkspaceId(104));
     }
 
@@ -597,10 +743,9 @@ mod tests {
             pane(1, Content::Terminal(TerminalId(1))),
             1,
         )]);
-        mirror.take(&remote, &machine(5), &mut fresh, &BTreeSet::new());
-        let followed = BTreeSet::from([TerminalId(401)]);
+        mirror.take(&remote, &machine(5), &mut fresh, &following(&[]), false);
         // Its terminal 1 now is another than before.
-        let taken = mirror.take(&remote, &machine(6), &mut fresh, &followed);
+        let taken = mirror.take(&remote, &machine(6), &mut fresh, &following(&[401]), false);
         assert!(taken.restarted && taken.changed);
         assert_eq!(mirror.terminal_numbers.local(1), Some(402));
         assert_eq!(mirror.terminal_numbers.remote(401), None);
@@ -627,7 +772,7 @@ mod tests {
         );
         let small = workspace(3, "small", pane(3, Content::Terminal(TerminalId(3))), 3);
         let remote = workspaces(vec![passed_on, big, small]);
-        let taken = mirror.take(&remote, &machine(5), &mut fresh, &BTreeSet::new());
+        let taken = mirror.take(&remote, &machine(5), &mut fresh, &following(&[]), false);
         assert!(taken.cut);
         let names: Vec<&str> = mirror.workspaces.iter().map(|w| w.name.as_str()).collect();
         assert_eq!(names, ["big"], "the next would be one pane too many");
@@ -653,7 +798,7 @@ mod tests {
         let mut tab = workspace(1, "x\u{202e}@y\x1b", layout, 99);
         tab.tabs[0].name = Some("\n".into());
         let remote = workspaces(vec![tab]);
-        mirror.take(&remote, &machine(5), &mut fresh, &BTreeSet::new());
+        mirror.take(&remote, &machine(5), &mut fresh, &following(&[]), false);
         let shown = &mirror.workspaces[0];
         assert_eq!(shown.name, "x_y");
         let tab = &shown.tabs[0];
@@ -697,7 +842,7 @@ mod tests {
             // The same workspace again.
             workspace(1, "b", pane(5, Content::Terminal(TerminalId(5))), 5),
         ]);
-        mirror.take(&remote, &machine(5), &mut fresh, &BTreeSet::new());
+        mirror.take(&remote, &machine(5), &mut fresh, &following(&[]), false);
         let [shown] = &mirror.workspaces[..] else {
             panic!("{:?}", mirror.workspaces);
         };
@@ -729,7 +874,7 @@ mod tests {
             pane(1, Content::Terminal(TerminalId(5))),
             1,
         )]);
-        mirror.take(&remote, &machine(5), &mut fresh, &BTreeSet::new());
+        mirror.take(&remote, &machine(5), &mut fresh, &following(&[]), false);
         let summary = |chat: u32, parent: Option<u32>, workspace: Option<u32>| ChatSummary {
             chat: TerminalId(chat),
             title: "fix\x07 it".into(),
@@ -762,5 +907,57 @@ mod tests {
             &mut fresh,
             &BTreeSet::new(),
         ));
+    }
+
+    #[test]
+    fn a_daemon_that_relays_has_every_kind_of_pane_shown_renumbered() {
+        let mut mirror = Mirror::default();
+        let mut fresh = Counters::default();
+        let layout = Layout::Split {
+            axis: Axis::LeftToRight,
+            parts: vec![
+                pane(1, Content::Buffer(BufferId(1))),
+                pane(2, Content::Files(FilesId(1))),
+                pane(3, Content::Folder(FilesId(2))),
+                pane(4, Content::Board(BoardId(1))),
+                pane(5, Content::Review(ReviewId(1))),
+                pane(6, Content::Browser(TerminalId(9))),
+                pane(7, Content::Terminal(TerminalId(9))),
+            ],
+            shares: vec![1; 7],
+        };
+        let remote = workspaces(vec![workspace(1, "a", layout, 1)]);
+        mirror.take(&remote, &machine(5), &mut fresh, &following(&[]), true);
+        let contents: Vec<Content> = (mirror.workspaces[0].tabs[0].layout.panes().iter())
+            .map(|pane| pane.content)
+            .collect();
+        assert_eq!(
+            contents,
+            [
+                Content::Buffer(BufferId(501)),
+                Content::Files(FilesId(602)),
+                Content::Folder(FilesId(603)),
+                Content::Board(BoardId(704)),
+                Content::Review(ReviewId(805)),
+                // A chat's page, and the chat, are the same chat here.
+                Content::Browser(TerminalId(401)),
+                Content::Terminal(TerminalId(401)),
+            ]
+        );
+        assert_eq!(mirror.buffer_numbers.remote(501), Some(1));
+        assert_eq!(mirror.files_numbers.local(2), Some(603));
+
+        // Gone from the layout, a buffer's number goes, unless it's
+        // followed; a board's stays.
+        let followed = InUse {
+            files: BTreeSet::from([FilesId(602)]),
+            ..InUse::default()
+        };
+        let none = workspaces(Vec::new());
+        mirror.take(&none, &machine(5), &mut fresh, &followed, true);
+        assert_eq!(mirror.buffer_numbers.len(), 0);
+        assert_eq!(mirror.files_numbers.remote(602), Some(1));
+        assert_eq!(mirror.files_numbers.remote(603), None);
+        assert_eq!(mirror.board_numbers.remote(704), Some(1));
     }
 }

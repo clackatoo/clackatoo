@@ -21,9 +21,11 @@ use clackatoo_daemon::{
     AgentConfig, Client, ClientError, CustomAgent, Daemon, DaemonConfig, LinkConfig, ShutdownHandle,
 };
 use clackatoo_protocol::{
-    ChatAction, ChatNode, ClientMessage, Connection, ConnectionState, Content, Error, Event, Item,
-    MachineId, NewAgent, NewTerminal, OpenFile, PaneId, PaneTerminal, Request, Response,
-    ServerMessage, Side, Size, TerminalId, View, ViewUpdate, Workspace, Workspaces,
+    Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode,
+    ClientMessage, Connection, ConnectionState, Content, Done, Edit, Error, Event, FileOp,
+    FilesAction, FilesId, FilesUpdate, Forwarding, Found, Item, MachineId, NewAgent, NewTerminal,
+    OpenFile, OpenFiles, PaneId, PaneTerminal, Query, Request, Response, Search, ServerMessage,
+    Side, Size, TerminalId, View, ViewUpdate, Workspace, Workspaces,
 };
 
 /// How long anything here may take, on a busy machine.
@@ -83,9 +85,42 @@ impl World {
     /// As [`start`](Self::start), making the workspaces and connections
     /// it kept again if `restore`.
     fn start_with(&self, host: &str, restore: bool) -> TestDaemon {
+        self.start_configured(host, restore, |_| {})
+    }
+
+    /// As [`start`](Self::start), with files ending `.fk` read as a
+    /// language whose server is the fake language server, in a project
+    /// whose root holds a file `project`.
+    fn start_speaking(&self, host: &str) -> TestDaemon {
+        let pack = self.host(host).join("languages/fake");
+        std::fs::create_dir_all(&pack).unwrap();
+        let server = format!(
+            "{:?}",
+            example("fake_language_server").display().to_string()
+        );
+        std::fs::write(
+            pack.join("language.toml"),
+            format!(
+                "grammar = \"fake\"\nextensions = [\"fk\"]\nserver = [{server}]\n\
+                 roots = [\"project\"]\n"
+            ),
+        )
+        .unwrap();
+        let languages = self.host(host).join("languages");
+        self.start_configured(host, false, |config| config.languages = Some(languages))
+    }
+
+    /// As [`start_with`](Self::start_with), with `configure` changing the
+    /// daemon's configuration first.
+    fn start_configured(
+        &self,
+        host: &str,
+        restore: bool,
+        configure: impl FnOnce(&mut DaemonConfig),
+    ) -> TestDaemon {
         let dir = self.host(host);
         std::fs::create_dir_all(dir.join("clackatoo")).unwrap();
-        let config = DaemonConfig {
+        let mut config = DaemonConfig {
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/sh".into(),
             home: dir.clone(),
@@ -128,6 +163,7 @@ impl World {
                 askpass: Some(example("daemon")),
             }),
         };
+        configure(&mut config);
         let socket = dir.join("clackatoo/daemon.sock");
         let mut daemon = Daemon::bind(&socket, config).expect("bind");
         if restore {
@@ -972,9 +1008,14 @@ struct Pair {
 
 impl Pair {
     fn new() -> Self {
+        Self::with(World::start)
+    }
+
+    /// A pair whose laptop is started by `start`.
+    fn with(start: impl FnOnce(&World, &str) -> TestDaemon) -> Self {
         let world = World::new();
         let desk = world.start("desk");
-        let laptop = world.start("laptop");
+        let laptop = start(&world, "laptop");
         let mut there = laptop.client();
         there.new_workspace(Some("work".into()), shell()).unwrap();
         let mut window = desk.client();
@@ -1122,8 +1163,8 @@ fn layout_changes_go_to_the_machine_a_workspace_lives_on_and_come_back() {
     });
     assert_eq!(shown.get(work).unwrap().name, "play");
 
-    // An editor there is shown as one to come, and can't be opened here
-    // yet.
+    // An editor there is shown here, as desk numbers its buffer, and one
+    // can be opened here too.
     let file = pair.world.host("laptop").join("notes.txt");
     std::fs::write(&file, "notes\n").unwrap();
     let editor = PaneTerminal::File(OpenFile {
@@ -1139,17 +1180,13 @@ fn layout_changes_go_to_the_machine_a_workspace_lives_on_and_come_back() {
         (shown.get(work)).is_some_and(|work| work.tabs[0].layout.panes().len() == 2)
     });
     let panes = shown.get(work).unwrap().tabs[0].layout.panes();
-    assert_eq!(
-        panes[1].content,
-        Content::Other {
-            kind: clackatoo_protocol::PaneKind::new("editor")
-        }
+    assert!(
+        matches!(panes[1].content, Content::Buffer(_)),
+        "{:?} isn't an editor",
+        panes[1].content
     );
-    let refused = pair.window.split_pane(pane, Side::Right, editor);
-    let Err(ClientError::Daemon(Error::Other(why))) = refused else {
-        panic!("{refused:?}");
-    };
-    assert_eq!(why, "an editor on laptop: coming soon");
+    let opened = pair.window.split_pane(pane, Side::Right, editor);
+    assert!(opened.is_ok(), "{opened:?}");
 
     // Closed here, the workspace goes there, and here.
     let closed = pair
@@ -1576,6 +1613,643 @@ fn a_client_that_stops_drawing_holds_up_no_one_else() {
     }
 }
 
+// --- Another machine's buffers, edited here ----------------------------
+
+/// The next update `client` is told of `buffer`, answering changes to
+/// views meanwhile as drawn.
+fn buffer_update(client: &mut Client, buffer: BufferId) -> BufferUpdate {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "no update came");
+        match client.next_event().expect("an event") {
+            Event::Buffer {
+                buffer: changed,
+                update,
+            } if changed == buffer => return update,
+            Event::View { terminal, .. } => client.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    }
+}
+
+/// The next update `client` is told of `buffer` that changes its text, or
+/// answers a change: an edit, an ack, a snapshot, or nothing done.
+fn next_change(client: &mut Client, buffer: BufferId) -> BufferUpdate {
+    loop {
+        let update = buffer_update(client, buffer);
+        if matches!(
+            update,
+            BufferUpdate::Edited { .. }
+                | BufferUpdate::Acked { .. }
+                | BufferUpdate::NoChange(_)
+                | BufferUpdate::Snapshot(_)
+                | BufferUpdate::Resumed { .. }
+        ) {
+            return update;
+        }
+    }
+}
+
+/// Attaches `client`, as the window numbered `window`, to `buffer`,
+/// returning the snapshot it's sent.
+fn attach_to_buffer(client: &mut Client, buffer: BufferId, window: u64) -> BufferSnapshot {
+    client.attach_buffer_as(buffer, window).unwrap();
+    loop {
+        if let BufferUpdate::Snapshot(snapshot) = next_change(client, buffer) {
+            return snapshot;
+        }
+    }
+}
+
+/// An edit putting `text` at byte `at` of a text `len` bytes long, at
+/// version `base`.
+fn insert(len: usize, at: usize, text: &str, base: u64) -> Change {
+    Change::Edit {
+        edit: Edit::replace(len, at, "", text),
+        base,
+        step: true,
+    }
+}
+
+/// Opens the file `path` on laptop, through desk, beside the first pane
+/// of `work`, its workspace there: desk's numbers for its pane and its
+/// buffer.
+fn open_there(pair: &mut Pair, path: &Path) -> (PaneId, BufferId) {
+    let first = pair.work.tabs[0].layout.panes()[0].id;
+    let editor = PaneTerminal::File(OpenFile {
+        path: path.display().to_string(),
+        cwd: None,
+    });
+    let pane = pair.window.split_pane(first, Side::Right, editor).unwrap();
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        (shown.find_pane(pane)).is_some_and(|(_, _, pane)| pane.content.buffer().is_some())
+    });
+    let (_, _, found) = shown.find_pane(pane).unwrap();
+    (pane, found.content.buffer().unwrap())
+}
+
+/// The text of laptop's buffer for the file `path`, as laptop's own
+/// windows are shown it.
+fn laptop_text(pair: &Pair, path: &Path) -> String {
+    let mut there = pair.laptop().client();
+    let shown = there.watch_workspaces().unwrap();
+    let buffer = (shown.list.iter())
+        .flat_map(|workspace| &workspace.tabs)
+        .flat_map(|tab| tab.layout.panes())
+        .find_map(|pane| pane.content.buffer())
+        .expect("laptop shows the file");
+    let snapshot = attach_to_buffer(&mut there, buffer, 99);
+    assert_eq!(snapshot.path, path.display().to_string());
+    snapshot.text
+}
+
+#[test]
+fn a_file_on_another_machine_is_edited_undone_and_saved_through_this_daemon() {
+    let mut pair = Pair::new();
+    let file = pair.world.host("laptop").join("notes.txt");
+    std::fs::write(&file, "notes\n").unwrap();
+    let (_, buffer) = open_there(&mut pair, &file);
+    let snapshot = attach_to_buffer(&mut pair.window, buffer, 1);
+    assert_eq!(snapshot.text, "notes\n");
+    assert_eq!(snapshot.path, file.display().to_string(), "laptop's path");
+    let base = snapshot.version;
+
+    // Typed here, made there, and acked as this window numbered it.
+    pair.window
+        .edit(buffer, 1, insert(6, 0, "my ", base))
+        .unwrap();
+    assert_eq!(
+        next_change(&mut pair.window, buffer),
+        BufferUpdate::Acked {
+            version: base + 1,
+            seq: 1
+        }
+    );
+
+    // A second window following it gets what's there, then what the first
+    // types, as an edit, while the first is acked.
+    let mut other = pair.desk.client();
+    let snapshot = attach_to_buffer(&mut other, buffer, 2);
+    assert_eq!(snapshot.text, "my notes\n");
+    assert_eq!(snapshot.applied, None, "it sent nothing yet");
+    pair.window
+        .edit(buffer, 2, insert(9, 9, "more\n", base + 1))
+        .unwrap();
+    assert_eq!(
+        next_change(&mut pair.window, buffer),
+        BufferUpdate::Acked {
+            version: base + 2,
+            seq: 2
+        }
+    );
+    let BufferUpdate::Edited {
+        version,
+        edit,
+        answers: None,
+        ..
+    } = next_change(&mut other, buffer)
+    else {
+        panic!("no edit came to the other window");
+    };
+    assert_eq!(version, base + 2);
+    let mut text = clackatoo_text::Rope::from_str(&snapshot.text);
+    edit.apply(&mut text).unwrap();
+    assert_eq!(text.to_string(), "my notes\nmore\n");
+
+    // The other undoes the user's last step: it's answered with the edit
+    // the undo made, under its own number, and the first told of it.
+    other.edit(buffer, 1, Change::Undo).unwrap();
+    let BufferUpdate::Edited {
+        answers: Some(1), ..
+    } = next_change(&mut other, buffer)
+    else {
+        panic!("the undo wasn't answered");
+    };
+    let BufferUpdate::Edited {
+        version,
+        answers: None,
+        ..
+    } = next_change(&mut pair.window, buffer)
+    else {
+        panic!("the first window wasn't told of the undo");
+    };
+    assert_eq!(version, base + 3);
+
+    // Saved there, as asked here.
+    let saved = pair.window.request(&Request::Save {
+        buffer,
+        force: false,
+    });
+    assert_eq!(saved.unwrap(), Response::Done);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "my notes\n");
+    assert_eq!(laptop_text(&pair, &file), "my notes\n");
+
+    // A buffer desk doesn't number is no buffer here or there.
+    let refused = pair.window.request(&Request::Save {
+        buffer: BufferId(9999),
+        force: false,
+    });
+    assert!(
+        matches!(refused, Ok(Response::Error(Error::NoSuchBuffer(_)))),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_save_or_a_discard_right_after_typing_acts_on_what_was_typed() {
+    let mut pair = Pair::new();
+    let file = pair.world.host("laptop").join("notes.txt");
+    std::fs::write(&file, "notes\n").unwrap();
+    let (_, buffer) = open_there(&mut pair, &file);
+    let base = attach_to_buffer(&mut pair.window, buffer, 1).version;
+    let mut other = pair.desk.client();
+    attach_to_buffer(&mut other, buffer, 2);
+    // Another window's change on its way, then this one types and saves at
+    // once, as `:wq` does: the save has what this one typed.
+    other.edit(buffer, 1, insert(6, 0, "b", base)).unwrap();
+    pair.window
+        .edit(buffer, 1, insert(6, 6, "a\n", base))
+        .unwrap();
+    let saved = pair.window.request(&Request::Save {
+        buffer,
+        force: false,
+    });
+    assert_eq!(saved.unwrap(), Response::Done);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "bnotes\na\n");
+    // Typed and thrown away at once, as `:e!` after typing: nothing typed
+    // is left.
+    pair.window
+        .edit(buffer, 2, insert(9, 0, "zz", base + 2))
+        .unwrap();
+    let discarded = pair.window.request(&Request::Discard { buffer });
+    assert_eq!(discarded.unwrap(), Response::Done);
+    assert_eq!(laptop_text(&pair, &file), "bnotes\na\n");
+}
+
+#[test]
+fn an_agent_there_and_a_window_here_edit_one_file_at_once() {
+    let mut pair = Pair::new();
+    let file = pair.world.host("laptop").join("notes.txt");
+    std::fs::write(&file, "one\n").unwrap();
+    let (_, buffer) = open_there(&mut pair, &file);
+    let snapshot = attach_to_buffer(&mut pair.window, buffer, 1);
+    let base = snapshot.version;
+    let mut other = pair.desk.client();
+    attach_to_buffer(&mut other, buffer, 2);
+
+    // A chat on laptop, whose agent writes the file through laptop's
+    // daemon, which makes it an edit of its buffer.
+    let mut there = pair.laptop().client();
+    let first = pair.at_laptop("work").tabs[0].layout.panes()[0].id;
+    let pane = there.split_pane(first, Side::Below, chat()).unwrap();
+    let shown = there.watch_workspaces().unwrap();
+    let Content::Terminal(chat) = shown.find_pane(pane).unwrap().2.content else {
+        panic!("no chat");
+    };
+    let path = file.display().to_string();
+    there
+        .chat(chat, ChatAction::Send(format!("write {path}\none\ntwo\n")))
+        .unwrap();
+    let BufferUpdate::Edited {
+        version,
+        author,
+        answers: None,
+        ..
+    } = next_change(&mut other, buffer)
+    else {
+        panic!("the agent's edit didn't come");
+    };
+    assert_eq!(version, base + 1);
+    // The agent's chat, as desk numbers it, never laptop's number.
+    let Author::Agent(by) = author else {
+        panic!("{author:?}");
+    };
+    let Response::Chats(chats) = pair.window.request(&Request::WatchChats).unwrap() else {
+        panic!("no chats");
+    };
+    assert!(
+        chats.iter().any(|summary| summary.chat == by),
+        "{by:?} isn't among {chats:?}"
+    );
+
+    // The first window, not having heard of it, types at the start, made
+    // to the version before: laptop brings it past the agent's edit.
+    pair.window
+        .edit(buffer, 1, insert(4, 0, "zero\n", base))
+        .unwrap();
+    let mut acked = None;
+    while acked.is_none() {
+        match next_change(&mut pair.window, buffer) {
+            BufferUpdate::Acked { version, seq: 1 } => acked = Some(version),
+            BufferUpdate::Edited { answers: None, .. } => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(acked, Some(base + 2));
+    let BufferUpdate::Edited {
+        version,
+        edit,
+        answers: None,
+        ..
+    } = next_change(&mut other, buffer)
+    else {
+        panic!("the window's edit didn't come to the other");
+    };
+    assert_eq!(version, base + 2);
+    let mut text = clackatoo_text::Rope::from_str("one\ntwo\n");
+    edit.apply(&mut text).unwrap();
+    assert_eq!(text.to_string(), "zero\none\ntwo\n");
+    assert_eq!(laptop_text(&pair, &file), "zero\none\ntwo\n");
+}
+
+#[test]
+fn what_a_window_types_while_the_connection_is_down_is_made_once_its_back() {
+    let mut pair = Pair::new();
+    let file = pair.world.host("laptop").join("notes.txt");
+    std::fs::write(&file, "notes\n").unwrap();
+    let (_, buffer) = open_there(&mut pair, &file);
+    let base = attach_to_buffer(&mut pair.window, buffer, 1).version;
+    // The connection ends, with laptop's daemon running on, as when a new
+    // ssh to carry it asks a question and no window answers.
+    pair.world.password(Some("hunter2"));
+    kill(&pid(&pair.world, "ssh.pid"));
+    wait_for_state(&mut pair.window, "laptop", |state| {
+        *state == ConnectionState::NeedsPassword
+    });
+    // Typed meanwhile, it waits.
+    pair.window
+        .edit(buffer, 1, insert(6, 0, "my ", base))
+        .unwrap();
+    // Laptop's own window edits the file meanwhile.
+    let mut there = pair.laptop().client();
+    let shown = there.watch_workspaces().unwrap();
+    let theirs = (shown.list.iter())
+        .flat_map(|workspace| &workspace.tabs)
+        .flat_map(|tab| tab.layout.panes())
+        .find_map(|pane| pane.content.buffer())
+        .unwrap();
+    let at_laptop = attach_to_buffer(&mut there, theirs, 50).version;
+    assert_eq!(at_laptop, base, "laptop has nothing of desk's yet");
+    there.edit(theirs, 1, insert(6, 6, "end\n", base)).unwrap();
+    assert!(matches!(
+        next_change(&mut there, theirs),
+        BufferUpdate::Acked { seq: 1, .. }
+    ));
+    // Back, the window hears of laptop's edit, then that its own was made,
+    // after it.
+    let mut answering = pair.desk.client();
+    answering.watch_connections(true).unwrap();
+    let (ask, ..) = next_question(&mut answering);
+    answering.answer_login(ask, Some("hunter2".into())).unwrap();
+    let BufferUpdate::Edited { version, .. } = next_change(&mut pair.window, buffer) else {
+        panic!("laptop's edit didn't come");
+    };
+    assert_eq!(version, base + 1);
+    assert_eq!(
+        next_change(&mut pair.window, buffer),
+        BufferUpdate::Acked {
+            version: base + 2,
+            seq: 1
+        }
+    );
+    assert_eq!(laptop_text(&pair, &file), "my notes\nend\n");
+}
+
+#[test]
+fn a_language_server_there_answers_each_window_here_under_its_own_number() {
+    let mut pair = Pair::with(World::start_speaking);
+    let app = pair.world.host("laptop").join("app");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::write(app.join("project"), "").unwrap();
+    std::fs::write(app.join("a.fk"), "é bad\nuse it\n").unwrap();
+    let (_, buffer) = open_there(&mut pair, &app.join("a.fk"));
+    let version = attach_to_buffer(&mut pair.window, buffer, 1).version;
+    let mut other = pair.desk.client();
+    attach_to_buffer(&mut other, buffer, 2);
+    // Its server, there, says what's wrong, which comes here.
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "no diagnostics came");
+        if let BufferUpdate::Diagnostics { diagnostics, .. } =
+            buffer_update(&mut pair.window, buffer)
+            && !diagnostics.is_empty()
+        {
+            break;
+        }
+    }
+    // Both windows ask, under the same number of their own, about places
+    // of the same kind: neither's question goes for the other's, and
+    // each is answered as it numbered it.
+    pair.window
+        .query(buffer, 1, (version, "é b".len()), Query::Hover)
+        .unwrap();
+    other
+        .query(buffer, 1, (version, "é bad\nu".len()), Query::Hover)
+        .unwrap();
+    let answer = |client: &mut Client| loop {
+        if let BufferUpdate::Answer { id, answer, .. } = buffer_update(client, buffer) {
+            return (id, answer);
+        }
+    };
+    let (id, hover) = answer(&mut pair.window);
+    assert_eq!(id, 1);
+    let Answer::Hover { text, range, .. } = hover else {
+        panic!("{hover:?}");
+    };
+    assert!(text.starts_with("# bad"), "{text}");
+    assert_eq!(range, Some(("é ".len(), "é bad".len())), "in bytes");
+    assert_eq!(answer(&mut other), (1, Answer::Nothing));
+}
+
+// --- Another machine's explorers, file operations and finder -----------
+
+/// The next change `client` is told of in explorer `files`, answering
+/// changes to views meanwhile as drawn.
+fn files_update(client: &mut Client, files: FilesId) -> FilesUpdate {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "no change came");
+        match client.next_event().expect("an event") {
+            Event::Files {
+                files: changed,
+                update,
+            } if changed == files => return update,
+            Event::View { terminal, .. } => client.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    }
+}
+
+/// The names `client` is next told folder `dir` of explorer `files`
+/// holds, as it's listed.
+fn listed(client: &mut Client, files: FilesId, dir: &str) -> Vec<String> {
+    loop {
+        if let FilesUpdate::Listed {
+            dir: of, entries, ..
+        } = files_update(client, files)
+            && of == dir
+        {
+            return entries.into_iter().map(|entry| entry.name).collect();
+        }
+    }
+}
+
+/// Whatever `client` has been sent, read until it's been quiet a moment,
+/// answering changes to views as drawn.
+fn quiet_events(client: &mut Client) -> Vec<Event> {
+    client
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    let mut events = Vec::new();
+    while let Ok(event) = client.next_event() {
+        if let Event::View { terminal, .. } = &event {
+            client.frame_done(*terminal).unwrap();
+        }
+        events.push(event);
+    }
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    events
+}
+
+#[test]
+fn an_explorer_on_another_machine_lists_its_folders_and_renames_its_files() {
+    let mut pair = Pair::new();
+    let project = pair.world.host("laptop").join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(project.join("a.txt"), "a\n").unwrap();
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let root = project.display().to_string();
+    let src = project.join("src").display().to_string();
+    let first = pair.work.tabs[0].layout.panes()[0].id;
+    let explorer = PaneTerminal::Files(OpenFiles {
+        dir: Some(root.clone()),
+    });
+    let pane = pair.window.split_pane(first, Side::Left, explorer).unwrap();
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        (shown.find_pane(pane)).is_some_and(|(_, _, pane)| pane.content.files().is_some())
+    });
+    let files = shown.find_pane(pane).unwrap().2.content.files().unwrap();
+    // Two windows follow it, each opening folders of its own.
+    let mut other = pair.desk.client();
+    for client in [&mut pair.window, &mut other] {
+        assert_eq!(
+            client.request(&Request::AttachFiles { files }).unwrap(),
+            Response::Done
+        );
+        let FilesUpdate::Root { path, .. } = files_update(client, files) else {
+            panic!("no root came");
+        };
+        assert_eq!(path, root, "laptop's folder");
+        client
+            .files(files, FilesAction::Expand(root.clone()))
+            .unwrap();
+        assert_eq!(listed(client, files, &root), ["src", "a.txt"]);
+    }
+    // One opens `src`: the other isn't sent its listing.
+    pair.window
+        .files(files, FilesAction::Expand(src.clone()))
+        .unwrap();
+    assert_eq!(listed(&mut pair.window, files, &src), ["main.rs"]);
+    let sent = quiet_events(&mut other);
+    assert!(
+        !sent.iter().any(|event| matches!(event,
+            Event::Files { update: FilesUpdate::Listed { dir, .. }, .. } if *dir == src)),
+        "{sent:?}"
+    );
+
+    // Renamed from here, as from the explorer, on laptop.
+    let rename = FileOp::Move {
+        from: project.join("a.txt").display().to_string(),
+        to: project.join("b.txt").display().to_string(),
+        overwrite: None,
+        expect: None,
+    };
+    pair.window.file_op_from(7, rename, pane).unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    let mut done = false;
+    let mut relisted = false;
+    while !(done && relisted) {
+        assert!(Instant::now() < deadline, "the rename never came back");
+        match pair.window.next_event().unwrap() {
+            Event::FileOp { id, outcome } => {
+                assert_eq!((id, outcome), (7, Ok(())));
+                done = true;
+            }
+            Event::Files {
+                update: FilesUpdate::Listed { dir, entries, .. },
+                ..
+            } if dir == root => {
+                let names: Vec<String> = entries.into_iter().map(|entry| entry.name).collect();
+                relisted = names == ["src", "b.txt"];
+            }
+            Event::View { terminal, .. } => pair.window.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    }
+    assert!(project.join("b.txt").exists() && !project.join("a.txt").exists());
+    // The other has the root open too, so it hears of it.
+    assert_eq!(listed(&mut other, files, &root), ["src", "b.txt"]);
+}
+
+#[test]
+fn the_finder_greps_the_machine_the_focused_pane_is_on() {
+    let mut pair = Pair::new();
+    let laptop_home = pair.world.host("laptop");
+    std::fs::write(laptop_home.join("notes.md"), "fix the frobnicator\n").unwrap();
+    std::fs::write(
+        pair.world.host("desk").join("notes.md"),
+        "frobnicator here too\n",
+    )
+    .unwrap();
+    let pane = pair.work.tabs[0].layout.panes()[0].id;
+    let grep = Search::Grep {
+        pattern: "frobnicator".into(),
+        exact: true,
+    };
+    pair.window.find(5, Some(pane), grep.clone()).unwrap();
+    let mut lines = Vec::new();
+    let mut root = None;
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "the search never ended");
+        match pair.window.next_event().unwrap() {
+            Event::Found {
+                id: 5,
+                found: Found::Root { path, .. },
+            } => root = Some(path),
+            Event::Found {
+                id: 5,
+                found: Found::Lines(found),
+            } => lines.extend(found),
+            Event::Found {
+                id: 5,
+                found: Found::Done(done),
+            } => {
+                assert_eq!(done, Done::All);
+                break;
+            }
+            Event::Found { id, .. } => assert_eq!(id, 5, "found for another search"),
+            Event::View { terminal, .. } => pair.window.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    }
+    // Laptop's home, where its shell is, and its notes, not desk's.
+    assert_eq!(root, Some(laptop_home.display().to_string()));
+    let texts: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
+    assert_eq!(texts, ["fix the frobnicator"]);
+}
+
+#[test]
+fn a_port_here_forwards_through_the_connection_to_another_machine() {
+    use std::io::Read as _;
+    use std::net::{TcpListener, TcpStream};
+
+    let mut pair = Pair::new();
+    // A server "on laptop", which says back what it's sent.
+    let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in server.incoming().flatten() {
+            let mut reader = stream.try_clone().unwrap();
+            let mut writer = stream;
+            std::thread::spawn(move || drop(std::io::copy(&mut reader, &mut writer)));
+        }
+    });
+    let pane = pair.work.tabs[0].layout.panes()[0].id;
+    let forward = |forwarding| Request::Forwards { pane, forwarding };
+    let added = pair.window.request(&forward(Forwarding::Add {
+        local: 0,
+        host: "localhost".into(),
+        port,
+    }));
+    let Ok(Response::Text(said)) = added else {
+        panic!("{added:?}");
+    };
+    let local: u16 = (said.strip_prefix("Forwarding port "))
+        .and_then(|rest| rest.split_once(' '))
+        .and_then(|(local, _)| local.parse().ok())
+        .unwrap_or_else(|| panic!("{said}"));
+    assert_eq!(
+        said,
+        format!("Forwarding port {local} here to localhost:{port} on laptop")
+    );
+    // Through desk, its connection to laptop, and laptop's daemon.
+    let mut stream = TcpStream::connect(("127.0.0.1", local)).unwrap();
+    stream.set_read_timeout(Some(PATIENCE)).unwrap();
+    stream.write_all(b"through the relay\n").unwrap();
+    let mut echoed = [0; 18];
+    stream.read_exact(&mut echoed).unwrap();
+    assert_eq!(&echoed, b"through the relay\n");
+    // Listed, then stopped.
+    let listed = pair.window.request(&forward(Forwarding::List)).unwrap();
+    let Response::Text(listed) = listed else {
+        panic!("{listed:?}");
+    };
+    assert!(listed.starts_with("Forwarding to laptop"), "{listed}");
+    let stopped = pair
+        .window
+        .request(&forward(Forwarding::Stop(None)))
+        .unwrap();
+    assert_eq!(
+        stopped,
+        Response::Text("Stopped forwarding the port to laptop".into())
+    );
+    assert!(
+        TcpStream::connect(("127.0.0.1", local)).is_err(),
+        "still listening"
+    );
+    // A pane of desk's own has nothing to forward to.
+    let own = pair.window.new_workspace(None, shell()).unwrap();
+    let refused = pair.window.request(&Request::Forwards {
+        pane: own,
+        forwarding: Forwarding::List,
+    });
+    assert!(
+        matches!(refused, Ok(Response::Error(Error::Other(_)))),
+        "{refused:?}"
+    );
+}
+
 // --- What the relay adds to a key's echo --------------------------------
 
 /// Keys timed each way, after a warm-up.
@@ -1696,6 +2370,170 @@ fn echo_straight_to_laptop() {
         line.clear();
         let took = time_echo(&mut client, terminal);
         println!("took {}", took.as_micros());
+    }
+}
+
+/// Times keys typed into an editor of a file on laptop, from each being
+/// sent to its being acked: through desk's relay, and straight to laptop,
+/// as for a key's echo.
+#[test]
+#[ignore = "measures latency: cargo test --profile quick -p clackatoo-daemon --test links -- \
+            --ignored --nocapture what_the_relay_adds_to_typing"]
+fn what_the_relay_adds_to_typing_in_an_editor() {
+    let world = World::new();
+    let desk = world.start("desk");
+    let laptop = world.start("laptop");
+    // A file each way, so neither sees the other's edits.
+    let relayed_file = world.host("laptop").join("relayed.txt");
+    let straight_file = world.host("laptop").join("straight.txt");
+    for file in [&relayed_file, &straight_file] {
+        std::fs::write(file, "").unwrap();
+    }
+    let open = |file: &Path| {
+        PaneTerminal::File(OpenFile {
+            path: file.display().to_string(),
+            cwd: None,
+        })
+    };
+    let mut there = laptop.client();
+    there
+        .new_workspace(Some("typing".into()), open(&relayed_file))
+        .unwrap();
+    let straight_pane = there
+        .new_workspace(Some("straight".into()), open(&straight_file))
+        .unwrap();
+    let shown = there.watch_workspaces().unwrap();
+    let straight_buffer = shown
+        .find_pane(straight_pane)
+        .unwrap()
+        .2
+        .content
+        .buffer()
+        .unwrap();
+    let mut window = desk.client();
+    connect(&mut window, "laptop");
+    let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "typing").is_some());
+    let typing = theirs(&shown, "typing").unwrap().tabs[0].layout.panes()[0];
+    let buffer = typing.content.buffer().expect("an editor");
+    let mut version = attach_to_buffer(&mut window, buffer, 1).version;
+
+    // The direct way, in a child process that connects as `--remote` does.
+    let mut direct = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "type_straight_to_laptop",
+        ])
+        .env("CLACKATOO_SSH", world.path().join("ssh"))
+        .env("LATENCY_BUFFER", straight_buffer.0.to_string())
+        .env("LATENCY_COMMAND", example("daemon"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut to_direct = direct.stdin.take().unwrap();
+    let mut from_direct = std::io::BufReader::new(direct.stdout.take().unwrap());
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert!(std::io::BufRead::read_line(&mut from_direct, &mut line).unwrap() > 0);
+        if line.trim() == "ready" {
+            break;
+        }
+    }
+    let mut through = Vec::new();
+    let mut straight = Vec::new();
+    let mut seq = 0;
+    for key in 0..KEYS + 50 {
+        seq += 1;
+        let (took, now) = time_keystroke(&mut window, buffer, seq, version);
+        version = now;
+        writeln!(to_direct, "key").unwrap();
+        let answer = loop {
+            line.clear();
+            assert!(std::io::BufRead::read_line(&mut from_direct, &mut line).unwrap() > 0);
+            if let Some(micros) = line.trim().strip_prefix("took ") {
+                break micros.parse::<u64>().unwrap();
+            }
+        };
+        if key >= 50 {
+            through.push(took);
+            straight.push(Duration::from_micros(answer));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(to_direct);
+    let _ = direct.wait();
+    let (through, straight) = (summed(&mut through), summed(&mut straight));
+    println!("keys typed into an editor and acked, {KEYS} each way, in microseconds:");
+    println!("  straight to laptop (--remote):   {straight}");
+    println!("  through desk's relay:            {through}");
+}
+
+/// The child process of [`what_the_relay_adds_to_typing_in_an_editor`]:
+/// connects to laptop as `--remote` does, follows its buffer, and times a
+/// key typed into it each time a line comes in, saying how long its ack
+/// took.
+#[test]
+#[ignore = "run by what_the_relay_adds_to_typing_in_an_editor"]
+fn type_straight_to_laptop() {
+    let (Some(buffer), Some(command)) = (
+        std::env::var("LATENCY_BUFFER").ok(),
+        std::env::var("LATENCY_COMMAND").ok(),
+    ) else {
+        return;
+    };
+    let buffer = BufferId(buffer.parse().unwrap());
+    let remote = clackatoo_daemon::remote::Remote {
+        host: "laptop".into(),
+        command,
+    };
+    let mut client = clackatoo_daemon::remote::connect(&remote, false, None).unwrap();
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    let mut version = attach_to_buffer(&mut client, buffer, 2).version;
+    println!("ready");
+    let mut line = String::new();
+    let mut seq = 0;
+    while std::io::stdin().read_line(&mut line).unwrap() > 0 {
+        line.clear();
+        seq += 1;
+        let (took, now) = time_keystroke(&mut client, buffer, seq, version);
+        version = now;
+        println!("took {}", took.as_micros());
+    }
+}
+
+/// Types a key at the end of `buffer`, at `version`, as the change
+/// numbered `seq`, through `client`, which follows it, and times how long
+/// until it's acked: returns that, and the version it made.
+fn time_keystroke(
+    client: &mut Client,
+    buffer: BufferId,
+    seq: u64,
+    version: u64,
+) -> (Duration, u64) {
+    // Nothing that came before counts.
+    drop(client.take_events());
+    let len = usize::try_from(seq - 1).unwrap();
+    let started = Instant::now();
+    client
+        .edit(buffer, seq, insert(len, len, "x", version))
+        .unwrap();
+    loop {
+        if let Event::Buffer {
+            buffer: changed,
+            update:
+                BufferUpdate::Acked {
+                    version,
+                    seq: acked,
+                },
+        } = client.next_event().expect("its ack")
+            && changed == buffer
+            && acked == seq
+        {
+            return (started.elapsed(), version);
+        }
     }
 }
 

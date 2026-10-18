@@ -111,6 +111,9 @@ enum Asked {
     /// `:recover`, whose answer is said in the bar, or is a new tab's
     /// pane, to switch to.
     Recovered,
+    /// `:PortForward` in a workspace from another machine, whose answer
+    /// is said in the bar.
+    Forwarded,
     /// Something asked about the devices paired with the web app, whose
     /// answer is said in the bar.
     Devices,
@@ -1584,6 +1587,14 @@ impl Desk {
                 }
                 true
             }
+            Some(Asker::Window(Asked::Forwarded)) => {
+                match response {
+                    Response::Text(said) => self.say(said),
+                    Response::Error(err) => self.warn(err.to_string()),
+                    _ => {}
+                }
+                true
+            }
             Some(Asker::Window(Asked::Devices)) => self.devices_answered(response),
             Some(Asker::Window(Asked::ChatChoices)) => self.chat_choices(response),
             Some(Asker::Window(Asked::Chats)) => self.chats_answered(response),
@@ -2449,7 +2460,7 @@ impl Desk {
             Command::Update(host) => return self.ask_update(host),
             Command::Connect(host) => return self.ask_connect(host),
             Command::Disconnect(host) => return self.ask_disconnect(host),
-            Command::PortForward(forwarding) => return self.forwards_asked.push(forwarding),
+            Command::PortForward(forwarding) => return self.port_forward(forwarding),
             _ => {}
         }
         let Some(shown) = self.shown else { return };
@@ -5392,6 +5403,113 @@ mod tests {
     }
 
     #[test]
+    fn a_daemon_relaying_another_machines_buffer_has_the_window_attach_again_keeping_its_change() {
+        use clackatoo_protocol::{BufferSnapshot, BufferUpdate};
+
+        let buffer = BufferId(7);
+        let layout = Layout::Pane(LayoutPane {
+            id: PaneId(1),
+            content: Content::Buffer(buffer),
+            home: None,
+        });
+        let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
+        let mut desk = Desk::default();
+        desk.connected(list(), false);
+        answer_all(&mut desk);
+        desk.buffer_changed(
+            buffer,
+            BufferUpdate::Snapshot(BufferSnapshot {
+                path: "/notes".into(),
+                text: "x\n".into(),
+                version: 0,
+                modified: false,
+                applied: None,
+                landed: None,
+                daemon: 5,
+            }),
+        );
+        type_text(&mut desk, "Aa");
+        let sent = buffer_changes(&mut desk);
+        let [_] = sent[..] else {
+            panic!("one change on its way: {sent:?}");
+        };
+
+        // A daemon relaying it can't bring the window up to date itself:
+        // it attaches again, from what it knew, as after a lost connection.
+        desk.buffer_changed(buffer, BufferUpdate::Reattach);
+        let window = desk.editors.window.0;
+        let resume = Some(clackatoo_protocol::Resume {
+            daemon: 5,
+            version: 0,
+        });
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::AttachBuffer {
+                buffer,
+                window,
+                resume
+            }]
+        );
+        assert_eq!(editor_text(&desk), "xa\n", "what it typed is kept");
+    }
+
+    #[test]
+    fn a_daemon_relaying_another_machines_buffer_has_the_window_attach_again_however_often_it_asks()
+    {
+        use clackatoo_protocol::{BufferSnapshot, BufferUpdate};
+
+        let buffer = BufferId(7);
+        let layout = Layout::Pane(LayoutPane {
+            id: PaneId(1),
+            content: Content::Buffer(buffer),
+            home: None,
+        });
+        let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
+        let snapshot = |version| {
+            BufferUpdate::Snapshot(BufferSnapshot {
+                path: "/notes".into(),
+                text: "x\n".into(),
+                version,
+                modified: false,
+                applied: None,
+                landed: None,
+                daemon: 5,
+            })
+        };
+        let mut desk = Desk::default();
+        desk.connected(list(), false);
+        answer_all(&mut desk);
+        desk.buffer_changed(buffer, snapshot(0));
+        // Past how often a window asks again of itself, in a minute: the
+        // daemon only asks when the copy would drift from the text there.
+        for version in 1..=MOST_MISSED as u64 + 1 {
+            desk.buffer_changed(buffer, BufferUpdate::Reattach);
+            let asked = answer_all(&mut desk);
+            assert!(
+                matches!(&asked[..], [Request::AttachBuffer { .. }]),
+                "asked again the {version}th time: {asked:?}"
+            );
+            // Nothing it says is taken in until what that brings comes.
+            assert!(
+                desk.buffer_copy(buffer)
+                    .is_some_and(crate::editor::BufferCopy::is_missing)
+            );
+            desk.buffer_changed(buffer, snapshot(version));
+            assert!(
+                !desk
+                    .buffer_copy(buffer)
+                    .is_some_and(crate::editor::BufferCopy::is_missing)
+            );
+        }
+        // Told again while still attaching again, it waits for what's
+        // coming, which brings everything.
+        desk.buffer_changed(buffer, BufferUpdate::Reattach);
+        answer_all(&mut desk);
+        desk.buffer_changed(buffer, BufferUpdate::Reattach);
+        assert!(answer_all(&mut desk).is_empty());
+    }
+
+    #[test]
     fn a_buffer_update_that_cant_be_read_brings_the_copy_up_to_date_once() {
         use clackatoo_protocol::{Author, BufferSnapshot, BufferUpdate, Edit};
 
@@ -5793,6 +5911,8 @@ mod tests {
             language: "toml".into(),
             grammar: true,
             server: Some("taplo".into()),
+            // Which machine to install it on, as the buffer says.
+            buffer: Some(buffer),
         };
         let asked = |desk: &Desk| {
             matches!(desk.status(), Status::Typing { text, .. }
@@ -5817,7 +5937,8 @@ mod tests {
         assert_eq!(
             answer_all(&mut desk),
             [Request::Decline {
-                language: "toml".into()
+                language: "toml".into(),
+                buffer: Some(buffer),
             }]
         );
 
@@ -8542,6 +8663,37 @@ mod tests {
     }
 
     #[test]
+    fn a_file_on_another_machine_keeps_marks_of_its_own_and_isnt_opened_here() {
+        // The same path here, in pane 1, and on desk, in pane 2.
+        let desk_id = clackatoo_protocol::MachineId([7; 16]);
+        let mut there = workspace(2, "w", vec![tab(2, file_pane(2, 8))]);
+        there.home = Some(desk_id);
+        if let Layout::Pane(pane) = &mut there.tabs[0].layout {
+            pane.home = Some(desk_id);
+        }
+        let mut desk = desk(workspaces(vec![
+            workspace(1, "w", vec![tab(1, file_pane(1, 7))]),
+            there,
+        ]));
+        load(&mut desk, 7, "/src/a.rs", A_RS);
+        type_text(&mut desk, "jwma");
+        desk.show_pane(PaneId(2));
+        load(&mut desk, 8, "/src/a.rs", A_RS);
+        // Its own `a` isn't this machine's file's.
+        type_text(&mut desk, "`a");
+        let said = note(&desk);
+        assert!(said.starts_with("mark a isn't set"), "{said}");
+        // Nor is a mark set there gone to from here.
+        type_text(&mut desk, "jjmB");
+        desk.show_pane(PaneId(1));
+        answer_all(&mut desk);
+        type_text(&mut desk, "`B");
+        let said = note(&desk);
+        assert!(said.contains("another machine"), "{said}");
+        assert!(answer_all(&mut desk).is_empty(), "nothing is opened here");
+    }
+
+    #[test]
     fn gv_and_the_selections_marks_are_each_files_own_and_kept_while_away() {
         let mut desk = desk(one_tab(file_pane(1, 7)));
         load(&mut desk, 7, "/src/a.rs", A_RS);
@@ -9803,7 +9955,7 @@ mod tests {
     fn file_ops(desk: &mut Desk) -> Vec<(u64, clackatoo_protocol::FileOp)> {
         (desk.take_outbox().into_iter())
             .filter_map(|message| match message {
-                ClientMessage::FileOp { id, op } => Some((id, op)),
+                ClientMessage::FileOp { id, op, .. } => Some((id, op)),
                 _ => None,
             })
             .collect()
@@ -10056,6 +10208,44 @@ mod tests {
         assert_eq!(note(&desk), "moved to ~/p/src/a.txt");
         type_keys(&mut desk, "p");
         assert_eq!(note(&desk), "nothing's cut or copied: x or y does");
+    }
+
+    #[test]
+    fn what_was_cut_on_one_machine_isnt_pasted_on_another() {
+        use clackatoo_protocol::{FilesId, FilesUpdate, MachineId};
+        // Desk's explorer, of a folder with the same path as this one's.
+        let desk_id = MachineId([7; 16]);
+        let mut there = workspace(2, "w", vec![tab(2, files_pane(4, 5))]);
+        there.home = Some(desk_id);
+        if let Layout::Pane(pane) = &mut there.tabs[0].layout {
+            pane.home = Some(desk_id);
+        }
+        let mut desk = desk(workspaces(vec![
+            workspace(
+                1,
+                "w",
+                vec![tab(1, side_by_side(vec![files_pane(2, 1), pane(3)]))],
+            ),
+            there,
+        ]));
+        explore_p(&mut desk);
+        type_keys(&mut desk, "jx");
+        desk.show_pane(PaneId(4));
+        let root = FilesUpdate::Root {
+            path: "/p".into(),
+            name: "~/p".into(),
+        };
+        desk.files_changed(FilesId(5), root);
+        let listed = FilesUpdate::Listed {
+            dir: "/p".into(),
+            entries: vec![entry("src", true), entry("a.txt", false)],
+            cut_short: false,
+        };
+        desk.files_changed(FilesId(5), listed);
+        file_ops(&mut desk);
+        type_keys(&mut desk, "p");
+        assert!(file_ops(&mut desk).is_empty(), "nothing is moved on desk");
+        assert_eq!(note(&desk), "cut on this machine: paste it there");
     }
 
     #[test]

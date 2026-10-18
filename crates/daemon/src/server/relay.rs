@@ -46,18 +46,24 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{self, Head};
 use clackatoo_protocol::{
-    ChatSummary, ClientMessage, Error, Event, PaneId, PaneTerminal, Request, Response,
-    ServerMessage, TabId, TerminalId, WorkspaceId, Workspaces,
+    BoardId, BufferId, ChatSummary, ClientMessage, Error, Event, FilesId, PROTOCOL_VERSION, PaneId,
+    PaneTerminal, Request, Response, ReviewId, ServerMessage, TabId, TerminalId, WorkspaceId,
+    Workspaces, wire,
 };
 use mio::Token;
 
 use super::links::Reached;
 use super::{Broadcast, Daemon, Flood, Held, Link, Source, ViewStream};
 
+pub(super) mod editors;
+pub(super) mod files;
+pub(super) mod finds;
+pub(super) mod forwards;
 pub(super) mod mirror;
+pub(super) mod shown;
 pub(super) mod unpack;
 
-use mirror::{Fresh, Mirror};
+use mirror::{Fresh, InUse, Mirror};
 use unpack::{Need, Unpacked, Unpacking};
 
 /// The most of what this daemon sends another that may wait to be
@@ -90,6 +96,21 @@ const NUMBERS_ROOM: u32 = 1 << 20;
 /// into, from another daemon: far more than any.
 const MOST_SMALL: usize = 4 * 1024 * 1024;
 
+/// The number of `Event::Buffer` among the events.
+const BUFFER: u32 = 2;
+
+/// The number of `Event::Installed` among the events.
+const INSTALLED: u32 = 3;
+
+/// The number of `Event::Found` among the events.
+const FOUND: u32 = 4;
+
+/// The number of `Event::Files` among the events.
+const FILES: u32 = 7;
+
+/// The number of `Event::FileOp` among the events.
+const FILE_OP: u32 = 8;
+
 /// What's relayed through one connection, kept while it's asked for,
 /// through the connection dropping.
 #[derive(Debug, Default)]
@@ -102,6 +123,76 @@ pub(super) struct Relayed {
     /// Whether this daemon has said it took in the workspaces of a daemon
     /// too old to say which it is, which it can't show.
     said_too_old: bool,
+    /// Whether the daemon there relays what its panes show besides
+    /// terminals, being of protocol 92 or later, as of the connection
+    /// last made.
+    pub(super) relays: bool,
+    /// Its buffers followed by this daemon's clients, by this daemon's
+    /// numbers.
+    buffers: BTreeMap<BufferId, editors::FollowedBuffer>,
+    /// What clients asked about its buffers, numbered for the connection.
+    asked: editors::Asked,
+    /// Requests about its buffers or their panes from clients with
+    /// changes to them waiting or on their way, held until those have
+    /// been made, as they act on the text those make: a save, a discard,
+    /// a close. Each one's place among its client's answers is taken.
+    held: VecDeque<HeldAsk>,
+    /// The clients that asked to install a language there, and which,
+    /// for telling how it went.
+    installing: Vec<(Token, String)>,
+    /// Its file explorers followed by this daemon's clients.
+    files: BTreeMap<FilesId, files::FollowedFiles>,
+    /// The file operations asked of it, numbered for the connection.
+    ops: editors::Asked,
+    /// The searches asked of it, numbered for the connection.
+    finds: editors::Asked,
+    /// Its boards followed by this daemon's clients.
+    boards: shown::Viewers<BoardId>,
+    /// Its reviews followed by this daemon's clients.
+    reviews: BTreeMap<ReviewId, shown::FollowedReview>,
+    /// Its chats' pages watched by this daemon's clients, and the size of
+    /// the pictures last asked for each.
+    browsers: shown::Viewers<TerminalId>,
+    browser_sizes: BTreeMap<TerminalId, [u32; 2]>,
+    /// The ports forwarded there, once any are asked for: kept through
+    /// the daemon there restarting.
+    forwards: Option<forwards::Forwarded>,
+}
+
+impl Relayed {
+    /// What this daemon's clients follow through the connection, whose
+    /// numbers are kept while they do.
+    pub(super) fn in_use(&self) -> InUse {
+        InUse {
+            terminals: self.followed.keys().copied().collect(),
+            buffers: self.buffers.keys().copied().collect(),
+            files: self.files.keys().copied().collect(),
+            boards: self.boards.keys().copied().collect(),
+            reviews: self.reviews.keys().copied().collect(),
+        }
+    }
+
+    /// The agent hunks the reviews followed told of last, by the daemon
+    /// there's numbers.
+    pub(super) fn review_hunks(&self) -> impl Iterator<Item = u64> + '_ {
+        (self.reviews.values()).flat_map(|review| review.hunks.iter().copied())
+    }
+
+    /// Forgets everything followed through the connection, as the daemon
+    /// there has restarted, and its numbers mean other things.
+    fn forget_followed(&mut self) {
+        self.followed.clear();
+        self.buffers.clear();
+        self.asked = editors::Asked::default();
+        self.installing.clear();
+        self.files.clear();
+        self.ops = editors::Asked::default();
+        self.finds = editors::Asked::default();
+        self.boards.clear();
+        self.reviews.clear();
+        self.browsers.clear();
+        self.browser_sizes.clear();
+    }
 }
 
 /// One of another daemon's terminals, followed by clients of this one.
@@ -149,6 +240,19 @@ pub(super) struct Upstream {
     unpacking: Unpacking<Route>,
 }
 
+/// A client's request held until its changes have been made (see
+/// [`Relayed::held`]).
+#[derive(Debug)]
+struct HeldAsk {
+    token: Token,
+    ticket: u64,
+    request: Request,
+    then: Then,
+    /// When it was asked: given up on, as any answer from another machine
+    /// is, should it wait too long.
+    asked: Instant,
+}
+
 /// What's to be done with an answer from another daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Expect {
@@ -157,6 +261,9 @@ enum Expect {
     Nothing,
     /// Taken in: the answer to watching its chats.
     Chats,
+    /// The answer to attaching to this daemon's buffer, for its clients
+    /// following it.
+    Attached(BufferId),
     /// Passed back to the client at `token`, as its answer numbered
     /// `ticket`, renumbered as `then` says. Asked at `asked`.
     Client {
@@ -178,6 +285,14 @@ enum Then {
     Created,
     /// What a new chat could be, with the chats in no pane.
     Choices,
+    /// Done, or a text saying what was done, or a new pane: as dealing
+    /// with buffers that came back from recovery files answers.
+    Recovered,
+    /// What was done reviewing.
+    Reviewed,
+    /// Done, attaching to this daemon's buffer: what came after the
+    /// snapshot it brought is every client's again.
+    Attached(BufferId),
 }
 
 /// What's done with a frame from another daemon once it's unpacked.
@@ -190,6 +305,22 @@ enum Route {
     View { local: TerminalId, snapshot: bool },
     /// Taken in by this daemon.
     TakeIn,
+    /// A change to this daemon's buffer `local`, of the kind of update
+    /// numbered `kind` (see [`editors`]).
+    Buffer { local: BufferId, kind: u32 },
+    /// A change to this daemon's explorer `local`.
+    Files { local: FilesId },
+    /// What the search numbered `number` for the connection found, of the
+    /// kind numbered `kind`.
+    Found { number: u64, kind: u64 },
+    /// How the file operation numbered `number` for the connection went.
+    FileOp { number: u64 },
+    /// A change to this daemon's board `local`.
+    Board { local: BoardId },
+    /// A new list of this daemon's review `local`.
+    Review { local: ReviewId },
+    /// A change to this daemon's chat `local`'s page.
+    Browser { local: TerminalId },
 }
 
 /// A request renumbered for another daemon, and how its answer is to be
@@ -209,19 +340,41 @@ pub(super) enum Routed {
 
 /// This daemon's counters, which numbers of what's shown from another
 /// machine come from.
-struct Counters<'a> {
+pub(super) struct Counters<'a> {
     workspaces: &'a mut crate::workspaces::WorkspaceState,
     next_terminal: &'a mut u32,
+    next_buffer: &'a mut u32,
+    explorers: &'a mut super::explorers::Explorers,
+    reviews: &'a mut super::review::Reviews,
+    /// Boards are numbered apart, from [`MIRRORED_BOARDS`] up, as this
+    /// daemon's own come from files read as it starts, maybe after
+    /// another machine's are numbered.
+    next_board: &'a mut u32,
 }
+
+/// The first number another machine's boards are given: past any this
+/// daemon's own reach.
+pub(super) const MIRRORED_BOARDS: u32 = 1 << 31;
 
 impl Counters<'_> {
     /// Whether every counter has [`NUMBERS_ROOM`] left: what's taken in
     /// from another daemon is only taken while they have, so none of them
     /// runs out on the way, and no number is given twice.
-    fn have_room(&self) -> bool {
+    pub(super) fn have_room(&self) -> bool {
         let left = |next: u32| u32::MAX - next >= NUMBERS_ROOM;
         let (workspace, tab, pane) = self.workspaces.next_numbers();
-        left(workspace) && left(tab) && left(pane) && left(*self.next_terminal)
+        [
+            workspace,
+            tab,
+            pane,
+            *self.next_terminal,
+            *self.next_buffer,
+            self.explorers.next_number(),
+            self.reviews.next_number(),
+            *self.next_board,
+        ]
+        .into_iter()
+        .all(left)
     }
 }
 
@@ -242,15 +395,57 @@ impl Fresh for Counters<'_> {
     }
 
     fn terminal(&mut self) -> u32 {
-        let id = *self.next_terminal;
-        if let Some(next) = id.checked_add(1) {
-            *self.next_terminal = next;
-        }
-        id
+        count_on(self.next_terminal)
+    }
+
+    fn buffer(&mut self) -> u32 {
+        count_on(self.next_buffer)
+    }
+
+    fn files(&mut self) -> u32 {
+        self.explorers.fresh_number()
+    }
+
+    fn board(&mut self) -> u32 {
+        count_on(self.next_board)
+    }
+
+    fn review(&mut self) -> u32 {
+        self.reviews.fresh_number()
+    }
+
+    fn hunk(&mut self) -> u64 {
+        self.reviews.fresh_hunk()
     }
 }
 
+/// The number `counter` gives next, counting it on, short of the last.
+fn count_on(counter: &mut u32) -> u32 {
+    let id = *counter;
+    if let Some(next) = id.checked_add(1) {
+        *counter = next;
+    }
+    id
+}
+
 impl Daemon {
+    /// The connection at `at`, and this daemon's counters, which number
+    /// what's shown from it.
+    pub(super) fn numbering(&mut self, at: usize) -> (&mut super::links::Linked, Counters<'_>) {
+        let super::links::Links {
+            list, next_board, ..
+        } = &mut self.links;
+        let counters = Counters {
+            workspaces: &mut self.workspaces,
+            next_terminal: &mut self.next_id,
+            next_buffer: &mut self.next_buffer,
+            explorers: &mut self.explorers,
+            reviews: &mut self.reviews,
+            next_board,
+        };
+        (&mut list[at], counters)
+    }
+
     /// The workspaces, as clients are shown them: this daemon's own, then
     /// each connected machine's, in the order they were connected to.
     pub(super) fn shown_workspaces(&self) -> Workspaces {
@@ -295,6 +490,144 @@ impl Daemon {
     /// are told them.
     pub(super) fn relayed_chats(&self) -> impl Iterator<Item = &ChatSummary> {
         (self.links.list.iter()).flat_map(|linked| &linked.relayed.mirror.chats)
+    }
+
+    /// Where `message`, from the client at `token`, goes, of those not
+    /// answered as requests are: on to the daemon on another machine, if
+    /// it's about something of its, renumbered; or back, to be dealt with
+    /// here.
+    pub(super) fn route_message(
+        &mut self,
+        token: Token,
+        message: ClientMessage,
+    ) -> Option<ClientMessage> {
+        match message {
+            ClientMessage::Edit {
+                buffer,
+                seq,
+                change,
+            } if self.relayed_buffer(buffer).is_some() => {
+                self.route_edit(token, buffer, seq, change);
+                None
+            }
+            message @ (ClientMessage::Query { .. }
+            | ClientMessage::Rename { .. }
+            | ClientMessage::Stage { .. }) => self.route_buffer_question(token, message),
+            ClientMessage::Files { files, action } => (!self.route_files(token, files, &action))
+                .then_some(ClientMessage::Files { files, action }),
+            ClientMessage::FileOp { id, op, pane } => (!self.route_file_op(token, id, &op, pane))
+                .then_some(ClientMessage::FileOp { id, op, pane }),
+            ClientMessage::Find { id, pane, search } => (!self
+                .route_find(token, id, pane, &search))
+            .then_some(ClientMessage::Find { id, pane, search }),
+            ClientMessage::StopFinding { id } => {
+                (!self.route_stop_finding(token, id)).then_some(ClientMessage::StopFinding { id })
+            }
+            ClientMessage::Board { board, action } => match self.relayed_board(board) {
+                Some((at, remote)) => {
+                    let act = ClientMessage::Board {
+                        board: remote,
+                        action,
+                    };
+                    let _ = self.send_upstream(at, &act, Expect::Nothing);
+                    None
+                }
+                None => Some(ClientMessage::Board { board, action }),
+            },
+            ClientMessage::Place { pane, place } => match self.relayed_pane(pane) {
+                Some((at, remote)) => {
+                    let place = ClientMessage::Place {
+                        pane: remote,
+                        place,
+                    };
+                    let _ = self.send_upstream(at, &place, Expect::Nothing);
+                    None
+                }
+                None => Some(ClientMessage::Place { pane, place }),
+            },
+            ClientMessage::Dismiss { pane } => match self.relayed_pane(pane) {
+                Some((at, remote)) => {
+                    let dismiss = ClientMessage::Dismiss { pane: remote };
+                    let _ = self.send_upstream(at, &dismiss, Expect::Nothing);
+                    None
+                }
+                None => Some(ClientMessage::Dismiss { pane }),
+            },
+            message => Some(message),
+        }
+    }
+
+    /// Where a request about another machine's explorers, boards, reviews
+    /// or chats' pages goes, if it's one, from the client at `token`.
+    fn route_shown(&mut self, token: Token, request: &Request) -> Option<Routed> {
+        let routed = match *request {
+            Request::AttachFiles { files } => return self.route_attach_files(token, files),
+            Request::DetachFiles { files } => return self.route_detach_files(token, files),
+            Request::AttachBoard { board: local } => {
+                let (at, board) = self.relayed_board(local)?;
+                self.follow_board(token, at, local, true);
+                (at, Request::AttachBoard { board })
+            }
+            Request::AttachReview { review: local } => {
+                let (at, review) = self.relayed_review(local)?;
+                self.follow_review(token, at, local, true);
+                (at, Request::AttachReview { review })
+            }
+            Request::AttachBrowser {
+                chat: local,
+                width,
+                height,
+            } => {
+                let (at, chat) = self.relayed_terminal(local)?;
+                self.follow_browser(token, at, local, true);
+                (self.links.list[at].relayed.browser_sizes).insert(local, [width, height]);
+                (
+                    at,
+                    Request::AttachBrowser {
+                        chat,
+                        width,
+                        height,
+                    },
+                )
+            }
+            Request::DetachBoard { board: local } => {
+                let (at, board) = self.relayed_board(local)?;
+                if self.follow_board(token, at, local, false) {
+                    let detach = ClientMessage::Request(Request::DetachBoard { board });
+                    let _ = self.send_upstream(at, &detach, Expect::Nothing);
+                }
+                return Some(Routed::Answered(Response::Done));
+            }
+            Request::DetachReview { review: local } => {
+                let (at, review) = self.relayed_review(local)?;
+                if self.follow_review(token, at, local, false) {
+                    let detach = ClientMessage::Request(Request::DetachReview { review });
+                    let _ = self.send_upstream(at, &detach, Expect::Nothing);
+                }
+                return Some(Routed::Answered(Response::Done));
+            }
+            Request::DetachBrowser { chat: local } => {
+                let (at, chat) = self.relayed_terminal(local)?;
+                if self.follow_browser(token, at, local, false) {
+                    (self.links.list[at].relayed.browser_sizes).remove(&local);
+                    let detach = ClientMessage::Request(Request::DetachBrowser { chat });
+                    let _ = self.send_upstream(at, &detach, Expect::Nothing);
+                }
+                return Some(Routed::Answered(Response::Done));
+            }
+            Request::Review(ref action) => {
+                return Some(match self.relayed_review_action(action)? {
+                    (at, Ok((request, then))) => self.wait_for(token, at, request, then),
+                    (_, Err(err)) => Routed::Answered(Response::Error(err)),
+                });
+            }
+            _ => return None,
+        };
+        let (at, request) = routed;
+        if !self.links.list[at].relayed.relays {
+            return Some(Routed::Answered(Response::Error(self.too_old(at, "it"))));
+        }
+        Some(self.wait_for(token, at, request, Then::Pass))
     }
 
     /// Where `request`, from the client at `token`, goes: to the daemon on
@@ -344,6 +677,27 @@ impl Daemon {
                 self.unfollow(token, at, terminal);
                 Routed::Answered(Response::Done)
             }
+            Request::AttachBuffer {
+                buffer,
+                window,
+                resume,
+            } => match self.route_attach_buffer(token, buffer, window, resume) {
+                Some(routed) => routed,
+                None => Routed::Here(Request::AttachBuffer {
+                    buffer,
+                    window,
+                    resume,
+                }),
+            },
+            Request::DetachBuffer { buffer } => self
+                .route_detach_buffer(token, buffer)
+                .unwrap_or(Routed::Here(Request::DetachBuffer { buffer })),
+            Request::Forwards { pane, forwarding } => {
+                match self.route_forwards(token, pane, &forwarding) {
+                    Some(routed) => routed,
+                    None => Routed::Here(Request::Forwards { pane, forwarding }),
+                }
+            }
             Request::Focus { pane } => {
                 let Some((at, remote)) = self.relayed_pane(pane) else {
                     // Its own, and the active workspace is one of this
@@ -362,7 +716,10 @@ impl Daemon {
                 }
                 Routed::Answered(Response::Done)
             }
-            request => self.route_waited_for(token, request),
+            request => match self.route_shown(token, &request) {
+                Some(routed) => routed,
+                None => self.route_waited_for(token, request),
+            },
         }
     }
 
@@ -556,11 +913,81 @@ impl Daemon {
                 };
                 (at, Ok((resize, Then::Pass)))
             }),
-            &(Request::OpenHere { pane, .. }
-            | Request::BlankHere { pane, .. }
-            | Request::Recover { pane, .. }) => self
-                .relayed_pane(pane)
-                .map(|(at, _)| (at, Err(self.not_yet(at, "an editor")))),
+            Request::OpenHere { pane: local, file } => {
+                self.relayed_pane(*local).map(|(at, pane)| {
+                    let open = Request::OpenHere {
+                        pane,
+                        file: file.clone(),
+                    };
+                    (at, self.if_relays(at, "an editor", (open, Then::Pass)))
+                })
+            }
+            Request::BlankHere { pane: local, blank } => {
+                self.relayed_pane(*local).map(|(at, pane)| {
+                    let blank = Request::BlankHere {
+                        pane,
+                        blank: blank.clone(),
+                    };
+                    (at, self.if_relays(at, "an editor", (blank, Then::Pass)))
+                })
+            }
+            &Request::Recover { pane: local, drop } => {
+                self.relayed_pane(local).map(|(at, pane)| {
+                    let recover = Request::Recover { pane, drop };
+                    (
+                        at,
+                        self.if_relays(at, "an editor", (recover, Then::Recovered)),
+                    )
+                })
+            }
+            &(Request::Save { buffer, .. }
+            | Request::Discard { buffer }
+            | Request::Reload { buffer }
+            | Request::SaveAs { buffer, .. }) => self.relayed_buffer(buffer).map(|(at, remote)| {
+                let request = match request.clone() {
+                    Request::Save { force, .. } => Request::Save {
+                        buffer: remote,
+                        force,
+                    },
+                    Request::Discard { .. } => Request::Discard { buffer: remote },
+                    Request::Reload { .. } => Request::Reload { buffer: remote },
+                    Request::SaveAs { path, force, .. } => Request::SaveAs {
+                        buffer: remote,
+                        path,
+                        force,
+                    },
+                    _ => unreachable!("matched above"),
+                };
+                (at, Ok((request, Then::Pass)))
+            }),
+            Request::Install {
+                language,
+                grammar,
+                server,
+                buffer: Some(local),
+            } => self.relayed_buffer(*local).map(|(at, remote)| {
+                self.links.list[at]
+                    .relayed
+                    .installing
+                    .push((token, language.clone()));
+                let install = Request::Install {
+                    language: language.clone(),
+                    grammar: *grammar,
+                    server: server.clone(),
+                    buffer: Some(remote),
+                };
+                (at, Ok((install, Then::Pass)))
+            }),
+            Request::Decline {
+                language,
+                buffer: Some(local),
+            } => self.relayed_buffer(*local).map(|(at, remote)| {
+                let decline = Request::Decline {
+                    language: language.clone(),
+                    buffer: Some(remote),
+                };
+                (at, Ok((decline, Then::Pass)))
+            }),
             &Request::AttachBrowser { chat, .. } => self
                 .relayed_terminal(chat)
                 .map(|(at, _)| (at, Err(self.not_yet(at, "a chat's browser")))),
@@ -569,6 +996,11 @@ impl Daemon {
         match renumbered {
             None => Routed::Here(request),
             Some((_, Err(err))) => Routed::Answered(Response::Error(err)),
+            // What acts on a buffer's text, or closes what shows it, waits
+            // for the client's changes to it.
+            Some((at, Ok((request, then)))) if acts_on_text(&request) => {
+                self.wait_for_changes(token, at, request, then)
+            }
             Some((at, Ok((request, then)))) => self.wait_for(token, at, request, then),
         }
     }
@@ -577,25 +1009,110 @@ impl Daemon {
     /// `at`, for the client at `token` to be answered as it answers, as
     /// `then` says.
     fn wait_for(&mut self, token: Token, at: usize, request: Request, then: Then) -> Routed {
+        if let Err(err) = self.can_ask(at) {
+            return Routed::Answered(Response::Error(err));
+        }
+        let Some(ticket) = self.take_place(token) else {
+            return Routed::Waiting;
+        };
+        self.ask_in_place(token, ticket, at, request, then);
+        Routed::Waiting
+    }
+
+    /// As [`wait_for`](Self::wait_for), but held, if the client at `token`
+    /// has changes to the buffers of the connection at `at` waiting or on
+    /// their way, or requests held already, until they've been made: for
+    /// what acts on the text they make, as a save does.
+    fn wait_for_changes(
+        &mut self,
+        token: Token,
+        at: usize,
+        request: Request,
+        then: Then,
+    ) -> Routed {
+        let held_already =
+            (self.links.list[at].relayed.held.iter()).any(|held| held.token == token);
+        if !held_already && !self.client_busy(at, token) {
+            return self.wait_for(token, at, request, then);
+        }
+        if let Err(err) = self.can_ask(at) {
+            return Routed::Answered(Response::Error(err));
+        }
+        let Some(ticket) = self.take_place(token) else {
+            return Routed::Waiting;
+        };
+        let held = HeldAsk {
+            token,
+            ticket,
+            request,
+            then,
+            asked: Instant::now(),
+        };
+        self.links.list[at].relayed.held.push_back(held);
+        Routed::Waiting
+    }
+
+    /// Sends the requests held for clients of the connection at `at` whose
+    /// changes have all been made, in the order they were asked; a client's
+    /// later ones wait behind one still held.
+    pub(super) fn pump_held(&mut self, at: usize) {
+        if !self.is_linked(at) {
+            return;
+        }
+        let mut waiting: Vec<Token> = Vec::new();
+        let mut ready = Vec::new();
+        let held = std::mem::take(&mut self.links.list[at].relayed.held);
+        let mut kept = VecDeque::new();
+        for ask in held {
+            if waiting.contains(&ask.token) || self.client_busy(at, ask.token) {
+                waiting.push(ask.token);
+                kept.push_back(ask);
+            } else {
+                ready.push(ask);
+            }
+        }
+        self.links.list[at].relayed.held = kept;
+        for ask in ready {
+            self.ask_in_place(ask.token, ask.ticket, at, ask.request, ask.then);
+        }
+    }
+
+    /// Whether the daemon of the connection at `at` can be asked anything
+    /// now, or why not.
+    fn can_ask(&self, at: usize) -> Result<(), Error> {
         let host = &self.links.list[at].remote.host;
         if !self.is_linked(at) {
-            let down = Error::Other(format!("{host} isn't connected just now"));
-            return Routed::Answered(Response::Error(down));
+            return Err(Error::Other(format!("{host} isn't connected just now")));
         }
         // Nothing more waits on one that has stopped answering.
         if !self.answering(at) {
-            let silent = Error::Other(format!("{host} isn't answering"));
-            return Routed::Answered(Response::Error(silent));
+            return Err(Error::Other(format!("{host} isn't answering")));
         }
+        Ok(())
+    }
+
+    /// Takes the next place among the answers of the client at `token`,
+    /// for one from another daemon to fill: its number, unless the client
+    /// has gone.
+    pub(super) fn take_place(&mut self, token: Token) -> Option<u64> {
+        let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
+            return None;
+        };
         self.links.tickets += 1;
         let ticket = self.links.tickets;
-        // Its place among the client's answers, before it's sent: should
-        // the connection be lost as it's sent, its answer, an error, takes
-        // that place at once.
-        let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
-            return Routed::Waiting;
-        };
         client.held.push_back(Held::Waiting(ticket));
+        Some(ticket)
+    }
+
+    /// Sends `request` to the daemon of the connection at `at`, for the
+    /// client at `token` to be answered as it answers, as `then` says, in
+    /// the place numbered `ticket` among its answers: an error there at
+    /// once, if it can't be asked.
+    fn ask_in_place(&mut self, token: Token, ticket: u64, at: usize, request: Request, then: Then) {
+        if let Err(err) = self.can_ask(at) {
+            self.hand_answer_with(token, ticket, Response::Error(err));
+            return;
+        }
         let expect = Expect::Client {
             token,
             ticket,
@@ -605,7 +1122,24 @@ impl Daemon {
         if let Err(err) = self.send_upstream(at, &ClientMessage::Request(request), expect) {
             self.hand_answer_with(token, ticket, Response::Error(err));
         }
-        Routed::Waiting
+    }
+
+    /// Answers [`Request::Relay`] from the client at `token`: a daemon on
+    /// another machine, which relays what it's sent for clients of its own.
+    pub(super) fn relaying(&mut self, token: Token) -> Result<Response, Error> {
+        match self.sources.get_mut(token.0) {
+            Some(Source::Client(client)) if !matches!(client.link, Link::Web(_)) => {
+                client.relays = true;
+                Ok(Response::Done)
+            }
+            _ => Err(Error::Other("only a daemon relays".into())),
+        }
+    }
+
+    /// Whether the client at `token` is a daemon relaying for clients of
+    /// its own (see [`Request::Relay`]).
+    pub(super) fn relays(&self, token: Token) -> bool {
+        matches!(self.sources.get(token.0), Some(Source::Client(client)) if client.relays)
     }
 
     /// Sends `bytes`, typed by the client at `token` into this daemon's
@@ -650,6 +1184,63 @@ impl Daemon {
         Error::Other(format!("{what} on {host}: coming soon"))
     }
 
+    /// Why `what`, on another machine than the workspace on the machine of
+    /// the connection at `at`, can't be shown in it.
+    fn elsewhere(&self, at: usize, what: &str) -> Error {
+        let host = &self.links.list[at].remote.host;
+        Error::Other(format!(
+            "{what} isn't on {host}, so it can't go in a workspace there"
+        ))
+    }
+
+    /// `asked`, if the daemon of the connection at `at` relays `what`,
+    /// being of protocol 92 or later, or else why it can't be had.
+    fn if_relays(&self, at: usize, what: &str, asked: (Request, Then)) -> Renumbered {
+        if self.links.list[at].relayed.relays {
+            Ok(asked)
+        } else {
+            Err(self.too_old(at, what))
+        }
+    }
+
+    /// Why `what` on the machine of the connection at `at`, whose
+    /// clackatoo is too old to relay it, can't be had here.
+    fn too_old(&self, at: usize, what: &str) -> Error {
+        let host = &self.links.list[at].remote.host;
+        Error::Other(format!(
+            "{what} on {host} needs a newer clackatoo there: update it"
+        ))
+    }
+
+    /// The protocol version the connection at `at` runs at, or this
+    /// build's while it's down.
+    pub(super) fn link_wire(&self, at: usize) -> u32 {
+        self.reached(at)
+            .map_or(PROTOCOL_VERSION, |reached| reached.wire)
+    }
+
+    /// The frame `unpacked` holds for the client at `token`, as it came
+    /// over the connection at `at` but for its leading numbers, which
+    /// `changes` renumbers (see [`frame::renumber_leading`]): encoded for
+    /// the client's version, from the connection's if it couldn't be
+    /// unpacked for it.
+    pub(super) fn frame_for(
+        &self,
+        at: usize,
+        token: Token,
+        unpacked: &Unpacked,
+        changes: &[(usize, u64)],
+    ) -> Option<Vec<u8>> {
+        let link = self.link_wire(at);
+        let wire = self.client_wire(token)?;
+        if let Some(frame) = unpacked.for_wire(wire) {
+            return frame::renumber_leading(frame.get(4..)?, changes);
+        }
+        let came = unpacked.for_wire(link)?;
+        let renumbered = frame::renumber_leading(came.get(4..)?, changes)?;
+        editors::transcode(&renumbered, link, wire)
+    }
+
     /// `content`, what a new pane in a workspace of the connection at `at`
     /// is to show, renumbered for the daemon there: a new terminal or
     /// chat, or one of its own terminals. Anything else is refused, for
@@ -665,11 +1256,50 @@ impl Daemon {
                     self.links.list[at].remote.host
                 ))),
             },
-            PaneTerminal::File(_) | PaneTerminal::Blank(_) => Err(self.not_yet(at, "an editor")),
-            PaneTerminal::Files(_) => Err(self.not_yet(at, "an explorer")),
-            PaneTerminal::Board(_) => Err(self.not_yet(at, "a board")),
-            PaneTerminal::Review(_) => Err(self.not_yet(at, "a review")),
-            PaneTerminal::Browser(_) => Err(self.not_yet(at, "a chat's browser")),
+            PaneTerminal::File(_) | PaneTerminal::Blank(_)
+                if !self.links.list[at].relayed.relays =>
+            {
+                Err(self.too_old(at, "an editor"))
+            }
+            PaneTerminal::File(file) => Ok(PaneTerminal::File(file.clone())),
+            PaneTerminal::Blank(blank) => Ok(PaneTerminal::Blank(blank.clone())),
+            PaneTerminal::Files(_)
+            | PaneTerminal::Board(_)
+            | PaneTerminal::Review(_)
+            | PaneTerminal::Browser(_)
+                if !self.links.list[at].relayed.relays =>
+            {
+                Err(self.too_old(at, "it"))
+            }
+            PaneTerminal::Files(files) => Ok(PaneTerminal::Files(files.clone())),
+            PaneTerminal::Board(clackatoo_protocol::OpenBoard::Named(name)) => Ok(
+                PaneTerminal::Board(clackatoo_protocol::OpenBoard::Named(name.clone())),
+            ),
+            &PaneTerminal::Board(clackatoo_protocol::OpenBoard::Id(board)) => {
+                match self.relayed_board(board) {
+                    Some((there, board)) if there == at => Ok(PaneTerminal::Board(
+                        clackatoo_protocol::OpenBoard::Id(board),
+                    )),
+                    _ => Err(self.elsewhere(at, "a board")),
+                }
+            }
+            PaneTerminal::Review(review) => {
+                let chat = match review.chat {
+                    None => None,
+                    Some(chat) => match self.relayed_terminal(chat) {
+                        Some((there, chat)) if there == at => Some(chat),
+                        _ => return Err(self.elsewhere(at, "the chat to review")),
+                    },
+                };
+                Ok(PaneTerminal::Review(clackatoo_protocol::NewReview {
+                    chat,
+                    ..review.clone()
+                }))
+            }
+            &PaneTerminal::Browser(chat) => match self.relayed_terminal(chat) {
+                Some((there, chat)) if there == at => Ok(PaneTerminal::Browser(chat)),
+                _ => Err(self.elsewhere(at, "a chat's page")),
+            },
         }
     }
 
@@ -940,8 +1570,19 @@ impl Daemon {
     }
 
     /// Forgets the client at `token`, gone: it follows none of other
-    /// daemons' terminals any more.
+    /// daemons' terminals, buffers or anything else any more.
     pub(super) fn forget_relay_client(&mut self, token: Token) {
+        self.forget_buffer_client(token);
+        self.forget_files_client(token);
+        self.forget_finds_client(token);
+        self.forget_shown_client(token);
+        self.forget_forwards_client(token);
+        for linked in &mut self.links.list {
+            linked
+                .relayed
+                .installing
+                .retain(|(asker, _)| *asker != token);
+        }
         let followed: Vec<(usize, TerminalId)> = (self.links.list.iter().enumerate())
             .flat_map(|(at, linked)| {
                 (linked.relayed.followed.iter())
@@ -1004,6 +1645,13 @@ impl Daemon {
     /// workspaces are `workspaces`: they're shown, its chats watched, and
     /// the terminals clients here follow followed there again.
     pub(super) fn relay_linked(&mut self, at: usize, workspaces: &Workspaces) {
+        let relays = self.link_wire(at) >= wire::RELAY;
+        self.links.list[at].relayed.relays = relays;
+        if relays {
+            // Before anything of its buffers is asked.
+            let relay = ClientMessage::Request(Request::Relay);
+            let _ = self.send_upstream(at, &relay, Expect::Nothing);
+        }
         self.relay_workspaces(at, workspaces);
         let watch = ClientMessage::Request(Request::WatchChats);
         let _ = self.send_upstream(at, &watch, Expect::Chats);
@@ -1025,6 +1673,12 @@ impl Daemon {
             let attach = ClientMessage::Request(Request::Attach { terminal: remote });
             let _ = self.send_upstream(at, &attach, Expect::Nothing);
         }
+        if relays {
+            self.buffers_linked(at);
+            self.files_linked(at);
+            self.shown_linked(at);
+        }
+        self.forwards_linked(at);
     }
 
     /// The connection at `at` has been lost, and with it `upstream`, what
@@ -1034,6 +1688,8 @@ impl Daemon {
     pub(super) fn relay_lost(&mut self, at: usize, upstream: Upstream) {
         let host = self.links.list[at].remote.host.clone();
         self.relay_answers_lost(&host, upstream);
+        self.buffers_lost(at);
+        self.forwards_lost(at);
         for followed in self.links.list[at].relayed.followed.values_mut() {
             followed.upstream = false;
             followed.owed = false;
@@ -1053,7 +1709,15 @@ impl Daemon {
             .chain(
                 (upstream.unpacking.abandon().into_iter()).filter_map(|route| match route {
                     Route::Answer(expect) => Some(expect),
-                    Route::View { .. } | Route::TakeIn => None,
+                    Route::View { .. }
+                    | Route::TakeIn
+                    | Route::Buffer { .. }
+                    | Route::Files { .. }
+                    | Route::Found { .. }
+                    | Route::FileOp { .. }
+                    | Route::Board { .. }
+                    | Route::Review { .. }
+                    | Route::Browser { .. } => None,
                 }),
             )
             .collect::<Vec<_>>();
@@ -1119,27 +1783,23 @@ impl Daemon {
             }
             return;
         };
-        let linked = &mut self.links.list[at];
-        let followed: BTreeSet<TerminalId> = linked.relayed.followed.keys().copied().collect();
-        let mut fresh = Counters {
-            workspaces: &mut self.workspaces,
-            next_terminal: &mut self.next_id,
-        };
+        let (linked, mut fresh) = self.numbering(at);
         if !fresh.have_room() {
             self.out_of_numbers(at);
             return;
         }
-        let taken = linked
-            .relayed
-            .mirror
-            .take(workspaces, &machine, &mut fresh, &followed);
+        let followed = linked.relayed.in_use();
+        let relays = linked.relayed.relays;
+        let taken =
+            (linked.relayed.mirror).take(workspaces, &machine, &mut fresh, &followed, relays);
         if taken.cut {
             log::warn!("{host} has more workspaces or panes than are shown: the rest are left out");
         }
         if taken.restarted {
-            // Its terminals are others now, and those followed are gone.
+            // Its terminals are others now, and those followed are gone,
+            // as are its buffers and the rest.
             let gone: Vec<TerminalId> = linked.relayed.followed.keys().copied().collect();
-            linked.relayed.followed.clear();
+            linked.relayed.forget_followed();
             for local in gone {
                 self.finish_relayed_streams(local);
             }
@@ -1169,7 +1829,7 @@ impl Daemon {
                 });
                 let need = match expect {
                     Expect::Nothing => continue,
-                    Expect::Chats => Need::Decode,
+                    Expect::Chats | Expect::Attached(_) => Need::Decode,
                     Expect::Client { token, then, .. } => {
                         // Only one that names nothing goes on as it came;
                         // anything else is looked at, and refused if it
@@ -1197,13 +1857,21 @@ impl Daemon {
                     wires,
                 };
                 (Route::View { local, snapshot }, need)
-            } else if head.is_workspaces() || head.is_chats() || head.is_small_event() {
+            } else if let Some((route, need)) = self.event_route(token, &head, &payload) {
+                (route, need)
+            } else if head.is_workspaces()
+                || head.is_chats()
+                || head.is_small_event()
+                || head.event_kind() == Some(INSTALLED)
+            {
                 if payload.len() > MOST_SMALL && !head.is_workspaces() {
-                    log::warn!(
-                        "{}: a message of {} bytes came, more than is taken in",
-                        reached.host,
-                        payload.len()
-                    );
+                    if let Some(Source::Reached(reached)) = self.sources.get(token.0) {
+                        log::warn!(
+                            "{}: a message of {} bytes came, more than is taken in",
+                            reached.host,
+                            payload.len()
+                        );
+                    }
                     continue;
                 }
                 (Route::TakeIn, Need::Decode)
@@ -1221,6 +1889,23 @@ impl Daemon {
             }
             let unpacked = unpack::unpack(&payload, wire, &need);
             self.relay_unpacked(token, route, unpacked);
+        }
+    }
+
+    /// What's done with a frame from the daemon reached at `token`,
+    /// `payload`, whose first numbers are `head`, if it's about one of its
+    /// buffers, explorers, boards, reviews or chats' pages followed here,
+    /// or answers a search or a file operation asked of it.
+    fn event_route(&self, token: Token, head: &Head, payload: &[u8]) -> Option<(Route, Need)> {
+        match head.event_kind()? {
+            BUFFER => self.buffer_route(token, head),
+            FOUND => self.found_route(token, payload),
+            FILES => self.files_route(token, head),
+            FILE_OP => self.file_op_route(token, payload),
+            kind @ (shown::BOARD | shown::REVIEW | shown::BROWSER) => {
+                self.shown_route(token, kind, head.get(2)?, head.get(3))
+            }
+            _ => None,
         }
     }
 
@@ -1314,6 +1999,33 @@ impl Daemon {
             (Route::TakeIn, Unpacked::Decoded(Err(err))) => {
                 // From a newer daemon, which knows what this build doesn't.
                 log::debug!("{host} sent what can't be read: {err}");
+            }
+            (Route::Buffer { local, kind }, unpacked @ Unpacked::PassedOn(_)) => {
+                self.relay_buffer_frame(at, local, kind, &unpacked);
+            }
+            (
+                Route::Buffer { local, .. },
+                Unpacked::Decoded(Ok(ServerMessage::Event(Event::Buffer { update, .. }))),
+            ) => self.relay_buffer_update(at, local, update),
+            (Route::Buffer { local, .. }, Unpacked::Decoded(_)) => {
+                log::debug!("{host} sent a change to buffer {local} that can't be read");
+            }
+            (Route::Files { local }, unpacked) => self.relay_files_frame(at, local, &unpacked),
+            (Route::Found { number, kind }, unpacked) => {
+                self.relay_found(at, number, kind, unpacked);
+            }
+            (Route::FileOp { number }, unpacked) => self.relay_file_op_frame(at, number, &unpacked),
+            (
+                Route::Board { local },
+                Unpacked::Decoded(Ok(ServerMessage::Event(Event::Board { update, .. }))),
+            ) => self.relay_board(at, local, update),
+            (
+                Route::Review { local },
+                Unpacked::Decoded(Ok(ServerMessage::Event(Event::Review { list, .. }))),
+            ) => self.relay_review(at, local, list),
+            (Route::Browser { local }, unpacked) => self.relay_browser(at, local, unpacked),
+            (Route::Board { .. } | Route::Review { .. }, _) => {
+                log::debug!("{host} sent what can't be read");
             }
             (Route::TakeIn | Route::Answer(_), _) => {}
         }
@@ -1430,6 +2142,7 @@ impl Daemon {
                     self.take_relayed_chats(at, &chats);
                 }
             }
+            Expect::Attached(local) => self.buffer_attached(at, local),
             Expect::Client {
                 token,
                 ticket,
@@ -1438,6 +2151,9 @@ impl Daemon {
             } => {
                 let response = self.renumbered_answer(at, then, response);
                 self.hand_answer_with(token, ticket, response);
+                if let Then::Attached(local) = then {
+                    self.buffer_attached(at, local);
+                }
             }
         }
     }
@@ -1446,13 +2162,9 @@ impl Daemon {
     /// as `then` says, for the client that asked: or an error, if it isn't
     /// an answer `then` allows, or this daemon's numbers are running out.
     fn renumbered_answer(&mut self, at: usize, then: Then, response: Response) -> Response {
-        let linked = &mut self.links.list[at];
+        let (linked, mut fresh) = self.numbering(at);
         let host = linked.remote.host.clone();
         let mirror = &mut linked.relayed.mirror;
-        let mut fresh = Counters {
-            workspaces: &mut self.workspaces,
-            next_terminal: &mut self.next_id,
-        };
         let room = fresh.have_room();
         match (then, response) {
             (_, Response::Error(err)) => Response::Error(local_error(mirror, &host, err)),
@@ -1464,8 +2176,11 @@ impl Daemon {
                 | Response::Text(_)
                 | Response::Found(_)
                 | Response::Block(_)),
-            ) => response,
-            (Then::Created, Response::PaneCreated(pane)) if room => {
+            )
+            | (Then::Recovered, response @ (Response::Done | Response::Text(_)))
+            | (Then::Reviewed, response @ Response::Reviewed(_))
+            | (Then::Attached(_), response @ Response::Done) => response,
+            (Then::Created | Then::Recovered, Response::PaneCreated(pane)) if room => {
                 let local = (mirror.pane_numbers).local_or_fresh(pane.0, || fresh.pane());
                 Response::PaneCreated(PaneId(local))
             }
@@ -1473,7 +2188,7 @@ impl Daemon {
                 Response::ChatChoices(shown_choices(mirror, &mut fresh, choices))
             }
             (
-                Then::Created | Then::Choices,
+                Then::Created | Then::Choices | Then::Recovered,
                 Response::PaneCreated(_) | Response::ChatChoices(_),
             ) => Response::Error(Error::Other(
                 "this daemon has used nearly all its numbers: restart it".into(),
@@ -1488,10 +2203,34 @@ impl Daemon {
     }
 
     /// Takes in `event`, from the daemon of the connection at `at`.
+    #[allow(clippy::too_many_lines, reason = "one arm per event, each short")]
     fn relay_event(&mut self, at: usize, event: Event) {
         match event {
             Event::Workspaces(workspaces) => self.relay_workspaces(at, &workspaces),
             Event::Chats(chats) => self.take_relayed_chats(at, &chats),
+            Event::Installed { language, outcome } => {
+                let relayed = &mut self.links.list[at].relayed;
+                let mut told = Vec::new();
+                relayed.installing.retain(|(token, asked)| {
+                    let this = *asked == language;
+                    if this {
+                        told.push(*token);
+                    }
+                    !this
+                });
+                let host = self.links.list[at].remote.host.clone();
+                let outcome = match outcome {
+                    Ok(what) => Ok(format!("{} on {host}", mirror::shown_name(&what))),
+                    Err(why) => Err(format!("{} (on {host})", mirror::shown_name(&why))),
+                };
+                for token in told {
+                    let installed = Event::Installed {
+                        language: language.clone(),
+                        outcome: outcome.clone(),
+                    };
+                    self.send_event(token, installed);
+                }
+            }
             Event::Exited { terminal } => {
                 let mirror = &self.links.list[at].relayed.mirror;
                 let Some(local) = mirror.terminal_numbers.local(terminal.0) else {
@@ -1510,9 +2249,9 @@ impl Daemon {
                 let Some(local) = mirror.pane_numbers.local(pane.0) else {
                     return;
                 };
-                // Only a pane: a place in a file is for editors, which
-                // aren't passed on yet.
-                let _ = place;
+                // A place in a file is the file's on that machine, which
+                // the pane shows.
+                let place = place.filter(|_| self.links.list[at].relayed.relays);
                 // A client from before federation isn't shown the pane.
                 let watchers: Vec<Token> = (self.sources.iter())
                     .filter_map(|(key, source)| match source {
@@ -1528,7 +2267,7 @@ impl Daemon {
                 for token in watchers {
                     let show = Event::Show {
                         pane: PaneId(local),
-                        at: None,
+                        at: place.clone(),
                     };
                     self.send_event(token, show);
                 }
@@ -1600,7 +2339,7 @@ impl Daemon {
     /// waits to be asked for again, as taking in more could give a number
     /// twice. Only a daemon that has run for a very long time gets here,
     /// and a restart starts its counters again.
-    fn out_of_numbers(&mut self, at: usize) {
+    pub(super) fn out_of_numbers(&mut self, at: usize) {
         log::error!(
             "this daemon's numbers are nearly used up: no more is taken from other machines"
         );
@@ -1617,7 +2356,7 @@ impl Daemon {
         let now = Instant::now();
         let mut due: Option<Instant> = None;
         let mut take = |at: Instant| due = Some(due.map_or(at, |due| due.min(at)));
-        for linked in &self.links.list {
+        for (at, linked) in self.links.list.iter().enumerate() {
             for followed in linked
                 .relayed
                 .followed
@@ -1634,11 +2373,15 @@ impl Daemon {
             let Some(Source::Reached(reached)) = self.sources.get(token.0) else {
                 continue;
             };
+            // Requests held, and attaches waiting, wait for answers too.
+            let held = (linked.relayed.held.iter()).map(|held| held.asked).min();
             let asked = (reached.upstream.expecting.iter())
                 .filter_map(|expect| match expect {
                     Expect::Client { asked, .. } => Some(*asked),
-                    Expect::Nothing | Expect::Chats => None,
+                    Expect::Nothing | Expect::Chats | Expect::Attached(_) => None,
                 })
+                .chain(held)
+                .chain(self.attaches_waiting_since(at))
                 .min();
             if let Some(asked) = asked {
                 let first = asked + KEYS_UNANSWERED;
@@ -1684,12 +2427,17 @@ impl Daemon {
                     token,
                     ticket,
                     asked,
-                    ..
+                    then,
                 } = *expect
                     && ((!answering && now >= asked + KEYS_UNANSWERED)
                         || now >= asked + LONGEST_ANSWER)
                 {
-                    *expect = Expect::Nothing;
+                    // An attach's answer, late, still ends what it brought
+                    // going to the client that asked alone.
+                    *expect = match then {
+                        Then::Attached(local) => Expect::Attached(local),
+                        _ => Expect::Nothing,
+                    };
                     given_up.push((token, ticket));
                 }
             }
@@ -1703,17 +2451,30 @@ impl Daemon {
                 let silent = Error::Other(format!("{host} isn't answering"));
                 self.hand_answer_with(token, ticket, Response::Error(silent));
             }
+            // Requests held for clients' changes, and attaches waiting
+            // behind a change, are given up on by the same rule: answered
+            // with an error, the attach still made in its turn.
+            let late = |asked: Instant| {
+                (!answering && now >= asked + KEYS_UNANSWERED) || now >= asked + LONGEST_ANSWER
+            };
+            let why = format!("{host} isn't answering");
+            let (late_held, kept): (VecDeque<HeldAsk>, VecDeque<HeldAsk>) =
+                std::mem::take(&mut self.links.list[at].relayed.held)
+                    .into_iter()
+                    .partition(|held| late(held.asked));
+            self.links.list[at].relayed.held = kept;
+            for held in late_held {
+                let silent = Error::Other(why.clone());
+                self.hand_answer_with(held.token, held.ticket, Response::Error(silent));
+            }
+            self.give_up_on_attaches(at, late, &why);
         }
     }
 
     /// Takes in `chats`, from the daemon of the connection at `at`.
     fn take_relayed_chats(&mut self, at: usize, chats: &[ChatSummary]) {
-        let linked = &mut self.links.list[at];
+        let (linked, mut fresh) = self.numbering(at);
         let followed: BTreeSet<TerminalId> = linked.relayed.followed.keys().copied().collect();
-        let mut fresh = Counters {
-            workspaces: &mut self.workspaces,
-            next_terminal: &mut self.next_id,
-        };
         if !fresh.have_room() {
             self.out_of_numbers(at);
             return;
@@ -1726,6 +2487,25 @@ impl Daemon {
             self.chat_watch.dirty = true;
         }
     }
+}
+
+/// Whether `request`, of a client's, acts on the text its changes to
+/// buffers make, or closes, or shows something else in, a pane that may
+/// show one: a save, a discard, a close.
+fn acts_on_text(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Save { .. }
+            | Request::SaveAs { .. }
+            | Request::Discard { .. }
+            | Request::Reload { .. }
+            | Request::Recover { .. }
+            | Request::OpenHere { .. }
+            | Request::BlankHere { .. }
+            | Request::ClosePane { .. }
+            | Request::CloseTab { .. }
+            | Request::CloseWorkspace { .. }
+    )
 }
 
 /// `err`, from another daemon, with the terminals, panes, tabs and
@@ -1771,6 +2551,21 @@ fn local_error(mirror: &Mirror, host: &str, err: Error) -> Error {
         Error::NoSuchWorkspace(id) => (mirror.workspace_numbers.local(id.0))
             .map(|workspace| Error::NoSuchWorkspace(WorkspaceId(workspace)))
             .ok_or("no such workspace"),
+        Error::NoSuchBuffer(id) => (mirror.buffer_numbers.local(id.0))
+            .map(|buffer| Error::NoSuchBuffer(BufferId(buffer)))
+            .ok_or("no such buffer"),
+        Error::NotAFile(id) => (mirror.pane_numbers.local(id.0))
+            .map(|pane| Error::NotAFile(PaneId(pane)))
+            .ok_or("the pane shows no file"),
+        Error::NoSuchFiles(id) => (mirror.files_numbers.local(id.0))
+            .map(|files| Error::NoSuchFiles(FilesId(files)))
+            .ok_or("no such explorer"),
+        Error::NoSuchBoard(id) => (mirror.board_numbers.local(id.0))
+            .map(|board| Error::NoSuchBoard(BoardId(board)))
+            .ok_or("no such board"),
+        Error::NoSuchReview(id) => (mirror.review_numbers.local(id.0))
+            .map(|review| Error::NoSuchReview(ReviewId(review)))
+            .ok_or("no such review"),
         err => Ok(err),
     };
     renumbered.unwrap_or_else(unnumbered)
@@ -1828,7 +2623,7 @@ mod tests {
     use super::*;
     use crate::server::{Client, Reading};
 
-    fn desk() -> Machine {
+    pub(super) fn desk() -> Machine {
         Machine {
             id: MachineId([9; 16]),
             name: "desk".into(),
@@ -1838,9 +2633,9 @@ mod tests {
 
     /// A daemon in `dir`, not running, connected to `desk`, which the test
     /// plays at the other end of the returned socket, having answered the
-    /// daemon's watching its chats and said it has one workspace, with a
-    /// terminal, its number 7, in it.
-    fn linked(dir: &std::path::Path) -> (Daemon, Token, UnixStream) {
+    /// daemon's saying it relays and watching its chats, and said it has
+    /// one workspace, with a terminal, its number 7, in it.
+    pub(super) fn linked(dir: &std::path::Path) -> (Daemon, Token, UnixStream) {
         let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir);
         let (link, mut there) = daemon.linked_for_test("desk", desk());
         let workspace = Workspace {
@@ -1859,6 +2654,7 @@ mod tests {
             active_tab: TabId(1),
             home: None,
         };
+        say(&mut there, &ServerMessage::Response(Response::Done));
         say(
             &mut there,
             &ServerMessage::Response(Response::Chats(Vec::new())),
@@ -1878,7 +2674,7 @@ mod tests {
 
     /// A client of `daemon`'s, greeted, over a socket pair whose other end
     /// is returned, for the test to read what it's sent.
-    fn client(daemon: &mut Daemon) -> (Token, UnixStream) {
+    pub(super) fn client(daemon: &mut Daemon) -> (Token, UnixStream) {
         let (ours, theirs) = UnixStream::pair().unwrap();
         ours.set_nonblocking(true).unwrap();
         theirs.set_nonblocking(true).unwrap();
@@ -1894,14 +2690,14 @@ mod tests {
     }
 
     /// Writes `message` to `stream`, framed, as a daemon of this build.
-    fn say(stream: &mut UnixStream, message: &ServerMessage) {
+    pub(super) fn say(stream: &mut UnixStream, message: &ServerMessage) {
         stream
             .write_all(&frame::encode(PROTOCOL_VERSION, message).unwrap())
             .unwrap();
     }
 
     /// What's come on `stream` so far, as `T`s.
-    fn read<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Vec<T> {
+    pub(super) fn read<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Vec<T> {
         let mut decoder = FrameDecoder::new();
         let mut buffer = vec![0; 65536];
         loop {
@@ -1916,12 +2712,12 @@ mod tests {
     }
 
     /// What the daemon has asked of the daemon there so far.
-    fn heard(there: &mut UnixStream) -> Vec<ClientMessage> {
+    pub(super) fn heard(there: &mut UnixStream) -> Vec<ClientMessage> {
         read(there)
     }
 
     /// The answers the client has been sent so far.
-    fn answers(window: &mut UnixStream) -> Vec<Response> {
+    pub(super) fn answers(window: &mut UnixStream) -> Vec<Response> {
         (read::<ServerMessage>(window).into_iter())
             .filter_map(|message| match message {
                 ServerMessage::Response(response) => Some(response),

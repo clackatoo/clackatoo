@@ -104,7 +104,7 @@ pub use files::{
     GitMark, OpenFiles,
 };
 pub use find::{Done, Found, FoundBuffer, FoundLine, FoundSymbol, Search};
-pub use forward::{Forward, ForwardFailure};
+pub use forward::{Forward, ForwardFailure, Forwarding};
 pub use machines::{BadMachineId, Connection, ConnectionState, Machine, MachineId, Secret};
 pub use review::{
     ChatName, CommentPlace, Hunks, Made, NewReview, ReviewAction, ReviewChat, ReviewComment,
@@ -121,7 +121,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 91;
+pub const PROTOCOL_VERSION: u32 = 92;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -271,6 +271,15 @@ pub enum ClientMessage {
         id: u64,
         /// What to do.
         op: FileOp,
+        /// The pane it's asked from, such as an explorer, which says on
+        /// which machine its paths are: the daemon's own, unless the pane
+        /// is on another it's connected to. `None` from a client older
+        /// than protocol 92, whose paths are the daemon's machine's.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::RELAY }, _>",
+            deserialize_with = "wire::since::<{ wire::RELAY }, _, _>"
+        )]
+        pane: Option<PaneId>,
     },
     /// Does something to a board the client attached to, as the user:
     /// posts on it, or archives it. Not answered: what comes of it comes
@@ -545,6 +554,12 @@ pub enum Event {
         /// The question, or `None` once it's no longer asked.
         question: Option<String>,
     },
+    /// Something to say about a port the daemon forwards to another
+    /// machine for the client ([`Request::Forwards`]), such as that
+    /// nothing listens where it goes: once for each forward until it
+    /// works again, to the client that last asked for that machine's.
+    /// Only to a client of protocol 92 or later.
+    Forwarded(String),
 }
 
 /// A message from a client to the daemon that expects an answer.
@@ -812,12 +827,28 @@ pub enum Request {
         grammar: bool,
         /// Install this language server, by its program's name.
         server: Option<String>,
+        /// The buffer whose offer this answers, which says on which
+        /// machine to install it: the daemon's own, unless the buffer is
+        /// on another it's connected to. `None` from a client older than
+        /// protocol 92, which installs it on the daemon's machine.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::RELAY }, _>",
+            deserialize_with = "wire::since::<{ wire::RELAY }, _, _>"
+        )]
+        buffer: Option<BufferId>,
     },
     /// Don't offer to install a language again: the answer to an offer was
     /// no. Kept on the daemon's machine.
     Decline {
         /// The language.
         language: String,
+        /// The buffer whose offer this answers, as for
+        /// [`Install`](Self::Install).
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::RELAY }, _>",
+            deserialize_with = "wire::since::<{ wire::RELAY }, _, _>"
+        )]
+        buffer: Option<BufferId>,
     },
     /// Shows `file` in `pane`, which shows a file or a folder, in place of
     /// what it shows, as Vim's `:e` does: a folder as its listing
@@ -1080,6 +1111,37 @@ pub enum Request {
     WatchConnections {
         /// The client answers ssh's questions.
         answer: bool,
+    },
+    /// Says the client is a daemon relaying for clients of its own, as a
+    /// daemon connected to this one does, any number of which may follow
+    /// one buffer. The daemon then answers each of its edits with the edit
+    /// as made, as [`BufferUpdate::Edited`] with `answers` naming it, as
+    /// for an undo, rather than [`BufferUpdate::Acked`], so that it can
+    /// pass the edit on to its other clients following the buffer; and
+    /// lets one of its questions to a language server go for a later one
+    /// of the same kind only when the top 24 bits of their numbers are the
+    /// same, as they say which of its clients asked, two of which may each
+    /// be waiting for one. Answered with [`Response::Done`]. New in
+    /// protocol 92: a client asks [`wire::daemon_has`] with
+    /// [`wire::RELAY`] before sending it.
+    Relay,
+    /// Forwards ports from the daemon's machine to the machine `pane` is
+    /// on, another the daemon is connected to, as a window on another
+    /// machine forwards its own (see [`Forward`]): the daemon listens on
+    /// its machine's loopback, and passes each connection on through its
+    /// connection to the other machine, which connects where it says. A
+    /// window on the daemon's machine asks for this in a workspace from
+    /// another. The forwards are the connection's, kept while it's
+    /// dropped and made again, until stopped or the connection is ended.
+    /// Answered with [`Response::Text`], saying what was done, or an
+    /// error. What happens to them later, such as nothing listening where
+    /// one goes, comes in [`Event::Forwarded`]. New in protocol 92, as
+    /// [`Relay`](Self::Relay).
+    Forwards {
+        /// A pane on the machine the ports go to.
+        pane: PaneId,
+        /// What to do.
+        forwarding: Forwarding,
     },
 }
 
