@@ -48,6 +48,11 @@ impl WorkspaceState {
             .map(str::to_owned);
     }
 
+    /// Tells windows which daemon this is.
+    pub(crate) fn set_machine(&mut self, machine: clackatoo_protocol::Machine) {
+        self.workspaces.machine = Some(machine);
+    }
+
     /// The workspaces, for the next build.
     pub(crate) fn hand_over(&self) -> handover::Workspaces {
         fn layout(node: &Layout) -> handover::Layout {
@@ -191,6 +196,7 @@ impl WorkspaceState {
                 name: workspace.name.clone(),
                 tabs,
                 active_tab,
+                home: None,
             });
         }
         let active = handed.active.map(WorkspaceId);
@@ -203,6 +209,7 @@ impl WorkspaceState {
                 active,
                 home: None,
                 restored: Vec::new(),
+                machine: None,
             },
             next_workspace: handed.next_workspace,
             next_tab: handed.next_tab,
@@ -239,6 +246,7 @@ impl WorkspaceState {
             name,
             active_tab: tab.id,
             tabs: vec![tab],
+            home: None,
         });
         self.workspaces.active = Some(id);
         pane
@@ -563,6 +571,7 @@ impl WorkspaceState {
             name,
             active_tab: tabs.get(active_tab).unwrap_or(&tabs[0]).id,
             tabs,
+            home: None,
         });
         id
     }
@@ -668,7 +677,11 @@ impl WorkspaceState {
     fn pane(&mut self, content: Content) -> Pane {
         let id = PaneId(self.next_pane);
         self.next_pane += 1;
-        Pane { id, content }
+        Pane {
+            id,
+            content,
+            home: None,
+        }
     }
 
     /// A new tab showing `content`, and its pane.
@@ -718,6 +731,7 @@ fn handed_pane(node: &handover::Layout) -> Option<Pane> {
     Some(Pane {
         id: PaneId(id),
         content,
+        home: None,
     })
 }
 
@@ -726,6 +740,7 @@ fn placeholder() -> Pane {
     Pane {
         id: PaneId(u32::MAX),
         content: Content::Terminal(TerminalId(u32::MAX)),
+        home: None,
     }
 }
 
@@ -875,6 +890,7 @@ fn split_edge(layout: &mut Layout, side: Side, new: Pane, share: Option<u16>) {
         Layout::Pane(Pane {
             id: PaneId(0),
             content: Content::Terminal(TerminalId(0)),
+            home: None,
         }),
     );
     let (parts, shares) = match share.map(|share| u32::from(share.clamp(1, 999))) {

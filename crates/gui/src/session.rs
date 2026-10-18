@@ -21,7 +21,7 @@ use clackatoo_daemon::{Client, ClientError, Contact, Receiver, RuntimeDir, Sende
 use clackatoo_protocol::frame::Head;
 use clackatoo_protocol::{
     BrowserUpdate, BufferId, Error, Event, NewTerminal, PROTOCOL_VERSION, PaneTerminal, Response,
-    ServerMessage, Size, TerminalId, TerminalStatus, Workspaces,
+    ServerMessage, Size, TerminalId, TerminalStatus, Workspaces, wire,
 };
 use winit::event_loop::EventLoopProxy;
 
@@ -486,7 +486,8 @@ fn with_causes(err: &dyn std::error::Error) -> String {
 
 /// Starts watching the workspaces. With none, makes one, showing the
 /// newest running terminal, such as one a script started, or else a new
-/// one. Also asks which release the daemon is.
+/// one. Also asks which release the daemon is, and answers the questions
+/// ssh asks for the daemon's connections to other machines.
 fn open(mut client: Client) -> Result<(Sender, Receiver, Workspaces, Option<String>), ClientError> {
     // A daemon that accepts but never answers would otherwise leave the
     // window blank forever.
@@ -516,6 +517,13 @@ fn open(mut client: Client) -> Result<(Sender, Receiver, Workspaces, Option<Stri
         .daemon_version()
         .inspect_err(|err| log::warn!("the daemon didn't say which release it is: {err}"))
         .ok();
+    // The window answers the questions ssh asks as the daemon connects to
+    // other machines, such as for a password.
+    if client.daemon_has(wire::FEDERATION)
+        && let Err(err) = client.watch_connections(true)
+    {
+        log::warn!("the window won't answer ssh's questions for the daemon: {err}");
+    }
     client.set_read_timeout(None)?;
     let (sender, receiver) = client.split()?;
     Ok((sender, receiver, workspaces, daemon_version))

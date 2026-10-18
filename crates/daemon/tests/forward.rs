@@ -63,6 +63,9 @@ impl TestDaemon {
             browser: None,
             web: None,
             trash: None,
+            links: None,
+            machine: None,
+            machine_name: None,
         };
         let mut daemon = Daemon::bind(&self.socket(), config).expect("bind");
         let shutdown = daemon.shutdown_handle();

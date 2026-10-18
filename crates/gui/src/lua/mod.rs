@@ -333,6 +333,7 @@ mod tests {
                     content: clackatoo_protocol::Content::Terminal(clackatoo_protocol::TerminalId(
                         id,
                     )),
+                    home: None,
                 })
             })
             .collect();
@@ -356,7 +357,9 @@ mod tests {
                     name: "work".into(),
                     active_tab: TabId(1),
                     tabs: vec![tab],
+                    home: None,
                 }],
+                machine: None,
             },
             shown: Some(Shown {
                 workspace: WorkspaceId(1),

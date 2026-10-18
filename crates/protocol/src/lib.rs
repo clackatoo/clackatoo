@@ -62,6 +62,7 @@ mod files;
 mod find;
 mod forward;
 pub mod frame;
+mod machines;
 mod review;
 mod view;
 pub mod wire;
@@ -104,6 +105,7 @@ pub use files::{
 };
 pub use find::{Done, Found, FoundBuffer, FoundLine, FoundSymbol, Search};
 pub use forward::{Forward, ForwardFailure};
+pub use machines::{BadMachineId, Connection, ConnectionState, Machine, MachineId, Secret};
 pub use review::{
     ChatName, CommentPlace, Hunks, Made, NewReview, ReviewAction, ReviewChat, ReviewComment,
     ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
@@ -119,7 +121,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 90;
+pub const PROTOCOL_VERSION: u32 = 91;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -335,6 +337,18 @@ pub enum ClientMessage {
         /// The pane.
         pane: PaneId,
     },
+    /// Answers the question numbered `ask` that the daemon passed on
+    /// from ssh ([`Event::Login`]), such as for a password: `None` turns
+    /// it down. The daemon hands the answer to ssh, and keeps it nowhere.
+    /// Only the client asked can answer. Not answered. Only to a daemon of
+    /// protocol 91 or later: a client asks [`wire::daemon_has`] with
+    /// [`wire::FEDERATION`] before sending it.
+    Login {
+        /// The question's number.
+        ask: u64,
+        /// The answer.
+        answer: Option<Secret>,
+    },
 }
 
 /// Everything the daemon sends.
@@ -506,6 +520,30 @@ pub enum Event {
         id: u64,
         /// Each block's spans.
         spans: Vec<Vec<Span>>,
+    },
+    /// The daemon's connections to daemons on other machines changed, for
+    /// a client watching them ([`Request::WatchConnections`]): every one,
+    /// in place of the last list. Only to a client of protocol 91 or
+    /// later.
+    Connections(Vec<Connection>),
+    /// ssh, logging in to `host` for one of the daemon's connections,
+    /// asks `question`, such as for a password, a key's passphrase, or
+    /// whether to trust a machine it hasn't met: answered with
+    /// [`ClientMessage::Login`], numbered `ask`. Sent to one client that
+    /// said it answers them ([`Request::WatchConnections`]), the one that
+    /// asked for the connection if it still can, one question at a time.
+    /// `None` takes the question numbered `ask` back: ssh gave up, or the
+    /// connection went, and a window showing it stops. The question is
+    /// ssh's words, which may hold the other machine's: one line or more,
+    /// with no other control characters. Only to a client of protocol 91
+    /// or later.
+    Login {
+        /// The question's number.
+        ask: u64,
+        /// The machine, as the connection names it.
+        host: String,
+        /// The question, or `None` once it's no longer asked.
+        question: Option<String>,
     },
 }
 
@@ -1005,6 +1043,44 @@ pub enum Request {
         /// Throw the changes set aside away, rather than take them.
         drop: bool,
     },
+    /// Connects the daemon to the daemon on another machine, `host`, as
+    /// ssh names it, as a client of it: over ssh, running `command` there
+    /// (`clackatoo`, if `None`), then QUIC inside it, moving onto UDP. The
+    /// connection is kept, made again whenever it's lost, and kept from
+    /// one run of the daemon to the next, until
+    /// [`Request::Disconnect`]. Answered with [`Response::Done`] at once:
+    /// how it goes is told to clients watching the connections
+    /// ([`Event::Connections`]). Questions ssh asks, such as for a
+    /// password, go to this client first, if it said it answers them. A
+    /// connection already made to `host` is left as it is, or tried again
+    /// at once if it's down. New in protocol 91: a client asks
+    /// [`wire::daemon_has`] with [`wire::FEDERATION`] before sending it.
+    Connect {
+        /// The machine: `host`, `user@host`, `host:port`, or a name from
+        /// the ssh config.
+        host: String,
+        /// The shell command that runs clackatoo there, if it isn't
+        /// `clackatoo`.
+        command: Option<String>,
+    },
+    /// Ends the daemon's connection to `host`, and forgets it. Answered
+    /// with [`Response::Done`], or [`Error::Other`] if there's none. New
+    /// in protocol 91, as [`Request::Connect`].
+    Disconnect {
+        /// The machine, as the connection was asked for.
+        host: String,
+    },
+    /// Lists the daemon's connections to daemons on other machines,
+    /// answered with [`Response::Connections`], and has the client told
+    /// whenever they change ([`Event::Connections`]). With `answer`, the
+    /// client also answers the questions ssh asks as it logs in for them
+    /// ([`Event::Login`]), as a window does: a connection waiting for a
+    /// window to ask through is tried again. Devices on the web app can't
+    /// answer them. New in protocol 91, as [`Request::Connect`].
+    WatchConnections {
+        /// The client answers ssh's questions.
+        answer: bool,
+    },
 }
 
 /// How to start a terminal.
@@ -1127,6 +1203,9 @@ pub enum Response {
     Devices(Vec<Device>),
     /// Answers [`Request::ChatChoices`].
     ChatChoices(ChatChoices),
+    /// Answers [`Request::WatchConnections`]: every connection, in the
+    /// order they were asked for.
+    Connections(Vec<Connection>),
 }
 
 /// Where a daemon takes QUIC packets over UDP, and how a client finds out

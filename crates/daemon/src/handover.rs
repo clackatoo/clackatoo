@@ -47,6 +47,8 @@
 //! 20. Each terminal's shell's secret (see `crate::shell`), the file it's
 //!     read from if the shell hasn't yet, and which block's command the
 //!     shell's integration marked with it.
+//! 21. Which machine the daemon is, by its ID, and its connections to the
+//!     daemons on other machines, which the next build makes again.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -59,11 +61,11 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 20;
+pub(crate) const VERSION: u32 = 21;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, VERSION,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -144,6 +146,23 @@ pub(crate) struct State {
     /// The secrets of the terminals' shells that have one. Since version
     /// 20; before, no shell had one.
     pub(crate) shells: Vec<Shell>,
+    /// Which machine the daemon is: its ID (see
+    /// [`MachineId`](clackatoo_protocol::MachineId)). Since version 21;
+    /// `None` before, for the build reading it to take the one its state
+    /// directory keeps.
+    pub(crate) machine: Option<[u8; 16]>,
+    /// The daemon's connections to the daemons on other machines. Since
+    /// version 21; before, there were none.
+    pub(crate) connections: Vec<Connection>,
+}
+
+/// A connection to the daemon on another machine. Since version 21.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Connection {
+    /// The machine, as ssh names it.
+    pub(crate) host: String,
+    /// The shell command that runs clackatoo there.
+    pub(crate) command: String,
 }
 
 /// What agents changed in files, hunk by hunk, whether the user has
@@ -745,8 +764,66 @@ impl State {
             // `Layout`, so they read as it does.
             16..=18 => Ok(postcard::from_bytes::<v18::State>(body)?.into()),
             19 => Ok(postcard::from_bytes::<v19::State>(body)?.into()),
+            20 => Ok(postcard::from_bytes::<v20::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
+        }
+    }
+}
+
+/// Version 20, as the builds that wrote it wrote it: no machine, and no
+/// connections.
+mod v20 {
+    use serde::Deserialize;
+
+    use super::{
+        Applied, Buffer, Chat, EditLog, Files, Process, Reviews, Shell, Terminal, Workspaces,
+    };
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+        edits: EditLog,
+        applied: Vec<Applied>,
+        daemon: u64,
+        reviews: Reviews,
+        recovery_lock: Option<u32>,
+        shells: Vec<Shell>,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: state.recovery_lock,
+                shells: state.shells,
+                machine: None,
+                connections: Vec::new(),
+            }
         }
     }
 }
@@ -797,6 +874,8 @@ mod v19 {
                 reviews: state.reviews,
                 recovery_lock: state.recovery_lock,
                 shells: Vec::new(),
+                machine: None,
+                connections: Vec::new(),
             }
         }
     }
@@ -848,6 +927,8 @@ mod v18 {
                 reviews: state.reviews,
                 recovery_lock: None,
                 shells: Vec::new(),
+                machine: None,
+                connections: Vec::new(),
             }
         }
     }
@@ -1364,6 +1445,8 @@ mod v7 {
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
                 shells: Vec::new(),
+                machine: None,
+                connections: Vec::new(),
             }
         }
     }
@@ -1439,6 +1522,8 @@ mod v8 {
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
                 shells: Vec::new(),
+                machine: None,
+                connections: Vec::new(),
             }
         }
     }
@@ -1484,6 +1569,8 @@ mod v9 {
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
                 shells: Vec::new(),
+                machine: None,
+                connections: Vec::new(),
             }
         }
     }
@@ -1531,6 +1618,8 @@ mod v11 {
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
                 shells: Vec::new(),
+                machine: None,
+                connections: Vec::new(),
             }
         }
     }
@@ -1627,6 +1716,8 @@ mod v15 {
                 reviews: state.reviews,
                 recovery_lock: None,
                 shells: Vec::new(),
+                machine: None,
+                connections: Vec::new(),
             }
         }
     }
@@ -1677,6 +1768,8 @@ mod v14 {
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
                 shells: Vec::new(),
+                machine: None,
+                connections: Vec::new(),
             }
         }
     }
@@ -1725,6 +1818,8 @@ mod v13 {
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
                 shells: Vec::new(),
+                machine: None,
+                connections: Vec::new(),
             }
         }
     }
@@ -1815,6 +1910,8 @@ mod v12 {
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
                 shells: Vec::new(),
+                machine: None,
+                connections: Vec::new(),
             }
         }
     }
@@ -1903,6 +2000,8 @@ mod v10 {
                 reviews: super::Reviews::default(),
                 recovery_lock: None,
                 shells: Vec::new(),
+                machine: None,
+                connections: Vec::new(),
             }
         }
     }
@@ -2070,6 +2169,11 @@ mod tests {
                 secret: "0123456789abcdef0123456789abcdef".to_owned(),
                 file: Some(b"/run/clackatoo/shell/secret.1".to_vec()),
                 trusted: Some(4),
+            }],
+            machine: Some([0xa7; 16]),
+            connections: vec![Connection {
+                host: "jack@laptop:2222".to_owned(),
+                command: "~/.cargo/bin/clackatoo".to_owned(),
             }],
         }
     }
@@ -2271,6 +2375,21 @@ mod tests {
     }
 
     #[test]
+    fn version_21_is_read_with_the_machine_and_its_connections() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v21.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        assert_eq!(state.machine, Some([0xa7; 16]));
+        let connection = &state.connections[0];
+        assert_eq!(
+            (connection.host.as_str(), connection.command.as_str()),
+            ("jack@laptop:2222", "~/.cargo/bin/clackatoo")
+        );
+        assert_eq!(state.shells[0].trusted, Some(4));
+    }
+
+    #[test]
     fn version_20_is_read_with_the_shells_secrets() {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v20.bin"))
@@ -2286,6 +2405,7 @@ mod tests {
             Some(&b"/run/clackatoo/shell/secret.1"[..])
         );
         assert_eq!(state.recovery_lock, Some(3));
+        assert!(state.machine.is_none() && state.connections.is_empty());
     }
 
     #[test]
@@ -2399,11 +2519,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v20.bin"]
+    #[ignore = "writes tests/fixtures/handover-v21.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v20.bin"
+            "/tests/fixtures/handover-v21.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();

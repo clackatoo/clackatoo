@@ -14,8 +14,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BoardId, BufferId, FilesId, NewAgent, NewReview, NewTerminal, OpenBoard, OpenFile, OpenFiles,
-    ReviewId, TerminalId, wire,
+    BoardId, BufferId, FilesId, Machine, MachineId, NewAgent, NewReview, NewTerminal, OpenBoard,
+    OpenFile, OpenFiles, ReviewId, TerminalId, wire,
 };
 
 /// Identifies a workspace within one daemon. Never reused while it runs.
@@ -79,6 +79,13 @@ pub struct Workspaces {
         deserialize_with = "wire::since::<{ wire::RESTORED }, _, _>"
     )]
     pub restored: Vec<Restored>,
+    /// Which daemon sent them: its ID and name. `None` from a daemon
+    /// older than protocol 91.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::FEDERATION }, _>",
+        deserialize_with = "wire::since::<{ wire::FEDERATION }, _, _>"
+    )]
+    pub machine: Option<Machine>,
 }
 
 /// What a pane made again as the daemon started still has to show for
@@ -120,6 +127,15 @@ pub struct Workspace {
     pub tabs: Vec<Tab>,
     /// The tab any client last switched to.
     pub active_tab: TabId,
+    /// The daemon it lives on, its *home*, by its ID, when that's another
+    /// than the daemon that sent it, as for a workspace from another
+    /// machine one daemon passes on from another: `None` for the sender's
+    /// own, and from a daemon older than protocol 91.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::FEDERATION }, _>",
+        deserialize_with = "wire::since::<{ wire::FEDERATION }, _, _>"
+    )]
+    pub home: Option<MachineId>,
 }
 
 /// One tab of a workspace: its panes, laid out.
@@ -192,6 +208,14 @@ pub struct Pane {
     pub id: PaneId,
     /// What it shows.
     pub content: Content,
+    /// The daemon what it shows lives on, its *home*, by its ID, when
+    /// that's another than its workspace's: `None` for the workspace's
+    /// own, and from a daemon older than protocol 91.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::FEDERATION }, _>",
+        deserialize_with = "wire::since::<{ wire::FEDERATION }, _, _>"
+    )]
+    pub home: Option<MachineId>,
 }
 
 /// What a pane shows.

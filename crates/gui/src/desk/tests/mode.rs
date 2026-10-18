@@ -385,6 +385,7 @@ fn folder_pane(pane: u32, files: u32) -> Layout {
     Layout::Pane(LayoutPane {
         id: PaneId(pane),
         content: Content::Folder(FilesId(files)),
+        home: None,
     })
 }
 
@@ -994,6 +995,7 @@ fn enter_in_a_review_goes_to_the_editor_in_normal_mode() {
     let review = Layout::Pane(LayoutPane {
         id: PaneId(2),
         content: Content::Review(ReviewId(1)),
+        home: None,
     });
     desk.workspaces_changed(one_tab(side_by_side(vec![file_pane(1, 7), review])));
     desk.answered(Response::PaneCreated(PaneId(2)));

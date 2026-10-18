@@ -27,8 +27,9 @@ use clackatoo_text::{
 
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
-    BLANK, BLOCK_MARKS, BLOCKS, COLOURS, EXITED, FALLBACKS, FORWARD_PACE, FORWARDS, HOVER,
-    INLAY_HINTS, LIMITS, PHONE_TERMINALS, PREVIEW_COLOURS, RECOVER, RESTORED, SYMBOLS, USES, WORDS,
+    BLANK, BLOCK_MARKS, BLOCKS, COLOURS, EXITED, FALLBACKS, FEDERATION, FORWARD_PACE, FORWARDS,
+    HOVER, INLAY_HINTS, LIMITS, PHONE_TERMINALS, PREVIEW_COLOURS, RECOVER, RESTORED, SYMBOLS, USES,
+    WORDS,
 };
 use crate::{
     AgentSession, AgentTools, Author, Axis, BlockMarks, BoardId, BufferId, BufferSnapshot,
@@ -45,12 +46,13 @@ use crate::{
 use crate::{
     Answer, BoardAction, BoardAuthor, BoardEntry, BoardLink, BoardScope, BoardSummary, BoardUpdate,
     BrowserFrame, BrowserStatus, BrowserUpdate, ChatChoices, ChatSummary, CodeAction, CommentPlace,
-    CompletionItem, Device, Done, Entry, EntryKind, Expect, FileLocation, FileOp, FileOpError,
-    FileStamp, FilesAction, FilesUpdate, Forward, ForwardFailure, Found, FoundLine, FoundSymbol,
-    GitMark, Hunks, InlayHint, InlayHintKind, Made, OpenBlank, OpenBoard, OpenFile, OpenFiles,
-    PairingAsk, PairingState, Place, PostKind, Query, Restored, ReviewAction, ReviewChat,
-    ReviewComment, ReviewFile, ReviewHunk, ReviewList, ReviewScope, Search, ServerFeatures, Symbol,
-    TextChange, Trigger, Udp, Use, UseKind,
+    CompletionItem, Connection, ConnectionState, Device, Done, Entry, EntryKind, Expect,
+    FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesUpdate, Forward,
+    ForwardFailure, Found, FoundLine, FoundSymbol, GitMark, Hunks, InlayHint, InlayHintKind,
+    Machine, MachineId, Made, OpenBlank, OpenBoard, OpenFile, OpenFiles, PairingAsk, PairingState,
+    Place, PostKind, Query, Restored, ReviewAction, ReviewChat, ReviewComment, ReviewFile,
+    ReviewHunk, ReviewList, ReviewScope, Search, Secret, ServerFeatures, Symbol, TextChange,
+    Trigger, Udp, Use, UseKind,
 };
 
 /// One sample: a message either side sends.
@@ -551,15 +553,18 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                             content: Content::Other {
                                 kind: PaneKind::new("notebook"),
                             },
+                            home: None,
                         }),
                         focused: PaneId(1),
                         name: None,
                     }],
                     active_tab: TabId(2),
+                    home: None,
                 }],
                 active: None,
                 home: None,
                 restored: Vec::new(),
+                machine: None,
             }))),
         ),
         (
@@ -925,7 +930,82 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ),
         (RESTORED, Client(ClientMessage::Dismiss { pane: PaneId(1) })),
     ]);
+    samples.extend(federation().into_iter().map(|sample| (FEDERATION, sample)));
     samples
+}
+
+/// Samples of protocol 91: a daemon saying which it is, workspaces and
+/// panes from another, connecting to another daemon in every state, and
+/// a question ssh asks, answered, turned down and taken back.
+fn federation() -> Vec<Sample> {
+    use Sample::{Client, Server};
+    let desktop = MachineId([7; 16]);
+    let laptop = Machine {
+        id: MachineId([0xa1; 16]),
+        name: "jack-ubuntu-laptop".into(),
+        run: 0x1a2b_3c4d_5e6f_7081,
+    };
+    let mut workspaces = workspaces();
+    workspaces.machine = Some(Machine {
+        id: desktop,
+        name: "jack-ubuntu-desktop".into(),
+        run: 7,
+    });
+    workspaces.list[0].home = Some(laptop.id);
+    if let Layout::Split { parts, .. } = &mut workspaces.list[0].tabs[0].layout
+        && let Layout::Pane(pane) = &mut parts[0]
+    {
+        pane.home = Some(desktop);
+    }
+    let connection = |state| Connection {
+        host: "jack@laptop:2222".into(),
+        machine: Some(laptop.clone()),
+        state,
+    };
+    let reason = || "ssh: connect to host laptop port 2222: Connection refused".to_owned();
+    vec![
+        Server(ServerMessage::Event(Event::Workspaces(workspaces))),
+        Client(ClientMessage::Request(Request::Connect {
+            host: "jack@laptop:2222".into(),
+            command: Some("~/.cargo/bin/clackatoo".into()),
+        })),
+        Server(ServerMessage::Response(Response::Done)),
+        Client(ClientMessage::Request(Request::WatchConnections {
+            answer: true,
+        })),
+        Server(ServerMessage::Response(Response::Connections(vec![
+            connection(ConnectionState::Connecting),
+            connection(ConnectionState::Asking),
+        ]))),
+        Server(ServerMessage::Event(Event::Connections(vec![
+            connection(ConnectionState::NeedsPassword),
+            connection(ConnectionState::Connected { wire: 90 }),
+            connection(ConnectionState::Down { reason: reason() }),
+            connection(ConnectionState::Stopped { reason: reason() }),
+            connection(ConnectionState::Other),
+        ]))),
+        Server(ServerMessage::Event(Event::Login {
+            ask: 3,
+            host: "jack@laptop:2222".into(),
+            question: Some("jack@laptop's password: ".into()),
+        })),
+        Client(ClientMessage::Login {
+            ask: 3,
+            answer: Some(Secret("hunter2".into())),
+        }),
+        Client(ClientMessage::Login {
+            ask: 4,
+            answer: None,
+        }),
+        Server(ServerMessage::Event(Event::Login {
+            ask: 4,
+            host: "jack@laptop:2222".into(),
+            question: None,
+        })),
+        Client(ClientMessage::Request(Request::Disconnect {
+            host: "jack@laptop:2222".into(),
+        })),
+    ]
 }
 
 /// Samples of protocol 82: a forwarded connection asked for, made, and
@@ -1890,6 +1970,7 @@ fn workspaces() -> Workspaces {
         Layout::Pane(Pane {
             id: PaneId(id),
             content,
+            home: None,
         })
     };
     Workspaces {
@@ -1921,10 +2002,12 @@ fn workspaces() -> Workspaces {
                 name: Some("main".into()),
             }],
             active_tab: TabId(2),
+            home: None,
         }],
         active: Some(WorkspaceId(1)),
         home: None,
         restored: Vec::new(),
+        machine: None,
     }
 }
 

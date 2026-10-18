@@ -112,6 +112,9 @@ impl TestDaemon {
             browser: None,
             web: None,
             trash: Some(dir.path().join("trash")),
+            links: None,
+            machine: None,
+            machine_name: None,
         };
         change(dir.path(), &mut config);
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
@@ -1575,10 +1578,14 @@ fn first_tab_panes(workspaces: &Workspaces) -> Vec<PaneId> {
 }
 
 impl TestDaemon {
-    /// The workspaces it has before any is made: none, at its home.
+    /// The workspaces it has before any is made: none, at its home, on
+    /// the machine it says it is.
     fn no_workspaces(&self) -> Workspaces {
+        let machine = self.client().watch_workspaces().unwrap().machine;
+        assert!(machine.is_some(), "a daemon says which machine it is");
         Workspaces {
             home: self.dir.path().to_str().map(str::to_owned),
+            machine,
             ..Workspaces::default()
         }
     }
@@ -4515,7 +4522,9 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Pairing(_)
             | Event::Sessions { .. }
             | Event::Exited { .. }
-            | Event::Coloured { .. }) => {
+            | Event::Coloured { .. }
+            | Event::Connections(_)
+            | Event::Login { .. }) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }

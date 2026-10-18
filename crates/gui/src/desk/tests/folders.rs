@@ -12,6 +12,7 @@ fn folder_pane(pane: u32, files: u32) -> Layout {
     Layout::Pane(LayoutPane {
         id: PaneId(pane),
         content: Content::Folder(FilesId(files)),
+        home: None,
     })
 }
 

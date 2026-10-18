@@ -13,6 +13,7 @@ fn clackatoo(runtime: &Path, args: &[&str]) -> Output {
         .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
+        .env("CLACKATOO_MACHINE", "off")
         .args(args)
         .env("XDG_RUNTIME_DIR", runtime)
         .output()
@@ -31,6 +32,7 @@ fn daemon_with(runtime: &Path, args: &[&str]) -> Child {
         .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
+        .env("CLACKATOO_MACHINE", "off")
         .arg("daemon")
         .args(args)
         .env("XDG_RUNTIME_DIR", runtime)
@@ -149,6 +151,7 @@ fn remote(runtime: &Path, ssh: &Path, remote_command: &str, args: &[&str]) -> Ou
         .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
+        .env("CLACKATOO_MACHINE", "off")
         .args(args)
         .args(["--remote", "box", "--remote-command", remote_command])
         .args(command)
@@ -267,6 +270,7 @@ fn the_bridge_relays_over_pipes() {
         .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
+        .env("CLACKATOO_MACHINE", "off")
         .arg("bridge")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .stdin(std::process::Stdio::piped())
@@ -350,6 +354,7 @@ fn config_sets_shows_and_unsets_settings() {
             .env("CLACKATOO_WORKSPACES", "off")
             .env("CLACKATOO_BOARDS", "off")
             .env("CLACKATOO_RECOVERY", "off")
+            .env("CLACKATOO_MACHINE", "off")
             .arg("config")
             .args(args)
             .env("XDG_CONFIG_HOME", home.path())
@@ -383,6 +388,7 @@ fn edit_shows_a_folder_as_its_listing_and_the_current_one_with_no_path() {
             .env("CLACKATOO_WORKSPACES", "off")
             .env("CLACKATOO_BOARDS", "off")
             .env("CLACKATOO_RECOVERY", "off")
+            .env("CLACKATOO_MACHINE", "off")
             .arg("edit")
             .args(args)
             .env("XDG_RUNTIME_DIR", runtime.path())
@@ -531,6 +537,7 @@ fn upgrading_keeps_terminals_and_their_programs_running() {
         .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
+        .env("CLACKATOO_MACHINE", "off")
         .arg("upgrade")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
@@ -614,6 +621,7 @@ fn upgrading_puts_a_fit_back_at_the_size_last_asked_for() {
         .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
+        .env("CLACKATOO_MACHINE", "off")
         .arg("upgrade")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
@@ -639,6 +647,7 @@ fn upgrading_keeps_chats_and_reaps_their_agent() {
         .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
+        .env("CLACKATOO_MACHINE", "off")
         .arg("daemon")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env("CLACKATOO_AGENT", "cat")
@@ -699,6 +708,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
         .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
+        .env("CLACKATOO_MACHINE", "off")
         .arg("daemon")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env("CLACKATOO_AGENT", "cat")
@@ -726,6 +736,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
         .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
+        .env("CLACKATOO_MACHINE", "off")
         .args(["mcp", "--chat", &chat.0.to_string()])
         .env("XDG_RUNTIME_DIR", runtime.path())
         .stdin(std::process::Stdio::piped())
@@ -753,6 +764,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
         .env("CLACKATOO_WORKSPACES", "off")
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
+        .env("CLACKATOO_MACHINE", "off")
         .args(["mcp", "--chat", "99"])
         .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
@@ -835,7 +847,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let flagless = script(
         bin.path(),
         "flagless",
-        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20"#,
+        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21"#,
     );
     not_upgrading(ask_to_upgrade(runtime.path(), &flagless), "can't take over");
     // Failed after everything was handed over: it says it can take over,
@@ -844,7 +856,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let vanishing = script(
         bin.path(),
         "vanishing",
-        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; rm -- "$0";; esac"#,
+        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21; rm -- "$0";; esac"#,
     );
     not_upgrading(
         ask_to_upgrade(runtime.path(), &vanishing),
@@ -882,6 +894,7 @@ impl UserShell {
             .env("CLACKATOO_WORKSPACES", "off")
             .env("CLACKATOO_BOARDS", "off")
             .env("CLACKATOO_RECOVERY", "off")
+            .env("CLACKATOO_MACHINE", "off")
             .arg("daemon")
             .env("XDG_RUNTIME_DIR", runtime.path())
             .env("SHELL", shell)
@@ -1412,4 +1425,181 @@ fn zsh_marks_its_commands_under_oh_my_zsh_and_powerlevel10k() {
             .any(|entry| (entry.file_name().to_string_lossy()).starts_with("p10k-instant-prompt-"));
         assert!(instant, "{round}: powerlevel10k wrote its instant prompt");
     }
+}
+
+/// A daemon on a "machine" of its own: a runtime directory, a state
+/// directory, keeping its workspaces and its connections there, and a
+/// stand-in for ssh that reaches the other machines in `hosts`, by name.
+struct Machine {
+    runtime: Runtime,
+    state: tempfile::TempDir,
+    ssh: std::path::PathBuf,
+}
+
+impl Machine {
+    fn new(ssh: &Path) -> Self {
+        Self {
+            runtime: Runtime::new(),
+            state: tempfile::tempdir().unwrap(),
+            ssh: ssh.to_owned(),
+        }
+    }
+
+    /// `clackatoo` run with `args` on this machine, with `stdin` as its
+    /// standard input.
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(BINARY);
+        command
+            .env("CLACKATOO_WORKSPACES", self.state.path().join("workspaces"))
+            .env("CLACKATOO_BOARDS", "off")
+            .env("CLACKATOO_RECOVERY", "off")
+            .env("CLACKATOO_UDP_PORTS", "off")
+            .env("XDG_RUNTIME_DIR", self.runtime.path())
+            .env("XDG_STATE_HOME", self.state.path())
+            .env("XDG_CONFIG_HOME", self.state.path().join("config"))
+            .env("CLACKATOO_SSH", &self.ssh)
+            .args(args);
+        command
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.command(args).output().expect("clackatoo runs")
+    }
+
+    /// Starts its daemon, and waits until it answers.
+    fn daemon(&self) -> Child {
+        let child = self
+            .command(&["daemon"])
+            .spawn()
+            .expect("the daemon starts");
+        eventually("the daemon answers", || {
+            self.run(&["list"]).status.success()
+        });
+        child
+    }
+
+    /// Which machine its daemon says it is: its name and ID.
+    fn machine(&self) -> String {
+        stdout(&self.run(&["machine"])).trim().to_owned()
+    }
+}
+
+/// A stand-in for ssh that runs the remote command on the machine whose
+/// runtime and state directories the files `hosts/HOST/runtime` and
+/// `hosts/HOST/state`, beside it, name, asking for the password in
+/// `password` first, if there's one, through its askpass, as ssh does.
+fn machines_ssh(dir: &Path) -> std::path::PathBuf {
+    script(
+        dir,
+        "ssh",
+        r#"dir=$(dirname "$0")
+while [ "$1" != "--" ]; do shift; done; shift
+host=$1; shift
+[ -d "$dir/hosts/$host" ] || { echo "ssh: Could not resolve hostname $host" >&2; exit 255; }
+if [ -f "$dir/password" ]; then
+    answer=$("$SSH_ASKPASS" "$host's password: ") || { echo "Permission denied." >&2; exit 255; }
+    [ "$answer" = "$(cat "$dir/password")" ] || { echo "Permission denied." >&2; exit 255; }
+fi
+exec env -u CLACKATOO_ASKPASS -u SSH_ASKPASS -u SSH_ASKPASS_REQUIRE \
+    XDG_RUNTIME_DIR="$(cat "$dir/hosts/$host/runtime")" \
+    XDG_STATE_HOME="$(cat "$dir/hosts/$host/state")" \
+    CLACKATOO_WORKSPACES=off CLACKATOO_BOARDS=off CLACKATOO_RECOVERY=off \
+    sh -c "$*""#,
+    )
+}
+
+/// Makes `machine` reachable as `host` through [`machines_ssh`] in `bin`.
+fn name_machine(bin: &Path, host: &str, machine: &Machine) {
+    let dir = bin.join("hosts").join(host);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("runtime"),
+        machine.runtime.path().as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("state"),
+        machine.state.path().as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn daemons_connect_to_each_other_and_keep_it_through_upgrades_and_restarts() {
+    let bin = tempfile::tempdir().unwrap();
+    let ssh = machines_ssh(bin.path());
+    let desk = Machine::new(&ssh);
+    let laptop = Machine::new(&ssh);
+    name_machine(bin.path(), "laptop", &laptop);
+    let laptop_daemon = laptop.daemon();
+    let desk_daemon = desk.daemon();
+    let ours = desk.machine();
+    let theirs = laptop.machine();
+    assert_ne!(ours, theirs);
+
+    // A password, typed on standard input: a wrong one fails, and the
+    // daemon goes on trying by itself.
+    std::fs::write(bin.path().join("password"), "hunter2\n").unwrap();
+    let connect = |password: &str| {
+        let mut child = desk
+            .command(&["connect", "laptop", "--command", BINARY])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(stdin, "{password}").unwrap();
+        drop(stdin);
+        child.wait_with_output().unwrap()
+    };
+    let wrong = connect("letmein");
+    assert!(!wrong.status.success());
+    assert!(
+        String::from_utf8_lossy(&wrong.stderr).contains("Permission denied"),
+        "{wrong:?}"
+    );
+    let right = connect("hunter2");
+    let said = stdout(&right);
+    let (name, id) = theirs.split_once(' ').unwrap();
+    assert!(
+        said.contains(&format!("connected to laptop: {name} ({id})")),
+        "{said}"
+    );
+    let listed = stdout(&desk.run(&["connections"]));
+    assert!(
+        listed.contains(id) && listed.contains("connected"),
+        "{listed}"
+    );
+
+    // An upgrade keeps which machine it is, and makes the connection
+    // again: with keys, as ssh asks no window then.
+    std::fs::remove_file(bin.path().join("password")).unwrap();
+    let upgraded = desk.run(&["upgrade"]);
+    assert!(upgraded.status.success(), "{upgraded:?}");
+    assert_eq!(desk.machine(), ours);
+    let reconnected = || {
+        let listed = stdout(&desk.run(&["connections"]));
+        listed.contains(id) && listed.contains("connected")
+    };
+    eventually(
+        "the connection is made again after the upgrade",
+        reconnected,
+    );
+
+    // So does a restart, from the connections kept with the workspaces.
+    stdout(&desk.run(&["stop"]));
+    wait(desk_daemon);
+    let desk_daemon = desk.daemon();
+    assert_eq!(desk.machine(), ours);
+    eventually("the connection is made again after a restart", reconnected);
+
+    // Ended, it stays ended, and the laptop's daemon never noticed.
+    stdout(&desk.run(&["disconnect", "laptop"]));
+    assert!(!stdout(&desk.run(&["connections"])).contains("laptop"));
+    assert_eq!(laptop.machine(), theirs);
+    stdout(&desk.run(&["stop"]));
+    wait(desk_daemon);
+    stdout(&laptop.run(&["stop"]));
+    wait(laptop_daemon);
 }

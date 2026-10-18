@@ -31,9 +31,9 @@ use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::wire;
 use clackatoo_protocol::{
     BlockMarks, BufferId, ChatAction, ClientMessage, Content, Error, GridState, HistoryLine,
-    HistoryLines, Line, LinkTarget, NodeId, PROTOCOL_VERSION, Pane, PaneId, PaneTerminal, Patch,
-    Request, Response, ServerMessage, Side, Size, TabId, TerminalId, TerminalInfo, TerminalStatus,
-    Udp, View, ViewUpdate, WorkspaceId,
+    HistoryLines, Line, LinkTarget, Machine, MachineId, NodeId, PROTOCOL_VERSION, Pane, PaneId,
+    PaneTerminal, Patch, Request, Response, ServerMessage, Side, Size, TabId, TerminalId,
+    TerminalInfo, TerminalStatus, Udp, View, ViewUpdate, WorkspaceId,
 };
 use clackatoo_syntax::{Languages, Syntax};
 use clackatoo_term::{Damage, Terminal};
@@ -69,6 +69,7 @@ mod forwards;
 mod groups;
 mod hover;
 mod language;
+mod links;
 mod offers;
 mod pieces;
 mod recovery;
@@ -213,6 +214,9 @@ enum Source {
     /// A connection a window on another machine forwards: its socket, if
     /// one is being made, and its QUIC stream.
     Forward(forwards::Pipe),
+    /// A connection to the daemon on another machine, which this daemon
+    /// is a client of.
+    Reached(links::Reached),
 }
 
 /// What a terminal is: a program on a PTY, or a chat with an agent, which
@@ -391,6 +395,9 @@ struct Client {
     window: Option<u64>,
     /// Whether the client is told when the chats change.
     watching_chats: bool,
+    /// Whether the client is told when the connections to other daemons
+    /// change.
+    watching_connections: bool,
     /// Until when the client's user is there, as it last said.
     present_until: Option<Instant>,
     /// Events to queue after the answer to the request being answered.
@@ -470,6 +477,9 @@ enum Flood {
     Agent(AgentId),
     /// What an agent sent its tools, on the connection at this token.
     Tools(Token),
+    /// What the daemon on another machine sent, on the connection at this
+    /// token.
+    Reached(Token),
 }
 
 /// Whether anything but a flood has become ready while a flood is read: a
@@ -504,6 +514,7 @@ fn others_ready(
             Some(&Source::Server(id, Pipe::Output)) => Some(Flood::Server(id)),
             Some(&Source::Agent(id, Pipe::Output)) => Some(Flood::Agent(id)),
             Some(Source::Tools(_)) => Some(Flood::Tools(token)),
+            Some(Source::Reached(_)) => Some(Flood::Reached(token)),
             _ => None,
         };
         !event.is_writable()
@@ -610,6 +621,7 @@ impl Client {
             browser_frames: BTreeMap::new(),
             window: None,
             watching_chats: false,
+            watching_connections: false,
             present_until: None,
             later: Vec::new(),
         }
@@ -896,6 +908,13 @@ pub struct Daemon {
     recovery: recovery::Recovery,
     /// Keeping the workspaces from one run of the daemon to the next.
     keeping: restore::Keeping,
+    /// Which daemon this is, kept from one run to the next.
+    machine: Machine,
+    /// The directory the daemon's socket is in, where ssh's askpass
+    /// sockets go.
+    runtime: Option<PathBuf>,
+    /// The connections to the daemons on other machines.
+    links: links::Links,
 }
 
 /// Stops a running [`Daemon`] from another thread.
@@ -930,7 +949,7 @@ impl Daemon {
         }
         let listener = UnixListener::bind(socket_path)?;
         log::info!("listening on {}", socket_path.display());
-        let mut daemon = Self::listening(listener, config, true)?;
+        let mut daemon = Self::listening(listener, config, true, None)?;
         // What the daemons before it kept of buffers' changes not saved.
         daemon.start_recovery(None);
         Ok(daemon)
@@ -938,11 +957,14 @@ impl Daemon {
 
     /// A daemon with no terminals, listening on `listener`: starting
     /// afresh, it waits a moment for the lock on the workspaces it keeps
-    /// if it's held (see [`saved::lock`](crate::saved::lock)).
+    /// if it's held (see [`saved::lock`](crate::saved::lock)). It's the
+    /// machine `machine`, handed over by the build before, or else the one
+    /// its config keeps.
     fn listening(
         mut listener: UnixListener,
         config: DaemonConfig,
         afresh: bool,
+        machine: Option<MachineId>,
     ) -> io::Result<Self> {
         let poll = Poll::new()?;
         poll.registry()
@@ -964,6 +986,19 @@ impl Daemon {
         };
         let boards = boards::BoardState::start(config.boards.clone(), &waker);
         let keeping = restore::Keeping::new(&config, afresh);
+        // Chosen afresh, unless the build before hands its own over.
+        let id = crate::client::random_window();
+        let machine = crate::machine::identity(
+            config.machine.as_deref(),
+            config.machine_name.as_deref(),
+            machine,
+            id,
+        );
+        log::info!("this is {} ({})", machine.name, machine.id);
+        let runtime = (listener.local_addr().ok())
+            .and_then(|address| Some(address.as_pathname()?.parent()?.to_owned()));
+        let mut workspaces = WorkspaceState::with_home(&config.home);
+        workspaces.set_machine(machine.clone());
         Ok(Self {
             poll,
             listener,
@@ -978,10 +1013,10 @@ impl Daemon {
             sources: Slab::new(),
             terminals: BTreeMap::new(),
             next_id: 1,
-            workspaces: WorkspaceState::with_home(&config.home),
+            workspaces,
             buffers: BTreeMap::new(),
             next_buffer: 1,
-            id: crate::client::random_window(),
+            id,
             languages: config.languages.clone().map(Languages::new),
             syntax: None,
             servers: Servers::default(),
@@ -1024,6 +1059,9 @@ impl Daemon {
             forwards: forwards::Forwards::default(),
             recovery: recovery::Recovery::default(),
             keeping,
+            machine,
+            runtime,
+            links: links::Links::default(),
         })
         .map(|mut daemon| {
             daemon.start_web();
@@ -1051,7 +1089,8 @@ impl Daemon {
         let state = &handover.state;
         let fds = &mut handover.fds;
         let listener = std::os::unix::net::UnixListener::from(fds.take(state.listener)?);
-        let mut daemon = Self::listening(UnixListener::from_std(listener), config, false)?;
+        let machine = state.machine.map(MachineId);
+        let mut daemon = Self::listening(UnixListener::from_std(listener), config, false, machine)?;
         daemon.next_id = state.next_terminal;
         daemon.workspaces = WorkspaceState::resume(&state.workspaces).unwrap_or_else(|err| {
             log::error!("the workspaces couldn't be taken over: {err}");
@@ -1079,6 +1118,9 @@ impl Daemon {
         if state.daemon != 0 {
             daemon.id = state.daemon;
         }
+        // The same run, to any daemon connected to it.
+        daemon.machine.run = daemon.id;
+        daemon.workspaces.set_machine(daemon.machine.clone());
         for buffer in buffers {
             let id = BufferId(buffer.id);
             let mut slot = BufferSlot::new(Buffer::resume(buffer));
@@ -1116,6 +1158,10 @@ impl Daemon {
             });
         daemon.start_recovery(lock);
         daemon.keep_places_kept();
+        // The connections the build before had, made again.
+        let connections = (state.connections.iter())
+            .map(|connection| (connection.host.clone(), connection.command.clone()));
+        daemon.connect_kept(connections.collect::<Vec<_>>());
         for orphan in &state.orphans {
             match Orphan::resume(orphan, fds) {
                 Ok(orphan) => daemon.watch_orphan(orphan),
@@ -1199,6 +1245,10 @@ impl Daemon {
             })
             .collect();
         let (next_files, explorers) = self.hand_over_files();
+        // Their ssh processes end with them, rather than outlive the exec.
+        let connections = (self.end_links().into_iter())
+            .map(|(host, command)| handover::Connection { host, command })
+            .collect();
         Ok(Handover {
             state: handover::State {
                 listener,
@@ -1229,6 +1279,8 @@ impl Daemon {
                 reviews: self.hand_over_reviews(),
                 recovery_lock,
                 shells,
+                machine: Some(self.machine.id.0),
+                connections,
             },
             fds,
         })
@@ -1309,6 +1361,7 @@ impl Daemon {
                     .chain(self.next_recovery_due())
                     .chain(self.upgrade_to.as_ref().map(|upgrading| upgrading.until))
                     .chain(self.keeping.due())
+                    .chain(self.links.due())
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
@@ -1367,6 +1420,8 @@ impl Daemon {
             self.time_out_tools();
             self.take_lookups();
             self.time_out_forwards();
+            self.take_link_news();
+            self.retry_links();
             self.relay_chats();
             self.take_browser();
             self.web_chores();
@@ -1412,6 +1467,7 @@ impl Daemon {
         let started = Instant::now();
         // As they are, before anything closes.
         self.keep_last();
+        self.end_links();
         let servers_until = started + stopping::STOP_WAIT;
         let until = started + STOPPING_WAIT;
         // A client waiting for an upgrade hears why there won't be one.
@@ -1555,7 +1611,11 @@ impl Daemon {
                 Some(Source::Tools(_)) => self.serve_tools(token, event),
                 Some(Source::Web(_)) => self.serve_web(token),
                 Some(Source::Forward(_)) => self.queue_forward(token),
-                None => {}
+                // One already queued is read at the end of the turn.
+                Some(Source::Reached(_)) if !self.unread.contains(&Flood::Reached(token)) => {
+                    self.read_reached(token, Reading::Look);
+                }
+                Some(Source::Reached(_)) | None => {}
             },
         }
     }
@@ -1582,6 +1642,7 @@ impl Daemon {
                 Flood::Server(id) => self.read_server(id, Reading::Flood),
                 Flood::Agent(id) => self.read_agent(id, Reading::Flood),
                 Flood::Tools(token) => self.read_tools(token, Reading::Flood),
+                Flood::Reached(token) => self.read_reached(token, Reading::Flood),
             }
             self.peers_flooded |= !matches!(flood, Flood::Terminal(_));
             read = true;
@@ -2367,7 +2428,8 @@ impl Daemon {
                     | ClientMessage::ListSessions { .. }
                     | ClientMessage::Colour { .. }
                     | ClientMessage::Place { .. }
-                    | ClientMessage::Dismiss { .. }),
+                    | ClientMessage::Dismiss { .. }
+                    | ClientMessage::Login { .. }),
                 ) => {
                     self.serve_unanswered(token, message);
                     continue;
@@ -2442,6 +2504,9 @@ impl Daemon {
             ClientMessage::Colour { id, code } => self.colour_code(token, id, code),
             ClientMessage::Place { pane, place } => self.serve_place(pane, place),
             ClientMessage::Dismiss { pane } => self.serve_dismiss(pane),
+            ClientMessage::Login { ask, answer } => {
+                self.serve_login(token, ask, answer.map(|answer| answer.0));
+            }
             other => log::error!("{other:?} is answered"),
         }
     }
@@ -2705,6 +2770,9 @@ impl Daemon {
             Request::RevokeDevice { device } => self.revoke_device(device),
             Request::AnswerPairing { code } => self.answer_pairing(token, code.as_deref()),
             Request::UnlockPairing => self.unlock_pairing(token),
+            Request::Connect { host, command } => self.serve_connect(token, &host, command),
+            Request::Disconnect { host } => self.serve_disconnect(token, &host),
+            Request::WatchConnections { answer } => self.watch_connections(token, answer),
             Request::Forward(_) => Err(Error::Forward(clackatoo_protocol::ForwardFailure::Other(
                 "a forwarded connection asks on a QUIC stream of its own".into(),
             ))),
@@ -3045,6 +3113,7 @@ impl Daemon {
             self.forget_stages(token, None);
             self.forget_piece_questions(token, None);
             self.forget_listings(token);
+            self.forget_link_client(token);
             if let Link::Quic(handle) = client.link {
                 self.abandon_forwards(Some(handle));
                 if let Some(quic) = self.quic.as_mut() {

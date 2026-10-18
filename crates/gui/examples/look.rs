@@ -437,6 +437,8 @@ fn start_daemon(project: &Path, kept: Option<&str>) -> anyhow::Result<Running> {
     };
     config.browser = None;
     config.servers = None;
+    config.machine = None;
+    config.links = None;
     config.agents.custom = vec![CustomAgent {
         name: "claude".into(),
         title: None,

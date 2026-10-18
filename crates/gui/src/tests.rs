@@ -460,6 +460,7 @@ fn two_pane_window(
         Layout::Pane(Pane {
             id: PaneId(id),
             content: Content::Terminal(TerminalId(id)),
+            home: None,
         })
     };
     let layout = Layout::Split {
@@ -2079,6 +2080,7 @@ fn the_finder_is_drawn_over_the_panes_with_a_preview() {
     let layout = Layout::Pane(Pane {
         id: PaneId(1),
         content: Content::Terminal(TerminalId(1)),
+        home: None,
     });
     let placement = Placement::new(&layout, &geometry.area);
     let screen = screen(150, 36, "$ ls\r\nCargo.toml  crates\r\n$ ");
@@ -2808,6 +2810,7 @@ fn crowded_bars_at(
     let layout = Layout::Pane(Pane {
         id: PaneId(1),
         content: Content::Terminal(TerminalId(1)),
+        home: None,
     });
     let placement = Placement::new(&layout, &geometry.area);
     let screen = screen(

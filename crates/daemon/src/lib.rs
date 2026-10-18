@@ -31,6 +31,7 @@ mod handover;
 mod hosted;
 pub mod launch;
 mod lsp;
+mod machine;
 pub mod mcp;
 mod memory;
 mod profiles;
@@ -162,6 +163,31 @@ pub struct DaemonConfig {
     /// The web app phones reach the daemon through, if it's on (see
     /// [`web`]).
     pub web: Option<web::WebConfig>,
+    /// The file this daemon's identity is kept in, its ID chosen at random
+    /// the first time it starts (see
+    /// [`Machine`](clackatoo_protocol::Machine)). `None` chooses a new one
+    /// each time it starts, as tests do.
+    pub machine: Option<PathBuf>,
+    /// The name this daemon goes by, for people. `None` takes the
+    /// machine's hostname.
+    pub machine_name: Option<String>,
+    /// How the daemon connects to the daemons on other machines (see
+    /// [`Request::Connect`](clackatoo_protocol::Request::Connect)). `None`
+    /// connects to none: it's refused.
+    pub links: Option<LinkConfig>,
+}
+
+/// How the daemon connects to the daemons on other machines.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkConfig {
+    /// The program run as ssh.
+    pub ssh: OsString,
+    /// The program ssh runs to ask its questions, such as for a password
+    /// (`SSH_ASKPASS`), which passes each to the daemon, to ask a window:
+    /// `clackatoo` itself, which does when run with
+    /// [`remote::ASKPASS_VAR`] set. `None` leaves ssh to ask on a
+    /// terminal, which the daemon hasn't, so it gets no answer.
+    pub askpass: Option<PathBuf>,
 }
 
 /// How buffers' changes that aren't saved are kept on disk.
@@ -249,7 +275,11 @@ impl DaemonConfig {
     /// [`state_dir`]), `$CLACKATOO_WORKSPACES`, the file the workspaces are
     /// kept in, or `off` for none (or else `workspaces` in
     /// [`state_dir`]), `$SHELL` (or `/bin/sh`),
-    /// `$HOME` (or `/`), `$CLACKATOO_AGENT`: the command of the agent a
+    /// `$HOME` (or `/`), `$CLACKATOO_MACHINE`, the file this daemon's ID is
+    /// kept in, or `off` for a new one each start (or else `machine` in
+    /// [`state_dir`]), the name `daemon/machine.toml` in [`config_dir`]
+    /// gives it, `$CLACKATOO_SSH`: the program run as ssh to connect to
+    /// other daemons (or else `ssh`), `$CLACKATOO_AGENT`: the command of the agent a
     /// chat gets when it asks for none, split at spaces (or else Claude
     /// Code's adapter), `$CLACKATOO_UDP_PORTS`: a port, a range such as
     /// `60000-61000` (the default), or `off`, the language packs in
@@ -263,6 +293,7 @@ impl DaemonConfig {
     /// and `$CLACKATOO_LSP_TRACE`: a file to trace language servers'
     /// messages to (or else none).
     #[must_use]
+    #[allow(clippy::too_many_lines, reason = "one field each")]
     pub fn from_env() -> Self {
         let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
         // Programs name this machine in `file://` links (see
@@ -359,6 +390,17 @@ impl DaemonConfig {
             },
             web: config_dir().zip(data_dir()).and_then(|(config, data)| {
                 web::config::read(&config.join("daemon/web.toml"), data.join("clackatoo/web"))
+            }),
+            machine: match non_empty("CLACKATOO_MACHINE") {
+                Some(off) if off == "off" => None,
+                Some(path) => Some(PathBuf::from(path)),
+                None => state_dir().map(|dir| dir.join("machine")),
+            },
+            machine_name: config_dir().and_then(|config| machine::configured_name(&config)),
+            links: Some(LinkConfig {
+                ssh: remote::ssh_program(),
+                // Only the `clackatoo` program knows it can ask.
+                askpass: None,
             }),
         }
     }

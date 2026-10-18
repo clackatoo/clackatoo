@@ -29,7 +29,7 @@ const HEADER_LEN: usize = 4;
 
 /// How many kinds of [`ClientMessage`](crate::ClientMessage) this build
 /// has: a newer client's begin at this number.
-const CLIENT_MESSAGES: u32 = 19;
+const CLIENT_MESSAGES: u32 = 20;
 
 /// Serializes `message` into a complete frame, as a build of protocol
 /// `wire` would: downgraded first, for a peer older than this build (see
@@ -115,13 +115,25 @@ impl FrameDecoder {
         let Some(payload) = self.next_payload()? else {
             return Ok(None);
         };
+        Self::decode_payload(wire, payload).map(Some)
+    }
+
+    /// Decodes `payload`, a frame's taken with
+    /// [`next_payload`](Self::next_payload), as a build of protocol `wire`
+    /// wrote it: so a reader can look at its [`Head`] first, and decode
+    /// only what it wants.
+    ///
+    /// # Errors
+    ///
+    /// If it doesn't hold a valid `T`, exactly.
+    pub fn decode_payload<T: DeserializeOwned>(wire: u32, payload: &[u8]) -> Result<T, FrameError> {
         let decoded = wire::speaking(wire, || postcard::take_from_bytes(payload));
         let (message, unread) =
             decoded.map_err(|err| FrameError::Decode(err, Head::of(payload)))?;
         if !unread.is_empty() {
             return Err(FrameError::TrailingBytes(unread.len(), Head::of(payload)));
         }
-        Ok(Some(message))
+        Ok(message)
     }
 
     /// Takes the next complete frame's payload as it is, such as a QUIC
@@ -166,9 +178,10 @@ impl FrameDecoder {
 pub struct Head([Option<u32>; 4]);
 
 impl Head {
-    /// Reads the first four numbers of `payload`, as far as they are
-    /// numbers.
-    fn of(payload: &[u8]) -> Self {
+    /// Reads the first four numbers of `payload`, a frame's, as far as
+    /// they are numbers: what it is, before it's decoded.
+    #[must_use]
+    pub fn of(payload: &[u8]) -> Self {
         let mut head = [None; 4];
         let mut rest = payload;
         for number in &mut head {
@@ -492,7 +505,8 @@ mod tests {
         // Read as it was, it overflowed the stack, which aborts.
         let nested = |depth: usize| {
             let mut payload = [1, 0, 1].repeat(depth);
-            payload.extend([0, 0, 0, 0]);
+            // A pane, showing terminal 0, from no other home.
+            payload.extend([0, 0, 0, 0, 0]);
             payload.extend([1, 1].repeat(depth));
             payload
         };
@@ -541,6 +555,7 @@ mod tests {
             Layout::Pane(Pane {
                 id: PaneId(id),
                 content: Content::Terminal(TerminalId(id)),
+                home: None,
             })
         };
         let server = ServerMessage::Event(crate::Event::Workspaces(Workspaces {
@@ -558,10 +573,12 @@ mod tests {
                     name: None,
                 }],
                 active_tab: TabId(0),
+                home: None,
             }],
             active: None,
             home: None,
             restored: Vec::new(),
+            machine: None,
         }));
         let mut frames: Vec<_> = client
             .iter()
@@ -786,8 +803,9 @@ mod tests {
     fn a_head_knows_the_kinds_of_message_this_build_has() {
         let head = |bytes: Vec<u8>| Head::of(&bytes[HEADER_LEN..]);
         // The last kind of client message is known; the next isn't.
-        let last = ClientMessage::Dismiss {
-            pane: crate::PaneId(1),
+        let last = ClientMessage::Login {
+            ask: 1,
+            answer: None,
         };
         let last = head(encode(PROTOCOL_VERSION, &last).unwrap());
         assert_eq!(last.get(0), Some(CLIENT_MESSAGES - 1));
@@ -804,6 +822,7 @@ mod tests {
             active: None,
             home: None,
             restored: Vec::new(),
+            machine: None,
         }));
         assert!(head(encode(PROTOCOL_VERSION, &workspaces).unwrap()).is_workspaces());
         let response = ServerMessage::Response(crate::Response::Done);

@@ -170,6 +170,9 @@ impl TestDaemon {
             recovery: None,
             browser: None,
             web: Some(web),
+            links: None,
+            machine: None,
+            machine_name: None,
         };
         daemon(&mut config);
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
@@ -1812,4 +1815,39 @@ fn a_fit_not_asked_for_again_lapses() {
         }),
         Response::Error(Error::NotFitted(terminal))
     );
+}
+
+#[test]
+fn a_device_cant_drive_or_watch_the_daemons_connections() {
+    let daemon = TestDaemon::start_daemon(
+        |_| {},
+        |config| {
+            config.links = Some(clackatoo_daemon::LinkConfig {
+                ssh: "false".into(),
+                askpass: None,
+            });
+        },
+    );
+    let cookie = daemon.pair();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    for request in [
+        Request::Connect {
+            host: "laptop".into(),
+            command: None,
+        },
+        Request::Disconnect {
+            host: "laptop".into(),
+        },
+        Request::WatchConnections { answer: false },
+        Request::WatchConnections { answer: true },
+    ] {
+        let refused = phone.request(request.clone());
+        assert!(
+            matches!(&refused, Response::Error(Error::Other(why)) if why.contains("web app")),
+            "{request:?}: {refused:?}"
+        );
+    }
+    // Nor was anything connected for it.
+    let mut window = daemon.window();
+    assert!(window.watch_connections(false).unwrap().is_empty());
 }

@@ -278,6 +278,8 @@ fn update_moves_the_daemon_onto_the_new_build() {
     let daemon = Command::new(BINARY)
         .arg("daemon")
         .env("XDG_RUNTIME_DIR", runtime.path())
+        // Never the machine of the user running the tests.
+        .env("CLACKATOO_MACHINE", "off")
         .spawn()
         .unwrap();
     let runtime = Runtime(runtime, Some(daemon));

@@ -11,8 +11,8 @@ use clackatoo_daemon::forward::{Forwarder, Forwards};
 use clackatoo_daemon::launch;
 use clackatoo_daemon::{Contact, Sender};
 use clackatoo_protocol::{
-    Axis, Content, Event, Layout, PROTOCOL_VERSION, Pane as LayoutPane, PaneId, ServerMessage,
-    Size, TabId, TerminalId, WorkspaceId, wire,
+    Axis, ClientMessage, Content, Event, Layout, PROTOCOL_VERSION, Pane as LayoutPane, PaneId,
+    Secret, ServerMessage, Size, TabId, TerminalId, WorkspaceId, wire,
 };
 use clackatoo_term::Row;
 use clackatoo_term::mouse::MouseAction;
@@ -1580,6 +1580,36 @@ impl App {
         }
     }
 
+    /// The daemon passes on ssh's `question`, numbered `ask`, as ssh logs
+    /// in to `host` for one of its own connections: shown in a notice to
+    /// answer, unless another notice is up. `None` takes the question
+    /// back, as ssh gave up.
+    fn daemon_asks(&mut self, ask: u64, host: String, question: Option<String>) {
+        let Some(question) = question else {
+            if matches!(
+                &self.notice,
+                Some(Notice::Ask { answer: Reply::Daemon { ask: shown, .. }, .. }) if *shown == ask
+            ) {
+                self.notice = None;
+                self.request_redraw();
+            }
+            return;
+        };
+        if self.notice.is_some() {
+            // Left unanswered: ssh gives up in a while, and the daemon
+            // tries again later.
+            log::info!("ssh's question for {host} isn't shown: another notice is up");
+            return;
+        }
+        self.notice = Some(Notice::Ask {
+            secret: is_secret(&question),
+            question,
+            input: Typed::default(),
+            answer: Reply::Daemon { ask, host },
+        });
+        self.request_redraw();
+    }
+
     /// Handles a key while a notice is shown: answering its question, or
     /// typing the answer to ssh's.
     fn notice_key(&mut self, press: &input::KeyPress<'_>, repeat: bool) {
@@ -1595,10 +1625,27 @@ impl App {
             Notice::Ask { input, answer, .. } => {
                 if enter || escape {
                     let reply = enter.then(|| std::mem::take(&mut input.0));
-                    // ssh has given up if this fails, and the session
-                    // thread will say why.
-                    let _ = answer.send(reply);
-                    self.notice = Some(Notice::Connecting);
+                    match answer {
+                        Reply::Window(answer) => {
+                            // ssh has given up if this fails, and the
+                            // session thread will say why.
+                            let _ = answer.send(reply);
+                            self.notice = Some(Notice::Connecting);
+                        }
+                        Reply::Daemon { ask, .. } => {
+                            let login = ClientMessage::Login {
+                                ask: *ask,
+                                answer: reply.map(Secret),
+                            };
+                            if let Some(sender) = &mut self.sender
+                                && let Err(err) = sender.send(&login)
+                            {
+                                log::warn!("sending to the daemon failed: {err}");
+                            }
+                            self.notice = None;
+                        }
+                    }
+                    self.request_redraw();
                 } else if is_paste(key, self.modifiers) {
                     match paste_text(&mut self.clipboard, Copy::Clipboard) {
                         Ok(text) => input.push(&text),
@@ -2366,6 +2413,7 @@ fn single_pane() -> Layout {
     Layout::Pane(LayoutPane {
         id: PaneId(0),
         content: Content::Terminal(TerminalId(0)),
+        home: None,
     })
 }
 
@@ -2578,8 +2626,19 @@ enum Notice {
         input: Typed,
         /// Whether to hide the answer.
         secret: bool,
-        answer: mpsc::Sender<Option<String>>,
+        answer: Reply,
     },
+}
+
+/// Where the answer to ssh's question goes.
+#[derive(Debug)]
+enum Reply {
+    /// To ssh logging in for the window's own connection, which waits for
+    /// it on this.
+    Window(mpsc::Sender<Option<String>>),
+    /// To the daemon, for ssh logging in to `host` for one of its own
+    /// connections: the question numbered `ask`.
+    Daemon { ask: u64, host: String },
 }
 
 impl Notice {
@@ -2637,15 +2696,23 @@ impl Notice {
                 question,
                 input,
                 secret,
-                ..
+                answer,
             } => {
                 let shown = if *secret {
                     "•".repeat(input.0.chars().count())
                 } else {
                     input.0.clone()
                 };
+                let logging_in = match answer {
+                    Reply::Window(_) => {
+                        format!("Logging in to {}.", host.unwrap_or("the daemon's machine"))
+                    }
+                    Reply::Daemon { host: to, .. } => {
+                        format!("The daemon{on_host} is logging in to {to}.")
+                    }
+                };
                 vec![
-                    format!("Logging in to {}.", host.unwrap_or("the daemon's machine")),
+                    logging_in,
                     question.trim().to_owned(),
                     format!("> {shown}▏"),
                     "  Enter  answer\n  Esc    cancel".into(),
@@ -3184,10 +3251,15 @@ impl App {
                     secret: is_secret(&question),
                     question,
                     input: Typed::default(),
-                    answer,
+                    answer: Reply::Window(answer),
                 });
                 self.request_redraw();
             }
+            SessionEvent::Message(ServerMessage::Event(Event::Login {
+                ask,
+                host,
+                question,
+            })) => self.daemon_asks(ask, host, question),
             SessionEvent::Message(ServerMessage::Event(Event::View { terminal, update })) => {
                 if self.desk.view_changed(terminal, &update) {
                     self.request_redraw();
@@ -3271,8 +3343,12 @@ impl App {
                     self.request_redraw();
                 }
             }
+            // The connections are shown once windows bring other machines'
+            // workspaces in.
             SessionEvent::Message(
-                ServerMessage::Hello { .. } | ServerMessage::NotUpgrading { .. },
+                ServerMessage::Hello { .. }
+                | ServerMessage::NotUpgrading { .. }
+                | ServerMessage::Event(Event::Connections(_)),
             ) => {}
             SessionEvent::Clipboard(heard) => {
                 for (from, text) in heard {

@@ -19,7 +19,10 @@
 //! window may not have. A window serves an [`Askpass`] instead: ssh runs
 //! clackatoo as its askpass program (`SSH_ASKPASS`), which passes each
 //! question to the window over a socket, and the window's answer back.
+//! A daemon connecting to another daemon does the same, passing each
+//! question on to a window of its own.
 
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown};
@@ -27,8 +30,8 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -104,11 +107,19 @@ pub enum RemoteError {
 }
 
 /// The program run as ssh: `$CLACKATOO_SSH`, or `ssh`.
-fn ssh_program() -> String {
-    std::env::var("CLACKATOO_SSH")
-        .ok()
+#[must_use]
+pub fn ssh_program() -> OsString {
+    std::env::var_os("CLACKATOO_SSH")
         .filter(|program| !program.is_empty())
         .unwrap_or_else(|| "ssh".into())
+}
+
+/// How ssh asks its questions: by running `program` as its askpass
+/// program, which asks the [`Askpass`] listening on `socket`.
+#[derive(Clone, Debug)]
+pub(crate) struct Asking {
+    pub(crate) program: PathBuf,
+    pub(crate) socket: PathBuf,
 }
 
 /// Connects to the daemon on `remote`'s machine, starting it there if it
@@ -127,36 +138,75 @@ pub fn connect(
     replace: bool,
     askpass: Option<&Path>,
 ) -> Result<Client, RemoteError> {
-    let (stream, ssh, address) = dial(ssh_command(remote, replace, askpass)?, &remote.host)?;
+    let asking = match askpass {
+        Some(socket) => Some(Asking {
+            program: std::env::current_exe()?,
+            socket: socket.to_owned(),
+        }),
+        None => None,
+    };
+    connect_with(remote, &ssh_program(), replace, asking, None)
+}
+
+/// As [`connect`], running `ssh` as ssh, which asks its questions as
+/// `asking` says, if it says. `cancel`, if given, can stop it from another
+/// thread while it logs in and greets the daemon: see [`Cancel`].
+pub(crate) fn connect_with(
+    remote: &Remote,
+    ssh: &OsStr,
+    replace: bool,
+    asking: Option<Asking>,
+    cancel: Option<&Arc<Cancel>>,
+) -> Result<Client, RemoteError> {
+    let command = ssh_command(remote, ssh, replace, asking.as_ref());
+    let (stream, ssh_process, address) = dial(command, &remote.host, cancel)?;
     // Whenever ssh closes, as when it gives up on a network that went
     // away, the connection carries on through a new one, which never
     // replaces the daemon.
+    // A new ssh can be stopped as the first can.
     let redial: Redial = {
         let remote = remote.clone();
-        let askpass = askpass.map(Path::to_owned);
+        let ssh = ssh.to_owned();
+        let cancel = cancel.cloned();
         Box::new(move || {
-            let command = ssh_command(&remote, false, askpass.as_deref())?;
-            let (stream, ssh, _) = dial(command, &remote.host).map_err(io::Error::other)?;
+            let command = ssh_command(&remote, &ssh, false, asking.as_ref());
+            let (stream, ssh, _) =
+                dial(command, &remote.host, cancel.as_ref()).map_err(io::Error::other)?;
             Ok(Redialed::keeping(stream, ssh))
         })
     };
-    Ok(Client::over_carrier(
+    let client = Client::over_carrier(
         stream,
         address.map(UdpTarget::Host),
-        Some(ssh),
+        Some(ssh_process),
         Some(redial),
-    )?)
+    );
+    if cancel.is_some_and(|cancel| cancel.cancelled()) {
+        return Err(RemoteError::Unreachable {
+            host: remote.host.clone(),
+            reason: CANCELLED.to_owned(),
+        });
+    }
+    Ok(client?)
 }
 
-/// The ssh command that runs the bridge on `remote`'s machine, replacing
-/// the daemon there first with `replace`, and asking for passwords through
-/// `askpass`, if given.
-fn ssh_command(remote: &Remote, replace: bool, askpass: Option<&Path>) -> io::Result<Command> {
-    let mut ssh = Command::new(ssh_program());
-    if let Some(socket) = askpass {
-        ssh.env("SSH_ASKPASS", std::env::current_exe()?)
+/// Why a connection [`Cancel`]led failed.
+const CANCELLED: &str = "it was stopped";
+
+/// The ssh command that runs the bridge on `remote`'s machine, running
+/// `program` as ssh, replacing the daemon there first with `replace`, and
+/// asking for passwords as `asking` says, if given.
+fn ssh_command(
+    remote: &Remote,
+    program: &OsStr,
+    replace: bool,
+    asking: Option<&Asking>,
+) -> Command {
+    let mut ssh = Command::new(program);
+    if let Some(asking) = asking {
+        ssh.env("SSH_ASKPASS", &asking.program)
             .env("SSH_ASKPASS_REQUIRE", "force")
-            .env(ASKPASS_VAR, socket);
+            .env(ASKPASS_VAR, &asking.socket);
     }
     ssh.args([
         "-T",
@@ -176,7 +226,7 @@ fn ssh_command(remote: &Remote, replace: bool, askpass: Option<&Path>) -> io::Re
         remote.command,
         if replace { " --replace" } else { "" }
     ));
-    Ok(ssh)
+    ssh
 }
 
 /// `host` as ssh's destination. ssh takes `user@host`, but a port only in
@@ -205,7 +255,7 @@ fn destination(host: &str) -> std::borrow::Cow<'_, str> {
 ///
 /// As [`connect`].
 pub fn through(command: Command, host: &str) -> Result<Client, RemoteError> {
-    let (stream, ssh, address) = dial(command, host)?;
+    let (stream, ssh, address) = dial(command, host, None)?;
     Ok(Client::over_carrier(
         stream,
         address.map(UdpTarget::Host),
@@ -217,9 +267,11 @@ pub fn through(command: Command, host: &str) -> Result<Client, RemoteError> {
 /// Runs `command`, which runs `clackatoo bridge` somewhere, and waits for
 /// the bridge to announce itself. Returns the stream to it, what keeps it
 /// running, and the address the bridge says its machine was reached at.
+/// `cancel`, if given, can stop it from another thread.
 fn dial(
     mut command: Command,
     host: &str,
+    cancel: Option<&Arc<Cancel>>,
 ) -> Result<(UnixStream, Ssh, Option<IpAddr>), RemoteError> {
     // A socket rather than pipes, so reads can time out.
     let (stream, theirs) = UnixStream::pair()?;
@@ -234,7 +286,7 @@ fn dial(
     // The command holds ssh's end of the socket, which must close here for
     // ssh exiting to be noticed.
     drop(command);
-    let mut ssh = Ssh::new(child);
+    let mut ssh = Ssh::new(child, cancel);
 
     let unreachable = |ssh: Ssh, greeting: &[u8], reason: &str| {
         let said = ssh.finish();
@@ -382,6 +434,20 @@ impl Askpass {
         let path = runtime
             .path()
             .join(format!("askpass-{}.sock", std::process::id()));
+        Self::serve_at(path, move |question, _| answer(question))
+    }
+
+    /// As [`serve`](Self::serve), on the socket at `path`, in a directory
+    /// for the user alone. `answer` is also given the [`Asker`], to see
+    /// while it waits whether the asker has gone.
+    ///
+    /// # Errors
+    ///
+    /// If the socket can't be made.
+    pub fn serve_at(
+        path: PathBuf,
+        answer: impl Fn(String, &Asker<'_>) -> Option<String> + Send + 'static,
+    ) -> io::Result<Self> {
         // Left by an earlier process with the same ID that didn't exit
         // cleanly.
         match std::fs::remove_file(&path) {
@@ -390,6 +456,11 @@ impl Askpass {
             Err(err) => return Err(err),
         }
         let listener = UnixListener::bind(&path)?;
+        // The user's alone, whatever the directory allows.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&stopped);
         std::thread::Builder::new()
@@ -428,17 +499,46 @@ impl Drop for Askpass {
 /// it.
 fn answer_one(
     mut stream: UnixStream,
-    answer: &impl Fn(String) -> Option<String>,
+    answer: &impl Fn(String, &Asker<'_>) -> Option<String>,
 ) -> io::Result<()> {
+    // Only the user's own programs are answered: a password is never
+    // handed to anyone else's.
+    let asker = rustix::net::sockopt::socket_peercred(&stream)?;
+    if asker.uid != rustix::process::getuid() {
+        return Err(io::Error::other("asked by another user's program"));
+    }
     let mut question = String::new();
     (&mut stream)
         .take(MAX_QUESTION)
         .read_to_string(&mut question)?;
-    if let Some(text) = answer(question) {
+    if let Some(text) = answer(question, &Asker(&stream)) {
         stream.write_all(b"y")?;
         stream.write_all(text.as_bytes())?;
     }
     Ok(())
+}
+
+/// The program asking an [`Askpass`] a question: clackatoo, run by ssh as
+/// its askpass program, which waits for the answer.
+#[derive(Debug)]
+pub struct Asker<'a>(&'a UnixStream);
+
+impl Asker<'_> {
+    /// Whether it has hung up, as it does when ssh gives up, or is ended:
+    /// its question needs no answer then. Doesn't wait.
+    #[must_use]
+    pub fn gone(&self) -> bool {
+        use rustix::event::{PollFd, PollFlags, Timespec};
+        let mut fds = [PollFd::new(self.0, PollFlags::empty())];
+        let now = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        match rustix::event::poll(&mut fds, Some(&now)) {
+            Ok(_) => (fds[0].revents()).intersects(PollFlags::HUP | PollFlags::ERR),
+            Err(_) => false,
+        }
+    }
 }
 
 /// Asks the [`Askpass`] at `socket` the `question` ssh asked, and prints
@@ -474,6 +574,58 @@ fn asked(socket: &Path, question: &str) -> io::Result<Option<String>> {
     Ok(reply.strip_prefix('y').map(str::to_owned))
 }
 
+/// A way to stop a connection from another thread, as it logs in with ssh
+/// and greets the daemon, or as a new ssh logs in to carry it on: every
+/// ssh of its is killed, and none is started again. Once it's made,
+/// dropping the client ends it too.
+#[derive(Debug, Default)]
+pub(crate) struct Cancel(Mutex<Cancelling>);
+
+#[derive(Debug, Default)]
+struct Cancelling {
+    cancelled: bool,
+    /// The IDs of its ssh processes, the first and any opened to carry it
+    /// on, while each runs and hasn't been reaped, so none can be another
+    /// process's.
+    ssh: Vec<u32>,
+}
+
+impl Cancel {
+    /// Stops the connection: kills its ssh, if it's running, and fails it
+    /// once it next looks.
+    pub(crate) fn cancel(&self) {
+        let mut cancelling = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        cancelling.cancelled = true;
+        for pid in &cancelling.ssh {
+            if let Some(pid) = rustix::process::Pid::from_raw(pid.cast_signed()) {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            }
+        }
+    }
+
+    /// Whether it was stopped.
+    pub(crate) fn cancelled(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .cancelled
+    }
+
+    /// Notes ssh running as `pid`. Returns whether to go on: not if it was
+    /// stopped already.
+    fn watch(&self, pid: u32) -> bool {
+        let mut cancelling = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        cancelling.ssh.push(pid);
+        !cancelling.cancelled
+    }
+
+    /// Forgets the ssh with ID `pid`, as it's about to be reaped.
+    fn forget(&self, pid: u32) {
+        let mut cancelling = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        cancelling.ssh.retain(|&watched| watched != pid);
+    }
+}
+
 /// The ssh process carrying a connection to a remote daemon. Ended when
 /// dropped.
 #[derive(Debug)]
@@ -481,10 +633,12 @@ pub(crate) struct Ssh {
     child: Child,
     /// Collects what ssh prints to stderr.
     errors: Option<JoinHandle<String>>,
+    /// What can kill it from another thread, while the connection is made.
+    cancel: Option<Arc<Cancel>>,
 }
 
 impl Ssh {
-    fn new(mut child: Child) -> Self {
+    fn new(mut child: Child, cancel: Option<&Arc<Cancel>>) -> Self {
         let errors = child.stderr.take().map(|mut stderr| {
             std::thread::spawn(move || {
                 let mut said = Vec::new();
@@ -498,16 +652,35 @@ impl Ssh {
                 String::from_utf8_lossy(&said).into_owned()
             })
         });
-        Self { child, errors }
+        let cancel = cancel.cloned();
+        if let Some(cancel) = &cancel
+            && !cancel.watch(child.id())
+        {
+            let _ = child.kill();
+        }
+        Self {
+            child,
+            errors,
+            cancel,
+        }
     }
 
     fn kill(&mut self) {
         let _ = self.child.kill();
     }
 
+    /// Reaps ssh, once it has exited.
+    fn wait(&mut self) {
+        // First, while its ID can't yet be another process's.
+        if let Some(cancel) = self.cancel.take() {
+            cancel.forget(self.child.id());
+        }
+        let _ = self.child.wait();
+    }
+
     /// Waits for ssh to exit, and returns what it printed to stderr.
     fn finish(mut self) -> String {
-        let _ = self.child.wait();
+        self.wait();
         self.errors
             .take()
             .and_then(|errors| errors.join().ok())
@@ -518,7 +691,7 @@ impl Ssh {
 impl Drop for Ssh {
     fn drop(&mut self) {
         self.kill();
-        let _ = self.child.wait();
+        self.wait();
     }
 }
 

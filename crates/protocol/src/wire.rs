@@ -67,9 +67,9 @@ use std::cell::Cell;
 use serde::{Deserialize, Deserializer};
 
 use crate::{
-    Answer, BufferUpdate, ChatPatch, ClientMessage, Content, Done, Error, Event, FilesUpdate,
-    Found, Item, Node, PROTOCOL_VERSION, Patch, Response, ServerMessage, Setting, SettingKind,
-    ToolContent, Turn, ViewUpdate, Workspaces,
+    Answer, BufferUpdate, ChatPatch, ClientMessage, ConnectionState, Content, Done, Error, Event,
+    FilesUpdate, Found, Item, Node, PROTOCOL_VERSION, Patch, Response, ServerMessage, Setting,
+    SettingKind, ToolContent, Turn, ViewUpdate, Workspaces,
 };
 
 /// The oldest client a daemon of this build talks to.
@@ -176,6 +176,15 @@ gates! {
     /// `Workspaces`' `restored` (`Restored`, `Place`), and
     /// `ClientMessage::Place` and `ClientMessage::Dismiss`.
     RESTORED = 90,
+    /// Which daemon is which, and daemons connecting to each other:
+    /// `Workspaces`' `machine` (`Machine`), `Workspace`'s and `Pane`'s
+    /// `home` (`MachineId`); `Request::Connect`, `Request::Disconnect`
+    /// and `Request::WatchConnections`, answered with
+    /// `Response::Connections` and followed by `Event::Connections`
+    /// (`Connection`, `ConnectionState`); and the questions ssh asks as
+    /// it logs in, `Event::Login`, answered with `ClientMessage::Login`
+    /// (`Secret`).
+    FEDERATION = 91,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -430,6 +439,20 @@ impl Since for SettingKind {
     }
 }
 
+impl Since for ConnectionState {
+    fn since(&self) -> u32 {
+        match self {
+            Self::Connecting
+            | Self::Asking
+            | Self::NeedsPassword
+            | Self::Connected { .. }
+            | Self::Down { .. }
+            | Self::Stopped { .. }
+            | Self::Other => FEDERATION,
+        }
+    }
+}
+
 impl Since for Event {
     fn since(&self) -> u32 {
         match self {
@@ -451,6 +474,7 @@ impl Since for Event {
             | Self::Sessions { .. } => EARLIER,
             Self::Exited { .. } => EXITED,
             Self::Coloured { .. } => COLOURS,
+            Self::Connections(_) | Self::Login { .. } => FEDERATION,
         }
     }
 }
@@ -528,6 +552,10 @@ pub fn newest(message: &ServerMessage) -> u32 {
                 },
                 Event::Files { update, .. } => update.since(),
                 Event::Found { found, .. } => found.since(),
+                Event::Connections(connections) => (connections.iter())
+                    .map(|connection| connection.state.since())
+                    .max()
+                    .unwrap_or(EARLIER),
                 _ => EARLIER,
             };
             event.since().max(inside)
@@ -645,7 +673,8 @@ impl Downgrade for ServerMessage {
     /// hover's code stays plain. And `BufferUpdate::Language`: words are
     /// read as in plain text, as they were before. And `Event::Coloured`,
     /// which only answers what a newer window asked: its code stays
-    /// plain.
+    /// plain. And `Event::Connections` and `Event::Login`, which go only
+    /// to a client that asked for them, which an older one never does.
     /// A new answer, or a new kind of thing found, only ever answers what
     /// a newer window asked; should one reach an older peer all the same,
     /// it's told its question failed, rather than wait for ever.
@@ -657,6 +686,8 @@ impl Downgrade for ServerMessage {
             Self::Event(
                 Event::Exited { .. }
                 | Event::Coloured { .. }
+                | Event::Connections(_)
+                | Event::Login { .. }
                 | Event::Buffer {
                     update: BufferUpdate::Coloured { .. } | BufferUpdate::Language { .. },
                     ..
@@ -858,12 +889,15 @@ mod tests {
         // And a hover's colours: without them, its code is plain. And
         // what a buffer's words are made of: without it, they're plain
         // text's. And the colours of a chat's code: without them, it's
-        // plain.
+        // plain. And the connections, and ssh's questions for them, which
+        // only a client that asked for them is sent.
         matches!(
             message,
             ServerMessage::Event(
                 Event::Exited { .. }
                     | Event::Coloured { .. }
+                    | Event::Connections(_)
+                    | Event::Login { .. }
                     | Event::Buffer {
                         update: BufferUpdate::Coloured { .. } | BufferUpdate::Language { .. },
                         ..

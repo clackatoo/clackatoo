@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod connections;
 mod desktop;
 mod language;
 mod logs;
@@ -182,6 +183,21 @@ enum Command {
     /// input and output. The agent runs this itself.
     #[command(hide = true)]
     Mcp(McpArgs),
+    /// Connect the daemon to the daemon on another machine, over ssh,
+    /// answering ssh's questions here, and keep it connected, trying again
+    /// whenever the connection is lost, until `disconnect`.
+    #[command(hide = true)]
+    Connect(connections::ConnectArgs),
+    /// End the daemon's connection to another machine.
+    #[command(hide = true)]
+    Disconnect(connections::DisconnectArgs),
+    /// List the daemon's connections to other machines, and how each is
+    /// going.
+    #[command(hide = true)]
+    Connections(Connection),
+    /// Print which machine the daemon is: its name and its ID.
+    #[command(hide = true)]
+    Machine(Connection),
 }
 
 #[derive(Debug, Args)]
@@ -379,6 +395,7 @@ fn main() -> ExitCode {
     }
 }
 
+#[allow(clippy::too_many_lines, reason = "one arm per command")]
 fn run(command: Command) -> anyhow::Result<()> {
     match command {
         Command::Daemon(args) => run_daemon(&args),
@@ -468,6 +485,10 @@ fn run(command: Command) -> anyhow::Result<()> {
             remote::bridge(&RuntimeDir::for_current_user(), args.replace)?;
             Ok(())
         }
+        Command::Connect(args) => connections::connect(&args),
+        Command::Disconnect(args) => connections::disconnect(&args),
+        Command::Connections(connection) => connections::list(&connection),
+        Command::Machine(connection) => connections::machine(&connection),
         Command::Mcp(args) => {
             let socket =
                 (args.socket).unwrap_or_else(|| RuntimeDir::for_current_user().socket_path());
@@ -546,6 +567,13 @@ fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
     let mut config = DaemonConfig::from_env();
     config.terminal.scrollback_compaction = args.scrollback_compaction.into();
     config.mcp = agent_tools();
+    // ssh asks its questions, connecting to other daemons, through this
+    // program, as it does for a window.
+    if let Some(links) = &mut config.links {
+        links.askpass = std::env::current_exe()
+            .inspect_err(|err| log::warn!("ssh can't ask its questions: {err}"))
+            .ok();
+    }
     if let Some(web) = &mut config.web {
         web.assets = web_app::ASSETS;
     }

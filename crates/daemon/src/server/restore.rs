@@ -304,6 +304,12 @@ impl Daemon {
             clackatoo_workspaces: saved::VERSION,
             workspaces: Vec::new(),
             active: None,
+            connections: (self.links.kept().into_iter())
+                .map(|(host, command)| saved::Connection {
+                    host,
+                    command: (command != "clackatoo").then_some(command),
+                })
+                .collect(),
         };
         for workspace in &workspaces.list {
             let mut tabs = Vec::new();
@@ -481,6 +487,11 @@ impl Daemon {
                 return;
             }
         };
+        // What the file holds: what's made again is written over it only
+        // where it differs, even if everything is closed again before the
+        // first write, which a daemon starting empty would take for no
+        // change.
+        self.keeping.last = Some(state.clone());
         let started = Instant::now();
         let mut room = MOST_PANES;
         // Chats first, so reviews of them find them made.
@@ -528,6 +539,10 @@ impl Daemon {
             self.workspaces.set_active(active);
         }
         self.workspaces.set_restored(restored);
+        self.connect_kept(state.connections.iter().map(|connection| {
+            let command = connection.command.as_deref().unwrap_or("clackatoo");
+            (connection.host.clone(), command.to_owned())
+        }));
         let panes = MOST_PANES - room;
         if room == 0 {
             log::warn!("no more than the first {MOST_PANES} panes kept were made again");

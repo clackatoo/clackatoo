@@ -66,6 +66,9 @@ fn pipelined_requests_arent_answered_past_what_the_client_reads() {
         recovery: None,
         browser: None,
         web: Some(web),
+        links: None,
+        machine: None,
+        machine_name: None,
     };
     let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).unwrap();
     let shutdown = daemon.shutdown_handle();

@@ -1112,8 +1112,10 @@ mod tests {
                 name: "clackatoo".into(),
                 tabs: Vec::new(),
                 active_tab: clackatoo_protocol::TabId(1),
+                home: None,
             }],
             active: None,
+            machine: None,
         };
         state.chats = vec![
             summary(1, Some(1), false, 5 * 60_000),
@@ -1418,13 +1420,16 @@ mod tests {
                     layout: clackatoo_protocol::Layout::Pane(clackatoo_protocol::Pane {
                         id: clackatoo_protocol::PaneId(1),
                         content: clackatoo_protocol::Content::Terminal(TerminalId(2)),
+                        home: None,
                     }),
                     focused: clackatoo_protocol::PaneId(1),
                     name: None,
                 }],
                 active_tab: clackatoo_protocol::TabId(1),
+                home: None,
             }],
             active: None,
+            machine: None,
         };
         state.terminals = vec![TerminalInfo {
             id: TerminalId(2),

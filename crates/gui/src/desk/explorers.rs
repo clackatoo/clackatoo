@@ -1211,6 +1211,7 @@ impl Desk {
             let whole = clackatoo_protocol::Layout::Pane(clackatoo_protocol::Pane {
                 id: PaneId(0),
                 content: Content::Terminal(clackatoo_protocol::TerminalId(0)),
+                home: None,
             });
             Placement::new(&whole, &area).panes[0].1.cols
         });

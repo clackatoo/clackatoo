@@ -2566,6 +2566,7 @@ impl Desk {
             &clackatoo_protocol::Layout::Pane(clackatoo_protocol::Pane {
                 id: PaneId(0),
                 content: Content::Terminal(TerminalId(0)),
+                home: None,
             }),
             &area,
         )
@@ -2665,6 +2666,7 @@ mod tests {
         Layout::Pane(LayoutPane {
             id: PaneId(id),
             content: Content::Terminal(TerminalId(id)),
+            home: None,
         })
     }
 
@@ -2692,6 +2694,7 @@ mod tests {
             name: name.into(),
             active_tab: tabs[0].id,
             tabs,
+            home: None,
         }
     }
 
@@ -2701,6 +2704,7 @@ mod tests {
             list,
             home: None,
             restored: Vec::new(),
+            machine: None,
         }
     }
 
@@ -2748,6 +2752,7 @@ mod tests {
                 | ClientMessage::Colour { .. }
                 | ClientMessage::Place { .. }
                 | ClientMessage::Dismiss { .. }
+                | ClientMessage::Login { .. }
                 | ClientMessage::Upgrade { .. } => None,
             })
             .collect();
@@ -5045,6 +5050,7 @@ mod tests {
             Layout::Pane(LayoutPane {
                 id: PaneId(1),
                 content: Content::Buffer(buffer),
+                home: None,
             }),
             pane(2),
         ]);
@@ -5182,6 +5188,7 @@ mod tests {
         let layout = Layout::Pane(LayoutPane {
             id: PaneId(1),
             content: Content::Buffer(buffer),
+            home: None,
         });
         let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
         let snapshot = BufferUpdate::Snapshot(BufferSnapshot {
@@ -5254,6 +5261,7 @@ mod tests {
         let layout = Layout::Pane(LayoutPane {
             id: PaneId(1),
             content: Content::Buffer(buffer),
+            home: None,
         });
         let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
         let mut desk = Desk::default();
@@ -5306,6 +5314,7 @@ mod tests {
         let layout = Layout::Pane(LayoutPane {
             id: PaneId(1),
             content: Content::Buffer(buffer),
+            home: None,
         });
         let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
         let snapshot = |text: &str, version, applied| {
@@ -5351,6 +5360,7 @@ mod tests {
         let layout = Layout::Pane(LayoutPane {
             id: PaneId(1),
             content: Content::Buffer(buffer),
+            home: None,
         });
         let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
         let mut desk = Desk::default();
@@ -5432,6 +5442,7 @@ mod tests {
         let layout = Layout::Pane(LayoutPane {
             id: PaneId(1),
             content: Content::Buffer(buffer),
+            home: None,
         });
         let snapshot = |text: &str, daemon| {
             clackatoo_protocol::BufferUpdate::Snapshot(clackatoo_protocol::BufferSnapshot {
@@ -5572,6 +5583,7 @@ mod tests {
         let layout = Layout::Pane(LayoutPane {
             id: PaneId(1),
             content: Content::Buffer(buffer),
+            home: None,
         });
         let mut desk = Desk::default();
         desk.connected(
@@ -5628,6 +5640,7 @@ mod tests {
         let layout = Layout::Pane(LayoutPane {
             id: PaneId(1),
             content: Content::Buffer(BufferId(7)),
+            home: None,
         });
         let mut desk = Desk::default();
         desk.connected(
@@ -5724,6 +5737,7 @@ mod tests {
         let layout = Layout::Pane(LayoutPane {
             id: PaneId(1),
             content: Content::Buffer(buffer),
+            home: None,
         });
         let mut desk = Desk::default();
         desk.connected(
@@ -5816,6 +5830,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines, reason = "one story, told in order")]
     fn a_file_is_edited_written_and_kept_open_while_it_has_changes() {
         use clackatoo_protocol::{BufferUpdate, Change, Edit};
 
@@ -5823,6 +5838,7 @@ mod tests {
         let layout = Layout::Pane(LayoutPane {
             id: PaneId(1),
             content: Content::Buffer(buffer),
+            home: None,
         });
         let mut desk = Desk::default();
         desk.set_area(Some(Area {
@@ -5932,6 +5948,7 @@ mod tests {
         Layout::Pane(LayoutPane {
             id: PaneId(pane),
             content: Content::Buffer(BufferId(buffer)),
+            home: None,
         })
     }
 
@@ -6403,6 +6420,7 @@ mod tests {
         let layout = Layout::Pane(LayoutPane {
             id: PaneId(1),
             content: Content::Buffer(buffer),
+            home: None,
         });
         let mut desk = desk(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
         desk.buffer_changed(
@@ -6711,6 +6729,7 @@ mod tests {
         let layout = Layout::Pane(LayoutPane {
             id: PaneId(1),
             content: Content::Buffer(BufferId(8)),
+            home: None,
         });
         desk.workspaces_changed(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
         assert!(
@@ -9687,6 +9706,7 @@ mod tests {
         Layout::Pane(LayoutPane {
             id: PaneId(pane),
             content: Content::Files(clackatoo_protocol::FilesId(files)),
+            home: None,
         })
     }
 
@@ -10073,6 +10093,7 @@ mod tests {
             Layout::Pane(LayoutPane {
                 id: PaneId(pane),
                 content: Content::Browser(TerminalId(5)),
+                home: None,
             })
         };
         let mut desk = desk(one_tab(pane(3)));
@@ -10159,6 +10180,7 @@ mod tests {
         Layout::Pane(LayoutPane {
             id: PaneId(pane),
             content: Content::Board(clackatoo_protocol::BoardId(board)),
+            home: None,
         })
     }
 
@@ -11173,6 +11195,7 @@ mod tests {
             Layout::Pane(LayoutPane {
                 id: PaneId(2),
                 content: Content::Review(ReviewId(1)),
+                home: None,
             }),
         ]);
         desk.workspaces_changed(one_tab(layout));

@@ -1304,6 +1304,7 @@ mod tests {
             Layout::Pane(Pane {
                 id: PaneId(id),
                 content: Content::Terminal(TerminalId(id)),
+                home: None,
             })
         };
         let mut state = State {
@@ -1324,8 +1325,10 @@ mod tests {
                         name: None,
                     }],
                     active_tab: TabId(1),
+                    home: None,
                 }],
                 active: None,
+                machine: None,
             },
             ..State::default()
         };

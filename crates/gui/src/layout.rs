@@ -330,6 +330,7 @@ mod tests {
         Layout::Pane(Pane {
             id: PaneId(id),
             content: Content::Terminal(TerminalId(id)),
+            home: None,
         })
     }
 

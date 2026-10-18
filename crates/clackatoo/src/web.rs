@@ -208,7 +208,7 @@ fn read_password() -> anyhow::Result<String> {
 
 /// Asks `question` on the terminal, and reads the answer without showing
 /// it.
-fn prompt(question: &str) -> anyhow::Result<String> {
+pub(crate) fn prompt(question: &str) -> anyhow::Result<String> {
     let stdin = io::stdin();
     eprint!("{question}");
     io::stderr().flush()?;

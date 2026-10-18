@@ -779,6 +779,10 @@ mod tests {
             trash: None,
             workspaces: None,
             keep_gate: None,
+            // Never the machine of the user running the tests.
+            machine: None,
+            machine_name: None,
+            links: None,
             ..DaemonConfig::from_env()
         };
         let mut daemon = Daemon::bind(&runtime.socket_path(), config).unwrap();

@@ -9,10 +9,10 @@ use std::path::Path;
 use clackatoo_protocol::frame::{self, FrameDecoder, FrameError, Head};
 use clackatoo_protocol::wire;
 use clackatoo_protocol::{
-    Block, BufferId, Change, ChatAction, ClientMessage, Code, Error, Event, FileOp, FilesAction,
-    FilesId, HistoryLines, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal, Place, Query,
-    Request, Response, Search, ServerMessage, Side, Size, TerminalId, TerminalInfo, Udp, View,
-    Which, WorkspaceId, Workspaces,
+    Block, BufferId, Change, ChatAction, ClientMessage, Code, Connection, Error, Event, FileOp,
+    FilesAction, FilesId, HistoryLines, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal, Place,
+    Query, Request, Response, Search, Secret, ServerMessage, Side, Size, TerminalId, TerminalInfo,
+    Udp, View, Which, WorkspaceId, Workspaces,
 };
 
 use crate::quic::{self, Carried, Contact, Redial, Route};
@@ -825,6 +825,69 @@ impl Client {
     /// See [`ClientError`].
     pub fn focus(&mut self, pane: PaneId) -> Result<(), ClientError> {
         self.done(&Request::Focus { pane })
+    }
+
+    /// Has the daemon connect to the daemon on another machine, `host`, as
+    /// ssh names it, running `command` there to reach clackatoo (see
+    /// [`Request::Connect`]). How it goes comes in
+    /// [`Event::Connections`], to a client watching them.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn connect_to(&mut self, host: &str, command: Option<&str>) -> Result<(), ClientError> {
+        self.done(&Request::Connect {
+            host: host.to_owned(),
+            command: command.map(str::to_owned),
+        })
+    }
+
+    /// Ends the daemon's connection to `host`, and forgets it.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`]: [`ClientError::Daemon`] if there's none.
+    pub fn disconnect(&mut self, host: &str) -> Result<(), ClientError> {
+        self.done(&Request::Disconnect {
+            host: host.to_owned(),
+        })
+    }
+
+    /// Lists the daemon's connections to daemons on other machines, and
+    /// has the client told whenever they change. With `answer`, the client
+    /// answers the questions ssh asks for them too: see
+    /// [`Request::WatchConnections`].
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn watch_connections(&mut self, answer: bool) -> Result<Vec<Connection>, ClientError> {
+        match self.request(&Request::WatchConnections { answer })? {
+            Response::Connections(connections) => Ok(connections),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Answers the question numbered `ask` ssh asked ([`Event::Login`]),
+    /// or with `None`, turns it down.
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn answer_login(&mut self, ask: u64, answer: Option<String>) -> Result<(), ClientError> {
+        self.send(&ClientMessage::Login {
+            ask,
+            answer: answer.map(Secret),
+        })
+    }
+
+    /// The connection, taken apart, for the daemon's loop to read itself:
+    /// the stream, what has been read of it and not yet decoded, the
+    /// protocol version it runs at, and what carries it to another
+    /// machine, which ends it when dropped. Events already read and not
+    /// taken are dropped.
+    pub(crate) fn into_parts(self) -> (UnixStream, FrameDecoder, u32, Option<Carried>) {
+        (self.stream, self.decoder, self.wire, self.carried)
     }
 
     fn pane_created(&mut self, request: &Request) -> Result<PaneId, ClientError> {

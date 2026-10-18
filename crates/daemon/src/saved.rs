@@ -9,6 +9,8 @@
 //! the command its shell was running, if one was; an editor's file, and
 //! where its cursor and view were; an explorer's or a folder's root; a
 //! board; a review; and a chat's agent and session, which the agent kept.
+//! Beside the workspaces, the daemon's connections to the daemons on other
+//! machines: each one's host, and the command that runs clackatoo there.
 //! Scrollback and running programs aren't kept: a terminal comes back as
 //! a new shell. A buffer with no file yet, and a chat's browser page,
 //! aren't kept at all.
@@ -71,6 +73,22 @@ pub(crate) struct State {
     /// Which of them was last switched to, by its place in the list.
     #[serde(default)]
     pub(crate) active: Option<usize>,
+    /// The daemon's connections to the daemons on other machines, in the
+    /// order they were asked for. Builds before them pass them over, and
+    /// write the file without them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) connections: Vec<Connection>,
+}
+
+/// A connection to the daemon on another machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Connection {
+    /// The machine, as ssh names it.
+    pub(crate) host: String,
+    /// The shell command that runs clackatoo there, if it isn't
+    /// `clackatoo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) command: Option<String>,
 }
 
 /// A workspace.
@@ -562,6 +580,7 @@ mod tests {
                 },
             ],
             active: Some(0),
+            connections: Vec::new(),
         }
     }
 
@@ -589,6 +608,33 @@ mod tests {
             "/tests/fixtures/workspaces-v1.json"
         );
         fs::write(path, state().encode()).unwrap();
+    }
+
+    #[test]
+    fn connections_are_kept_beside_the_workspaces() {
+        let kept = State {
+            connections: vec![
+                Connection {
+                    host: "laptop".into(),
+                    command: None,
+                },
+                Connection {
+                    host: "jack@server:2222".into(),
+                    command: Some("~/.cargo/bin/clackatoo".into()),
+                },
+            ],
+            ..state()
+        };
+        let encoded = kept.encode();
+        assert_eq!(State::decode(&encoded).unwrap(), kept);
+        let text = String::from_utf8(encoded).unwrap();
+        assert_eq!(text.matches("\"command\"").count(), 1, "{text}");
+        // None, none written: a file an older build reads as it wrote it.
+        assert!(
+            !String::from_utf8(state().encode())
+                .unwrap()
+                .contains("connections")
+        );
     }
 
     #[test]

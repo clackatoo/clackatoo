@@ -40,6 +40,7 @@ impl DaemonProcess {
         let child = Command::new(binary)
             .env("CLACKATOO_BOARDS", "off")
             .env("CLACKATOO_RECOVERY", "off")
+            .env("CLACKATOO_MACHINE", "off")
             .env("CLACKATOO_WORKSPACES", "off")
             .arg("daemon")
             .env("XDG_RUNTIME_DIR", runtime_dir.path())
