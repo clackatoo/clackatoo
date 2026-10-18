@@ -365,6 +365,7 @@ mod tests {
                     active_tab: TabId(1),
                     tabs: vec![tab],
                     home: None,
+                    lent: None,
                 }],
                 machine: None,
             },

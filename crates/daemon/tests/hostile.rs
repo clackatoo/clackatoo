@@ -350,6 +350,7 @@ fn a_tab_split_as_deep_as_windows_read_refuses_more() {
             side,
             terminal: file(),
             share: None,
+            on: None,
         };
         match client.request(&request).expect("an answer") {
             Response::PaneCreated(_) => assert!(n < max, "split {n} was made"),
@@ -446,6 +447,7 @@ fn places_and_versions_out_of_range_are_refused() {
     let open = request(Request::NewWorkspace {
         name: None,
         terminal: PaneTerminal::File(OpenFile { path, cwd: None }),
+        on: None,
     });
     let new = request(Request::NewTerminal(NewTerminal {
         size: clackatoo_protocol::Size::new(10, 3).expect("a valid size"),
@@ -463,6 +465,7 @@ fn places_and_versions_out_of_range_are_refused() {
             pane: clackatoo_protocol::PaneId(id),
             side: clackatoo_protocol::Side::Right,
             terminal: PaneTerminal::Existing(clackatoo_protocol::TerminalId(id)),
+            on: None,
         }));
         for shares in [vec![u32::MAX, u32::MAX], vec![u32::MAX, 1]] {
             messages.push(request(Request::ResizeSplit {
@@ -653,10 +656,12 @@ fn fuzz_round(rng: &mut Rng, round: usize) {
         Request::NewWorkspace {
             name: Some("w".to_owned()),
             terminal: PaneTerminal::File(OpenFile { path, cwd: None }),
+            on: None,
         },
         Request::NewTab {
             workspace: clackatoo_protocol::WorkspaceId(0),
             terminal: PaneTerminal::New(cat()),
+            on: None,
         },
     ];
     for request in setup {

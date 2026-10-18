@@ -195,6 +195,15 @@ gates! {
     /// `Content::Other`, as it would do what's asked of them on the
     /// daemon's own machine; and `BufferUpdate::Reattach`.
     RELAY = 92,
+    /// Panes on another machine than their workspace's, and new ones made
+    /// on a machine named: `Request::NewWorkspace`'s, `Request::NewTab`'s,
+    /// `Request::Split`'s and `Request::SplitTab`'s `on`; the panes a
+    /// daemon lends a daemon connected to it, `Request::Lend`, and the
+    /// workspaces holding them, `Workspace`'s `lent` (`Lent`), which only
+    /// the daemon that asked for them is shown, once it says which machine
+    /// it is, `Request::RelayAs`; giving one back, `Request::Unlend`, and
+    /// listing them, `Request::Lent`; and `Event::Said`, for the bar.
+    LEND = 93,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -487,6 +496,7 @@ impl Since for Event {
             Self::Coloured { .. } => COLOURS,
             Self::Connections(_) | Self::Login { .. } => FEDERATION,
             Self::Forwarded(_) => RELAY,
+            Self::Said(_) => LEND,
         }
     }
 }
@@ -604,7 +614,42 @@ fn newest_in_workspaces(workspaces: &Workspaces) -> u32 {
     } else {
         EARLIER
     };
-    contents.max(homes).max(relayed)
+    // A workspace lent to another daemon, which only one of protocol 93
+    // or later asks for, and an older peer would show as one of the
+    // daemon's own.
+    let lent = if (workspaces.list.iter()).any(|workspace| workspace.lent.is_some()) {
+        LEND
+    } else {
+        EARLIER
+    };
+    contents.max(homes).max(relayed).max(lent)
+}
+
+/// `message`, if it's the workspaces and some are lent to another daemon,
+/// without those: what a peer from before lending is sent, should one be,
+/// though none ever asks for them.
+fn without_lent(message: &ServerMessage) -> Option<ServerMessage> {
+    let (ServerMessage::Event(Event::Workspaces(workspaces))
+    | ServerMessage::Response(Response::Workspaces(workspaces))) = message
+    else {
+        return None;
+    };
+    if workspaces
+        .list
+        .iter()
+        .all(|workspace| workspace.lent.is_none())
+    {
+        return None;
+    }
+    let mut own = workspaces.clone();
+    own.list.retain(|workspace| workspace.lent.is_none());
+    if (own.active).is_some_and(|active| own.get(active).is_none()) {
+        own.active = None;
+    }
+    Some(match message {
+        ServerMessage::Event(_) => ServerMessage::Event(Event::Workspaces(own)),
+        _ => ServerMessage::Response(Response::Workspaces(own)),
+    })
 }
 
 /// Whether `pane` is on another machine than the daemon's, and shows what
@@ -788,13 +833,23 @@ impl Downgrade for ServerMessage {
     /// own. `Event::Forwarded` is dropped, as it goes only to a client
     /// that asked for forwards, which an older one never does; and so is
     /// `BufferUpdate::Reattach`, as only another machine's buffers are
-    /// attached again so, which an older peer isn't shown.
+    /// attached again so, which an older peer isn't shown; and so is
+    /// `Event::Said`, which is only ever about a pane lent, which an
+    /// older peer is never shown.
     /// A new answer, or a new kind of thing found, only ever answers what
     /// a newer window asked; should one reach an older peer all the same,
     /// it's told its question failed, rather than wait for ever.
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
         if newest(self) <= wire {
             return Downgraded::AsIs;
+        }
+        if wire < LEND
+            && let Some(own) = without_lent(self)
+        {
+            return match own.downgrade(wire) {
+                Downgraded::AsIs => Downgraded::To(own),
+                downgraded => downgraded,
+            };
         }
         if wire < FEDERATION
             && let Some(own) = without_others(self)
@@ -819,6 +874,7 @@ impl Downgrade for ServerMessage {
                 | Event::Connections(_)
                 | Event::Login { .. }
                 | Event::Forwarded(_)
+                | Event::Said(_)
                 | Event::Buffer {
                     update:
                         BufferUpdate::Coloured { .. }
@@ -1025,7 +1081,8 @@ mod tests {
         // text's. And the colours of a chat's code: without them, it's
         // plain. And the connections, and ssh's questions for them, and
         // what's said of ports forwarded through them, which only a client
-        // that asked for them is sent.
+        // that asked for them is sent; and what the bar is told of panes
+        // lent, which an older peer is never shown.
         matches!(
             message,
             ServerMessage::Event(
@@ -1034,6 +1091,7 @@ mod tests {
                     | Event::Connections(_)
                     | Event::Login { .. }
                     | Event::Forwarded(_)
+                    | Event::Said(_)
                     | Event::Buffer {
                         update: BufferUpdate::Coloured { .. }
                             | BufferUpdate::Language { .. }
@@ -1252,6 +1310,45 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_from_before_lending_is_never_sent_a_workspace_lent_to_another() {
+        use crate::{Layout, Lent, Pane, PaneId, Tab, TabId, Workspace, WorkspaceId};
+        let workspace = |id: u32, lent: Option<Lent>| Workspace {
+            id: WorkspaceId(id),
+            name: String::new(),
+            tabs: vec![Tab {
+                id: TabId(id),
+                layout: Layout::Pane(Pane {
+                    id: PaneId(id),
+                    content: Content::Terminal(crate::TerminalId(id)),
+                    home: None,
+                }),
+                focused: PaneId(id),
+                name: None,
+            }],
+            active_tab: TabId(id),
+            home: None,
+            lent,
+        };
+        let lent = Lent {
+            to: crate::MachineId([7; 16]),
+            key: 9,
+        };
+        let workspaces = Workspaces {
+            list: vec![workspace(1, None), workspace(2, Some(lent))],
+            ..Workspaces::default()
+        };
+        let message = ServerMessage::Event(Event::Workspaces(workspaces));
+        assert_eq!(newest(&message), LEND);
+        assert_eq!(message.downgrade(LEND), Downgraded::AsIs);
+        let Downgraded::To(ServerMessage::Event(Event::Workspaces(own))) =
+            message.downgrade(LEND - 1)
+        else {
+            panic!("{message:?} wasn't downgraded");
+        };
+        assert_eq!(own.list, vec![workspace(1, None)]);
+    }
+
+    #[test]
     fn a_peer_from_before_federation_sees_only_the_daemons_own_workspaces() {
         use crate::{Layout, Pane, PaneId, Tab, TabId, Workspace, WorkspaceId};
         let workspace = |id: u32, home: Option<crate::MachineId>| Workspace {
@@ -1269,6 +1366,7 @@ mod tests {
             }],
             active_tab: TabId(id),
             home,
+            lent: None,
         };
         let desk = crate::MachineId([7; 16]);
         let workspaces = Workspaces {

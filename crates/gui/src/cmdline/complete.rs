@@ -4,8 +4,9 @@
 //! takes (see [`command::takes`]): options for `:set`, and `name=` a
 //! choice's values; files and folders for `:e`, `:Editor` and `:Explore`;
 //! workspaces for `:workspace`; lessons for `:Tutor`; machines for
-//! `:connect` and `:disconnect`; and the words `:Gitsigns`, `:Devices` and
-//! `:Review` take.
+//! `:connect` and `:disconnect`, and after a kind of pane's `@`
+//! (`:Terminal@desk`) and `:workspace new@`; and the words `:Gitsigns`,
+//! `:Devices` and `:Review` take.
 //!
 //! One choice is put in at once. With more, the first is put in, they're
 //! listed under the line, and Tab and Shift+Tab go through them, and past
@@ -39,6 +40,9 @@ pub(crate) struct Sources {
     /// daemon is connected to, then those ssh's config names, and those
     /// connected to lately. Only looked for once Tab is pressed after one.
     pub(crate) hosts: Vec<String>,
+    /// The machines `@` may name after a kind of pane: those the daemon
+    /// is connected to, then `local`.
+    pub(crate) machines: Vec<String>,
     /// The folder paths are from: the focused pane's, if the window can
     /// look at it, as it can when the daemon is on this machine.
     pub(crate) folder: Option<PathBuf>,
@@ -91,6 +95,16 @@ impl Completion {
         let Some(end) = before[lead..].find(char::is_whitespace) else {
             // The command's name itself.
             let (mark, name) = split_mark(word);
+            // A kind of pane's machine.
+            if let Some((kind, machine)) = name.split_once('@')
+                && command::PANES.contains(&kind)
+            {
+                let machines = sources.machines.iter().map(String::as_str);
+                let choices = (matching(machines, machine).into_iter())
+                    .map(|machine| format!("{mark}{kind}@{machine}"))
+                    .collect();
+                return Ok(Found::Done(Self::new(start, word, choices)));
+            }
             let names = if mark.is_empty() {
                 command::NAMES
             } else {
@@ -105,6 +119,13 @@ impl Completion {
         let choices = match command::takes(command) {
             Takes::Path => return paths(start, word, sources),
             Takes::Options => option_words(word),
+            // A new workspace's machine.
+            Takes::Workspace if first_argument && word.starts_with("new@") => {
+                let machines = sources.machines.iter().map(String::as_str);
+                (matching(machines, &word["new@".len()..]).into_iter())
+                    .map(|machine| format!("new@{machine}"))
+                    .collect()
+            }
             Takes::Workspace if first_argument => {
                 matching(sources.workspaces.iter().map(String::as_str), word)
             }
@@ -411,6 +432,26 @@ mod tests {
         );
         // A number has no words to choose from.
         assert!(choices("set tabstop=", &none()).is_empty());
+    }
+
+    #[test]
+    fn a_kind_of_pane_and_a_new_workspace_complete_the_machine_after_an_at() {
+        let sources = Sources {
+            machines: vec!["desk".into(), "dev-box".into(), "local".into()],
+            ..none()
+        };
+        assert_eq!(
+            choices("Terminal@", &sources),
+            ["Terminal@desk", "Terminal@dev-box", "Terminal@local"]
+        );
+        assert_eq!(choices("|Editor@des", &sources), ["|Editor@desk"]);
+        assert_eq!(choices("Agent@l", &sources), ["Agent@local"]);
+        assert_eq!(choices("ws new@d", &sources), ["new@desk", "new@dev-box"]);
+        // Only after a kind of pane, or `new`.
+        assert!(choices("Files@d", &sources).is_empty());
+        assert!(choices("ws notes@d", &sources).is_empty());
+        // What a kind of pane takes still completes after its machine.
+        assert_eq!(command::takes("|Editor@desk"), Takes::Path);
     }
 
     #[test]

@@ -566,6 +566,7 @@ fn a_program_s_last_output_is_kept_as_its_pane_closes() {
                 cwd: None,
                 record_to: Some(path.to_str().unwrap().to_owned()),
             }),
+            on: None,
         });
         assert!(matches!(made, Ok(Response::PaneCreated(_))), "{made:?}");
     }
@@ -783,6 +784,7 @@ fn a_client_from_before_exits_were_said_never_hears_of_one() {
     raw.request(Request::NewWorkspace {
         name: None,
         terminal: new_pane(&["sh", "-c", "read line"]),
+        on: None,
     });
     let terminal = loop {
         match raw.next().expect("the workspaces") {
@@ -4528,7 +4530,8 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Coloured { .. }
             | Event::Connections(_)
             | Event::Login { .. }
-            | Event::Forwarded(_)) => {
+            | Event::Forwarded(_)
+            | Event::Said(_)) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }
@@ -10575,6 +10578,7 @@ fn explore(client: &mut Client, root: &Path) -> (FilesId, String) {
     let pane = match client.request(&Request::NewWorkspace {
         name: None,
         terminal: PaneTerminal::Files(open),
+        on: None,
     }) {
         Ok(Response::PaneCreated(pane)) => pane,
         other => panic!("no explorer: {other:?}"),
@@ -10738,6 +10742,7 @@ fn an_explorer_with_no_directory_goes_down_the_tabs_edge_rooted_at_its_project()
     let pane = match client.request(&Request::NewWorkspace {
         name: None,
         terminal: open_file(dir, "repo/src/main.rs"),
+        on: None,
     }) {
         Ok(Response::PaneCreated(pane)) => pane,
         other => panic!("no editor: {other:?}"),
@@ -10748,6 +10753,7 @@ fn an_explorer_with_no_directory_goes_down_the_tabs_edge_rooted_at_its_project()
         side: Side::Left,
         terminal: PaneTerminal::Files(OpenFiles { dir: None }),
         share: Some(250),
+        on: None,
     });
     let Ok(Response::PaneCreated(explorer)) = made else {
         panic!("no explorer: {made:?}");
@@ -13168,6 +13174,7 @@ fn a_board_pane_shows_the_board_live_and_posts_as_the_user() {
             pane: chat_pane,
             side: Side::Right,
             terminal: PaneTerminal::Board(OpenBoard::Named("notes".into())),
+            on: None,
         };
         let Response::PaneCreated(pane) = client.request(&split).unwrap() else {
             panic!("no pane");

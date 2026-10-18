@@ -376,6 +376,7 @@ impl Desk {
                         pane,
                         side,
                         terminal,
+                        on: None,
                     },
                     Asked::Lua(request),
                 );

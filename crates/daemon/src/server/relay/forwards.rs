@@ -45,7 +45,18 @@ impl Daemon {
         pane: PaneId,
         forwarding: &Forwarding,
     ) -> Option<Routed> {
-        let (at, _) = self.relayed_pane(pane)?;
+        let at = if let Some((at, _)) = self.relayed_pane(pane) {
+            at
+        } else {
+            // A pane borrowed from another machine is on it, connected or
+            // not.
+            let borrowed = self.workspaces.borrowed().get(&pane)?;
+            let Some(at) = self.link_to(borrowed.machine) else {
+                let why = self.borrowed_pane(pane)?.err()?;
+                return Some(Routed::Answered(Response::Error(why)));
+            };
+            at
+        };
         // Only a window on this machine forwards this machine's ports.
         let local = matches!(
             self.sources.get(token.0),

@@ -385,9 +385,11 @@ struct Menu {
 enum MenuTarget {
     Workspace(WorkspaceId),
     Tab(TabId),
+    /// The bar's `+`, asking which machine a new workspace goes on.
+    NewWorkspace,
 }
 
-/// A menu's items, in order.
+/// A workspace's or tab's menu's items, in order.
 const MENU_ITEMS: [&str; 2] = ["Rename", "Close"];
 
 /// The window's whole state.
@@ -681,7 +683,7 @@ impl App {
                 bottom_shown: true,
                 menu: self
                     .menu
-                    .map(|menu| (menu.at, MENU_ITEMS.map(str::to_owned).to_vec())),
+                    .map(|menu| (menu.at, self.menu_items(menu.target))),
                 alert: self.reconnecting().or_else(|| self.out_of_contact()),
                 rounded,
                 finder,
@@ -1087,6 +1089,14 @@ impl App {
                 self.desk.show_tab(tab);
                 Ok(())
             }
+            // Once the daemon is connected to other machines, which one.
+            Hit::NewWorkspace if self.desk.workspace_machines().len() > 1 => {
+                self.menu = Some(Menu {
+                    at: point,
+                    target: MenuTarget::NewWorkspace,
+                });
+                Ok(())
+            }
             Hit::NewWorkspace => {
                 self.desk.new_workspace();
                 Ok(())
@@ -1236,6 +1246,12 @@ impl App {
     /// Handles a key press: a notice's keys, then the desk's.
     /// Carries out the menu item at `index` for `target`.
     fn menu_picked(&mut self, target: MenuTarget, index: usize) {
+        if target == MenuTarget::NewWorkspace {
+            if let Some(&(_, machine)) = self.desk.workspace_machines().get(index) {
+                self.desk.new_workspace_on(machine);
+            }
+            return;
+        }
         match (MENU_ITEMS.get(index).copied(), target) {
             (Some("Rename"), MenuTarget::Workspace(workspace)) => {
                 self.desk.rename_workspace(workspace);
@@ -1246,6 +1262,19 @@ impl App {
             }
             (Some("Close"), MenuTarget::Tab(tab)) => self.desk.close_tab(tab),
             _ => {}
+        }
+    }
+
+    /// What the menu for `target` offers, in order.
+    fn menu_items(&self, target: MenuTarget) -> Vec<String> {
+        match target {
+            MenuTarget::Workspace(_) | MenuTarget::Tab(_) => MENU_ITEMS.map(str::to_owned).to_vec(),
+            MenuTarget::NewWorkspace => (self.desk.workspace_machines().into_iter())
+                .map(|(name, machine)| match machine {
+                    None => format!("New workspace here, on {name}"),
+                    Some(_) => format!("New workspace on {name}"),
+                })
+                .collect(),
         }
     }
 
@@ -3274,6 +3303,10 @@ impl App {
             })) => self.daemon_asks(ask, host, question),
             SessionEvent::Message(ServerMessage::Event(Event::Forwarded(said))) => {
                 self.desk.forwarded(&said);
+                self.request_redraw();
+            }
+            SessionEvent::Message(ServerMessage::Event(Event::Said(said))) => {
+                self.desk.daemon_said(&said);
                 self.request_redraw();
             }
             SessionEvent::Message(ServerMessage::Event(Event::View { terminal, update })) => {

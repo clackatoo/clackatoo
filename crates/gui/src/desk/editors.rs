@@ -161,12 +161,6 @@ fn follow_places(
 }
 
 impl Desk {
-    /// The machine `pane` is on, if it's another than the daemon's: one of
-    /// a workspace `:connect` brought in.
-    pub(super) fn pane_machine(&self, pane: PaneId) -> Option<clackatoo_protocol::MachineId> {
-        (self.workspaces.find_pane(pane)).and_then(|(_, _, pane)| pane.home)
-    }
-
     /// The editor `pane` is, if it's one.
     pub(crate) fn editor(&self, pane: PaneId) -> Option<&Editor> {
         self.editors.panes.get(&pane)
@@ -296,8 +290,11 @@ impl Desk {
             .retain(|pane, _| anywhere.contains_key(pane));
         editors.told.retain(|pane, _| anywhere.contains_key(pane));
         self.drop_held_for_none();
+        let machines: Vec<_> = (shown.iter())
+            .map(|&(pane, _)| self.pane_machine(pane))
+            .collect();
         let (editors, options) = (&mut self.editors, &self.options);
-        for &(pane, buffer) in &shown {
+        for (&(pane, buffer), machine) in shown.iter().zip(machines) {
             if let std::collections::hash_map::Entry::Vacant(entry) = editors.panes.entry(pane) {
                 entry.insert(Editor::new(buffer, options));
                 // Made again as the daemon started: where it was, it goes.
@@ -308,7 +305,6 @@ impl Desk {
                     editors.put_back.insert(pane, place);
                 }
             }
-            let machine = (self.workspaces.find_pane(pane)).and_then(|(_, _, pane)| pane.home);
             editors
                 .buffers
                 .entry(buffer)
@@ -501,6 +497,7 @@ impl Desk {
         let request = Request::NewTab {
             workspace: shown.workspace,
             terminal: PaneTerminal::Blank(blank),
+            on: None,
         };
         self.request(request, Asked::Blank(dir));
     }
@@ -1803,11 +1800,13 @@ impl Desk {
             Place::Tab | Place::Here => Request::NewTab {
                 workspace: shown.workspace,
                 terminal,
+                on: None,
             },
             Place::Beside(side) => Request::Split {
                 pane: shown.pane,
                 side,
                 terminal,
+                on: None,
             },
         };
         self.request(request, Asked::Pane);

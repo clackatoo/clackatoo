@@ -225,6 +225,7 @@ impl Desk {
                 pane: review,
                 side: Side::Left,
                 terminal: PaneTerminal::File(OpenFile { path, cwd: None }),
+                on: None,
             };
             self.request(request, Asked::PaneAt(Some(landing)));
         }
@@ -315,6 +316,7 @@ impl Desk {
             pane: shown.pane,
             side: side.unwrap_or(Side::Right),
             terminal: PaneTerminal::Review(NewReview { chat, scope, cwd }),
+            on: None,
         };
         self.request(request, Asked::Pane);
     }

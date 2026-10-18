@@ -394,6 +394,7 @@ impl Desk {
             Request::NewTab {
                 workspace: shown.workspace,
                 terminal: practice,
+                on: None,
             },
             self.lesson_asked(LessonAsked::Practice),
         );
@@ -479,6 +480,7 @@ impl Desk {
                 pane,
                 side: Side::Left,
                 terminal: lesson,
+                on: None,
             },
             self.lesson_asked(LessonAsked::Lesson),
         );
@@ -551,6 +553,7 @@ impl Desk {
                         side: Side::Left,
                         terminal: PaneTerminal::Files(OpenFiles { dir: Some(dir) }),
                         share: Some(self.explorer_share()),
+                        on: None,
                     };
                     self.request(request, self.lesson_asked(LessonAsked::Setup));
                 }

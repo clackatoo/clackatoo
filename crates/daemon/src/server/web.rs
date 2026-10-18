@@ -3,13 +3,13 @@
 //! pair, and the chats as a list, with what needs the user, and the
 //! notifications sent when no one is looking (see [`crate::web`]).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    ChatState, ChatSummary, Device, Error, Event, Outcome, Response, ServerMessage, TerminalId,
-    WorkspaceId,
+    ChatState, ChatSummary, Device, Error, Event, MachineId, Outcome, Response, ServerMessage,
+    TerminalId, WorkspaceId,
 };
 use clackatoo_protocol::{frame, wire};
 use mio::{Interest, Token};
@@ -720,7 +720,8 @@ impl Daemon {
         }
         // The next change goes to every watcher, whatever was sent before.
         self.chat_watch.sent = None;
-        let mut chats = self.chat_summaries();
+        // Those lent to another machine's daemon are its alone.
+        let mut chats = self.chats_for(token, &self.chat_summaries());
         // A client from before federation is shown only this daemon's.
         if let Some(Source::Client(client)) = self.sources.get(token.0)
             && client.wire < wire::FEDERATION
@@ -903,7 +904,9 @@ impl Daemon {
             (std::mem::take(&mut self.chat_watch.due).into_iter()).partition(|n| n.at <= now);
         self.chat_watch.due = waiting;
         for notice in due {
-            if self.looked_at(notice.chat) {
+            // One lent to another machine's daemon is said there, if
+            // anywhere.
+            if self.looked_at(notice.chat) || self.terminal_lent_to(notice.chat).is_some() {
                 continue;
             }
             let Some(chat) = self.chat_ref(notice.chat) else {
@@ -950,27 +953,49 @@ impl Daemon {
             return;
         }
         self.chat_watch.sent = Some(chats.clone());
+        // Those lent to another machine's daemon go to it alone.
+        let lent: HashMap<TerminalId, MachineId> = (chats.iter())
+            .filter_map(|chat| Some((chat.chat, self.terminal_lent_to(chat.chat)?)))
+            .collect();
         // A client from before federation is shown only this daemon's own,
         // as it's shown only its workspaces.
         let own = (chats.iter())
-            .filter(|chat| self.chat_ref(chat.chat).is_some())
+            .filter(|chat| self.chat_ref(chat.chat).is_some() && !lent.contains_key(&chat.chat))
             .cloned()
             .collect();
-        let event = ServerMessage::Event(Event::Chats(chats));
+        let shown: Vec<ChatSummary> = (chats.iter())
+            .filter(|chat| !lent.contains_key(&chat.chat))
+            .cloned()
+            .collect();
+        let event = ServerMessage::Event(Event::Chats(shown));
         let mut event = Broadcast::new(&event, "the chats");
         let older = ServerMessage::Event(Event::Chats(own));
         let mut older = Broadcast::new(&older, "the chats");
         let mut told = Vec::new();
         for (key, source) in &mut self.sources {
-            if let Source::Client(client) = source
-                && client.watching_chats
-                && !client.finished
-                && let Some(bytes) = if client.wire < wire::FEDERATION {
-                    older.to(client.wire)
-                } else {
-                    event.to(client.wire)
+            let Source::Client(client) = source else {
+                continue;
+            };
+            if !client.watching_chats || client.finished {
+                continue;
+            }
+            let borrower = client.machine.as_ref().map(|machine| machine.id);
+            let theirs = borrower.is_some_and(|machine| lent.values().any(|&to| to == machine));
+            if theirs && client.wire >= wire::FEDERATION {
+                let with: Vec<ChatSummary> = (chats.iter())
+                    .filter(|chat| lent.get(&chat.chat).is_none_or(|&to| Some(to) == borrower))
+                    .cloned()
+                    .collect();
+                match frame::encode(client.wire, &ServerMessage::Event(Event::Chats(with))) {
+                    Ok(bytes) => client.outgoing.extend_from_slice(&bytes),
+                    Err(err) => log::error!("encoding the chats failed: {err}"),
                 }
-            {
+                told.push(Token(key));
+            } else if let Some(bytes) = if client.wire < wire::FEDERATION {
+                older.to(client.wire)
+            } else {
+                event.to(client.wire)
+            } {
                 client.outgoing.extend_from_slice(bytes);
                 told.push(Token(key));
             }

@@ -4,7 +4,9 @@
 //! brought in, that doesn't come through: an editor, say, whose machine's
 //! clackatoo is too old to pass it on, or a terminal from yet another
 //! machine. The pane says so, and how to update the one that's too old;
-//! the rest of the window goes on as usual.
+//! the rest of the window goes on as usual. A pane from another machine
+//! in a workspace of the daemon's own shows as one too until that machine
+//! says what it shows, as before it's reached.
 
 use clackatoo_protocol::{Attributes, PaneKind, Size, Style};
 use clackatoo_term::{Row, RowBuilder};
@@ -18,6 +20,9 @@ pub(crate) struct OtherPane {
     kind: PaneKind,
     /// The machine it's on, for one from another machine.
     host: Option<String>,
+    /// It's from another machine, in a workspace of the daemon's own, and
+    /// waits for that machine to say what it shows.
+    waiting: bool,
     title: String,
     width: usize,
     rows: Vec<Row>,
@@ -34,10 +39,29 @@ impl OtherPane {
         Self {
             kind,
             host,
+            waiting: false,
             title,
             width: 0,
             rows: Vec::new(),
         }
+    }
+
+    /// A pane of `kind` on `host`, in a workspace of the daemon's own,
+    /// waiting for that machine to say what it shows.
+    pub(crate) fn waiting(kind: PaneKind, host: String) -> Self {
+        Self {
+            kind,
+            title: said_waiting(kind, &host),
+            host: Some(host),
+            waiting: true,
+            width: 0,
+            rows: Vec::new(),
+        }
+    }
+
+    /// Whether it waits for its machine to say what it shows.
+    pub(crate) fn is_waiting(&self) -> bool {
+        self.waiting
     }
 
     /// What kind of pane it is, as the daemon names it.
@@ -67,6 +91,10 @@ impl OtherPane {
             ..Style::DEFAULT
         };
         let (first_words, second_words) = match &self.host {
+            Some(host) if self.waiting => (
+                said_waiting(self.kind, host),
+                format!("It shows here once {host} is reached, and says what it shows."),
+            ),
             Some(host) if self.kind.as_str() == "terminal" => (
                 said_elsewhere(self.kind, host),
                 format!(
@@ -134,6 +162,21 @@ pub(crate) fn said(kind: PaneKind) -> String {
     format!("This pane needs a newer clackatoo ({kind})")
 }
 
+/// What a pane of `kind` on `host`, another machine, says while it waits
+/// for that machine: "a terminal on desk".
+fn said_waiting(kind: PaneKind, host: &str) -> String {
+    let what = match kind.as_str() {
+        "terminal" => "a terminal",
+        "editor" => "an editor",
+        "explorer" => "an explorer",
+        "board" => "a board",
+        "review" => "a review",
+        "browser" => "a chat's browser",
+        _ => "a pane",
+    };
+    format!("{what} on {host}")
+}
+
 /// What a pane of `kind` on `host`, another machine, says: "an editor on
 /// desk needs a newer clackatoo there", as the daemon says when asked
 /// for one there.
@@ -190,5 +233,16 @@ mod tests {
         // A terminal from yet another machine is for later.
         let pane = OtherPane::new(PaneKind::new("terminal"), Some("desk".into()));
         assert!(pane.title().ends_with("coming soon"), "{}", pane.title());
+    }
+
+    #[test]
+    fn one_waiting_for_its_machine_says_where_and_what_it_waits_for() {
+        let mut pane = OtherPane::waiting(PaneKind::new("terminal"), "desk".into());
+        pane.resize(Size::new(120, 10).unwrap());
+        let rows: Vec<String> = pane.scene().iter().map(|row| row.text()).collect();
+        assert_eq!(rows[0].trim_end(), "a terminal on desk");
+        assert!(rows[1].contains("once desk is reached"), "{rows:?}");
+        assert_eq!(pane.title(), "a terminal on desk");
+        assert!(pane.is_waiting());
     }
 }

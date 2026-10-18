@@ -2234,10 +2234,13 @@ fn a_port_here_forwards_through_the_connection_to_another_machine() {
         stopped,
         Response::Text("Stopped forwarding the port to laptop".into())
     );
-    assert!(
-        TcpStream::connect(("127.0.0.1", local)).is_err(),
-        "still listening"
-    );
+    // The connection's thread lets go of its copy of the socket as it's
+    // told, a moment after.
+    let deadline = Instant::now() + PATIENCE;
+    while TcpStream::connect(("127.0.0.1", local)).is_ok() {
+        assert!(Instant::now() < deadline, "still listening");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     // A pane of desk's own has nothing to forward to.
     let own = pair.window.new_workspace(None, shell()).unwrap();
     let refused = pair.window.request(&Request::Forwards {
@@ -2248,6 +2251,629 @@ fn a_port_here_forwards_through_the_connection_to_another_machine() {
         matches!(refused, Ok(Response::Error(Error::Other(_)))),
         "{refused:?}"
     );
+}
+
+// --- Panes on another machine in this daemon's own workspaces ----------
+
+/// The pane `pane` in `workspaces`, and its workspace.
+fn found(workspaces: &Workspaces, pane: PaneId) -> (Workspace, clackatoo_protocol::Pane) {
+    let (workspace, _, pane) =
+        (workspaces.find_pane(pane)).unwrap_or_else(|| panic!("no pane {pane} in {workspaces:?}"));
+    (workspace.clone(), pane)
+}
+
+/// Waits for the pane `pane` to show what laptop says it shows, as
+/// `client` is shown it: once laptop has lent it.
+fn wait_for_borrowed(client: &mut Client, pane: PaneId) -> Content {
+    let shown = wait_for_workspaces(client, |shown| {
+        (shown.find_pane(pane))
+            .is_some_and(|(_, _, pane)| !matches!(pane.content, Content::Other { .. }))
+    });
+    found(&shown, pane).1.content
+}
+
+/// The terminal `content` is.
+fn terminal_of(content: Content) -> TerminalId {
+    content
+        .terminal()
+        .unwrap_or_else(|| panic!("{content:?} isn't a terminal"))
+}
+
+/// A new tab of `workspace` showing `terminal`, on `machine`.
+fn new_tab_on(
+    workspace: clackatoo_protocol::WorkspaceId,
+    terminal: PaneTerminal,
+    machine: MachineId,
+) -> Request {
+    Request::NewTab {
+        workspace,
+        terminal,
+        on: Some(machine),
+    }
+}
+
+/// The pane `client` asking `request` makes.
+fn made(client: &mut Client, request: &Request) -> PaneId {
+    match client.request(request).unwrap() {
+        Response::PaneCreated(pane) => pane,
+        other => panic!("{request:?} made no pane: {other:?}"),
+    }
+}
+
+/// How many terminals laptop runs.
+fn laptops_lent(pair: &Pair) -> usize {
+    lent_by(&mut pair.laptop().client())
+}
+
+/// How many workspaces the daemon `client` is of has lent, as it lists
+/// them: its own clients see nothing of them else.
+fn lent_by(client: &mut Client) -> usize {
+    match client.request(&Request::Lent).unwrap() {
+        Response::Text(listed) if listed.starts_with("no workspace") => 0,
+        Response::Text(listed) => listed.lines().count(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_pane_on_another_machine_goes_in_a_workspace_here_and_its_keys_reach_it_there() {
+    let mut pair = Pair::new();
+    let laptop = pair.laptop().machine().id;
+    let first = pair
+        .window
+        .new_workspace(Some("home".into()), shell())
+        .unwrap();
+    let shown = pair.window.watch_workspaces().unwrap();
+    let home = found(&shown, first).0.id;
+    let before = laptops_lent(&pair);
+
+    // A new tab here, holding a terminal on laptop.
+    let there = made(&mut pair.window, &new_tab_on(home, shell(), laptop));
+    let terminal = terminal_of(wait_for_borrowed(&mut pair.window, there));
+    let shown = pair.window.watch_workspaces().unwrap();
+    let (workspace, pane) = found(&shown, there);
+    assert_eq!((workspace.id, workspace.home), (home, None), "here's own");
+    assert_eq!(pane.home, Some(laptop));
+    assert_eq!(laptops_lent(&pair), before + 1);
+    // Laptop's own windows never see the workspace holding it there.
+    let at_laptop = pair.laptop().client().watch_workspaces().unwrap();
+    let names: Vec<&str> = (at_laptop.list.iter())
+        .map(|workspace| workspace.name.as_str())
+        .collect();
+    assert_eq!(names, ["work"]);
+    // Typed into here, it runs there: in laptop's home.
+    attach_to(&mut pair.window, terminal);
+    (pair.window)
+        .send_input(terminal, b"echo at-$(basename $PWD)\r")
+        .unwrap();
+    wait_for_view(&mut pair.window, terminal, "at-laptop");
+
+    // Split, it splits in on laptop too, as the pane split is there.
+    let split = pair.window.split_pane(there, Side::Right, shell()).unwrap();
+    wait_for_borrowed(&mut pair.window, split);
+    let shown = pair.window.watch_workspaces().unwrap();
+    let (workspace, pane) = found(&shown, split);
+    assert_eq!((workspace.id, pane.home), (home, Some(laptop)));
+    assert_eq!(laptops_lent(&pair), before + 2);
+    // Beside here's own, it's here's.
+    let own = pair.window.split_pane(first, Side::Below, shell()).unwrap();
+    let shown = pair.window.watch_workspaces().unwrap();
+    assert_eq!(found(&shown, own).1.home, None);
+    assert_eq!(laptops_lent(&pair), before + 2);
+
+    // Closed here, it's closed there.
+    pair.window.close_pane(split).unwrap();
+    wait_for_workspaces(&mut pair.window, |shown| shown.find_pane(split).is_none());
+    let deadline = Instant::now() + PATIENCE;
+    while laptops_lent(&pair) != before + 1 {
+        assert!(Instant::now() < deadline, "its pane there never closed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Its program exiting there, it closes here.
+    pair.window.send_input(terminal, b"exit\r").unwrap();
+    wait_for_workspaces(&mut pair.window, |shown| shown.find_pane(there).is_none());
+    assert_eq!(laptops_lent(&pair), before);
+}
+
+#[test]
+fn a_new_pane_goes_on_the_machine_of_the_pane_its_made_from_whatever_its_kind() {
+    let mut pair = Pair::new();
+    let laptop = pair.laptop().machine().id;
+    let laptop_home = pair.world.host("laptop");
+    std::fs::write(laptop_home.join("notes.txt"), "notes\n").unwrap();
+    let first = pair
+        .window
+        .new_workspace(Some("home".into()), shell())
+        .unwrap();
+    let shown = pair.window.watch_workspaces().unwrap();
+    let home = found(&shown, first).0.id;
+    let there = made(&mut pair.window, &new_tab_on(home, shell(), laptop));
+    wait_for_borrowed(&mut pair.window, there);
+    let editor = PaneTerminal::File(OpenFile {
+        path: "notes.txt".into(),
+        cwd: None,
+    });
+    let explorer = PaneTerminal::Files(OpenFiles { dir: None });
+    let mut made_here = Vec::new();
+    for terminal in [editor, explorer, chat()] {
+        made_here.push(
+            pair.window
+                .split_pane(there, Side::Below, terminal)
+                .unwrap(),
+        );
+    }
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        made_here.iter().all(|&pane| {
+            (shown.find_pane(pane))
+                .is_some_and(|(_, _, pane)| !matches!(pane.content, Content::Other { .. }))
+        })
+    });
+    let kinds: Vec<(&str, Option<MachineId>)> = (made_here.iter())
+        .map(|&pane| {
+            let (workspace, pane) = found(&shown, pane);
+            assert_eq!(workspace.id, home);
+            (pane.content.kind_name(), pane.home)
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("editor", Some(laptop)),
+            ("explorer", Some(laptop)),
+            ("terminal", Some(laptop)),
+        ]
+    );
+    // The finder greps laptop, from the pane there.
+    std::fs::write(laptop_home.join("todo.md"), "fix the frobnicator\n").unwrap();
+    let grep = Search::Grep {
+        pattern: "frobnicator".into(),
+        exact: true,
+    };
+    pair.window.find(6, Some(there), grep).unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    let root = loop {
+        assert!(Instant::now() < deadline, "the search never said its root");
+        match pair.window.next_event().unwrap() {
+            Event::Found {
+                id: 6,
+                found: Found::Root { path, .. },
+            } => break path,
+            Event::View { terminal, .. } => pair.window.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    };
+    assert_eq!(root, laptop_home.display().to_string());
+}
+
+#[test]
+fn a_pane_from_a_machine_a_workspace_there_cant_reach_is_refused() {
+    let mut pair = Pair::new();
+    let desk = pair.desk.machine();
+    let pane = pair.work.tabs[0].layout.panes()[0].id;
+    let refusals = [
+        Request::Split {
+            pane,
+            side: Side::Right,
+            terminal: shell(),
+            on: Some(desk.id),
+        },
+        new_tab_on(pair.work.id, shell(), desk.id),
+    ];
+    for refused in refusals {
+        let answer = pair.window.request(&refused).unwrap();
+        assert_eq!(
+            answer,
+            Response::Error(Error::Other(
+                "‘laptop’ can't reach ‘desk’: open it in one of ‘desk’'s workspaces".into()
+            )),
+        );
+    }
+    // Naming laptop itself is the same as naming none.
+    let laptop = pair.laptop().machine().id;
+    let split = Request::Split {
+        pane,
+        side: Side::Right,
+        terminal: shell(),
+        on: Some(laptop),
+    };
+    made(&mut pair.window, &split);
+    assert_eq!(pair.at_laptop("work").tabs[0].layout.panes().len(), 2);
+}
+
+#[test]
+fn a_new_workspace_is_made_on_the_machine_named_and_lives_there() {
+    let mut pair = Pair::new();
+    let laptop = pair.laptop().machine().id;
+    let new = Request::NewWorkspace {
+        name: Some("notes".into()),
+        terminal: shell(),
+        on: Some(laptop),
+    };
+    let pane = made(&mut pair.window, &new);
+    let shown = wait_for_workspaces(&mut pair.window, |shown| theirs(shown, "notes").is_some());
+    let (workspace, _) = found(&shown, pane);
+    assert_eq!(
+        (workspace.name.as_str(), workspace.home),
+        ("notes", Some(laptop))
+    );
+    assert_eq!(pair.at_laptop("notes").tabs.len(), 1);
+    // Named on this machine itself, it's this machine's.
+    let desk = pair.desk.machine().id;
+    let new = Request::NewWorkspace {
+        name: Some("mine".into()),
+        terminal: shell(),
+        on: Some(desk),
+    };
+    let pane = made(&mut pair.window, &new);
+    let shown = pair.window.watch_workspaces().unwrap();
+    assert_eq!(found(&shown, pane).0.home, None);
+}
+
+#[test]
+fn a_pane_on_another_machine_is_kept_through_either_restarting() {
+    let world = World::new();
+    let laptop = world.start_with("laptop", true);
+    let laptop_id = laptop.machine().id;
+    {
+        let desk = world.start("desk");
+        let mut window = desk.client();
+        window.watch_connections(false).unwrap();
+        connect(&mut window, "laptop");
+        wait_for_state(&mut window, "laptop", connected);
+        let first = window.new_workspace(Some("home".into()), shell()).unwrap();
+        let shown = window.watch_workspaces().unwrap();
+        let home = found(&shown, first).0.id;
+        let there = made(&mut window, &new_tab_on(home, shell(), laptop_id));
+        let terminal = terminal_of(wait_for_borrowed(&mut window, there));
+        attach_to(&mut window, terminal);
+        window
+            .send_input(terminal, b"echo before-$((6 * 7))\r")
+            .unwrap();
+        wait_for_view(&mut window, terminal, "before-42");
+    }
+    // Desk restarts: its layout comes back with the pane, which shows the
+    // same terminal on laptop as before, once laptop is reached again.
+    let desk = world.start_with("desk", true);
+    let mut window = desk.client();
+    let shown = wait_for_workspaces(&mut window, |shown| {
+        (shown.list.iter()).any(|workspace| workspace.name == "home" && workspace.tabs.len() == 2)
+    });
+    let home_now = (shown.list.iter())
+        .find(|workspace| workspace.name == "home")
+        .unwrap();
+    let pane = home_now.tabs[1].layout.panes()[0].id;
+    let terminal = terminal_of(wait_for_borrowed(&mut window, pane));
+    let view = attach_to(&mut window, terminal);
+    assert!(
+        screen_text(&view).contains("before-42"),
+        "{}",
+        screen_text(&view)
+    );
+
+    // Laptop restarts: it makes the pane again, a new shell, which the
+    // pane here shows.
+    drop(laptop);
+    let laptop = world.start_with("laptop", true);
+    let shown = wait_for_workspaces(&mut window, |shown| {
+        (shown.find_pane(pane)).is_some_and(|(_, _, shown)| {
+            shown.content.terminal().is_some_and(|now| now != terminal)
+        })
+    });
+    let again = terminal_of(found(&shown, pane).1.content);
+    attach_to(&mut window, again);
+    window
+        .send_input(again, b"echo after-$((6 * 7))\r")
+        .unwrap();
+    wait_for_view(&mut window, again, "after-42");
+    drop(laptop);
+}
+
+#[test]
+fn a_pane_lent_to_a_daemon_that_no_longer_shows_it_is_closed_once_its_back() {
+    let world = World::new();
+    let laptop = world.start("laptop");
+    let laptop_id = laptop.machine().id;
+    let terminals = || lent_by(&mut laptop.client());
+    let before = terminals();
+    {
+        let desk = world.start("desk");
+        let mut window = desk.client();
+        window.watch_connections(false).unwrap();
+        connect(&mut window, "laptop");
+        wait_for_state(&mut window, "laptop", connected);
+        let first = window.new_workspace(Some("home".into()), shell()).unwrap();
+        let shown = window.watch_workspaces().unwrap();
+        let home = found(&shown, first).0.id;
+        let there = made(&mut window, &new_tab_on(home, shell(), laptop_id));
+        wait_for_borrowed(&mut window, there);
+        assert_eq!(terminals(), before + 1);
+    }
+    // Desk starts afresh, keeping nothing: laptop still lends it the pane,
+    // which nothing here shows, so it's closed there.
+    let desk = world.start("desk");
+    let mut window = desk.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "laptop");
+    wait_for_state(&mut window, "laptop", connected);
+    let deadline = Instant::now() + PATIENCE;
+    while terminals() != before {
+        assert!(Instant::now() < deadline, "the pane lent was never closed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // And a pane can't be lent by a machine that isn't connected.
+    window.disconnect("laptop").unwrap();
+    let first = window.new_workspace(None, shell()).unwrap();
+    let shown = window.watch_workspaces().unwrap();
+    let home = found(&shown, first).0.id;
+    let refused = window
+        .request(&new_tab_on(home, shell(), laptop_id))
+        .unwrap();
+    assert!(
+        matches!(&refused, Response::Error(Error::Other(why)) if why.contains("isn't connected")),
+        "{refused:?}"
+    );
+}
+
+/// Lends desk, through `pair`, a pane of laptop's showing `content`, in a
+/// new tab of a workspace of desk's own made for it: desk's numbers for
+/// the pane, and what it shows.
+fn borrow(pair: &mut Pair, content: PaneTerminal) -> (PaneId, Content) {
+    let laptop = pair.laptop().machine().id;
+    let first = pair.window.new_workspace(None, shell()).unwrap();
+    let shown = pair.window.watch_workspaces().unwrap();
+    let home = found(&shown, first).0.id;
+    let there = made(&mut pair.window, &new_tab_on(home, content, laptop));
+    let content = wait_for_borrowed(&mut pair.window, there);
+    (there, content)
+}
+
+#[test]
+fn what_a_machine_lent_is_the_borrowers_alone() {
+    let mut pair = Pair::new();
+    let (_, _) = borrow(&mut pair, shell());
+    let (_, chat_content) = borrow(&mut pair, chat());
+    // Laptop's numbers for what it lent come just before those of what's
+    // made next: a terminal, a chat, and their workspaces.
+    let mut plain = pair.laptop().client();
+    let probe = plain
+        .new_terminal(NewTerminal {
+            size: Size::new(60, 10).unwrap(),
+            command: None,
+            cwd: None,
+            record_to: None,
+        })
+        .unwrap();
+    let (lent_terminal, lent_chat) = (TerminalId(probe.0 - 2), TerminalId(probe.0 - 1));
+    let listed: Vec<TerminalId> = (plain.list_terminals().unwrap().into_iter())
+        .map(|terminal| terminal.id)
+        .collect();
+    assert!(
+        !listed.contains(&lent_terminal) && !listed.contains(&lent_chat),
+        "{listed:?}"
+    );
+    assert!(listed.contains(&probe));
+    // Nothing can be asked of them, but by desk.
+    for refused in [
+        Request::SendInput {
+            terminal: lent_terminal,
+            bytes: b"exit\r".to_vec(),
+        },
+        Request::Capture {
+            terminal: lent_terminal,
+        },
+        Request::CloseTerminal {
+            terminal: lent_terminal,
+        },
+        Request::Attach {
+            terminal: lent_terminal,
+        },
+        Request::Chat {
+            terminal: lent_chat,
+            action: ChatAction::Stop,
+        },
+    ] {
+        let answer = plain.request(&refused).unwrap();
+        assert!(
+            matches!(answer, Response::Error(Error::NoSuchTerminal(_))),
+            "{refused:?}: {answer:?}"
+        );
+    }
+    // Nor are its chats told to laptop's windows; desk is told its own.
+    let chats = match plain.request(&Request::WatchChats).unwrap() {
+        Response::Chats(chats) => chats,
+        other => panic!("{other:?}"),
+    };
+    assert!(chats.iter().all(|chat| chat.chat != lent_chat), "{chats:?}");
+    let at_desk = match pair.window.request(&Request::WatchChats).unwrap() {
+        Response::Chats(chats) => chats,
+        other => panic!("{other:?}"),
+    };
+    let desk_chat = terminal_of(chat_content);
+    assert!(
+        at_desk.iter().any(|chat| chat.chat == desk_chat),
+        "{at_desk:?}"
+    );
+}
+
+#[test]
+fn a_workspace_lent_is_listed_and_taken_back_but_never_otherwise_touched_there() {
+    let mut pair = Pair::new();
+    borrow(&mut pair, shell());
+    // Laptop's number for the workspace lent comes just before the next.
+    let mut plain = pair.laptop().client();
+    let probe_workspace = plain.new_workspace(None, shell()).unwrap();
+    let shown = plain.watch_workspaces().unwrap();
+    let after = found(&shown, probe_workspace).0.id;
+    let lent_workspace = clackatoo_protocol::WorkspaceId(after.0 - 1);
+    for refused in [
+        Request::CloseWorkspace {
+            workspace: lent_workspace,
+        },
+        Request::RenameWorkspace {
+            workspace: lent_workspace,
+            name: "mine".into(),
+        },
+    ] {
+        let answer = plain.request(&refused).unwrap();
+        assert!(
+            matches!(answer, Response::Error(Error::NoSuchWorkspace(_))),
+            "{refused:?}: {answer:?}"
+        );
+    }
+    // Nor may laptop's own clients say they're another machine.
+    let relay_as = Request::RelayAs {
+        machine: clackatoo_protocol::Machine {
+            id: pair.desk.machine().id,
+            name: "desk".into(),
+            run: 1,
+        },
+    };
+    let answer = plain.request(&relay_as).unwrap();
+    assert!(
+        matches!(answer, Response::Error(Error::Other(_))),
+        "{answer:?}"
+    );
+    // But the workspaces can be listed, and taken back by hand.
+    let Response::Text(listed) = plain.request(&Request::Lent).unwrap() else {
+        panic!("no list");
+    };
+    assert!(listed.contains("lent to desk, connected"), "{listed}");
+    let reclaim = Request::Unlend {
+        workspace: lent_workspace,
+        close_idle: false,
+    };
+    assert_eq!(
+        plain.request(&reclaim).unwrap(),
+        Response::Text("gave it back, as ‘from-desk’".into())
+    );
+    assert_eq!(pair.at_laptop("from-desk").tabs.len(), 1);
+}
+
+#[test]
+fn a_blank_with_changes_lent_and_closed_by_its_borrower_is_given_back_not_lost() {
+    let mut pair = Pair::new();
+    let blank = PaneTerminal::Blank(clackatoo_protocol::OpenBlank { cwd: None });
+    let (there, content) = borrow(&mut pair, blank);
+    let buffer = content.buffer().expect("an editor");
+    let snapshot = attach_to_buffer(&mut pair.window, buffer, 1);
+    pair.window
+        .edit(buffer, 1, insert(0, 0, "keep me\n", snapshot.version))
+        .unwrap();
+    assert!(matches!(
+        next_change(&mut pair.window, buffer),
+        BufferUpdate::Acked { .. }
+    ));
+    // Desk closes the tab holding it, which closes it on laptop: laptop
+    // keeps it, as one of its own.
+    let shown = pair.window.watch_workspaces().unwrap();
+    let (workspace, _) = found(&shown, there);
+    let tab = (workspace.tabs.iter())
+        .find(|tab| tab.layout.contains(there))
+        .unwrap()
+        .id;
+    pair.window.request(&Request::CloseTab { tab }).unwrap();
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        theirs(shown, "from-desk").is_some() && shown.find_pane(there).is_none()
+    });
+    let kept = theirs(&shown, "from-desk").unwrap();
+    assert!(matches!(
+        kept.tabs[0].layout.panes()[0].content,
+        Content::Buffer(_)
+    ));
+}
+
+#[test]
+fn a_pane_given_back_that_isnt_an_idle_shell_is_kept_there() {
+    let world = World::new();
+    let laptop = world.start("laptop");
+    let laptop_id = laptop.machine().id;
+    {
+        let desk = world.start("desk");
+        let mut window = desk.client();
+        window.watch_connections(false).unwrap();
+        connect(&mut window, "laptop");
+        wait_for_state(&mut window, "laptop", connected);
+        let first = window.new_workspace(Some("home".into()), shell()).unwrap();
+        let shown = window.watch_workspaces().unwrap();
+        let home = found(&shown, first).0.id;
+        let explorer = PaneTerminal::Files(OpenFiles { dir: None });
+        let there = made(&mut window, &new_tab_on(home, explorer, laptop_id));
+        wait_for_borrowed(&mut window, there);
+    }
+    // Desk starts afresh: laptop isn't told to close the explorer it lent,
+    // only given it back, and keeps it as its own.
+    let desk = world.start("desk");
+    let mut window = desk.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "laptop");
+    wait_for_state(&mut window, "laptop", connected);
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let shown = laptop.client().watch_workspaces().unwrap();
+        if let Some(kept) = (shown.list.iter()).find(|workspace| workspace.name == "from-desk") {
+            assert!(matches!(
+                kept.tabs[0].layout.panes()[0].content,
+                Content::Files(_)
+            ));
+            break;
+        }
+        assert!(Instant::now() < deadline, "it was never given back");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_machine_that_restarted_without_a_pane_it_lent_is_said_to_have() {
+    let world = World::new();
+    let laptop = world.start("laptop");
+    let laptop_id = laptop.machine().id;
+    let desk = world.start("desk");
+    let mut window = desk.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "laptop");
+    wait_for_state(&mut window, "laptop", connected);
+    let first = window.new_workspace(Some("home".into()), shell()).unwrap();
+    let shown = window.watch_workspaces().unwrap();
+    let home = found(&shown, first).0.id;
+    let there = made(&mut window, &new_tab_on(home, shell(), laptop_id));
+    wait_for_borrowed(&mut window, there);
+    // Laptop restarts keeping nothing.
+    drop(laptop);
+    let laptop = world.start("laptop");
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "the bar was never told");
+        match window.next_event().expect("an event") {
+            Event::Said(said) => {
+                assert_eq!(
+                    said,
+                    "‘laptop’ restarted without a pane it lent this machine: closed here"
+                );
+                break;
+            }
+            Event::View { terminal, .. } => window.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    }
+    wait_for_workspaces(&mut window, |shown| shown.find_pane(there).is_none());
+    drop(laptop);
+}
+
+#[test]
+fn workspaces_lent_to_a_machine_gone_a_month_are_given_back_as_the_daemon_starts() {
+    let world = World::new();
+    let desk = "07".repeat(16);
+    let kept = format!(
+        r#"{{"clackatoo_workspaces": 1, "workspaces": [{{"name": "", "tabs": [{{"layout": {{"pane": {{"terminal": {{"cwd": null}}}}}}}}], "lent": {{"to": "{desk}", "key": 5}}}}], "borrowers": [{{"machine": "{desk}", "name": "desk", "last_seen": 1000}}]}}"#
+    );
+    std::fs::create_dir_all(world.host("laptop")).unwrap();
+    std::fs::write(world.host("laptop").join("workspaces"), kept).unwrap();
+    let laptop = world.start_with("laptop", true);
+    let shown = laptop.client().watch_workspaces().unwrap();
+    let names: Vec<&str> = (shown.list.iter())
+        .map(|workspace| workspace.name.as_str())
+        .collect();
+    assert_eq!(names, ["from-desk"]);
 }
 
 // --- What the relay adds to a key's echo --------------------------------

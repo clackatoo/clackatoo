@@ -121,11 +121,13 @@ impl Desk {
                 pane,
                 side: Side::Right,
                 terminal: file,
+                on: None,
             }
         } else {
             Request::NewTab {
                 workspace: shown.workspace,
                 terminal: file,
+                on: None,
             }
         };
         self.request(request, Asked::PaneAt(landing));

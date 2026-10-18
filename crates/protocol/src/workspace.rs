@@ -136,6 +136,29 @@ pub struct Workspace {
         deserialize_with = "wire::since::<{ wire::FEDERATION }, _, _>"
     )]
     pub home: Option<MachineId>,
+    /// Who it's lent to, if it holds a pane the daemon made for a daemon
+    /// connected to it, to show in a workspace of that daemon's own
+    /// ([`Request::Lend`](crate::Request::Lend)): such a workspace has one
+    /// tab of one pane, and is shown to that daemon alone, never to a
+    /// window. `None` for any other, and from a daemon older than protocol
+    /// 93.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::LEND }, _>",
+        deserialize_with = "wire::since::<{ wire::LEND }, _, _>"
+    )]
+    pub lent: Option<Lent>,
+}
+
+/// Who a workspace holding a pane lent to another daemon is lent to, and
+/// how that daemon knows the pane: see [`Workspace::lent`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lent {
+    /// The machine of the daemon it's lent to.
+    pub to: MachineId,
+    /// The number that daemon chose for the pane as it asked for it, kept
+    /// with the pane from one run to the next of either daemon, by which
+    /// it finds the pane again: the pane's own ID is new each run.
+    pub key: u64,
 }
 
 /// One tab of a workspace: its panes, laid out.

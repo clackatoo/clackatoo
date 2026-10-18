@@ -49,6 +49,10 @@
 //!     shell's integration marked with it.
 //! 21. Which machine the daemon is, by its ID, and its connections to the
 //!     daemons on other machines, which the next build makes again.
+//! 22. Panes showing what's on another machine, by that machine and the
+//!     number this daemon gave the pane there, and the workspaces this
+//!     daemon lent another, holding a pane of its own for that daemon to
+//!     show.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -61,11 +65,11 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 21;
+pub(crate) const VERSION: u32 = 22;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, VERSION,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -154,6 +158,34 @@ pub(crate) struct State {
     /// The daemon's connections to the daemons on other machines. Since
     /// version 21; before, there were none.
     pub(crate) connections: Vec<Connection>,
+    /// The workspaces lent to the daemons on other machines. Since version
+    /// 22; before, there were none.
+    pub(crate) lent: Vec<Lent>,
+    /// The machines they're lent to. Since version 22.
+    pub(crate) borrowers: Vec<Borrower>,
+}
+
+/// A machine whose daemon this one lends workspaces to. Since version 22.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Borrower {
+    /// Its ID.
+    pub(crate) machine: [u8; 16],
+    /// What it says it's called.
+    pub(crate) name: String,
+    /// When its daemon was last connected, in seconds since 1970.
+    pub(crate) last_seen: u64,
+}
+
+/// A workspace lent to the daemon on another machine, holding a pane for
+/// it to show (see [`clackatoo_protocol::Lent`]). Since version 22.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Lent {
+    /// The workspace, by its ID.
+    pub(crate) workspace: u32,
+    /// The machine it's lent to, by its ID.
+    pub(crate) to: [u8; 16],
+    /// The number that machine knows the pane by.
+    pub(crate) key: u64,
 }
 
 /// A connection to the daemon on another machine. Since version 21.
@@ -635,6 +667,16 @@ pub(crate) enum Layout {
     /// A pane showing a folder in an editor, as its listing, by the
     /// explorer whose root it is. Since version 18.
     Folder { id: u32, files: u32 },
+    /// A pane showing what's on another machine: a pane its daemon lent
+    /// this one, by that machine's ID and the number this daemon gave the
+    /// pane, and the kind of pane it is, such as `terminal`. Since version
+    /// 22.
+    Borrowed {
+        id: u32,
+        machine: [u8; 16],
+        key: u64,
+        kind: String,
+    },
 }
 
 /// A file explorer: the directory at its root. What's expanded in it is
@@ -765,8 +807,72 @@ impl State {
             16..=18 => Ok(postcard::from_bytes::<v18::State>(body)?.into()),
             19 => Ok(postcard::from_bytes::<v19::State>(body)?.into()),
             20 => Ok(postcard::from_bytes::<v20::State>(body)?.into()),
+            // Version 21 is version 22 without lent workspaces; borrowed
+            // panes go on the end of `Layout`, so they read as it does.
+            21 => Ok(postcard::from_bytes::<v21::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
+        }
+    }
+}
+
+/// Version 21, as the builds that wrote it wrote it: no lent workspaces.
+mod v21 {
+    use serde::Deserialize;
+
+    use super::{
+        Applied, Buffer, Chat, Connection, EditLog, Files, Process, Reviews, Shell, Terminal,
+        Workspaces,
+    };
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+        edits: EditLog,
+        applied: Vec<Applied>,
+        daemon: u64,
+        reviews: Reviews,
+        recovery_lock: Option<u32>,
+        shells: Vec<Shell>,
+        machine: Option<[u8; 16]>,
+        connections: Vec<Connection>,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: state.recovery_lock,
+                shells: state.shells,
+                machine: state.machine,
+                connections: state.connections,
+                lent: Vec::new(),
+                borrowers: Vec::new(),
+            }
         }
     }
 }
@@ -823,6 +929,8 @@ mod v20 {
                 shells: state.shells,
                 machine: None,
                 connections: Vec::new(),
+                lent: Vec::new(),
+                borrowers: Vec::new(),
             }
         }
     }
@@ -876,6 +984,8 @@ mod v19 {
                 shells: Vec::new(),
                 machine: None,
                 connections: Vec::new(),
+                lent: Vec::new(),
+                borrowers: Vec::new(),
             }
         }
     }
@@ -929,6 +1039,8 @@ mod v18 {
                 shells: Vec::new(),
                 machine: None,
                 connections: Vec::new(),
+                lent: Vec::new(),
+                borrowers: Vec::new(),
             }
         }
     }
@@ -1447,6 +1559,8 @@ mod v7 {
                 shells: Vec::new(),
                 machine: None,
                 connections: Vec::new(),
+                lent: Vec::new(),
+                borrowers: Vec::new(),
             }
         }
     }
@@ -1524,6 +1638,8 @@ mod v8 {
                 shells: Vec::new(),
                 machine: None,
                 connections: Vec::new(),
+                lent: Vec::new(),
+                borrowers: Vec::new(),
             }
         }
     }
@@ -1571,6 +1687,8 @@ mod v9 {
                 shells: Vec::new(),
                 machine: None,
                 connections: Vec::new(),
+                lent: Vec::new(),
+                borrowers: Vec::new(),
             }
         }
     }
@@ -1620,6 +1738,8 @@ mod v11 {
                 shells: Vec::new(),
                 machine: None,
                 connections: Vec::new(),
+                lent: Vec::new(),
+                borrowers: Vec::new(),
             }
         }
     }
@@ -1718,6 +1838,8 @@ mod v15 {
                 shells: Vec::new(),
                 machine: None,
                 connections: Vec::new(),
+                lent: Vec::new(),
+                borrowers: Vec::new(),
             }
         }
     }
@@ -1770,6 +1892,8 @@ mod v14 {
                 shells: Vec::new(),
                 machine: None,
                 connections: Vec::new(),
+                lent: Vec::new(),
+                borrowers: Vec::new(),
             }
         }
     }
@@ -1820,6 +1944,8 @@ mod v13 {
                 shells: Vec::new(),
                 machine: None,
                 connections: Vec::new(),
+                lent: Vec::new(),
+                borrowers: Vec::new(),
             }
         }
     }
@@ -1912,6 +2038,8 @@ mod v12 {
                 shells: Vec::new(),
                 machine: None,
                 connections: Vec::new(),
+                lent: Vec::new(),
+                borrowers: Vec::new(),
             }
         }
     }
@@ -2002,6 +2130,8 @@ mod v10 {
                 shells: Vec::new(),
                 machine: None,
                 connections: Vec::new(),
+                lent: Vec::new(),
+                borrowers: Vec::new(),
             }
         }
     }
@@ -2112,34 +2242,53 @@ mod tests {
             }],
             orphans: vec![Process { pid: 42, pidfd: 2 }],
             workspaces: Workspaces {
-                list: vec![Workspace {
-                    id: 1,
-                    name: "clackatoo".to_owned(),
-                    tabs: vec![Tab {
+                list: vec![
+                    Workspace {
                         id: 1,
-                        layout: Layout::Split {
-                            left_to_right: true,
-                            parts: vec![
-                                Layout::Pane { id: 1, terminal: 1 },
-                                Layout::Pane { id: 2, terminal: 2 },
-                                Layout::Buffer { id: 3, buffer: 1 },
-                                Layout::Files { id: 4, files: 1 },
-                                Layout::Board { id: 5, board: 3 },
-                                Layout::Review { id: 6, review: 1 },
-                                Layout::Browser { id: 7, chat: 2 },
-                                Layout::Folder { id: 8, files: 2 },
-                            ],
-                            shares: vec![2, 1, 1, 1, 1, 1, 1, 1],
-                        },
-                        focused: 2,
-                        name: None,
-                    }],
-                    active_tab: 1,
-                }],
+                        name: "clackatoo".to_owned(),
+                        tabs: vec![Tab {
+                            id: 1,
+                            layout: Layout::Split {
+                                left_to_right: true,
+                                parts: vec![
+                                    Layout::Pane { id: 1, terminal: 1 },
+                                    Layout::Pane { id: 2, terminal: 2 },
+                                    Layout::Buffer { id: 3, buffer: 1 },
+                                    Layout::Files { id: 4, files: 1 },
+                                    Layout::Board { id: 5, board: 3 },
+                                    Layout::Review { id: 6, review: 1 },
+                                    Layout::Browser { id: 7, chat: 2 },
+                                    Layout::Folder { id: 8, files: 2 },
+                                    Layout::Borrowed {
+                                        id: 9,
+                                        machine: [0xd5; 16],
+                                        key: 0x0123_4567_89ab_cdef,
+                                        kind: "terminal".to_owned(),
+                                    },
+                                ],
+                                shares: vec![2, 1, 1, 1, 1, 1, 1, 1, 1],
+                            },
+                            focused: 2,
+                            name: None,
+                        }],
+                        active_tab: 1,
+                    },
+                    Workspace {
+                        id: 2,
+                        name: String::new(),
+                        tabs: vec![Tab {
+                            id: 2,
+                            layout: Layout::Buffer { id: 10, buffer: 1 },
+                            focused: 10,
+                            name: None,
+                        }],
+                        active_tab: 2,
+                    },
+                ],
                 active: Some(1),
-                next_workspace: 2,
-                next_tab: 2,
-                next_pane: 9,
+                next_workspace: 3,
+                next_tab: 3,
+                next_pane: 11,
             },
             next_buffer: 2,
             buffers: vec![buffer()],
@@ -2174,6 +2323,16 @@ mod tests {
             connections: vec![Connection {
                 host: "jack@laptop:2222".to_owned(),
                 command: "~/.cargo/bin/clackatoo".to_owned(),
+            }],
+            lent: vec![Lent {
+                workspace: 2,
+                to: [0xa1; 16],
+                key: 7,
+            }],
+            borrowers: vec![Borrower {
+                machine: [0xa1; 16],
+                name: "jack-ubuntu-laptop".to_owned(),
+                last_seen: 1_792_000_000,
             }],
         }
     }
@@ -2375,6 +2534,29 @@ mod tests {
     }
 
     #[test]
+    fn version_22_is_read_with_borrowed_panes_and_lent_workspaces() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v22.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        let Layout::Split { parts, .. } = &state.workspaces.list[0].tabs[0].layout else {
+            panic!("not split");
+        };
+        assert!(matches!(
+            &parts[8],
+            Layout::Borrowed { id: 9, machine: [0xd5, ..], key: 0x0123_4567_89ab_cdef, kind }
+                if kind == "terminal"
+        ));
+        let lent = &state.lent[0];
+        assert_eq!((lent.workspace, lent.to, lent.key), (2, [0xa1; 16], 7));
+        let borrower = &state.borrowers[0];
+        assert_eq!(
+            (borrower.machine, borrower.name.as_str(), borrower.last_seen),
+            ([0xa1; 16], "jack-ubuntu-laptop", 1_792_000_000)
+        );
+    }
+
+    #[test]
     fn version_21_is_read_with_the_machine_and_its_connections() {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v21.bin"))
@@ -2387,6 +2569,7 @@ mod tests {
             ("jack@laptop:2222", "~/.cargo/bin/clackatoo")
         );
         assert_eq!(state.shells[0].trusted, Some(4));
+        assert!(state.lent.is_empty());
     }
 
     #[test]
@@ -2519,11 +2702,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v21.bin"]
+    #[ignore = "writes tests/fixtures/handover-v22.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v21.bin"
+            "/tests/fixtures/handover-v22.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();

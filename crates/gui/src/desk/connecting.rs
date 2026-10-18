@@ -217,14 +217,19 @@ impl Desk {
     /// Where `workspace` is, if it's from another machine: the connection
     /// to its home, as the daemon last said.
     pub(crate) fn elsewhere(&self, workspace: &Workspace) -> Option<Elsewhere> {
-        let home = workspace.home?;
+        Some(self.elsewhere_on(workspace.home?))
+    }
+
+    /// Where the machine `home` is, another than the daemon's: the
+    /// connection to it, as the daemon last said.
+    pub(crate) fn elsewhere_on(&self, home: clackatoo_protocol::MachineId) -> Elsewhere {
         let connection = (self.connections.iter()).find(|connection| {
             connection
                 .machine
                 .as_ref()
                 .is_some_and(|machine| machine.id == home)
         });
-        Some(match connection {
+        match connection {
             Some(connection) => Elsewhere {
                 host: connection.host.clone(),
                 machine: connection
@@ -248,7 +253,7 @@ impl Desk {
                 machine: None,
                 reach: Reach::Connecting,
             },
-        })
+        }
     }
 
     /// `workspace`'s name, as the bar and the command line show it: with
@@ -339,12 +344,11 @@ impl Desk {
             )
     }
 
-    /// The machine the pane shown is on, if it's another than the daemon's,
-    /// in a workspace `:connect` brought in.
+    /// The machine the pane shown is on, if it's another than the daemon's:
+    /// in a workspace `:connect` brought in, or one of the daemon's own
+    /// showing a pane from another machine.
     pub(super) fn shown_elsewhere(&self) -> Option<Elsewhere> {
-        let shown = self.shown?;
-        let workspace = self.workspaces.get(shown.workspace)?;
-        self.elsewhere(workspace)
+        self.pane_elsewhere(self.shown?.pane)
     }
 
     /// Carries out `:PortForward`, as `forwarding` asks: the window forwards

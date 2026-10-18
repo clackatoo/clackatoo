@@ -1572,6 +1572,7 @@ mod tests {
             }],
             active_tab: TabId(2),
             home: None,
+            lent: None,
         };
         say(
             &mut there,

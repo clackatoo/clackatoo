@@ -198,6 +198,9 @@ enum Command {
     /// Print which machine the daemon is: its name and its ID.
     #[command(hide = true)]
     Machine(Connection),
+    /// List the workspaces this daemon lent the daemons on other machines,
+    /// holding the panes they show of this machine's, or give one back.
+    Lent(connections::LentArgs),
 }
 
 #[derive(Debug, Args)]
@@ -488,6 +491,7 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::Connect(args) => connections::connect(&args),
         Command::Disconnect(args) => connections::disconnect(&args),
         Command::Connections(connection) => connections::list(&connection),
+        Command::Lent(args) => connections::lent(&args),
         Command::Machine(connection) => connections::machine(&connection),
         Command::Mcp(args) => {
             let socket =

@@ -786,7 +786,11 @@ impl Client {
         name: Option<String>,
         terminal: PaneTerminal,
     ) -> Result<PaneId, ClientError> {
-        self.pane_created(&Request::NewWorkspace { name, terminal })
+        self.pane_created(&Request::NewWorkspace {
+            name,
+            terminal,
+            on: None,
+        })
     }
 
     /// Adds a tab to `workspace`, showing `terminal`.
@@ -802,6 +806,7 @@ impl Client {
         self.pane_created(&Request::NewTab {
             workspace,
             terminal,
+            on: None,
         })
     }
 
@@ -820,6 +825,7 @@ impl Client {
             pane,
             side,
             terminal,
+            on: None,
         })
     }
 

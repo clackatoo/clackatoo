@@ -15,6 +15,7 @@ fn new_blank_tab(cwd: Option<&str>) -> Request {
         terminal: PaneTerminal::Blank(OpenBlank {
             cwd: cwd.map(str::to_owned),
         }),
+        on: None,
     }
 }
 
@@ -28,6 +29,7 @@ fn explorer_down_the_left(tab: u32, dir: Option<&str>) -> Request {
             dir: dir.map(str::to_owned),
         }),
         share: Some(250),
+        on: None,
     }
 }
 

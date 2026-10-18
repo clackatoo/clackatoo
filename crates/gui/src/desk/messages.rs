@@ -56,6 +56,17 @@ impl Desk {
         self.message = Some(message);
     }
 
+    /// Warns `said`, what the daemon says of the workspaces for the bar
+    /// ([`clackatoo_protocol::Event::Said`]), as that a machine lost panes
+    /// it lent: on one line, cut short.
+    pub(crate) fn daemon_said(&mut self, said: &str) {
+        let said: String = (said.chars())
+            .filter(|ch| !ch.is_control())
+            .take(512)
+            .collect();
+        self.warn(said);
+    }
+
     /// Says `said`, what the daemon says of a port it forwards to another
     /// machine for the window ([`clackatoo_protocol::Event::Forwarded`]),
     /// as the window says what its own forwards run into.

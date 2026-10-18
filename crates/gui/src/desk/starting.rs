@@ -37,6 +37,8 @@ impl Desk {
         let agent = Some(self.options.agent.clone()).filter(|name| !name.is_empty());
         let case = Case::of(&self.options);
         self.start = Some(StartPage::new(place, self.last_chat.clone(), agent, case));
+        // `:Agent@desk`: the chat it starts is on desk.
+        self.start_on = self.opening_on;
         let pane = self.shown.map(|shown| shown.pane);
         self.request(Request::ChatChoices { pane }, Asked::ChatChoices);
     }
@@ -92,15 +94,21 @@ impl Desk {
     pub(super) fn start_did(&mut self, outcome: Outcome) {
         match outcome {
             Outcome::Nothing | Outcome::Changed => {}
-            Outcome::Close => self.start = None,
+            Outcome::Close => {
+                self.start = None;
+                self.start_on = None;
+            }
             Outcome::List { agent, cwd } => {
                 self.searches += 1;
                 let id = self.searches;
                 // An agent's past sessions on another machine are listed
                 // there, which isn't relayed yet.
-                let elsewhere = (self.shown)
-                    .and_then(|shown| self.workspaces.get(shown.workspace))
-                    .and_then(|workspace| self.elsewhere(workspace));
+                let own = self.workspaces.machine.as_ref().map(|own| own.id);
+                let elsewhere = match self.start_on {
+                    Some(on) if Some(on) != own => Some(self.elsewhere_on(on)),
+                    Some(_) => None,
+                    None => self.shown_elsewhere(),
+                };
                 if let Some(page) = &mut self.start {
                     page.listing(id);
                     if let Some(elsewhere) = elsewhere {
@@ -184,18 +192,23 @@ impl Desk {
     /// Opens a new pane showing `terminal` at `place`: in a new tab, or
     /// beside the focused pane.
     fn open_at(&mut self, place: Place, terminal: PaneTerminal) {
+        let on = self.start_on.take();
         let Some(shown) = self.shown else { return };
         let request = match place {
             Place::Tab | Place::Here => Request::NewTab {
                 workspace: shown.workspace,
                 terminal,
+                on: None,
             },
             Place::Beside(side) => Request::Split {
                 pane: shown.pane,
                 side,
                 terminal,
+                on: None,
             },
         };
+        let asked = std::mem::replace(&mut self.opening_on, on);
         self.request(request, Asked::Pane);
+        self.opening_on = asked;
     }
 }

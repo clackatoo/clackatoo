@@ -242,6 +242,13 @@ impl HostedTerminal {
         cwd.into_os_string().into_string().ok()
     }
 
+    /// Whether its program is a shell at its prompt, running nothing: the
+    /// process group in front is its own.
+    pub(crate) fn is_idle_shell(&self) -> bool {
+        let front = self.pty.as_ref().and_then(Pty::foreground);
+        front.is_some_and(|front| front.as_raw_nonzero().get().cast_unsigned() == self.pid)
+    }
+
     /// The directory the terminal's own program is in: for a shell, where
     /// it last changed to, whatever runs in front of it.
     pub(crate) fn own_directory(&self) -> Option<String> {

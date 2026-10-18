@@ -408,7 +408,6 @@ impl Desk {
             Action::Split(side, kind) => self.run(Command::Open {
                 place: Place::Beside(side),
                 kind,
-                daemon: None,
                 agent: None,
             }),
             Action::Close => self.run(Command::Close),

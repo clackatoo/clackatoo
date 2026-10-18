@@ -527,6 +527,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "In another machine's workspaces, editors, explorers, the finder, reviews, boards and :PortForward work too",
     },
+    News {
+        id: "elsewhere",
+        date: "2026-10-18",
+        lesson: "remote",
+        what: ":Terminal@desk opens a pane on desk in your workspace, and :ws new@desk a workspace there",
+    },
 ];
 
 impl News {

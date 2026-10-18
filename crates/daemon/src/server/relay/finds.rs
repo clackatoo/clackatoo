@@ -43,10 +43,36 @@ impl Daemon {
         pane: Option<PaneId>,
         search: &Search,
     ) -> bool {
-        let Some((at, remote)) = pane.and_then(|pane| self.relayed_pane(pane)) else {
+        let Some(found) = pane.and_then(|pane| self.pane_elsewhere(pane)) else {
             return false;
         };
-        let refused = if self.links.list[at].relayed.relays {
+        let refused = match found {
+            Err(why) => Some(why),
+            Ok((at, remote)) => self.find_there(token, id, at, remote, search),
+        };
+        if let Some(why) = refused {
+            let why = match why {
+                clackatoo_protocol::Error::Other(why) => why,
+                why => why.to_string(),
+            };
+            let found = Found::Done(Done::Failed(why));
+            self.send_event(token, Event::Found { id, found });
+        }
+        true
+    }
+
+    /// Asks the daemon of the connection at `at` for the search the client
+    /// at `token` numbered `id`, in the project of its pane `remote`: or
+    /// says why it can't be.
+    fn find_there(
+        &mut self,
+        token: Token,
+        id: u64,
+        at: usize,
+        remote: PaneId,
+        search: &Search,
+    ) -> Option<clackatoo_protocol::Error> {
+        if self.links.list[at].relayed.relays {
             // Asked again under the same number, it's the same search,
             // which the daemon there stops before starting it again.
             let number = self.links.list[at].relayed.finds.number(token, id);
@@ -58,16 +84,7 @@ impl Daemon {
             self.send_upstream(at, &find, Expect::Nothing).err()
         } else {
             Some(self.too_old(at, "the finder"))
-        };
-        if let Some(why) = refused {
-            let why = match why {
-                clackatoo_protocol::Error::Other(why) => why,
-                why => why.to_string(),
-            };
-            let found = Found::Done(Done::Failed(why));
-            self.send_event(token, Event::Found { id, found });
         }
-        true
     }
 
     /// Stops the search the client at `token` numbered `id`, if it's

@@ -4,10 +4,23 @@
 //! Requests are checked before anything changes, so a request that fails
 //! leaves no terminal behind: the server checks, starts the terminal, then
 //! makes the change, which can't fail.
+//!
+//! A pane can show what's on another machine: a pane the daemon there
+//! lent this one (CLACKA-117). Such a pane is *borrowed*. It's known here
+//! by that machine and a number this daemon gave it ([`Borrowed`]), never
+//! by what the daemon there numbers it, which changes as it restarts. It
+//! holds a pane to come ([`Content::Other`]) with its home set, and the
+//! relay shows what it shows there in its place. A workspace can be
+//! *lent*, too: it holds a pane of this daemon's for the daemon on another
+//! machine to show in a workspace of its own ([`Workspace::lent`]). No
+//! window sees one, and no other workspace's name has to differ from its.
+
+use std::collections::{BTreeMap, HashMap};
 
 use clackatoo_protocol::{
-    Axis, BoardId, BufferId, Content, Error, FilesId, Layout, MAX_NESTING, Pane, PaneId, Restored,
-    ReviewId, Side, Tab, TabId, TerminalId, Workspace, WorkspaceId, Workspaces,
+    Axis, BoardId, BufferId, Content, Error, FilesId, Layout, Lent, MAX_NESTING, MachineId, Pane,
+    PaneId, PaneKind, Restored, ReviewId, Side, Tab, TabId, TerminalId, Workspace, WorkspaceId,
+    Workspaces,
 };
 
 use crate::handover::{self, HandoverError};
@@ -19,6 +32,41 @@ pub(crate) struct WorkspaceState {
     next_workspace: u32,
     next_tab: u32,
     next_pane: u32,
+    /// The panes showing what's on another machine.
+    borrowed: BTreeMap<PaneId, Borrowed>,
+    /// The terminals and chats of the workspaces lent to other machines'
+    /// daemons, and who each is lent to, as of the last change: what's
+    /// asked of one by anyone else is refused, keys first, so it's a map
+    /// rather than a walk of the workspaces.
+    lent_terminals: HashMap<TerminalId, MachineId>,
+    /// Whether any workspace is lent, as of the last change.
+    any_lent: bool,
+    /// The machines this daemon has lent workspaces to, as each last said
+    /// it was called, and when it was last connected.
+    borrowers: BTreeMap<MachineId, Borrower>,
+}
+
+/// A machine whose daemon this one lends workspaces to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Borrower {
+    /// What it says it's called, which a workspace given back is named
+    /// after.
+    pub(crate) name: String,
+    /// When its daemon was last connected, in seconds since 1970.
+    pub(crate) last_seen: u64,
+}
+
+/// What a borrowed pane shows: a pane the daemon on another machine lent
+/// this one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Borrowed {
+    /// The machine, by its ID.
+    pub(crate) machine: MachineId,
+    /// The number this daemon gave the pane as it asked for it, which the
+    /// daemon there keeps with it (see [`Lent::key`]).
+    pub(crate) key: u64,
+    /// What kind of pane it is, said while what it shows can't be.
+    pub(crate) kind: PaneKind,
 }
 
 impl WorkspaceState {
@@ -28,6 +76,10 @@ impl WorkspaceState {
             next_workspace: 1,
             next_tab: 1,
             next_pane: 1,
+            borrowed: BTreeMap::new(),
+            lent_terminals: HashMap::new(),
+            any_lent: false,
+            borrowers: BTreeMap::new(),
         }
     }
 
@@ -53,11 +105,21 @@ impl WorkspaceState {
         self.workspaces.machine = Some(machine);
     }
 
-    /// The workspaces, for the next build.
-    pub(crate) fn hand_over(&self) -> handover::Workspaces {
-        fn layout(node: &Layout) -> handover::Layout {
+    /// The workspaces, for the next build, and those lent to other
+    /// machines' daemons.
+    pub(crate) fn hand_over(&self) -> (handover::Workspaces, Vec<handover::Lent>) {
+        fn layout(node: &Layout, borrowed: &BTreeMap<PaneId, Borrowed>) -> handover::Layout {
             match node {
                 Layout::Pane(pane) => match pane.content {
+                    _ if borrowed.contains_key(&pane.id) => {
+                        let borrowed = borrowed[&pane.id];
+                        handover::Layout::Borrowed {
+                            id: pane.id.0,
+                            machine: borrowed.machine.0,
+                            key: borrowed.key,
+                            kind: borrowed.kind.to_string(),
+                        }
+                    }
                     Content::Terminal(terminal) => handover::Layout::Pane {
                         id: pane.id.0,
                         terminal: terminal.0,
@@ -86,9 +148,9 @@ impl WorkspaceState {
                         id: pane.id.0,
                         files: files.0,
                     },
-                    // Only what a newer daemon sends a client is Other:
-                    // no request makes one, so no daemon's workspaces hold
-                    // one.
+                    // Only what a newer daemon sends a client is Other,
+                    // and a borrowed pane, handed over above: no request
+                    // makes another, so no daemon's workspaces hold one.
                     Content::Other { kind } => {
                         unreachable!(
                             "the daemon's workspaces hold a {kind} pane, of no kind it has"
@@ -101,12 +163,12 @@ impl WorkspaceState {
                     shares,
                 } => handover::Layout::Split {
                     left_to_right: *axis == Axis::LeftToRight,
-                    parts: parts.iter().map(layout).collect(),
+                    parts: (parts.iter()).map(|part| layout(part, borrowed)).collect(),
                     shares: shares.clone(),
                 },
             }
         }
-        handover::Workspaces {
+        let workspaces = handover::Workspaces {
             list: (self.workspaces.list.iter())
                 .map(|workspace| handover::Workspace {
                     id: workspace.id.0,
@@ -114,7 +176,7 @@ impl WorkspaceState {
                     tabs: (workspace.tabs.iter())
                         .map(|tab| handover::Tab {
                             id: tab.id.0,
-                            layout: layout(&tab.layout),
+                            layout: layout(&tab.layout, &self.borrowed),
                             focused: tab.focused.0,
                             name: tab.name.clone(),
                         })
@@ -126,18 +188,39 @@ impl WorkspaceState {
             next_workspace: self.next_workspace,
             next_tab: self.next_tab,
             next_pane: self.next_pane,
-        }
+        };
+        let lent = (self.workspaces.list.iter())
+            .filter_map(|workspace| {
+                let lent = workspace.lent?;
+                Some(handover::Lent {
+                    workspace: workspace.id.0,
+                    to: lent.to.0,
+                    key: lent.key,
+                })
+            })
+            .collect();
+        (workspaces, lent)
     }
 
-    /// The workspaces the last build handed over.
-    pub(crate) fn resume(handed: &handover::Workspaces) -> Result<Self, HandoverError> {
-        fn layout(node: &handover::Layout) -> Result<Layout, HandoverError> {
+    /// The workspaces the last build handed over, and those it had lent
+    /// to other machines' daemons.
+    pub(crate) fn resume(
+        handed: &handover::Workspaces,
+        lent: &[handover::Lent],
+    ) -> Result<Self, HandoverError> {
+        fn layout(
+            node: &handover::Layout,
+            borrowed: &mut BTreeMap<PaneId, Borrowed>,
+        ) -> Result<Layout, HandoverError> {
             let handover::Layout::Split {
                 left_to_right,
                 parts,
                 shares,
             } = node
             else {
+                if let Some(pane) = handed_borrowed(node, borrowed) {
+                    return Ok(Layout::Pane(pane));
+                }
                 return handed_pane(node)
                     .map(Layout::Pane)
                     .ok_or(HandoverError::Damaged("a pane that isn't one"));
@@ -156,17 +239,20 @@ impl WorkspaceState {
                 } else {
                     Axis::TopToBottom
                 },
-                parts: parts.iter().map(layout).collect::<Result<_, _>>()?,
+                parts: (parts.iter())
+                    .map(|part| layout(part, borrowed))
+                    .collect::<Result<_, _>>()?,
                 shares: shares.clone(),
             })
         }
+        let mut borrowed = BTreeMap::new();
         let mut list = Vec::new();
         for workspace in &handed.list {
             let mut tabs = Vec::new();
             for tab in &workspace.tabs {
                 let mut tab = Tab {
                     id: TabId(tab.id),
-                    layout: layout(&tab.layout)?,
+                    layout: layout(&tab.layout, &mut borrowed)?,
                     focused: PaneId(tab.focused),
                     name: tab.name.clone(),
                 };
@@ -191,12 +277,14 @@ impl WorkspaceState {
                     "a workspace's active tab isn't in it",
                 ));
             }
+            let lent = handed_lent(lent, workspace.id);
             list.push(Workspace {
                 id: WorkspaceId(workspace.id),
                 name: workspace.name.clone(),
                 tabs,
                 active_tab,
                 home: None,
+                lent,
             });
         }
         let active = handed.active.map(WorkspaceId);
@@ -214,7 +302,17 @@ impl WorkspaceState {
             next_workspace: handed.next_workspace,
             next_tab: handed.next_tab,
             next_pane: handed.next_pane,
-        })
+            borrowed,
+            ..Self::new()
+        }
+        .with_lent_refreshed())
+    }
+
+    /// Itself, with what's lent refreshed (see
+    /// [`refresh_lent`](Self::refresh_lent)).
+    fn with_lent_refreshed(mut self) -> Self {
+        self.refresh_lent();
+        self
     }
 
     pub(crate) fn get(&self) -> &Workspaces {
@@ -247,6 +345,7 @@ impl WorkspaceState {
             active_tab: tab.id,
             tabs: vec![tab],
             home: None,
+            lent: None,
         });
         self.workspaces.active = Some(id);
         pane
@@ -257,6 +356,12 @@ impl WorkspaceState {
         self.workspaces
             .get(workspace)
             .ok_or(Error::NoSuchWorkspace(workspace))
+    }
+
+    /// Checks that `workspace` exists and can have a tab added: one lent to
+    /// another machine's daemon holds its one pane alone.
+    pub(crate) fn check_new_tab(&self, workspace: WorkspaceId) -> Result<(), Error> {
+        unlent(self.check_workspace(workspace)?)
     }
 
     /// Adds a tab showing `content` to `workspace`, which
@@ -285,7 +390,9 @@ impl WorkspaceState {
     /// Checks that `pane` exists and can be split on `side` without its
     /// tab's splits going deeper than a window can read.
     pub(crate) fn check_split(&self, pane: PaneId, side: Side) -> Result<(), Error> {
-        let (_, tab, _) = (self.workspaces.find_pane(pane)).ok_or(Error::NoSuchPane(pane))?;
+        let (workspace, tab, _) =
+            (self.workspaces.find_pane(pane)).ok_or(Error::NoSuchPane(pane))?;
+        unlent(workspace)?;
         let mut layout = tab.layout.clone();
         split(&mut layout, pane, side, placeholder());
         fits(&layout)
@@ -294,7 +401,8 @@ impl WorkspaceState {
     /// Checks that `tab` exists and can be split along `side` without its
     /// splits going deeper than a window can read.
     pub(crate) fn check_split_tab(&self, tab: TabId, side: Side) -> Result<(), Error> {
-        let (_, tab) = self.workspaces.find_tab(tab).ok_or(Error::NoSuchTab(tab))?;
+        let (workspace, tab) = self.workspaces.find_tab(tab).ok_or(Error::NoSuchTab(tab))?;
+        unlent(workspace)?;
         let mut layout = tab.layout.clone();
         split_edge(&mut layout, side, placeholder(), None);
         fits(&layout)
@@ -348,8 +456,11 @@ impl WorkspaceState {
             .workspaces
             .find_pane(pane)
             .ok_or(Error::NoSuchPane(pane))?;
-        let (workspace, tab) = (workspace.id, tab.id);
-        self.workspaces.active = Some(workspace);
+        let (lent, workspace, tab) = (workspace.lent.is_some(), workspace.id, tab.id);
+        // No window shows a lent one, so a new window never starts on it.
+        if !lent {
+            self.workspaces.active = Some(workspace);
+        }
         let workspace = self.workspace_mut(workspace);
         workspace.active_tab = tab;
         workspace
@@ -514,7 +625,10 @@ impl WorkspaceState {
             .expect("its workspace");
         list.remove(index);
         if self.workspaces.active == Some(workspace) {
-            self.workspaces.active = list.get(index.saturating_sub(1)).map(|w| w.id);
+            // The one before it, or else after, that a window can show.
+            let before = (list[..index].iter().rev()).find(|w| w.lent.is_none());
+            let after = || list[index..].iter().find(|w| w.lent.is_none());
+            self.workspaces.active = before.or_else(after).map(|w| w.id);
         }
         true
     }
@@ -572,6 +686,7 @@ impl WorkspaceState {
             active_tab: tabs.get(active_tab).unwrap_or(&tabs[0]).id,
             tabs,
             home: None,
+            lent: None,
         });
         id
     }
@@ -667,11 +782,209 @@ impl WorkspaceState {
         Ok(trimmed.to_owned())
     }
 
+    /// Whether a workspace but `except` is called `name`: a lent one isn't
+    /// called anything, as nobody names it.
     fn name_taken(&self, name: &str, except: Option<WorkspaceId>) -> bool {
-        self.workspaces
-            .list
-            .iter()
-            .any(|workspace| workspace.name == name && Some(workspace.id) != except)
+        self.workspaces.list.iter().any(|workspace| {
+            workspace.name == name && Some(workspace.id) != except && workspace.lent.is_none()
+        })
+    }
+
+    /// Makes a workspace lent to another machine's daemon, as `lent` says,
+    /// with one tab showing `content`, and returns its pane. It has no
+    /// name, and doesn't become the one last switched to.
+    pub(crate) fn new_lent(&mut self, lent: Lent, content: Content) -> PaneId {
+        let id = WorkspaceId(self.next_workspace);
+        self.next_workspace += 1;
+        let (tab, pane) = self.tab(content);
+        self.workspaces.list.push(Workspace {
+            id,
+            name: String::new(),
+            active_tab: tab.id,
+            tabs: vec![tab],
+            home: None,
+            lent: Some(lent),
+        });
+        pane
+    }
+
+    /// The pane of the workspace lent as `lent` says, if there is one.
+    pub(crate) fn lent_pane(&self, lent: Lent) -> Option<PaneId> {
+        let workspace =
+            (self.workspaces.list.iter()).find(|workspace| workspace.lent == Some(lent))?;
+        Some(workspace.tabs.first()?.focused)
+    }
+
+    /// Whether `workspace` is lent to another machine's daemon.
+    pub(crate) fn is_lent(&self, workspace: WorkspaceId) -> bool {
+        self.lent_of(workspace).is_some()
+    }
+
+    /// Who `workspace` is lent to, if it is.
+    pub(crate) fn lent_of(&self, workspace: WorkspaceId) -> Option<Lent> {
+        self.workspaces.get(workspace)?.lent
+    }
+
+    /// Who the workspace holding `pane` is lent to, if it is.
+    pub(crate) fn lent_of_pane(&self, pane: PaneId) -> Option<Lent> {
+        self.workspaces.find_pane(pane)?.0.lent
+    }
+
+    /// Who the workspace holding `tab` is lent to, if it is.
+    pub(crate) fn lent_of_tab(&self, tab: TabId) -> Option<Lent> {
+        self.workspaces.find_tab(tab)?.0.lent
+    }
+
+    /// Whether any workspace is lent, as of the last change.
+    pub(crate) fn has_lent(&self) -> bool {
+        self.any_lent
+    }
+
+    /// The machine terminal or chat `terminal` is lent to, if its pane is
+    /// in a workspace lent to one, as of the last change.
+    pub(crate) fn lent_terminal(&self, terminal: TerminalId) -> Option<MachineId> {
+        self.lent_terminals.get(&terminal).copied()
+    }
+
+    /// Notes the terminals and chats the workspaces lent hold, as they are
+    /// now: after every change to the workspaces.
+    pub(crate) fn refresh_lent(&mut self) {
+        self.lent_terminals.clear();
+        self.any_lent = false;
+        for workspace in &self.workspaces.list {
+            let Some(lent) = workspace.lent else { continue };
+            self.any_lent = true;
+            for pane in workspace.tabs.iter().flat_map(|tab| tab.layout.panes()) {
+                if let Content::Terminal(id) | Content::Browser(id) = pane.content {
+                    self.lent_terminals.insert(id, lent.to);
+                }
+            }
+        }
+    }
+
+    /// Gives back the lent workspace `workspace`: it becomes one of this
+    /// daemon's own, called `name`, or with a number after it if that's
+    /// taken. Returns what it's called, if it was lent.
+    pub(crate) fn unlend(&mut self, workspace: WorkspaceId, name: &str) -> Option<String> {
+        self.lent_of(workspace)?;
+        // As names may be: no `@`, nor control characters.
+        let base: String = (name.chars())
+            .map(|ch| {
+                if ch == '@' || ch.is_control() {
+                    '_'
+                } else {
+                    ch
+                }
+            })
+            .collect();
+        let named = (1..=u32::MAX)
+            .map(|n| {
+                if n == 1 {
+                    base.clone()
+                } else {
+                    format!("{base}-{n}")
+                }
+            })
+            .find(|name| self.check_name(name, None).is_ok())
+            .expect("some number is free");
+        let shown = self.workspace_mut(workspace);
+        shown.lent = None;
+        shown.name.clone_from(&named);
+        self.refresh_lent();
+        Some(named)
+    }
+
+    /// The machines this daemon lends workspaces to.
+    pub(crate) fn borrowers(&self) -> &BTreeMap<MachineId, Borrower> {
+        &self.borrowers
+    }
+
+    /// Notes that the daemon of `machine`, called `name`, is connected at
+    /// `now`, in seconds since 1970.
+    pub(crate) fn borrower_seen(&mut self, machine: MachineId, name: &str, now: u64) {
+        let borrower = self.borrowers.entry(machine).or_insert_with(|| Borrower {
+            name: name.to_owned(),
+            last_seen: now,
+        });
+        name.clone_into(&mut borrower.name);
+        borrower.last_seen = borrower.last_seen.max(now);
+    }
+
+    /// Takes the machines this daemon lent workspaces to, as kept from the
+    /// last run or handed over, forgetting those it lends none now.
+    pub(crate) fn set_borrowers(&mut self, borrowers: BTreeMap<MachineId, Borrower>) {
+        self.borrowers = borrowers;
+        self.forget_idle_borrowers();
+    }
+
+    /// Forgets the machines this daemon lends no workspace any more.
+    pub(crate) fn forget_idle_borrowers(&mut self) {
+        let list = &self.workspaces.list;
+        self.borrowers.retain(|machine, _| {
+            list.iter()
+                .any(|workspace| workspace.lent.is_some_and(|lent| lent.to == *machine))
+        });
+    }
+
+    /// Makes `workspace`, made again from those kept, lent as `lent` says,
+    /// as it was: with no name.
+    pub(crate) fn set_lent(&mut self, workspace: WorkspaceId, lent: Lent) {
+        if let Some(workspace) = (self.workspaces.list.iter_mut()).find(|w| w.id == workspace) {
+            workspace.lent = Some(lent);
+            workspace.name.clear();
+        }
+    }
+
+    /// A pane borrowed as `borrowed` says, with an ID of its own, to put in
+    /// a layout made for [`add_restored`](Self::add_restored).
+    pub(crate) fn fresh_borrowed(&mut self, borrowed: Borrowed) -> Pane {
+        let mut pane = self.pane(Content::Other {
+            kind: borrowed.kind,
+        });
+        pane.home = Some(borrowed.machine);
+        self.borrowed.insert(pane.id, borrowed);
+        pane
+    }
+
+    /// Makes `pane` a borrowed one, showing what `borrowed` says: a pane
+    /// to come, on that machine, until the relay shows what it shows.
+    pub(crate) fn borrow(&mut self, pane: PaneId, borrowed: Borrowed) {
+        let Some(tab) = (self.workspaces.list.iter_mut())
+            .flat_map(|workspace| &mut workspace.tabs)
+            .find(|tab| tab.layout.contains(pane))
+        else {
+            return;
+        };
+        if let Some(shown) = pane_mut(&mut tab.layout, pane) {
+            shown.content = Content::Other {
+                kind: borrowed.kind,
+            };
+            shown.home = Some(borrowed.machine);
+            self.borrowed.insert(pane, borrowed);
+        }
+    }
+
+    /// The panes showing what's on another machine.
+    pub(crate) fn borrowed(&self) -> &BTreeMap<PaneId, Borrowed> {
+        &self.borrowed
+    }
+
+    /// Forgets the borrowed panes that have closed, returning what they
+    /// showed, so the daemons that lent them can be told.
+    pub(crate) fn sweep_borrowed(&mut self) -> Vec<Borrowed> {
+        if self.borrowed.is_empty() {
+            return Vec::new();
+        }
+        let workspaces = &self.workspaces;
+        let mut gone = Vec::new();
+        self.borrowed.retain(|&pane, borrowed| {
+            let open = workspaces.find_pane(pane).is_some();
+            if !open {
+                gone.push(*borrowed);
+            }
+            open
+        });
+        gone
     }
 
     /// A workspace's number no workspace has had, for one from another
@@ -754,12 +1067,65 @@ fn handed_pane(node: &handover::Layout) -> Option<Pane> {
         handover::Layout::Review { id, review } => (id, Content::Review(ReviewId(review))),
         handover::Layout::Browser { id, chat } => (id, Content::Browser(TerminalId(chat))),
         handover::Layout::Folder { id, files } => (id, Content::Folder(FilesId(files))),
-        handover::Layout::Split { .. } => return None,
+        handover::Layout::Split { .. } | handover::Layout::Borrowed { .. } => return None,
     };
     Some(Pane {
         id: PaneId(id),
         content,
         home: None,
+    })
+}
+
+/// Refuses a new pane in `workspace` if it's lent to another machine's
+/// daemon: it holds the one pane that daemon shows, which another, made
+/// beside it here, would never be shown.
+fn unlent(workspace: &Workspace) -> Result<(), Error> {
+    match workspace.lent {
+        Some(_) => Err(Error::Other(
+            "this pane is shown in a workspace on another machine: a pane beside it goes there"
+                .into(),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Who workspace `id` was lent to, as `lent` handed it over, if it was.
+fn handed_lent(lent: &[handover::Lent], id: u32) -> Option<Lent> {
+    let lent = lent.iter().find(|lent| lent.workspace == id)?;
+    Some(Lent {
+        to: MachineId(lent.to),
+        key: lent.key,
+    })
+}
+
+/// The pane `node` is, as handed over, if it's a borrowed one, noting
+/// what it shows in `borrowed`.
+fn handed_borrowed(
+    node: &handover::Layout,
+    borrowed: &mut BTreeMap<PaneId, Borrowed>,
+) -> Option<Pane> {
+    let handover::Layout::Borrowed {
+        id,
+        machine,
+        key,
+        kind,
+    } = node
+    else {
+        return None;
+    };
+    let kind = PaneKind::new(kind);
+    let machine = MachineId(*machine);
+    let pane = PaneId(*id);
+    let shown = Borrowed {
+        machine,
+        key: *key,
+        kind,
+    };
+    borrowed.insert(pane, shown);
+    Some(Pane {
+        id: pane,
+        content: Content::Other { kind },
+        home: Some(machine),
     })
 }
 
@@ -1261,6 +1627,108 @@ mod tests {
     }
 
     #[test]
+    fn a_lent_workspace_takes_no_name_and_is_never_where_a_new_window_starts() {
+        let mut state = WorkspaceState::new();
+        let own = state.new_workspace("1".into(), TerminalId(1));
+        let a = state.get().list[0].id;
+        let lent = Lent {
+            to: MachineId([7; 16]),
+            key: 9,
+        };
+        let pane = state.new_lent(lent, Content::Terminal(TerminalId(2)));
+        assert_eq!(state.lent_pane(lent), Some(pane));
+        assert_eq!(state.lent_pane(Lent { key: 8, ..lent }), None);
+        assert_eq!(state.get().active, Some(a));
+        let lent_workspace = state.get().list[1].id;
+        assert!(state.is_lent(lent_workspace) && !state.is_lent(a));
+        // It holds its one pane alone: one beside it would never be shown.
+        assert!(state.check_split(pane, Side::Right).is_err());
+        let tab = state.get().list[1].tabs[0].id;
+        assert!(state.check_split_tab(tab, Side::Left).is_err());
+        assert!(state.check_new_tab(lent_workspace).is_err());
+        assert_eq!(state.check_new_tab(a), Ok(()));
+        // Its empty name is no one's, and no name is taken from it.
+        assert_eq!(state.name_for_new(None).unwrap(), "2");
+        state.focus(pane).unwrap();
+        assert_eq!(state.get().active, Some(a));
+        // With this daemon's own gone, no workspace is the active one.
+        state.remove_pane(own);
+        assert_eq!(state.get().active, None);
+        // Handed over, it's still lent, with its pane.
+        let (handed, lent_list) = state.hand_over();
+        let mut resumed = WorkspaceState::resume(&handed, &lent_list).unwrap();
+        assert_eq!(resumed.lent_pane(lent), Some(pane));
+        // Its terminal is known to be lent, to whom, without a walk.
+        assert!(resumed.has_lent());
+        assert_eq!(
+            resumed.lent_terminal(TerminalId(2)),
+            Some(MachineId([7; 16]))
+        );
+        assert_eq!(resumed.lent_terminal(TerminalId(1)), None);
+        // Given back, it's named after the machine, and nothing's lent.
+        resumed.new_workspace("from-laptop".into(), TerminalId(3));
+        assert_eq!(
+            resumed.unlend(lent_workspace, "from-laptop").as_deref(),
+            Some("from-laptop-2")
+        );
+        assert!(!resumed.has_lent() && resumed.lent_terminal(TerminalId(2)).is_none());
+        assert_eq!(
+            resumed.unlend(lent_workspace, "again"),
+            None,
+            "not lent now"
+        );
+    }
+
+    #[test]
+    fn borrowers_are_kept_only_while_something_is_lent_to_them() {
+        let mut state = WorkspaceState::new();
+        let laptop = MachineId([7; 16]);
+        state.borrower_seen(laptop, "laptop", 10);
+        state.borrower_seen(laptop, "jack-laptop", 5);
+        assert_eq!(
+            state.borrowers()[&laptop],
+            Borrower {
+                name: "jack-laptop".into(),
+                last_seen: 10
+            }
+        );
+        state.forget_idle_borrowers();
+        assert!(state.borrowers().is_empty(), "nothing's lent to it");
+        state.new_lent(
+            Lent { to: laptop, key: 1 },
+            Content::Terminal(TerminalId(1)),
+        );
+        state.borrower_seen(laptop, "laptop", 20);
+        state.forget_idle_borrowers();
+        assert_eq!(state.borrowers()[&laptop].last_seen, 20);
+    }
+
+    #[test]
+    fn a_borrowed_pane_is_handed_over_and_forgotten_once_closed() {
+        let mut state = WorkspaceState::new();
+        let one = state.new_workspace("a".into(), TerminalId(1));
+        let kind = PaneKind::new("terminal");
+        let two = state.split(one, Side::Right, Content::Other { kind });
+        let borrowed = Borrowed {
+            machine: MachineId([7; 16]),
+            key: 9,
+            kind,
+        };
+        state.borrow(two, borrowed);
+        let (_, _, pane) = state.get().find_pane(two).unwrap();
+        assert_eq!(pane.home, Some(MachineId([7; 16])));
+        assert_eq!(state.borrowed().get(&two), Some(&borrowed));
+        let (handed, lent) = state.hand_over();
+        let mut resumed = WorkspaceState::resume(&handed, &lent).unwrap();
+        assert_eq!(resumed.borrowed().get(&two), Some(&borrowed));
+        assert_eq!(resumed.get().find_pane(two).unwrap().2, pane);
+        assert!(resumed.sweep_borrowed().is_empty(), "it's open");
+        resumed.remove_pane(two);
+        assert_eq!(resumed.sweep_borrowed(), [borrowed]);
+        assert!(resumed.borrowed().is_empty());
+    }
+
+    #[test]
     fn focus_records_the_tab_pane_and_workspace() {
         let mut state = WorkspaceState::new();
         let one = state.new_workspace("a".into(), TerminalId(1));
@@ -1322,7 +1790,7 @@ mod tests {
             pane = state.split(pane, side, TerminalId(n + 2));
         }
         let before = only_tab(&state).layout.panes();
-        let resumed = WorkspaceState::resume(&state.hand_over()).unwrap();
+        let resumed = WorkspaceState::resume(&state.hand_over().0, &[]).unwrap();
         let tab = only_tab(&resumed);
         assert_eq!(tab.layout.depth(), MAX_NESTING);
         assert_eq!(tab.layout.panes(), before, "every pane kept, in order");

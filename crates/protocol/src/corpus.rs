@@ -28,14 +28,14 @@ use clackatoo_text::{
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
     BLANK, BLOCK_MARKS, BLOCKS, COLOURS, EXITED, FALLBACKS, FEDERATION, FORWARD_PACE, FORWARDS,
-    HOVER, INLAY_HINTS, LIMITS, PHONE_TERMINALS, PREVIEW_COLOURS, RECOVER, RELAY, RESTORED,
+    HOVER, INLAY_HINTS, LEND, LIMITS, PHONE_TERMINALS, PREVIEW_COLOURS, RECOVER, RELAY, RESTORED,
     SYMBOLS, USES, WORDS,
 };
 use crate::{
     AgentSession, AgentTools, Author, Axis, BlockMarks, BoardId, BufferId, BufferSnapshot,
     BufferUpdate, Change, ChatAction, ChatName, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind,
     ClientMessage, Content, CursorState, Diff, Error, Event, FilesId, GridNode, GridState,
-    HistoryLine, HistoryLines, Item, Layout, Limit, Line, LinkTarget, Location, NewAgent,
+    HistoryLine, HistoryLines, Item, Layout, Lent, Limit, Line, LinkTarget, Location, NewAgent,
     NewReview, NewTerminal, Node, NodeId, Outcome, Pane, PaneId, PaneKind, PaneTerminal, Patch,
     Provider, ProviderModels, Question, Request, Response, Resume, ResumeSession, ReviewId, Run,
     Sender, ServerMessage, Setting, SettingChoice, SettingKind, Side, Subagent, SubagentStatus,
@@ -176,6 +176,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 pane: PaneId(1),
                 side: Side::Right,
                 terminal: PaneTerminal::New(new_terminal()),
+                on: None,
             })),
         ),
         (
@@ -449,6 +450,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                         title: "Earlier".into(),
                     }),
                 }),
+                on: None,
             })),
         ),
         (
@@ -560,6 +562,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     }],
                     active_tab: TabId(2),
                     home: None,
+                    lent: None,
                 }],
                 active: None,
                 home: None,
@@ -858,6 +861,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 terminal: PaneTerminal::Blank(OpenBlank {
                     cwd: Some("/home/jack/src".into()),
                 }),
+                on: None,
             })),
         ),
         (
@@ -932,7 +936,92 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
     ]);
     samples.extend(federation().into_iter().map(|sample| (FEDERATION, sample)));
     samples.extend(relay().into_iter().map(|sample| (RELAY, sample)));
+    samples.extend(lend().into_iter().map(|sample| (LEND, sample)));
     samples
+}
+
+/// Samples of protocol 93: new panes and a workspace asked for on a
+/// machine named; a daemon saying which machine it is as it relays, and
+/// asking for a pane to be lent it; the workspaces it's shown, one of
+/// them holding the pane lent it, beside one of its own holding a pane
+/// from the lending machine; giving one back, listing them, and what the
+/// bar is told of them.
+fn lend() -> Vec<Sample> {
+    use Sample::{Client, Server};
+    let desktop = MachineId([7; 16]);
+    let laptop = MachineId([0xa1; 16]);
+    let new = || {
+        PaneTerminal::New(NewTerminal {
+            size: size(),
+            command: None,
+            cwd: None,
+            record_to: None,
+        })
+    };
+    let mut workspaces = workspaces();
+    workspaces.list[0].lent = Some(Lent {
+        to: laptop,
+        key: 0x0123_4567_89ab_cdef,
+    });
+    let mut own = workspaces.list[0].clone();
+    own.id = WorkspaceId(9);
+    own.lent = None;
+    if let Layout::Split { parts, .. } = &mut own.tabs[0].layout
+        && let Layout::Pane(pane) = &mut parts[0]
+    {
+        pane.home = Some(desktop);
+    }
+    workspaces.list.push(own);
+    vec![
+        Client(ClientMessage::Request(Request::NewWorkspace {
+            name: Some("notes".into()),
+            terminal: new(),
+            on: Some(desktop),
+        })),
+        Client(ClientMessage::Request(Request::NewTab {
+            workspace: WorkspaceId(1),
+            terminal: new(),
+            on: Some(desktop),
+        })),
+        Client(ClientMessage::Request(Request::Split {
+            pane: PaneId(1),
+            side: Side::Right,
+            terminal: new(),
+            on: Some(laptop),
+        })),
+        Client(ClientMessage::Request(Request::SplitTab {
+            tab: TabId(2),
+            side: Side::Left,
+            terminal: new(),
+            share: Some(250),
+            on: Some(desktop),
+        })),
+        Client(ClientMessage::Request(Request::RelayAs {
+            machine: Machine {
+                id: laptop,
+                name: "jack-ubuntu-laptop".into(),
+                run: 0x5eed,
+            },
+        })),
+        Client(ClientMessage::Request(Request::Lend {
+            key: 0x0123_4567_89ab_cdef,
+            beside: Some(PaneId(1)),
+            terminal: new(),
+        })),
+        Server(ServerMessage::Response(Response::PaneCreated(PaneId(12)))),
+        Server(ServerMessage::Event(Event::Workspaces(workspaces))),
+        Client(ClientMessage::Request(Request::Unlend {
+            workspace: WorkspaceId(1),
+            close_idle: true,
+        })),
+        Client(ClientMessage::Request(Request::Lent)),
+        Server(ServerMessage::Response(Response::Text(
+            "1  a terminal in ~/src  lent to jack-ubuntu-laptop, connected".into(),
+        ))),
+        Server(ServerMessage::Event(Event::Said(
+            "desk has lost 2 panes it lent this machine: they've closed".into(),
+        ))),
+    ]
 }
 
 /// Samples of protocol 92: a daemon saying it relays, a workspace from
@@ -1305,6 +1394,7 @@ fn more() -> Vec<Sample> {
             pane: PaneId(1),
             side: Side::Above,
             terminal,
+            on: None,
         })
     };
     let mut samples = vec![
@@ -2072,6 +2162,7 @@ fn workspaces() -> Workspaces {
             }],
             active_tab: TabId(2),
             home: None,
+            lent: None,
         }],
         active: Some(WorkspaceId(1)),
         home: None,

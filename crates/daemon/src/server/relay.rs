@@ -55,6 +55,7 @@ use mio::Token;
 use super::links::Reached;
 use super::{Broadcast, Daemon, Flood, Held, Link, Source, ViewStream};
 
+pub(super) mod borrowed;
 pub(super) mod editors;
 pub(super) mod files;
 pub(super) mod finds;
@@ -114,6 +115,7 @@ const FILE_OP: u32 = 8;
 /// What's relayed through one connection, kept while it's asked for,
 /// through the connection dropping.
 #[derive(Debug, Default)]
+#[allow(clippy::struct_excessive_bools, reason = "each is so or not")]
 pub(super) struct Relayed {
     /// The daemon there's workspaces and chats, as shown here.
     pub(super) mirror: Mirror,
@@ -157,6 +159,18 @@ pub(super) struct Relayed {
     /// The ports forwarded there, once any are asked for: kept through
     /// the daemon there restarting.
     forwards: Option<forwards::Forwarded>,
+    /// The panes asked of it for this daemon's own workspaces, by the
+    /// number this daemon gave each, until it answers (see [`borrowed`]).
+    lending: BTreeMap<u64, borrowed::Lending>,
+    /// The panes it lends this daemon that it was asked to close, on this
+    /// connection, as no pane here shows them.
+    closing: BTreeSet<u64>,
+    /// Whether it has shown this daemon the panes it lends it, on this
+    /// connection: until then, none of them seems to have gone.
+    lends_known: bool,
+    /// Whether it has restarted since it last showed this daemon all it
+    /// lends it: one it no longer lends then, it lost.
+    restarted: bool,
 }
 
 impl Relayed {
@@ -261,6 +275,9 @@ enum Expect {
     Nothing,
     /// Taken in: the answer to watching its chats.
     Chats,
+    /// The answer to saying which machine this is: the daemon there has
+    /// shown this one the panes it lends it, if any, before it.
+    Lends,
     /// The answer to attaching to this daemon's buffer, for its clients
     /// following it.
     Attached(BufferId),
@@ -293,6 +310,9 @@ enum Then {
     /// Done, attaching to this daemon's buffer: what came after the
     /// snapshot it brought is every client's again.
     Attached(BufferId),
+    /// A pane lent this daemon, as the number it gave it, to go in one of
+    /// its own workspaces.
+    Lent(u64),
 }
 
 /// What's done with a frame from another daemon once it's unpacked.
@@ -447,9 +467,15 @@ impl Daemon {
     }
 
     /// The workspaces, as clients are shown them: this daemon's own, then
-    /// each connected machine's, in the order they were connected to.
+    /// each connected machine's, in the order they were connected to. A
+    /// pane of this daemon's own showing what's on another machine shows
+    /// what the daemon there says it shows, or a pane to come until it
+    /// has; a workspace lent to another machine's daemon is left out, as
+    /// it's for that daemon alone (see [`with_lent`](Self::with_lent)).
     pub(super) fn shown_workspaces(&self) -> Workspaces {
         let mut shown = self.workspaces.get().clone();
+        shown.list.retain(|workspace| workspace.lent.is_none());
+        self.show_borrowed(&mut shown);
         for linked in &self.links.list {
             shown
                 .list
@@ -468,15 +494,30 @@ impl Daemon {
     /// change only to other machines' workspaces: nothing of this daemon's
     /// own is kept again for it.
     pub(super) fn tell_workspaces(&mut self) {
-        let event = ServerMessage::Event(Event::Workspaces(self.shown_workspaces()));
+        let shown = self.shown_workspaces();
+        // A daemon lent workspaces is told them, and no one else.
+        let lent: BTreeMap<Token, Vec<u8>> =
+            if (self.workspaces.get().list.iter()).any(|workspace| workspace.lent.is_some()) {
+                (self.sources.iter())
+                    .filter_map(|(key, _)| Some((Token(key), self.lent_frame(Token(key), &shown)?)))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            };
+        let event = ServerMessage::Event(Event::Workspaces(shown));
         let mut event = Broadcast::new(&event, "the workspaces");
         let mut watchers = Vec::new();
         for (key, source) in &mut self.sources {
-            if let Source::Client(client) = source
-                && client.watching_workspaces
-                && !client.finished
-                && let Some(bytes) = event.to(client.wire)
-            {
+            let Source::Client(client) = source else {
+                continue;
+            };
+            if !client.watching_workspaces || client.finished {
+                continue;
+            }
+            if let Some(bytes) = lent.get(&Token(key)) {
+                client.outgoing.extend_from_slice(bytes);
+                watchers.push(Token(key));
+            } else if let Some(bytes) = event.to(client.wire) {
                 client.outgoing.extend_from_slice(bytes);
                 watchers.push(Token(key));
             }
@@ -534,8 +575,8 @@ impl Daemon {
                 }
                 None => Some(ClientMessage::Board { board, action }),
             },
-            ClientMessage::Place { pane, place } => match self.relayed_pane(pane) {
-                Some((at, remote)) => {
+            ClientMessage::Place { pane, place } => match self.pane_elsewhere(pane) {
+                Some(Ok((at, remote))) => {
                     let place = ClientMessage::Place {
                         pane: remote,
                         place,
@@ -543,14 +584,17 @@ impl Daemon {
                     let _ = self.send_upstream(at, &place, Expect::Nothing);
                     None
                 }
+                // Of no use later.
+                Some(Err(_)) => None,
                 None => Some(ClientMessage::Place { pane, place }),
             },
-            ClientMessage::Dismiss { pane } => match self.relayed_pane(pane) {
-                Some((at, remote)) => {
+            ClientMessage::Dismiss { pane } => match self.pane_elsewhere(pane) {
+                Some(Ok((at, remote))) => {
                     let dismiss = ClientMessage::Dismiss { pane: remote };
                     let _ = self.send_upstream(at, &dismiss, Expect::Nothing);
                     None
                 }
+                Some(Err(_)) => None,
                 None => Some(ClientMessage::Dismiss { pane }),
             },
             message => Some(message),
@@ -716,6 +760,10 @@ impl Daemon {
                 }
                 Routed::Answered(Response::Done)
             }
+            request @ (Request::NewWorkspace { .. }
+            | Request::NewTab { .. }
+            | Request::Split { .. }
+            | Request::SplitTab { .. }) => self.route_new_pane(token, request),
             request => match self.route_shown(token, &request) {
                 Some(routed) => routed,
                 None => self.route_waited_for(token, request),
@@ -726,7 +774,7 @@ impl Daemon {
     /// As [`route_request`](Self::route_request), for the requests whose
     /// answers are waited for.
     #[allow(clippy::too_many_lines, reason = "one arm per request, each short")]
-    fn route_waited_for(&mut self, token: Token, request: Request) -> Routed {
+    pub(super) fn route_waited_for(&mut self, token: Token, request: Request) -> Routed {
         let terminal = |daemon: &Self, terminal: TerminalId| daemon.relayed_terminal(terminal);
         let renumbered: Option<(usize, Renumbered)> = match &request {
             &Request::History {
@@ -822,20 +870,24 @@ impl Daemon {
                 let action = action.clone();
                 (at, Ok((Request::Chat { terminal, action }, Then::Pass)))
             }),
-            &Request::ChatChoices { pane: Some(local) } => {
-                self.relayed_pane(local).map(|(at, pane)| {
+            &Request::ChatChoices { pane: Some(local) } => self
+                .pane_elsewhere(local)
+                .map(|found| {
+                    let (at, pane) = found?;
                     let choices = Request::ChatChoices { pane: Some(pane) };
-                    (at, Ok((choices, Then::Choices)))
+                    Ok((at, (choices, Then::Choices)))
                 })
-            }
+                .map(flip),
             Request::NewTab {
                 workspace: local,
                 terminal: content,
+                ..
             } => self.relayed_workspace(*local).map(|(at, workspace)| {
                 let renumbered = self.relayed_content(at, content).map(|terminal| {
                     let tab = Request::NewTab {
                         workspace,
                         terminal,
+                        on: None,
                     };
                     (tab, Then::Created)
                 });
@@ -845,12 +897,14 @@ impl Daemon {
                 pane: local,
                 side,
                 terminal: content,
+                ..
             } => self.relayed_pane(*local).map(|(at, pane)| {
                 let renumbered = self.relayed_content(at, content).map(|terminal| {
                     let split = Request::Split {
                         pane,
                         side: *side,
                         terminal,
+                        on: None,
                     };
                     (split, Then::Created)
                 });
@@ -861,6 +915,7 @@ impl Daemon {
                 side,
                 terminal: content,
                 share,
+                ..
             } => self.relayed_tab(*local).map(|(at, tab)| {
                 let renumbered = self.relayed_content(at, content).map(|terminal| {
                     let split = Request::SplitTab {
@@ -868,14 +923,25 @@ impl Daemon {
                         side: *side,
                         terminal,
                         share: *share,
+                        on: None,
                     };
                     (split, Then::Created)
                 });
                 (at, renumbered)
             }),
-            &Request::ClosePane { pane: local } => self
-                .relayed_pane(local)
-                .map(|(at, pane)| (at, Ok((Request::ClosePane { pane }, Then::Pass)))),
+            &Request::ClosePane { pane: local } => match self.relayed_pane(local) {
+                Some((at, pane)) => Some((at, Ok((Request::ClosePane { pane }, Then::Pass)))),
+                // A pane borrowed from another machine closes there,
+                // which closes it here once the daemon there says so; or
+                // here alone while it can't be reached, and there once
+                // it can.
+                None => self.borrowed_lent(local).map(|(at, lent)| {
+                    let close = Request::CloseWorkspace {
+                        workspace: lent.workspace,
+                    };
+                    (at, Ok((close, Then::Pass)))
+                }),
+            },
             &Request::CloseTab { tab: local } => self
                 .relayed_tab(local)
                 .map(|(at, tab)| (at, Ok((Request::CloseTab { tab }, Then::Pass)))),
@@ -913,33 +979,39 @@ impl Daemon {
                 };
                 (at, Ok((resize, Then::Pass)))
             }),
-            Request::OpenHere { pane: local, file } => {
-                self.relayed_pane(*local).map(|(at, pane)| {
+            Request::OpenHere { pane: local, file } => self
+                .pane_elsewhere(*local)
+                .map(|found| {
+                    let (at, pane) = found?;
                     let open = Request::OpenHere {
                         pane,
                         file: file.clone(),
                     };
-                    (at, self.if_relays(at, "an editor", (open, Then::Pass)))
+                    Ok((at, self.if_relays(at, "an editor", (open, Then::Pass))?))
                 })
-            }
-            Request::BlankHere { pane: local, blank } => {
-                self.relayed_pane(*local).map(|(at, pane)| {
+                .map(flip),
+            Request::BlankHere { pane: local, blank } => self
+                .pane_elsewhere(*local)
+                .map(|found| {
+                    let (at, pane) = found?;
                     let blank = Request::BlankHere {
                         pane,
                         blank: blank.clone(),
                     };
-                    (at, self.if_relays(at, "an editor", (blank, Then::Pass)))
+                    Ok((at, self.if_relays(at, "an editor", (blank, Then::Pass))?))
                 })
-            }
-            &Request::Recover { pane: local, drop } => {
-                self.relayed_pane(local).map(|(at, pane)| {
+                .map(flip),
+            &Request::Recover { pane: local, drop } => self
+                .pane_elsewhere(local)
+                .map(|found| {
+                    let (at, pane) = found?;
                     let recover = Request::Recover { pane, drop };
-                    (
+                    Ok((
                         at,
-                        self.if_relays(at, "an editor", (recover, Then::Recovered)),
-                    )
+                        self.if_relays(at, "an editor", (recover, Then::Recovered))?,
+                    ))
                 })
-            }
+                .map(flip),
             &(Request::Save { buffer, .. }
             | Request::Discard { buffer }
             | Request::Reload { buffer }
@@ -1648,9 +1720,16 @@ impl Daemon {
         let relays = self.link_wire(at) >= wire::RELAY;
         self.links.list[at].relayed.relays = relays;
         if relays {
-            // Before anything of its buffers is asked.
-            let relay = ClientMessage::Request(Request::Relay);
-            let _ = self.send_upstream(at, &relay, Expect::Nothing);
+            // Before anything of its buffers is asked; saying which machine
+            // this is, to one that lends panes, which then shows this
+            // daemon those it lent it.
+            let (relay, expect) = if self.link_wire(at) >= wire::LEND {
+                let machine = self.machine.clone();
+                (Request::RelayAs { machine }, Expect::Lends)
+            } else {
+                (Request::Relay, Expect::Nothing)
+            };
+            let _ = self.send_upstream(at, &ClientMessage::Request(relay), expect);
         }
         self.relay_workspaces(at, workspaces);
         let watch = ClientMessage::Request(Request::WatchChats);
@@ -1688,6 +1767,7 @@ impl Daemon {
     pub(super) fn relay_lost(&mut self, at: usize, upstream: Upstream) {
         let host = self.links.list[at].remote.host.clone();
         self.relay_answers_lost(&host, upstream);
+        self.lending_lost(at);
         self.buffers_lost(at);
         self.forwards_lost(at);
         for followed in self.links.list[at].relayed.followed.values_mut() {
@@ -1783,6 +1863,7 @@ impl Daemon {
             }
             return;
         };
+        let own = self.machine.id;
         let (linked, mut fresh) = self.numbering(at);
         if !fresh.have_room() {
             self.out_of_numbers(at);
@@ -1791,11 +1872,13 @@ impl Daemon {
         let followed = linked.relayed.in_use();
         let relays = linked.relayed.relays;
         let taken =
-            (linked.relayed.mirror).take(workspaces, &machine, &mut fresh, &followed, relays);
+            (linked.relayed.mirror).take(workspaces, &machine, own, &mut fresh, &followed, relays);
         if taken.cut {
             log::warn!("{host} has more workspaces or panes than are shown: the rest are left out");
         }
         if taken.restarted {
+            // What it lent this daemon that's gone, it lost.
+            linked.relayed.restarted = true;
             // Its terminals are others now, and those followed are gone,
             // as are its buffers and the rest.
             let gone: Vec<TerminalId> = linked.relayed.followed.keys().copied().collect();
@@ -1806,6 +1889,9 @@ impl Daemon {
         }
         if taken.changed {
             self.tell_workspaces();
+        }
+        if taken.lent || self.links.list[at].relayed.lends_known {
+            self.borrowed_taken(at, taken.lent);
         }
         // Chats name workspaces, which may have been numbered since.
         if taken.chats {
@@ -1829,7 +1915,7 @@ impl Daemon {
                 });
                 let need = match expect {
                     Expect::Nothing => continue,
-                    Expect::Chats | Expect::Attached(_) => Need::Decode,
+                    Expect::Chats | Expect::Attached(_) | Expect::Lends => Need::Decode,
                     Expect::Client { token, then, .. } => {
                         // Only one that names nothing goes on as it came;
                         // anything else is looked at, and refused if it
@@ -2143,6 +2229,33 @@ impl Daemon {
                 }
             }
             Expect::Attached(local) => self.buffer_attached(at, local),
+            Expect::Lends => match response {
+                Response::Done => self.lends_known(at),
+                // As when the daemon there still has the connection this
+                // daemon made before restarting: made again in a moment,
+                // when it may have let it go. Until then, nothing borrowed
+                // from it seems to have gone.
+                refused => {
+                    let why = match refused {
+                        Response::Error(err) => err.to_string(),
+                        other => format!("{other:?}"),
+                    };
+                    let host = self.links.list[at].remote.host.clone();
+                    log::warn!("{host} won't say what it lent this machine: {why}");
+                    if let Some((token, _)) = self.links.list[at].connected {
+                        self.reached_lost(token, Some(format!("{host} refused it: {why}")));
+                    }
+                }
+            },
+            Expect::Client {
+                token,
+                ticket,
+                then: Then::Lent(key),
+                ..
+            } => {
+                let response = self.lent_answer(at, key, response);
+                self.hand_answer_with(token, ticket, response);
+            }
             Expect::Client {
                 token,
                 ticket,
@@ -2378,7 +2491,7 @@ impl Daemon {
             let asked = (reached.upstream.expecting.iter())
                 .filter_map(|expect| match expect {
                     Expect::Client { asked, .. } => Some(*asked),
-                    Expect::Nothing | Expect::Chats | Expect::Attached(_) => None,
+                    Expect::Nothing | Expect::Chats | Expect::Attached(_) | Expect::Lends => None,
                 })
                 .chain(held)
                 .chain(self.attaches_waiting_since(at))
@@ -2422,6 +2535,7 @@ impl Daemon {
                 continue;
             };
             let mut given_up = Vec::new();
+            let mut lent_late = Vec::new();
             for expect in &mut reached.upstream.expecting {
                 if let Expect::Client {
                     token,
@@ -2439,6 +2553,11 @@ impl Daemon {
                         _ => Expect::Nothing,
                     };
                     given_up.push((token, ticket));
+                    // A pane lent late is one no pane here shows, which
+                    // the daemon there is asked to close.
+                    if let Then::Lent(key) = then {
+                        lent_late.push(key);
+                    }
                 }
             }
             if !given_up.is_empty() {
@@ -2450,6 +2569,9 @@ impl Daemon {
             for (token, ticket) in given_up {
                 let silent = Error::Other(format!("{host} isn't answering"));
                 self.hand_answer_with(token, ticket, Response::Error(silent));
+            }
+            for key in lent_late {
+                self.lending_given_up(at, key);
             }
             // Requests held for clients' changes, and attaches waiting
             // behind a change, are given up on by the same rule: answered
@@ -2486,6 +2608,17 @@ impl Daemon {
         {
             self.chat_watch.dirty = true;
         }
+    }
+}
+
+/// `found`, the connection a request goes to and the request renumbered
+/// for it, or why it can't be asked, as [`Renumbered`] is kept beside its
+/// connection. An error goes to no connection: it's answered at once,
+/// and the number it's given here is never looked at.
+fn flip(found: Result<(usize, (Request, Then)), Error>) -> (usize, Renumbered) {
+    match found {
+        Ok((at, asked)) => (at, Ok(asked)),
+        Err(err) => (usize::MAX, Err(err)),
     }
 }
 
@@ -2653,6 +2786,7 @@ mod tests {
             }],
             active_tab: TabId(1),
             home: None,
+            lent: None,
         };
         say(&mut there, &ServerMessage::Response(Response::Done));
         say(

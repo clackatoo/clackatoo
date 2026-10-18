@@ -385,11 +385,13 @@ impl Desk {
             Place::Tab | Place::Here => Request::NewTab {
                 workspace: shown.workspace,
                 terminal,
+                on: None,
             },
             Place::Beside(side) => Request::Split {
                 pane: shown.pane,
                 side,
                 terminal,
+                on: None,
             },
         };
         self.request(request, Asked::PaneAt(landing));

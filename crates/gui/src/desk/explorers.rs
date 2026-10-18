@@ -1171,6 +1171,7 @@ impl Desk {
             let request = Request::NewTab {
                 workspace: shown.workspace,
                 terminal: file,
+                on: None,
             };
             return self.request(request, Asked::Pane);
         }
@@ -1187,6 +1188,7 @@ impl Desk {
                     pane: editor,
                     side,
                     terminal: file,
+                    on: None,
                 };
                 self.request(request, Asked::Pane);
             }
@@ -1219,6 +1221,7 @@ impl Desk {
                     pane,
                     side: if left_of { Side::Left } else { Side::Right },
                     terminal: file,
+                    on: None,
                 }
             }
             None => Request::SplitTab {
@@ -1226,6 +1229,7 @@ impl Desk {
                 side: Side::Right,
                 terminal: file,
                 share: Some(1000 - self.explorer_share()),
+                on: None,
             },
         };
         self.request(request, Asked::Pane);
@@ -1277,9 +1281,12 @@ impl Desk {
     /// the first.
     fn explorer_in_tab(&self) -> Option<PaneId> {
         let tab = self.shown_tab()?;
+        // Only one on the machine a new one would be made on.
+        let machine = self.aimed_machine();
         let explorers = (tab.layout.panes().into_iter())
             .filter(|pane| matches!(pane.content, Content::Files(_)))
-            .map(|pane| pane.id);
+            .map(|pane| pane.id)
+            .filter(|&pane| self.pane_machine(pane) == machine);
         let focused = self.shown.map(|shown| shown.pane);
         let mut first = None;
         for pane in explorers {
@@ -1360,6 +1367,7 @@ impl Desk {
             side: Side::Left,
             terminal: PaneTerminal::Files(OpenFiles { dir }),
             share: Some(self.explorer_share()),
+            on: None,
         };
         self.request(request, Asked::Explorer { reveal, edit });
     }
@@ -1376,6 +1384,7 @@ impl Desk {
             pane: shown.pane,
             side,
             terminal: PaneTerminal::Files(OpenFiles { dir }),
+            on: None,
         };
         self.request(request, Asked::Explorer { reveal, edit });
     }

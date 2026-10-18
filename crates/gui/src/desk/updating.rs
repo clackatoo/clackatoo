@@ -82,6 +82,7 @@ impl Desk {
             Request::NewTab {
                 workspace: shown.workspace,
                 terminal,
+                on: None,
             },
             Asked::Pane,
         );

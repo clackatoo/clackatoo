@@ -825,6 +825,7 @@ fn a_device_answers_a_chats_question_over_its_websocket() {
         phone.request(Request::NewWorkspace {
             name: None,
             terminal: chat,
+            on: None,
         }),
         Response::PaneCreated(_)
     ));
@@ -898,6 +899,7 @@ fn a_turn_ending_while_no_one_looks_is_unseen_until_someone_does() {
     phone.request(Request::NewWorkspace {
         name: None,
         terminal: chat,
+        on: None,
     });
     let chats = phone.chats_until(|chats| {
         chats.len() == 1 && chats[0].state == clackatoo_protocol::ChatState::Ready
@@ -1245,6 +1247,7 @@ fn a_device_cant_upgrade_the_daemon_carry_quic_or_serve_tools() {
     phone.request(Request::NewWorkspace {
         name: None,
         terminal: chat,
+        on: None,
     });
     let Response::Chats(chats) = phone.request(Request::WatchChats) else {
         panic!("chats");
@@ -1423,6 +1426,7 @@ fn shell_in_a_workspace(window: &mut Client) -> TerminalId {
     let Response::PaneCreated(pane) = (window.request(&Request::NewWorkspace {
         name: None,
         terminal: shell,
+        on: None,
     }))
     .unwrap() else {
         panic!("a pane");

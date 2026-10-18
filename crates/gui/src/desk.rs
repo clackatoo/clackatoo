@@ -159,6 +159,7 @@ mod colours;
 mod connecting;
 mod devices;
 mod editors;
+mod elsewhere;
 mod explorers;
 mod finding;
 mod formatting;
@@ -411,6 +412,12 @@ pub(crate) struct Desk {
     /// Whether `:connect` asked for the picker of a machine, waiting for
     /// the window to open it.
     connect_asked: bool,
+    /// The machine `@host` named, while the command after it is carried
+    /// out: new panes and workspaces go there (see [`elsewhere`]).
+    opening_on: Option<clackatoo_protocol::MachineId>,
+    /// The machine `@host` named for the chat the start page starts, while
+    /// it's open.
+    start_on: Option<clackatoo_protocol::MachineId>,
     /// The daemon's connections to other machines, as last heard: where
     /// workspaces from them are, and how each is reached.
     connections: Vec<clackatoo_protocol::Connection>,
@@ -715,11 +722,10 @@ impl Desk {
             .collect()
     }
 
-    /// What `pane`, of a workspace from another machine not connected
-    /// just now, says over its last screen, as its pill does.
+    /// What `pane`, on another machine not connected just now, says over
+    /// its last screen, as its pill does.
     pub(crate) fn away_notice(&self, pane: PaneId) -> Option<String> {
-        let (workspace, ..) = self.workspaces.find_pane(pane)?;
-        self.elsewhere(workspace)?.notice()
+        self.pane_elsewhere(pane)?.notice()
     }
 
     /// The shown workspace's tabs, by name, and whether each is the one
@@ -908,13 +914,24 @@ impl Desk {
         let title: Option<String> = (tab.name.as_deref().or_else(|| self.tab_title(tab)))
             .map(|title| title.chars().filter(|&ch| shown_in_names(ch)).collect())
             .filter(|title: &String| !title.trim().is_empty());
+        // Its focused pane on another machine than its workspace says
+        // which, unless `showhost` says never.
+        let away = (self.options.showhost != crate::options::ShowHost::Never)
+            .then(|| {
+                let (workspace, _, pane) = self.workspaces.find_pane(tab.focused)?;
+                let home = pane.home.filter(|&home| Some(home) != workspace.home)?;
+                Some(self.elsewhere_on(home).host)
+            })
+            .flatten();
+        let away = away.map(|host| format!("@{host}")).unwrap_or_default();
         match title.as_deref() {
             Some(title) if title.chars().count() > MAX_TITLE => {
                 let short: String = title.chars().take(MAX_TITLE - 1).collect();
-                format!("{number} {short}…")
+                format!("{number} {short}…{away}")
             }
-            Some(title) => format!("{number} {title}"),
-            None => number.to_string(),
+            Some(title) => format!("{number} {title}{away}"),
+            None if away.is_empty() => number.to_string(),
+            None => format!("{number} {away}"),
         }
     }
 
@@ -1008,9 +1025,27 @@ impl Desk {
         self.run(Command::Open {
             place: Place::Tab,
             kind: Kind::Terminal,
-            daemon: None,
             agent: None,
         });
+    }
+
+    /// Carries out `:workspace`: switches to the workspace `name` names,
+    /// or makes it if there's none, on the machine it names after `@`, as
+    /// `:ws new@desk NAME` does too; or with no name, makes a new one.
+    fn switch_workspace(&mut self, name: Option<String>) {
+        let existing = (name.as_deref())
+            .and_then(|name| self.workspace_named(name.trim()))
+            .map(|workspace| workspace.id);
+        if let Some(workspace) = existing {
+            return self.show_workspace(workspace);
+        }
+        match name.as_deref().and_then(elsewhere::new_elsewhere) {
+            Some((name, host)) => {
+                let host = host.to_owned();
+                self.new_workspace_named_on(name, &host);
+            }
+            None => self.new_workspace_here(name),
+        }
     }
 
     /// Switches to `workspace`, at its active tab and that tab's focused
@@ -1207,29 +1242,39 @@ impl Desk {
     /// the tab shown of a kind this window doesn't know, and forgets those
     /// gone.
     fn show_others(&mut self) {
-        // In a workspace from another machine, one of a kind not relayed
-        // yet, which says so.
-        let host = (self.shown)
+        // On another machine, one of a kind not relayed yet, which says
+        // so, by its host; or in a workspace of the daemon's own, one
+        // waiting for its machine to say what it shows.
+        let own = (self.shown)
             .and_then(|shown| self.workspaces.get(shown.workspace))
-            .and_then(|workspace| self.elsewhere(workspace))
-            .map(|elsewhere| elsewhere.host);
-        let shown: Vec<(PaneId, PaneKind)> = (self.shown_tab())
+            .is_some_and(|workspace| workspace.home.is_none());
+        let shown: Vec<(PaneId, PaneKind, Option<String>, bool)> = (self.shown_tab())
             .map(|tab| {
                 (tab.layout.panes().iter())
                     .filter_map(|pane| match pane.content {
-                        Content::Other { kind } => Some((pane.id, kind)),
+                        Content::Other { kind } => {
+                            let host = self.pane_elsewhere(pane.id).map(|away| away.host);
+                            let waiting = own && host.is_some();
+                            Some((pane.id, kind, host, waiting))
+                        }
                         _ => None,
                     })
                     .collect()
             })
             .unwrap_or_default();
         self.others.retain(|pane, other| {
-            shown.contains(&(*pane, other.kind())) && other.host() == host.as_deref()
+            (shown.iter()).any(|(shown, kind, host, waiting)| {
+                shown == pane
+                    && *kind == other.kind()
+                    && host.as_deref() == other.host()
+                    && *waiting == other.is_waiting()
+            })
         });
-        for (pane, kind) in shown {
-            self.others
-                .entry(pane)
-                .or_insert_with(|| OtherPane::new(kind, host.clone()));
+        for (pane, kind, host, waiting) in shown {
+            self.others.entry(pane).or_insert_with(|| match host {
+                Some(host) if waiting => OtherPane::waiting(kind, host),
+                host => OtherPane::new(kind, host),
+            });
         }
     }
 
@@ -1682,6 +1727,7 @@ impl Desk {
 
     /// Queues a request of the window's own.
     fn request(&mut self, request: Request, asked: Asked) {
+        let request = self.aimed(request);
         if self.connected {
             self.sending(&request, &asked);
             let window = Asker::Window(asked);
@@ -2461,34 +2507,36 @@ impl Desk {
             Command::Connect(host) => return self.ask_connect(host),
             Command::Disconnect(host) => return self.ask_disconnect(host),
             Command::PortForward(forwarding) => return self.port_forward(forwarding),
+            Command::On { host, command } => return self.run_on(&host, *command),
+            Command::Workspace(name) => return self.switch_workspace(name),
             _ => {}
         }
-        let Some(shown) = self.shown else { return };
+        let Some(shown) = self.shown else {
+            // With no workspace shown, a new pane opens one.
+            if let Command::Open { kind, agent, .. } = command {
+                let terminal = new_pane(kind, agent, self.new_pane_size(None), &self.options);
+                let new = Request::NewWorkspace {
+                    name: None,
+                    terminal,
+                    on: None,
+                };
+                self.request(new, Asked::Pane);
+            }
+            return;
+        };
         // A new pane beside a folder, or a path, is from the folder shown.
         self.root_folder_first(shown.pane);
         let new = |kind, agent, size| new_pane(kind, agent, size, &self.options);
         match command {
-            Command::Open {
-                daemon: Some(daemon),
-                ..
-            } => {
-                self.say(format!(
-                    "a pane on {daemon} beside this machine's comes in a later release: \
-                     :connect {daemon} brings its workspaces in, and panes made in one are on \
-                     {daemon}"
-                ));
-            }
             // A chat with no agent named: the start page, to pick one.
             Command::Open {
                 place,
                 kind: Kind::Agent,
-                daemon: None,
                 agent: None,
             } => self.open_start_page(place),
             Command::Open {
                 place: Place::Tab | Place::Here,
                 kind,
-                daemon: None,
                 agent,
             } => {
                 let terminal = new(kind, agent, self.new_pane_size(None));
@@ -2496,6 +2544,7 @@ impl Desk {
                     Request::NewTab {
                         workspace: shown.workspace,
                         terminal,
+                        on: None,
                     },
                     Asked::Pane,
                 );
@@ -2503,7 +2552,6 @@ impl Desk {
             Command::Open {
                 place: Place::Beside(side),
                 kind,
-                daemon: None,
                 agent,
             } => {
                 let terminal = new(kind, agent, self.new_pane_size(Some(side)));
@@ -2512,26 +2560,10 @@ impl Desk {
                         pane: shown.pane,
                         side,
                         terminal,
+                        on: None,
                     },
                     Asked::Pane,
                 );
-            }
-            Command::Workspace(name) => {
-                let existing = (name.as_deref())
-                    .and_then(|name| self.workspace_named(name.trim()))
-                    .map(|workspace| workspace.id);
-                if let Some(workspace) = existing {
-                    self.show_workspace(workspace);
-                } else if let Some((name, host)) = name.as_deref().and_then(|n| n.rsplit_once('@'))
-                {
-                    self.warn(format!(
-                        "there's no workspace ‘{name}’ on ‘{host}’: new workspaces on another \
-                         machine come in a later release"
-                    ));
-                } else {
-                    let terminal = new(Kind::Terminal, None, self.new_pane_size(None));
-                    self.request(Request::NewWorkspace { name, terminal }, Asked::Pane);
-                }
             }
             // In an editor, a number is a line, as in Vim.
             Command::Tab(number) if self.focused_editor().is_some() => {
@@ -2585,7 +2617,9 @@ impl Desk {
             | Command::Update(_)
             | Command::Connect(_)
             | Command::Disconnect(_)
-            | Command::PortForward(_) => {}
+            | Command::PortForward(_)
+            | Command::On { .. }
+            | Command::Workspace(_) => {}
         }
     }
 
@@ -2745,6 +2779,7 @@ mod tests {
             active_tab: tabs[0].id,
             tabs,
             home: None,
+            lent: None,
         }
     }
 
@@ -3045,6 +3080,7 @@ mod tests {
                 pane: PaneId(1),
                 side: Side::Right,
                 terminal: PaneTerminal::Existing(TerminalId(7)),
+                on: None,
             }]
         );
 
@@ -7040,6 +7076,7 @@ mod tests {
                 pane: PaneId(1),
                 side: Side::Right,
                 terminal: PaneTerminal::File(OpenFile { path, .. }),
+                ..
             }] if path == "/p/README"
         ));
         type_keys(&mut desk, " pf");
@@ -8311,6 +8348,7 @@ mod tests {
                     pane,
                     side,
                     terminal: PaneTerminal::File(file),
+                    ..
                 } => Some(format!("{side:?} of {} {}", pane.0, file.path)),
                 Request::OpenHere { pane, file } => Some(format!("in {} {}", pane.0, file.path)),
                 _ => None,
@@ -9979,6 +10017,7 @@ mod tests {
                 side: Side::Left,
                 terminal: PaneTerminal::Files(OpenFiles { dir: None }),
                 share: Some(250),
+                on: None,
             }],
             "20 cells, a quarter of the tab's 80 columns, as that's fewer than 30"
         );
@@ -10058,6 +10097,7 @@ mod tests {
                 terminal: PaneTerminal::Files(OpenFiles {
                     dir: Some("src".into())
                 }),
+                on: None,
             }]
         );
         command(&mut desk, "-Review base");
@@ -10071,6 +10111,7 @@ mod tests {
                     scope: ReviewScope::Base,
                     cwd: Some("/p/src".into()),
                 }),
+                on: None,
             }]
         );
     }
@@ -10118,10 +10159,12 @@ mod tests {
                     pane: PaneId(1),
                     side: Side::Right,
                     terminal: PaneTerminal::File(file("/p/a.txt")),
+                    on: None,
                 },
                 Request::NewTab {
                     workspace: WorkspaceId(1),
                     terminal: PaneTerminal::File(file("/p/a.txt")),
+                    on: None,
                 }
             ]
         );
@@ -10144,6 +10187,7 @@ mod tests {
                 pane: PaneId(3),
                 side: Side::Left,
                 terminal: file.clone(),
+                on: None,
             }],
             "between the explorer and the terminal"
         );
@@ -10159,6 +10203,7 @@ mod tests {
                 side: Side::Right,
                 terminal: file,
                 share: Some(750),
+                on: None,
             }]
         );
     }
@@ -10308,6 +10353,7 @@ mod tests {
                     dir: Some("~/src".into())
                 }),
                 share: Some(250),
+                on: None,
             }]
         );
         let mut desk = super::tests::desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
@@ -10392,6 +10438,7 @@ mod tests {
             pane: PaneId(4),
             side: Side::Below,
             terminal: PaneTerminal::Browser(TerminalId(5)),
+            on: None,
         }));
 
         // In a tab not shown, it's let go: no pictures nobody sees.
@@ -10439,11 +10486,13 @@ mod tests {
                 Request::NewTab {
                     workspace: WorkspaceId(1),
                     terminal: PaneTerminal::Board(OpenBoard::Named("plan".into())),
+                    on: None,
                 },
                 Request::Split {
                     pane: PaneId(3),
                     side: Side::Right,
                     terminal: PaneTerminal::Board(OpenBoard::Named("plan".into())),
+                    on: None,
                 },
             ]
         );
@@ -10541,6 +10590,7 @@ mod tests {
                 pane: PaneId(3),
                 side: Side::Right,
                 terminal: PaneTerminal::Board(OpenBoard::Id(BoardId(5))),
+                on: None,
             }]
         );
     }
@@ -11425,6 +11475,7 @@ mod tests {
                     scope: ReviewScope::Turn(Some(0)),
                     cwd: Some("/p".into()),
                 }),
+                on: None,
             }]
         );
         let layout = side_by_side(vec![

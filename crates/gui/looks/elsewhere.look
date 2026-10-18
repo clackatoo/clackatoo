@@ -1,0 +1,44 @@
+# Panes on another machine in this machine's own workspace, and new
+# workspaces there (CLACKA-117, phase 4): a terminal on desk in a new
+# tab here, one split from it, Tab offering machines after an @, the
+# refusal of this machine's pane in a workspace on desk, a workspace made
+# on desk, the bar's + asking which machine, and desk going away.
+size 1280x800
+machine desk notes
+keys <C-;>:connect desk<CR>
+wait-for notes
+# A terminal on desk, in a new tab of this machine's workspace.
+keys <C-;>:Terminal@desk<CR>
+wait-for @desk
+keys i
+shell echo typed here, run on desk
+wait-for run on desk
+shot tab
+# Split from it: on desk too, as the pane split is desk's.
+keys <C-;>:|Terminal<CR>
+sleep 1000
+shot split
+# Tab offers the machines after a kind of pane's @.
+keys <C-;>:-Editor@<Tab>
+shot completion
+keys <Esc>
+# In desk's own workspace, a pane of this machine's is refused, for now.
+keys <C-;>:workspace notes<CR>
+sleep 500
+keys <C-;>:|Terminal@local<CR>
+sleep 500
+shot refused
+# A workspace made on desk.
+keys <C-;>:ws new@desk ideas<CR>
+wait-for ideas
+shot new-workspace
+# The bar's + asks which machine a new workspace goes on.
+click 308 20
+shot plus
+click 640 600
+# Desk going away: the panes here borrowed from it say so.
+keys <C-;>:workspace 1<CR>
+keys <C-;>:2<CR>
+machine-stop desk
+sleep 3000
+shot away

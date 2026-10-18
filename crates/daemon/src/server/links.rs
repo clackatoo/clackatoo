@@ -1457,6 +1457,7 @@ mod tests {
                 tabs: Vec::new(),
                 active_tab: clackatoo_protocol::TabId(1),
                 home: None,
+                lent: None,
             }],
             ..Workspaces::default()
         }))

@@ -963,6 +963,7 @@ mod tests {
                 }],
                 active_tab: TabId(0),
                 home: None,
+                lent: None,
             }],
             active: None,
             home: None,

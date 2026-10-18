@@ -324,11 +324,27 @@ impl Desk {
     /// which paths are from, and, after a command that takes one, the
     /// machines it may name.
     fn completion_sources(&self) -> Sources {
-        let takes_host = (self.input.as_ref())
-            .and_then(|input| input.line.text().split_whitespace().next())
+        let first = (self.input.as_ref()).and_then(|input| {
+            input
+                .line
+                .text()
+                .split_whitespace()
+                .next()
+                .map(str::to_owned)
+        });
+        let takes_host = (first.as_deref())
             .is_some_and(|word| crate::command::takes(word) == crate::command::Takes::Host);
-        // A pane on another machine than the window's has its files there.
-        let remote = self.remote || self.shown_elsewhere().is_some();
+        // A pane on another machine than the window's has its files there,
+        // as does one made on another with `@`.
+        let own = self.workspaces.machine.as_ref().map(|own| own.id);
+        let named = (first.as_deref())
+            .and_then(|word| word.split_once('@'))
+            .and_then(|(_, host)| self.machine_named(host).ok());
+        let remote = self.remote
+            || match named {
+                Some(machine) => Some(machine) != own,
+                None => self.shown_elsewhere().is_some(),
+            };
         Sources {
             workspaces: (self.workspaces.list.iter())
                 .map(|workspace| self.shown_name(workspace))
@@ -338,6 +354,7 @@ impl Desk {
             } else {
                 Vec::new()
             },
+            machines: self.machine_names(),
             folder: (!remote).then(|| self.focused_folder()).flatten(),
             remote,
         }

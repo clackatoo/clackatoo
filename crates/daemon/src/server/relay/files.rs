@@ -246,19 +246,21 @@ impl Daemon {
         op: &FileOp,
         pane: Option<PaneId>,
     ) -> bool {
-        let Some((at, remote)) = pane.and_then(|pane| self.relayed_pane(pane)) else {
+        let Some(found) = pane.and_then(|pane| self.pane_elsewhere(pane)) else {
             return false;
         };
-        let refused = if self.links.list[at].relayed.relays {
-            let number = self.links.list[at].relayed.ops.number(token, id);
-            let asked = ClientMessage::FileOp {
-                id: number,
-                op: op.clone(),
-                pane: Some(remote),
-            };
-            self.send_upstream(at, &asked, Expect::Nothing).err()
-        } else {
-            Some(self.too_old(at, "a file operation"))
+        let refused = match found {
+            Err(why) => Some(why),
+            Ok((at, remote)) if self.links.list[at].relayed.relays => {
+                let number = self.links.list[at].relayed.ops.number(token, id);
+                let asked = ClientMessage::FileOp {
+                    id: number,
+                    op: op.clone(),
+                    pane: Some(remote),
+                };
+                self.send_upstream(at, &asked, Expect::Nothing).err()
+            }
+            Ok((at, _)) => Some(self.too_old(at, "a file operation")),
         };
         if let Some(why) = refused {
             let failed = FileOpError::Failed(match why {

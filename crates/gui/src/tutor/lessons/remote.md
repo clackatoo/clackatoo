@@ -66,4 +66,12 @@ option showhost=always
 
 `:workspace notes@desk` switches to a workspace by its machine. Tab after `:connect` offers the machines in your `~/.ssh/config` and those you've connected to lately. In your config, `client.connect("desk")` connects whenever a window opens, saying nothing unless it fails.
 
-`:connect` alone still opens a window on another machine, and `:Terminal@host`, for a pane on another machine beside your own, comes in a later release.
+`:connect` alone still opens a window on another machine.
+
+## A pane on another machine, beside your own
+
+A new pane goes on the machine of the pane you make it from: `:Terminal`, a split, `:e`, `:Explore` or the finder in one of desk's panes is desk's, wherever its workspace is. `@host` after a kind of pane picks the machine instead: `:Terminal@desk` opens a terminal on desk in a new tab of the workspace you're in, `:|Terminal@desk` splits one in beside the pane you're in, and `:Editor@desk notes.md`, `:Explore@desk` and the rest work the same. `@local`, or this machine's own name, is your daemon's machine. Tab after the `@` offers the machines your daemon is connected to.
+
+Such a pane is desk's in every way: what you type runs there, and a split or a file opened from it is desk's too. Its tab says which machine it's on, as `2 src@desk`, unless `showhost` is `never`. Your workspace keeps it, after your daemon restarts too, and desk keeps what it shows, after desk restarts too: a terminal comes back as a new shell in its folder there, as desk's own do. While desk can't be reached the pane says so over its last screen, and closing it closes it on desk once desk is back. Desk never throws away what it lent on so little: a pane nothing here shows any more, or a `[No Name]` with changes, comes back as one of desk's own workspaces, `from-laptop`, unless it's a shell running nothing. On desk, `clackatoo lent` lists what it lent, and `clackatoo lent reclaim N` takes one back; after a month without your laptop, desk takes them all back. A workspace on desk can't hold a pane of this machine's yet: `:|Terminal@local` in one says so.
+
+`:workspace new@desk notes` makes a workspace called notes on desk, and `:workspace notes@desk` does too if desk has none of that name. The `+` at the end of the workspaces asks which machine once your daemon is connected to another. A workspace made on desk lives there, so it carries on while your laptop sleeps, and desk's own windows have it too.

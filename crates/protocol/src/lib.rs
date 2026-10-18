@@ -115,13 +115,13 @@ pub use view::{
     Links, Node, NodeId, Patch, Run, View, ViewUpdate,
 };
 pub use workspace::{
-    Axis, Content, Layout, MAX_NESTING, Pane, PaneId, PaneKind, PaneTerminal, Place, Restored,
-    Side, Tab, TabId, Workspace, WorkspaceId, Workspaces,
+    Axis, Content, Layout, Lent, MAX_NESTING, Pane, PaneId, PaneKind, PaneTerminal, Place,
+    Restored, Side, Tab, TabId, Workspace, WorkspaceId, Workspaces,
 };
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 92;
+pub const PROTOCOL_VERSION: u32 = 93;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -560,6 +560,11 @@ pub enum Event {
     /// works again, to the client that last asked for that machine's.
     /// Only to a client of protocol 92 or later.
     Forwarded(String),
+    /// Something for the window's bar to say about the workspaces, such
+    /// as that a machine has lost panes it lent this daemon, which have
+    /// closed. To every client watching the workspaces, of protocol 93 or
+    /// later.
+    Said(String),
 }
 
 /// A message from a client to the daemon that expects an answer.
@@ -680,6 +685,16 @@ pub enum Request {
         name: Option<String>,
         /// What its pane shows.
         terminal: PaneTerminal,
+        /// The machine the workspace goes on, a daemon this one is connected to
+        /// or this one itself: `None` for the machine the daemon picks,
+        /// as this one's own. New in protocol 93: a client asks
+        /// [`wire::daemon_has`] with [`wire::LEND`] before giving one, as
+        /// an older daemon would make it on its own machine.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::LEND }, _>",
+            deserialize_with = "wire::since::<{ wire::LEND }, _, _>"
+        )]
+        on: Option<MachineId>,
     },
     /// Adds a tab to a workspace, after its others, showing `terminal`.
     /// Answered with [`Response::PaneCreated`].
@@ -688,6 +703,16 @@ pub enum Request {
         workspace: WorkspaceId,
         /// What the tab's pane shows.
         terminal: PaneTerminal,
+        /// The machine the tab's pane goes on, a daemon this one is connected to
+        /// or this one itself: `None` for the machine the daemon picks,
+        /// as the workspace's own. New in protocol 93: a client asks
+        /// [`wire::daemon_has`] with [`wire::LEND`] before giving one, as
+        /// an older daemon would make it on its own machine.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::LEND }, _>",
+            deserialize_with = "wire::since::<{ wire::LEND }, _, _>"
+        )]
+        on: Option<MachineId>,
     },
     /// Splits a pane in two, putting a new pane on `side` of it. Answered
     /// with [`Response::PaneCreated`].
@@ -698,6 +723,16 @@ pub enum Request {
         side: Side,
         /// What the new pane shows.
         terminal: PaneTerminal,
+        /// The machine the new pane goes on, a daemon this one is connected to
+        /// or this one itself: `None` for the machine the daemon picks,
+        /// as the one the pane split is on. New in protocol 93: a client asks
+        /// [`wire::daemon_has`] with [`wire::LEND`] before giving one, as
+        /// an older daemon would make it on its own machine.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::LEND }, _>",
+            deserialize_with = "wire::since::<{ wire::LEND }, _, _>"
+        )]
+        on: Option<MachineId>,
     },
     /// Closes a pane and the terminal it shows. A tab goes with its last
     /// pane, and a workspace with its last tab. A pane also closes when its
@@ -900,6 +935,16 @@ pub enum Request {
         /// to 999. `None` gives it as much as each of the parts beside it
         /// has, as a split does.
         share: Option<u16>,
+        /// The machine the new pane goes on, a daemon this one is connected to
+        /// or this one itself: `None` for the machine the daemon picks,
+        /// as the one the tab's focused pane is on. New in protocol 93: a client asks
+        /// [`wire::daemon_has`] with [`wire::LEND`] before giving one, as
+        /// an older daemon would make it on its own machine.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::LEND }, _>",
+            deserialize_with = "wire::since::<{ wire::LEND }, _, _>"
+        )]
+        on: Option<MachineId>,
     },
     /// Reads the buffer's file again, as an edit by the user, which can be
     /// undone, if it has changed on disk since it was read or last written
@@ -1143,6 +1188,64 @@ pub enum Request {
         /// What to do.
         forwarding: Forwarding,
     },
+    /// As [`Relay`](Self::Relay), from a daemon that says which machine it
+    /// is: the daemon then also shows it the workspaces holding the panes
+    /// it lent it ([`Lend`](Self::Lend)), and no other client. Only a
+    /// client over QUIC, as a daemon connected to this one is, may say it;
+    /// not this daemon's own machine, nor a machine another connection
+    /// says it is in another run, nor another machine than the one this
+    /// connection said before. This is how daemons of the same user that
+    /// work together keep out of each other's way, not a boundary: any
+    /// client may say what it likes. Answered with [`Response::Done`]. New
+    /// in protocol 93: a client asks [`wire::daemon_has`] with
+    /// [`wire::LEND`] before sending it, and sends [`Relay`](Self::Relay)
+    /// to an older daemon.
+    RelayAs {
+        /// The machine of the daemon relaying: its ID, its name, as a
+        /// workspace it was lent is named after once it's given back
+        /// (`from-laptop`), and its run.
+        machine: Machine,
+    },
+    /// Makes a pane for the daemon asking, which said which machine it is
+    /// ([`RelayAs`](Self::RelayAs)), to show in a workspace of its own:
+    /// the pane goes in a workspace of its own here, lent to that daemon
+    /// ([`Workspace::lent`]), which only that daemon is shown, and which
+    /// goes with the pane, as any workspace does with its last pane. The
+    /// daemon asking closes the pane by closing that workspace. Answered
+    /// with [`Response::PaneCreated`]. New in protocol 93, as
+    /// [`RelayAs`](Self::RelayAs).
+    Lend {
+        /// The number the daemon asking gives the pane, by which it finds
+        /// it again from one run to the next (see [`Lent::key`]).
+        key: u64,
+        /// A pane of this daemon's whose folder a new terminal, chat or
+        /// explorer starts in when it names none, as one split beside it
+        /// would: the pane on this machine the asking daemon's new pane
+        /// goes beside.
+        beside: Option<PaneId>,
+        /// What the pane shows.
+        terminal: PaneTerminal,
+    },
+    /// Gives back the workspace lent to another machine's daemon,
+    /// `workspace`: it becomes one of this daemon's own, named after that
+    /// machine (`from-laptop`), shown in every window, holding what it
+    /// held. With `close_idle`, as the daemon it was lent to asks of one
+    /// it no longer shows, a terminal whose shell runs nothing is closed
+    /// instead, as nothing would be lost. Asked by that daemon, or by a
+    /// client on this machine, as `clackatoo lent reclaim` is. Answered
+    /// with [`Response::Text`], saying what was done. New in protocol 93,
+    /// as [`RelayAs`](Self::RelayAs).
+    Unlend {
+        /// The workspace lent.
+        workspace: WorkspaceId,
+        /// Close it instead if it's a shell running nothing.
+        close_idle: bool,
+    },
+    /// Lists the workspaces lent to other machines' daemons: each one's
+    /// number, what its pane shows, who it's lent to and when that daemon
+    /// was last connected. Answered with [`Response::Text`], a line each.
+    /// New in protocol 93, as [`RelayAs`](Self::RelayAs).
+    Lent,
 }
 
 /// How to start a terminal.

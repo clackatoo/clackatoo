@@ -11,6 +11,10 @@
 //! board; a review; and a chat's agent and session, which the agent kept.
 //! Beside the workspaces, the daemon's connections to the daemons on other
 //! machines: each one's host, and the command that runs clackatoo there.
+//! A pane showing what's on another machine, a pane its daemon lent this
+//! one, is kept as that machine and the number this daemon gave the pane,
+//! which the daemon there keeps with it: a workspace this daemon lent
+//! another is kept with who it's lent to, and that number.
 //! Scrollback and running programs aren't kept: a terminal comes back as
 //! a new shell. A buffer with no file yet, and a chat's browser page,
 //! aren't kept at all.
@@ -78,6 +82,22 @@ pub(crate) struct State {
     /// write the file without them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) connections: Vec<Connection>,
+    /// The machines whose daemons workspaces are lent to: what each is
+    /// called, and when it was last connected, by which those lent to one
+    /// gone a long while are given back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) borrowers: Vec<Borrower>,
+}
+
+/// A machine whose daemon workspaces are lent to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Borrower {
+    /// Its ID, as 32 hex digits.
+    pub(crate) machine: String,
+    /// What it said it's called.
+    pub(crate) name: String,
+    /// When its daemon was last connected, in seconds since 1970.
+    pub(crate) last_seen: u64,
 }
 
 /// A connection to the daemon on another machine.
@@ -100,6 +120,33 @@ pub(crate) struct Workspace {
     /// Which tab was last shown, by its place in the list.
     #[serde(default)]
     pub(crate) active_tab: usize,
+    /// Who it's lent to, if it holds a pane this daemon made for the
+    /// daemon on another machine to show. Builds before lending read it
+    /// as a workspace of their own, with no name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) lent: Option<Lent>,
+}
+
+/// Who a workspace is lent to, and how that daemon knows its pane.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Lent {
+    /// The machine of the daemon it's lent to, by its ID, as 32 hex
+    /// digits.
+    pub(crate) to: String,
+    /// The number that daemon gave the pane.
+    pub(crate) key: u64,
+}
+
+/// A pane on another machine, which its daemon lent this one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Elsewhere {
+    /// The machine, by its ID, as 32 hex digits.
+    pub(crate) machine: String,
+    /// The number this daemon gave the pane, which the daemon there keeps
+    /// with it.
+    pub(crate) key: u64,
+    /// What kind of pane it is: `terminal`, `editor` and so on.
+    pub(crate) kind: String,
 }
 
 /// A tab.
@@ -144,6 +191,12 @@ pub(crate) enum Pane {
         /// `server::restore::kept_command`.
         #[serde(default)]
         ran: Option<String>,
+        /// The pane on another machine it shows instead, if it's one its
+        /// daemon lent this one, of whatever kind: kept as a terminal so a
+        /// build from before lending, which passes this over, makes it a
+        /// new shell of its own rather than refuse the file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        elsewhere: Option<Elsewhere>,
     },
     /// A chat with an agent.
     Chat {
@@ -483,6 +536,7 @@ mod tests {
             Layout::Pane(Pane::Terminal {
                 cwd: Some(cwd.to_owned()),
                 ran: ran.map(str::to_owned),
+                elsewhere: None,
             })
         };
         State {
@@ -549,6 +603,7 @@ mod tests {
                         },
                     ],
                     active_tab: 1,
+                    lent: None,
                 },
                 Workspace {
                     name: "notes".into(),
@@ -577,10 +632,12 @@ mod tests {
                         focused: 0,
                     }],
                     active_tab: 0,
+                    lent: None,
                 },
             ],
             active: Some(0),
             connections: Vec::new(),
+            borrowers: Vec::new(),
         }
     }
 
@@ -608,6 +665,41 @@ mod tests {
             "/tests/fixtures/workspaces-v1.json"
         );
         fs::write(path, state().encode()).unwrap();
+    }
+
+    #[test]
+    fn panes_on_other_machines_and_workspaces_lent_to_them_are_kept_by_their_numbers() {
+        let mut kept = state();
+        let borrowed = Pane::Terminal {
+            cwd: None,
+            ran: None,
+            elsewhere: Some(Elsewhere {
+                machine: "07".repeat(16),
+                key: u64::MAX - 1,
+                kind: "editor".into(),
+            }),
+        };
+        kept.workspaces[0].tabs[0].layout = Layout::Pane(borrowed);
+        kept.workspaces[0].lent = Some(Lent {
+            to: "a1".repeat(16),
+            key: 9,
+        });
+        let encoded = kept.encode();
+        assert_eq!(State::decode(&encoded).unwrap(), kept, "every bit of a u64");
+        // A build from before lending passes them over: a pane borrowed is
+        // a terminal to it, and a workspace lent one of its own.
+        let text = String::from_utf8(encoded).unwrap();
+        assert!(text.contains("\"terminal\""), "{text}");
+        assert!(
+            text.contains("\"elsewhere\"") && text.contains("\"lent\""),
+            "{text}"
+        );
+        // None, none written.
+        let plain = String::from_utf8(state().encode()).unwrap();
+        assert!(
+            !plain.contains("elsewhere") && !plain.contains("lent"),
+            "{plain}"
+        );
     }
 
     #[test]
@@ -655,7 +747,8 @@ mod tests {
             tab.layout,
             Layout::Pane(Pane::Terminal {
                 cwd: None,
-                ran: None
+                ran: None,
+                elsewhere: None,
             })
         );
     }

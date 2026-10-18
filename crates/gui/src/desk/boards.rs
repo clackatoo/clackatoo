@@ -226,16 +226,19 @@ impl Desk {
             Place::Tab => Request::NewTab {
                 workspace: shown.workspace,
                 terminal,
+                on: None,
             },
             Place::Beside(side) => Request::Split {
                 pane: shown.pane,
                 side,
                 terminal,
+                on: None,
             },
             Place::Here => Request::Split {
                 pane: shown.pane,
                 side: Side::Right,
                 terminal,
+                on: None,
             },
         };
         self.request(request, Asked::Pane);

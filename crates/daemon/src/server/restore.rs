@@ -42,6 +42,7 @@ use clackatoo_term::Progress;
 use super::{Daemon, Hosted};
 use crate::chat::HostedChat;
 use crate::saved::{self, Pane, Scope, State, Tools};
+use crate::workspaces::Borrowed;
 
 /// How long after something kept changes the workspaces are written: so
 /// a burst of changes, such as a layout being made, is written once, and
@@ -287,6 +288,7 @@ impl Daemon {
 
     /// The workspaces, as they're kept.
     fn kept_state(&mut self) -> State {
+        self.note_borrowers_seen();
         // Forgotten for what's gone, as the file is written.
         let terminals = &self.terminals;
         self.keeping
@@ -308,6 +310,13 @@ impl Daemon {
                 .map(|(host, command)| saved::Connection {
                     host,
                     command: (command != "clackatoo").then_some(command),
+                })
+                .collect(),
+            borrowers: (self.workspaces.borrowers().iter())
+                .map(|(machine, borrower)| saved::Borrower {
+                    machine: machine.to_string(),
+                    name: borrower.name.clone(),
+                    last_seen: borrower.last_seen,
                 })
                 .collect(),
         };
@@ -338,6 +347,10 @@ impl Daemon {
                 name: workspace.name.clone(),
                 tabs,
                 active_tab,
+                lent: workspace.lent.map(|lent| saved::Lent {
+                    to: lent.to.to_string(),
+                    key: lent.key,
+                }),
             });
         }
         state
@@ -377,6 +390,17 @@ impl Daemon {
     /// Pane `id`, showing `content`, as it's kept: `None` for one that
     /// isn't, a buffer with no file yet or a chat's browser page.
     fn kept_pane(&self, id: PaneId, content: Content) -> Option<Pane> {
+        if let Some(borrowed) = self.workspaces.borrowed().get(&id) {
+            return Some(Pane::Terminal {
+                cwd: None,
+                ran: None,
+                elsewhere: Some(saved::Elsewhere {
+                    machine: borrowed.machine.to_string(),
+                    key: borrowed.key,
+                    kind: borrowed.kind.to_string(),
+                }),
+            });
+        }
         let restored = self.workspaces.restored(id);
         match content {
             Content::Terminal(terminal) => match &self.terminals.get(&terminal)?.terminal {
@@ -391,6 +415,7 @@ impl Daemon {
                         // program printed.
                         ran: (restored.and_then(|restored| restored.ran.clone()))
                             .or_else(|| emulator.trusted_running_command().and_then(kept_command)),
+                        elsewhere: None,
                     })
                 }
                 Hosted::Chat(chat) => Some(Pane::Chat {
@@ -526,19 +551,32 @@ impl Daemon {
             made.push(if tabs.is_empty() {
                 None
             } else {
-                Some(
-                    self.workspaces
-                        .add_restored(&workspace.name, tabs, active_tab),
-                )
+                let made = self
+                    .workspaces
+                    .add_restored(&workspace.name, tabs, active_tab);
+                // Lent to another machine's daemon, it still is, as that
+                // daemon finds its pane again by the number it gave it.
+                let lent = (workspace.lent.as_ref()).and_then(|lent| {
+                    let to = lent.to.parse().ok()?;
+                    Some(clackatoo_protocol::Lent { to, key: lent.key })
+                });
+                if let Some(lent) = lent {
+                    self.workspaces.set_lent(made, lent);
+                }
+                Some(made)
             });
         }
         let active = (state.active)
             .and_then(|active| made.get(active).copied().flatten())
-            .or_else(|| made.iter().copied().flatten().next());
+            .filter(|&active| !self.workspaces.is_lent(active))
+            .or_else(|| {
+                (made.iter().copied().flatten()).find(|&made| !self.workspaces.is_lent(made))
+            });
         if let Some(active) = active {
             self.workspaces.set_active(active);
         }
         self.workspaces.set_restored(restored);
+        self.restore_borrowers(&state.borrowers);
         self.connect_kept(state.connections.iter().map(|connection| {
             let command = connection.command.as_deref().unwrap_or("clackatoo");
             (connection.host.clone(), command.to_owned())
@@ -553,6 +591,24 @@ impl Daemon {
             started.elapsed().as_millis()
         );
         self.workspaces_changed();
+    }
+
+    /// Takes the machines the workspaces made again were lent to, as kept,
+    /// and gives back at once those lent to one gone a long while.
+    fn restore_borrowers(&mut self, kept: &[saved::Borrower]) {
+        self.workspaces.set_borrowers(
+            (kept.iter())
+                .filter_map(|borrower| {
+                    let kept = crate::workspaces::Borrower {
+                        name: borrower.name.clone(),
+                        last_seen: borrower.last_seen,
+                    };
+                    Some((borrower.machine.parse().ok()?, kept))
+                })
+                .collect(),
+        );
+        self.workspaces.refresh_lent();
+        self.unlend_unseen();
     }
 
     /// Takes where editors were from the workspaces kept, as a daemon
@@ -663,6 +719,26 @@ impl Daemon {
         restored: &mut Vec<Restored>,
     ) -> Option<Layout> {
         match layout {
+            // A pane borrowed from another machine is shown again once
+            // the daemon there is reached, and says what it shows.
+            saved::Layout::Pane(Pane::Terminal {
+                elsewhere: Some(elsewhere),
+                ..
+            }) => {
+                let machine = elsewhere.machine.parse().ok();
+                let made = machine.filter(|_| *room > 0).map(|machine| {
+                    *room -= 1;
+                    let kind = clackatoo_protocol::PaneKind::new(&elsewhere.kind);
+                    let borrowed = Borrowed {
+                        machine,
+                        key: elsewhere.key,
+                        kind,
+                    };
+                    self.workspaces.fresh_borrowed(borrowed)
+                });
+                panes.push(made.map(|made| made.id));
+                Some(Layout::Pane(made?))
+            }
             saved::Layout::Pane(pane) => {
                 let content = self.restore_pane(pane, chats, room);
                 let made = content.map(|content| self.workspaces.fresh_pane(content));

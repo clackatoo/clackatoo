@@ -352,6 +352,12 @@ impl QuicServer {
         }
     }
 
+    /// When the connection with `handle` was last heard from, if it's
+    /// open.
+    pub(crate) fn heard(&self, handle: ConnectionHandle) -> Option<Instant> {
+        Some(self.connections.get(&handle)?.heard)
+    }
+
     /// The client the connection with `handle` is, once given one.
     pub(crate) fn client_of(&self, handle: ConnectionHandle) -> Option<Token> {
         self.connections.get(&handle)?.client

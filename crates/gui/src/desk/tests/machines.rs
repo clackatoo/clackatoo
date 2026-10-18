@@ -90,15 +90,226 @@ fn a_workspace_on_another_machine_is_named_name_at_host() {
     assert_eq!(desk.shown().unwrap().workspace, WorkspaceId(1));
     command(&mut desk, "workspace work");
     assert_eq!(desk.shown().unwrap().workspace, WorkspaceId(3));
-    // One that isn't there isn't made there yet.
+}
+
+/// The machine each new workspace asked for goes on, and its name.
+fn new_workspaces(asked: &[Request]) -> Vec<(Option<String>, Option<MachineId>)> {
+    (asked.iter())
+        .filter_map(|request| match request {
+            Request::NewWorkspace { name, on, .. } => Some((name.clone(), *on)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_new_workspace_goes_on_the_machine_named() {
+    let mut desk = desk(here(three()));
+    desk.connections_changed(to_desk(connected()));
+    normal_mode(&mut desk);
     answer_all(&mut desk);
     command(&mut desk, "workspace new@desk");
-    assert!(answer_all(&mut desk).is_empty());
-    assert!(
-        note_of(&desk).contains("later release"),
-        "{}",
-        note_of(&desk)
+    command(&mut desk, "workspace new@desk my notes");
+    // One named that isn't there is made there.
+    command(&mut desk, "workspace ideas@desk");
+    command(&mut desk, "workspace new@local");
+    assert_eq!(
+        new_workspaces(&answer_all(&mut desk)),
+        [
+            (None, Some(DESK)),
+            (Some("my notes".into()), Some(DESK)),
+            (Some("ideas".into()), Some(DESK)),
+            (None, None),
+        ]
     );
+    // One that is there is gone to.
+    command(&mut desk, "workspace work@desk");
+    assert_eq!(desk.shown().unwrap().workspace, WorkspaceId(3));
+    answer_all(&mut desk);
+    // A machine it isn't connected to is said to be.
+    command(&mut desk, "workspace new@server");
+    assert!(answer_all(&mut desk).is_empty());
+    assert_eq!(
+        note_of(&desk),
+        "no machine ‘server’ is connected: :connect server brings it in"
+    );
+    // The bar's + offers each machine connected to.
+    let machines = desk.workspace_machines();
+    assert_eq!(
+        machines,
+        [
+            ("jack-ubuntu-laptop".into(), None),
+            ("desk".into(), Some(DESK))
+        ]
+    );
+    desk.new_workspace_on(Some(DESK));
+    assert_eq!(new_workspaces(&answer_all(&mut desk)), [(None, Some(DESK))]);
+}
+
+/// The ID of the daemon's own machine.
+const LAPTOP: MachineId = MachineId([0xa1; 16]);
+
+/// `workspaces`, from a daemon that says it's on `jack-ubuntu-laptop`.
+fn here(mut workspaces: Workspaces) -> Workspaces {
+    workspaces.machine = Some(Machine {
+        id: LAPTOP,
+        name: "jack-ubuntu-laptop".into(),
+        run: 1,
+    });
+    workspaces
+}
+
+/// Where each new pane asked for goes: the machine asked for, if any.
+fn aimed(asked: &[Request]) -> Vec<(&'static str, Option<MachineId>)> {
+    (asked.iter())
+        .filter_map(|request| match request {
+            Request::NewTab { on, .. } => Some(("tab", *on)),
+            Request::Split { on, .. } => Some(("split", *on)),
+            Request::SplitTab { on, .. } => Some(("edge", *on)),
+            Request::NewWorkspace { on, .. } => Some(("workspace", *on)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_pane_goes_on_the_machine_named_after_its_kind() {
+    let mut desk = desk(here(three()));
+    desk.connections_changed(to_desk(connected()));
+    normal_mode(&mut desk);
+    answer_all(&mut desk);
+    command(&mut desk, "Terminal@desk");
+    command(&mut desk, "|Terminal@desk");
+    command(&mut desk, "-Agent@desk codex");
+    command(&mut desk, "|Editor@desk notes.md");
+    command(&mut desk, "Terminal@local");
+    command(&mut desk, "Terminal@jack-ubuntu-laptop");
+    command(&mut desk, "Terminal@jack-ubuntu-desktop");
+    assert_eq!(
+        aimed(&answer_all(&mut desk)),
+        [
+            ("tab", Some(DESK)),
+            ("split", Some(DESK)),
+            ("split", Some(DESK)),
+            ("split", Some(DESK)),
+            ("tab", Some(LAPTOP)),
+            ("tab", Some(LAPTOP)),
+            ("tab", Some(DESK)),
+        ]
+    );
+    // One it isn't connected to, or a slip, makes nothing.
+    command(&mut desk, "Terminal@dsk");
+    assert!(answer_all(&mut desk).is_empty());
+    assert_eq!(note_of(&desk), "no machine ‘dsk’: did you mean ‘desk’?");
+}
+
+#[test]
+fn a_new_pane_goes_on_the_machine_of_the_pane_its_made_from() {
+    // This machine's workspace, holding a terminal on desk beside its own.
+    let borrowed = Layout::Pane(LayoutPane {
+        id: PaneId(9),
+        content: Content::Terminal(TerminalId(9)),
+        home: Some(DESK),
+    });
+    let mut workspaces = here(three());
+    workspaces.list[0].tabs[0] = tab(1, side_by_side(vec![pane(1), borrowed]));
+    let mut desk = desk(workspaces);
+    desk.connections_changed(to_desk(connected()));
+    normal_mode(&mut desk);
+    answer_all(&mut desk);
+    // From this machine's own pane: this machine, said.
+    command(&mut desk, "Terminal");
+    command(&mut desk, "|Terminal");
+    let mut asked = answer_all(&mut desk);
+    // From desk's: desk.
+    desk.show_pane(PaneId(9));
+    command(&mut desk, "Terminal");
+    command(&mut desk, "|Terminal");
+    command(&mut desk, "Explore");
+    asked.extend(answer_all(&mut desk));
+    // From a workspace of desk's: desk.
+    desk.show_pane(PaneId(2));
+    command(&mut desk, "|Terminal");
+    asked.extend(answer_all(&mut desk));
+    assert_eq!(
+        aimed(&asked),
+        [
+            ("tab", Some(LAPTOP)),
+            ("split", Some(LAPTOP)),
+            ("tab", Some(DESK)),
+            ("split", Some(DESK)),
+            ("edge", Some(DESK)),
+            ("split", Some(DESK)),
+        ]
+    );
+    // It says when desk can't be reached, as a pane of a workspace there
+    // does.
+    let down = ConnectionState::Down {
+        reason: "gone".into(),
+    };
+    desk.connections_changed(to_desk(down));
+    assert_eq!(
+        desk.away_notice(PaneId(9)).as_deref(),
+        Some("desk isn't connected · trying")
+    );
+    assert_eq!(desk.away_notice(PaneId(1)), None);
+}
+
+#[test]
+fn a_tab_whose_pane_is_on_another_machine_says_which() {
+    let borrowed = Layout::Pane(LayoutPane {
+        id: PaneId(9),
+        content: Content::Terminal(TerminalId(9)),
+        home: Some(DESK),
+    });
+    let mut workspaces = here(three());
+    workspaces.list[0].tabs.push(tab(5, borrowed));
+    let mut desk = desk(workspaces);
+    desk.connections_changed(to_desk(connected()));
+    let names: Vec<String> = (desk.tab_names().into_iter())
+        .map(|(_, name, _)| name)
+        .collect();
+    assert_eq!(names, ["1", "2 @desk"]);
+    desk.options.showhost = ShowHost::Never;
+    let names: Vec<String> = (desk.tab_names().into_iter())
+        .map(|(_, name, _)| name)
+        .collect();
+    assert_eq!(names, ["1", "2"]);
+}
+
+#[test]
+fn a_new_pane_with_no_workspace_shown_makes_one_on_the_machine_named() {
+    let none = Workspaces {
+        active: None,
+        list: Vec::new(),
+        home: None,
+        restored: Vec::new(),
+        machine: None,
+    };
+    let mut desk = desk(here(none));
+    desk.connections_changed(to_desk(connected()));
+    normal_mode(&mut desk);
+    answer_all(&mut desk);
+    command(&mut desk, "Terminal@desk");
+    assert_eq!(aimed(&answer_all(&mut desk)), [("workspace", Some(DESK))]);
+}
+
+#[test]
+fn a_borrowed_pane_waiting_for_its_machine_says_so() {
+    let waiting = Layout::Pane(LayoutPane {
+        id: PaneId(9),
+        content: Content::Other {
+            kind: PaneKind::new("terminal"),
+        },
+        home: Some(DESK),
+    });
+    let mut workspaces = here(three());
+    workspaces.list[0].tabs[0] = tab(1, waiting);
+    let mut desk = desk(workspaces);
+    desk.connections_changed(to_desk(connected()));
+    desk.show_pane(PaneId(9));
+    let other = desk.other(PaneId(9)).expect("a pane in its place");
+    assert_eq!(other.title(), "a terminal on desk");
 }
 
 #[test]
@@ -208,4 +419,25 @@ fn the_configs_connections_are_asked_for_on_each_new_connection() {
     desk.lost();
     desk.connected(three(), false);
     assert!(!answer_all(&mut desk).contains(&connect));
+}
+
+#[test]
+fn a_new_tab_of_a_workspace_not_shown_goes_on_its_machine() {
+    let mut desk = desk(here(three()));
+    desk.connections_changed(to_desk(connected()));
+    let tab = |workspace| Request::NewTab {
+        workspace: WorkspaceId(workspace),
+        terminal: PaneTerminal::Existing(TerminalId(1)),
+        on: None,
+    };
+    let on = |request| match request {
+        Request::NewTab { on, .. } => on,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(on(desk.aimed(tab(3))), Some(DESK), "desk's own");
+    assert_eq!(
+        on(desk.aimed(tab(1))),
+        Some(LAPTOP),
+        "the one shown, this machine's"
+    );
 }

@@ -6,8 +6,9 @@
 //! or else the `agent` option does), or `Editor PATH`, a file, or a
 //! folder's listing, and with no path, the focused pane's folder's, in a new
 //! tab, and with a mark before it, beside the focused pane (`|` right, `|<`
-//! left, `-` below, `-^` above). `Terminal@host` asks for it on another
-//! machine's daemon. A number goes to that line in an editor, as Vim's
+//! left, `-` below, `-^` above). Any kind of pane goes on the machine of
+//! the pane it's made from, unless `@host` after its name says which:
+//! `Terminal@desk`, `|Editor@desk PATH`, `Explore@local`. A number goes to that line in an editor, as Vim's
 //! does, or else moves to that tab. Lowercase words are the
 //! window's own commands, and Vim's for files, `w`, `q`, `wq` and `e`, and
 //! for options, `set`, and for registers and marks, `registers` and
@@ -108,12 +109,13 @@ pub(crate) enum Command {
     Open {
         place: Place,
         kind: Kind,
-        /// The daemon to open it on, if not the focused pane's.
-        daemon: Option<String>,
         /// For a chat, the agent it talks to, by name, if not the one the
         /// `agent` option names.
         agent: Option<String>,
     },
+    /// `command`, which makes a pane, made on the machine `host` names
+    /// after `@`, rather than the focused pane's: `:Terminal@desk`.
+    On { host: String, command: Box<Command> },
     /// Switch to the workspace with this name, making it if there's none,
     /// or with no name, make a new one.
     Workspace(Option<String>),
@@ -309,6 +311,9 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         None => (line, None),
     };
     let argument = argument.filter(|argument| !argument.is_empty());
+    if let Some(on) = on_machine(word, argument) {
+        return on;
+    }
     match word {
         "workspace" | "ws" => return Ok(Command::Workspace(argument.map(str::to_owned))),
         "rename" => {
@@ -370,41 +375,64 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             Ok(number) => Ok(Command::Tab(number)),
         };
     }
-    let (name, daemon) = match rest.split_once('@') {
-        Some((_, "")) => return Err(format!("{word} names no daemon after the @")),
-        Some((name, daemon)) => (name, Some(daemon.to_owned())),
-        None => (rest, None),
-    };
-    let kind = match KINDS.iter().find(|(kind, _)| *kind == name) {
+    let kind = match KINDS.iter().find(|(kind, _)| *kind == rest) {
         Some(&(_, kind)) => kind,
         // A split mark alone opens a terminal.
-        None if name.is_empty() && place != Place::Tab => Kind::Terminal,
+        None if rest.is_empty() && place != Place::Tab => Kind::Terminal,
         // Said before anything after it is, which means nothing either.
-        None => {
-            return Err(unknown(
-                &word[..word.len() - rest.len()],
-                name,
-                daemon,
-                place,
-            ));
-        }
+        None => return Err(unknown(&word[..word.len() - rest.len()], rest, "", place)),
     };
     let agent = agent_named(word, rest, argument)?;
-    Ok(Command::Open {
-        place,
-        kind,
-        daemon,
-        agent,
+    Ok(Command::Open { place, kind, agent })
+}
+
+/// What `word`, with `argument` after it, asks for, if it names a machine
+/// after `@`: the pane it names, made there; or why it means nothing.
+/// `None` if it names none.
+fn on_machine(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
+    let (bare, host) = word.split_once('@')?;
+    let (place, name) = place(bare);
+    let mark = &bare[..bare.len() - name.len()];
+    if host.is_empty() {
+        return Some(Err(format!("{word} names no machine after the @")));
+    }
+    let at = format!("@{host}");
+    if name.is_empty() && place == Place::Tab {
+        return Some(Err(unknown(mark, name, &at, place)));
+    }
+    let line = match argument {
+        Some(argument) => format!("{bare} {argument}"),
+        None => bare.to_owned(),
+    };
+    let command = match parse(&line) {
+        Ok(command) => command,
+        Err(why) if why.starts_with("no ") => return Some(Err(unknown(mark, name, &at, place))),
+        Err(why) => return Some(Err(why)),
+    };
+    let makes_pane = matches!(
+        command,
+        Command::Open { .. }
+            | Command::Edit { .. }
+            | Command::Explore { .. }
+            | Command::Board { .. }
+            | Command::Browser(_)
+            | Command::Review(ReviewCommand::Open { .. })
+    );
+    Some(if makes_pane {
+        Ok(Command::On {
+            host: host.to_owned(),
+            command: Box::new(command),
+        })
+    } else {
+        Err(format!("‘:{bare}’ makes no pane, so it takes no {at}"))
     })
 }
 
-/// Why `name`, after a split's `mark` if it has one, and before
-/// `@daemon` if it has that, means nothing: in one clause, and with the
-/// name nearest it if it looks like a slip. Tab lists every name, so the
-/// error doesn't.
-fn unknown(mark: &str, name: &str, daemon: Option<String>, place: Place) -> String {
-    let at = daemon.map(|daemon| format!("@{daemon}"));
-    let at = at.as_deref().unwrap_or_default();
+/// Why `name`, after a split's `mark` if it has one, and before `at`, a
+/// machine named after `@`, if it has that, means nothing: in one clause,
+/// and with the name nearest it if it looks like a slip. Tab lists every
+/// name, so the error doesn't.
+fn unknown(mark: &str, name: &str, at: &str, place: Place) -> String {
     if name.is_empty() {
         return if at.is_empty() {
             "no command: Tab lists them".to_owned()
@@ -731,6 +759,8 @@ pub(crate) fn takes(word: &str) -> Takes {
         return Takes::Nothing;
     }
     let (_, word) = place(word);
+    // The machine `@` names doesn't change what the kind of pane takes.
+    let word = word.split_once('@').map_or(word, |(kind, _)| kind);
     let word = word.strip_suffix('!').unwrap_or(word);
     match word {
         "e" | "edit" | "w" | "write" | "wq" | "x" | EDITOR | "Explore" | "Ex" => Takes::Path,
@@ -792,12 +822,18 @@ fn turn_number(number: &str) -> Result<u32, String> {
 mod tests {
     use super::*;
 
-    fn open(place: Place, daemon: Option<&str>) -> Command {
-        Command::Open {
+    fn open(place: Place, host: Option<&str>) -> Command {
+        let open = Command::Open {
             place,
             kind: Kind::Terminal,
-            daemon: daemon.map(str::to_owned),
             agent: None,
+        };
+        match host {
+            Some(host) => Command::On {
+                host: host.to_owned(),
+                command: Box::new(open),
+            },
+            None => open,
         }
     }
 
@@ -961,7 +997,6 @@ mod tests {
             Command::Open {
                 place: Place::Beside(Side::Right),
                 kind: Kind::Agent,
-                daemon: None,
                 agent: None,
             }
         );
@@ -975,7 +1010,6 @@ mod tests {
         let agent = |place, agent: Option<&str>| Command::Open {
             place,
             kind: Kind::Agent,
-            daemon: None,
             agent: agent.map(str::to_owned),
         };
         assert_eq!(
@@ -990,10 +1024,13 @@ mod tests {
             parse("-Agent").unwrap(),
             agent(Place::Beside(Side::Below), None)
         );
-        assert!(matches!(
+        assert_eq!(
             parse("Agent@desktop codex").unwrap(),
-            Command::Open { agent: Some(name), daemon: Some(_), .. } if name == "codex"
-        ));
+            Command::On {
+                host: "desktop".into(),
+                command: Box::new(agent(Place::Tab, Some("codex"))),
+            }
+        );
         assert_eq!(
             parse("Agent codex claude").unwrap_err(),
             "Agent takes one agent's name, such as :Agent codex"
@@ -1016,6 +1053,50 @@ mod tests {
             open(Place::Tab, Some("desktop"))
         );
         assert!(parse("Terminal@").is_err());
+        // Every kind of pane takes one, before what it takes after it.
+        let on = |command| Command::On {
+            host: "desk".into(),
+            command: Box::new(command),
+        };
+        assert_eq!(
+            parse("|Editor@desk src/main.rs").unwrap(),
+            on(Command::Edit {
+                place: Place::Beside(Side::Right),
+                path: "src/main.rs".into(),
+            })
+        );
+        assert_eq!(
+            parse("Explore@desk").unwrap(),
+            on(Command::Explore {
+                dir: None,
+                edit: false,
+                side: None,
+            })
+        );
+        assert_eq!(
+            parse("Board@desk plans").unwrap(),
+            on(Command::Board {
+                place: Place::Tab,
+                name: Some("plans".into()),
+            })
+        );
+        assert_eq!(
+            parse("|@desk").unwrap(),
+            open(Place::Beside(Side::Right), Some("desk"))
+        );
+        // What makes no pane takes no machine.
+        assert_eq!(
+            parse("Files@desk").unwrap_err(),
+            "‘:Files’ makes no pane, so it takes no @desk"
+        );
+        assert_eq!(
+            parse("@desk").unwrap_err(),
+            "@desk needs a kind of pane before it, as ‘:Terminal@desk’"
+        );
+        assert_eq!(
+            parse("Termnal@desk").unwrap_err(),
+            "no command ‘Termnal’: did you mean ‘:Terminal@desk’?"
+        );
     }
 
     #[test]

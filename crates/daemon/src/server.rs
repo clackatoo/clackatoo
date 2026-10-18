@@ -69,6 +69,7 @@ mod forwards;
 mod groups;
 mod hover;
 mod language;
+mod lending;
 mod links;
 mod offers;
 mod pieces;
@@ -398,6 +399,10 @@ struct Client {
     /// its own (see [`Request::Relay`]): its edits are answered with the
     /// edit made, and its questions never go for later ones.
     relays: bool,
+    /// The machine of the daemon relaying, if it said
+    /// ([`Request::RelayAs`]): it's shown the workspaces lent it, and may
+    /// ask for panes to be lent it.
+    machine: Option<Machine>,
     /// Whether the client is told when the chats change.
     watching_chats: bool,
     /// Whether the client is told when the connections to other daemons
@@ -639,6 +644,7 @@ impl Client {
             browser_frames: BTreeMap::new(),
             window: None,
             relays: false,
+            machine: None,
             watching_chats: false,
             watching_connections: false,
             present_until: None,
@@ -1112,11 +1118,24 @@ impl Daemon {
         let machine = state.machine.map(MachineId);
         let mut daemon = Self::listening(UnixListener::from_std(listener), config, false, machine)?;
         daemon.next_id = state.next_terminal;
-        daemon.workspaces = WorkspaceState::resume(&state.workspaces).unwrap_or_else(|err| {
-            log::error!("the workspaces couldn't be taken over: {err}");
-            WorkspaceState::new()
-        });
+        daemon.workspaces =
+            WorkspaceState::resume(&state.workspaces, &state.lent).unwrap_or_else(|err| {
+                log::error!("the workspaces couldn't be taken over: {err}");
+                WorkspaceState::new()
+            });
         daemon.workspaces.set_home(&daemon.config.home);
+        daemon.workspaces.set_borrowers(
+            (state.borrowers.iter())
+                .map(|borrower| {
+                    let machine = MachineId(borrower.machine);
+                    let kept = crate::workspaces::Borrower {
+                        name: borrower.name.clone(),
+                        last_seen: borrower.last_seen,
+                    };
+                    (machine, kept)
+                })
+                .collect(),
+        );
 
         for terminal in &state.terminals {
             let id = TerminalId(terminal.id);
@@ -1265,6 +1284,15 @@ impl Daemon {
             })
             .collect();
         let (next_files, explorers) = self.hand_over_files();
+        self.note_borrowers_seen();
+        let (workspaces, lent) = self.workspaces.hand_over();
+        let borrowers = (self.workspaces.borrowers().iter())
+            .map(|(machine, borrower)| handover::Borrower {
+                machine: machine.0,
+                name: borrower.name.clone(),
+                last_seen: borrower.last_seen,
+            })
+            .collect();
         // Their ssh processes end with them, rather than outlive the exec.
         let connections = (self.end_links().into_iter())
             .map(|(host, command)| handover::Connection { host, command })
@@ -1277,7 +1305,7 @@ impl Daemon {
                 terminals,
                 chats,
                 orphans,
-                workspaces: self.workspaces.hand_over(),
+                workspaces,
                 next_buffer: self.next_buffer,
                 buffers: (self.buffers.iter())
                     .map(|(id, slot)| slot.buffer.hand_over(id.0))
@@ -1301,6 +1329,8 @@ impl Daemon {
                 shells,
                 machine: Some(self.machine.id.0),
                 connections,
+                lent,
+                borrowers,
             },
             fds,
         })
@@ -1385,6 +1415,7 @@ impl Daemon {
                     .chain(self.keeping.due())
                     .chain(self.links.due())
                     .chain(self.relay_due())
+                    .chain(self.next_lent_due())
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
@@ -1445,6 +1476,12 @@ impl Daemon {
             self.time_out_forwards();
             self.take_link_news();
             self.time_out_relays();
+            if self
+                .next_lent_due()
+                .is_some_and(|due| due <= Instant::now())
+            {
+                self.unlend_unseen();
+            }
             self.tell_forward_reports();
             self.retry_links();
             self.relay_chats();
@@ -2244,7 +2281,7 @@ impl Daemon {
         workspace: WorkspaceId,
         terminal: PaneTerminal,
     ) -> Result<Response, Error> {
-        self.workspaces.check_workspace(workspace)?;
+        self.workspaces.check_new_tab(workspace)?;
         let beside = self.workspaces.focused_pane(workspace);
         let content = self.pane_content(terminal, beside)?;
         let pane = self.workspaces.new_tab(workspace, content);
@@ -2284,7 +2321,14 @@ impl Daemon {
     /// client whose request changed them hears before the request's answer,
     /// which is queued after this.
     fn workspaces_changed(&mut self) {
+        self.workspaces.refresh_lent();
         self.workspaces.sweep_restored();
+        // A pane borrowed from another machine that has closed here is
+        // closed there.
+        let gone = self.workspaces.sweep_borrowed();
+        if !gone.is_empty() {
+            self.borrowed_closed(&gone);
+        }
         self.keep_soon();
         // A chat agents started may have come out of the background, or
         // gone back.
@@ -2663,18 +2707,23 @@ impl Daemon {
     }
 
     /// What each terminal is, chats included.
-    fn terminal_infos(&self) -> Vec<TerminalInfo> {
-        (self.terminals.values())
-            .map(|slot| slot.terminal.info())
+    fn terminal_infos(&self, token: Token) -> Vec<TerminalInfo> {
+        (self.terminals.iter())
+            .filter(|&(&id, _)| self.may_see_terminal(token, id))
+            .map(|(_, slot)| slot.terminal.info())
             .collect()
     }
 
     /// Answers one request from the client at `token`.
     #[allow(clippy::too_many_lines, reason = "one arm per request, each short")]
     fn respond(&mut self, request: Request, token: Token) -> Response {
+        // What's lent to another machine's daemon is that daemon's alone.
+        if let Err(err) = self.refuse_lent(token, &request) {
+            return Response::Error(err);
+        }
         let response = match request {
             Request::Version => Ok(Response::Text(env!("CARGO_PKG_VERSION").to_owned())),
-            Request::ListTerminals => Ok(Response::Terminals(self.terminal_infos())),
+            Request::ListTerminals => Ok(Response::Terminals(self.terminal_infos(token))),
             Request::NewTerminal(request) => {
                 self.new_terminal(&request).map(Response::TerminalCreated)
             }
@@ -2812,6 +2861,17 @@ impl Daemon {
                 Ok(Response::Done)
             }
             Request::Relay => self.relaying(token),
+            Request::RelayAs { machine } => self.relaying_as(token, machine),
+            Request::Unlend {
+                workspace,
+                close_idle,
+            } => self.serve_unlend(token, workspace, close_idle),
+            Request::Lent => Ok(self.list_lent()),
+            Request::Lend {
+                key,
+                beside,
+                terminal,
+            } => self.lend(token, key, beside, terminal),
             // One for a pane on another machine is the relay's.
             Request::Forwards { .. } => Err(Error::Other(
                 "this daemon's own ports are this machine's: there's nothing to forward".into(),
@@ -2824,6 +2884,7 @@ impl Daemon {
     /// Nothing is closed, or shown in place of what a pane shows, that
     /// would lose a buffer with no file yet that has changes, whoever asks:
     /// a window that saw it, one that didn't, or one too old to know of it.
+    #[allow(clippy::too_many_lines, reason = "one arm per request, each short")]
     fn respond_about_workspaces(
         &mut self,
         request: Request,
@@ -2841,6 +2902,13 @@ impl Daemon {
             _ => Vec::new(),
         };
         if self.loses_blank(&closing) {
+            // A workspace lent to the daemon asking, which no longer shows
+            // it, is given back rather than kept hidden.
+            if let Request::CloseWorkspace { workspace } = request
+                && self.unlend_rather_than_lose(token, workspace)
+            {
+                return Ok(Response::Done);
+            }
             let wire = match self.sources.get(token.0) {
                 Some(Source::Client(client)) => client.wire,
                 _ => PROTOCOL_VERSION,
@@ -2854,25 +2922,33 @@ impl Daemon {
                 }
                 // A window opening while devices ask hears of them.
                 self.tell_of_asks(token);
-                Ok(Response::Workspaces(self.shown_workspaces()))
+                let shown = self.shown_workspaces();
+                Ok(Response::Workspaces(
+                    self.with_lent(token, &shown).unwrap_or(shown),
+                ))
             }
-            Request::NewWorkspace { name, terminal } => {
+            // Made on another machine, it was the relay's: the machine
+            // asked for is this one.
+            Request::NewWorkspace { name, terminal, .. } => {
                 self.new_workspace(name.as_deref(), terminal)
             }
             Request::NewTab {
                 workspace,
                 terminal,
+                ..
             } => self.new_tab(workspace, terminal),
             Request::Split {
                 pane,
                 side,
                 terminal,
+                ..
             } => self.split(pane, side, terminal),
             Request::SplitTab {
                 tab,
                 side,
                 terminal,
                 share,
+                ..
             } => self.split_tab(tab, side, terminal, share),
             Request::ClosePane { pane } => match self.workspaces.check_pane(pane)? {
                 Content::Terminal(terminal) => {

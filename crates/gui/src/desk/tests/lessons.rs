@@ -85,6 +85,7 @@ fn with_lesson(lesson: Layout, more: Vec<Tab>, active: u32) -> Workspace {
         active_tab: TabId(active),
         tabs,
         home: None,
+        lent: None,
     }
 }
 
@@ -113,7 +114,7 @@ fn open(desk: &mut Desk, id: &str, practice: Layout) -> Vec<Request> {
     assert!(
         asked.iter().any(|request| matches!(
             request,
-            Request::Split { pane: PaneId(2), side: Side::Left, terminal: PaneTerminal::File(file) }
+            Request::Split { pane: PaneId(2), side: Side::Left, terminal: PaneTerminal::File(file), .. }
                 if file.path == lesson_file
         )),
         "{asked:?}"

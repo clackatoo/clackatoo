@@ -12,7 +12,7 @@
 use std::io::{self, BufRead as _, Write as _};
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{Connection as Link, ConnectionState, Event, wire};
+use clackatoo_protocol::{Connection as Link, ConnectionState, Event, Request, Response, wire};
 use clap::Args;
 
 use crate::Connection;
@@ -40,6 +40,46 @@ pub(crate) struct DisconnectArgs {
     host: String,
     #[command(flatten)]
     connection: Connection,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct LentArgs {
+    /// `reclaim N` gives back the workspace numbered N, as listed, making
+    /// it one of this machine's own, shown in every window, named after
+    /// the machine it was lent to.
+    #[arg(value_names = ["reclaim", "N"], num_args = 0..=2)]
+    reclaim: Vec<String>,
+    #[command(flatten)]
+    connection: Connection,
+}
+
+/// Lists the workspaces the daemon lent the daemons on other machines, or
+/// gives one back, as `args` says.
+pub(crate) fn lent(args: &LentArgs) -> anyhow::Result<()> {
+    let mut client = crate::connect(&args.connection)?;
+    anyhow::ensure!(
+        client.daemon_has(wire::LEND),
+        "the daemon is from an older build, which lends no panes: `clackatoo upgrade` moves it \
+         onto this one"
+    );
+    let request = match &args.reclaim[..] {
+        [] => Request::Lent,
+        [word, number] if word == "reclaim" => Request::Unlend {
+            workspace: clackatoo_protocol::WorkspaceId(
+                number
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("{number} isn't a workspace's number"))?,
+            ),
+            close_idle: false,
+        },
+        _ => anyhow::bail!("lent takes nothing, or reclaim N"),
+    };
+    match client.request(&request)? {
+        Response::Text(said) => println!("{}", said.trim_end()),
+        Response::Error(err) => anyhow::bail!("{err}"),
+        other => anyhow::bail!("the daemon answered with {other:?}"),
+    }
+    Ok(())
 }
 
 /// A client of the daemon `connection` says, which must connect to other
