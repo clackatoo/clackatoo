@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.56 (2026-10-18)
+
+### Features
+
+- **daemon,protocol,gui:** :connect brings another machine's workspaces in, its terminals and chats working through the daemon (7411cd0)
+
 ## 2026.10.55 (2026-10-18)
 
 ### Features
