@@ -2012,12 +2012,20 @@ impl App {
                 }
             })
             .collect();
-        let pills: Vec<(Tile, String)> = (drawings.iter())
+        // A pane of a workspace from another machine says over its last
+        // screen that the machine isn't connected, in place of how far
+        // it's scrolled.
+        let away: Vec<(Tile, String)> = (placement.panes.iter())
+            .filter_map(|&(pane, tile)| Some((tile, desk.away_notice(pane)?)))
+            .collect();
+        let mut pills: Vec<(Tile, String)> = (drawings.iter())
+            .filter(|drawing| !away.iter().any(|(tile, _)| *tile == drawing.tile))
             .filter_map(|drawing| {
                 let pill = desk.pane(drawing.terminal?)?.pill(drawing.focused)?;
                 Some((drawing.tile, pill))
             })
             .collect();
+        pills.extend(away);
         let offers: Vec<(Tile, crate::desk::Offer)> = (drawings.iter())
             .filter_map(|drawing| {
                 let offer =
@@ -2344,8 +2352,10 @@ fn drawings<'a>(
         };
         let height = usize::from(tile.rows);
         let (rows, mut cursor) = state.scene(height);
+        // Hollow, too, on another machine's terminal while that machine
+        // isn't connected, which takes no keys: its pill says so.
         if let Some(cursor) = &mut cursor
-            && !(has_focus && keys_here)
+            && (!(has_focus && keys_here) || desk.away_notice(id).is_some())
         {
             cursor.style = CursorStyle::Hollow;
         }
@@ -3177,6 +3187,7 @@ impl App {
                 daemon_version,
                 wire,
                 forwarder,
+                connections,
             } => {
                 let tries = self.reconnecting.take().map_or(0, |reconnecting| {
                     log::info!(
@@ -3201,6 +3212,7 @@ impl App {
                     self.attach_forwards(forwarder);
                 }
                 self.desk.connected(workspaces, remote);
+                self.desk.connections_changed(connections);
                 let host = self.session.host();
                 let news = self.updates.daemon_is(daemon_version.as_deref(), host);
                 self.tell_updates(news);
@@ -3343,12 +3355,13 @@ impl App {
                     self.request_redraw();
                 }
             }
-            // The connections are shown once windows bring other machines'
-            // workspaces in.
+            SessionEvent::Message(ServerMessage::Event(Event::Connections(connections))) => {
+                if self.desk.connections_changed(connections) {
+                    self.request_redraw();
+                }
+            }
             SessionEvent::Message(
-                ServerMessage::Hello { .. }
-                | ServerMessage::NotUpgrading { .. }
-                | ServerMessage::Event(Event::Connections(_)),
+                ServerMessage::Hello { .. } | ServerMessage::NotUpgrading { .. },
             ) => {}
             SessionEvent::Clipboard(heard) => {
                 for (from, text) in heard {

@@ -75,6 +75,10 @@ pub(crate) enum SessionEvent {
         /// Where the window's forwards go, for a daemon on another
         /// machine.
         forwarder: Option<clackatoo_daemon::forward::Forwarder>,
+        /// The daemon's connections to other machines, whose workspaces
+        /// it shows: changes to them arrive as
+        /// [`Event::Connections`](clackatoo_protocol::Event::Connections).
+        connections: Vec<clackatoo_protocol::Connection>,
     },
     /// A daemon on another machine went out of contact, or came back.
     Contact,
@@ -372,19 +376,20 @@ fn run(
         contact.on_change(move || drop(proxy.send_event(SessionEvent::Contact)));
     }
     let mut receiver = match open(client) {
-        Ok((sender, receiver, workspaces, daemon_version)) => {
+        Ok(opened) => {
             let connected = SessionEvent::Connected {
-                sender,
-                workspaces,
+                sender: opened.sender,
+                workspaces: opened.workspaces,
                 contact,
-                daemon_version,
+                daemon_version: opened.daemon_version,
                 wire,
                 forwarder,
+                connections: opened.connections,
             };
             if proxy.send_event(connected).is_err() {
                 return;
             }
-            receiver
+            opened.receiver
         }
         Err(err) => return lost(err.to_string()),
     };
@@ -484,11 +489,24 @@ fn with_causes(err: &dyn std::error::Error) -> String {
     text
 }
 
+/// A connection to the daemon, open, and what the daemon said as it was
+/// opened.
+struct Opened {
+    sender: Sender,
+    receiver: Receiver,
+    workspaces: Workspaces,
+    /// Which release of clackatoo the daemon is, if it said.
+    daemon_version: Option<String>,
+    /// Its connections to other machines.
+    connections: Vec<clackatoo_protocol::Connection>,
+}
+
 /// Starts watching the workspaces. With none, makes one, showing the
 /// newest running terminal, such as one a script started, or else a new
-/// one. Also asks which release the daemon is, and answers the questions
-/// ssh asks for the daemon's connections to other machines.
-fn open(mut client: Client) -> Result<(Sender, Receiver, Workspaces, Option<String>), ClientError> {
+/// one. Also asks which release the daemon is, and watches the daemon's
+/// connections to other machines, answering the questions ssh asks for
+/// them.
+fn open(mut client: Client) -> Result<Opened, ClientError> {
     // A daemon that accepts but never answers would otherwise leave the
     // window blank forever.
     client.set_read_timeout(Some(OPEN_TIMEOUT))?;
@@ -518,13 +536,24 @@ fn open(mut client: Client) -> Result<(Sender, Receiver, Workspaces, Option<Stri
         .inspect_err(|err| log::warn!("the daemon didn't say which release it is: {err}"))
         .ok();
     // The window answers the questions ssh asks as the daemon connects to
-    // other machines, such as for a password.
-    if client.daemon_has(wire::FEDERATION)
-        && let Err(err) = client.watch_connections(true)
-    {
-        log::warn!("the window won't answer ssh's questions for the daemon: {err}");
-    }
+    // other machines, such as for a password, and shows how they are.
+    let connections = if client.daemon_has(wire::FEDERATION) {
+        client
+            .watch_connections(true)
+            .inspect_err(|err| {
+                log::warn!("the window won't answer ssh's questions for the daemon: {err}");
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     client.set_read_timeout(None)?;
     let (sender, receiver) = client.split()?;
-    Ok((sender, receiver, workspaces, daemon_version))
+    Ok(Opened {
+        sender,
+        receiver,
+        workspaces,
+        daemon_version,
+        connections,
+    })
 }

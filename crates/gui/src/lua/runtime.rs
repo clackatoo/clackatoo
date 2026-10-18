@@ -655,7 +655,35 @@ fn acting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    let s = state.clone();
+    core.set(
+        "connect",
+        lua.create_function(move |_, host: String| {
+            s.tell(FromLua::Connect(machine(&host, "connect")?));
+            Ok(())
+        })?,
+    )?;
+    let s = state.clone();
+    core.set(
+        "disconnect",
+        lua.create_function(move |_, host: String| {
+            s.tell(FromLua::Disconnect(machine(&host, "disconnect")?));
+            Ok(())
+        })?,
+    )?;
     Ok(())
+}
+
+/// `host`, a machine `client.connect` or `client.disconnect`, `name`,
+/// was given, if it can be one: one word.
+fn machine(host: &str, name: &str) -> mlua::Result<String> {
+    let host = host.trim();
+    if host.is_empty() || host.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+        return Err(mlua::Error::runtime(format!(
+            "client.{name} takes a machine, as ssh names it: \"desk\", \"jack@desk\""
+        )));
+    }
+    Ok(host.to_owned())
 }
 
 /// What Lua reads of a window, workspace, tab or pane, or nil if it's gone.

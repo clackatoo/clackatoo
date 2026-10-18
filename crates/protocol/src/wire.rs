@@ -564,12 +564,53 @@ pub fn newest(message: &ServerMessage) -> u32 {
 }
 
 fn newest_in_workspaces(workspaces: &Workspaces) -> u32 {
-    (workspaces.list.iter())
+    let contents = (workspaces.list.iter())
         .flat_map(|workspace| &workspace.tabs)
         .flat_map(|tab| tab.layout.panes())
         .map(|pane| pane.content.since())
         .max()
-        .unwrap_or(EARLIER)
+        .unwrap_or(EARLIER);
+    // A workspace from another machine, which a peer from before
+    // federation would take for one of the daemon's own.
+    let homes = if workspaces
+        .list
+        .iter()
+        .any(|workspace| workspace.home.is_some())
+    {
+        FEDERATION
+    } else {
+        EARLIER
+    };
+    contents.max(homes)
+}
+
+/// `message`, if it's the workspaces and some are from other machines,
+/// without those: what a peer from before federation is sent, which can't
+/// tell them from the daemon's own, as names may be the same, nor has any
+/// way to say where they are. Its active one, if it was one of those, is
+/// none.
+fn without_others(message: &ServerMessage) -> Option<ServerMessage> {
+    let (ServerMessage::Event(Event::Workspaces(workspaces))
+    | ServerMessage::Response(Response::Workspaces(workspaces))) = message
+    else {
+        return None;
+    };
+    if workspaces
+        .list
+        .iter()
+        .all(|workspace| workspace.home.is_none())
+    {
+        return None;
+    }
+    let mut own = workspaces.clone();
+    own.list.retain(|workspace| workspace.home.is_none());
+    if (own.active).is_some_and(|active| own.get(active).is_none()) {
+        own.active = None;
+    }
+    Some(match message {
+        ServerMessage::Event(_) => ServerMessage::Event(Event::Workspaces(own)),
+        _ => ServerMessage::Response(Response::Workspaces(own)),
+    })
 }
 
 fn newest_in_node(node: &Node) -> u32 {
@@ -675,12 +716,22 @@ impl Downgrade for ServerMessage {
     /// which only answers what a newer window asked: its code stays
     /// plain. And `Event::Connections` and `Event::Login`, which go only
     /// to a client that asked for them, which an older one never does.
+    /// The workspaces leave out those from other machines for a peer from
+    /// before federation, which would take them for the daemon's own.
     /// A new answer, or a new kind of thing found, only ever answers what
     /// a newer window asked; should one reach an older peer all the same,
     /// it's told its question failed, rather than wait for ever.
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
         if newest(self) <= wire {
             return Downgraded::AsIs;
+        }
+        if wire < FEDERATION
+            && let Some(own) = without_others(self)
+        {
+            return match own.downgrade(wire) {
+                Downgraded::AsIs => Downgraded::To(own),
+                downgraded => downgraded,
+            };
         }
         match self {
             Self::Event(
@@ -919,10 +970,9 @@ mod tests {
                 let newer = newest(&message) > wire;
                 match message.downgrade(wire) {
                     Downgraded::AsIs => assert!(!newer, "{message:?} goes to {wire} as it is"),
-                    // Before the fallbacks there's no Other to read.
-                    Downgraded::To(older) if wire < FALLBACKS => {
-                        panic!("{message:?} became {older:?} for {wire}");
-                    }
+                    // Before the fallbacks there's no Other to read: which
+                    // the check that what it gets is no newer than it
+                    // covers, as an Other is from the fallbacks.
                     Downgraded::To(older) => {
                         assert!(newer, "{message:?} is changed for nothing");
                         assert!(
@@ -1112,6 +1162,65 @@ mod tests {
             "FALLBACKS is {FALLBACKS}, but no release has had them yet: it must be \
              PROTOCOL_VERSION ({PROTOCOL_VERSION}), and MIN_DAEMON with it"
         );
+    }
+
+    #[test]
+    fn a_peer_from_before_federation_sees_only_the_daemons_own_workspaces() {
+        use crate::{Layout, Pane, PaneId, Tab, TabId, Workspace, WorkspaceId};
+        let workspace = |id: u32, home: Option<crate::MachineId>| Workspace {
+            id: WorkspaceId(id),
+            name: "main".into(),
+            tabs: vec![Tab {
+                id: TabId(id),
+                layout: Layout::Pane(Pane {
+                    id: PaneId(id),
+                    content: Content::Terminal(crate::TerminalId(id)),
+                    home: None,
+                }),
+                focused: PaneId(id),
+                name: None,
+            }],
+            active_tab: TabId(id),
+            home,
+        };
+        let desk = crate::MachineId([7; 16]);
+        let workspaces = Workspaces {
+            list: vec![workspace(1, None), workspace(2, Some(desk))],
+            active: Some(WorkspaceId(2)),
+            ..Workspaces::default()
+        };
+        for message in [
+            ServerMessage::Event(Event::Workspaces(workspaces.clone())),
+            ServerMessage::Response(Response::Workspaces(workspaces.clone())),
+        ] {
+            assert_eq!(message.downgrade(FEDERATION), Downgraded::AsIs);
+            let Downgraded::To(
+                ServerMessage::Event(Event::Workspaces(own))
+                | ServerMessage::Response(Response::Workspaces(own)),
+            ) = message.downgrade(FEDERATION - 1)
+            else {
+                panic!("{message:?} wasn't downgraded");
+            };
+            assert_eq!(own.list, vec![workspace(1, None)]);
+            assert_eq!(own.active, None, "the active one was another machine's");
+            // And it reads as such a peer would write it.
+            let frame = frame::encode(FEDERATION - 1, &message).unwrap();
+            let mut decoder = FrameDecoder::new();
+            decoder.push(&frame);
+            let read: ServerMessage = decoder.decode(FEDERATION - 1).unwrap().unwrap();
+            assert!(matches!(
+                read,
+                ServerMessage::Event(Event::Workspaces(ref read))
+                    | ServerMessage::Response(Response::Workspaces(ref read))
+                    if read.list.len() == 1
+            ));
+        }
+        // With none from elsewhere, nothing changes.
+        let own = ServerMessage::Event(Event::Workspaces(Workspaces {
+            list: vec![workspace(1, None)],
+            ..Workspaces::default()
+        }));
+        assert_eq!(own.downgrade(FALLBACKS), Downgraded::AsIs);
     }
 
     #[test]

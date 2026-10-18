@@ -19,13 +19,14 @@
 //! connection is the client's end of a socket pair whose other end the
 //! QUIC connection's own thread drives, as a window's is: the loop reads
 //! it as it reads a client, a little at a time, as a peer that floods
-//! ([`Flood::Reached`]). Only the daemon there's workspaces are decoded,
-//! which say which daemon it is, and only up to [`MOST_WORKSPACES`]: all
-//! else is passed over unread, as a daemon reached is a peer this one
-//! chose, but not one it trusts with its memory. What carries a
-//! connection is ended off the loop too, as ending it waits for that
-//! thread, but as the daemon stops or upgrades, it's waited for, with the
-//! threads of tries, so no ssh of theirs outlives it.
+//! ([`Flood::Reached`]), and what it reads is relayed (see
+//! [`relay`](super::relay)): the daemon there's workspaces, which also
+//! say which daemon it is, but only up to [`MOST_WORKSPACES`], as a
+//! daemon reached is a peer this one chose, but not one it trusts with
+//! its memory. What carries a connection is ended off the loop too, as
+//! ending it waits for that thread, but as the daemon stops or upgrades,
+//! it's waited for, with the threads of tries, so no ssh of theirs
+//! outlives it.
 //!
 //! # Trying again
 //!
@@ -69,11 +70,13 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{FrameDecoder, FrameError, Head};
 use clackatoo_protocol::{
-    Connection, ConnectionState, Error, Event, Machine, Response, ServerMessage,
+    Connection, ConnectionState, Error, Event, Machine, Response, ServerMessage, WorkspaceId,
+    Workspaces,
 };
 use mio::net::UnixStream;
 use mio::{Interest, Token};
 
+use super::relay::{Relayed, Upstream};
 use super::{Broadcast, Daemon, FIRST_LOOK, Flood, Link, Reading, Source};
 use crate::client::ClientError;
 use crate::quic::Carried;
@@ -118,7 +121,7 @@ const THREADS_WAIT: Duration = Duration::from_secs(1);
 #[derive(Debug)]
 pub(super) struct Links {
     /// The connections, in the order they were asked for: one per host.
-    list: Vec<Linked>,
+    pub(super) list: Vec<Linked>,
     /// How many tries have been started, which numbers each, so that what
     /// a try given up on comes to is told apart from the try after it.
     tries: u64,
@@ -138,6 +141,12 @@ pub(super) struct Links {
     /// The threads of tries at connections since ended, and those ending
     /// connections, while they run: waited for as the daemon stops.
     ending: Vec<JoinHandle<()>>,
+    /// How many requests have been relayed for clients, which numbers the
+    /// answer each waits for.
+    pub(super) tickets: u64,
+    /// The workspace from another machine a client last switched to, the
+    /// active one, if that's the last a client switched to.
+    pub(super) active: Option<WorkspaceId>,
 }
 
 impl Default for Links {
@@ -154,19 +163,21 @@ impl Default for Links {
             sockets: 0,
             told: None,
             ending: Vec::new(),
+            tickets: 0,
+            active: None,
         }
     }
 }
 
 /// One connection.
 #[derive(Debug)]
-struct Linked {
-    remote: Remote,
+pub(super) struct Linked {
+    pub(super) remote: Remote,
     /// How it's going, but for questions waiting, which make it
     /// [`ConnectionState::Asking`].
     state: ConnectionState,
     /// The daemon there, once it has said.
-    machine: Option<Machine>,
+    pub(super) machine: Option<Machine>,
     /// The client that last asked for it, which ssh's questions go to
     /// first.
     asker: Option<Token>,
@@ -178,7 +189,7 @@ struct Linked {
     /// opens to carry on: once it ends.
     cancel: Arc<Cancel>,
     /// The connection, once made, and when.
-    connected: Option<(Token, Instant)>,
+    pub(super) connected: Option<(Token, Instant)>,
     /// When it's tried again, while it waits to be.
     retry_at: Option<Instant>,
     /// How long after its next failure it's tried again.
@@ -187,6 +198,9 @@ struct Linked {
     askpass: Option<Askpass>,
     /// What its last question came to, since its try started.
     answered: Option<Answered>,
+    /// What's relayed through it: the daemon there's workspaces, as shown
+    /// here, and its terminals followed.
+    pub(super) relayed: Relayed,
 }
 
 /// What a question of ssh's came to.
@@ -260,20 +274,23 @@ struct Made {
     wire: u32,
     /// What carries it: dropping it ends the connection.
     carried: Option<Carried>,
-    /// The daemon there, if it said.
-    machine: Option<Machine>,
+    /// The daemon there's workspaces, which say which daemon it is, if
+    /// it's one that says.
+    workspaces: Workspaces,
 }
 
 /// A connection to another daemon, made, as the loop reads it.
 #[derive(Debug)]
 pub(super) struct Reached {
     /// The connection's host.
-    host: String,
-    stream: UnixStream,
+    pub(super) host: String,
+    pub(super) stream: UnixStream,
     decoder: FrameDecoder,
-    wire: u32,
+    pub(super) wire: u32,
     /// What carries it, kept while it's read.
-    carried: Option<Carried>,
+    pub(super) carried: Option<Carried>,
+    /// What's relayed through it, as this end sends and waits.
+    pub(super) upstream: Upstream,
 }
 
 impl Links {
@@ -293,7 +310,7 @@ impl Links {
     }
 
     /// Where the connection to `host` is in the list.
-    fn find(&self, host: &str) -> Option<usize> {
+    pub(super) fn find(&self, host: &str) -> Option<usize> {
         (self.list.iter()).position(|linked| linked.remote.host == host)
     }
 
@@ -596,7 +613,7 @@ impl Daemon {
 
     /// Ends `linked`: stops its try, if one is under way, and closes its
     /// connection, waiting for that only if `now`. Its askpass goes with
-    /// it, and the socket with that.
+    /// it, and the socket with that, and what was shown of its workspaces.
     fn end_link(&mut self, mut linked: Linked, now: bool) {
         // Its try's ssh, and any its connection opened to carry on.
         linked.cancel.cancel();
@@ -604,15 +621,19 @@ impl Daemon {
             && let Some(Source::Reached(mut reached)) = self.sources.try_remove(token.0)
         {
             let _ = self.poll.registry().deregister(&mut reached.stream);
+            self.unread
+                .retain(|&unread| unread != Flood::Reached(token));
             if now {
-                drop(reached.carried);
+                drop(reached.carried.take());
             } else {
                 self.let_carried_go(reached.carried.take());
             }
+            self.relay_answers_lost(&reached.host, reached.upstream);
         }
         if let Some(thread) = linked.thread.take() {
             self.links.ending.push(thread);
         }
+        self.relay_ended(&linked.relayed);
         // Its askpass, and the socket with it.
         drop(linked);
     }
@@ -626,7 +647,10 @@ impl Daemon {
         };
         if let Some(Source::Reached(mut reached)) = self.sources.try_remove(token.0) {
             let _ = self.poll.registry().deregister(&mut reached.stream);
+            self.unread
+                .retain(|&unread| unread != Flood::Reached(token));
             self.let_carried_go(reached.carried.take());
+            self.relay_lost(at, reached.upstream);
         }
     }
 
@@ -754,10 +778,10 @@ impl Daemon {
             decoder,
             wire,
             carried,
-            machine,
+            workspaces,
         } = made;
         let host = self.links.list[at].remote.host.clone();
-        let machine = machine.map(|machine| shown_machine(&machine, &host));
+        let machine = (workspaces.machine.as_ref()).map(|machine| shown_machine(machine, &host));
         let refused = machine
             .as_ref()
             .and_then(|machine| self.same_machine(machine));
@@ -789,6 +813,7 @@ impl Daemon {
             decoder,
             wire,
             carried,
+            upstream: Upstream::default(),
         }));
         let linked = &mut self.links.list[at];
         linked.connected = Some((token, Instant::now()));
@@ -799,6 +824,7 @@ impl Daemon {
                 .map(|machine| format!(" ({}, {})", machine.name, machine.id))
                 .unwrap_or_default()
         );
+        self.relay_linked(at, &workspaces);
         // What came after the answer, read already, is taken in too.
         self.queue_flood(Flood::Reached(token));
     }
@@ -831,6 +857,17 @@ impl Daemon {
         };
     }
 
+    /// Ends the connection made for the connection at `at` in the list, if
+    /// there is one, for `reason`: it isn't tried again until asked for
+    /// again.
+    pub(super) fn stop_link(&mut self, at: usize, reason: &str) {
+        let host = self.links.list[at].remote.host.clone();
+        self.take_back_asks(&host);
+        self.end_connection(at);
+        self.link_stopped(at, reason);
+        self.tell_connections();
+    }
+
     /// Reads what the daemon at `token` sent as `reading` says, queueing
     /// it to be read again if there may be more.
     pub(super) fn read_reached(&mut self, token: Token, reading: Reading) {
@@ -842,11 +879,11 @@ impl Daemon {
     }
 
     /// Reads what the daemon at `token` sent, [`FIRST_LOOK`] bytes if
-    /// there are that many, and takes in the messages it finishes: which
-    /// daemon it is, as its workspaces say; nothing else is used yet.
-    /// Returns how many bytes it read, or `None` once the connection is
-    /// lost.
+    /// there are that many, and relays the messages it finishes, after
+    /// those the parser's thread has unpacked meanwhile. Returns how many
+    /// bytes it read, or `None` once the connection is lost.
     fn read_reached_once(&mut self, token: Token) -> Option<usize> {
+        self.take_relay_unpacked(token);
         let Some(Source::Reached(reached)) = self.sources.get_mut(token.0) else {
             return None;
         };
@@ -870,11 +907,8 @@ impl Daemon {
                 }
             }
         }
-        let heard = hear(&mut reached.decoder, reached.wire);
-        let host = reached.host.clone();
-        match heard {
-            Ok(Heard::Workspaces(machine)) => self.reached_says(&host, machine),
-            Ok(Heard::Nothing) => {}
+        match frames(&mut reached.decoder) {
+            Ok(frames) => self.relay_frames(token, frames),
             Err(why) => {
                 self.reached_refused(token, &why);
                 return None;
@@ -884,7 +918,9 @@ impl Daemon {
             self.reached_lost(token, why);
             return None;
         }
-        Some(read)
+        // The connection may have been let go of meanwhile, as when it
+        // turned out to be to this daemon itself.
+        matches!(self.sources.get(token.0), Some(Source::Reached(_))).then_some(read)
     }
 
     /// The daemon at `token` sent what this one won't take, for `why`: the
@@ -922,7 +958,7 @@ impl Daemon {
     /// The daemon connected to as `host` says it's `machine`, as its
     /// workspaces changed. One that turns out to be this daemon itself is
     /// let go.
-    fn reached_says(&mut self, host: &str, machine: Option<Machine>) {
+    pub(super) fn reached_says(&mut self, host: &str, machine: Option<Machine>) {
         let Some(at) = self.links.find(host) else {
             return;
         };
@@ -944,11 +980,13 @@ impl Daemon {
 
     /// The connection at `token` was lost, for `why`, or as the QUIC
     /// connection's thread says: it's tried again a while later.
-    fn reached_lost(&mut self, token: Token, why: Option<String>) {
+    pub(super) fn reached_lost(&mut self, token: Token, why: Option<String>) {
         let Some(Source::Reached(mut reached)) = self.sources.try_remove(token.0) else {
             return;
         };
         let _ = self.poll.registry().deregister(&mut reached.stream);
+        self.unread
+            .retain(|&unread| unread != Flood::Reached(token));
         let reason = why
             .or_else(|| reached.carried.as_ref().and_then(Carried::ended))
             .unwrap_or_else(|| "the daemon there closed the connection".to_owned());
@@ -956,6 +994,7 @@ impl Daemon {
         let Some(at) = self.links.find(&reached.host) else {
             return;
         };
+        self.relay_lost(at, reached.upstream);
         let linked = &mut self.links.list[at];
         if let Some((_, since)) = linked.connected.take()
             && since.elapsed() >= LASTED
@@ -1121,6 +1160,7 @@ impl Linked {
             backoff: FIRST_RETRY,
             askpass: None,
             answered: None,
+            relayed: Relayed::default(),
         }
     }
 }
@@ -1160,7 +1200,7 @@ fn try_connecting(
                 decoder,
                 wire,
                 carried,
-                machine: workspaces.machine,
+                workspaces,
             }))
         }
         Err(err) => Outcome::Failed(with_causes(&err)),
@@ -1215,28 +1255,16 @@ fn serve_askpass(
     .ok()
 }
 
-/// What the daemon at the other end of a connection said, that's taken in.
-#[derive(Debug, PartialEq, Eq)]
-enum Heard {
-    /// Nothing that is.
-    Nothing,
-    /// Its workspaces, which say which daemon it is, if it's one that
-    /// says.
-    Workspaces(Option<Machine>),
-}
-
-/// Takes in what the daemon at the other end of a connection sent and
-/// `decoder` holds, at protocol `wire`: only its workspaces, to see which
-/// daemon it is, and at most [`MOST_WORKSPACES`] of them. All else is
-/// passed over unread, but for how it begins, which says what it is. Returns
-/// what the latest workspaces said, if any came, or why the connection
-/// is refused.
-fn hear(decoder: &mut FrameDecoder, wire: u32) -> Result<Heard, String> {
-    let mut heard = Heard::Nothing;
+/// The whole frames' payloads `decoder` holds of what the daemon at the
+/// other end of a connection sent, to be relayed: or why the connection
+/// is refused, as for workspaces past [`MOST_WORKSPACES`], or a frame too
+/// big to read.
+fn frames(decoder: &mut FrameDecoder) -> Result<Vec<Vec<u8>>, String> {
+    let mut frames = Vec::new();
     loop {
         let payload = match decoder.next_payload() {
             Ok(Some(payload)) => payload,
-            Ok(None) => return Ok(heard),
+            Ok(None) => return Ok(frames),
             Err(FrameError::TooLarge(len)) => {
                 return Err(format!(
                     "the daemon there sent a message of {len} bytes, too big to read"
@@ -1244,10 +1272,7 @@ fn hear(decoder: &mut FrameDecoder, wire: u32) -> Result<Heard, String> {
             }
             Err(err) => return Err(format!("the daemon there sent what can't be read: {err}")),
         };
-        if !Head::of(payload).is_workspaces() {
-            continue;
-        }
-        if payload.len() > MOST_WORKSPACES {
+        if Head::of(payload).is_workspaces() && payload.len() > MOST_WORKSPACES {
             return Err(format!(
                 "the daemon there sent its workspaces in {} bytes, more than the {} this one \
                  takes",
@@ -1255,14 +1280,7 @@ fn hear(decoder: &mut FrameDecoder, wire: u32) -> Result<Heard, String> {
                 MOST_WORKSPACES
             ));
         }
-        match FrameDecoder::decode_payload::<ServerMessage>(wire, payload) {
-            Ok(ServerMessage::Event(Event::Workspaces(workspaces))) => {
-                heard = Heard::Workspaces(workspaces.machine);
-            }
-            Ok(_) => {}
-            // From a newer daemon, which knows what this build doesn't.
-            Err(err) => log::debug!("the daemon there sent workspaces that can't be read: {err}"),
-        }
+        frames.push(payload.to_vec());
     }
 }
 
@@ -1303,6 +1321,48 @@ fn with_causes(err: &dyn std::error::Error) -> String {
 }
 
 #[cfg(test)]
+impl Daemon {
+    /// A connection to `host`, made as if a try had made it, to the daemon
+    /// `machine`, over a socket pair whose other end is returned: for a
+    /// test to play the daemon there, writing what it sends and reading
+    /// what this daemon asks. Its token too, for the test to have it read.
+    pub(super) fn linked_for_test(
+        &mut self,
+        host: &str,
+        machine: Machine,
+    ) -> (Token, std::os::unix::net::UnixStream) {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut linked = Linked::new(
+            Remote {
+                host: host.to_owned(),
+                command: COMMAND.to_owned(),
+            },
+            None,
+        );
+        linked.machine = Some(machine.clone());
+        self.links.list.push(linked);
+        let at = self.links.list.len() - 1;
+        let workspaces = Workspaces {
+            machine: Some(machine),
+            ..Workspaces::default()
+        };
+        self.made(
+            at,
+            Made {
+                stream: ours,
+                decoder: FrameDecoder::new(),
+                wire: clackatoo_protocol::PROTOCOL_VERSION,
+                carried: None,
+                workspaces,
+            },
+        );
+        let token = self.links.list[at].connected.unwrap().0;
+        theirs.set_nonblocking(true).unwrap();
+        (token, theirs)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1340,7 +1400,7 @@ mod tests {
         clackatoo_protocol::frame::encode(clackatoo_protocol::PROTOCOL_VERSION, message).unwrap()
     }
 
-    fn workspaces(name: &str, machine: Option<Machine>) -> ServerMessage {
+    fn workspaces(name: &str) -> ServerMessage {
         use clackatoo_protocol::{Workspace, WorkspaceId, Workspaces};
         ServerMessage::Event(Event::Workspaces(Workspaces {
             list: vec![Workspace {
@@ -1350,38 +1410,28 @@ mod tests {
                 active_tab: clackatoo_protocol::TabId(1),
                 home: None,
             }],
-            machine,
             ..Workspaces::default()
         }))
     }
 
     #[test]
-    fn only_the_workspaces_are_heard_and_only_so_big() {
-        let wire = clackatoo_protocol::PROTOCOL_VERSION;
-        let laptop = Machine {
-            id: clackatoo_protocol::MachineId([4; 16]),
-            name: "laptop".into(),
-            run: 9,
-        };
+    fn whole_frames_are_relayed_and_workspaces_only_so_big() {
         let mut decoder = FrameDecoder::new();
-        // Anything else is passed over unread, even what can't be read.
-        decoder.push(&framed(&ServerMessage::Event(Event::Chats(Vec::new()))));
-        decoder.push(&clackatoo_protocol::frame::header(3));
-        decoder.push(&[2, 0xff, 0xff]);
-        assert_eq!(hear(&mut decoder, wire), Ok(Heard::Nothing));
-        decoder.push(&framed(&workspaces("w", None)));
-        decoder.push(&framed(&workspaces("w", Some(laptop.clone()))));
-        assert_eq!(
-            hear(&mut decoder, wire),
-            Ok(Heard::Workspaces(Some(laptop)))
-        );
-        // Workspaces that can't be read are passed over too.
-        decoder.push(&clackatoo_protocol::frame::header(3));
-        decoder.push(&[3, 1, 0xff]);
-        assert_eq!(hear(&mut decoder, wire), Ok(Heard::Nothing));
+        let chats = framed(&ServerMessage::Event(Event::Chats(Vec::new())));
+        let small = framed(&workspaces("w"));
+        decoder.push(&chats);
+        decoder.push(&small[..small.len() - 1]);
+        // What can't be read goes on too, to be passed over there.
+        assert_eq!(frames(&mut decoder), Ok(vec![chats[4..].to_vec()]));
+        decoder.push(&small[small.len() - 1..]);
+        assert_eq!(frames(&mut decoder), Ok(vec![small[4..].to_vec()]));
         // Too many are refused, read or not.
-        decoder.push(&framed(&workspaces(&"x".repeat(MOST_WORKSPACES), None)));
-        let refused = hear(&mut decoder, wire).unwrap_err();
+        decoder.push(&framed(&workspaces(&"x".repeat(MOST_WORKSPACES))));
+        let refused = frames(&mut decoder).unwrap_err();
         assert!(refused.contains("workspaces"), "{refused}");
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&u32::MAX.to_le_bytes());
+        let refused = frames(&mut decoder).unwrap_err();
+        assert!(refused.contains("too big"), "{refused}");
     }
 }

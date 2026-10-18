@@ -68,6 +68,15 @@ impl Daemon {
     ) {
         // Asking again under the same number stops the search before.
         self.stop_finding(token, id);
+        // A pane on another machine has its project there, which isn't
+        // searched through the relay yet.
+        if let Some((at, _)) = pane.and_then(|pane| self.relayed_pane(pane)) {
+            let host = &self.links.list[at].remote.host;
+            let why = format!("the finder on {host}: coming soon");
+            let found = Found::Done(Done::Failed(why));
+            self.send_event(token, Event::Found { id, found });
+            return;
+        }
         // The boards are at hand: no need for a thread.
         if search == Search::Boards {
             let found = match self.boards.ready() {

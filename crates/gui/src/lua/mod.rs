@@ -196,6 +196,13 @@ pub(crate) enum FromLua {
     /// window on this machine, which has none to forward: a config runs in
     /// every window.
     Forward(clackatoo_daemon::forward::Spec),
+    /// Have the daemon connect to another machine, as `:connect HOST`
+    /// does, but saying nothing unless it fails: a config runs in every
+    /// window.
+    Connect(String),
+    /// Have the daemon end its connection to another machine, as
+    /// `:disconnect HOST` does.
+    Disconnect(String),
     /// Set an option, to a value it can hold.
     Set {
         option: &'static Info,

@@ -48,6 +48,18 @@ The app lists each workspace's terminals under its chats, with what each is runn
 
 Tap the rows to bring up the keyboard; what you type goes as you type it, a key at a time, and the row above the keyboard has Esc, Tab, Ctrl (for the next key), Ctrl+C, the arrows, `|`, `~`, `/`, `-` and Paste. When the daemon can't be reached, or hasn't answered for three seconds, keys are turned down and the phone says so, rather than reach a shell long after you meant them.
 
-## Panes from several machines
+## Another machine's workspaces, in your bar
 
-`:connect HOST`, to bring another machine's workspaces into this daemon, and `:Terminal@host`, for a pane on another machine beside your own, aren't built yet, as both say. Until then, a window shows one machine, and `:connect` alone opens a window on another.
+`:connect HOST` has your daemon connect to the daemon on HOST, through ssh as `--remote` does, and bring HOST's workspaces into your bar beside your own. Their terminals and chats work as your own do: what you type goes there and their screens come back, through your daemon, so your phone and your scripts have them too. `:Terminal`, a split, a rename or closing a tab in one of them happens on HOST, which keeps them, so they carry on while your laptop sleeps. Editors, explorers, the finder and boards on HOST come in a later release: until then, their panes say so.
+
+A workspace from another machine has a ring in place of its dot: in its colour while it's connected, red while the connection is down and being made again, and amber when ssh needs a password no window has given yet, which `:connect HOST` asks for again. The mouse over it says which machine it's on, and how its connection is. If the connection drops, its workspaces stay in the bar as they last were, each pane saying so over its last screen, and keys for its terminals are turned down until it's back. Your daemon keeps the connection, makes it again whenever it drops, and after it restarts; `:disconnect HOST`, or `:disconnect` in one of its workspaces, ends it.
+
+A workspace's name says which machine it's on only while another has the same name, as `notes@desk`. `:set showhost=always` says it for every one, and `never` for none. Try it:
+
+```check
+option showhost=always
+```
+
+`:workspace notes@desk` switches to a workspace by its machine. Tab after `:connect` offers the machines in your `~/.ssh/config` and those you've connected to lately. In your config, `client.connect("desk")` connects whenever a window opens, saying nothing unless it fails.
+
+`:connect` alone still opens a window on another machine, and `:Terminal@host`, for a pane on another machine beside your own, comes in a later release.

@@ -320,13 +320,22 @@ impl Desk {
         input.completing = Some(completion);
     }
 
-    /// What Tab completes with: the workspaces, and the focused pane's
-    /// folder, which paths are from.
-    fn completion_sources(&self) -> Sources<'_> {
+    /// What Tab completes with: the workspaces, the focused pane's folder,
+    /// which paths are from, and, after a command that takes one, the
+    /// machines it may name.
+    fn completion_sources(&self) -> Sources {
+        let takes_host = (self.input.as_ref())
+            .and_then(|input| input.line.text().split_whitespace().next())
+            .is_some_and(|word| crate::command::takes(word) == crate::command::Takes::Host);
         Sources {
             workspaces: (self.workspaces.list.iter())
-                .map(|workspace| workspace.name.as_str())
+                .map(|workspace| self.shown_name(workspace))
                 .collect(),
+            hosts: if takes_host {
+                self.known_hosts()
+            } else {
+                Vec::new()
+            },
             folder: (!self.remote).then(|| self.focused_folder()).flatten(),
             remote: self.remote,
         }

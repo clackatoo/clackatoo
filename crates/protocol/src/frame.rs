@@ -74,6 +74,57 @@ pub fn header(len: usize) -> [u8; HEADER_LEN] {
     u32::try_from(len).unwrap_or(u32::MAX).to_le_bytes()
 }
 
+/// A whole frame holding `payload`, taken from another frame with
+/// [`FrameDecoder::next_payload`]: a message passed on as it came, as one
+/// daemon passes another's answers on to its own clients, never decoded.
+#[must_use]
+pub fn reframe(payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(HEADER_LEN + payload.len());
+    frame.extend_from_slice(&header(payload.len()));
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// `payload`, a frame's holding a change to a terminal's view
+/// (`ServerMessage::Event(Event::View { terminal, update })`), as a whole
+/// frame about `terminal` instead: the same bytes but for the terminal's
+/// number, which comes before the update. A daemon passing on the views
+/// of another daemon's terminals, under numbers of its own, so never
+/// decodes them. `None` if the payload isn't a change to a view, or the
+/// frame would be too big.
+#[must_use]
+pub fn renumber_view(payload: &[u8], terminal: TerminalId) -> Option<Vec<u8>> {
+    let (3, rest) = varint(payload)? else {
+        return None;
+    };
+    let (0, rest) = varint(rest)? else {
+        return None;
+    };
+    let (_, update) = varint(rest)?;
+    let mut frame = vec![0; HEADER_LEN];
+    frame.extend_from_slice(&[3, 0]);
+    put_varint(&mut frame, terminal.0);
+    frame.extend_from_slice(update);
+    let len = frame.len() - HEADER_LEN;
+    if len > MAX_FRAME_LEN {
+        return None;
+    }
+    frame[..HEADER_LEN].copy_from_slice(&header(len));
+    Some(frame)
+}
+
+/// Writes `value` as one of postcard's variable-length numbers, as
+/// [`varint`] reads them.
+fn put_varint(out: &mut Vec<u8>, mut value: u32) {
+    while value >= 0x80 {
+        #[allow(clippy::cast_possible_truncation, reason = "the low seven bits")]
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    #[allow(clippy::cast_possible_truncation, reason = "under 0x80")]
+    out.push(value as u8);
+}
+
 /// Reassembles frames from a byte stream that arrives in arbitrary pieces.
 #[derive(Debug, Default)]
 pub struct FrameDecoder {
@@ -227,6 +278,43 @@ impl Head {
         self.get(0) == Some(2)
     }
 
+    /// Of the daemon's message: whether it was an answer that may name
+    /// terminals, panes, tabs or workspaces by their numbers, as an error
+    /// about one, or a new pane, does: one that a daemon passing another's
+    /// answers on renumbers. Any other answer is passed on as it is.
+    #[must_use]
+    pub fn names_ids(&self) -> bool {
+        // Error, Terminals, TerminalCreated, Workspaces, PaneCreated,
+        // Chats and ChatChoices.
+        self.is_response() && matches!(self.get(1), Some(0 | 2 | 3 | 9 | 10 | 13 | 15))
+    }
+
+    /// Of the daemon's message: whether it was one of the answers that
+    /// name nothing by number, and say no more than what was asked of a
+    /// terminal or chat: done, a view, history, text, a match or a block.
+    #[must_use]
+    pub fn is_plain_answer(&self) -> bool {
+        // Done, View, History, Text, Found and Block.
+        self.is_response() && matches!(self.get(1), Some(1 | 4..=8))
+    }
+
+    /// Of the daemon's message: whether it was the chats, for a client
+    /// watching them.
+    #[must_use]
+    pub fn is_chats(&self) -> bool {
+        self.get(0) == Some(3) && self.get(1) == Some(13)
+    }
+
+    /// Of the daemon's message: whether it said a terminal's program
+    /// ended, or asked for a pane to be shown, or a program put text on a
+    /// clipboard, or asked what's on one: small events about one thing,
+    /// which a daemon passing them on decodes, to renumber it.
+    #[must_use]
+    pub fn is_small_event(&self) -> bool {
+        // Clipboard, ClipboardAsked, Show and Exited.
+        self.get(0) == Some(3) && matches!(self.get(1), Some(5 | 6 | 9 | 16))
+    }
+
     /// Of the daemon's message: the terminal, if it was a change to a
     /// terminal's view.
     #[must_use]
@@ -352,6 +440,113 @@ mod tests {
             assert_eq!(received, messages, "pieces of {piece_len} bytes");
             assert!(!decoder.has_partial_frame());
         }
+    }
+
+    #[test]
+    fn a_view_renumbered_is_the_view_encoded_about_the_other_terminal() {
+        use crate::{Event, Patch, ViewUpdate};
+        let view = |terminal: u32| {
+            ServerMessage::Event(Event::View {
+                terminal: crate::TerminalId(terminal),
+                update: ViewUpdate::Patch(vec![Patch::Title("vim".into())]),
+            })
+        };
+        // Numbers of one byte and of several, either way.
+        for (from, to) in [(3, 5), (7, 300), (300, 2), (u32::MAX, 0), (90_000, 90_001)] {
+            let frame = encode(PROTOCOL_VERSION, &view(from)).unwrap();
+            let renumbered =
+                renumber_view(&frame[HEADER_LEN..], crate::TerminalId(to)).expect("a view");
+            assert_eq!(renumbered, encode(PROTOCOL_VERSION, &view(to)).unwrap());
+            assert_eq!(reframe(&frame[HEADER_LEN..]), frame);
+        }
+        // Anything else isn't one.
+        let other = encode(
+            PROTOCOL_VERSION,
+            &ServerMessage::Event(Event::Exited {
+                terminal: crate::TerminalId(3),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            renumber_view(&other[HEADER_LEN..], crate::TerminalId(1)),
+            None
+        );
+        assert_eq!(renumber_view(&[3], crate::TerminalId(1)), None);
+    }
+
+    #[test]
+    fn heads_say_which_answers_and_events_a_relay_looks_into() {
+        use crate::{Error, Event, PaneId, Response, Selection, TerminalId};
+        let head = |message: &ServerMessage| {
+            Head::of(&encode(PROTOCOL_VERSION, message).unwrap()[HEADER_LEN..])
+        };
+        let named = [
+            Response::Error(Error::NoSuchPane(PaneId(1))),
+            Response::Terminals(Vec::new()),
+            Response::TerminalCreated(TerminalId(1)),
+            Response::Workspaces(crate::Workspaces::default()),
+            Response::PaneCreated(PaneId(1)),
+            Response::Chats(Vec::new()),
+        ];
+        for response in named {
+            assert!(
+                head(&ServerMessage::Response(response.clone())).names_ids(),
+                "{response:?}"
+            );
+        }
+        for response in [Response::Done, Response::Text("x".into())] {
+            assert!(
+                !head(&ServerMessage::Response(response.clone())).names_ids(),
+                "{response:?}"
+            );
+        }
+        // Plain answers, a view's and history's by their numbers, 4 and 5.
+        let plain = [
+            Response::Done,
+            Response::Text("x".into()),
+            Response::Found(None),
+        ];
+        for response in plain.into_iter().chain([Response::Block(None)]) {
+            let head = head(&ServerMessage::Response(response.clone()));
+            assert!(head.is_plain_answer() && !head.names_ids(), "{response:?}");
+        }
+        assert!(Head::of(&[2, 4]).is_plain_answer() && Head::of(&[2, 5]).is_plain_answer());
+        for response in [
+            Response::Error(Error::Unsupported),
+            Response::PaneCreated(PaneId(1)),
+            Response::Terminals(Vec::new()),
+            Response::Reviewed(String::new()),
+        ] {
+            let head = head(&ServerMessage::Response(response.clone()));
+            assert!(!head.is_plain_answer(), "{response:?}");
+        }
+        let small = [
+            Event::Clipboard {
+                terminal: TerminalId(1),
+                selection: Selection::Clipboard,
+                text: String::new(),
+            },
+            Event::ClipboardAsked {
+                terminal: TerminalId(1),
+                id: 1,
+                selection: Selection::Clipboard,
+            },
+            Event::Show {
+                pane: PaneId(1),
+                at: None,
+            },
+            Event::Exited {
+                terminal: TerminalId(1),
+            },
+        ];
+        for event in small {
+            assert!(
+                head(&ServerMessage::Event(event.clone())).is_small_event(),
+                "{event:?}"
+            );
+        }
+        assert!(head(&ServerMessage::Event(Event::Chats(Vec::new()))).is_chats());
+        assert!(!head(&ServerMessage::Event(Event::Chats(Vec::new()))).is_small_event());
     }
 
     #[test]

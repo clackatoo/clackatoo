@@ -515,6 +515,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "shell",
         what: "bash too offers what it was running after a restart, and only the shell's own marks count",
     },
+    News {
+        id: "connect",
+        date: "2026-10-18",
+        lesson: "remote",
+        what: ":connect HOST brings another machine's workspaces, terminals and chats into your bar",
+    },
 ];
 
 impl News {

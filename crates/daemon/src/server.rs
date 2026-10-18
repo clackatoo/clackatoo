@@ -73,6 +73,7 @@ mod links;
 mod offers;
 mod pieces;
 mod recovery;
+mod relay;
 mod rename;
 mod restore;
 mod review;
@@ -402,6 +403,19 @@ struct Client {
     present_until: Option<Instant>,
     /// Events to queue after the answer to the request being answered.
     later: Vec<u8>,
+    /// Answers waiting for one before them, which was passed on to the
+    /// daemon on another machine (see [`relay`]): a client's answers come
+    /// in the order it asked.
+    held: VecDeque<Held>,
+}
+
+/// An answer of a client's, waiting its turn.
+#[derive(Debug)]
+enum Held {
+    /// Passed on to another daemon, numbered this, whose answer comes.
+    Waiting(u64),
+    /// Ready, encoded, with any events to follow it.
+    Ready(Vec<u8>),
 }
 
 /// The messages a client has sent lately that couldn't be read, as from a
@@ -624,6 +638,7 @@ impl Client {
             watching_connections: false,
             present_until: None,
             later: Vec::new(),
+            held: VecDeque::new(),
         }
     }
 
@@ -1321,6 +1336,8 @@ impl Daemon {
             let agent_unread = self.agents.unread();
             let servers_unread = self.servers_unread();
             let tools_unread = self.tools_unread();
+            // Queued as floods, which the poll doesn't wait for.
+            self.relays_unpacked();
             let web_unread = !self.web_unread.is_empty();
             let peers_flooded = std::mem::take(&mut self.peers_flooded);
             let timeout = if self.unread.is_empty()
@@ -1362,6 +1379,7 @@ impl Daemon {
                     .chain(self.upgrade_to.as_ref().map(|upgrading| upgrading.until))
                     .chain(self.keeping.due())
                     .chain(self.links.due())
+                    .chain(self.relay_due())
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
@@ -1421,6 +1439,7 @@ impl Daemon {
             self.take_lookups();
             self.time_out_forwards();
             self.take_link_news();
+            self.time_out_relays();
             self.retry_links();
             self.relay_chats();
             self.take_browser();
@@ -1611,11 +1630,18 @@ impl Daemon {
                 Some(Source::Tools(_)) => self.serve_tools(token, event),
                 Some(Source::Web(_)) => self.serve_web(token),
                 Some(Source::Forward(_)) => self.queue_forward(token),
-                // One already queued is read at the end of the turn.
-                Some(Source::Reached(_)) if !self.unread.contains(&Flood::Reached(token)) => {
-                    self.read_reached(token, Reading::Look);
+                Some(Source::Reached(_)) => {
+                    if event.is_writable() {
+                        self.flush_reached(token);
+                    }
+                    // One already queued is read at the end of the turn.
+                    if (event.is_readable() || event.is_read_closed() || event.is_error())
+                        && !self.unread.contains(&Flood::Reached(token))
+                    {
+                        self.read_reached(token, Reading::Look);
+                    }
                 }
-                Some(Source::Reached(_)) | None => {}
+                None => {}
             },
         }
     }
@@ -2258,24 +2284,7 @@ impl Daemon {
         // gone back.
         self.note_subagents();
         self.chats_moved();
-        let event = ServerMessage::Event(clackatoo_protocol::Event::Workspaces(
-            self.workspaces.get().clone(),
-        ));
-        let mut event = Broadcast::new(&event, "the workspaces");
-        let mut watchers = Vec::new();
-        for (key, source) in &mut self.sources {
-            if let Source::Client(client) = source
-                && client.watching_workspaces
-                && !client.finished
-                && let Some(bytes) = event.to(client.wire)
-            {
-                client.outgoing.extend_from_slice(bytes);
-                watchers.push(Token(key));
-            }
-        }
-        for token in watchers {
-            self.flush_client(token);
-        }
+        self.tell_workspaces();
     }
 
     /// Registers `fd` for readability under a new token. `None` for a missing
@@ -2404,6 +2413,8 @@ impl Daemon {
                     if let Some(subscription) = client.views.get_mut(&terminal) {
                         subscription.awaiting_ack = false;
                         self.views_pending = true;
+                    } else {
+                        self.relayed_frame_done(token, terminal);
                     }
                     continue;
                 }
@@ -2411,9 +2422,13 @@ impl Daemon {
                     self.present(token, here);
                     continue;
                 }
-                Some(ClientMessage::Request(request)) => {
-                    ServerMessage::Response(self.respond(request, token))
-                }
+                Some(ClientMessage::Request(request)) => match self.route_request(token, request) {
+                    relay::Routed::Here(request) => {
+                        ServerMessage::Response(self.respond(request, token))
+                    }
+                    relay::Routed::Answered(response) => ServerMessage::Response(response),
+                    relay::Routed::Waiting => continue,
+                },
                 Some(
                     message @ (ClientMessage::Edit { .. }
                     | ClientMessage::Query { .. }
@@ -2439,16 +2454,20 @@ impl Daemon {
             let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
                 return;
             };
-            match frame::encode(client.wire, &reply) {
-                Ok(bytes) => client.outgoing.extend_from_slice(&bytes),
+            let mut answer = match frame::encode(client.wire, &reply) {
+                Ok(bytes) => bytes,
                 Err(err) => {
                     log::error!("encoding a response failed: {err}");
                     client.finished = true;
+                    Vec::new()
                 }
-            }
-            if !client.later.is_empty() {
-                let later = std::mem::take(&mut client.later);
-                client.outgoing.extend_from_slice(&later);
+            };
+            answer.append(&mut client.later);
+            // Behind an answer still to come from another machine.
+            if client.held.is_empty() {
+                client.outgoing.extend_from_slice(&answer);
+            } else {
+                client.held.push_back(Held::Ready(answer));
             }
             if client.finished || client.carrying || client.serving_tools.is_some() {
                 break;
@@ -2493,7 +2512,11 @@ impl Daemon {
                 at,
             } => self.serve_stage(token, buffer, (id, version, at)),
             ClientMessage::Clipboard { terminal, id, text } => {
-                self.clipboard_answered(token, terminal, id, text.as_deref());
+                if self.relayed_terminal(terminal).is_some() {
+                    self.relayed_clipboard(token, terminal, id, text);
+                } else {
+                    self.clipboard_answered(token, terminal, id, text.as_deref());
+                }
             }
             ClientMessage::Files { files, action } => self.serve_files(token, files, action),
             ClientMessage::FileOp { id, op } => self.serve_file_op(token, id, op),
@@ -2818,7 +2841,7 @@ impl Daemon {
                 }
                 // A window opening while devices ask hears of them.
                 self.tell_of_asks(token);
-                Ok(Response::Workspaces(self.workspaces.get().clone()))
+                Ok(Response::Workspaces(self.shown_workspaces()))
             }
             Request::NewWorkspace { name, terminal } => {
                 self.new_workspace(name.as_deref(), terminal)
@@ -3114,6 +3137,7 @@ impl Daemon {
             self.forget_piece_questions(token, None);
             self.forget_listings(token);
             self.forget_link_client(token);
+            self.forget_relay_client(token);
             if let Link::Quic(handle) = client.link {
                 self.abandon_forwards(Some(handle));
                 if let Some(quic) = self.quic.as_mut() {

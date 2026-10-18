@@ -96,10 +96,20 @@ impl Desk {
             Outcome::List { agent, cwd } => {
                 self.searches += 1;
                 let id = self.searches;
-                (self.outbox).push(ClientMessage::ListSessions { id, agent, cwd });
+                // An agent's past sessions on another machine are listed
+                // there, which isn't relayed yet.
+                let elsewhere = (self.shown)
+                    .and_then(|shown| self.workspaces.get(shown.workspace))
+                    .and_then(|workspace| self.elsewhere(workspace));
                 if let Some(page) = &mut self.start {
                     page.listing(id);
+                    if let Some(elsewhere) = elsewhere {
+                        let why = format!("past sessions on {}: coming soon", elsewhere.host);
+                        page.listed(id, Err(why));
+                        return;
+                    }
                 }
+                (self.outbox).push(ClientMessage::ListSessions { id, agent, cwd });
             }
             Outcome::Start(new) => {
                 let Some(place) = self.start.take().map(|page| page.place()) else {

@@ -408,6 +408,15 @@ pub(crate) struct Desk {
     /// Whether `:connect` asked for the picker of a machine, waiting for
     /// the window to open it.
     connect_asked: bool,
+    /// The daemon's connections to other machines, as last heard: where
+    /// workspaces from them are, and how each is reached.
+    connections: Vec<clackatoo_protocol::Connection>,
+    /// The machine `:connect HOST` last asked the daemon to connect to,
+    /// until the bar has said how that went.
+    connecting: Option<String>,
+    /// The machines the config asked the daemon to connect to, with
+    /// `client.connect`, asked again on each new connection to it.
+    config_hosts: Vec<String>,
     /// What `:PortForward` asked for, waiting for the window to do it, as
     /// the window keeps the forwards (see [`crate::forwards`]).
     forwards_asked: Vec<crate::command::Forwarding>,
@@ -680,7 +689,8 @@ impl Desk {
     }
 
     /// Every workspace, by name, how many tabs it has, whether it's the
-    /// one shown, and what it says of its chats.
+    /// one shown, what it says of its chats, and for one from another
+    /// machine, where it is.
     pub(crate) fn workspace_names(&self) -> Vec<WorkspaceName> {
         let shown = self.shown.map(|shown| shown.workspace);
         self.workspaces
@@ -688,12 +698,25 @@ impl Desk {
             .iter()
             .map(|workspace| WorkspaceName {
                 id: workspace.id,
-                name: workspace.name.clone(),
+                name: self.shown_name(workspace),
                 tabs: workspace.tabs.len(),
                 shown: Some(workspace.id) == shown,
                 mark: self.workspace_mark(workspace.id),
+                away: self
+                    .elsewhere(workspace)
+                    .map(|elsewhere| crate::chrome::Away {
+                        said: elsewhere.said(),
+                        reach: elsewhere.reach,
+                    }),
             })
             .collect()
+    }
+
+    /// What `pane`, of a workspace from another machine not connected
+    /// just now, says over its last screen, as its pill does.
+    pub(crate) fn away_notice(&self, pane: PaneId) -> Option<String> {
+        let (workspace, ..) = self.workspaces.find_pane(pane)?;
+        self.elsewhere(workspace)?.notice()
     }
 
     /// The shown workspace's tabs, by name, and whether each is the one
@@ -1181,6 +1204,12 @@ impl Desk {
     /// the tab shown of a kind this window doesn't know, and forgets those
     /// gone.
     fn show_others(&mut self) {
+        // In a workspace from another machine, one of a kind not relayed
+        // yet, which says so.
+        let host = (self.shown)
+            .and_then(|shown| self.workspaces.get(shown.workspace))
+            .and_then(|workspace| self.elsewhere(workspace))
+            .map(|elsewhere| elsewhere.host);
         let shown: Vec<(PaneId, PaneKind)> = (self.shown_tab())
             .map(|tab| {
                 (tab.layout.panes().iter())
@@ -1191,12 +1220,13 @@ impl Desk {
                     .collect()
             })
             .unwrap_or_default();
-        self.others
-            .retain(|pane, other| shown.contains(&(*pane, other.kind())));
+        self.others.retain(|pane, other| {
+            shown.contains(&(*pane, other.kind())) && other.host() == host.as_deref()
+        });
         for (pane, kind) in shown {
             self.others
                 .entry(pane)
-                .or_insert_with(|| OtherPane::new(kind));
+                .or_insert_with(|| OtherPane::new(kind, host.clone()));
         }
     }
 
@@ -1285,6 +1315,7 @@ impl Desk {
         }
         self.workspaces_changed(workspaces);
         self.watch_chats();
+        self.connect_config_hosts();
         self.tutor_connected();
         // A new daemon, or one that lost the last connection, doesn't know.
         self.pairing = clackatoo_protocol::PairingState::default();
@@ -2417,6 +2448,7 @@ impl Desk {
             Command::Set(words) => return self.run_set(&words),
             Command::Update(host) => return self.ask_update(host),
             Command::Connect(host) => return self.ask_connect(host),
+            Command::Disconnect(host) => return self.ask_disconnect(host),
             Command::PortForward(forwarding) => return self.forwards_asked.push(forwarding),
             _ => {}
         }
@@ -2430,7 +2462,9 @@ impl Desk {
                 ..
             } => {
                 self.say(format!(
-                    "panes on {daemon} come with :connect, which isn't built yet"
+                    "a pane on {daemon} beside this machine's comes in a later release: \
+                     :connect {daemon} brings its workspaces in, and panes made in one are on \
+                     {daemon}"
                 ));
             }
             // A chat with no agent named: the start page, to pick one.
@@ -2472,14 +2506,17 @@ impl Desk {
                 );
             }
             Command::Workspace(name) => {
-                let existing = name.as_deref().and_then(|name| {
-                    self.workspaces
-                        .list
-                        .iter()
-                        .find(|workspace| workspace.name == name.trim())
-                });
+                let existing = (name.as_deref())
+                    .and_then(|name| self.workspace_named(name.trim()))
+                    .map(|workspace| workspace.id);
                 if let Some(workspace) = existing {
-                    self.show_workspace(workspace.id);
+                    self.show_workspace(workspace);
+                } else if let Some((name, host)) = name.as_deref().and_then(|n| n.rsplit_once('@'))
+                {
+                    self.warn(format!(
+                        "there's no workspace ‘{name}’ on ‘{host}’: new workspaces on another \
+                         machine come in a later release"
+                    ));
                 } else {
                     let terminal = new(Kind::Terminal, None, self.new_pane_size(None));
                     self.request(Request::NewWorkspace { name, terminal }, Asked::Pane);
@@ -2536,6 +2573,7 @@ impl Desk {
             | Command::Set(_)
             | Command::Update(_)
             | Command::Connect(_)
+            | Command::Disconnect(_)
             | Command::PortForward(_) => {}
         }
     }
@@ -2647,6 +2685,7 @@ mod tests {
     mod blank;
     mod folders;
     mod lessons;
+    mod machines;
     mod messages;
     mod mode;
     mod mouse;
@@ -8033,10 +8072,18 @@ mod tests {
         assert!(desk.take_connect_asked());
         // The window opens it: nothing goes to the daemon.
         assert_eq!(answer_all(&mut desk), []);
-        // Federation isn't built, and says so.
+        // With a machine, the daemon connects to it, to bring its
+        // workspaces in.
         command(&mut desk, "connect server");
         assert!(!desk.take_connect_asked());
-        assert!(note(&desk).starts_with(":connect server isn't built yet"));
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::Connect {
+                host: "server".into(),
+                command: None
+            }]
+        );
+        assert!(note(&desk).starts_with("connecting to ‘server’"));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! each step took to show in `timings.txt` beside them.
 //!
 //! ```text
-//! cargo build -p clackatoo-daemon --example fake_agent --example fake_language_server
+//! cargo build -p clackatoo-daemon --example fake_agent --example fake_language_server --example daemon
 //! cargo run -p clackatoo-gui --example look -- crates/gui/looks/*.look target/looks
 //! ```
 //!
@@ -52,6 +52,9 @@
 //! | `quiet MS` | How long nothing must change for the window to have settled (300 to start) |
 //! | `sleep MS` | Lets the window carry on by itself for MS milliseconds |
 //! | `shot NAME` | Writes what the window shows to `NAME.png`, once it's settled |
+//! | `machine NAME [WORKSPACE]...` | Starts the daemon of another machine, called NAME, with a workspace for each WORKSPACE, a shell in each, and written `WORKSPACE+FILE`, an editor of the project's FILE beside it: `:connect NAME` reaches it, through a stand-in for ssh |
+//! | `machine-stop NAME` | Stops that daemon, as when its machine goes away |
+//! | `password [TEXT]` | Has the stand-in for ssh ask for TEXT as a password from now on, or with none, ask for none |
 //!
 //! After each key, click, scroll or `open`, the window is left to settle,
 //! and how long that took to show is noted for `timings.txt`. The window
@@ -64,7 +67,9 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
-use clackatoo_daemon::{Client, CustomAgent, Daemon, DaemonConfig, RuntimeDir, ShutdownHandle};
+use clackatoo_daemon::{
+    Client, CustomAgent, Daemon, DaemonConfig, LinkConfig, RuntimeDir, ShutdownHandle,
+};
 use clackatoo_gui::look::{Timing, Window};
 use clackatoo_protocol::{NewTerminal, PaneTerminal, Size};
 use winit::event::MouseButton;
@@ -247,6 +252,9 @@ enum Command {
     Quiet(Duration),
     Sleep(Duration),
     Shot(String),
+    Machine(String, Vec<String>),
+    MachineStop(String),
+    Password(Option<String>),
 }
 
 /// The steps of `script`.
@@ -366,6 +374,21 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
             "sleep" => Command::Sleep(millis()?),
             "shot" if !rest.is_empty() && !rest.contains('/') => Command::Shot(rest.to_owned()),
             "shot" => bail!("line {line_number}: `shot` takes a name, with no `/`"),
+            "machine" | "machine-stop" => {
+                let mut words = rest.split_whitespace();
+                let name = (words.next())
+                    .filter(|name| {
+                        name.chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+                    })
+                    .with_context(|| format!("line {line_number}: `{word}` takes a name"))?;
+                if word == "machine" {
+                    Command::Machine(name.to_owned(), words.map(str::to_owned).collect())
+                } else {
+                    Command::MachineStop(name.to_owned())
+                }
+            }
+            "password" => Command::Password((!rest.is_empty()).then(|| rest.to_owned())),
             _ => bail!("line {line_number}: no command called `{word}`"),
         };
         steps.push(Step {
@@ -410,31 +433,130 @@ fn example(name: &str) -> anyhow::Result<PathBuf> {
     }
 }
 
-/// Starts a daemon in the runtime directory the environment names, with
-/// the fake agent and the fake language server, and a workspace with a
-/// shell in `project`, or else the workspaces `kept`, made again as a
-/// daemon starting afresh makes those it kept.
-fn start_daemon(project: &Path, kept: Option<&str>) -> anyhow::Result<Running> {
-    let runtime = RuntimeDir::for_current_user();
-    let lock = runtime.lock()?;
+/// The stand-in for ssh, as written for a script into its temporary
+/// directory: it runs the daemon example's bridge, as clackatoo, in the
+/// runtime directory of the "machine" named, `hosts/NAME` beside it,
+/// first asking for the password in `password` beside it, through its
+/// askpass, if there's one.
+const FAKE_SSH: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
+while [ "$1" != "--" ]; do shift; done; shift
+host=$1; shift
+[ -d "$dir/hosts/$host" ] || { echo "ssh: Could not resolve hostname $host" >&2; exit 255; }
+if [ -f "$dir/password" ]; then
+    answer=$("$SSH_ASKPASS" "$host's password: ") || { echo "Permission denied (password)." >&2; exit 255; }
+    [ "$answer" = "$(cat "$dir/password")" ] || { echo "Permission denied (password)." >&2; exit 255; }
+fi
+# Real ssh never passes its environment on.
+exec env -u CLACKATOO_ASKPASS -u SSH_ASKPASS -u SSH_ASKPASS_REQUIRE XDG_RUNTIME_DIR="$dir/hosts/$host" BRIDGE bridge
+"#;
+
+/// Writes the stand-in for ssh into `root`, through `sh`, so this process
+/// never has it open for writing, as a program being started on another
+/// thread could inherit it (see the memory
+/// `tests-never-write-executables-in-process`). Returns its path.
+fn write_fake_ssh(root: &Path) -> anyhow::Result<PathBuf> {
+    use std::io::Write as _;
+    let path = root.join("ssh");
+    let script = FAKE_SSH.replace("BRIDGE", &example("daemon")?.display().to_string());
+    let mut writer = std::process::Command::new("sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(&path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    writer
+        .stdin
+        .take()
+        .context("no input for sh")?
+        .write_all(script.as_bytes())?;
+    if !writer.wait()?.success() {
+        bail!("the stand-in for ssh couldn't be written");
+    }
+    std::fs::create_dir_all(root.join("hosts"))?;
+    Ok(path)
+}
+
+/// The daemons of the other machines a script started, by name, and
+/// where they're reached.
+struct Machines {
+    /// The script's temporary directory, where the stand-in for ssh is.
+    root: PathBuf,
+    running: Vec<(String, Running)>,
+}
+
+impl Machines {
+    /// Starts the daemon of the machine `name`, in its own runtime and
+    /// state directories under `hosts`, with a workspace with a shell in
+    /// `project` for each of `workspaces`.
+    fn start(&mut self, name: &str, workspaces: &[String], project: &Path) -> anyhow::Result<()> {
+        if self.running.iter().any(|(running, _)| running == name) {
+            bail!("{name} is running already");
+        }
+        let dir = self.root.join("hosts").join(name);
+        let runtime = RuntimeDir::at(dir.join("clackatoo"));
+        // Only this user's, as a runtime directory must be.
+        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+            .create(runtime.path())?;
+        let lock = runtime.lock()?;
+        let mut config = machine_config()?;
+        config.machine = Some(dir.join("machine"));
+        config.machine_name = Some(name.to_owned());
+        config.workspaces = None;
+        let daemon = Daemon::bind(&runtime.socket_path(), config)?;
+        let running = run(daemon, lock)?;
+        let mut client = Client::connect(&runtime.socket_path())?;
+        for workspace in workspaces {
+            // `NAME+FILE` has an editor of the project's FILE beside its
+            // shell.
+            let (name, file) = match workspace.split_once('+') {
+                Some((name, file)) => (name, Some(file)),
+                None => (workspace.as_str(), None),
+            };
+            let pane = client.new_workspace(Some(name.to_owned()), shell(project))?;
+            if let Some(file) = file {
+                let editor = PaneTerminal::File(clackatoo_protocol::OpenFile {
+                    path: project.join(file).display().to_string(),
+                    cwd: None,
+                });
+                client.split_pane(pane, clackatoo_protocol::Side::Right, editor)?;
+            }
+        }
+        self.running.push((name.to_owned(), running));
+        Ok(())
+    }
+
+    /// Stops the daemon of the machine `name`, which then can't be
+    /// reached, as a machine that has gone away can't: no bridge starts
+    /// another daemon there.
+    fn stop(&mut self, name: &str) -> anyhow::Result<()> {
+        let at = (self.running.iter())
+            .position(|(running, _)| running == name)
+            .with_context(|| format!("{name} isn't running"))?;
+        drop(self.running.remove(at));
+        let hosts = self.root.join("hosts");
+        std::fs::rename(hosts.join(name), hosts.join(format!("{name}.gone")))?;
+        Ok(())
+    }
+}
+
+/// What a new pane shows: a shell, in `project`.
+fn shell(project: &Path) -> PaneTerminal {
+    PaneTerminal::New(NewTerminal {
+        size: Size::new(80, 24).expect("80x24 is a size"),
+        command: None,
+        cwd: Some(project.display().to_string()),
+        record_to: None,
+    })
+}
+
+/// The config every daemon of a script's has: the environment's, with
+/// the fake agent, and nothing reaching outside the script.
+fn machine_config() -> anyhow::Result<DaemonConfig> {
     let home = PathBuf::from(std::env::var_os("HOME").context("no HOME")?);
     let agent = example("fake_agent")?;
     let mut config = DaemonConfig::from_env();
     config.udp_ports = None;
     config.web = None;
-    config.workspaces = match kept {
-        Some(kept) => {
-            let dir = clackatoo_daemon::state_dir().context("no state directory")?;
-            std::fs::create_dir_all(&dir)?;
-            let file = dir.join("workspaces");
-            std::fs::write(
-                &file,
-                kept.replace("$PROJECT", &project.display().to_string()),
-            )?;
-            Some(file)
-        }
-        None => None,
-    };
     config.browser = None;
     config.servers = None;
     config.machine = None;
@@ -450,12 +572,11 @@ fn start_daemon(project: &Path, kept: Option<&str>) -> anyhow::Result<Running> {
         starting_mode: None,
     }];
     config.mcp = Some(vec![agent.into(), "mcp".into()]);
-    config.languages = Some(languages(&home.join("languages"))?);
-    let mut daemon = Daemon::bind(&runtime.socket_path(), config)?;
-    daemon.install_shell_integration(runtime.path().join("shell"), true);
-    if kept.is_some() {
-        daemon.restore_workspaces();
-    }
+    Ok(config)
+}
+
+/// Runs `daemon` on a thread of its own, holding `lock` while it runs.
+fn run(mut daemon: Daemon, lock: clackatoo_daemon::DaemonLock) -> anyhow::Result<Running> {
     let shutdown = daemon.shutdown_handle();
     let thread = std::thread::Builder::new()
         .name("daemon".into())
@@ -464,26 +585,54 @@ fn start_daemon(project: &Path, kept: Option<&str>) -> anyhow::Result<Running> {
                 eprintln!("look: the daemon failed: {err}");
             }
         })?;
-    let running = Running {
+    Ok(Running {
         shutdown,
         thread: Some(thread),
         _lock: lock,
+    })
+}
+
+/// Starts a daemon in the runtime directory the environment names, with
+/// the fake agent and the fake language server, and a workspace with a
+/// shell in `project`, or else the workspaces `kept`, made again as a
+/// daemon starting afresh makes those it kept. It reaches other machines
+/// through `ssh`, the stand-in for it.
+fn start_daemon(project: &Path, kept: Option<&str>, ssh: &Path) -> anyhow::Result<Running> {
+    let runtime = RuntimeDir::for_current_user();
+    let lock = runtime.lock()?;
+    let home = PathBuf::from(std::env::var_os("HOME").context("no HOME")?);
+    let mut config = machine_config()?;
+    config.links = Some(LinkConfig {
+        ssh: ssh.into(),
+        askpass: Some(example("daemon")?),
+    });
+    config.workspaces = match kept {
+        Some(kept) => {
+            let dir = clackatoo_daemon::state_dir().context("no state directory")?;
+            std::fs::create_dir_all(&dir)?;
+            let file = dir.join("workspaces");
+            std::fs::write(
+                &file,
+                kept.replace("$PROJECT", &project.display().to_string()),
+            )?;
+            Some(file)
+        }
+        None => None,
     };
+    config.languages = Some(languages(&home.join("languages"))?);
+    let mut daemon = Daemon::bind(&runtime.socket_path(), config)?;
+    daemon.install_shell_integration(runtime.path().join("shell"), true);
+    if kept.is_some() {
+        daemon.restore_workspaces();
+    }
+    let running = run(daemon, lock)?;
     if kept.is_some() {
         return Ok(running);
     }
     // The window opens on this workspace, rather than make one with a
     // shell at home.
     let mut client = Client::connect(&runtime.socket_path())?;
-    client.new_workspace(
-        None,
-        PaneTerminal::New(NewTerminal {
-            size: Size::new(80, 24).expect("80x24 is a size"),
-            command: None,
-            cwd: Some(project.display().to_string()),
-            record_to: None,
-        }),
-    )?;
+    client.new_workspace(None, shell(project))?;
     Ok(running)
 }
 
@@ -547,6 +696,8 @@ struct Look {
     /// window to run; none until one does.
     config: Option<PathBuf>,
     timings: String,
+    /// The other machines' daemons the script started.
+    machines: Machines,
 }
 
 impl Look {
@@ -663,6 +814,23 @@ impl Look {
                 write_png(&path, picture.size, &picture.rgba)?;
                 println!("  {}", path.display());
             }
+            Command::Machine(name, workspaces) => {
+                timed = false;
+                let project = self.project.clone();
+                self.machines.start(name, workspaces, &project)?;
+            }
+            Command::MachineStop(name) => {
+                timed = false;
+                self.machines.stop(name)?;
+            }
+            Command::Password(password) => {
+                timed = false;
+                let file = self.machines.root.join("password");
+                match password {
+                    Some(password) => std::fs::write(file, format!("{password}\n"))?,
+                    None => drop(std::fs::remove_file(file)),
+                }
+            }
         }
         if timed {
             let (quiet, timeout) = (self.quiet, self.timeout);
@@ -732,7 +900,9 @@ fn run_script(script: &Path, out: &Path) -> anyhow::Result<()> {
         Command::Kept(kept) => Some(kept.as_str()),
         _ => None,
     });
-    let daemon = start_daemon(&project, kept)?;
+    let root = PathBuf::from(std::env::var_os(ISOLATED).context("not in a directory of its own")?);
+    let ssh = write_fake_ssh(&root)?;
+    let daemon = start_daemon(&project, kept, &ssh)?;
     let mut look = Look {
         size: [1280, 800],
         scale: 1.0,
@@ -760,6 +930,10 @@ fn run_script(script: &Path, out: &Path) -> anyhow::Result<()> {
                 "optimised"
             },
         ),
+        machines: Machines {
+            root,
+            running: Vec::new(),
+        },
     };
     let started = Instant::now();
     let result = steps.iter().try_for_each(|step| {
@@ -770,9 +944,18 @@ fn run_script(script: &Path, out: &Path) -> anyhow::Result<()> {
         ran
     });
     std::fs::write(out.join("timings.txt"), &look.timings)?;
-    // The window goes before its daemon, as a window closing does.
+    // The window goes before its daemon, as a window closing does, and
+    // that before the other machines'.
+    let machines = std::mem::replace(
+        &mut look.machines,
+        Machines {
+            root: PathBuf::new(),
+            running: Vec::new(),
+        },
+    );
     drop(look);
     drop(daemon);
+    drop(machines);
     result?;
     println!("  took {:.1?}", started.elapsed());
     Ok(())

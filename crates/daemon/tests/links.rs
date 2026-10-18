@@ -1,6 +1,7 @@
 //! Daemons connecting to each other (CLACKA-117): which daemon each is,
 //! a connection made, lost and made again, kept from one run to the
-//! next, and ssh's questions passed to a window.
+//! next, and ssh's questions passed to a window; and one daemon showing
+//! another's workspaces, with their terminals and chats relayed.
 //!
 //! Every daemon here runs on a thread of the test, in a directory of its
 //! own. The "other machines" are daemons reached through a stand-in for
@@ -17,9 +18,13 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use clackatoo_daemon::{
-    AgentConfig, Client, ClientError, Daemon, DaemonConfig, LinkConfig, ShutdownHandle,
+    AgentConfig, Client, ClientError, CustomAgent, Daemon, DaemonConfig, LinkConfig, ShutdownHandle,
 };
-use clackatoo_protocol::{Connection, ConnectionState, Event, MachineId};
+use clackatoo_protocol::{
+    ChatAction, ChatNode, ClientMessage, Connection, ConnectionState, Content, Error, Event, Item,
+    MachineId, NewAgent, NewTerminal, OpenFile, PaneId, PaneTerminal, Request, Response,
+    ServerMessage, Side, Size, TerminalId, View, ViewUpdate, Workspace, Workspaces,
+};
 
 /// How long anything here may take, on a busy machine.
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -85,7 +90,16 @@ impl World {
             shell: "/bin/sh".into(),
             home: dir.clone(),
             shell_integration: None,
-            agents: AgentConfig::default(),
+            // Chats talk to the agent for tests, as Claude Code.
+            agents: AgentConfig {
+                custom: vec![CustomAgent {
+                    name: "claude".into(),
+                    title: None,
+                    command: vec![example("fake_agent").into()],
+                    starting_mode: None,
+                }],
+                ..AgentConfig::default()
+            },
             mcp: None,
             udp_ports: None,
             languages: None,
@@ -785,4 +799,950 @@ fn a_new_ssh_with_no_window_to_ask_waits_for_one() {
     let (ask, ..) = next_question(&mut window);
     window.answer_login(ask, Some("hunter2".into())).unwrap();
     wait_for(&mut script, "laptop", connected);
+}
+
+// --- Another machine's workspaces, relayed -----------------------------
+
+/// What a new pane shows: a new terminal, running the shell.
+fn shell() -> PaneTerminal {
+    PaneTerminal::New(NewTerminal {
+        size: Size::new(60, 10).unwrap(),
+        command: None,
+        cwd: None,
+        record_to: None,
+    })
+}
+
+/// A new chat with the agent for tests.
+fn chat() -> PaneTerminal {
+    PaneTerminal::Agent(NewAgent {
+        size: Size::new(60, 10).unwrap(),
+        cwd: None,
+        agent: None,
+        tools: clackatoo_protocol::AgentTools::Off,
+        task: false,
+        browser: false,
+        model: None,
+        resume: None,
+    })
+}
+
+/// The workspaces `client` is shown once they're as `wanted` says: as it
+/// asks for them, or as it's told of a change to them, answering each
+/// change to a view it follows meanwhile as drawn.
+fn wait_for_workspaces(client: &mut Client, wanted: impl Fn(&Workspaces) -> bool) -> Workspaces {
+    let workspaces = client.watch_workspaces().unwrap();
+    // What came before the answer is older than it.
+    for event in client.take_events() {
+        if let Event::View { terminal, .. } = event {
+            client.frame_done(terminal).unwrap();
+        }
+    }
+    if wanted(&workspaces) {
+        return workspaces;
+    }
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "they never came");
+        match client.next_event().expect("an event") {
+            Event::Workspaces(workspaces) if wanted(&workspaces) => return workspaces,
+            Event::View { terminal, .. } => client.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    }
+}
+
+/// Waits for the connection to `host`, as `client`, watching the
+/// connections and maybe more, hears of them, to be as `wanted` says.
+fn wait_for_state(
+    client: &mut Client,
+    host: &str,
+    wanted: impl Fn(&ConnectionState) -> bool,
+) -> Connection {
+    let list = client.watch_connections(false).unwrap();
+    if let Some(connection) = list.into_iter().find(|link| link.host == host)
+        && wanted(&connection.state)
+    {
+        return connection;
+    }
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "it never came");
+        match client.next_event().expect("an event") {
+            Event::Connections(list) => {
+                if let Some(connection) = list.into_iter().find(|link| link.host == host)
+                    && wanted(&connection.state)
+                {
+                    return connection;
+                }
+            }
+            Event::View { terminal, .. } => client.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    }
+}
+
+/// The workspace from another machine called `name` in `workspaces`.
+fn theirs<'a>(workspaces: &'a Workspaces, name: &str) -> Option<&'a Workspace> {
+    (workspaces.list.iter()).find(|workspace| workspace.home.is_some() && workspace.name == name)
+}
+
+/// The terminal `workspace`'s first tab's first pane shows.
+fn first_terminal(workspace: &Workspace) -> TerminalId {
+    match workspace.tabs[0].layout.panes()[0].content {
+        Content::Terminal(terminal) => terminal,
+        other => panic!("{other:?} isn't a terminal"),
+    }
+}
+
+fn screen_text(view: &View) -> String {
+    let grid = view.grid().expect("terminals show a grid");
+    grid.lines.iter().map(|line| line.text() + "\n").collect()
+}
+
+/// Waits for a change to `terminal`'s view `client` follows to show
+/// `text`, answering each as drawn; returns how many came.
+fn wait_for_view(client: &mut Client, terminal: TerminalId, text: &str) -> usize {
+    let deadline = Instant::now() + PATIENCE;
+    let mut came = 0;
+    loop {
+        assert!(Instant::now() < deadline, "{text} never came");
+        if let Event::View {
+            terminal: changed,
+            update,
+        } = client.next_event().expect("an event")
+        {
+            client.frame_done(changed).unwrap();
+            if changed != terminal {
+                continue;
+            }
+            came += 1;
+            let shown = match &update {
+                ViewUpdate::Snapshot(view) => screen_text(view),
+                ViewUpdate::Patch(patches) => (patches.iter())
+                    .flat_map(|patch| match patch {
+                        clackatoo_protocol::Patch::Grid { lines, .. } => {
+                            lines.iter().map(|(_, line)| line.text()).collect()
+                        }
+                        _ => Vec::new(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            };
+            if shown.contains(text) {
+                return came;
+            }
+        }
+    }
+}
+
+/// Attaches `client` to `terminal`, waiting for the snapshot that comes
+/// first.
+fn attach_to(client: &mut Client, terminal: TerminalId) -> View {
+    client.attach(terminal).unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "no snapshot came");
+        if let Event::View {
+            terminal: changed,
+            update,
+        } = client.next_event().expect("an event")
+        {
+            client.frame_done(changed).unwrap();
+            match update {
+                ViewUpdate::Snapshot(view) if changed == terminal => return view,
+                ViewUpdate::Patch(_) if changed == terminal => {
+                    panic!("a patch came before the snapshot")
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Desk, connected to laptop, which has a workspace `work` with a shell
+/// in it, as `window`, a client of desk's, is shown it.
+struct Pair {
+    world: World,
+    desk: TestDaemon,
+    laptop: Option<TestDaemon>,
+    window: Client,
+    work: Workspace,
+}
+
+impl Pair {
+    fn new() -> Self {
+        let world = World::new();
+        let desk = world.start("desk");
+        let laptop = world.start("laptop");
+        let mut there = laptop.client();
+        there.new_workspace(Some("work".into()), shell()).unwrap();
+        let mut window = desk.client();
+        window.watch_connections(false).unwrap();
+        connect(&mut window, "laptop");
+        let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "work").is_some());
+        let work = theirs(&shown, "work").unwrap().clone();
+        Self {
+            world,
+            desk,
+            laptop: Some(laptop),
+            window,
+            work,
+        }
+    }
+
+    fn laptop(&self) -> &TestDaemon {
+        self.laptop.as_ref().expect("laptop is running")
+    }
+
+    /// Laptop's own workspace called `name`, as it shows it.
+    fn at_laptop(&self, name: &str) -> Workspace {
+        let shown = self.laptop().client().watch_workspaces().unwrap();
+        (shown.list.into_iter())
+            .find(|workspace| workspace.name == name)
+            .unwrap_or_else(|| panic!("laptop has no {name}"))
+    }
+}
+
+#[test]
+fn another_machines_workspaces_come_in_and_its_terminals_answer_through_this_daemon() {
+    let world = World::new();
+    let desk = world.start("desk");
+    let laptop = world.start("laptop");
+    let machine = laptop.machine();
+    laptop
+        .client()
+        .new_workspace(Some("work".into()), shell())
+        .unwrap();
+    // One of desk's own, with the same name: names are only unique on one
+    // machine.
+    let mut window = desk.client();
+    window.new_workspace(Some("work".into()), shell()).unwrap();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "laptop");
+    let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "work").is_some());
+    let work = theirs(&shown, "work").unwrap();
+    assert_eq!(work.home, Some(machine.id));
+    let own: Vec<&Workspace> = (shown.list.iter())
+        .filter(|workspace| workspace.home.is_none())
+        .collect();
+    assert_eq!(own.len(), 1, "{shown:?}");
+    // Numbered as desk numbers its own: never the same as one of them.
+    let terminal = first_terminal(work);
+    assert_ne!(terminal, first_terminal(own[0]));
+    assert_ne!(work.id, own[0].id);
+    // Laptop's own clients see it as it is.
+    let at_laptop = laptop.client().watch_workspaces().unwrap();
+    assert!(
+        at_laptop
+            .list
+            .iter()
+            .all(|workspace| workspace.home.is_none())
+    );
+
+    // Typed into here, it echoes here.
+    attach_to(&mut window, terminal);
+    window
+        .send_input(terminal, b"echo relayed-$((6 * 7))\r")
+        .unwrap();
+    wait_for_view(&mut window, terminal, "relayed-42");
+    let captured = screen_text(&window.capture(terminal).unwrap());
+    assert!(captured.contains("relayed-42"), "{captured}");
+
+    // A second client following it gets a snapshot, then what both see.
+    let mut other = desk.client();
+    let snapshot = attach_to(&mut other, terminal);
+    assert!(screen_text(&snapshot).contains("relayed-42"));
+    window
+        .send_input(terminal, b"echo again-$((2 * 3))\r")
+        .unwrap();
+    wait_for_view(&mut window, terminal, "again-6");
+    wait_for_view(&mut other, terminal, "again-6");
+
+    // Its answers come in the order they were asked for, with desk's own.
+    let (mut sender, mut receiver) = desk.client().split().unwrap();
+    let history = Request::History {
+        terminal,
+        end: 0,
+        count: 10,
+    };
+    sender.send(&ClientMessage::Request(history)).unwrap();
+    sender
+        .send(&ClientMessage::Request(Request::Version))
+        .unwrap();
+    let mut answers = Vec::new();
+    while answers.len() < 2 {
+        if let ServerMessage::Response(response) = receiver.receive().unwrap() {
+            answers.push(response);
+        }
+    }
+    assert!(matches!(answers[0], Response::History(_)), "{answers:?}");
+    assert!(matches!(answers[1], Response::Text(_)), "{answers:?}");
+}
+
+#[test]
+fn layout_changes_go_to_the_machine_a_workspace_lives_on_and_come_back() {
+    let mut pair = Pair::new();
+    let work = pair.work.id;
+    // A new tab asked for here is made there, and shown here.
+    let pane = pair.window.new_tab(work, shell()).unwrap();
+    let shown = pair.window.watch_workspaces().unwrap();
+    let tabs = &shown.get(work).expect("it's shown").tabs;
+    assert_eq!(tabs.len(), 2);
+    assert!(tabs[1].layout.contains(pane), "{tabs:?}");
+    assert_eq!(pair.at_laptop("work").tabs.len(), 2);
+    // Split, and split there too.
+    let split = pair.window.split_pane(pane, Side::Right, shell()).unwrap();
+    assert_ne!(split, pane);
+    assert_eq!(pair.at_laptop("work").tabs[1].layout.panes().len(), 2);
+
+    // Renamed here, it's renamed there.
+    let renamed = pair.window.request(&Request::RenameWorkspace {
+        workspace: work,
+        name: "play".into(),
+    });
+    assert_eq!(renamed.unwrap(), Response::Done);
+    let play = pair.at_laptop("play");
+    // Laptop's rules hold, and its errors come back: a name with `@` is
+    // refused.
+    let refused = pair.window.request(&Request::RenameWorkspace {
+        workspace: work,
+        name: "a@b".into(),
+    });
+    assert!(
+        matches!(refused.unwrap(), Response::Error(Error::BadName { .. })),
+        "the error is laptop's"
+    );
+
+    // A pane closed there goes here.
+    let closing = play.tabs[1].layout.panes()[1].id;
+    pair.laptop().client().close_pane(closing).unwrap();
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        (shown.get(work)).is_some_and(|work| !work.tabs[1].layout.contains(split))
+    });
+    assert_eq!(shown.get(work).unwrap().name, "play");
+
+    // An editor there is shown as one to come, and can't be opened here
+    // yet.
+    let file = pair.world.host("laptop").join("notes.txt");
+    std::fs::write(&file, "notes\n").unwrap();
+    let editor = PaneTerminal::File(OpenFile {
+        path: file.display().to_string(),
+        cwd: None,
+    });
+    let first = play.tabs[0].layout.panes()[0].id;
+    pair.laptop()
+        .client()
+        .split_pane(first, Side::Below, editor.clone())
+        .unwrap();
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        (shown.get(work)).is_some_and(|work| work.tabs[0].layout.panes().len() == 2)
+    });
+    let panes = shown.get(work).unwrap().tabs[0].layout.panes();
+    assert_eq!(
+        panes[1].content,
+        Content::Other {
+            kind: clackatoo_protocol::PaneKind::new("editor")
+        }
+    );
+    let refused = pair.window.split_pane(pane, Side::Right, editor);
+    let Err(ClientError::Daemon(Error::Other(why))) = refused else {
+        panic!("{refused:?}");
+    };
+    assert_eq!(why, "an editor on laptop: coming soon");
+
+    // Closed here, the workspace goes there, and here.
+    let closed = pair
+        .window
+        .request(&Request::CloseWorkspace { workspace: work });
+    assert_eq!(closed.unwrap(), Response::Done);
+    let shown = wait_for_workspaces(&mut pair.window, |shown| shown.get(work).is_none());
+    assert!(shown.list.iter().all(|workspace| workspace.home.is_none()));
+}
+
+#[test]
+fn a_chat_on_another_machine_is_talked_to_through_this_daemon() {
+    let mut pair = Pair::new();
+    let pane = pair.window.new_tab(pair.work.id, chat()).unwrap();
+    let shown = pair.window.watch_workspaces().unwrap();
+    let (_, _, pane) = shown.find_pane(pane).expect("its pane is shown");
+    let Content::Terminal(chat) = pane.content else {
+        panic!("{pane:?}");
+    };
+    let view = attach_to(&mut pair.window, chat);
+    assert!(view.chat().is_some(), "a chat's view is a chat");
+    pair.window
+        .chat(chat, ChatAction::Send("hello there".into()))
+        .unwrap();
+    // Its turns come as changes to its view, and it can be asked for.
+    let deadline = Instant::now() + PATIENCE;
+    let mut changes = 0;
+    loop {
+        let node = pair.window.capture(chat).unwrap().chat().cloned().unwrap();
+        if last_words(&node) == "echo: hello there\n" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the answer never came: {node:#?}"
+        );
+        for event in pair.window.take_events() {
+            if let Event::View { terminal, .. } = event {
+                pair.window.frame_done(terminal).unwrap();
+                changes += usize::from(terminal == chat);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let deadline = Instant::now() + PATIENCE;
+    for event in pair.window.take_events() {
+        if let Event::View { terminal, .. } = event {
+            pair.window.frame_done(terminal).unwrap();
+            changes += usize::from(terminal == chat);
+        }
+    }
+    while changes == 0 {
+        assert!(Instant::now() < deadline, "no change to the chat came");
+        if let Event::View { terminal, .. } = pair.window.next_event().unwrap() {
+            pair.window.frame_done(terminal).unwrap();
+            changes += usize::from(terminal == chat);
+        }
+    }
+    // It's among the chats, in its workspace, as numbered here.
+    let Response::Chats(chats) = pair.window.request(&Request::WatchChats).unwrap() else {
+        panic!("no chats");
+    };
+    let summary = (chats.iter())
+        .find(|summary| summary.chat == chat)
+        .expect("listed");
+    assert_eq!(summary.workspace, Some(pair.work.id));
+}
+
+/// What the agent said in `chat`'s last turn.
+fn last_words(chat: &ChatNode) -> String {
+    let Some(turn) = chat.turns.last() else {
+        return String::new();
+    };
+    (turn.items.iter())
+        .filter_map(|item| match item {
+            Item::Words(words) => Some(words.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_dropped_connection_keeps_what_was_shown_and_turns_keys_down_until_its_back() {
+    let mut pair = Pair::new();
+    let terminal = first_terminal(&pair.work);
+    attach_to(&mut pair.window, terminal);
+    // Laptop stops, keeping its workspaces, as when it restarts.
+    drop(pair.laptop.take());
+    wait_for_state(&mut pair.window, "laptop", |state| {
+        matches!(state, ConnectionState::Down { .. })
+    });
+    let shown = pair.window.watch_workspaces().unwrap();
+    assert_eq!(
+        theirs(&shown, "work").map(|work| work.id),
+        Some(pair.work.id)
+    );
+    let refused = pair.window.send_input(terminal, b"ls\r");
+    let Err(ClientError::Daemon(Error::Other(why))) = refused else {
+        panic!("{refused:?}");
+    };
+    assert!(why.contains("laptop"), "{why}");
+    let refused = pair.window.history(terminal, 0, 10);
+    assert!(
+        matches!(refused, Err(ClientError::Daemon(_))),
+        "{refused:?}"
+    );
+
+    // Back, afresh with what it kept: its terminals are new, and so are
+    // their numbers here.
+    pair.laptop = Some(pair.world.start_with("laptop", true));
+    wait_for_state(&mut pair.window, "laptop", connected);
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        theirs(shown, "work").is_some_and(|work| first_terminal(work) != terminal)
+    });
+    let again = first_terminal(theirs(&shown, "work").unwrap());
+    attach_to(&mut pair.window, again);
+    pair.window
+        .send_input(again, b"echo back-$((5 * 5))\r")
+        .unwrap();
+    wait_for_view(&mut pair.window, again, "back-25");
+}
+
+#[test]
+fn a_connection_lost_and_made_again_follows_its_terminals_again() {
+    let mut pair = Pair::new();
+    let terminal = first_terminal(&pair.work);
+    attach_to(&mut pair.window, terminal);
+    // The connection ends, with laptop's daemon running on, as when a new
+    // ssh to carry it asks a question and no window answers; and it's made
+    // again, once one does.
+    pair.world.password(Some("hunter2"));
+    kill(&pid(&pair.world, "ssh.pid"));
+    wait_for_state(&mut pair.window, "laptop", |state| {
+        *state == ConnectionState::NeedsPassword
+    });
+    let mut answering = pair.desk.client();
+    answering.watch_connections(true).unwrap();
+    let (ask, ..) = next_question(&mut answering);
+    answering.answer_login(ask, Some("hunter2".into())).unwrap();
+    wait_for_state(&mut pair.window, "laptop", connected);
+    // The same terminal, with the same number: a fresh snapshot comes, and
+    // what's typed echoes.
+    let shown = pair.window.watch_workspaces().unwrap();
+    assert_eq!(theirs(&shown, "work").map(first_terminal), Some(terminal));
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "no snapshot came again");
+        if let Event::View {
+            terminal: changed,
+            update,
+        } = pair.window.next_event().unwrap()
+        {
+            pair.window.frame_done(changed).unwrap();
+            if changed == terminal && matches!(update, ViewUpdate::Snapshot(_)) {
+                break;
+            }
+        }
+    }
+    pair.window
+        .send_input(terminal, b"echo still-$((3 * 3))\r")
+        .unwrap();
+    wait_for_view(&mut pair.window, terminal, "still-9");
+}
+
+#[test]
+fn after_a_restart_another_machines_workspaces_come_back() {
+    let world = World::new();
+    let laptop = world.start("laptop");
+    laptop
+        .client()
+        .new_workspace(Some("work".into()), shell())
+        .unwrap();
+    {
+        let desk = world.start("desk");
+        let mut window = desk.client();
+        connect(&mut window, "laptop");
+        wait_for_workspaces(&mut window, |shown| theirs(shown, "work").is_some());
+    }
+    let desk = world.start_with("desk", true);
+    let mut window = desk.client();
+    wait_for_workspaces(&mut window, |shown| theirs(shown, "work").is_some());
+}
+
+#[test]
+fn daemons_connected_both_ways_show_only_each_others_own() {
+    let world = World::new();
+    let desk = world.start("desk");
+    let laptop = world.start("laptop");
+    desk.client()
+        .new_workspace(Some("desk-work".into()), shell())
+        .unwrap();
+    laptop
+        .client()
+        .new_workspace(Some("laptop-work".into()), shell())
+        .unwrap();
+    let mut at_desk = desk.client();
+    let mut at_laptop = laptop.client();
+    connect(&mut at_desk, "laptop");
+    connect(&mut at_laptop, "desk");
+    wait_for_workspaces(&mut at_desk, |shown| theirs(shown, "laptop-work").is_some());
+    wait_for_workspaces(&mut at_laptop, |shown| theirs(shown, "desk-work").is_some());
+    // Each has had the other's, with what it shows of its own: never its
+    // own back.
+    std::thread::sleep(Duration::from_millis(500));
+    for (client, own) in [(&mut at_desk, "desk-work"), (&mut at_laptop, "laptop-work")] {
+        let shown = client.watch_workspaces().unwrap();
+        let names: Vec<(&str, bool)> = (shown.list.iter())
+            .map(|workspace| (workspace.name.as_str(), workspace.home.is_some()))
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names.contains(&(own, false)), "{names:?}");
+    }
+}
+
+#[test]
+fn requests_go_to_the_machine_what_they_name_lives_on() {
+    let mut pair = Pair::new();
+    // A split of laptop's pane is made there; one of desk's own, here.
+    let own = pair
+        .window
+        .new_workspace(Some("own".into()), shell())
+        .unwrap();
+    let theirs_pane = pair.work.tabs[0].layout.panes()[0].id;
+    let made = pair
+        .window
+        .split_pane(theirs_pane, Side::Below, shell())
+        .unwrap();
+    let shown = pair.window.watch_workspaces().unwrap();
+    let (workspace, ..) = shown.find_pane(made).unwrap();
+    assert_eq!(workspace.id, pair.work.id);
+    let made = pair.window.split_pane(own, Side::Below, shell()).unwrap();
+    let shown = pair.window.watch_workspaces().unwrap();
+    let (workspace, ..) = shown.find_pane(made).unwrap();
+    assert!(workspace.home.is_none());
+    // One of desk's terminals can't go into a workspace on laptop yet.
+    let (_, _, pane) = shown.find_pane(made).unwrap();
+    let Content::Terminal(local) = pane.content else {
+        panic!("{pane:?}");
+    };
+    pair.window.close_pane(made).unwrap();
+    let refused = pair
+        .window
+        .split_pane(theirs_pane, Side::Right, PaneTerminal::Existing(local));
+    assert!(
+        matches!(refused, Err(ClientError::Daemon(_))),
+        "{refused:?}"
+    );
+    // A pane that's neither's is no pane.
+    let refused = pair.window.close_pane(PaneId(9999));
+    assert!(
+        matches!(refused, Err(ClientError::Daemon(Error::NoSuchPane(_)))),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_machine_that_stops_answering_holds_up_no_ones_answers_and_gets_no_keys() {
+    let mut pair = Pair::new();
+    let terminal = first_terminal(&pair.work);
+    attach_to(&mut pair.window, terminal);
+    // Nothing gets through to laptop, nor back, as when its machine
+    // freezes: the stand-in for ssh carrying the connection is stopped.
+    let bridge = pid(&pair.world, "ssh.pid");
+    signal(&bridge, "-STOP");
+    let (mut sender, mut receiver) = pair.desk.client().split().unwrap();
+    let asked = Instant::now();
+    let history = Request::History {
+        terminal,
+        end: 0,
+        count: 10,
+    };
+    sender.send(&ClientMessage::Request(history)).unwrap();
+    sender
+        .send(&ClientMessage::Request(Request::Version))
+        .unwrap();
+    let mut answers = Vec::new();
+    while answers.len() < 2 {
+        if let ServerMessage::Response(response) = receiver.receive().unwrap() {
+            answers.push(response);
+        }
+    }
+    // Both come, in order, the one desk answers itself only a few seconds
+    // late, behind laptop's, given up on.
+    assert!(
+        asked.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        asked.elapsed()
+    );
+    let Response::Error(Error::Other(why)) = &answers[0] else {
+        panic!("{answers:?}");
+    };
+    assert_eq!(why, "laptop isn't answering");
+    assert!(matches!(answers[1], Response::Text(_)), "{answers:?}");
+    // Keys are turned down, not sent late.
+    let refused = pair.window.send_input(terminal, b"rm -rf build\r");
+    let Err(ClientError::Daemon(Error::Other(why))) = refused else {
+        panic!("{refused:?}");
+    };
+    assert_eq!(why, "laptop isn't answering: keys aren't sent");
+
+    // Back, laptop's late answer goes nowhere, and what's asked next is
+    // answered as asked.
+    signal(&bridge, "-CONT");
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        match pair.window.history(terminal, 0, 10) {
+            Ok(_) => break,
+            Err(err) => assert!(Instant::now() < deadline, "never answered again: {err}"),
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    pair.window
+        .send_input(terminal, b"echo answering-$((4 * 4))\r")
+        .unwrap();
+    wait_for_view(&mut pair.window, terminal, "answering-16");
+}
+
+/// Sends the process `pid` the signal `signal`, as `kill` names it.
+fn signal(pid: &str, signal: &str) {
+    let sent = Command::new("kill").args([signal, pid]).status().unwrap();
+    assert!(sent.success());
+}
+
+#[test]
+fn a_client_from_before_federation_sees_only_this_daemons_own() {
+    use clackatoo_protocol::frame::{self, FrameDecoder};
+    use std::io::Read as _;
+
+    let mut pair = Pair::new();
+    pair.window
+        .new_workspace(Some("own".into()), shell())
+        .unwrap();
+    // A chat on laptop, which desk lists among its own once it's heard.
+    pair.window.new_tab(pair.work.id, chat()).unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let Response::Chats(chats) = pair.window.request(&Request::WatchChats).unwrap() else {
+            panic!("no chats");
+        };
+        if !chats.is_empty() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "laptop's chat never came");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // A window of protocol 90, which has no way to tell another machine's
+    // workspaces from desk's own.
+    let old = clackatoo_protocol::wire::FEDERATION - 1;
+    let mut stream = std::os::unix::net::UnixStream::connect(&pair.desk.socket).unwrap();
+    stream.set_read_timeout(Some(PATIENCE)).unwrap();
+    for message in [
+        ClientMessage::Hello {
+            protocol_version: old,
+        },
+        ClientMessage::Request(Request::WatchWorkspaces),
+        ClientMessage::Request(Request::WatchChats),
+    ] {
+        stream
+            .write_all(&frame::encode(old, &message).unwrap())
+            .unwrap();
+    }
+    let mut decoder = FrameDecoder::new();
+    let mut answers = Vec::new();
+    let mut buffer = vec![0; 65536];
+    while answers.len() < 3 {
+        match decoder.decode::<ServerMessage>(old).unwrap() {
+            Some(ServerMessage::Event(_)) => {}
+            Some(answer) => answers.push(answer),
+            None => {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0, "the daemon hung up");
+                decoder.push(&buffer[..read]);
+            }
+        }
+    }
+    let ServerMessage::Response(Response::Workspaces(workspaces)) = &answers[1] else {
+        panic!("{answers:?}");
+    };
+    let names: Vec<&str> = (workspaces.list.iter())
+        .map(|workspace| workspace.name.as_str())
+        .collect();
+    assert_eq!(names, ["own"]);
+    assert_eq!(
+        answers[2],
+        ServerMessage::Response(Response::Chats(Vec::new()))
+    );
+}
+
+#[test]
+fn a_client_that_stops_drawing_holds_up_no_one_else() {
+    let mut pair = Pair::new();
+    let terminal = first_terminal(&pair.work);
+    // A window hidden, which draws nothing, and so says nothing is drawn.
+    let mut hidden = pair.desk.client();
+    hidden.attach(terminal).unwrap();
+    attach_to(&mut pair.window, terminal);
+    for number in 1..=3 {
+        let typed = format!("echo shown-$(({number} * 11))\r");
+        pair.window.send_input(terminal, typed.as_bytes()).unwrap();
+        wait_for_view(
+            &mut pair.window,
+            terminal,
+            &format!("shown-{}", number * 11),
+        );
+    }
+    // Once it draws again, it's followed afresh, from a snapshot.
+    for event in hidden.take_events() {
+        if let Event::View { terminal, .. } = event {
+            hidden.frame_done(terminal).unwrap();
+        }
+    }
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "no snapshot came");
+        if let Event::View { update, .. } = hidden.next_event().unwrap() {
+            if let ViewUpdate::Snapshot(view) = update
+                && screen_text(&view).contains("shown-33")
+            {
+                break;
+            }
+            hidden.frame_done(terminal).unwrap();
+        }
+    }
+}
+
+// --- What the relay adds to a key's echo --------------------------------
+
+/// Keys timed each way, after a warm-up.
+const KEYS: usize = 400;
+
+/// Times keys typed into a terminal on laptop and echoed: through desk's
+/// relay, as a window on desk types into one of laptop's workspaces, and
+/// straight to laptop, as a window with `--remote laptop` does, both
+/// through the same stand-in for ssh and QUIC, a key each way in turn so
+/// the machine's load falls on both alike. Prints what each took, and
+/// what the relay adds. The direct way runs in a process of its own, as
+/// it takes its ssh from the environment.
+#[test]
+#[ignore = "measures latency: cargo test --profile quick -p clackatoo-daemon --test links -- \
+            --ignored --nocapture what_the_relay_adds"]
+fn what_the_relay_adds_to_a_keys_echo() {
+    let world = World::new();
+    let desk = world.start("desk");
+    let laptop = world.start("laptop");
+    let echo = PaneTerminal::New(NewTerminal {
+        size: Size::new(80, 24).unwrap(),
+        command: Some(vec![
+            "sh".into(),
+            "-c".into(),
+            "stty raw -echo; exec cat".into(),
+        ]),
+        cwd: None,
+        record_to: None,
+    });
+    // One terminal each way, so neither sees the other's echoes.
+    let mut there = laptop.client();
+    there
+        .new_workspace(Some("echo".into()), echo.clone())
+        .unwrap();
+    there.new_workspace(Some("straight".into()), echo).unwrap();
+    let remote_terminal = first_terminal(&there.watch_workspaces().unwrap().list[1]);
+    let mut window = desk.client();
+    connect(&mut window, "laptop");
+    let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "echo").is_some());
+    let relayed = first_terminal(theirs(&shown, "echo").unwrap());
+    attach_to(&mut window, relayed);
+
+    // The direct way, in a child process that connects as `--remote` does.
+    let mut direct = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "echo_straight_to_laptop",
+        ])
+        .env("CLACKATOO_SSH", world.path().join("ssh"))
+        .env("LATENCY_TERMINAL", remote_terminal.0.to_string())
+        .env("LATENCY_COMMAND", example("daemon"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut to_direct = direct.stdin.take().unwrap();
+    let mut from_direct = std::io::BufReader::new(direct.stdout.take().unwrap());
+    let mut line = String::new();
+    // It says when it's ready, then times a key each time it's told to.
+    loop {
+        line.clear();
+        assert!(std::io::BufRead::read_line(&mut from_direct, &mut line).unwrap() > 0);
+        if line.trim() == "ready" {
+            break;
+        }
+    }
+    let mut through = Vec::new();
+    let mut straight = Vec::new();
+    for key in 0..KEYS + 50 {
+        let took = time_echo(&mut window, relayed);
+        writeln!(to_direct, "key").unwrap();
+        let answer = loop {
+            line.clear();
+            assert!(std::io::BufRead::read_line(&mut from_direct, &mut line).unwrap() > 0);
+            if let Some(micros) = line.trim().strip_prefix("took ") {
+                break micros.parse::<u64>().unwrap();
+            }
+        };
+        if key >= 50 {
+            through.push(took);
+            straight.push(Duration::from_micros(answer));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(to_direct);
+    let _ = direct.wait();
+    let (through, straight) = (summed(&mut through), summed(&mut straight));
+    println!("keys echoed, {KEYS} each way, in microseconds:");
+    println!("  straight to laptop (--remote):   {straight}");
+    println!("  through desk's relay:            {through}");
+}
+
+/// The child process of [`what_the_relay_adds_to_a_keys_echo`]: connects to
+/// laptop as `--remote` does, follows its terminal, and times a key's echo
+/// each time a line comes in, saying how long it took.
+#[test]
+#[ignore = "run by what_the_relay_adds_to_a_keys_echo"]
+fn echo_straight_to_laptop() {
+    let (Some(terminal), Some(command)) = (
+        std::env::var("LATENCY_TERMINAL").ok(),
+        std::env::var("LATENCY_COMMAND").ok(),
+    ) else {
+        return;
+    };
+    let terminal = TerminalId(terminal.parse().unwrap());
+    let remote = clackatoo_daemon::remote::Remote {
+        host: "laptop".into(),
+        command,
+    };
+    let mut client = clackatoo_daemon::remote::connect(&remote, false, None).unwrap();
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    attach_to(&mut client, terminal);
+    println!("ready");
+    let mut line = String::new();
+    while std::io::stdin().read_line(&mut line).unwrap() > 0 {
+        line.clear();
+        let took = time_echo(&mut client, terminal);
+        println!("took {}", took.as_micros());
+    }
+}
+
+/// Types a key into `terminal`, which echoes it, through `client`, which
+/// follows it, and times how long until the change to its view comes.
+fn time_echo(client: &mut Client, terminal: TerminalId) -> Duration {
+    // Nothing that came before counts.
+    for event in client.take_events() {
+        if let Event::View { terminal, .. } = event {
+            client.frame_done(terminal).unwrap();
+        }
+    }
+    let started = Instant::now();
+    client.send_input(terminal, b"x").unwrap();
+    loop {
+        if let Event::View {
+            terminal: changed,
+            update,
+        } = client.next_event().expect("its echo")
+        {
+            client.frame_done(changed).unwrap();
+            if changed == terminal && matches!(update, ViewUpdate::Patch(_)) {
+                return started.elapsed();
+            }
+        }
+    }
+}
+
+/// `times`, summed up: the median, the 90th and 99th percentiles and the
+/// worst, in microseconds.
+fn summed(times: &mut [Duration]) -> String {
+    times.sort_unstable();
+    let at = |fraction: f64| {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "an index into a few hundred"
+        )]
+        let index = ((times.len() - 1) as f64 * fraction).round() as usize;
+        times[index].as_micros()
+    };
+    format!(
+        "median {}  p90 {}  p99 {}  worst {}",
+        at(0.5),
+        at(0.9),
+        at(0.99),
+        at(1.0)
+    )
 }

@@ -1,0 +1,57 @@
+# :connect: another machine's workspaces in the bar, with their ring and
+# what the mouse over it says, `name@host` as showhost says, a terminal
+# typed into through the relay, an editor not relayed yet, a password
+# asked for, one turned down, and a connection dropped.
+size 1280x800
+file notes.txt <<END
+Notes kept on desk.
+END
+machine desk notes work+notes.txt
+keys <C-;>:connect desk<CR>
+wait-for work
+shot connected
+# This machine's own workspace with the same name as one of desk's.
+keys <C-;>:rename notes<CR>
+wait-for notes@desk
+shot ambiguous
+move 160 20
+shot hover
+move 640 400
+# Typed into there, through this daemon.
+keys <C-;>:workspace notes@desk<CR>
+keys i
+shell echo typed-on-$((6*7))
+wait-for typed-on-42
+shot relayed
+keys <C-;>:workspace work<CR>
+wait-for coming soon
+shot editor
+keys <C-;>:set showhost=always<CR>
+shot always
+# Another machine that asks for a password.
+password hunter2
+machine server build
+keys <C-;>:connect server<CR>
+wait-for password
+shot password
+type hunter2
+keys <CR>
+wait-for build
+shot server
+# One whose question is turned down.
+machine lab tests
+keys <C-;>:connect lab<CR>
+wait-for password
+keys <Esc>
+wait-for turned down
+password
+move 590 20
+shot turned-down
+move 640 400
+# Desk goes away.
+machine-stop desk
+keys <C-;>:workspace notes@desk<CR>
+sleep 1500
+shot dropped
+move 160 20
+shot dropped-hover

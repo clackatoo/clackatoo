@@ -674,6 +674,34 @@ impl WorkspaceState {
             .any(|workspace| workspace.name == name && Some(workspace.id) != except)
     }
 
+    /// A workspace's number no workspace has had, for one from another
+    /// machine, shown among these: numbered as this daemon's own are, so
+    /// no two are ever the same. `None` once the numbers have run out.
+    pub(crate) fn fresh_workspace(&mut self) -> Option<WorkspaceId> {
+        let id = WorkspaceId(self.next_workspace);
+        self.next_workspace = self.next_workspace.checked_add(1)?;
+        Some(id)
+    }
+
+    /// A tab's number no tab has had, as [`fresh_workspace`](Self::fresh_workspace).
+    pub(crate) fn fresh_tab(&mut self) -> Option<TabId> {
+        let id = TabId(self.next_tab);
+        self.next_tab = self.next_tab.checked_add(1)?;
+        Some(id)
+    }
+
+    /// A pane's number no pane has had, as [`fresh_workspace`](Self::fresh_workspace).
+    pub(crate) fn fresh_pane_id(&mut self) -> Option<PaneId> {
+        let id = PaneId(self.next_pane);
+        self.next_pane = self.next_pane.checked_add(1)?;
+        Some(id)
+    }
+
+    /// The numbers the next workspace, tab and pane get.
+    pub(crate) fn next_numbers(&self) -> (u32, u32, u32) {
+        (self.next_workspace, self.next_tab, self.next_pane)
+    }
+
     fn pane(&mut self, content: Content) -> Pane {
         let id = PaneId(self.next_pane);
         self.next_pane += 1;

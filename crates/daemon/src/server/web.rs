@@ -7,11 +7,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::frame;
 use clackatoo_protocol::{
     ChatState, ChatSummary, Device, Error, Event, Outcome, Response, ServerMessage, TerminalId,
     WorkspaceId,
 };
+use clackatoo_protocol::{frame, wire};
 use mio::{Interest, Token};
 
 use super::{Broadcast, Client, Daemon, Link, Source, WEB};
@@ -60,7 +60,7 @@ pub(super) struct ChatWatch {
     /// no one has looked since.
     unseen: BTreeSet<TerminalId>,
     /// The list changed since the clients watching it were told.
-    dirty: bool,
+    pub(super) dirty: bool,
     /// Notifications waiting to go.
     due: Vec<Notice>,
     /// The list as every client watching it was last told, if they all
@@ -720,13 +720,22 @@ impl Daemon {
         }
         // The next change goes to every watcher, whatever was sent before.
         self.chat_watch.sent = None;
-        Response::Chats(self.chat_summaries())
+        let mut chats = self.chat_summaries();
+        // A client from before federation is shown only this daemon's.
+        if let Some(Source::Client(client)) = self.sources.get(token.0)
+            && client.wire < wire::FEDERATION
+        {
+            chats.retain(|chat| self.chat_ref(chat.chat).is_some());
+        }
+        Response::Chats(chats)
     }
 
-    /// Every chat, summed up, in the order they were made.
+    /// Every chat, summed up, in the order they were made: this daemon's,
+    /// then those of other machines whose workspaces it shows.
     fn chat_summaries(&self) -> Vec<ChatSummary> {
         (self.terminals.keys())
             .filter_map(|&id| self.chat_summary(id))
+            .chain(self.relayed_chats().cloned())
             .collect()
     }
 
@@ -941,14 +950,26 @@ impl Daemon {
             return;
         }
         self.chat_watch.sent = Some(chats.clone());
+        // A client from before federation is shown only this daemon's own,
+        // as it's shown only its workspaces.
+        let own = (chats.iter())
+            .filter(|chat| self.chat_ref(chat.chat).is_some())
+            .cloned()
+            .collect();
         let event = ServerMessage::Event(Event::Chats(chats));
         let mut event = Broadcast::new(&event, "the chats");
+        let older = ServerMessage::Event(Event::Chats(own));
+        let mut older = Broadcast::new(&older, "the chats");
         let mut told = Vec::new();
         for (key, source) in &mut self.sources {
             if let Source::Client(client) = source
                 && client.watching_chats
                 && !client.finished
-                && let Some(bytes) = event.to(client.wire)
+                && let Some(bytes) = if client.wire < wire::FEDERATION {
+                    older.to(client.wire)
+                } else {
+                    event.to(client.wire)
+                }
             {
                 client.outgoing.extend_from_slice(bytes);
                 told.push(Token(key));

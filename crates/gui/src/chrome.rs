@@ -244,6 +244,33 @@ impl Mark {
     }
 }
 
+/// How the daemon reaches the machine a workspace from another machine
+/// is on, which the workspace's ring shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Reach {
+    /// Connected: the workspace is as it is there.
+    Connected,
+    /// Connecting, and not yet connected.
+    Connecting,
+    /// ssh asks a question, such as for a password, that no window has
+    /// answered.
+    NeedsPassword,
+    /// The connection dropped, for this reason, and is tried again.
+    Down(String),
+    /// Not tried again until `:connect` asks, for this reason.
+    Stopped(String),
+}
+
+/// A workspace from another machine, as the top bar shows it: a ring in
+/// place of its dot, saying how its connection is, and what the mouse
+/// over it says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Away {
+    pub(crate) reach: Reach,
+    /// Which machine it's on, and how it's reached.
+    pub(crate) said: String,
+}
+
 /// A workspace, as the top bar names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkspaceName {
@@ -255,6 +282,8 @@ pub(crate) struct WorkspaceName {
     pub(crate) shown: bool,
     /// What it says of its chats, after its name.
     pub(crate) mark: Option<Mark>,
+    /// Where it is, if it's from another machine.
+    pub(crate) away: Option<Away>,
 }
 
 impl WorkspaceName {
@@ -276,6 +305,7 @@ impl WorkspaceName {
             tabs,
             shown,
             mark: None,
+            away: None,
         }
     }
 }
@@ -294,6 +324,11 @@ pub(crate) struct Item<T> {
     /// What a workspace says of its chats, after its name, and where it
     /// starts.
     pub(crate) mark: Option<(Mark, f32)>,
+    /// How a workspace from another machine is reached, which its ring
+    /// shows in place of its dot.
+    pub(crate) ring: Option<Reach>,
+    /// What the mouse over it says, raised below it, and where.
+    pub(crate) tip: Option<(String, Rect)>,
 }
 
 /// What the bottom bar and the palette show.
@@ -765,13 +800,13 @@ impl Chrome {
         let metrics = self.geometry.metrics;
         let mut painted = Painted::default();
         for (index, item) in (0_u8..).zip(&self.workspaces) {
-            paint_workspace(
-                item,
-                index,
-                hover == Hit::Workspace(item.id),
-                &self.geometry,
-                &mut painted,
-            );
+            let hovered = hover == Hit::Workspace(item.id);
+            paint_workspace(item, index, hovered, &self.geometry, &mut painted);
+            // Where a workspace from another machine is, with the mouse
+            // over it, raised over the panes below it.
+            if hovered && let Some((said, rect)) = &item.tip {
+                self.paint_tip(said, *rect, &mut painted);
+            }
         }
         for &(button, rect) in &self.buttons {
             self.paint_button(button, rect, hover == Hit::Button(button), &mut painted);
@@ -869,6 +904,31 @@ impl Chrome {
 
     /// The menu, if one is open, over everything, with the item under the
     /// mouse picked out.
+    /// Draws `said`, what the mouse over something says, in `rect`, raised
+    /// over the panes as a menu is.
+    fn paint_tip<'a>(&'a self, said: &'a str, rect: Rect, painted: &mut Painted<'a>) {
+        let metrics = self.geometry.metrics;
+        push_shadow(
+            &mut painted.over,
+            rect,
+            self.geometry.radius,
+            metrics.padding,
+        );
+        painted.over.push(
+            Fill::rounded(rect.to_array(), Paint::Palette, self.geometry.radius)
+                .bordered(self.geometry.edge, Paint::PaletteEdge),
+        );
+        painted.over_texts.push(Text {
+            origin: [
+                rect.x + 3.0 * metrics.padding,
+                (rect.y + (rect.height - metrics.ui_line) / 2.0).round(),
+            ],
+            content: said,
+            ink: Ink::Plain,
+            font: TextFont::Ui,
+        });
+    }
+
     fn paint_menu<'a>(&'a self, hover: Hit, painted: &mut Painted<'a>) {
         let metrics = self.geometry.metrics;
         let Some((rect, items)) = &self.menu else {
@@ -1313,6 +1373,8 @@ fn lay_out_bottom(
                 active: *active,
                 rect,
                 mark: None,
+                ring: None,
+                tip: None,
             }
         })
         .collect();
@@ -1815,16 +1877,28 @@ fn paint_workspace<'a>(
     }
     let dot = metrics.dot();
     let dot_x = (rect.x + 3.0 * padding).round();
-    painted.fills.push(Fill::rounded(
-        [
-            dot_x,
-            (rect.y + (rect.height - dot) / 2.0).round(),
-            dot,
-            dot,
-        ],
-        Paint::Workspace(index),
-        dot / 2.0,
-    ));
+    let place = [
+        dot_x,
+        (rect.y + (rect.height - dot) / 2.0).round(),
+        dot,
+        dot,
+    ];
+    // One from another machine has a ring: in its colour while it's
+    // connected, the warning colour while it isn't, and filled with amber
+    // while it waits for a password, which is for the user to give.
+    let ring = (dot / 4.0).max(1.0);
+    painted.fills.push(match &item.ring {
+        None => Fill::rounded(place, Paint::Workspace(index), dot / 2.0),
+        Some(Reach::Connected) => {
+            Fill::rounded(place, Paint::Clear, dot / 2.0).bordered(ring, Paint::Workspace(index))
+        }
+        Some(Reach::NeedsPassword) => {
+            Fill::rounded(place, Paint::Caution, dot / 2.0).bordered(ring, Paint::Caution)
+        }
+        Some(Reach::Connecting | Reach::Down(_) | Reach::Stopped(_)) => {
+            Fill::rounded(place, Paint::Clear, dot / 2.0).bordered(ring, Paint::WarningEdge)
+        }
+    });
     let text_y = (rect.y + (rect.height - metrics.ui_line) / 2.0).round();
     let text_x = dot_x + dot + 2.0 * padding;
     painted.texts.push(Text {
@@ -1925,6 +1999,19 @@ fn lay_out_workspaces(
             // places the name.
             let text_x = (rect.x + 3.0 * padding).round() + dot + 2.0 * padding;
             let after = text_x + measure(&text, active);
+            // What the mouse over one from another machine says, below
+            // it, kept within the strip.
+            let tip = workspace.away.as_ref().map(|away| {
+                let width = (measure(&away.said, false) + 6.0 * padding).round();
+                let x = rect.x.min(span.end - width).max(span.start).round();
+                let tip = Rect {
+                    x,
+                    y: (rect.y + rect.height + padding).round(),
+                    width,
+                    height: rect.height,
+                };
+                (away.said.clone(), tip)
+            });
             Item {
                 id: workspace.id,
                 text,
@@ -1932,6 +2019,8 @@ fn lay_out_workspaces(
                 active,
                 rect,
                 mark: workspace.mark.map(|mark| (mark, after.round())),
+                ring: workspace.away.as_ref().map(|away| away.reach.clone()),
+                tip,
             }
         })
         .collect();
@@ -2391,6 +2480,57 @@ mod tests {
             chrome.hit([alert.x + 2.0, alert.y + 2.0], false),
             Hit::TopBar
         );
+    }
+
+    #[test]
+    fn a_workspace_from_another_machine_has_a_ring_and_says_where_it_is_under_the_mouse() {
+        let buttons = ButtonLayout::default();
+        let away = Away {
+            reach: Reach::Down("gone".into()),
+            said: "on desk · not connected, trying again: gone".into(),
+        };
+        let chrome = Chrome::new(
+            Geometry::new([800, 600], METRICS),
+            Contents {
+                workspaces: vec![
+                    WorkspaceName::plain(1, "notes", 1, true),
+                    WorkspaceName {
+                        away: Some(away.clone()),
+                        ..WorkspaceName::plain(2, "notes@desk", 1, false)
+                    },
+                ],
+                tabs: Vec::new(),
+                status: Status::tabs(),
+                buttons: &buttons,
+                bottom_shown: true,
+                menu: None,
+                alert: None,
+                rounded: false,
+                finder: None,
+                scrolls: Scrolls::default(),
+                messages: None,
+                waiting: None,
+                which_keys: None,
+            },
+            &mut measure,
+        );
+        let [own, theirs] = &chrome.workspaces[..] else {
+            panic!("two workspaces");
+        };
+        assert_eq!((own.ring.clone(), own.tip.clone()), (None, None));
+        assert_eq!(theirs.ring, Some(Reach::Down("gone".into())));
+        let (said, tip) = theirs.tip.clone().expect("what the mouse over it says");
+        assert_eq!(said, away.said);
+        // Below it, as wide as its words, and in the window.
+        assert!(tip.y >= theirs.rect.y + theirs.rect.height);
+        assert_eq!(tip.width, (43.0 * 8.0 + 6.0 * METRICS.padding).round());
+        assert!(tip.x + tip.width <= 800.0);
+        // Said only with the mouse over it, raised over the panes.
+        let said_over =
+            |hover| (chrome.paint(hover).over_texts.iter()).any(|text| text.content == away.said);
+        assert!(said_over(Hit::Workspace(WorkspaceId(2))));
+        assert!(!said_over(Hit::Workspace(WorkspaceId(1))));
+        assert!(!said_over(Hit::Nothing));
     }
 
     #[test]

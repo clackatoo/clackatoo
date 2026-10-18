@@ -622,6 +622,13 @@ options! {
     /// status, as `✗ 2`; `all` marks those that worked too, with a dim
     /// `✓`; `none` marks none.
     blockmarks("bm"): BlockMarks = BlockMarks::Failed;
+    /// When a workspace from another machine, one `:connect` brought in,
+    /// says which machine it's on after its name, as `notes@desk`:
+    /// `ambiguous` only while another workspace has the same name,
+    /// `always` for every one, `never` for none. Its ring, in place of the
+    /// dot, says it's from another machine whatever this says, and the
+    /// mouse over it says which, and how its connection is.
+    showhost("shh"): ShowHost = ShowHost::Ambiguous;
     /// Ports forwarded to a daemon on another machine (`:PortForward`)
     /// send as background traffic: only as fast as the link takes them
     /// without a queue growing, so keys and screens never wait behind a
@@ -652,6 +659,18 @@ choice! {
         /// On a slow link to another machine.
         Auto = "auto",
         /// Always, even on this machine.
+        Always = "always",
+        /// Never.
+        Never = "never",
+    }
+}
+
+choice! {
+    /// When `showhost` names a workspace's machine after its name.
+    ShowHost {
+        /// Only while another workspace has the same name.
+        Ambiguous = "ambiguous",
+        /// For every workspace from another machine.
         Always = "always",
         /// Never.
         Never = "never",

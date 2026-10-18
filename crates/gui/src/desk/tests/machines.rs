@@ -1,0 +1,208 @@
+//! Workspaces from other machines, which `:connect` brings in: how the
+//! bar names them and shows where they are, `:workspace name@host`,
+//! `:disconnect`, panes not relayed yet, and a connection dropping,
+//! driven through the desk as a window would drive it, with the daemon
+//! played by the test.
+
+use clackatoo_protocol::{Connection, ConnectionState, Machine, MachineId, PaneKind};
+
+use super::*;
+use crate::chrome::Reach;
+use crate::options::ShowHost;
+
+/// The ID of the machine the daemon calls `desk`.
+const DESK: MachineId = MachineId([7; 16]);
+
+/// This machine's `notes`, and `desk`'s `notes` and `work`, whose second
+/// tab has an editor, which isn't relayed yet.
+fn three() -> Workspaces {
+    let elsewhere = |mut workspace: Workspace| {
+        workspace.home = Some(DESK);
+        workspace
+    };
+    let editor = Layout::Pane(LayoutPane {
+        id: PaneId(4),
+        content: Content::Other {
+            kind: PaneKind::new("editor"),
+        },
+        home: None,
+    });
+    workspaces(vec![
+        workspace(1, "notes", vec![tab(1, pane(1))]),
+        elsewhere(workspace(2, "notes", vec![tab(2, pane(2))])),
+        elsewhere(workspace(3, "work", vec![tab(3, pane(3)), tab(4, editor)])),
+    ])
+}
+
+/// The daemon's connection to `desk`, as `state` says.
+fn to_desk(state: ConnectionState) -> Vec<Connection> {
+    vec![Connection {
+        host: "desk".into(),
+        machine: Some(Machine {
+            id: DESK,
+            name: "jack-ubuntu-desktop".into(),
+            run: 1,
+        }),
+        state,
+    }]
+}
+
+fn connected() -> ConnectionState {
+    ConnectionState::Connected {
+        wire: clackatoo_protocol::PROTOCOL_VERSION,
+    }
+}
+
+fn names(desk: &Desk) -> Vec<String> {
+    desk.workspace_names()
+        .into_iter()
+        .map(|name| name.name)
+        .collect()
+}
+
+#[test]
+fn the_bar_names_another_machines_workspaces_as_showhost_says_and_rings_them() {
+    let mut desk = desk(three());
+    desk.connections_changed(to_desk(connected()));
+    // Only where two share a name, by default.
+    assert_eq!(names(&desk), ["notes", "notes@desk", "work"]);
+    desk.options.showhost = ShowHost::Always;
+    assert_eq!(names(&desk), ["notes", "notes@desk", "work@desk"]);
+    desk.options.showhost = ShowHost::Never;
+    assert_eq!(names(&desk), ["notes", "notes", "work"]);
+    // Each from another machine has a ring, saying where it is.
+    let shown = desk.workspace_names();
+    assert_eq!(shown[0].away, None);
+    let away = shown[1].away.clone().expect("from desk");
+    assert_eq!(away.reach, Reach::Connected);
+    assert_eq!(away.said, "on jack-ubuntu-desktop (desk) · connected");
+}
+
+#[test]
+fn a_workspace_on_another_machine_is_named_name_at_host() {
+    let mut desk = desk(three());
+    desk.connections_changed(to_desk(connected()));
+    normal_mode(&mut desk);
+    command(&mut desk, "workspace notes@desk");
+    assert_eq!(desk.shown().unwrap().workspace, WorkspaceId(2));
+    // A name alone is this machine's own first.
+    command(&mut desk, "workspace notes");
+    assert_eq!(desk.shown().unwrap().workspace, WorkspaceId(1));
+    command(&mut desk, "workspace work");
+    assert_eq!(desk.shown().unwrap().workspace, WorkspaceId(3));
+    // One that isn't there isn't made there yet.
+    answer_all(&mut desk);
+    command(&mut desk, "workspace new@desk");
+    assert!(answer_all(&mut desk).is_empty());
+    assert!(
+        note_of(&desk).contains("later release"),
+        "{}",
+        note_of(&desk)
+    );
+}
+
+#[test]
+fn disconnect_ends_the_connection_to_the_machine_named_or_shown() {
+    let mut desk = desk(three());
+    desk.connections_changed(to_desk(connected()));
+    normal_mode(&mut desk);
+    answer_all(&mut desk);
+    // This machine's own names no machine.
+    command(&mut desk, "disconnect");
+    assert!(answer_all(&mut desk).is_empty());
+    assert!(note_of(&desk).contains("own"), "{}", note_of(&desk));
+    command(&mut desk, "disconnect dsek");
+    assert!(answer_all(&mut desk).is_empty());
+    assert!(note_of(&desk).contains("‘desk’"), "{}", note_of(&desk));
+    // Shown, it's the one ended.
+    desk.show_workspace(WorkspaceId(3));
+    answer_all(&mut desk);
+    command(&mut desk, "disconnect");
+    assert_eq!(
+        answer_all(&mut desk),
+        [Request::Disconnect {
+            host: "desk".into()
+        }]
+    );
+}
+
+#[test]
+fn a_dropped_connection_shows_on_its_ring_and_its_panes() {
+    let mut desk = desk(three());
+    desk.connections_changed(to_desk(connected()));
+    assert_eq!(desk.away_notice(PaneId(2)), None);
+    let down = ConnectionState::Down {
+        reason: "the daemon there stopped".into(),
+    };
+    assert!(desk.connections_changed(to_desk(down)));
+    let away = desk.workspace_names()[2].away.clone().unwrap();
+    assert_eq!(away.reach, Reach::Down("the daemon there stopped".into()));
+    assert_eq!(
+        desk.away_notice(PaneId(3)).as_deref(),
+        Some("desk isn't connected · trying")
+    );
+    assert_eq!(desk.away_notice(PaneId(1)), None, "this machine's own");
+    // Waiting for a password, it says how to give it.
+    desk.connections_changed(to_desk(ConnectionState::NeedsPassword));
+    assert_eq!(
+        desk.workspace_names()[2]
+            .away
+            .as_ref()
+            .map(|away| &away.reach),
+        Some(&Reach::NeedsPassword)
+    );
+    assert_eq!(
+        desk.away_notice(PaneId(3)).as_deref(),
+        Some("desk needs a password · :connect desk")
+    );
+}
+
+#[test]
+fn a_pane_not_relayed_yet_says_where_it_is() {
+    let mut desk = desk(three());
+    desk.connections_changed(to_desk(connected()));
+    desk.show_pane(PaneId(4));
+    let other = desk.other(PaneId(4)).expect("a pane in its place");
+    assert_eq!(other.title(), "an editor on desk: coming soon");
+}
+
+#[test]
+fn connect_says_how_it_went() {
+    let mut desk = desk(three());
+    normal_mode(&mut desk);
+    command(&mut desk, "connect desk");
+    assert_eq!(
+        answer_all(&mut desk),
+        [Request::Connect {
+            host: "desk".into(),
+            command: None
+        }]
+    );
+    desk.connections_changed(to_desk(ConnectionState::Connecting));
+    assert!(note_of(&desk).starts_with("connecting to ‘desk’"));
+    desk.connections_changed(to_desk(connected()));
+    assert_eq!(note_of(&desk), "connected to ‘desk’");
+    // Said once.
+    desk.connections_changed(to_desk(ConnectionState::Down {
+        reason: "gone".into(),
+    }));
+    assert_eq!(note_of(&desk), "connected to ‘desk’");
+}
+
+#[test]
+fn the_configs_connections_are_asked_for_on_each_new_connection() {
+    let mut desk = desk(three());
+    desk.config_connects("desk".into());
+    let connect = Request::Connect {
+        host: "desk".into(),
+        command: None,
+    };
+    assert_eq!(answer_all(&mut desk), std::slice::from_ref(&connect));
+    desk.lost();
+    desk.connected(three(), false);
+    assert!(answer_all(&mut desk).contains(&connect));
+    desk.config_disconnects("desk".into());
+    desk.lost();
+    desk.connected(three(), false);
+    assert!(!answer_all(&mut desk).contains(&connect));
+}

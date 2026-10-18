@@ -13,7 +13,9 @@
 //! for options, `set`, and for registers and marks, `registers` and
 //! `marks`, which list them, and `update`, which installs the latest
 //! release here, or named, on the daemon's machine, and `connect`, which
-//! picks a machine to open a new window on. The finder's are capitalised too, as fzf.vim's are:
+//! picks a machine to open a new window on, or named, has the daemon bring
+//! that machine's workspaces in, until `disconnect`. The finder's are
+//! capitalised too, as fzf.vim's are:
 //! `Files`, `Grep` and `Buffers`, each with what to start with typed. So is
 //! `Gitsigns`, with what to do to the hunk at the cursor, as gitsigns.nvim
 //! names it: `preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` or
@@ -199,9 +201,11 @@ pub(crate) enum Command {
     /// or with a name, on that machine, the one the window's daemon is on.
     Update(Option<String>),
     /// `:connect`: the picker of a machine to open a new window on; or,
-    /// with a name, that machine's workspaces in this daemon's, which
-    /// isn't built yet.
+    /// with a name, that machine's workspaces brought into this daemon's.
     Connect(Option<String>),
+    /// `:disconnect`: the daemon's connection to the machine named, or to
+    /// the one the workspace shown is on, ended, and its workspaces gone.
+    Disconnect(Option<String>),
     /// `:Board`: the board with this name, made if there's none, where
     /// `place` says; or with none, the finder, to pick one.
     Board { place: Place, name: Option<String> },
@@ -330,6 +334,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         }
         "update" => return Ok(Command::Update(argument.map(str::to_owned))),
         "connect" => return Ok(Command::Connect(argument.map(str::to_owned))),
+        "disconnect" => return Ok(Command::Disconnect(argument.map(str::to_owned))),
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
         "Devices" => return devices_command(argument).map(Command::Devices),
         "PortForward" | "PortForward!" => {
@@ -654,6 +659,7 @@ pub(crate) const NAMES: &[&str] = &[
     "recover",
     "update",
     "connect",
+    "disconnect",
     "quit",
     "write",
     "wq",
@@ -711,6 +717,8 @@ pub(crate) enum Takes {
     Workspace,
     /// A lesson's name.
     Lesson,
+    /// A machine, as ssh names it.
+    Host,
     /// One of these words, first.
     Words(&'static [&'static str]),
 }
@@ -729,6 +737,7 @@ pub(crate) fn takes(word: &str) -> Takes {
         "set" | "se" => Takes::Options,
         "workspace" | "ws" => Takes::Workspace,
         "Tutor" => Takes::Lesson,
+        "connect" | "disconnect" => Takes::Host,
         "Gitsigns" => Takes::Words(&[
             "preview_hunk",
             "reset_hunk",
@@ -815,6 +824,7 @@ mod tests {
         ("Ex", "Explore"),
         ("update", ""),
         ("connect", ""),
+        ("disconnect", ""),
         ("Tutor", ""),
         ("Devices", ""),
         ("PortForward", ""),
@@ -1269,6 +1279,13 @@ mod tests {
             parse("connect  jack@desk ").unwrap(),
             Command::Connect(Some("jack@desk".into()))
         );
+        assert_eq!(parse("disconnect").unwrap(), Command::Disconnect(None));
+        assert_eq!(
+            parse("disconnect desk").unwrap(),
+            Command::Disconnect(Some("desk".into()))
+        );
+        assert_eq!(takes("connect"), Takes::Host);
+        assert_eq!(takes("disconnect"), Takes::Host);
     }
 
     #[test]

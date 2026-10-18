@@ -52,7 +52,7 @@ const MAX_MESSAGE: usize = 64 * 1024 * 1024;
 /// How long a message must be to be parsed on the parser's thread: about
 /// a millisecond's parsing in a release build, for a language server's
 /// list of small objects.
-const BIG: usize = 256 * 1024;
+pub(crate) const BIG: usize = 256 * 1024;
 
 /// The most bytes of one program's messages that may wait for the
 /// parser's thread: past this, no more is read from the program until the
@@ -1041,6 +1041,9 @@ enum Job {
     },
     /// To free what the loop threw away.
     Free(Box<dyn Send>),
+    /// To do other heavy work, such as decoding a big message from
+    /// another daemon (see [`Parser::run`]).
+    Run(Box<dyn FnOnce() + Send>),
 }
 
 impl Parser {
@@ -1115,8 +1118,27 @@ impl Parser {
             log::error!("the thread parsing big messages has gone: they're parsed on the loop");
             match unsent.0 {
                 Job::Parse { bytes, body, .. } => (bytes, body),
-                Job::Free(_) => unreachable!("a message was sent"),
+                Job::Free(_) | Job::Run(_) => unreachable!("a message was sent"),
             }
+        })
+    }
+}
+
+impl Parser {
+    /// Does `work` on the thread, after what was handed to it before,
+    /// starting it if it hasn't been: work that would hold the loop up,
+    /// which says when it's done as it sees fit, as by waking the loop.
+    /// Gives it back if there's no thread, to be done on the loop.
+    pub(crate) fn run(
+        &self,
+        work: Box<dyn FnOnce() + Send>,
+    ) -> Result<(), Box<dyn FnOnce() + Send>> {
+        let Some(jobs) = self.jobs() else {
+            return Err(work);
+        };
+        jobs.send(Job::Run(work)).map_err(|unsent| match unsent.0 {
+            Job::Run(work) => work,
+            Job::Parse { .. } | Job::Free(_) => unreachable!("work was sent"),
         })
     }
 }
@@ -1172,6 +1194,10 @@ fn run(job: Job, waker: &Waker, progress: &Mutex<Progress>) {
         }
         Job::Free(thing) => {
             drop(thing);
+            progressed(false);
+        }
+        Job::Run(work) => {
+            work();
             progressed(false);
         }
     }

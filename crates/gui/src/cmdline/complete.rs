@@ -3,8 +3,9 @@
 //! split's mark (`|`, `-`), a kind of pane's. After it, what the command
 //! takes (see [`command::takes`]): options for `:set`, and `name=` a
 //! choice's values; files and folders for `:e`, `:Editor` and `:Explore`;
-//! workspaces for `:workspace`; lessons for `:Tutor`; and the words
-//! `:Gitsigns`, `:Devices` and `:Review` take.
+//! workspaces for `:workspace`; lessons for `:Tutor`; machines for
+//! `:connect` and `:disconnect`; and the words `:Gitsigns`, `:Devices` and
+//! `:Review` take.
 //!
 //! One choice is put in at once. With more, the first is put in, they're
 //! listed under the line, and Tab and Shift+Tab go through them, and past
@@ -30,9 +31,14 @@ const MOST_CHOICES: usize = 1000;
 
 /// What Tab completes with besides what's built in.
 #[derive(Debug, Default)]
-pub(crate) struct Sources<'a> {
-    /// The workspaces' names.
-    pub(crate) workspaces: Vec<&'a str>,
+pub(crate) struct Sources {
+    /// The workspaces' names, as the bar shows them: `name@host` for one
+    /// from another machine, where that's needed to tell them apart.
+    pub(crate) workspaces: Vec<String>,
+    /// The machines `:connect` and `:disconnect` may name: those the
+    /// daemon is connected to, then those ssh's config names, and those
+    /// connected to lately. Only looked for once Tab is pressed after one.
+    pub(crate) hosts: Vec<String>,
     /// The folder paths are from: the focused pane's, if the window can
     /// look at it, as it can when the daemon is on this machine.
     pub(crate) folder: Option<PathBuf>,
@@ -78,7 +84,7 @@ impl Completion {
     /// What the word before the caret, the end of `before`, could be, from
     /// `sources`; or why there's nothing to say, such as files that can't
     /// be listed.
-    pub(crate) fn of(before: &str, sources: &Sources<'_>) -> Result<Found, String> {
+    pub(crate) fn of(before: &str, sources: &Sources) -> Result<Found, String> {
         let start = word_start(before);
         let word = &before[start..];
         let lead = before.len() - before.trim_start().len();
@@ -100,14 +106,19 @@ impl Completion {
             Takes::Path => return paths(start, word, sources),
             Takes::Options => option_words(word),
             Takes::Workspace if first_argument => {
-                matching(sources.workspaces.iter().copied(), word)
+                matching(sources.workspaces.iter().map(String::as_str), word)
             }
             Takes::Lesson if first_argument => {
                 let lessons = crate::tutor::lessons().iter().map(|lesson| lesson.id);
                 matching(lessons.chain(["new"]), word)
             }
+            Takes::Host if first_argument => {
+                matching(sources.hosts.iter().map(String::as_str), word)
+            }
             Takes::Words(words) if first_argument => matching(words.iter().copied(), word),
-            Takes::Nothing | Takes::Workspace | Takes::Lesson | Takes::Words(_) => Vec::new(),
+            Takes::Nothing | Takes::Workspace | Takes::Lesson | Takes::Host | Takes::Words(_) => {
+                Vec::new()
+            }
         };
         Ok(Found::Done(Self::new(start, word, choices)))
     }
@@ -208,7 +219,7 @@ fn option_words(word: &str) -> Vec<String> {
 
 /// What `word`, from `start`, could be, as a path: `~` the home folder;
 /// otherwise the files and folders of its folder, which must be listed.
-fn paths(start: usize, word: &str, sources: &Sources<'_>) -> Result<Found, String> {
+fn paths(start: usize, word: &str, sources: &Sources) -> Result<Found, String> {
     if sources.remote {
         return Err("files complete only with the daemon on this machine".to_owned());
     }
@@ -339,7 +350,7 @@ mod tests {
     use super::*;
 
     /// What `before` could be, listing any files at once.
-    fn choices(before: &str, sources: &Sources<'_>) -> Vec<String> {
+    fn choices(before: &str, sources: &Sources) -> Vec<String> {
         let completion = match Completion::of(before, sources).unwrap() {
             Found::Done(completion) => completion,
             Found::List(listing) => listing.run().completion().unwrap(),
@@ -349,7 +360,7 @@ mod tests {
             .unwrap_or_default()
     }
 
-    fn none() -> Sources<'static> {
+    fn none() -> Sources {
         Sources::default()
     }
 
@@ -407,7 +418,7 @@ mod tests {
         assert!(choices("Tutor ba", &none()).contains(&"basics".to_owned()));
         assert_eq!(choices("Tutor ne", &none()), ["new"]);
         let sources = Sources {
-            workspaces: vec!["peios", "clackatoo", "homelab"],
+            workspaces: ["peios", "clackatoo", "homelab"].map(String::from).to_vec(),
             ..Sources::default()
         };
         assert_eq!(choices("workspace c", &sources), ["clackatoo"]);

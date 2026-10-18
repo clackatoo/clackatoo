@@ -198,6 +198,18 @@ local client = {
 	forward = function(spec)
 		call(core.forward, tostring(spec))
 	end,
+	-- Has the daemon bring another machine's workspaces in, as
+	-- `:connect HOST` does, saying nothing unless it fails:
+	-- `client.connect("desk")`. The daemon keeps its connections, so
+	-- asking again, as a config does in every window, leaves one as it is.
+	connect = function(host)
+		call(core.connect, tostring(host))
+	end,
+	-- Ends the daemon's connection to another machine, as
+	-- `:disconnect HOST` does: `client.disconnect("desk")`.
+	disconnect = function(host)
+		call(core.disconnect, tostring(host))
+	end,
 	-- The options, by name or short name, as Vim's `vim.opt`:
 	-- `client.opt.number = false`.
 	opt = setmetatable({}, {
