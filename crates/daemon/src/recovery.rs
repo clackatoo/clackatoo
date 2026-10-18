@@ -1132,7 +1132,12 @@ mod tests {
         };
         let Opened { mut store, .. } =
             Store::open(dir.clone(), 1, None, Some(gate.clone()), wake).unwrap();
-        for file in 0..QUEUED * 3 {
+        // The thread takes all it can before it stops at the gate, so how
+        // much it holds depends on timing: write on until some wait.
+        for file in 0..QUEUED * 64 {
+            if store.is_waiting() {
+                break;
+            }
             store.write(format!("{file}"), keep("/a", "", "x"), Vec::new());
         }
         assert!(store.is_waiting());
