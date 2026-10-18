@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.55 (2026-10-18)
+
+### Features
+
+- **daemon,protocol,gui:** daemons know which machine they are, and connect to each other (12f301a)
+
 ## 2026.10.54 (2026-10-16)
 
 ### Features
