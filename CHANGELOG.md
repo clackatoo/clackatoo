@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026.10.61 (2026-10-19)
+
+### Features
+
+- **gui:** rendered Markdown in the editor, toggled with its text (9f034ed)
+
+### Fixes
+
+- **gui:** rendered Markdown as a pager, and keys typed into it kept as the editor's (d6376d7)
+
 ## 2026.10.60 (2026-10-19)
 
 ### Features
