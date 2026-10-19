@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.60 (2026-10-19)
+
+### Features
+
+- **daemon,protocol,gui:** machines passed on through the daemons connected to them (ad8283b)
+
 ## 2026.10.59 (2026-10-19)
 
 ### Features
