@@ -331,6 +331,7 @@ mod tests {
             id: PaneId(id),
             content: Content::Terminal(TerminalId(id)),
             home: None,
+            key: None,
         })
     }
 

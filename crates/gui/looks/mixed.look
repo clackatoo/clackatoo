@@ -1,0 +1,35 @@
+# Panes of this machine's in a workspace of a machine that can't reach it
+# (CLACKA-117, phase 5): a terminal of this machine's split into desk's
+# workspace, typed into here; desk going away, the pane parked in a
+# workspace of this machine's named after it; desk coming back, and the
+# pane back where it was. mixed-desk.look shows desk's side.
+size 1280x800
+machine desk notes
+keys <C-;>:connect desk<CR>
+wait-for notes
+keys <C-;>:workspace notes<CR>
+sleep 500
+# A terminal of this machine's, beside desk's.
+keys <C-;>:|Terminal@local<CR>
+sleep 1000
+keys i
+shell echo typed here, run here, in $(basename $PWD)
+wait-for run here
+shot held
+# Desk going away: the pane is parked here, a tab of `from-desk`, and
+# desk's workspace, as last shown, says so in its place.
+machine-stop desk
+wait-for from-desk
+shot parked-placeholder
+keys <C-;>:workspace from-desk<CR>
+sleep 500
+keys i
+shell echo still here while desk is away
+wait-for still here
+shot parked
+# Desk back: the pane is back in desk's workspace, the same terminal.
+machine-back desk
+sleep 8000
+keys <C-;>:workspace notes<CR>
+sleep 1000
+shot back

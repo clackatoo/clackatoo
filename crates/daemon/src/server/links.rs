@@ -162,6 +162,11 @@ pub(super) struct Links {
     /// Set by the threads of ports forwarded to other machines when they
     /// have something to tell (see [`relay::forwards`](super::relay::forwards)).
     pub(super) forward_news: Arc<std::sync::atomic::AtomicBool>,
+    /// The panes this machine put in other machines' layouts that were
+    /// typed into while parked, by who they're lent to and their number:
+    /// given back rather than closed should the layout come back without
+    /// them (see [`relay::held`](super::relay::held)).
+    pub(super) typed_parked: std::collections::BTreeSet<(clackatoo_protocol::MachineId, u64)>,
 }
 
 impl Default for Links {
@@ -184,6 +189,7 @@ impl Default for Links {
             next_board: super::relay::MIRRORED_BOARDS,
             changes: 0,
             forward_news: Arc::default(),
+            typed_parked: std::collections::BTreeSet::new(),
         }
     }
 }
@@ -670,6 +676,9 @@ impl Daemon {
                 .retain(|&unread| unread != Flood::Reached(token));
             self.let_carried_go(reached.carried.take());
             self.relay_lost(at, reached.upstream);
+            // What's lent it is parked now, and what's reached through it
+            // shown no more.
+            self.held_reach_changed();
         }
     }
 
@@ -1020,6 +1029,7 @@ impl Daemon {
         {
             linked.backoff = FIRST_RETRY;
         }
+        self.held_reach_changed();
         self.take_back_asks(&reached.host);
         self.link_failed(at, reason);
         self.tell_connections();

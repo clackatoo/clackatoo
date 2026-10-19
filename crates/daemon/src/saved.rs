@@ -135,6 +135,10 @@ pub(crate) struct Lent {
     pub(crate) to: String,
     /// The number that daemon gave the pane.
     pub(crate) key: u64,
+    /// This daemon put it in that daemon's layout itself, as that daemon
+    /// can't reach this one. Builds before then read it as asked for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) placed: bool,
 }
 
 /// A pane on another machine, which its daemon lent this one.
@@ -147,6 +151,11 @@ pub(crate) struct Elsewhere {
     pub(crate) key: u64,
     /// What kind of pane it is: `terminal`, `editor` and so on.
     pub(crate) kind: String,
+    /// What the machine said it's called, if it did, for windows to name
+    /// it by while this daemon isn't connected to it. Builds before then
+    /// pass it over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
 }
 
 /// A tab.
@@ -677,15 +686,24 @@ mod tests {
                 machine: "07".repeat(16),
                 key: u64::MAX - 1,
                 kind: "editor".into(),
+                name: Some("jack-ubuntu-laptop".into()),
             }),
         };
         kept.workspaces[0].tabs[0].layout = Layout::Pane(borrowed);
         kept.workspaces[0].lent = Some(Lent {
             to: "a1".repeat(16),
             key: 9,
+            placed: true,
         });
         let encoded = kept.encode();
         assert_eq!(State::decode(&encoded).unwrap(), kept, "every bit of a u64");
+        // A workspace put in another machine's layout says so, and the
+        // machine of a pane borrowed what it's called.
+        let text = String::from_utf8(encoded.clone()).unwrap();
+        assert!(
+            text.contains("\"placed\"") && text.contains("jack-ubuntu-laptop"),
+            "{text}"
+        );
         // A build from before lending passes them over: a pane borrowed is
         // a terminal to it, and a workspace lent one of its own.
         let text = String::from_utf8(encoded).unwrap();

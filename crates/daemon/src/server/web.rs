@@ -906,7 +906,7 @@ impl Daemon {
         for notice in due {
             // One lent to another machine's daemon is said there, if
             // anywhere.
-            if self.looked_at(notice.chat) || self.terminal_lent_to(notice.chat).is_some() {
+            if self.looked_at(notice.chat) || self.lent_away(notice.chat).is_some() {
                 continue;
             }
             let Some(chat) = self.chat_ref(notice.chat) else {
@@ -953,9 +953,10 @@ impl Daemon {
             return;
         }
         self.chat_watch.sent = Some(chats.clone());
-        // Those lent to another machine's daemon go to it alone.
+        // Those lent to another machine's daemon go to it alone, but for
+        // those in a layout this daemon's clients are shown.
         let lent: HashMap<TerminalId, MachineId> = (chats.iter())
-            .filter_map(|chat| Some((chat.chat, self.terminal_lent_to(chat.chat)?)))
+            .filter_map(|chat| Some((chat.chat, self.lent_away(chat.chat)?)))
             .collect();
         // A client from before federation is shown only this daemon's own,
         // as it's shown only its workspaces.

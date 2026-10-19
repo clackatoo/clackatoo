@@ -894,8 +894,8 @@ mod tests {
         // Read as it was, it overflowed the stack, which aborts.
         let nested = |depth: usize| {
             let mut payload = [1, 0, 1].repeat(depth);
-            // A pane, showing terminal 0, from no other home.
-            payload.extend([0, 0, 0, 0, 0]);
+            // A pane, showing terminal 0, from no other home, with no key.
+            payload.extend([0, 0, 0, 0, 0, 0]);
             payload.extend([1, 1].repeat(depth));
             payload
         };
@@ -945,6 +945,7 @@ mod tests {
                 id: PaneId(id),
                 content: Content::Terminal(TerminalId(id)),
                 home: None,
+                key: None,
             })
         };
         let server = ServerMessage::Event(crate::Event::Workspaces(Workspaces {
@@ -969,6 +970,7 @@ mod tests {
             home: None,
             restored: Vec::new(),
             machine: None,
+            others: Vec::new(),
         }));
         let mut frames: Vec<_> = client
             .iter()
@@ -1213,6 +1215,7 @@ mod tests {
             home: None,
             restored: Vec::new(),
             machine: None,
+            others: Vec::new(),
         }));
         assert!(head(encode(PROTOCOL_VERSION, &workspaces).unwrap()).is_workspaces());
         let response = ServerMessage::Response(crate::Response::Done);

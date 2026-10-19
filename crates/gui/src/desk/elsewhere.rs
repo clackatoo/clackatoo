@@ -26,10 +26,16 @@ use super::connecting::Elsewhere;
 use crate::command::Command;
 
 impl Desk {
-    /// The machine `pane` is on, if it's another than the daemon's.
+    /// The machine `pane` is on, if it's another than the daemon's: a
+    /// pane of the daemon's own machine in a workspace of another's, which
+    /// that machine's daemon can't reach, is on the daemon's.
     pub(crate) fn pane_machine(&self, pane: PaneId) -> Option<MachineId> {
         let (workspace, _, pane) = self.workspaces.find_pane(pane)?;
-        pane.home.or(workspace.home)
+        let own = self.own_machine().map(|own| own.id);
+        match pane.home {
+            Some(home) if Some(home) == own => None,
+            home => home.or(workspace.home),
+        }
     }
 
     /// Where `pane` is, if it's on another machine than the daemon's: the

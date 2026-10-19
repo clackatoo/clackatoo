@@ -54,6 +54,7 @@
 //! | `shot NAME` | Writes what the window shows to `NAME.png`, once it's settled |
 //! | `machine NAME [WORKSPACE]...` | Starts the daemon of another machine, called NAME, with a workspace for each WORKSPACE, a shell in each, and written `WORKSPACE+FILE`, an editor of the project's FILE beside it: `:connect NAME` reaches it, through a stand-in for ssh |
 //! | `machine-stop NAME` | Stops that daemon, as when its machine goes away |
+//! | `machine-back NAME` | Starts that daemon again, as the machine coming back: with what it kept, its workspaces too |
 //! | `password [TEXT]` | Has the stand-in for ssh ask for TEXT as a password from now on, or with none, ask for none |
 //!
 //! After each key, click, scroll or `open`, the window is left to settle,
@@ -254,6 +255,7 @@ enum Command {
     Shot(String),
     Machine(String, Vec<String>),
     MachineStop(String),
+    MachineBack(String),
     Password(Option<String>),
 }
 
@@ -374,7 +376,7 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
             "sleep" => Command::Sleep(millis()?),
             "shot" if !rest.is_empty() && !rest.contains('/') => Command::Shot(rest.to_owned()),
             "shot" => bail!("line {line_number}: `shot` takes a name, with no `/`"),
-            "machine" | "machine-stop" => {
+            "machine" | "machine-stop" | "machine-back" => {
                 let mut words = rest.split_whitespace();
                 let name = (words.next())
                     .filter(|name| {
@@ -382,10 +384,12 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
                             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
                     })
                     .with_context(|| format!("line {line_number}: `{word}` takes a name"))?;
-                if word == "machine" {
-                    Command::Machine(name.to_owned(), words.map(str::to_owned).collect())
-                } else {
-                    Command::MachineStop(name.to_owned())
+                match word {
+                    "machine" => {
+                        Command::Machine(name.to_owned(), words.map(str::to_owned).collect())
+                    }
+                    "machine-stop" => Command::MachineStop(name.to_owned()),
+                    _ => Command::MachineBack(name.to_owned()),
                 }
             }
             "password" => Command::Password((!rest.is_empty()).then(|| rest.to_owned())),
@@ -493,20 +497,7 @@ impl Machines {
             bail!("{name} is running already");
         }
         let dir = self.root.join("hosts").join(name);
-        let runtime = RuntimeDir::at(dir.join("clackatoo"));
-        // Only this user's, as a runtime directory must be.
-        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
-            .create(runtime.path())?;
-        let lock = runtime.lock()?;
-        let mut config = machine_config()?;
-        config.machine = Some(dir.join("machine"));
-        config.machine_name = Some(name.to_owned());
-        config.workspaces = None;
-        // Its files are read as the window's own daemon reads them.
-        config.languages = Some(languages(&dir.join("languages"))?);
-        let daemon = Daemon::bind(&runtime.socket_path(), config)?;
-        let running = run(daemon, lock)?;
-        let mut client = Client::connect(&runtime.socket_path())?;
+        let mut client = self.run_machine(name, &dir, false)?;
         for workspace in workspaces {
             // `NAME+FILE` has an editor of the project's FILE beside its
             // shell.
@@ -523,8 +514,45 @@ impl Machines {
                 client.split_pane(pane, clackatoo_protocol::Side::Right, editor)?;
             }
         }
-        self.running.push((name.to_owned(), running));
         Ok(())
+    }
+
+    /// Starts the daemon of the machine `name` stopped before again, as
+    /// that machine coming back, making again what it kept.
+    fn back(&mut self, name: &str) -> anyhow::Result<()> {
+        if self.running.iter().any(|(running, _)| running == name) {
+            bail!("{name} is running already");
+        }
+        let hosts = self.root.join("hosts");
+        std::fs::rename(hosts.join(format!("{name}.gone")), hosts.join(name))
+            .with_context(|| format!("{name} was never stopped"))?;
+        self.run_machine(name, &hosts.join(name), true)?;
+        Ok(())
+    }
+
+    /// Runs the daemon of the machine `name`, in `dir`, keeping its
+    /// workspaces there, and making those it kept again if `restore`.
+    /// Returns a client of it.
+    fn run_machine(&mut self, name: &str, dir: &Path, restore: bool) -> anyhow::Result<Client> {
+        let runtime = RuntimeDir::at(dir.join("clackatoo"));
+        // Only this user's, as a runtime directory must be.
+        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+            .create(runtime.path())?;
+        let lock = runtime.lock()?;
+        let mut config = machine_config()?;
+        config.machine = Some(dir.join("machine"));
+        config.machine_name = Some(name.to_owned());
+        config.workspaces = Some(dir.join("workspaces"));
+        // Its files are read as the window's own daemon reads them.
+        config.languages = Some(languages(&dir.join("languages"))?);
+        let mut daemon = Daemon::bind(&runtime.socket_path(), config)?;
+        if restore {
+            daemon.restore_workspaces();
+        }
+        let running = run(daemon, lock)?;
+        let client = Client::connect(&runtime.socket_path())?;
+        self.running.push((name.to_owned(), running));
+        Ok(client)
     }
 
     /// Stops the daemon of the machine `name`, which then can't be
@@ -824,6 +852,10 @@ impl Look {
             Command::MachineStop(name) => {
                 timed = false;
                 self.machines.stop(name)?;
+            }
+            Command::MachineBack(name) => {
+                timed = false;
+                self.machines.back(name)?;
             }
             Command::Password(password) => {
                 timed = false;

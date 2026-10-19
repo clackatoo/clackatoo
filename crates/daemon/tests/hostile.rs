@@ -889,7 +889,8 @@ fn tame(message: &mut ClientMessage, rng: &mut Rng, started: &mut usize, root: &
             blank.cwd = None;
             true
         }
-        PaneTerminal::Existing(_) | PaneTerminal::Board(_) | PaneTerminal::Browser(_) => true,
+        // Nothing of these reaches outside the daemon.
+        _ => true,
     }
 }
 

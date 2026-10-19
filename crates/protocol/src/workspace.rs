@@ -86,6 +86,27 @@ pub struct Workspaces {
         deserialize_with = "wire::since::<{ wire::FEDERATION }, _, _>"
     )]
     pub machine: Option<Machine>,
+    /// What the daemon knows the machines its panes are on to be called,
+    /// for those it isn't connected to itself, as a pane another machine
+    /// put in one of its workspaces is ([`PaneTerminal::Lent`]): a window
+    /// names such a pane's machine by it, as it can't by a connection.
+    /// Empty from a daemon older than protocol 94.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::MIXED }, _>",
+        deserialize_with = "wire::since::<{ wire::MIXED }, _, _>"
+    )]
+    pub others: Vec<OtherMachine>,
+}
+
+/// A machine a daemon isn't connected to, but whose panes it shows: see
+/// [`Workspaces::others`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OtherMachine {
+    /// Its ID.
+    pub id: MachineId,
+    /// What it said it's called, made safe to show, as
+    /// [`Machine::name`] is.
+    pub name: String,
 }
 
 /// What a pane made again as the daemon started still has to show for
@@ -138,10 +159,12 @@ pub struct Workspace {
     pub home: Option<MachineId>,
     /// Who it's lent to, if it holds a pane the daemon made for a daemon
     /// connected to it, to show in a workspace of that daemon's own
-    /// ([`Request::Lend`](crate::Request::Lend)): such a workspace has one
-    /// tab of one pane, and is shown to that daemon alone, never to a
-    /// window. `None` for any other, and from a daemon older than protocol
-    /// 93.
+    /// ([`Request::Lend`](crate::Request::Lend)), or put in one itself
+    /// ([`Lent::placed`]): such a workspace has one tab of one pane, and is
+    /// shown to daemons alone, never to a window: to that daemon, and
+    /// from protocol 94, to any other, which shows its pane where that
+    /// daemon's layout names it. `None` for any other, and from a daemon
+    /// older than protocol 93.
     #[serde(
         skip_serializing_if = "wire::before::<{ wire::LEND }, _>",
         deserialize_with = "wire::since::<{ wire::LEND }, _, _>"
@@ -159,6 +182,17 @@ pub struct Lent {
     /// with the pane from one run to the next of either daemon, by which
     /// it finds the pane again: the pane's own ID is new each run.
     pub key: u64,
+    /// The daemon lending it put it in that daemon's layout itself
+    /// ([`PaneTerminal::Lent`]), rather than being asked for it
+    /// ([`Request::Lend`](crate::Request::Lend)), as that daemon can't
+    /// reach this one: it's this daemon's, not that one's, to close or
+    /// give back once that daemon's layout no longer names it. `false`
+    /// from a daemon older than protocol 94.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::MIXED }, _>",
+        deserialize_with = "wire::since::<{ wire::MIXED }, _, _>"
+    )]
+    pub placed: bool,
 }
 
 /// One tab of a workspace: its panes, laid out.
@@ -239,6 +273,16 @@ pub struct Pane {
         deserialize_with = "wire::since::<{ wire::FEDERATION }, _, _>"
     )]
     pub home: Option<MachineId>,
+    /// For a pane on another machine than its workspace's, which the
+    /// daemon there lent: the number the pane has there, by which that
+    /// machine, or another reaching it, finds it ([`Lent::key`]). A window
+    /// has no use for it. `None` for any other pane, and from a daemon
+    /// older than protocol 94.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::MIXED }, _>",
+        deserialize_with = "wire::since::<{ wire::MIXED }, _, _>"
+    )]
+    pub key: Option<u64>,
 }
 
 /// What a pane shows.
@@ -557,6 +601,22 @@ pub enum PaneTerminal {
     /// [`wire::daemon_has`](crate::wire::daemon_has) with
     /// [`wire::BLANK`](crate::wire::BLANK) before asking for one.
     Blank(crate::OpenBlank),
+    /// A pane on the machine of the daemon asking, which said which
+    /// machine it is ([`Request::RelayAs`](crate::Request::RelayAs)): one
+    /// it made in a workspace of its own, lent to this daemon, for this
+    /// daemon's layout to show, as this daemon can't reach it to ask for
+    /// one ([`Lent::placed`]). It's shown here as a pane to come
+    /// ([`Content::Other`]), with its home and key set, which the daemon
+    /// on that machine, and any other that reaches it, shows what it
+    /// shows in place of. New in protocol 94: a daemon asks
+    /// [`wire::daemon_has`](crate::wire::daemon_has) with
+    /// [`wire::MIXED`](crate::wire::MIXED) before giving one.
+    Lent {
+        /// The number the pane has on that machine ([`Lent::key`]).
+        key: u64,
+        /// What kind of pane it is, as [`Content::Other`] names one.
+        kind: PaneKind,
+    },
 }
 
 impl Workspaces {

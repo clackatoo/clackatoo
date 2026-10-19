@@ -12,8 +12,10 @@
 //! holds a pane to come ([`Content::Other`]) with its home set, and the
 //! relay shows what it shows there in its place. A workspace can be
 //! *lent*, too: it holds a pane of this daemon's for the daemon on another
-//! machine to show in a workspace of its own ([`Workspace::lent`]). No
-//! window sees one, and no other workspace's name has to differ from its.
+//! machine to show in a workspace of its own ([`Workspace::lent`]), or
+//! one this daemon put in a layout of that daemon's itself, as that daemon
+//! can't reach this one ([`Lent::placed`]). No window sees one as a
+//! workspace, and no other workspace's name has to differ from its.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -38,12 +40,16 @@ pub(crate) struct WorkspaceState {
     /// daemons, and who each is lent to, as of the last change: what's
     /// asked of one by anyone else is refused, keys first, so it's a map
     /// rather than a walk of the workspaces.
-    lent_terminals: HashMap<TerminalId, MachineId>,
+    lent_terminals: HashMap<TerminalId, Lent>,
     /// Whether any workspace is lent, as of the last change.
     any_lent: bool,
     /// The machines this daemon has lent workspaces to, as each last said
     /// it was called, and when it was last connected.
     borrowers: BTreeMap<MachineId, Borrower>,
+    /// What the machines borrowed panes are on said they're called, for
+    /// windows to name them by when this daemon isn't connected to them
+    /// ([`Workspaces::others`]).
+    lenders: BTreeMap<MachineId, String>,
 }
 
 /// A machine whose daemon this one lends workspaces to.
@@ -67,6 +73,11 @@ pub(crate) struct Borrowed {
     pub(crate) key: u64,
     /// What kind of pane it is, said while what it shows can't be.
     pub(crate) kind: PaneKind,
+    /// The daemon there put it here itself ([`Lent::placed`]), in this
+    /// daemon's present run: it's that daemon's to close, as it may lend
+    /// it before this daemon hears so. Kept only while this daemon runs:
+    /// after a restart, such a pane is as any borrowed.
+    pub(crate) placed: bool,
 }
 
 impl WorkspaceState {
@@ -80,6 +91,7 @@ impl WorkspaceState {
             lent_terminals: HashMap::new(),
             any_lent: false,
             borrowers: BTreeMap::new(),
+            lenders: BTreeMap::new(),
         }
     }
 
@@ -196,6 +208,7 @@ impl WorkspaceState {
                     workspace: workspace.id.0,
                     to: lent.to.0,
                     key: lent.key,
+                    placed: lent.placed,
                 })
             })
             .collect();
@@ -298,6 +311,7 @@ impl WorkspaceState {
                 home: None,
                 restored: Vec::new(),
                 machine: None,
+                others: Vec::new(),
             },
             next_workspace: handed.next_workspace,
             next_tab: handed.next_tab,
@@ -808,11 +822,19 @@ impl WorkspaceState {
         pane
     }
 
-    /// The pane of the workspace lent as `lent` says, if there is one.
-    pub(crate) fn lent_pane(&self, lent: Lent) -> Option<PaneId> {
-        let workspace =
-            (self.workspaces.list.iter()).find(|workspace| workspace.lent == Some(lent))?;
+    /// The pane of the workspace lent to `to` as `key`, if there is one.
+    pub(crate) fn lent_pane(&self, to: MachineId, key: u64) -> Option<PaneId> {
+        let workspace = self.lent_workspace(to, key)?;
         Some(workspace.tabs.first()?.focused)
+    }
+
+    /// The workspace lent to `to` as `key`, if there is one.
+    pub(crate) fn lent_workspace(&self, to: MachineId, key: u64) -> Option<&Workspace> {
+        (self.workspaces.list.iter()).find(|workspace| {
+            workspace
+                .lent
+                .is_some_and(|lent| lent.to == to && lent.key == key)
+        })
     }
 
     /// Whether `workspace` is lent to another machine's daemon.
@@ -840,9 +862,10 @@ impl WorkspaceState {
         self.any_lent
     }
 
-    /// The machine terminal or chat `terminal` is lent to, if its pane is
-    /// in a workspace lent to one, as of the last change.
-    pub(crate) fn lent_terminal(&self, terminal: TerminalId) -> Option<MachineId> {
+    /// Who terminal or chat `terminal` is lent to, and as what, if its
+    /// pane is in a workspace lent to another machine, as of the last
+    /// change.
+    pub(crate) fn lent_terminal(&self, terminal: TerminalId) -> Option<Lent> {
         self.lent_terminals.get(&terminal).copied()
     }
 
@@ -856,7 +879,7 @@ impl WorkspaceState {
             self.any_lent = true;
             for pane in workspace.tabs.iter().flat_map(|tab| tab.layout.panes()) {
                 if let Content::Terminal(id) | Content::Browser(id) = pane.content {
-                    self.lent_terminals.insert(id, lent.to);
+                    self.lent_terminals.insert(id, lent);
                 }
             }
         }
@@ -867,6 +890,17 @@ impl WorkspaceState {
     /// taken. Returns what it's called, if it was lent.
     pub(crate) fn unlend(&mut self, workspace: WorkspaceId, name: &str) -> Option<String> {
         self.lent_of(workspace)?;
+        let named = self.free_name(name, &[]);
+        let shown = self.workspace_mut(workspace);
+        shown.lent = None;
+        shown.name.clone_from(&named);
+        self.refresh_lent();
+        Some(named)
+    }
+
+    /// `name`, made a name a workspace may have, as no workspace has, nor
+    /// any of `taken`: with a number after it if it's taken.
+    pub(crate) fn free_name(&self, name: &str, taken: &[String]) -> String {
         // As names may be: no `@`, nor control characters.
         let base: String = (name.chars())
             .map(|ch| {
@@ -877,7 +911,7 @@ impl WorkspaceState {
                 }
             })
             .collect();
-        let named = (1..=u32::MAX)
+        (1..=u32::MAX)
             .map(|n| {
                 if n == 1 {
                     base.clone()
@@ -885,13 +919,8 @@ impl WorkspaceState {
                     format!("{base}-{n}")
                 }
             })
-            .find(|name| self.check_name(name, None).is_ok())
-            .expect("some number is free");
-        let shown = self.workspace_mut(workspace);
-        shown.lent = None;
-        shown.name.clone_from(&named);
-        self.refresh_lent();
-        Some(named)
+            .find(|name| self.check_name(name, None).is_ok() && !taken.contains(name))
+            .expect("some number is free")
     }
 
     /// The machines this daemon lends workspaces to.
@@ -942,6 +971,7 @@ impl WorkspaceState {
             kind: borrowed.kind,
         });
         pane.home = Some(borrowed.machine);
+        pane.key = Some(borrowed.key);
         self.borrowed.insert(pane.id, borrowed);
         pane
     }
@@ -960,8 +990,56 @@ impl WorkspaceState {
                 kind: borrowed.kind,
             };
             shown.home = Some(borrowed.machine);
+            shown.key = Some(borrowed.key);
             self.borrowed.insert(pane, borrowed);
         }
+    }
+
+    /// The pane borrowed from `machine` as `key`, if one is.
+    pub(crate) fn borrowed_as(&self, machine: MachineId, key: u64) -> Option<PaneId> {
+        (self.borrowed.iter())
+            .find(|(_, borrowed)| borrowed.machine == machine && borrowed.key == key)
+            .map(|(&pane, _)| pane)
+    }
+
+    /// Notes that `machine`, which panes borrowed here are on, says it's
+    /// called `name`, for windows to name it by.
+    pub(crate) fn lender_named(&mut self, machine: MachineId, name: &str) {
+        if self
+            .lenders
+            .get(&machine)
+            .is_some_and(|known| known == name)
+        {
+            return;
+        }
+        self.lenders.insert(machine, name.to_owned());
+        self.tell_others();
+    }
+
+    /// What the machines borrowed panes are on are called, as kept.
+    pub(crate) fn lenders(&self) -> &BTreeMap<MachineId, String> {
+        &self.lenders
+    }
+
+    /// Takes what the machines borrowed panes are on are called, as kept
+    /// from the last run or handed over.
+    pub(crate) fn set_lenders(&mut self, lenders: BTreeMap<MachineId, String>) {
+        self.lenders = lenders;
+        self.tell_others();
+    }
+
+    /// Tells windows what the machines borrowed panes are on are called,
+    /// forgetting those no pane is on any more.
+    fn tell_others(&mut self) {
+        let borrowed = &self.borrowed;
+        self.lenders
+            .retain(|machine, _| borrowed.values().any(|b| b.machine == *machine));
+        self.workspaces.others = (self.lenders.iter())
+            .map(|(&id, name)| clackatoo_protocol::OtherMachine {
+                id,
+                name: name.clone(),
+            })
+            .collect();
     }
 
     /// The panes showing what's on another machine.
@@ -984,6 +1062,9 @@ impl WorkspaceState {
             }
             open
         });
+        if !gone.is_empty() {
+            self.tell_others();
+        }
         gone
     }
 
@@ -1022,6 +1103,7 @@ impl WorkspaceState {
             id,
             content,
             home: None,
+            key: None,
         }
     }
 
@@ -1073,6 +1155,7 @@ fn handed_pane(node: &handover::Layout) -> Option<Pane> {
         id: PaneId(id),
         content,
         home: None,
+        key: None,
     })
 }
 
@@ -1095,6 +1178,7 @@ fn handed_lent(lent: &[handover::Lent], id: u32) -> Option<Lent> {
     Some(Lent {
         to: MachineId(lent.to),
         key: lent.key,
+        placed: lent.placed,
     })
 }
 
@@ -1120,12 +1204,14 @@ fn handed_borrowed(
         machine,
         key: *key,
         kind,
+        placed: false,
     };
     borrowed.insert(pane, shown);
     Some(Pane {
         id: pane,
         content: Content::Other { kind },
         home: Some(machine),
+        key: Some(*key),
     })
 }
 
@@ -1135,6 +1221,7 @@ fn placeholder() -> Pane {
         id: PaneId(u32::MAX),
         content: Content::Terminal(TerminalId(u32::MAX)),
         home: None,
+        key: None,
     }
 }
 
@@ -1285,6 +1372,7 @@ fn split_edge(layout: &mut Layout, side: Side, new: Pane, share: Option<u16>) {
             id: PaneId(0),
             content: Content::Terminal(TerminalId(0)),
             home: None,
+            key: None,
         }),
     );
     let (parts, shares) = match share.map(|share| u32::from(share.clamp(1, 999))) {
@@ -1634,10 +1722,11 @@ mod tests {
         let lent = Lent {
             to: MachineId([7; 16]),
             key: 9,
+            placed: true,
         };
         let pane = state.new_lent(lent, Content::Terminal(TerminalId(2)));
-        assert_eq!(state.lent_pane(lent), Some(pane));
-        assert_eq!(state.lent_pane(Lent { key: 8, ..lent }), None);
+        assert_eq!(state.lent_pane(lent.to, 9), Some(pane));
+        assert_eq!(state.lent_pane(lent.to, 8), None);
         assert_eq!(state.get().active, Some(a));
         let lent_workspace = state.get().list[1].id;
         assert!(state.is_lent(lent_workspace) && !state.is_lent(a));
@@ -1657,13 +1746,11 @@ mod tests {
         // Handed over, it's still lent, with its pane.
         let (handed, lent_list) = state.hand_over();
         let mut resumed = WorkspaceState::resume(&handed, &lent_list).unwrap();
-        assert_eq!(resumed.lent_pane(lent), Some(pane));
-        // Its terminal is known to be lent, to whom, without a walk.
+        assert_eq!(resumed.lent_pane(lent.to, 9), Some(pane));
+        // Its terminal is known to be lent, to whom and how, without a
+        // walk.
         assert!(resumed.has_lent());
-        assert_eq!(
-            resumed.lent_terminal(TerminalId(2)),
-            Some(MachineId([7; 16]))
-        );
+        assert_eq!(resumed.lent_terminal(TerminalId(2)), Some(lent));
         assert_eq!(resumed.lent_terminal(TerminalId(1)), None);
         // Given back, it's named after the machine, and nothing's lent.
         resumed.new_workspace("from-laptop".into(), TerminalId(3));
@@ -1695,7 +1782,11 @@ mod tests {
         state.forget_idle_borrowers();
         assert!(state.borrowers().is_empty(), "nothing's lent to it");
         state.new_lent(
-            Lent { to: laptop, key: 1 },
+            Lent {
+                to: laptop,
+                key: 1,
+                placed: false,
+            },
             Content::Terminal(TerminalId(1)),
         );
         state.borrower_seen(laptop, "laptop", 20);
@@ -1713,6 +1804,7 @@ mod tests {
             machine: MachineId([7; 16]),
             key: 9,
             kind,
+            placed: false,
         };
         state.borrow(two, borrowed);
         let (_, _, pane) = state.get().find_pane(two).unwrap();

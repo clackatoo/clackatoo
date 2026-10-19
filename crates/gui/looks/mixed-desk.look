@@ -1,0 +1,31 @@
+# Desk's side of mixed.look (CLACKA-117, phase 5): a workspace of desk's
+# holding a terminal laptop put in it, which desk can't reach, as desk
+# keeps it from one run to the next: a pane to come, saying so.
+size 1280x800
+kept <<END
+{
+  "clackatoo_workspaces": 1,
+  "workspaces": [{
+    "name": "notes",
+    "tabs": [{
+      "layout": {"split": {
+        "left_to_right": true,
+        "parts": [
+          {"pane": {"terminal": {"cwd": "$PROJECT"}}},
+          {"pane": {"terminal": {"cwd": null, "elsewhere": {
+            "machine": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "key": 7,
+            "kind": "terminal",
+            "name": "laptop"
+          }}}}
+        ],
+        "shares": [1, 1]
+      }}
+    }]
+  }]
+}
+END
+sleep 1500
+keys <C-;><C-w>l
+sleep 500
+shot placeholder

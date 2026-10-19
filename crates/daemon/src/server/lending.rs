@@ -14,9 +14,19 @@
 //! its pane, as any workspace does, which tells that daemon the pane has
 //! gone.
 //!
-//! It's that daemon's alone: no other client is shown it, nor its
-//! terminals and chats, nor told of them, nor may ask anything of them,
-//! and it's never offered as the workspace last switched to. Saying which
+//! It's that daemon's alone, as a workspace: no window is shown it, and
+//! it's never offered as the workspace last switched to. Its terminals and
+//! chats are that daemon's too, with two exceptions (CLACKA-117, phase 5).
+//! Any other daemon of protocol 94 or later is shown it, never to list as
+//! a workspace, but to show its pane where that daemon's layout names it,
+//! and may ask what it shows of it, never end or close it, as it reaches
+//! this machine more directly than through that daemon: only while this
+//! daemon is connected to the daemon it's lent to, and its layout names
+//! it, so a pane borrowed as phase 4 borrows hops only when its lender is
+//! connected to its borrower too. And this daemon's own clients may
+//! have what it shows while it's in a layout they're shown: in a workspace
+//! of another machine's, connected to, as its pane, or parked while that
+//! machine is away (see [`held`](super::relay::held)). Saying which
 //! machine a client is is a convention between daemons of the same user
 //! that work together, not a boundary: anything the user runs could say
 //! it. So only a client over QUIC may say it, as a daemon connected to
@@ -43,7 +53,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use clackatoo_protocol::{
     ChatSummary, Error, Event, Lent, Machine, MachineId, PaneId, PaneTerminal, Request, Response,
-    ServerMessage, TerminalId, Workspace, WorkspaceId, Workspaces, wire,
+    ServerMessage, TerminalId, WorkspaceId, Workspaces, wire,
 };
 use mio::Token;
 
@@ -59,7 +69,7 @@ const STILL_HEARD: Duration = Duration::from_secs(5);
 pub(crate) const UNSEEN_FOR: Duration = Duration::from_hours(30 * 24);
 
 /// Now, in seconds since 1970.
-fn now_seconds() -> u64 {
+pub(super) fn now_seconds() -> u64 {
     (SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)).map_or(0, |since| since.as_secs())
 }
 
@@ -118,10 +128,16 @@ impl Daemon {
             return Ok(done);
         };
         client.machine = Some(machine);
+        let watching = client.watching_workspaces;
+        // What's lent it and parked here is in its layouts again.
+        self.held_reach_changed();
         // It watches the workspaces already, as it learned which machine
         // this is from them: those lent it, kept from before, come now.
-        if client.watching_workspaces {
-            let shown = self.shown_workspaces();
+        if watching {
+            let mut shown = self.shown_workspaces();
+            if let Some(without) = self.without_parked(&shown) {
+                shown = without;
+            }
             if let Some(with) = self.with_lent(token, &shown) {
                 self.send_event(token, Event::Workspaces(with));
             }
@@ -157,8 +173,9 @@ impl Daemon {
         let lent = Lent {
             to: machine.id,
             key,
+            placed: false,
         };
-        if let Some(pane) = self.workspaces.lent_pane(lent) {
+        if let Some(pane) = self.workspaces.lent_pane(machine.id, key) {
             return Ok(Response::PaneCreated(pane));
         }
         let beside = beside.filter(|&pane| {
@@ -174,21 +191,27 @@ impl Daemon {
         Ok(Response::PaneCreated(pane))
     }
 
-    /// The workspaces lent to `machine`'s daemon.
-    fn lent_to(&self, machine: MachineId) -> impl Iterator<Item = &Workspace> {
-        (self.workspaces.get().list.iter())
-            .filter(move |workspace| workspace.lent.is_some_and(|lent| lent.to == machine))
-    }
-
     /// `shown`, the workspaces as clients are shown them, with those lent
     /// to the machine of the client at `token` too, if any are and it
-    /// reads them: `None` if it's shown `shown` as it is.
+    /// reads them, and, for a daemon of protocol 94 or later, which may
+    /// show their layouts, those lent to another machine that this daemon
+    /// is connected to, whose layouts name them: `None` if it's shown
+    /// `shown` as it is. So a pane another machine borrowed from this one,
+    /// as phase 4 borrows, is reached from a third only while this daemon
+    /// is connected to the one that borrowed it too.
     pub(super) fn with_lent(&self, token: Token, shown: &Workspaces) -> Option<Workspaces> {
         let Some(Source::Client(client)) = self.sources.get(token.0) else {
             return None;
         };
         let machine = (client.machine.as_ref()).filter(|_| client.wire >= wire::LEND)?;
-        let mut lent = self.lent_to(machine.id).peekable();
+        let others = client.wire >= wire::MIXED;
+        let mut lent = (self.workspaces.get().list.iter())
+            .filter(|workspace| {
+                workspace.lent.is_some_and(|lent| {
+                    lent.to == machine.id || (others && self.lent_named_live(lent))
+                })
+            })
+            .peekable();
         lent.peek()?;
         let mut with = shown.clone();
         with.list.extend(lent.cloned());
@@ -209,25 +232,54 @@ impl Daemon {
             .ok()
     }
 
-    /// The machine terminal or chat `id` is lent to, if it's in a pane of
-    /// a workspace lent to one, or is a chat started by one that is.
-    pub(super) fn terminal_lent_to(&self, id: TerminalId) -> Option<MachineId> {
-        if let Some(machine) = self.workspaces.lent_terminal(id) {
-            return Some(machine);
+    /// Who terminal or chat `id` is lent to, and as what, if it's in a
+    /// pane of a workspace lent to another machine, or is a chat started by
+    /// one that is.
+    pub(super) fn terminal_lent_to(&self, id: TerminalId) -> Option<Lent> {
+        if let Some(lent) = self.workspaces.lent_terminal(id) {
+            return Some(lent);
         }
         // A subagent's chat is its parent's workspace's.
         self.chat_ref(id)?;
         let workspace = self.workspace_of_chat(id)?;
-        Some(self.workspaces.lent_of(workspace)?.to)
+        self.workspaces.lent_of(workspace)
     }
 
-    /// Whether the client at `token` may have what's lent to `machine`, if
-    /// anything: only that machine's daemon may.
-    fn may_have(&self, token: Token, machine: Option<MachineId>) -> bool {
-        machine.is_none_or(|machine| {
-            self.machine_of_client(token)
-                .is_some_and(|client| client.id == machine)
-        })
+    /// Whether terminal or chat `id` is lent to another machine, and not
+    /// in a layout this daemon's own clients are shown (see
+    /// [`lent_shown_here`](Self::lent_shown_here)): what's said of it is
+    /// said there, if anywhere.
+    pub(super) fn lent_away(&self, id: TerminalId) -> Option<MachineId> {
+        let lent = self.terminal_lent_to(id)?;
+        (!self.lent_shown_here(lent)).then_some(lent.to)
+    }
+
+    /// Whether the client at `token` may have what's lent as `lent` says,
+    /// if anything: that machine's daemon may; so may this daemon's own
+    /// clients, while it's shown them (see
+    /// [`lent_shown_here`](Self::lent_shown_here)); and so may any other
+    /// daemon of protocol 94 or later if it's only to `use` what it shows,
+    /// as it shows it where the layout of the machine it's lent to names
+    /// it, while this daemon is connected to that machine and its layouts
+    /// name it too; never to close it or change what holds it.
+    fn may_have(&self, token: Token, lent: Option<Lent>, used: bool) -> bool {
+        let Some(lent) = lent else { return true };
+        let Some(Source::Client(client)) = self.sources.get(token.0) else {
+            return false;
+        };
+        match &client.machine {
+            Some(machine) => {
+                machine.id == lent.to
+                    || (used && client.wire >= wire::MIXED && self.lent_named_live(lent))
+            }
+            None => self.lent_shown_here(lent),
+        }
+    }
+
+    /// Whether the client at `token` is the daemon `lent` is lent to.
+    fn is_borrower(&self, token: Token, lent: Lent) -> bool {
+        self.machine_of_client(token)
+            .is_some_and(|machine| machine.id == lent.to)
     }
 
     /// Refuses `request`, from the client at `token`, if it's about a
@@ -236,31 +288,28 @@ impl Daemon {
     /// but that daemon may have one.
     pub(super) fn refuse_lent(&self, token: Token, request: &Request) -> Result<(), Error> {
         let terminal = |id: TerminalId| {
-            if self.may_have(token, self.terminal_lent_to(id)) {
+            if self.may_have(token, self.terminal_lent_to(id), true) {
                 Ok(())
             } else {
                 Err(Error::NoSuchTerminal(id))
             }
         };
-        let pane = |id: PaneId| {
-            let lent = self.workspaces.lent_of_pane(id).map(|lent| lent.to);
-            if self.may_have(token, lent) {
+        let pane = |id: PaneId, used: bool| {
+            if self.may_have(token, self.workspaces.lent_of_pane(id), used) {
                 Ok(())
             } else {
                 Err(Error::NoSuchPane(id))
             }
         };
         let tab = |id: clackatoo_protocol::TabId| {
-            let lent = self.workspaces.lent_of_tab(id).map(|lent| lent.to);
-            if self.may_have(token, lent) {
+            if self.may_have(token, self.workspaces.lent_of_tab(id), false) {
                 Ok(())
             } else {
                 Err(Error::NoSuchTab(id))
             }
         };
         let workspace = |id: WorkspaceId| {
-            let lent = self.workspaces.lent_of(id).map(|lent| lent.to);
-            if self.may_have(token, lent) {
+            if self.may_have(token, self.workspaces.lent_of(id), false) {
                 Ok(())
             } else {
                 Err(Error::NoSuchWorkspace(id))
@@ -280,18 +329,25 @@ impl Daemon {
             | Request::BlockText { terminal: id, .. }
             | Request::Search { terminal: id, .. }
             | Request::Block { terminal: id, .. }
-            | Request::CloseTerminal { terminal: id }
             | Request::Fit { terminal: id, .. }
             | Request::Chat { terminal: id, .. }
             | Request::AttachBrowser { chat: id, .. } => terminal(id),
+            // Ending its program is for those that may close it.
+            Request::CloseTerminal { terminal: id } => {
+                if self.may_have(token, self.terminal_lent_to(id), false) {
+                    Ok(())
+                } else {
+                    Err(Error::NoSuchTerminal(id))
+                }
+            }
             Request::ClosePane { pane: id }
             | Request::Focus { pane: id }
-            | Request::OpenHere { pane: id, .. }
+            | Request::Split { pane: id, .. } => pane(id, false),
+            Request::OpenHere { pane: id, .. }
             | Request::BlankHere { pane: id, .. }
             | Request::Recover { pane: id, .. }
-            | Request::Split { pane: id, .. }
             | Request::ChatChoices { pane: Some(id) }
-            | Request::Forwards { pane: id, .. } => pane(id),
+            | Request::Forwards { pane: id, .. } => pane(id, true),
             Request::CloseTab { tab: id }
             | Request::RenameTab { tab: id, .. }
             | Request::ResizeSplit { tab: id, .. }
@@ -304,9 +360,10 @@ impl Daemon {
     }
 
     /// Whether the client at `token` may be shown the terminal or chat
-    /// `id`: not one lent to another machine's daemon than its.
+    /// `id`: not one lent to another machine's daemon than its, unless
+    /// it may have it all the same.
     pub(super) fn may_see_terminal(&self, token: Token, id: TerminalId) -> bool {
-        self.may_have(token, self.terminal_lent_to(id))
+        self.may_have(token, self.terminal_lent_to(id), true)
     }
 
     /// `chats`, as the client at `token` is told them: without those lent
@@ -321,13 +378,12 @@ impl Daemon {
     }
 
     /// Gives back the lent workspace `workspace`, naming it after the
-    /// machine it was lent to. Returns what it's called now.
+    /// machine it was lent to: as this daemon's connection to it names it,
+    /// if it has one, as a workspace parked meanwhile is named, or else as
+    /// it said it's called. Returns what it's called now.
     pub(super) fn unlend(&mut self, workspace: WorkspaceId) -> Option<String> {
         let lent = self.workspaces.lent_of(workspace)?;
-        let machine = (self.workspaces.borrowers().get(&lent.to)).map_or_else(
-            || lent.to.to_string()[..8].to_owned(),
-            |borrower| borrower.name.clone(),
-        );
+        let machine = self.machine_named(lent.to);
         let named = self
             .workspaces
             .unlend(workspace, &format!("from-{machine}"))?;
@@ -358,6 +414,17 @@ impl Daemon {
         if !allowed {
             return Err(Error::NoSuchWorkspace(workspace));
         }
+        self.close_or_unlend(workspace, close_idle)
+    }
+
+    /// Gives back the lent workspace `workspace`, or with `close_idle`,
+    /// closes it instead if all it holds is a shell running nothing, as
+    /// nothing would be lost. Answers what was done.
+    pub(super) fn close_or_unlend(
+        &mut self,
+        workspace: WorkspaceId,
+        close_idle: bool,
+    ) -> Result<Response, Error> {
         let panes = self.workspaces.workspace_panes(workspace)?;
         let idle = close_idle
             && panes.iter().all(|pane| {
@@ -381,6 +448,9 @@ impl Daemon {
     /// Answers [`Request::Lent`]: a line for each workspace lent.
     pub(super) fn list_lent(&self) -> Response {
         let now = now_seconds();
+        // Connected to this daemon, or it to them, as for panes it put in
+        // their layouts itself.
+        let linked = self.linked_machines();
         let mut listed = String::new();
         for workspace in &self.workspaces.get().list {
             let Some(lent) = workspace.lent else { continue };
@@ -398,10 +468,11 @@ impl Daemon {
             };
             let borrower = self.workspaces.borrowers().get(&lent.to);
             let to = borrower.map_or_else(|| lent.to.to_string(), |b| b.name.clone());
-            let connected = (self.sources.iter()).any(|(_, source)| {
-                matches!(source, Source::Client(client)
-                    if client.machine.as_ref().is_some_and(|m| m.id == lent.to))
-            });
+            let connected = linked.iter().any(|machine| machine.id == lent.to)
+                || (self.sources.iter()).any(|(_, source)| {
+                    matches!(source, Source::Client(client)
+                        if client.machine.as_ref().is_some_and(|m| m.id == lent.to))
+                });
             let seen = match borrower {
                 _ if connected => "connected".to_owned(),
                 Some(borrower) => {
@@ -419,15 +490,17 @@ impl Daemon {
     }
 
     /// Notes the machines whose daemons are connected now as seen now, as
-    /// the workspaces are kept.
+    /// the workspaces are kept: those connected to this one, and those it's
+    /// connected to, whose layouts hold the panes it put there itself.
     pub(super) fn note_borrowers_seen(&mut self) {
         let now = now_seconds();
-        let connected: Vec<Machine> = (self.sources.iter())
+        let mut connected: Vec<Machine> = (self.sources.iter())
             .filter_map(|(_, source)| match source {
                 Source::Client(client) if !client.finished => client.machine.clone(),
                 _ => None,
             })
             .collect();
+        connected.extend(self.linked_machines());
         for machine in connected {
             self.workspaces
                 .borrower_seen(machine.id, &machine.name, now);
@@ -479,7 +552,7 @@ impl Daemon {
         let Some(lent) = self.workspaces.lent_of(workspace) else {
             return false;
         };
-        if !self.may_have(token, Some(lent.to)) {
+        if !self.is_borrower(token, lent) {
             return false;
         }
         self.unlend(workspace).is_some()

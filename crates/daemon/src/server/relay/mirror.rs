@@ -29,13 +29,23 @@
 //! workspace of its own, lent to this machine, which isn't shown as a
 //! workspace at all. What each pane shows is numbered as any other's, and
 //! kept by the number this daemon gave the pane ([`Mirror::lent`]), for
-//! this daemon's own layouts to show.
+//! this daemon's own layouts to show. It shows this daemon those it lent
+//! other machines too, kept by who they're lent to and the number each
+//! has ([`Mirror::held_for`]), for their layouts to show (see
+//! [`held`](super::held)).
+//!
+//! A pane in its workspaces may be on yet another machine, or on this
+//! one, with the number it has there ([`Pane::key`]): one that machine
+//! lent it. It's kept as a pane to come, on that machine
+//! ([`Mirror::held`]), which this daemon shows what it shows in place of,
+//! if it reaches that machine.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use clackatoo_protocol::{
-    BoardId, BufferId, ChatState, ChatSummary, Content, FilesId, Layout, Machine, MachineId, Pane,
-    PaneId, PaneKind, ReviewId, Tab, TabId, TerminalId, Workspace, WorkspaceId, Workspaces,
+    BoardId, BufferId, ChatState, ChatSummary, Content, FilesId, Layout, Machine, MachineId,
+    OtherMachine, Pane, PaneId, PaneKind, ReviewId, Tab, TabId, TerminalId, Workspace, WorkspaceId,
+    Workspaces,
 };
 
 /// The most of another daemon's workspaces shown: more than anyone keeps.
@@ -48,6 +58,13 @@ pub(crate) const MOST_PANES: usize = 512;
 /// The most of the panes another daemon lent this one taken in, beside
 /// its workspaces: as many as this daemon keeps of its own.
 pub(crate) const MOST_LENT: usize = 512;
+
+/// The most of the panes another daemon lent other machines taken in,
+/// beside those it lent this one, which have a budget of their own.
+pub(crate) const MOST_HELD_FOR: usize = 512;
+
+/// The most names of other machines taken in from another daemon.
+const MOST_OTHERS: usize = 64;
 
 /// The most of another daemon's chats taken in.
 pub(crate) const MOST_CHATS: usize = 1024;
@@ -158,6 +175,21 @@ pub(crate) struct Mirror {
     /// Some panes it lent this daemon were left out, past what's taken in:
     /// those not among [`lent`](Self::lent) may still be there.
     pub(crate) lent_cut: bool,
+    /// The panes it lent other machines, by who and the number each has
+    /// there.
+    pub(crate) held_for: BTreeMap<(MachineId, u64), LentPane>,
+    /// The panes of its workspaces on yet another machine, or on this
+    /// one, lent it, by this daemon's numbers.
+    pub(crate) held: BTreeMap<PaneId, Held>,
+    /// The machines those are on and the numbers they have there, to look
+    /// one up by.
+    pub(crate) held_keys: BTreeSet<(MachineId, u64)>,
+    /// What it says the machines it isn't connected to are called.
+    pub(crate) others: Vec<OtherMachine>,
+    /// Some of its workspaces or panes were left out, past what's shown:
+    /// a pane of another machine's not among [`held`](Self::held) may
+    /// still be in its layouts.
+    pub(crate) cut: bool,
     pub(crate) workspace_numbers: Numbers,
     pub(crate) tab_numbers: Numbers,
     pub(crate) pane_numbers: Numbers,
@@ -189,6 +221,21 @@ pub(crate) struct LentPane {
     pub(crate) pane: PaneId,
     /// What it shows, by this daemon's numbers.
     pub(crate) content: Content,
+    /// The daemon there put it in the layout it's lent to itself (see
+    /// [`Lent::placed`](clackatoo_protocol::Lent::placed)).
+    pub(crate) placed: bool,
+}
+
+/// A pane of another daemon's workspaces that's on yet another machine,
+/// or on this one, and lent it there: see [`Mirror::held`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Held {
+    /// The machine it's on.
+    pub(crate) home: MachineId,
+    /// The number it has there.
+    pub(crate) key: u64,
+    /// The pane, by the number of the daemon whose workspaces hold it.
+    pub(crate) remote: PaneId,
 }
 
 /// What this daemon's clients follow of another daemon's, by this daemon's
@@ -217,6 +264,8 @@ pub(crate) struct Taken {
     pub(crate) lent: bool,
     /// What's told of its chats changed, as they name its workspaces.
     pub(crate) chats: bool,
+    /// What's known of the panes it lent other machines changed.
+    pub(crate) held: bool,
 }
 
 impl Mirror {
@@ -247,20 +296,33 @@ impl Mirror {
         let mut kept = Kept::default();
         let mut panes = 0;
         let mut lent = BTreeMap::new();
+        let mut held_for = BTreeMap::new();
         self.lent_cut = false;
+        self.held.clear();
+        self.held_keys.clear();
         let shown = Shown { machine, relays };
         for workspace in &remote.list {
-            // Lent to another machine, it's that machine's to show.
+            // Lent to another machine, it's that machine's to show, where
+            // its layouts name it.
             let Some(to) = workspace.lent else { continue };
-            if to.to != own || workspace.home.is_some() {
+            if workspace.home.is_some() {
                 continue;
             }
-            if lent.len() == MOST_LENT {
+            let mine = to.to == own;
+            if mine && lent.len() == MOST_LENT {
                 self.lent_cut = true;
-                break;
+                continue;
             }
-            if let Some(pane) = self.renumber_lent(workspace, shown, fresh, &mut kept) {
+            if !mine && held_for.len() == MOST_HELD_FOR {
+                continue;
+            }
+            let Some(pane) = self.renumber_lent(workspace, shown, fresh, &mut kept) else {
+                continue;
+            };
+            if mine {
                 lent.entry(to.key).or_insert(pane);
+            } else {
+                held_for.entry((to.to, to.key)).or_insert(pane);
             }
         }
         for workspace in remote
@@ -296,10 +358,21 @@ impl Mirror {
             let boards = followed.boards.iter().map(|id| id.0);
             keep_with(&mut self.board_numbers, kept.boards, boards);
         }
+        self.cut = taken.cut;
         taken.changed = taken.restarted || workspaces != self.workspaces;
         self.workspaces = workspaces;
         taken.lent = taken.restarted || lent != self.lent;
         self.lent = lent;
+        taken.held = held_for != self.held_for;
+        self.held_for = held_for;
+        self.others = (remote.others.iter())
+            .filter(|other| other.id != own && other.id != machine.id)
+            .take(MOST_OTHERS)
+            .map(|other| OtherMachine {
+                id: other.id,
+                name: shown_name(&other.name).replace('@', "_"),
+            })
+            .collect();
         taken.chats = self.renumber_chats(fresh);
         self.keep_terminals(&followed.terminals);
         taken
@@ -369,6 +442,19 @@ impl Mirror {
     /// has restarted, whose numbers then mean other things.
     pub(crate) fn forget(&mut self) {
         *self = Self::default();
+    }
+
+    /// The run of the daemon there what's shown is of, once it has said.
+    pub(crate) fn run(&self) -> Option<u64> {
+        self.run
+    }
+
+    /// The panes its workspaces hold of `home`'s, lent them: the number
+    /// each has there, and this daemon's number for it.
+    pub(crate) fn held_of(&self, home: MachineId) -> impl Iterator<Item = (u64, PaneId)> + '_ {
+        (self.held.iter())
+            .filter(move |(_, held)| held.home == home)
+            .map(|(&local, held)| (held.key, local))
     }
 
     /// Forgets the numbers of the terminals no longer shown or told, but
@@ -476,15 +562,36 @@ impl Mirror {
                     return None;
                 }
                 kept.panes.insert(pane.id.0);
-                let id = self.pane_numbers.local_or_fresh(pane.id.0, || fresh.pane());
+                let id = PaneId(self.pane_numbers.local_or_fresh(pane.id.0, || fresh.pane()));
                 let content = self.renumber_shown(pane, shown, fresh, kept);
-                // Whatever it says of the pane's home, it's on the machine
-                // the workspace is, as far as this daemon shows it: one
-                // from elsewhere is shown as one to come.
+                // A pane lent it from another machine, or this one, is on
+                // that machine: shown as one to come, which this daemon
+                // shows what it shows in place of, if it reaches it. Of
+                // any other, whatever it says of its home, it's on the
+                // machine the workspace is, as far as this daemon shows
+                // it: one from elsewhere is shown as one to come.
+                if let (Some(home), Some(key)) = (pane.home, pane.key)
+                    && home != shown.machine.id
+                {
+                    let held = Held {
+                        home,
+                        key,
+                        remote: pane.id,
+                    };
+                    self.held.insert(id, held);
+                    self.held_keys.insert((home, key));
+                    return Some(Layout::Pane(Pane {
+                        id,
+                        content,
+                        home: Some(home),
+                        key: Some(key),
+                    }));
+                }
                 Some(Layout::Pane(Pane {
-                    id: clackatoo_protocol::PaneId(id),
+                    id,
                     content,
                     home: Some(shown.machine.id),
+                    key: None,
                 }))
             }
             Layout::Split {
@@ -539,6 +646,7 @@ impl Mirror {
             workspace: workspace.id,
             pane: pane.id,
             content: self.renumber_shown(&pane, shown, fresh, kept),
+            placed: workspace.lent.is_some_and(|lent| lent.placed),
         })
     }
 
@@ -736,6 +844,7 @@ mod tests {
             id: PaneId(id),
             content,
             home: None,
+            key: None,
         })
     }
 
@@ -825,7 +934,11 @@ mod tests {
         let mut fresh = Counters::default();
         let lent = |id, to, key| {
             let mut workspace = workspace(id, "", pane(id, Content::Terminal(TerminalId(id))), id);
-            workspace.lent = Some(clackatoo_protocol::Lent { to, key });
+            workspace.lent = Some(clackatoo_protocol::Lent {
+                to,
+                key,
+                placed: false,
+            });
             workspace
         };
         let remote = workspaces(vec![
@@ -856,6 +969,10 @@ mod tests {
         // Its terminal is numbered as any, and kept while it's lent.
         assert_eq!(mirror.terminal_numbers.remote(local.0), Some(2));
         assert_eq!(mirror.lent.len(), 1, "only this machine's");
+        // That lent to yet another machine is kept apart too, for that
+        // machine's layouts as this daemon shows them.
+        let other = mirror.held_for[&(MachineId([3; 16]), 78)];
+        assert_eq!((other.workspace, other.pane), (WorkspaceId(3), PaneId(3)));
         let again = mirror.take(
             &remote,
             &machine(5),
@@ -876,6 +993,115 @@ mod tests {
         let taken = mirror.take(&gone, &machine(5), HERE, &mut fresh, &following(&[]), true);
         assert!(taken.lent && mirror.lent.is_empty());
         assert_eq!(mirror.terminal_numbers.remote(local.0), None);
+    }
+
+    #[test]
+    fn panes_lent_other_machines_have_a_budget_of_their_own() {
+        let mut mirror = Mirror::default();
+        let mut fresh = Counters::default();
+        let lent = |id: u32, to, key| {
+            let mut workspace = workspace(id, "", pane(id, Content::Terminal(TerminalId(id))), id);
+            workspace.lent = Some(clackatoo_protocol::Lent {
+                to,
+                key,
+                placed: true,
+            });
+            workspace
+        };
+        // More lent to another machine than are taken in, before the one
+        // lent this machine.
+        let mut list: Vec<Workspace> = (1..=600)
+            .map(|id| lent(id, MachineId([3; 16]), u64::from(id)))
+            .collect();
+        list.push(lent(601, HERE, 77));
+        mirror.take(
+            &workspaces(list),
+            &machine(5),
+            HERE,
+            &mut fresh,
+            &following(&[]),
+            true,
+        );
+        assert_eq!(mirror.held_for.len(), MOST_HELD_FOR);
+        assert!(mirror.lent.contains_key(&77) && !mirror.lent_cut);
+    }
+
+    #[test]
+    fn a_pane_lent_it_from_this_machine_or_another_is_kept_as_one_to_come() {
+        let mut mirror = Mirror::default();
+        let mut fresh = Counters::default();
+        let lent = |id, home: MachineId, key| {
+            Layout::Pane(Pane {
+                id: PaneId(id),
+                content: Content::Other {
+                    kind: PaneKind::new("terminal"),
+                },
+                home: Some(home),
+                key: Some(key),
+            })
+        };
+        let split = Layout::Split {
+            axis: Axis::LeftToRight,
+            parts: vec![
+                pane(1, Content::Terminal(TerminalId(1))),
+                lent(2, HERE, 77),
+                lent(3, MachineId([3; 16]), 78),
+            ],
+            shares: vec![1, 1, 1],
+        };
+        let mut remote = workspaces(vec![workspace(1, "main", split, 1)]);
+        remote.others = vec![
+            OtherMachine {
+                id: HERE,
+                name: "this one".into(),
+            },
+            OtherMachine {
+                id: MachineId([3; 16]),
+                name: "ser\u{202e}ver@x".into(),
+            },
+        ];
+        mirror.take(
+            &remote,
+            &machine(5),
+            HERE,
+            &mut fresh,
+            &following(&[]),
+            true,
+        );
+        let panes = mirror.workspaces[0].tabs[0].layout.panes();
+        // Each on its own machine, with its number there, to come.
+        assert_eq!((panes[1].home, panes[1].key), (Some(HERE), Some(77)));
+        assert_eq!(
+            (panes[2].home, panes[2].key),
+            (Some(MachineId([3; 16])), Some(78))
+        );
+        assert!(matches!(panes[1].content, Content::Other { .. }));
+        assert_eq!(
+            mirror.held_of(HERE).collect::<Vec<_>>(),
+            [(77, panes[1].id)]
+        );
+        assert_eq!(mirror.held[&panes[2].id].remote, PaneId(3));
+        assert!(mirror.held_keys.contains(&(MachineId([3; 16]), 78)));
+        // What it says other machines are called is made safe to show;
+        // never this one's.
+        assert_eq!(mirror.others.len(), 1);
+        assert_eq!(mirror.others[0].name, "server_x");
+        // Its own panes are its own, whatever key it says they have.
+        let mut own = pane(1, Content::Terminal(TerminalId(1)));
+        if let Layout::Pane(pane) = &mut own {
+            pane.home = Some(MachineId([9; 16]));
+            pane.key = Some(5);
+        }
+        let remote = workspaces(vec![workspace(1, "main", own, 1)]);
+        mirror.take(
+            &remote,
+            &machine(5),
+            HERE,
+            &mut fresh,
+            &following(&[]),
+            true,
+        );
+        assert!(mirror.held.is_empty() && mirror.held_keys.is_empty());
     }
 
     #[test]
@@ -1026,6 +1252,7 @@ mod tests {
             id: PaneId(2),
             content: Content::Terminal(TerminalId(2)),
             home: Some(MachineId([1; 16])),
+            key: None,
         });
         let layout = Layout::Split {
             axis: Axis::LeftToRight,

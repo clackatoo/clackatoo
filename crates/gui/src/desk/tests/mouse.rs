@@ -249,6 +249,7 @@ fn showing_a_folder() -> Desk {
         id: PaneId(1),
         content: Content::Folder(FilesId(1)),
         home: None,
+        key: None,
     });
     let mut desk = desk(one_tab(layout));
     normal_mode(&mut desk);

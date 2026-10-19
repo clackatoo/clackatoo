@@ -52,6 +52,7 @@ impl Elsewhere {
             Reach::NeedsPassword => format!("needs a password: :connect {}", self.host),
             Reach::Down(why) => format!("not connected, trying again: {why}"),
             Reach::Stopped(why) => format!("not connected: {why}"),
+            Reach::Unreachable => "not reachable from here".to_owned(),
         };
         format!("{machine} · {how}")
     }
@@ -61,7 +62,8 @@ impl Elsewhere {
     pub(crate) fn notice(&self) -> Option<String> {
         let host = &self.host;
         match &self.reach {
-            Reach::Connected => None,
+            // Its panes say so themselves.
+            Reach::Connected | Reach::Unreachable => None,
             Reach::Connecting | Reach::Down(_) => Some(format!("{host} isn't connected · trying")),
             Reach::NeedsPassword => Some(format!("{host} needs a password · :connect {host}")),
             Reach::Stopped(_) => Some(format!("{host} isn't connected · :connect {host}")),
@@ -229,29 +231,37 @@ impl Desk {
                 .as_ref()
                 .is_some_and(|machine| machine.id == home)
         });
-        match connection {
-            Some(connection) => Elsewhere {
-                host: connection.host.clone(),
-                machine: connection
-                    .machine
-                    .as_ref()
-                    .map(|machine| machine.name.clone()),
-                reach: match &connection.state {
-                    ConnectionState::Connected { .. } => Reach::Connected,
-                    ConnectionState::Asking | ConnectionState::NeedsPassword => {
-                        Reach::NeedsPassword
-                    }
-                    ConnectionState::Down { reason } => Reach::Down(reason.clone()),
-                    ConnectionState::Stopped { reason } => Reach::Stopped(reason.clone()),
-                    ConnectionState::Connecting | ConnectionState::Other => Reach::Connecting,
-                },
-            },
-            // A machine this window hasn't heard the daemon's connection to,
-            // as from a daemon that doesn't say: by the start of its ID.
-            None => Elsewhere {
-                host: home.to_string()[..8].to_owned(),
+        // A machine the daemon has no connection to: by what it says that
+        // machine is called, or the start of its ID. Its panes are in a
+        // workspace another machine put them in, out of reach; or, from a
+        // daemon that doesn't say, still to come.
+        let Some(connection) = connection else {
+            let named = (self.workspaces.others.iter()).find(|other| other.id == home);
+            return Elsewhere {
+                host: named.map_or_else(
+                    || home.to_string()[..8].to_owned(),
+                    |other| other.name.clone(),
+                ),
                 machine: None,
-                reach: Reach::Connecting,
+                reach: if self.daemon_has(wire::MIXED) {
+                    Reach::Unreachable
+                } else {
+                    Reach::Connecting
+                },
+            };
+        };
+        Elsewhere {
+            host: connection.host.clone(),
+            machine: connection
+                .machine
+                .as_ref()
+                .map(|machine| machine.name.clone()),
+            reach: match &connection.state {
+                ConnectionState::Connected { .. } => Reach::Connected,
+                ConnectionState::Asking | ConnectionState::NeedsPassword => Reach::NeedsPassword,
+                ConnectionState::Down { reason } => Reach::Down(reason.clone()),
+                ConnectionState::Stopped { reason } => Reach::Stopped(reason.clone()),
+                ConnectionState::Connecting | ConnectionState::Other => Reach::Connecting,
             },
         }
     }

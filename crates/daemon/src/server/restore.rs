@@ -350,6 +350,7 @@ impl Daemon {
                 lent: workspace.lent.map(|lent| saved::Lent {
                     to: lent.to.to_string(),
                     key: lent.key,
+                    placed: lent.placed,
                 }),
             });
         }
@@ -398,6 +399,7 @@ impl Daemon {
                     machine: borrowed.machine.to_string(),
                     key: borrowed.key,
                     kind: borrowed.kind.to_string(),
+                    name: self.workspaces.lenders().get(&borrowed.machine).cloned(),
                 }),
             });
         }
@@ -558,7 +560,11 @@ impl Daemon {
                 // daemon finds its pane again by the number it gave it.
                 let lent = (workspace.lent.as_ref()).and_then(|lent| {
                     let to = lent.to.parse().ok()?;
-                    Some(clackatoo_protocol::Lent { to, key: lent.key })
+                    Some(clackatoo_protocol::Lent {
+                        to,
+                        key: lent.key,
+                        placed: lent.placed,
+                    })
                 });
                 if let Some(lent) = lent {
                     self.workspaces.set_lent(made, lent);
@@ -733,8 +739,13 @@ impl Daemon {
                         machine,
                         key: elsewhere.key,
                         kind,
+                        placed: false,
                     };
-                    self.workspaces.fresh_borrowed(borrowed)
+                    let pane = self.workspaces.fresh_borrowed(borrowed);
+                    if let Some(name) = &elsewhere.name {
+                        self.workspaces.lender_named(machine, name);
+                    }
+                    pane
                 });
                 panes.push(made.map(|made| made.id));
                 Some(Layout::Pane(made?))

@@ -5,8 +5,10 @@
 //! split or the focused one of the tab, unless the request names another
 //! (`on`): `:Terminal@desk` in a window here. In a workspace of another
 //! machine's, the daemon there makes it, in its own layout, as before;
-//! one of a third machine's, which the daemon there can't be told to
-//! reach yet, is refused. In one of this daemon's own, a pane on another
+//! one of this machine's, this daemon makes, and has the daemon there
+//! show (see [`held`](super::held)); one of a third machine's, which the
+//! daemon there can't be told to reach yet, is refused. In one of this
+//! daemon's own, a pane on another
 //! machine is *borrowed*: the daemon there is asked to lend one
 //! ([`Request::Lend`]), which it makes in a workspace of its own, lent to
 //! this machine, and this daemon puts a pane in its own layout showing
@@ -55,6 +57,32 @@ pub(in crate::server) enum Placing {
     Edge(TabId, Side, Option<u16>),
 }
 
+impl Placing {
+    /// The request that makes a new pane showing `terminal` where it says.
+    pub(in crate::server) fn request(self, terminal: PaneTerminal) -> Request {
+        match self {
+            Self::Tab(workspace) => Request::NewTab {
+                workspace,
+                terminal,
+                on: None,
+            },
+            Self::Split(pane, side) => Request::Split {
+                pane,
+                side,
+                terminal,
+                on: None,
+            },
+            Self::Edge(tab, side, share) => Request::SplitTab {
+                tab,
+                side,
+                terminal,
+                share,
+                on: None,
+            },
+        }
+    }
+}
+
 /// A pane asked of another machine's daemon, waiting for its answer.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::server) struct Lending {
@@ -69,6 +97,15 @@ impl Daemon {
     /// pane it's made from.
     pub(super) fn route_new_pane(&mut self, token: Token, request: Request) -> Routed {
         let own = self.machine.id;
+        // A pane another machine put in a layout here goes where it's put:
+        // its machine is the one asking.
+        if let Request::NewTab { terminal, .. }
+        | Request::Split { terminal, .. }
+        | Request::SplitTab { terminal, .. } = &request
+            && matches!(terminal, PaneTerminal::Lent { .. })
+        {
+            return Routed::Here(request);
+        }
         let (on, mirrored, from) = match &request {
             Request::NewWorkspace { on, .. } => (*on, None, None),
             &Request::NewTab { workspace, on, .. } => (
@@ -89,9 +126,11 @@ impl Daemon {
         let on = on.or(borrowed.map(|borrowed| borrowed.machine));
         let request = without_on(request);
         if let Some(at) = mirrored {
-            // Another machine's layout: made there, unless asked of a
+            // Another machine's layout: made there, or here, for one of
+            // this machine's, which it's asked to show; unless asked of a
             // third.
             return match on {
+                Some(machine) if machine == own => self.place_here(token, at, request, from),
                 Some(machine) if Some(machine) != self.machine_of(at) => {
                     Routed::Answered(Response::Error(self.unreachable_from(at, machine)))
                 }
@@ -290,8 +329,15 @@ impl Daemon {
                 "where the new pane was to go has closed".into(),
             ));
         };
-        self.workspaces
-            .borrow(pane, Borrowed { machine, key, kind });
+        self.workspaces.borrow(
+            pane,
+            Borrowed {
+                machine,
+                key,
+                kind,
+                placed: false,
+            },
+        );
         self.workspaces_changed();
         Response::PaneCreated(pane)
     }
@@ -346,8 +392,11 @@ impl Daemon {
         }
         let kept =
             |key: &u64| relayed.mirror.lent.contains_key(key) || relayed.lending.contains_key(key);
+        // One it put here itself in its present run, it closes itself, as
+        // it may have lent it before this daemon is shown so.
+        let theirs = |borrowed: &Borrowed| borrowed.placed && !relayed.restarted;
         let gone: Vec<PaneId> = (self.workspaces.borrowed().iter())
-            .filter(|(_, borrowed)| borrowed.machine == machine)
+            .filter(|(_, borrowed)| borrowed.machine == machine && !theirs(borrowed))
             .filter(|(_, borrowed)| !relayed.mirror.lent_cut && !kept(&borrowed.key))
             .map(|(&pane, _)| pane)
             .collect();
@@ -356,8 +405,12 @@ impl Daemon {
             .map(|borrowed| borrowed.key)
             .collect();
         let shown = |key: u64| shown.contains(&key);
+        // One it put in a layout here itself is its own to give back, as it
+        // may not have been put there yet.
         let unshown: Vec<(u64, LentPane)> = (relayed.mirror.lent.iter())
-            .filter(|&(&key, _)| !relayed.lending.contains_key(&key) && !shown(key))
+            .filter(|&(&key, lent)| {
+                !lent.placed && !relayed.lending.contains_key(&key) && !shown(key)
+            })
             .map(|(&key, &lent)| (key, lent))
             .collect();
         // One asked to close and still lent is asked again only on the
@@ -414,6 +467,69 @@ impl Daemon {
                 self.close_lent(at, borrowed.key, lent);
             }
         }
+    }
+
+    /// Answers `request`, from the client at `token`, if it's a new pane
+    /// another machine's daemon puts in a layout of this daemon's, showing
+    /// a pane of its own it made for it ([`PaneTerminal::Lent`]): a pane
+    /// borrowed from it, by its key there, which this daemon shows if it
+    /// reaches that machine, and as a pane to come if not. `None` for any
+    /// other request.
+    pub(in crate::server) fn place_from(
+        &mut self,
+        token: Token,
+        request: &Request,
+    ) -> Option<Result<Response, Error>> {
+        let (Request::NewTab { terminal, .. }
+        | Request::Split { terminal, .. }
+        | Request::SplitTab { terminal, .. }
+        | Request::NewWorkspace { terminal, .. }) = request
+        else {
+            return None;
+        };
+        let &PaneTerminal::Lent { key, kind } = terminal else {
+            return None;
+        };
+        let Some(machine) = self.machine_of_client(token).cloned() else {
+            return Some(Err(Error::Other(
+                "only a daemon on another machine that says which it is puts its panes here".into(),
+            )));
+        };
+        // Asked again, it's the one made already.
+        if let Some(pane) = self.workspaces.borrowed_as(machine.id, key) {
+            return Some(Ok(Response::PaneCreated(pane)));
+        }
+        let placeholder = Content::Other { kind };
+        let pane = match *request {
+            Request::NewTab { workspace, .. } => (self.workspaces.check_new_tab(workspace))
+                .map(|()| self.workspaces.new_tab(workspace, placeholder)),
+            Request::Split { pane, side, .. } => (self.workspaces.check_split(pane, side))
+                .map(|()| self.workspaces.split(pane, side, placeholder)),
+            Request::SplitTab {
+                tab, side, share, ..
+            } => (self.workspaces.check_split_tab(tab, side))
+                .map(|()| self.workspaces.split_tab(tab, side, placeholder, share)),
+            _ => Err(Error::Other(
+                "a pane from another machine goes beside a pane of this one's".into(),
+            )),
+        };
+        let pane = match pane {
+            Ok(pane) => pane,
+            Err(err) => return Some(Err(err)),
+        };
+        let name = crate::server::relay::mirror::shown_name(&machine.name).replace('@', "_");
+        self.workspaces.borrow(
+            pane,
+            Borrowed {
+                machine: machine.id,
+                key,
+                kind,
+                placed: true,
+            },
+        );
+        self.workspaces.lender_named(machine.id, &name);
+        self.workspaces_changed();
+        Some(Ok(Response::PaneCreated(pane)))
     }
 
     /// Shows in `shown`'s panes borrowed from other machines what the
@@ -494,6 +610,10 @@ impl Daemon {
         &self,
         local: PaneId,
     ) -> Option<Result<(usize, PaneId), Error>> {
+        // On a third machine, it's asked there, not of its layout's.
+        if let Some(found) = self.hop_pane(local) {
+            return Some(Ok(found));
+        }
         match self.relayed_pane(local) {
             Some(found) => Some(Ok(found)),
             None => self.borrowed_pane(local),
@@ -507,18 +627,24 @@ impl Daemon {
     }
 
     /// The machine of the connection at `at`, once it has said.
-    fn machine_of(&self, at: usize) -> Option<MachineId> {
+    pub(super) fn machine_of(&self, at: usize) -> Option<MachineId> {
         (self.links.list[at].machine.as_ref()).map(|machine| machine.id)
     }
 
     /// What `machine` is called here: its connection's host, this
-    /// machine's name, or the start of its ID.
-    fn machine_named(&self, machine: MachineId) -> String {
+    /// machine's name, what it said it's called as it lent or borrowed a
+    /// pane, or the start of its ID.
+    pub(in crate::server) fn machine_named(&self, machine: MachineId) -> String {
         if machine == self.machine.id {
             return self.machine.name.clone();
         }
-        match self.link_to(machine) {
-            Some(at) => self.links.list[at].remote.host.clone(),
+        if let Some(at) = self.link_to(machine) {
+            return self.links.list[at].remote.host.clone();
+        }
+        let said = (self.workspaces.lenders().get(&machine))
+            .or_else(|| Some(&self.workspaces.borrowers().get(&machine)?.name));
+        match said {
+            Some(name) => name.clone(),
             None => machine.to_string()[..8].to_owned(),
         }
     }
@@ -562,6 +688,8 @@ impl Daemon {
         relayed.lending.clear();
         relayed.closing.clear();
         relayed.lends_known = false;
+        relayed.placing.clear();
+        relayed.closing_there.clear();
     }
 
     /// Forgets the pane the daemon of the connection at `at` was asked to
@@ -661,6 +789,7 @@ mod tests {
                     id: PaneId(id),
                     content: Content::Terminal(TerminalId(id + 6)),
                     home: None,
+                    key: None,
                 }),
                 focused: PaneId(id),
                 name: None,
@@ -713,6 +842,7 @@ mod tests {
         let lent = Lent {
             to: daemon.machine.id,
             key,
+            placed: false,
         };
         // Its workspaces come first, then the answer.
         say(&mut desk_end, &there(Some(lent)));
@@ -755,6 +885,7 @@ mod tests {
         let lent = Lent {
             to: daemon.machine.id,
             key,
+            placed: false,
         };
         // Desk made it, and said so, but its answer is long in coming.
         say(&mut desk_end, &there(Some(lent)));

@@ -259,6 +259,10 @@ pub(crate) enum Reach {
     Down(String),
     /// Not tried again until `:connect` asks, for this reason.
     Stopped(String),
+    /// The daemon has no connection to it at all: a pane on it is in a
+    /// workspace another machine put it in, and only a daemon that reaches
+    /// it shows it.
+    Unreachable,
 }
 
 /// A workspace from another machine, as the top bar shows it: a ring in
@@ -1895,7 +1899,7 @@ fn paint_workspace<'a>(
         Some(Reach::NeedsPassword) => {
             Fill::rounded(place, Paint::Caution, dot / 2.0).bordered(ring, Paint::Caution)
         }
-        Some(Reach::Connecting | Reach::Down(_) | Reach::Stopped(_)) => {
+        Some(Reach::Connecting | Reach::Down(_) | Reach::Stopped(_) | Reach::Unreachable) => {
             Fill::rounded(place, Paint::Clear, dot / 2.0).bordered(ring, Paint::WarningEdge)
         }
     });

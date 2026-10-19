@@ -1117,6 +1117,7 @@ mod tests {
             }],
             active: None,
             machine: None,
+            others: Vec::new(),
         };
         state.chats = vec![
             summary(1, Some(1), false, 5 * 60_000),
@@ -1422,6 +1423,7 @@ mod tests {
                         id: clackatoo_protocol::PaneId(1),
                         content: clackatoo_protocol::Content::Terminal(TerminalId(2)),
                         home: None,
+                        key: None,
                     }),
                     focused: clackatoo_protocol::PaneId(1),
                     name: None,
@@ -1432,6 +1434,7 @@ mod tests {
             }],
             active: None,
             machine: None,
+            others: Vec::new(),
         };
         state.terminals = vec![TerminalInfo {
             id: TerminalId(2),

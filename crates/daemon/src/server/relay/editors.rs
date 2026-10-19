@@ -1566,6 +1566,7 @@ mod tests {
                     id: PaneId(2),
                     content: Content::Buffer(THERE),
                     home: None,
+                    key: None,
                 }),
                 focused: PaneId(2),
                 name: None,

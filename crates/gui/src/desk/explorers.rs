@@ -1262,6 +1262,7 @@ impl Desk {
                 id: PaneId(0),
                 content: Content::Terminal(clackatoo_protocol::TerminalId(0)),
                 home: None,
+                key: None,
             });
             Placement::new(&whole, &area).panes[0].1.cols
         });

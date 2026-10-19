@@ -561,6 +561,7 @@ mod tests {
                 id: PaneId(id),
                 content,
                 home: None,
+                key: None,
             })
         };
         let workspace = Workspace {

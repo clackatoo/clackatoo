@@ -1124,18 +1124,7 @@ impl Daemon {
                 WorkspaceState::new()
             });
         daemon.workspaces.set_home(&daemon.config.home);
-        daemon.workspaces.set_borrowers(
-            (state.borrowers.iter())
-                .map(|borrower| {
-                    let machine = MachineId(borrower.machine);
-                    let kept = crate::workspaces::Borrower {
-                        name: borrower.name.clone(),
-                        last_seen: borrower.last_seen,
-                    };
-                    (machine, kept)
-                })
-                .collect(),
-        );
+        daemon.resume_machines(state);
 
         for terminal in &state.terminals {
             let id = TerminalId(terminal.id);
@@ -1293,6 +1282,12 @@ impl Daemon {
                 last_seen: borrower.last_seen,
             })
             .collect();
+        let lenders = (self.workspaces.lenders().iter())
+            .map(|(machine, name)| handover::Lender {
+                machine: machine.0,
+                name: name.clone(),
+            })
+            .collect();
         // Their ssh processes end with them, rather than outlive the exec.
         let connections = (self.end_links().into_iter())
             .map(|(host, command)| handover::Connection { host, command })
@@ -1331,9 +1326,33 @@ impl Daemon {
                 connections,
                 lent,
                 borrowers,
+                lenders,
             },
             fds,
         })
+    }
+
+    /// Takes the machines the last build lent workspaces to, and what the
+    /// machines its borrowed panes are on are called, from `state`, which
+    /// it handed over.
+    fn resume_machines(&mut self, state: &handover::State) {
+        self.workspaces.set_borrowers(
+            (state.borrowers.iter())
+                .map(|borrower| {
+                    let machine = MachineId(borrower.machine);
+                    let kept = crate::workspaces::Borrower {
+                        name: borrower.name.clone(),
+                        last_seen: borrower.last_seen,
+                    };
+                    (machine, kept)
+                })
+                .collect(),
+        );
+        self.workspaces.set_lenders(
+            (state.lenders.iter())
+                .map(|lender| (MachineId(lender.machine), lender.name.clone()))
+                .collect(),
+        );
     }
 
     /// A handle that stops [`run`](Self::run) from another thread.
@@ -2220,6 +2239,13 @@ impl Daemon {
             PaneTerminal::Blank(blank) => {
                 return Ok(Content::Buffer(self.open_blank(&blank, beside)));
             }
+            // Only another machine's daemon puts one of these, as a new tab
+            // or beside a pane (see `place_from`).
+            PaneTerminal::Lent { .. } => {
+                return Err(Error::Other(
+                    "a pane from another machine goes only beside a pane".into(),
+                ));
+            }
         };
         Ok(Content::Terminal(terminal))
     }
@@ -2329,6 +2355,9 @@ impl Daemon {
         if !gone.is_empty() {
             self.borrowed_closed(&gone);
         }
+        // A pane of this machine's in another machine's layout that's gone
+        // here goes there.
+        self.held_changed();
         self.keep_soon();
         // A chat agents started may have come out of the background, or
         // gone back.
@@ -2721,15 +2750,21 @@ impl Daemon {
         if let Err(err) = self.refuse_lent(token, &request) {
             return Response::Error(err);
         }
+        // What's parked here while the machine it's lent to is away.
+        if let Some(answer) = self.parked_request(token, &request) {
+            return answer.unwrap_or_else(Response::Error);
+        }
         let response = match request {
             Request::Version => Ok(Response::Text(env!("CARGO_PKG_VERSION").to_owned())),
             Request::ListTerminals => Ok(Response::Terminals(self.terminal_infos(token))),
             Request::NewTerminal(request) => {
                 self.new_terminal(&request).map(Response::TerminalCreated)
             }
-            Request::SendInput { terminal, bytes } => self
-                .send_input(token, terminal, &bytes)
-                .map(|()| Response::Done),
+            Request::SendInput { terminal, bytes } => {
+                self.note_typed(terminal);
+                self.send_input(token, terminal, &bytes)
+                    .map(|()| Response::Done)
+            }
             Request::Capture { terminal } => self
                 .terminals
                 .get(&terminal)
@@ -2890,6 +2925,10 @@ impl Daemon {
         request: Request,
         token: Token,
     ) -> Result<Response, Error> {
+        // A pane another machine's daemon puts here, of its own.
+        if let Some(placed) = self.place_from(token, &request) {
+            return placed;
+        }
         let ids = |panes: Vec<Pane>| panes.iter().map(|pane| pane.id).collect();
         let closing: Vec<PaneId> = match &request {
             Request::ClosePane { pane }
@@ -2922,7 +2961,12 @@ impl Daemon {
                 }
                 // A window opening while devices ask hears of them.
                 self.tell_of_asks(token);
-                let shown = self.shown_workspaces();
+                let mut shown = self.shown_workspaces();
+                if self.relays(token)
+                    && let Some(without) = self.without_parked(&shown)
+                {
+                    shown = without;
+                }
                 Ok(Response::Workspaces(
                     self.with_lent(token, &shown).unwrap_or(shown),
                 ))
@@ -3227,6 +3271,10 @@ impl Daemon {
             self.forget_listings(token);
             self.forget_link_client(token);
             self.forget_relay_client(token);
+            // What's lent to its machine may be parked now.
+            if client.machine.is_some() {
+                self.held_reach_changed();
+            }
             if let Link::Quic(handle) = client.link {
                 self.abandon_forwards(Some(handle));
                 if let Some(quic) = self.quic.as_mut() {

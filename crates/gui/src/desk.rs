@@ -31,7 +31,7 @@ use crate::input::{self, KeptPress, KeyPress, Modifiers};
 use crate::keymap::{Chord, Pressed};
 use crate::layout::{Area, Direction, Divider, Placement};
 use crate::options::Options;
-use crate::other::OtherPane;
+use crate::other::{OtherPane, Why};
 use crate::pane::{self, Copy, Mode, Pane, PaneMouse, Selection};
 use bindings::Binding;
 pub(crate) use updating::UpdateAsked;
@@ -915,11 +915,16 @@ impl Desk {
             .map(|title| title.chars().filter(|&ch| shown_in_names(ch)).collect())
             .filter(|title: &String| !title.trim().is_empty());
         // Its focused pane on another machine than its workspace says
-        // which, unless `showhost` says never.
+        // which, unless `showhost` says never: `@local` for this machine's
+        // own, in a workspace of another's.
+        let own = self.workspaces.machine.as_ref().map(|machine| machine.id);
         let away = (self.options.showhost != crate::options::ShowHost::Never)
             .then(|| {
                 let (workspace, _, pane) = self.workspaces.find_pane(tab.focused)?;
                 let home = pane.home.filter(|&home| Some(home) != workspace.home)?;
+                if Some(home) == own {
+                    return Some("local".to_owned());
+                }
                 Some(self.elsewhere_on(home).host)
             })
             .flatten();
@@ -1243,38 +1248,48 @@ impl Desk {
     /// gone.
     fn show_others(&mut self) {
         // On another machine, one of a kind not relayed yet, which says
-        // so, by its host; or in a workspace of the daemon's own, one
-        // waiting for its machine to say what it shows.
-        let own = (self.shown)
-            .and_then(|shown| self.workspaces.get(shown.workspace))
-            .is_some_and(|workspace| workspace.home.is_none());
-        let shown: Vec<(PaneId, PaneKind, Option<String>, bool)> = (self.shown_tab())
+        // so, by its host; in a workspace of the daemon's own, one waiting
+        // for its machine to say what it shows; one on a machine the
+        // daemon can't reach; or one of the daemon's own machine, parked
+        // while the machine whose workspace it's in is away.
+        let shown_workspace = (self.shown).and_then(|shown| self.workspaces.get(shown.workspace));
+        let own = shown_workspace.is_some_and(|workspace| workspace.home.is_none());
+        let own_machine = self.workspaces.machine.as_ref().map(|machine| machine.id);
+        let layout_host = shown_workspace
+            .and_then(|workspace| self.elsewhere(workspace))
+            .map(|away| away.host);
+        let shown: Vec<(PaneId, PaneKind, Why)> = (self.shown_tab())
             .map(|tab| {
                 (tab.layout.panes().iter())
-                    .filter_map(|pane| match pane.content {
-                        Content::Other { kind } => {
-                            let host = self.pane_elsewhere(pane.id).map(|away| away.host);
-                            let waiting = own && host.is_some();
-                            Some((pane.id, kind, host, waiting))
-                        }
-                        _ => None,
+                    .filter_map(|pane| {
+                        let Content::Other { kind } = pane.content else {
+                            return None;
+                        };
+                        let why = match self.pane_elsewhere(pane.id) {
+                            _ if pane.home.is_some() && pane.home == own_machine => {
+                                Why::Parked(layout_host.clone().unwrap_or_default())
+                            }
+                            Some(away) if away.reach == crate::chrome::Reach::Unreachable => {
+                                Why::Unreachable(away.host)
+                            }
+                            Some(away) if own => Why::Waiting(away.host),
+                            Some(away) => Why::TooOld(away.host),
+                            None => Why::Newer,
+                        };
+                        Some((pane.id, kind, why))
                     })
                     .collect()
             })
             .unwrap_or_default();
         self.others.retain(|pane, other| {
-            (shown.iter()).any(|(shown, kind, host, waiting)| {
-                shown == pane
-                    && *kind == other.kind()
-                    && host.as_deref() == other.host()
-                    && *waiting == other.is_waiting()
+            (shown.iter()).any(|(shown, kind, why)| {
+                shown == pane && *kind == other.kind() && why == other.reason()
             })
         });
-        for (pane, kind, host, waiting) in shown {
-            self.others.entry(pane).or_insert_with(|| match host {
-                Some(host) if waiting => OtherPane::waiting(kind, host),
-                host => OtherPane::new(kind, host),
-            });
+        for (pane, kind, why) in shown {
+            self.others
+                .entry(pane)
+                .or_insert_with(|| OtherPane::why(kind, why));
         }
     }
 
@@ -2650,6 +2665,7 @@ impl Desk {
                 id: PaneId(0),
                 content: Content::Terminal(TerminalId(0)),
                 home: None,
+                key: None,
             }),
             &area,
         )
@@ -2751,6 +2767,7 @@ mod tests {
             id: PaneId(id),
             content: Content::Terminal(TerminalId(id)),
             home: None,
+            key: None,
         })
     }
 
@@ -2790,6 +2807,7 @@ mod tests {
             home: None,
             restored: Vec::new(),
             machine: None,
+            others: Vec::new(),
         }
     }
 
@@ -5137,6 +5155,7 @@ mod tests {
                 id: PaneId(1),
                 content: Content::Buffer(buffer),
                 home: None,
+                key: None,
             }),
             pane(2),
         ]);
@@ -5275,6 +5294,7 @@ mod tests {
             id: PaneId(1),
             content: Content::Buffer(buffer),
             home: None,
+            key: None,
         });
         let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
         let snapshot = BufferUpdate::Snapshot(BufferSnapshot {
@@ -5348,6 +5368,7 @@ mod tests {
             id: PaneId(1),
             content: Content::Buffer(buffer),
             home: None,
+            key: None,
         });
         let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
         let mut desk = Desk::default();
@@ -5401,6 +5422,7 @@ mod tests {
             id: PaneId(1),
             content: Content::Buffer(buffer),
             home: None,
+            key: None,
         });
         let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
         let snapshot = |text: &str, version, applied| {
@@ -5447,6 +5469,7 @@ mod tests {
             id: PaneId(1),
             content: Content::Buffer(buffer),
             home: None,
+            key: None,
         });
         let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
         let mut desk = Desk::default();
@@ -5499,6 +5522,7 @@ mod tests {
             id: PaneId(1),
             content: Content::Buffer(buffer),
             home: None,
+            key: None,
         });
         let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
         let snapshot = |version| {
@@ -5554,6 +5578,7 @@ mod tests {
             id: PaneId(1),
             content: Content::Buffer(buffer),
             home: None,
+            key: None,
         });
         let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
         let mut desk = Desk::default();
@@ -5636,6 +5661,7 @@ mod tests {
             id: PaneId(1),
             content: Content::Buffer(buffer),
             home: None,
+            key: None,
         });
         let snapshot = |text: &str, daemon| {
             clackatoo_protocol::BufferUpdate::Snapshot(clackatoo_protocol::BufferSnapshot {
@@ -5777,6 +5803,7 @@ mod tests {
             id: PaneId(1),
             content: Content::Buffer(buffer),
             home: None,
+            key: None,
         });
         let mut desk = Desk::default();
         desk.connected(
@@ -5834,6 +5861,7 @@ mod tests {
             id: PaneId(1),
             content: Content::Buffer(BufferId(7)),
             home: None,
+            key: None,
         });
         let mut desk = Desk::default();
         desk.connected(
@@ -5931,6 +5959,7 @@ mod tests {
             id: PaneId(1),
             content: Content::Buffer(buffer),
             home: None,
+            key: None,
         });
         let mut desk = Desk::default();
         desk.connected(
@@ -6035,6 +6064,7 @@ mod tests {
             id: PaneId(1),
             content: Content::Buffer(buffer),
             home: None,
+            key: None,
         });
         let mut desk = Desk::default();
         desk.set_area(Some(Area {
@@ -6145,6 +6175,7 @@ mod tests {
             id: PaneId(pane),
             content: Content::Buffer(BufferId(buffer)),
             home: None,
+            key: None,
         })
     }
 
@@ -6617,6 +6648,7 @@ mod tests {
             id: PaneId(1),
             content: Content::Buffer(buffer),
             home: None,
+            key: None,
         });
         let mut desk = desk(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
         desk.buffer_changed(
@@ -6926,6 +6958,7 @@ mod tests {
             id: PaneId(1),
             content: Content::Buffer(BufferId(8)),
             home: None,
+            key: None,
         });
         desk.workspaces_changed(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
         assert!(
@@ -9944,6 +9977,7 @@ mod tests {
             id: PaneId(pane),
             content: Content::Files(clackatoo_protocol::FilesId(files)),
             home: None,
+            key: None,
         })
     }
 
@@ -10377,6 +10411,7 @@ mod tests {
                 id: PaneId(pane),
                 content: Content::Browser(TerminalId(5)),
                 home: None,
+                key: None,
             })
         };
         let mut desk = desk(one_tab(pane(3)));
@@ -10465,6 +10500,7 @@ mod tests {
             id: PaneId(pane),
             content: Content::Board(clackatoo_protocol::BoardId(board)),
             home: None,
+            key: None,
         })
     }
 
@@ -11484,6 +11520,7 @@ mod tests {
                 id: PaneId(2),
                 content: Content::Review(ReviewId(1)),
                 home: None,
+                key: None,
             }),
         ]);
         desk.workspaces_changed(one_tab(layout));

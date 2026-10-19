@@ -204,6 +204,13 @@ gates! {
     /// it is, `Request::RelayAs`; giving one back, `Request::Unlend`, and
     /// listing them, `Request::Lent`; and `Event::Said`, for the bar.
     LEND = 93,
+    /// Layouts holding panes from machines their daemon can't reach: a
+    /// pane another machine puts in one, `PaneTerminal::Lent`, which the
+    /// workspace lending it says it did, `Lent`'s `placed`; the number a
+    /// pane has on its machine, `Pane`'s `key`, by which any daemon that
+    /// reaches that machine shows it; and what the machines a daemon isn't
+    /// connected to are called, `Workspaces`' `others` (`OtherMachine`).
+    MIXED = 94,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -622,7 +629,73 @@ fn newest_in_workspaces(workspaces: &Workspaces) -> u32 {
     } else {
         EARLIER
     };
-    contents.max(homes).max(relayed).max(lent)
+    // A pane of the daemon's own in a workspace from another machine, or
+    // one on a machine the daemon can't reach, whose home an older peer
+    // would misread.
+    let own = if own_elsewhere(workspaces).next().is_some() {
+        MIXED
+    } else {
+        EARLIER
+    };
+    contents.max(homes).max(relayed).max(lent).max(own)
+}
+
+/// The panes, by their IDs, whose homes an older peer would misread:
+/// those of the daemon's own in `workspaces`' workspaces from other
+/// machines, lent to them, which have a key; and those on a machine the
+/// daemon isn't connected to (`others`), which it would wait for as one
+/// it's connecting to.
+fn own_elsewhere(workspaces: &Workspaces) -> impl Iterator<Item = crate::PaneId> + '_ {
+    let own = workspaces.machine.as_ref().map(|machine| machine.id);
+    let other = |home: Option<crate::MachineId>| {
+        home.is_some_and(|home| workspaces.others.iter().any(|other| other.id == home))
+    };
+    (workspaces.list.iter())
+        .flat_map(move |workspace| {
+            let elsewhere = workspace.home.is_some();
+            (workspace.tabs.iter())
+                .flat_map(|tab| tab.layout.panes())
+                .filter(move |pane| {
+                    (elsewhere && own.is_some() && pane.home == own && pane.key.is_some())
+                        || other(pane.home)
+                })
+        })
+        .map(|pane| pane.id)
+}
+
+/// `message`, if it's the workspaces and some panes' homes are ones an
+/// older peer would misread (see [`own_elsewhere`]), with those said to be
+/// on their workspace's machine: what a peer from before mixed layouts is
+/// sent. It would take a home of the daemon's own for yet another
+/// machine's, and wait for one the daemon can't reach. Asked about
+/// through the daemon, as all a window asks is, such a pane still works,
+/// or says it can't.
+fn with_own_homes_unsaid(message: &ServerMessage) -> Option<ServerMessage> {
+    let (ServerMessage::Event(Event::Workspaces(workspaces))
+    | ServerMessage::Response(Response::Workspaces(workspaces))) = message
+    else {
+        return None;
+    };
+    let panes: Vec<crate::PaneId> = own_elsewhere(workspaces).collect();
+    if panes.is_empty() {
+        return None;
+    }
+    let mut shown = workspaces.clone();
+    for tab in shown
+        .list
+        .iter_mut()
+        .flat_map(|workspace| &mut workspace.tabs)
+    {
+        tab.layout.for_each_pane_mut(&mut |pane| {
+            if panes.contains(&pane.id) {
+                pane.home = None;
+            }
+        });
+    }
+    Some(match message {
+        ServerMessage::Event(_) => ServerMessage::Event(Event::Workspaces(shown)),
+        _ => ServerMessage::Response(Response::Workspaces(shown)),
+    })
 }
 
 /// `message`, if it's the workspaces and some are lent to another daemon,
@@ -842,6 +915,14 @@ impl Downgrade for ServerMessage {
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
         if newest(self) <= wire {
             return Downgraded::AsIs;
+        }
+        if wire < MIXED
+            && let Some(shown) = with_own_homes_unsaid(self)
+        {
+            return match shown.downgrade(wire) {
+                Downgraded::AsIs => Downgraded::To(shown),
+                downgraded => downgraded,
+            };
         }
         if wire < LEND
             && let Some(own) = without_lent(self)
@@ -1321,6 +1402,7 @@ mod tests {
                     id: PaneId(id),
                     content: Content::Terminal(crate::TerminalId(id)),
                     home: None,
+                    key: None,
                 }),
                 focused: PaneId(id),
                 name: None,
@@ -1332,6 +1414,7 @@ mod tests {
         let lent = Lent {
             to: crate::MachineId([7; 16]),
             key: 9,
+            placed: false,
         };
         let workspaces = Workspaces {
             list: vec![workspace(1, None), workspace(2, Some(lent))],
@@ -1349,6 +1432,77 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_from_before_mixed_layouts_is_told_a_pane_of_the_daemons_own_is_its_workspaces() {
+        use crate::{Layout, Machine, Pane, PaneId, Tab, TabId, Workspace, WorkspaceId};
+        let laptop = crate::MachineId([0xa1; 16]);
+        let pane = |id: u32, home, key| {
+            Layout::Pane(Pane {
+                id: PaneId(id),
+                content: Content::Terminal(crate::TerminalId(id)),
+                home,
+                key,
+            })
+        };
+        let desk = |held: Layout| Workspace {
+            id: WorkspaceId(1),
+            name: "work".into(),
+            tabs: vec![Tab {
+                id: TabId(1),
+                layout: held,
+                focused: PaneId(1),
+                name: None,
+            }],
+            active_tab: TabId(1),
+            home: Some(crate::MachineId([7; 16])),
+            lent: None,
+        };
+        let workspaces = |held| Workspaces {
+            list: vec![desk(held)],
+            machine: Some(Machine {
+                id: laptop,
+                name: "laptop".into(),
+                run: 1,
+            }),
+            ..Workspaces::default()
+        };
+        // Desk's workspace holds a terminal of the daemon's own machine,
+        // lent it.
+        let message = ServerMessage::Event(Event::Workspaces(workspaces(pane(
+            1,
+            Some(laptop),
+            Some(9),
+        ))));
+        assert_eq!(newest(&message), MIXED);
+        assert_eq!(message.downgrade(MIXED), Downgraded::AsIs);
+        let Downgraded::To(ServerMessage::Event(Event::Workspaces(older))) =
+            message.downgrade(MIXED - 1)
+        else {
+            panic!("{message:?} wasn't downgraded");
+        };
+        assert_eq!(older, workspaces(pane(1, None, Some(9))));
+        // One on a machine the daemon isn't connected to, which it names,
+        // is told as one of the workspace's.
+        let mut away = workspaces(pane(1, Some(crate::MachineId([5; 16])), Some(3)));
+        away.others = vec![crate::OtherMachine {
+            id: crate::MachineId([5; 16]),
+            name: "server".into(),
+        }];
+        let message = ServerMessage::Event(Event::Workspaces(away.clone()));
+        let Downgraded::To(ServerMessage::Event(Event::Workspaces(older))) =
+            message.downgrade(MIXED - 1)
+        else {
+            panic!("{message:?} wasn't downgraded");
+        };
+        away.list[0].tabs[0].layout = pane(1, None, Some(3));
+        assert_eq!(older, away);
+        // One of the daemon's machine with no key, as protocol 91's
+        // samples have, is as it was.
+        let message =
+            ServerMessage::Event(Event::Workspaces(workspaces(pane(1, Some(laptop), None))));
+        assert!(newest(&message) < MIXED);
+    }
+
+    #[test]
     fn a_peer_from_before_federation_sees_only_the_daemons_own_workspaces() {
         use crate::{Layout, Pane, PaneId, Tab, TabId, Workspace, WorkspaceId};
         let workspace = |id: u32, home: Option<crate::MachineId>| Workspace {
@@ -1360,6 +1514,7 @@ mod tests {
                     id: PaneId(id),
                     content: Content::Terminal(crate::TerminalId(id)),
                     home: None,
+                    key: None,
                 }),
                 focused: PaneId(id),
                 name: None,

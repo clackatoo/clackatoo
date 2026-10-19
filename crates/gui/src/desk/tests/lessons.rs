@@ -1307,6 +1307,7 @@ fn the_explorer_lessons_editor_goes_to_its_folder_with_minus_and_opens_a_file_fr
         id: PaneId(2),
         content: Content::Folder(FilesId(5)),
         home: None,
+        key: None,
     });
     let layout = side_by_side(vec![file_pane(3, 8), folder]);
     desk.workspaces_changed(workspaces(vec![with_lesson(layout, vec![], 2)]));
@@ -1392,6 +1393,7 @@ fn the_explorer_lessons_e_alone_opens_the_explorer_beside_a_blank_file_which_w_n
         id: PaneId(4),
         content: Content::Files(FilesId(5)),
         home: None,
+        key: None,
     });
     open(&mut desk, "explorer", file_pane(2, 9));
     let layout = side_by_side(vec![file_pane(3, 8), explorer.clone(), file_pane(2, 9)]);

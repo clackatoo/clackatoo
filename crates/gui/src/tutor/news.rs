@@ -533,6 +533,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: ":Terminal@desk opens a pane on desk in your workspace, and :ws new@desk a workspace there",
     },
+    News {
+        id: "mixed",
+        date: "2026-10-19",
+        lesson: "remote",
+        what: ":|Terminal@local puts a pane of this machine's in one of desk's workspaces, parked here while desk is away",
+    },
 ];
 
 impl News {

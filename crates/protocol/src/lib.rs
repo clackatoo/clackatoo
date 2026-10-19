@@ -115,13 +115,13 @@ pub use view::{
     Links, Node, NodeId, Patch, Run, View, ViewUpdate,
 };
 pub use workspace::{
-    Axis, Content, Layout, Lent, MAX_NESTING, Pane, PaneId, PaneKind, PaneTerminal, Place,
-    Restored, Side, Tab, TabId, Workspace, WorkspaceId, Workspaces,
+    Axis, Content, Layout, Lent, MAX_NESTING, OtherMachine, Pane, PaneId, PaneKind, PaneTerminal,
+    Place, Restored, Side, Tab, TabId, Workspace, WorkspaceId, Workspaces,
 };
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 93;
+pub const PROTOCOL_VERSION: u32 = 94;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1190,7 +1190,10 @@ pub enum Request {
     },
     /// As [`Relay`](Self::Relay), from a daemon that says which machine it
     /// is: the daemon then also shows it the workspaces holding the panes
-    /// it lent it ([`Lend`](Self::Lend)), and no other client. Only a
+    /// it lent it ([`Lend`](Self::Lend)), and no client but such a daemon.
+    /// One of protocol 94 or later is shown those lent to other machines
+    /// too, as it may show their layouts, and reach a pane lent there
+    /// straight from here rather than through them. Only a
     /// client over QUIC, as a daemon connected to this one is, may say it;
     /// not this daemon's own machine, nor a machine another connection
     /// says it is in another run, nor another machine than the one this

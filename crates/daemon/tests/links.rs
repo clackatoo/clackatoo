@@ -2446,28 +2446,9 @@ fn a_new_pane_goes_on_the_machine_of_the_pane_its_made_from_whatever_its_kind() 
 }
 
 #[test]
-fn a_pane_from_a_machine_a_workspace_there_cant_reach_is_refused() {
+fn a_pane_named_on_the_machine_a_workspace_is_on_is_made_there() {
     let mut pair = Pair::new();
-    let desk = pair.desk.machine();
     let pane = pair.work.tabs[0].layout.panes()[0].id;
-    let refusals = [
-        Request::Split {
-            pane,
-            side: Side::Right,
-            terminal: shell(),
-            on: Some(desk.id),
-        },
-        new_tab_on(pair.work.id, shell(), desk.id),
-    ];
-    for refused in refusals {
-        let answer = pair.window.request(&refused).unwrap();
-        assert_eq!(
-            answer,
-            Response::Error(Error::Other(
-                "‘laptop’ can't reach ‘desk’: open it in one of ‘desk’'s workspaces".into()
-            )),
-        );
-    }
     // Naming laptop itself is the same as naming none.
     let laptop = pair.laptop().machine().id;
     let split = Request::Split {
@@ -3209,4 +3190,633 @@ fn summed(times: &mut [Duration]) -> String {
         at(0.99),
         at(1.0)
     )
+}
+
+// --- Panes of this machine's in another machine's layouts --------------
+
+/// Laptop, connected to desk, which has a workspace `work` with a shell in
+/// it, as `window`, a client of laptop's, is shown it; desk isn't
+/// connected to laptop, and can't reach it. Who's who is the other way
+/// round from [`Pair`], as a window on a laptop working in a workspace of
+/// desk's is what this is for. Both keep their workspaces from one run to
+/// the next.
+struct Mixed {
+    world: World,
+    laptop: Option<TestDaemon>,
+    desk: Option<TestDaemon>,
+    window: Client,
+    work: Workspace,
+}
+
+impl Mixed {
+    fn new() -> Self {
+        let world = World::new();
+        let laptop = world.start_with("laptop", true);
+        let desk = world.start_with("desk", true);
+        desk.client()
+            .new_workspace(Some("work".into()), shell())
+            .unwrap();
+        let mut window = laptop.client();
+        window.watch_connections(false).unwrap();
+        connect(&mut window, "desk");
+        let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "work").is_some());
+        let work = theirs(&shown, "work").unwrap().clone();
+        Self {
+            world,
+            laptop: Some(laptop),
+            desk: Some(desk),
+            window,
+            work,
+        }
+    }
+
+    fn laptop(&self) -> &TestDaemon {
+        self.laptop.as_ref().expect("laptop is running")
+    }
+
+    fn desk(&self) -> &TestDaemon {
+        self.desk.as_ref().expect("desk is running")
+    }
+
+    /// Puts a pane of laptop's showing `content` in desk's `work`, beside
+    /// its first pane, from laptop's window: laptop's number for the pane
+    /// there, and what it shows, by laptop's numbers, once it's shown.
+    fn place(&mut self, content: PaneTerminal) -> (PaneId, Content) {
+        let laptop = self.laptop().machine().id;
+        let beside = self.work.tabs[0].layout.panes()[0].id;
+        let split = Request::Split {
+            pane: beside,
+            side: Side::Right,
+            terminal: content,
+            on: Some(laptop),
+        };
+        let pane = made(&mut self.window, &split);
+        let content = wait_for_borrowed(&mut self.window, pane);
+        (pane, content)
+    }
+
+    /// How many workspaces laptop lends, desk's layouts' included.
+    fn lent(&self) -> usize {
+        lent_by(&mut self.laptop().client())
+    }
+
+    /// Waits for laptop to lend `count` workspaces.
+    fn wait_for_lent(&self, count: usize) {
+        let deadline = Instant::now() + PATIENCE;
+        while self.lent() != count {
+            assert!(
+                Instant::now() < deadline,
+                "laptop lends {}, not {count}",
+                self.lent()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+/// The panes of `machine`'s in desk's `work`, as `workspaces`, a client of
+/// desk's or a daemon showing desk's workspaces, shows them.
+fn panes_of(workspaces: &Workspaces, machine: MachineId) -> Vec<clackatoo_protocol::Pane> {
+    (workspaces.list.iter())
+        .filter(|workspace| workspace.name == "work")
+        .flat_map(|workspace| &workspace.tabs)
+        .flat_map(|tab| tab.layout.panes())
+        .filter(|pane| pane.home == Some(machine))
+        .collect()
+}
+
+/// The workspace of laptop's own called `name`, as `workspaces` shows it.
+fn own<'a>(workspaces: &'a Workspaces, name: &str) -> Option<&'a Workspace> {
+    (workspaces.list.iter()).find(|workspace| workspace.home.is_none() && workspace.name == name)
+}
+
+#[test]
+fn a_pane_of_this_machine_in_another_machines_layout_is_typed_into_here_alone() {
+    let mut mixed = Mixed::new();
+    let laptop = mixed.laptop().machine();
+    let desk = mixed.desk().machine();
+    let (pane, content) = mixed.place(shell());
+    let terminal = terminal_of(content);
+    // Laptop's window sees it in desk's workspace, a pane of laptop's own,
+    // by laptop's numbers: laptop lists the terminal as one of its own.
+    let shown = mixed.window.watch_workspaces().unwrap();
+    let (workspace, shown_pane) = found(&shown, pane);
+    assert_eq!(
+        (workspace.name.as_str(), workspace.home),
+        ("work", Some(desk.id))
+    );
+    assert_eq!(shown_pane.home, Some(laptop.id));
+    let listed: Vec<TerminalId> = (mixed.window.list_terminals().unwrap().into_iter())
+        .map(|terminal| terminal.id)
+        .collect();
+    assert!(listed.contains(&terminal), "{listed:?}");
+    // Laptop lists it as lent to desk, which it's connected to.
+    let lent = mixed.laptop().client().request(&Request::Lent).unwrap();
+    assert!(
+        matches!(&lent, Response::Text(text) if text.contains("lent to desk, connected")),
+        "{lent:?}"
+    );
+    // Keys go straight to it, never through desk: with the connection to
+    // desk frozen, they still reach it, and it answers, in laptop's home.
+    attach_to(&mut mixed.window, terminal);
+    let bridge = pid(&mixed.world, "ssh.pid");
+    signal(&bridge, "-STOP");
+    (mixed.window)
+        .send_input(terminal, b"echo at-$(basename $PWD)\r")
+        .unwrap();
+    wait_for_view(&mut mixed.window, terminal, "at-laptop");
+    signal(&bridge, "-CONT");
+    // Desk's own windows see a pane to come, on laptop, by its name, as
+    // desk can't reach laptop.
+    let at_desk = wait_for_workspaces(&mut mixed.desk().client(), |shown| {
+        panes_of(shown, laptop.id).len() == 1
+    });
+    let placeholder = panes_of(&at_desk, laptop.id)[0];
+    assert!(
+        matches!(placeholder.content, Content::Other { kind } if kind.as_str() == "terminal"),
+        "{placeholder:?}"
+    );
+    assert!(placeholder.key.is_some());
+    assert!(
+        (at_desk.others.iter()).any(|other| other.id == laptop.id && other.name == "laptop"),
+        "{:?}",
+        at_desk.others
+    );
+    // Nor can desk's windows ask anything of it there.
+    let mut at_desk_client = mixed.desk().client();
+    let refused = at_desk_client
+        .request(&Request::OpenHere {
+            pane: placeholder.id,
+            file: OpenFile {
+                path: "notes.txt".into(),
+                cwd: None,
+            },
+        })
+        .unwrap();
+    assert!(matches!(refused, Response::Error(_)), "{refused:?}");
+}
+
+#[test]
+fn a_pane_of_this_machine_is_parked_here_while_the_layouts_machine_is_away() {
+    let mut mixed = Mixed::new();
+    let laptop = mixed.laptop().machine().id;
+    let (pane, content) = mixed.place(shell());
+    let terminal = terminal_of(content);
+    attach_to(&mut mixed.window, terminal);
+    (mixed.window)
+        .send_input(terminal, b"echo one-$((1 + 1))\r")
+        .unwrap();
+    wait_for_view(&mut mixed.window, terminal, "one-2");
+    // Desk goes away: the pane is parked in a workspace of laptop's own,
+    // named after desk, and desk's workspace, as last shown, shows a pane
+    // to come in its place, as a terminal is in one pane at most.
+    drop(mixed.desk.take());
+    let shown = wait_for_workspaces(&mut mixed.window, |shown| own(shown, "from-desk").is_some());
+    let parked = own(&shown, "from-desk").unwrap();
+    assert_eq!(
+        parked.tabs[0].layout.panes()[0].content,
+        Content::Terminal(terminal)
+    );
+    assert!(matches!(
+        found(&shown, pane).1.content,
+        Content::Other { .. }
+    ));
+    // It's typed into as ever: nothing of it went anywhere.
+    (mixed.window)
+        .send_input(terminal, b"echo two-$((2 + 2))\r")
+        .unwrap();
+    wait_for_view(&mut mixed.window, terminal, "two-4");
+    // Desk back, it's back where it was, the same terminal, and the
+    // workspace it was parked in has gone.
+    mixed.desk = Some(mixed.world.start_with("desk", true));
+    let shown = wait_for_workspaces(&mut mixed.window, |shown| {
+        own(shown, "from-desk").is_none()
+            && panes_of(shown, laptop)
+                .iter()
+                .any(|pane| pane.content == Content::Terminal(terminal))
+    });
+    assert_eq!(panes_of(&shown, laptop).len(), 1);
+    (mixed.window)
+        .send_input(terminal, b"echo three-$((3 + 3))\r")
+        .unwrap();
+    wait_for_view(&mut mixed.window, terminal, "three-6");
+}
+
+#[test]
+fn a_pane_of_this_machine_closed_on_either_side_goes_from_both() {
+    let mut mixed = Mixed::new();
+    let laptop = mixed.laptop().machine().id;
+    let before = mixed.lent();
+    let at_desk = |mixed: &Mixed, count: usize| {
+        let mut client = mixed.desk().client();
+        wait_for_workspaces(&mut client, |shown| panes_of(shown, laptop).len() == count)
+    };
+    // Closed from here: here, and there.
+    let (pane, _) = mixed.place(shell());
+    assert_eq!(mixed.lent(), before + 1);
+    mixed.window.close_pane(pane).unwrap();
+    at_desk(&mixed, 0);
+    mixed.wait_for_lent(before);
+    // Closed from desk, a shell running nothing closes here.
+    mixed.place(shell());
+    let shown = at_desk(&mixed, 1);
+    mixed
+        .desk()
+        .client()
+        .close_pane(panes_of(&shown, laptop)[0].id)
+        .unwrap();
+    mixed.wait_for_lent(before);
+    // One running something is given back instead, as a workspace of
+    // laptop's own, named after desk, as desk couldn't see what it closed.
+    let (_, content) = mixed.place(shell());
+    let terminal = terminal_of(content);
+    attach_to(&mut mixed.window, terminal);
+    (mixed.window)
+        .send_input(terminal, b"echo started; sleep 1000\r")
+        .unwrap();
+    wait_for_view(&mut mixed.window, terminal, "started");
+    std::thread::sleep(Duration::from_millis(300));
+    let shown = at_desk(&mixed, 1);
+    mixed
+        .desk()
+        .client()
+        .close_pane(panes_of(&shown, laptop)[0].id)
+        .unwrap();
+    let shown = wait_for_workspaces(&mut mixed.window, |shown| own(shown, "from-desk").is_some());
+    assert_eq!(
+        own(&shown, "from-desk").unwrap().tabs[0].layout.panes()[0].content,
+        Content::Terminal(terminal)
+    );
+    assert_eq!(mixed.lent(), before);
+    // Its program ending here, it goes from desk's layout too.
+    let (_, content) = mixed.place(shell());
+    let terminal = terminal_of(content);
+    mixed.window.send_input(terminal, b"exit\r").unwrap();
+    at_desk(&mixed, 0);
+    mixed.wait_for_lent(before);
+    // A tab of desk's holding one alone, closed from here, closes on both,
+    // and the close is answered as any.
+    let tab = new_tab_on(mixed.work.id, shell(), laptop);
+    let pane = made(&mut mixed.window, &tab);
+    let shown = wait_for_workspaces(&mut mixed.window, |shown| {
+        (shown.find_pane(pane)).is_some_and(|(_, _, pane)| pane.content.terminal().is_some())
+    });
+    let (_, tab, _) = shown.find_pane(pane).unwrap();
+    assert_eq!(mixed.lent(), before + 1);
+    let closed = mixed
+        .window
+        .request(&Request::CloseTab { tab: tab.id })
+        .unwrap();
+    assert_eq!(closed, Response::Done);
+    at_desk(&mixed, 0);
+    mixed.wait_for_lent(before);
+}
+
+#[test]
+fn a_pane_of_this_machine_the_layouts_machine_restarted_without_is_given_back_here() {
+    let mut mixed = Mixed::new();
+    let before = mixed.lent();
+    let (_, content) = mixed.place(shell());
+    let terminal = terminal_of(content);
+    // Desk starts afresh, keeping nothing: the pane, a shell running
+    // nothing though it is, becomes a workspace of laptop's own.
+    drop(mixed.desk.take());
+    std::fs::remove_file(mixed.world.host("desk").join("workspaces")).unwrap();
+    mixed.desk = Some(mixed.world.start_with("desk", true));
+    let shown = wait_for_workspaces(&mut mixed.window, |shown| {
+        (shown.list.iter()).any(|workspace| {
+            workspace.home.is_none()
+                && workspace.name.starts_with("from-desk")
+                && workspace.tabs[0].layout.panes()[0].content == Content::Terminal(terminal)
+        })
+    });
+    mixed.wait_for_lent(before);
+    // A window here can use it as any.
+    drop(shown);
+    attach_to(&mut mixed.window, terminal);
+    (mixed.window)
+        .send_input(terminal, b"echo kept-$((5 * 5))\r")
+        .unwrap();
+    wait_for_view(&mut mixed.window, terminal, "kept-25");
+}
+
+#[test]
+fn a_pane_of_this_machine_is_made_again_in_the_layout_after_this_machine_restarts() {
+    let mut mixed = Mixed::new();
+    let laptop = mixed.laptop().machine().id;
+    let (_, content) = mixed.place(shell());
+    let terminal = terminal_of(content);
+    // Laptop restarts, keeping its workspaces and connections: it makes
+    // the pane again, a new shell, which desk's layout still names.
+    drop(mixed.laptop.take());
+    let laptop_again = mixed.world.start_with("laptop", true);
+    let mut window = laptop_again.client();
+    let shown = wait_for_workspaces(&mut window, |shown| {
+        panes_of(shown, laptop)
+            .iter()
+            .any(|pane| matches!(pane.content, Content::Terminal(_)))
+    });
+    let again = terminal_of(panes_of(&shown, laptop)[0].content);
+    assert_eq!(
+        again.0 == terminal.0,
+        again == terminal,
+        "a terminal of this run"
+    );
+    attach_to(&mut window, again);
+    window
+        .send_input(again, b"echo again-$(basename $PWD)\r")
+        .unwrap();
+    wait_for_view(&mut window, again, "again-laptop");
+    mixed.laptop = Some(laptop_again);
+}
+
+#[test]
+fn every_kind_of_pane_of_this_machine_goes_in_another_machines_layout_and_works_from_here() {
+    let mut mixed = Mixed::new();
+    let laptop = mixed.laptop().machine().id;
+    let home = mixed.world.host("laptop");
+    std::fs::write(home.join("notes.txt"), "notes\n").unwrap();
+    std::fs::write(home.join("todo.md"), "fix the frobnicator\n").unwrap();
+    let editor = PaneTerminal::File(OpenFile {
+        path: "notes.txt".into(),
+        cwd: None,
+    });
+    let explorer = PaneTerminal::Files(OpenFiles { dir: None });
+    let (editor_pane, editor_content) = mixed.place(editor);
+    let (_, explorer_content) = mixed.place(explorer);
+    let (_, chat_content) = mixed.place(chat());
+    assert!(
+        matches!(editor_content, Content::Buffer(_)),
+        "{editor_content:?}"
+    );
+    assert!(
+        matches!(explorer_content, Content::Files(_)),
+        "{explorer_content:?}"
+    );
+    assert!(
+        matches!(chat_content, Content::Terminal(_)),
+        "{chat_content:?}"
+    );
+    let shown = mixed.window.watch_workspaces().unwrap();
+    assert_eq!(panes_of(&shown, laptop).len(), 3);
+    // The editor's buffer is laptop's own: its text is the file here.
+    let Content::Buffer(buffer) = editor_content else {
+        unreachable!()
+    };
+    let snapshot = attach_to_buffer(&mut mixed.window, buffer, 7);
+    assert_eq!(snapshot.text, "notes\n");
+    // Another file opened in it is opened here.
+    let open = Request::OpenHere {
+        pane: editor_pane,
+        file: OpenFile {
+            path: "todo.md".into(),
+            cwd: None,
+        },
+    };
+    assert_eq!(mixed.window.request(&open).unwrap(), Response::Done);
+    wait_for_workspaces(&mut mixed.window, |shown| {
+        (shown.find_pane(editor_pane))
+            .is_some_and(|(_, _, pane)| matches!(pane.content, Content::Buffer(b) if b != buffer))
+    });
+    // The finder from it greps laptop.
+    let grep = Search::Grep {
+        pattern: "frobnicator".into(),
+        exact: true,
+    };
+    mixed.window.find(8, Some(editor_pane), grep).unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    let root = loop {
+        assert!(Instant::now() < deadline, "the search never said its root");
+        match mixed.window.next_event().unwrap() {
+            Event::Found {
+                id: 8,
+                found: Found::Root { path, .. },
+            } => break path,
+            Event::View { terminal, .. } => mixed.window.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    };
+    assert_eq!(root, home.display().to_string());
+}
+
+#[test]
+fn a_pane_of_this_machine_is_shown_on_the_layouts_machine_once_it_reaches_this_one() {
+    let mut mixed = Mixed::new();
+    let laptop = mixed.laptop().machine().id;
+    let (_, content) = mixed.place(shell());
+    let here = terminal_of(content);
+    // Desk connects to laptop too: its windows see the pane as it is, and
+    // what they type reaches it, through desk.
+    let mut at_desk = mixed.desk().client();
+    at_desk.watch_connections(false).unwrap();
+    connect(&mut at_desk, "laptop");
+    let shown = wait_for_workspaces(&mut at_desk, |shown| {
+        panes_of(shown, laptop)
+            .iter()
+            .any(|pane| matches!(pane.content, Content::Terminal(_)))
+    });
+    let there = terminal_of(panes_of(&shown, laptop)[0].content);
+    attach_to(&mut at_desk, there);
+    at_desk.send_input(there, b"echo via-$((7 * 8))\r").unwrap();
+    wait_for_view(&mut at_desk, there, "via-56");
+    // Laptop's own window still has it straight from here.
+    let shown = mixed.window.watch_workspaces().unwrap();
+    assert!(
+        panes_of(&shown, laptop)
+            .iter()
+            .any(|pane| pane.content == Content::Terminal(here)),
+        "{shown:?}"
+    );
+    assert_eq!(mixed.lent(), 1);
+    // Laptop no longer connected to desk, but desk to it: desk's layout
+    // still shows it, so it isn't parked here as well.
+    mixed.window.disconnect("desk").unwrap();
+    let shown = wait_for_workspaces(&mut mixed.window, |shown| theirs(shown, "work").is_none());
+    assert!(own(&shown, "from-desk").is_none(), "{shown:?}");
+    at_desk
+        .send_input(there, b"echo kept-$((7 * 9))\r")
+        .unwrap();
+    wait_for_view(&mut at_desk, there, "kept-63");
+}
+
+#[test]
+fn what_is_asked_of_a_pane_of_this_machine_is_answered_here_without_desk() {
+    let mut mixed = Mixed::new();
+    let home = mixed.world.host("laptop");
+    std::fs::write(home.join("notes.txt"), "notes\n").unwrap();
+    std::fs::write(home.join("todo.md"), "fix the frobnicator\n").unwrap();
+    let editor = PaneTerminal::File(OpenFile {
+        path: "notes.txt".into(),
+        cwd: None,
+    });
+    let (pane, content) = mixed.place(editor);
+    let Content::Buffer(notes) = content else {
+        panic!("{content:?}");
+    };
+    // With the connection to desk frozen, the finder and a file opened in
+    // it, asked by the number of the pane in desk's layout, are answered
+    // at once: here, never through desk.
+    let bridge = pid(&mixed.world, "ssh.pid");
+    signal(&bridge, "-STOP");
+    let grep = Search::Grep {
+        pattern: "frobnicator".into(),
+        exact: true,
+    };
+    mixed.window.find(5, Some(pane), grep).unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    let root = loop {
+        assert!(Instant::now() < deadline, "the search never said its root");
+        match mixed.window.next_event().unwrap() {
+            Event::Found {
+                id: 5,
+                found: Found::Root { path, .. },
+            } => break path,
+            Event::View { terminal, .. } => mixed.window.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    };
+    assert_eq!(root, home.display().to_string());
+    let asked = Instant::now();
+    let open = Request::OpenHere {
+        pane,
+        file: OpenFile {
+            path: "todo.md".into(),
+            cwd: None,
+        },
+    };
+    assert_eq!(mixed.window.request(&open).unwrap(), Response::Done);
+    assert!(
+        asked.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        asked.elapsed()
+    );
+    let shown = wait_for_workspaces(&mut mixed.window, |shown| {
+        (shown.find_pane(pane)).is_some_and(
+            |(_, _, pane)| matches!(pane.content, Content::Buffer(buffer) if buffer != notes),
+        )
+    });
+    let Content::Buffer(buffer) = found(&shown, pane).1.content else {
+        unreachable!()
+    };
+    assert_eq!(
+        attach_to_buffer(&mut mixed.window, buffer, 3).text,
+        "fix the frobnicator\n"
+    );
+    signal(&bridge, "-CONT");
+}
+
+#[test]
+fn the_workspace_panes_are_parked_in_closes_them_all_but_takes_no_new_name_or_pane() {
+    let mut mixed = Mixed::new();
+    let before = mixed.lent();
+    mixed.place(shell());
+    mixed.place(shell());
+    drop(mixed.desk.take());
+    let shown = wait_for_workspaces(&mut mixed.window, |shown| {
+        own(shown, "from-desk").is_some_and(|parked| parked.tabs.len() == 2)
+    });
+    let parked = own(&shown, "from-desk").unwrap().clone();
+    let first = parked.tabs[0].layout.panes()[0].id;
+    // Neither a new name nor a pane beside one: they go back to desk.
+    let rename = Request::RenameWorkspace {
+        workspace: parked.id,
+        name: "mine".into(),
+    };
+    let refused = mixed.window.request(&rename).unwrap();
+    assert!(
+        matches!(&refused, Response::Error(Error::Other(why)) if why.contains("parked while ‘desk’ is away")),
+        "{refused:?}"
+    );
+    let split = Request::Split {
+        pane: first,
+        side: Side::Right,
+        terminal: shell(),
+        on: None,
+    };
+    let refused = mixed.window.request(&split).unwrap();
+    assert!(
+        matches!(&refused, Response::Error(Error::Other(why)) if why.contains("once it's back in desk's workspace")),
+        "{refused:?}"
+    );
+    // Closed, every pane parked for desk closes.
+    let close = Request::CloseWorkspace {
+        workspace: parked.id,
+    };
+    assert_eq!(mixed.window.request(&close).unwrap(), Response::Done);
+    wait_for_workspaces(&mut mixed.window, |shown| own(shown, "from-desk").is_none());
+    mixed.wait_for_lent(before);
+}
+
+#[test]
+fn a_third_machine_reaching_both_shows_a_pane_of_one_in_the_others_layout_from_it() {
+    let mut mixed = Mixed::new();
+    let laptop = mixed.laptop().machine().id;
+    let (_, content) = mixed.place(shell());
+    terminal_of(content);
+    // A server connected to desk and laptop, but neither to it.
+    let server = mixed.world.start("server");
+    let mut window = server.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "desk");
+    connect(&mut window, "laptop");
+    let shown = wait_for_workspaces(&mut window, |shown| {
+        panes_of(shown, laptop)
+            .iter()
+            .any(|pane| matches!(pane.content, Content::Terminal(_)))
+    });
+    let terminal = terminal_of(panes_of(&shown, laptop)[0].content);
+    attach_to(&mut window, terminal);
+    window
+        .send_input(terminal, b"echo hop-$(basename $PWD)\r")
+        .unwrap();
+    wait_for_view(&mut window, terminal, "hop-laptop");
+    // It may type into it, but not end its program: that's for the
+    // machines whose layouts hold it.
+    let refused = window
+        .request(&Request::CloseTerminal { terminal })
+        .unwrap();
+    assert!(matches!(refused, Response::Error(_)), "{refused:?}");
+    window
+        .send_input(terminal, b"echo still-$((2 * 3))\r")
+        .unwrap();
+    wait_for_view(&mut window, terminal, "still-6");
+    // An editor of laptop's there is laptop's file, edited through the
+    // server's connection to laptop.
+    std::fs::write(mixed.world.host("laptop").join("notes.txt"), "notes\n").unwrap();
+    let editor = PaneTerminal::File(OpenFile {
+        path: "notes.txt".into(),
+        cwd: None,
+    });
+    mixed.place(editor);
+    let shown = wait_for_workspaces(&mut window, |shown| {
+        panes_of(shown, laptop)
+            .iter()
+            .any(|pane| matches!(pane.content, Content::Buffer(_)))
+    });
+    let Some(Content::Buffer(buffer)) = (panes_of(&shown, laptop).iter())
+        .map(|pane| pane.content)
+        .find(|content| matches!(content, Content::Buffer(_)))
+    else {
+        unreachable!()
+    };
+    let snapshot = attach_to_buffer(&mut window, buffer, 9);
+    assert_eq!(snapshot.text, "notes\n");
+    // Its pane's `:e` opens laptop's file in it there.
+    std::fs::write(mixed.world.host("laptop").join("todo.md"), "todo\n").unwrap();
+    let pane = (panes_of(&shown, laptop).iter())
+        .find(|pane| pane.content == Content::Buffer(buffer))
+        .unwrap()
+        .id;
+    let open = Request::OpenHere {
+        pane,
+        file: OpenFile {
+            path: "todo.md".into(),
+            cwd: None,
+        },
+    };
+    assert_eq!(window.request(&open).unwrap(), Response::Done);
+    wait_for_workspaces(&mut window, |shown| {
+        (shown.find_pane(pane))
+            .is_some_and(|(_, _, pane)| matches!(pane.content, Content::Buffer(b) if b != buffer))
+    });
 }

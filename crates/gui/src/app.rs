@@ -2453,6 +2453,7 @@ fn single_pane() -> Layout {
         id: PaneId(0),
         content: Content::Terminal(TerminalId(0)),
         home: None,
+        key: None,
     })
 }
 

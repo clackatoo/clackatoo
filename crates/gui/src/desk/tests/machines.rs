@@ -26,6 +26,7 @@ fn three() -> Workspaces {
             kind: PaneKind::new("editor"),
         },
         home: None,
+        key: None,
     });
     workspaces(vec![
         workspace(1, "notes", vec![tab(1, pane(1))]),
@@ -210,6 +211,7 @@ fn a_new_pane_goes_on_the_machine_of_the_pane_its_made_from() {
         id: PaneId(9),
         content: Content::Terminal(TerminalId(9)),
         home: Some(DESK),
+        key: None,
     });
     let mut workspaces = here(three());
     workspaces.list[0].tabs[0] = tab(1, side_by_side(vec![pane(1), borrowed]));
@@ -261,6 +263,7 @@ fn a_tab_whose_pane_is_on_another_machine_says_which() {
         id: PaneId(9),
         content: Content::Terminal(TerminalId(9)),
         home: Some(DESK),
+        key: None,
     });
     let mut workspaces = here(three());
     workspaces.list[0].tabs.push(tab(5, borrowed));
@@ -285,6 +288,7 @@ fn a_new_pane_with_no_workspace_shown_makes_one_on_the_machine_named() {
         home: None,
         restored: Vec::new(),
         machine: None,
+        others: Vec::new(),
     };
     let mut desk = desk(here(none));
     desk.connections_changed(to_desk(connected()));
@@ -302,6 +306,7 @@ fn a_borrowed_pane_waiting_for_its_machine_says_so() {
             kind: PaneKind::new("terminal"),
         },
         home: Some(DESK),
+        key: None,
     });
     let mut workspaces = here(three());
     workspaces.list[0].tabs[0] = tab(1, waiting);
@@ -310,6 +315,92 @@ fn a_borrowed_pane_waiting_for_its_machine_says_so() {
     desk.show_pane(PaneId(9));
     let other = desk.other(PaneId(9)).expect("a pane in its place");
     assert_eq!(other.title(), "a terminal on desk");
+}
+
+#[test]
+fn a_pane_of_this_machine_in_another_machines_workspace_is_this_machines() {
+    // Desk's `work`, holding a terminal of this machine's, which the
+    // daemon shows from here.
+    let held = Layout::Pane(LayoutPane {
+        id: PaneId(9),
+        content: Content::Terminal(TerminalId(9)),
+        home: Some(LAPTOP),
+        key: Some(0xbeef),
+    });
+    let mut workspaces = here(three());
+    workspaces.list[2].tabs[0] = tab(3, side_by_side(vec![pane(3), held]));
+    workspaces.list[2].tabs[0].focused = PaneId(9);
+    let mut desk = desk(workspaces);
+    desk.connections_changed(to_desk(connected()));
+    normal_mode(&mut desk);
+    answer_all(&mut desk);
+    // It's on this machine: no machine elsewhere, and so no pill when
+    // desk drops; what's made beside it is made on this machine.
+    assert_eq!(desk.pane_machine(PaneId(9)), None);
+    assert_eq!(desk.pane_machine(PaneId(3)), Some(DESK));
+    desk.show_pane(PaneId(9));
+    command(&mut desk, "|Terminal");
+    desk.show_pane(PaneId(3));
+    command(&mut desk, "|Terminal");
+    assert_eq!(
+        aimed(&answer_all(&mut desk)),
+        [("split", Some(LAPTOP)), ("split", Some(DESK))]
+    );
+    // Its tab says it's this machine's.
+    desk.show_pane(PaneId(9));
+    let names: Vec<String> = (desk.tab_names().into_iter())
+        .map(|(_, name, _)| name)
+        .collect();
+    assert!(names[0].ends_with("@local"), "{names:?}");
+    let down = ConnectionState::Down {
+        reason: "gone".into(),
+    };
+    desk.connections_changed(to_desk(down));
+    assert_eq!(desk.away_notice(PaneId(9)), None);
+}
+
+#[test]
+fn a_pane_on_a_machine_out_of_reach_or_parked_says_so() {
+    // This machine's own workspace, holding a terminal on a machine the
+    // daemon isn't connected to, put there by it; and desk's, holding one
+    // of this machine's, parked while desk is away.
+    let away = MachineId([0x5e; 16]);
+    let out_of_reach = Layout::Pane(LayoutPane {
+        id: PaneId(9),
+        content: Content::Other {
+            kind: PaneKind::new("terminal"),
+        },
+        home: Some(away),
+        key: Some(1),
+    });
+    let parked = Layout::Pane(LayoutPane {
+        id: PaneId(8),
+        content: Content::Other {
+            kind: PaneKind::new("editor"),
+        },
+        home: Some(LAPTOP),
+        key: Some(2),
+    });
+    let mut workspaces = here(three());
+    workspaces.list[0].tabs[0] = tab(1, side_by_side(vec![pane(1), out_of_reach]));
+    workspaces.list[2].tabs[0] = tab(3, side_by_side(vec![pane(3), parked]));
+    workspaces.others = vec![clackatoo_protocol::OtherMachine {
+        id: away,
+        name: "server".into(),
+    }];
+    let mut desk = desk(workspaces);
+    desk.connections_changed(to_desk(connected()));
+    desk.show_pane(PaneId(9));
+    let other = desk.other(PaneId(9)).expect("a pane in its place");
+    assert_eq!(
+        other.title(),
+        "a terminal on server, not reachable from here"
+    );
+    // It needs no pill: it says so itself.
+    assert_eq!(desk.away_notice(PaneId(9)), None);
+    desk.show_pane(PaneId(8));
+    let other = desk.other(PaneId(8)).expect("a pane in its place");
+    assert_eq!(other.title(), "an editor, parked while ‘desk’ is away");
 }
 
 #[test]

@@ -341,6 +341,7 @@ mod tests {
                         id,
                     )),
                     home: None,
+                    key: None,
                 })
             })
             .collect();
@@ -368,6 +369,7 @@ mod tests {
                     lent: None,
                 }],
                 machine: None,
+                others: Vec::new(),
             },
             shown: Some(Shown {
                 workspace: WorkspaceId(1),

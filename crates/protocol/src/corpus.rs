@@ -28,8 +28,8 @@ use clackatoo_text::{
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
     BLANK, BLOCK_MARKS, BLOCKS, COLOURS, EXITED, FALLBACKS, FEDERATION, FORWARD_PACE, FORWARDS,
-    HOVER, INLAY_HINTS, LEND, LIMITS, PHONE_TERMINALS, PREVIEW_COLOURS, RECOVER, RELAY, RESTORED,
-    SYMBOLS, USES, WORDS,
+    HOVER, INLAY_HINTS, LEND, LIMITS, MIXED, PHONE_TERMINALS, PREVIEW_COLOURS, RECOVER, RELAY,
+    RESTORED, SYMBOLS, USES, WORDS,
 };
 use crate::{
     AgentSession, AgentTools, Author, Axis, BlockMarks, BoardId, BufferId, BufferSnapshot,
@@ -556,6 +556,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                                 kind: PaneKind::new("notebook"),
                             },
                             home: None,
+                            key: None,
                         }),
                         focused: PaneId(1),
                         name: None,
@@ -568,6 +569,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 home: None,
                 restored: Vec::new(),
                 machine: None,
+                others: Vec::new(),
             }))),
         ),
         (
@@ -937,7 +939,49 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
     samples.extend(federation().into_iter().map(|sample| (FEDERATION, sample)));
     samples.extend(relay().into_iter().map(|sample| (RELAY, sample)));
     samples.extend(lend().into_iter().map(|sample| (LEND, sample)));
+    samples.extend(mixed().into_iter().map(|sample| (MIXED, sample)));
     samples
+}
+
+/// Samples of protocol 94: a daemon putting a pane of its machine's in a
+/// layout of the daemon it's connected to; that daemon's workspaces,
+/// holding it, with its key, its home and what that machine is called;
+/// and the workspace holding it on its own machine, lent and placed, as
+/// that machine's daemon shows another.
+fn mixed() -> Vec<Sample> {
+    use Sample::{Client, Server};
+    let desktop = MachineId([7; 16]);
+    let laptop = MachineId([0xa1; 16]);
+    let mut workspaces = workspaces();
+    if let Layout::Split { parts, .. } = &mut workspaces.list[0].tabs[0].layout
+        && let Layout::Pane(pane) = &mut parts[0]
+    {
+        pane.home = Some(laptop);
+        pane.key = Some(0x0123_4567_89ab_cdef);
+    }
+    workspaces.others = vec![crate::OtherMachine {
+        id: laptop,
+        name: "jack-ubuntu-laptop".into(),
+    }];
+    let mut lent = self::workspaces();
+    lent.list[0].lent = Some(Lent {
+        to: desktop,
+        key: 0x0123_4567_89ab_cdef,
+        placed: true,
+    });
+    vec![
+        Client(ClientMessage::Request(Request::Split {
+            pane: PaneId(1),
+            side: Side::Below,
+            terminal: PaneTerminal::Lent {
+                key: 0x0123_4567_89ab_cdef,
+                kind: PaneKind::new("terminal"),
+            },
+            on: None,
+        })),
+        Server(ServerMessage::Event(Event::Workspaces(workspaces))),
+        Server(ServerMessage::Event(Event::Workspaces(lent))),
+    ]
 }
 
 /// Samples of protocol 93: new panes and a workspace asked for on a
@@ -962,6 +1006,7 @@ fn lend() -> Vec<Sample> {
     workspaces.list[0].lent = Some(Lent {
         to: laptop,
         key: 0x0123_4567_89ab_cdef,
+        placed: false,
     });
     let mut own = workspaces.list[0].clone();
     own.id = WorkspaceId(9);
@@ -2130,6 +2175,7 @@ fn workspaces() -> Workspaces {
             id: PaneId(id),
             content,
             home: None,
+            key: None,
         })
     };
     Workspaces {
@@ -2168,6 +2214,7 @@ fn workspaces() -> Workspaces {
         home: None,
         restored: Vec::new(),
         machine: None,
+        others: Vec::new(),
     }
 }
 

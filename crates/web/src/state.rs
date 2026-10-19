@@ -1305,6 +1305,7 @@ mod tests {
                 id: PaneId(id),
                 content: Content::Terminal(TerminalId(id)),
                 home: None,
+                key: None,
             })
         };
         let mut state = State {
@@ -1330,6 +1331,7 @@ mod tests {
                 }],
                 active: None,
                 machine: None,
+                others: Vec::new(),
             },
             ..State::default()
         };
