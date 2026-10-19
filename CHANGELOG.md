@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.59 (2026-10-19)
+
+### Features
+
+- **daemon,protocol,gui:** a pane of this machine's in a workspace of a machine that can't reach it (9001ed9)
+
 ## 2026.10.58 (2026-10-18)
 
 ### Features
