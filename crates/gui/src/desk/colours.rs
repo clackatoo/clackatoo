@@ -1,6 +1,7 @@
 //! Asking the daemon to colour the code in chats, as each chat lays it
-//! out (see `chat::colours`), and in the finder's preview of a file not
-//! open, which comes plain; and handing each its answers.
+//! out (see `markdown::colours`), in editors' rendered Markdown (see
+//! `super::markdown`), and in the finder's preview of a file not open,
+//! which comes plain; and handing each its answers.
 
 use clackatoo_protocol::{ClientMessage, Span, wire};
 
@@ -55,7 +56,7 @@ impl Desk {
                 sent = true;
             }
         }
-        sent
+        sent | self.ask_rendered_colours(colours)
     }
 
     /// The daemon's colours for the code asked about in the ask numbered
@@ -67,6 +68,9 @@ impl Desk {
         {
             let spans = spans.into_iter().next().unwrap_or_default();
             return finder.coloured(spans);
+        }
+        if self.rendered_asked(id) {
+            return self.rendered_coloured(id, spans);
         }
         let Some(terminal) = self.colour_asks.remove(&id) else {
             return false;
@@ -83,6 +87,7 @@ impl Desk {
         if let Some(finder) = &mut self.finder {
             finder.forget_colour_ask();
         }
+        self.forget_rendered_colour_asks();
     }
 
     /// The chat that asked for colours numbered `id`, for tests.

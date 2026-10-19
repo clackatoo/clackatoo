@@ -120,6 +120,9 @@ pub(crate) enum Action {
     SendCtrlB,
     /// Turns inlay hints off, or on, as `:set ih!` does.
     ToggleInlayHints,
+    /// Shows the focused editor's Markdown rendered, or its text again, as
+    /// `:Markdown` does.
+    ToggleMarkdown,
 }
 
 /// What a key does in reviewing what agents changed.
@@ -160,6 +163,7 @@ impl std::ops::DerefMut for Keys {
 }
 
 /// The keymap the window starts with.
+#[allow(clippy::too_many_lines, reason = "a binding or two a line")]
 fn defaults() -> Keymap<Binding> {
     let mut map = Keymap::default();
     let mut bind = |modes: &str, keys: &str, action, label: Option<&str>| {
@@ -237,6 +241,13 @@ fn defaults() -> Keymap<Binding> {
         Action::ToggleInlayHints,
         Some("inlay hints"),
     );
+    // Beside it: `m` for Markdown.
+    bind(
+        "nv",
+        "<Space>tm",
+        Action::ToggleMarkdown,
+        Some("rendered Markdown"),
+    );
     for (letter, direction) in DIRECTIONS {
         bind(
             "nv",
@@ -275,6 +286,7 @@ fn name_groups(map: &mut Keymap<Binding>) {
         ("<Space>p", "project"),
         ("<Space>h", "git hunks"),
         ("<Space>g", "agent changes"),
+        ("<Space>t", "toggles"),
     ] {
         let keys = parse_keys(keys).expect("the defaults' keys are valid");
         map.name_group(&modes, &keys, Some(name));
@@ -444,6 +456,7 @@ impl Desk {
                     .into(),
                 );
             }
+            Action::ToggleMarkdown => self.run(Command::Markdown),
         }
     }
 

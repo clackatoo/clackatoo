@@ -811,12 +811,18 @@ impl App {
             Hit::Panes if self.desk.reports_mouse_at(point, self.modifiers.shift) => {
                 CursorIcon::Default
             }
-            // A chat says what's under the pointer.
-            Hit::Panes if let Some(pointer) = self.desk.chat_pointer(point) => match pointer {
-                Pointer::Arrow => CursorIcon::Default,
-                Pointer::Hand => CursorIcon::Pointer,
-                Pointer::Text => CursorIcon::Text,
-            },
+            // A chat says what's under the pointer, and so does an editor's
+            // rendered Markdown.
+            Hit::Panes
+                if let Some(pointer) = (self.desk.chat_pointer(point))
+                    .or_else(|| self.desk.rendered_pointer(point)) =>
+            {
+                match pointer {
+                    Pointer::Arrow => CursorIcon::Default,
+                    Pointer::Hand => CursorIcon::Pointer,
+                    Pointer::Text => CursorIcon::Text,
+                }
+            }
             Hit::Panes => CursorIcon::Text,
             Hit::TopBar | Hit::Note | Hit::Finder(None) | Hit::Nothing => CursorIcon::Default,
         };
@@ -1962,8 +1968,10 @@ impl App {
     /// drawn, or `None` if the frame wasn't shown.
     #[allow(clippy::too_many_lines, reason = "each layer of the frame in turn")]
     fn draw_panes(&mut self, chrome: &Chrome) -> Option<Vec<TerminalId>> {
-        let (chats, chat_paint) = self.paint_chats(chrome);
+        // Editors first, as settling one may show its Markdown rendered,
+        // which is drawn with the chats.
         self.desk.settle_editors();
+        let (chats, chat_paint) = self.paint_chats(chrome);
         self.desk.settle_explorers();
         self.desk.settle_boards();
         self.desk.settle_browsers();
@@ -2173,6 +2181,25 @@ impl App {
                     all.ime = paint.ime;
                 }
                 chats.push(terminal);
+            }
+        }
+        // Editors showing their Markdown rendered, which is laid out as a
+        // chat's words are.
+        let editors: Vec<(PaneId, Tile)> = (placement.panes.iter())
+            .filter(|(pane, _)| {
+                self.desk
+                    .editor(*pane)
+                    .is_some_and(crate::editor::Editor::rendered)
+            })
+            .copied()
+            .collect();
+        for (pane, tile) in editors {
+            let size = tile.cells_size(cell);
+            if let Some(paint) =
+                (self.desk).paint_rendered(pane, &mut frame.fonts, tile.origin, size)
+            {
+                all.fills.extend(paint.fills);
+                all.glyphs.extend(paint.glyphs);
             }
         }
         (chats, all)

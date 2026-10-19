@@ -57,6 +57,7 @@ mod pattern;
 mod pieces;
 mod preview;
 mod registers;
+mod rendered;
 mod scratch;
 mod snippet;
 mod substitute;
@@ -97,6 +98,7 @@ pub(crate) use pieces::{GiveUp, PATIENCE};
 use preview::Preview;
 use registers::Wrote;
 pub(crate) use registers::{Register, Registers};
+use rendered::Rendered;
 pub(crate) use text::Stretch;
 use text::{Text, Underlines, tab_end};
 #[cfg(test)]
@@ -652,6 +654,15 @@ pub(crate) struct Editor {
     put_again: Option<std::rc::Rc<Register>>,
     /// What's kept of block visual mode (see [`block`]).
     blocks: block::Blocks,
+    /// Its text rendered, as Markdown, while it's shown so (see
+    /// [`rendered`]).
+    rendered: Option<Box<Rendered>>,
+    /// The rendered view last shown, kept while the text is, so showing it
+    /// again lays out only what's changed since.
+    put_away: Option<Box<Rendered>>,
+    /// Whether to show its text rendered once it's come, if it's Markdown,
+    /// as `markdownview` says files open.
+    open_rendered: bool,
 }
 
 /// How a lesson's text is drawn, as the tutor marks it: its titles, and
@@ -795,6 +806,9 @@ impl Editor {
             repeat_selection: false,
             put_again: None,
             blocks: block::Blocks::default(),
+            rendered: None,
+            put_away: None,
+            open_rendered: options.markdownview == crate::options::MarkdownView::Rendered,
         }
     }
 
@@ -806,6 +820,9 @@ impl Editor {
     pub(crate) fn show_lesson(&mut self, options: &Options, copy: &BufferCopy, prose: Prose) {
         if !self.lesson {
             self.lesson = true;
+            // A lesson is drawn as the tutor marks it, never rendered.
+            self.rendered = None;
+            self.open_rendered = false;
             self.styling.prose = Some(std::rc::Rc::new(prose));
             self.set_options(options, copy);
         }
@@ -1060,6 +1077,9 @@ impl Editor {
             return status.clone();
         }
         let modified = if copy.modified() { " [+]" } else { "" };
+        if let Some(position) = self.rendered_position() {
+            return format!("{}{modified}  rendered  {position}", copy.name());
+        }
         let at = self.cursor.at;
         let mut label = format!("{}{modified}  {}:{}", copy.name(), at.line + 1, at.col + 1);
         // A count waiting for its command shows first, as Vim's `showcmd`.
@@ -1143,7 +1163,12 @@ impl Editor {
         }
         self.replaying = replaying;
         self.snippet_before_key(copy);
-        let done = self.stroke(stroke, copy, shared);
+        // The rendered view's keys scroll it; any other shows the text, to
+        // do there what it does.
+        let done = match self.rendered_key(stroke, copy, shared) {
+            Some(done) => done,
+            None => self.stroke(stroke, copy, shared),
+        };
         self.snippet_record(stroke);
         // A macro or a binding goes back to insert mode once it's done
         // (see `desk::macros`), not after the command that ended a
@@ -1220,6 +1245,8 @@ impl Editor {
 
     /// Puts `text` in at the cursor, as typed in insert mode.
     pub(crate) fn paste(&mut self, text: &str, copy: &mut BufferCopy) {
+        // Rendered, it goes into the text, where the view was.
+        self.show_text(copy);
         // Into a search or a name being typed, if one is.
         if let Some((line, _)) = self.prompt_line() {
             line.put(text);
@@ -4745,6 +4772,11 @@ impl Editor {
         reason = "the rows laid out in one pass, step by step"
     )]
     pub(crate) fn settle(&mut self, copy: &BufferCopy) {
+        self.open_as_wanted(copy);
+        // Rendered, nothing of the text is drawn.
+        if self.rendered() {
+            return;
+        }
         self.settle_uses(copy);
         // The rows may have wrapped afresh, putting the cursor out of view.
         if self.resized {
@@ -5091,8 +5123,12 @@ impl Editor {
         .collect()
     }
 
-    /// The rows to draw, and the cursor.
+    /// The rows to draw, and the cursor: none while its text is rendered,
+    /// which is drawn as prose (see [`paint_rendered`](Self::paint_rendered)).
     pub(crate) fn scene(&self) -> (Vec<&Row>, Option<SceneCursor>) {
+        if self.rendered() {
+            return (Vec::new(), None);
+        }
         let rows = self.rows.iter().collect();
         let cursor = self.cursor_cell.map(|(line, col)| SceneCursor {
             line,
@@ -5122,6 +5158,9 @@ impl Editor {
     /// text just copied.
     pub(crate) fn highlights(&self) -> Vec<Highlight> {
         let mut highlights = Vec::new();
+        if self.rendered() {
+            return highlights;
+        }
         let width = self.text_width();
         let now = Instant::now();
         for lit in (self.lit.iter()).filter(|lit| lit.until.is_none_or(|until| until > now)) {

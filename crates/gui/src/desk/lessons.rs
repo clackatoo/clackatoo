@@ -1300,6 +1300,12 @@ impl Facts for DeskFacts<'_> {
         self.desk.registers().recording()
     }
 
+    fn rendered(&self) -> bool {
+        self.desk
+            .focused_editor()
+            .is_some_and(|(editor, _)| editor.rendered())
+    }
+
     fn messages_shown(&self) -> bool {
         self.desk.messages_listed().is_some()
     }

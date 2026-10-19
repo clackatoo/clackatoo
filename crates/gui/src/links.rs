@@ -289,7 +289,7 @@ fn digits(number: u64) -> usize {
 }
 
 /// `text` with its `%XX` escapes decoded.
-fn percent_decode(text: &str) -> String {
+pub(crate) fn percent_decode(text: &str) -> String {
     let mut bytes = Vec::with_capacity(text.len());
     let mut rest = text.as_bytes();
     while let Some((&byte, after)) = rest.split_first() {

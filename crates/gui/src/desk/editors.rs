@@ -176,6 +176,19 @@ impl Desk {
                 || (self.is_folder(pane) && self.keeps_its_folder(pane).is_none()))
     }
 
+    /// The editor `pane` is, if it's one, and its buffer, if it's come.
+    pub(super) fn editor_and_copy(&mut self, pane: PaneId) -> Option<(&mut Editor, &BufferCopy)> {
+        let editors = &mut self.editors;
+        let editor = editors.panes.get_mut(&pane)?;
+        let copy = (editors.buffers.get(&editor.buffer())).filter(|copy| copy.loaded())?;
+        Some((editor, copy))
+    }
+
+    /// Every editor, by the pane it is.
+    pub(super) fn editors_mut(&mut self) -> impl Iterator<Item = (PaneId, &mut Editor)> {
+        (self.editors.panes.iter_mut()).map(|(&pane, editor)| (pane, editor))
+    }
+
     /// The window's copy of `buffer`, if an editor shows it.
     pub(super) fn buffer_copy(&self, buffer: BufferId) -> Option<&BufferCopy> {
         self.editors.buffers.get(&buffer)
@@ -1416,6 +1429,8 @@ impl Desk {
             && let Some(copy) = editors.buffers.get_mut(&editor.buffer())
         {
             if insert {
+                // Rendered Markdown isn't typed in: its text is.
+                editor.show_text(copy);
                 editor.enter_insert_mode();
                 return;
             }
@@ -1470,6 +1485,9 @@ impl Desk {
         let Some(editor) = editors.panes.get_mut(&pane) else {
             return false;
         };
+        if editor.wheel_rendered(lines) {
+            return true;
+        }
         let Some(copy) = editors.buffers.get(&editor.buffer()) else {
             return false;
         };

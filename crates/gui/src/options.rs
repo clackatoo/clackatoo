@@ -563,6 +563,11 @@ options! {
     /// They're never part of the text: the cursor, motions, searches and
     /// yanks pass them by. `<Space>th` toggles it.
     inlayhints("ih"): bool = true;
+    /// How a Markdown file opens in an editor: as its text (`raw`), or
+    /// rendered, as prose, with its headings, lists, tables and code drawn
+    /// as such (`rendered`). `:Markdown` and `<Space>tm` turn each editor
+    /// from one to the other.
+    markdownview("mdv"): MarkdownView = MarkdownView::Raw;
     /// Which of the desktop's the unnamed register goes along with, as in
     /// Neovim: the clipboard, so what's yanked or deleted in an editor can
     /// be pasted anywhere, and `p` puts what was copied anywhere; the
@@ -699,6 +704,16 @@ choice! {
         Unnamed = "unnamed",
         /// Neither.
         Off = "none",
+    }
+}
+
+choice! {
+    /// How `markdownview` says a Markdown file opens.
+    MarkdownView {
+        /// As its text.
+        Raw = "raw",
+        /// Rendered, as prose.
+        Rendered = "rendered",
     }
 }
 

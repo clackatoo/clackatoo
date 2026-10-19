@@ -24,6 +24,22 @@ pub(crate) struct Block {
     pub(crate) spans: Vec<Span>,
     /// How many lists or quotes it's inside, which indent it.
     pub(crate) indent: u8,
+    /// Where it starts in the Markdown, in bytes: at its marks, such as a
+    /// heading's `#`s, a list item's marker or code's opening fence.
+    pub(crate) at: usize,
+    /// Its links, and its images, which go to the image.
+    pub(crate) links: Vec<Link>,
+    /// It's the first item of a list.
+    pub(crate) starts_list: bool,
+}
+
+/// A link in a block's text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Link {
+    /// Where it is in the block's text.
+    pub(crate) range: Range<usize>,
+    /// Where it goes, as written: a URL, a file, or `#` and a heading.
+    pub(crate) to: String,
 }
 
 /// What a block is.
@@ -101,6 +117,8 @@ pub(crate) struct Style {
     pub(crate) strike: bool,
     pub(crate) code: bool,
     pub(crate) link: bool,
+    /// An image's text, said in its place.
+    pub(crate) image: bool,
 }
 
 /// The blocks `markdown` is made of.
@@ -110,7 +128,7 @@ pub(crate) fn blocks(markdown: &str) -> Vec<Block> {
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
     for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
         if event == Event::End(TagEnd::CodeBlock)
-            && !closed(&markdown[range])
+            && !closed(&markdown[range.clone()])
             && let Some(Block {
                 kind: BlockKind::Code(language),
                 ..
@@ -118,6 +136,7 @@ pub(crate) fn blocks(markdown: &str) -> Vec<Block> {
         {
             *language = None;
         }
+        reader.at = range.start;
         reader.event(event);
     }
     reader.finish_block();
@@ -144,6 +163,16 @@ struct Reader {
     italic: u8,
     strike: u8,
     link: u8,
+    image: u8,
+    /// Where the event being read starts in the Markdown.
+    at: usize,
+    /// Where the item whose first block hasn't started starts.
+    item_at: Option<usize>,
+    /// A list has started whose first item hasn't.
+    list_starts: bool,
+    /// The links being read: where each starts in the open block's text,
+    /// and where it goes.
+    links: Vec<(usize, String)>,
 }
 
 /// Where in a table the reader is.
@@ -172,6 +201,9 @@ impl Reader {
                     text: String::new(),
                     spans: Vec::new(),
                     indent: self.indent(),
+                    at: self.at,
+                    links: Vec::new(),
+                    starts_list: false,
                 });
             }
             Event::TaskListMarker(done) => self.push(if done { "☑ " } else { "☐ " }, false),
@@ -227,6 +259,7 @@ impl Reader {
             Tag::List(start) => {
                 self.finish_block();
                 self.lists.push(*start);
+                self.list_starts = true;
             }
             Tag::Item => {
                 self.finish_block();
@@ -239,6 +272,7 @@ impl Reader {
                     _ => "•".to_owned(),
                 };
                 self.marker = Some(marker);
+                self.item_at = Some(self.at);
             }
             Tag::BlockQuote(_) => {
                 self.finish_block();
@@ -247,7 +281,14 @@ impl Reader {
             Tag::Strong => self.bold += 1,
             Tag::Emphasis => self.italic += 1,
             Tag::Strikethrough => self.strike += 1,
-            Tag::Link { .. } => self.link += 1,
+            Tag::Link { dest_url, .. } => {
+                self.link += 1;
+                self.open_link(dest_url);
+            }
+            Tag::Image { dest_url, .. } => {
+                self.image += 1;
+                self.open_link(dest_url);
+            }
             _ => {}
         }
     }
@@ -292,7 +333,14 @@ impl Reader {
             TagEnd::Strong => self.bold = self.bold.saturating_sub(1),
             TagEnd::Emphasis => self.italic = self.italic.saturating_sub(1),
             TagEnd::Strikethrough => self.strike = self.strike.saturating_sub(1),
-            TagEnd::Link => self.link = self.link.saturating_sub(1),
+            TagEnd::Link => {
+                self.link = self.link.saturating_sub(1);
+                self.close_link();
+            }
+            TagEnd::Image => {
+                self.image = self.image.saturating_sub(1);
+                self.close_link();
+            }
             _ => {}
         }
     }
@@ -312,13 +360,35 @@ impl Reader {
             (_, kind) => kind,
         };
         // A list's later blocks line up with its items' text.
-        let indent = self.indent() + u8::from(in_item && !matches!(kind, BlockKind::Item(_)));
+        let item = matches!(kind, BlockKind::Item(_));
+        let indent = self.indent() + u8::from(in_item && !item);
+        let starts_list = item && std::mem::take(&mut self.list_starts);
         self.open = Some(Block {
             kind,
             text: String::new(),
             spans: Vec::new(),
             indent,
+            at: self.item_at.take().unwrap_or(self.at),
+            links: Vec::new(),
+            starts_list,
         });
+    }
+
+    /// A link to `to` starts here, or an image of it.
+    fn open_link(&mut self, to: &str) {
+        let start = self.open.as_ref().map_or(0, |block| block.text.len());
+        self.links.push((start, to.to_owned()));
+    }
+
+    /// The link last opened ends here.
+    fn close_link(&mut self) {
+        if let Some((start, to)) = self.links.pop()
+            && let Some(block) = &mut self.open
+            && block.text.len() > start
+        {
+            let range = start..block.text.len();
+            block.links.push(Link { range, to });
+        }
     }
 
     /// Adds text to the open block, opening one if there's none, as for a
@@ -333,6 +403,7 @@ impl Reader {
             strike: self.strike > 0,
             code,
             link: self.link > 0,
+            image: self.image > 0,
         };
         let block = self.open.as_mut().expect("opened above");
         let start = block.text.len();
@@ -532,5 +603,68 @@ mod tests {
             ]
         );
         assert_eq!(kinds("**bold so f")[0].1, "**bold so f");
+    }
+
+    #[test]
+    fn each_block_says_where_its_markdown_starts() {
+        let markdown = "# Title\n\n- one\n- two\n  - deeper\n\n> quoted\n\n```\ncode\n```\n\n---\n\n| a |\n|---|\n| 1 |\n";
+        let starts: Vec<(String, &str)> = (blocks(markdown).into_iter())
+            .map(|block| {
+                let line = markdown[block.at..].lines().next().unwrap_or_default();
+                (block.text, line)
+            })
+            .collect();
+        assert_eq!(
+            starts,
+            [
+                ("Title".into(), "# Title"),
+                ("one".into(), "- one"),
+                ("two".into(), "- two"),
+                ("deeper".into(), "- deeper"),
+                ("quoted".into(), "quoted"),
+                ("code".into(), "```"),
+                (String::new(), "---"),
+                ("a".into(), " a |"),
+                ("1".into(), " 1 |"),
+            ]
+        );
+    }
+
+    #[test]
+    fn links_and_images_say_where_they_go() {
+        let blocks = blocks(
+            "See [the docs](https://x.org/docs) and [notes](notes.md#setup), ![a cat](cat.png).",
+        );
+        let block = &blocks[0];
+        assert_eq!(block.text, "See the docs and notes, a cat.");
+        let links: Vec<(&str, &str)> = (block.links.iter())
+            .map(|link| (&block.text[link.range.clone()], link.to.as_str()))
+            .collect();
+        assert_eq!(
+            links,
+            [
+                ("the docs", "https://x.org/docs"),
+                ("notes", "notes.md#setup"),
+                ("a cat", "cat.png"),
+            ]
+        );
+        let image = (block.spans.iter()).find(|span| span.style.image);
+        assert_eq!(
+            image.map(|span| &block.text[span.range.clone()]),
+            Some("a cat")
+        );
+    }
+
+    #[test]
+    fn a_linked_image_goes_where_the_link_does() {
+        let blocks = blocks("[![build](badge.svg)](https://ci.example/run)");
+        let block = &blocks[0];
+        // The image's link closes first, inside the one around it.
+        assert_eq!(
+            (block.links.iter())
+                .map(|link| link.to.as_str())
+                .collect::<Vec<_>>(),
+            ["badge.svg", "https://ci.example/run"]
+        );
     }
 }

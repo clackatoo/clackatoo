@@ -167,6 +167,7 @@ mod jumps;
 mod lessons;
 mod links;
 mod macros;
+mod markdown;
 mod messages;
 mod mode;
 mod offers;
@@ -291,6 +292,9 @@ pub(crate) struct Desk {
     /// ask not yet answered, and the number of the last.
     colour_asks: HashMap<u64, TerminalId>,
     next_colour: u64,
+    /// The editors whose rendered Markdown asked for its code's colours, by
+    /// the number of the ask not yet answered.
+    rendered_colour_asks: HashMap<u64, PaneId>,
     /// The space the panes' tiles share, once the window is open.
     area: Option<Area>,
     /// What's being typed in the palette, such as a command after `:`.
@@ -2112,8 +2116,12 @@ impl Desk {
         {
             outcome.redraw |= self.mouse_left();
             if let MouseAction::Press(MouseButton::Left) = action {
-                outcome.redraw =
-                    self.focus_at(point) | self.editor_press(pane, cell, clicks, modifiers.alt);
+                let focused = self.focus_at(point);
+                // Rendered Markdown takes a click on a link, and selects
+                // nothing.
+                let clicked = self.rendered_click(point)
+                    || self.editor_press(pane, cell, clicks, modifiers.alt);
+                outcome.redraw = focused | clicked;
             }
             return outcome;
         }
@@ -2607,6 +2615,7 @@ impl Desk {
             Command::Discard => self.discard_changes(),
             Command::Recover { drop } => self.recover(drop),
             Command::Format => self.format_file(),
+            Command::Markdown => self.toggle_markdown(),
             Command::Find { kind, query } => self.open_finder(kind, query),
             Command::Hunk(action) => self.editor_hunk(action),
             Command::Registers => self.show_registers(),
@@ -2748,6 +2757,7 @@ mod tests {
     mod folders;
     mod lessons;
     mod machines;
+    mod markdown;
     mod messages;
     mod mode;
     mod mouse;
@@ -4205,7 +4215,7 @@ mod tests {
                 ("b", "+file symbols"),
                 ("h", "+git hunks"),
                 ("e", "explorer"),
-                ("t", "+inlay hints"),
+                ("t", "+toggles"),
                 ("g", "+agent changes"),
                 ("c", "comment"),
             ]

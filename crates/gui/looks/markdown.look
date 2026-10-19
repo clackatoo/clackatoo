@@ -1,0 +1,89 @@
+# A Markdown file in an editor, as its text and rendered (:Markdown, or
+# <Space>tm): headings, lists, a task list, quotes, links, code coloured
+# by the test grammars (JSON and the curly `fk`), a table and a rule.
+size 1400x900
+file project
+file README.md <<END
+# clackatoo
+
+A fast, light **terminal**, *workspace* and agent harness, with an editor
+of its own. See [the docs](https://learn.peios.org/clackatoo) or the
+[changes](CHANGES.md), and ~~nothing else~~ `cargo run` to try it.
+
+## Getting started
+
+1. Install it with `scripts/install`.
+2. Open a window:
+   - on this machine, `clackatoo`;
+   - on another, `clackatoo desk`, which connects over ssh.
+3. Read the tutor, with `:Tutor`.
+
+- [x] Terminals that survive the window
+- [x] An editor with Vim's keys
+- [ ] Images in rendered Markdown
+
+> Speed and code quality come before output speed.
+> — the working agreement
+
+### Configuration
+
+```json
+{
+  "font": "JetBrains Mono",
+  "size": 12,
+  "wrap": true
+}
+```
+
+```fk
+fn main(args) {
+    let count = 42;
+    print(add(count, 8));
+}
+```
+
+| Option | Short | Default |
+|---|:-:|--:|
+| `wrap` | `wrap` | on |
+| `markdownview` | `mdv` | raw |
+| `scrolloff` | `so` | 5 |
+
+![the window, split three ways](docs/window.png)
+
+---
+
+That's all. Jump back to [the top](#clackatoo).
+END
+file CHANGES.md <<END
+# Changes
+
+Rendered Markdown, with :Markdown.
+END
+open README.md
+wait-for Getting started
+shot markdown-raw
+keys <Space>tm
+sleep 800
+shot markdown-rendered
+keys <C-d>
+sleep 300
+shot markdown-scrolled
+keys G
+sleep 300
+shot markdown-end
+# A link to a heading scrolls to it: "the top", at the end.
+click 530 815
+sleep 300
+shot markdown-link
+keys 21G
+sleep 300
+# `i` shows the text, where the view was, to type in.
+keys i
+sleep 300
+shot markdown-insert
+keys <C-;>gg<Space>tm
+sleep 300
+# Beside a terminal: a narrower column.
+keys :|Terminal<CR>
+sleep 800
+shot markdown-split

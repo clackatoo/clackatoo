@@ -40,6 +40,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("blocks", include_str!("lessons/blocks.md")),
     ("substitute", include_str!("lessons/substitute.md")),
     ("wrap", include_str!("lessons/wrap.md")),
+    ("markdown", include_str!("lessons/markdown.md")),
     ("font", include_str!("lessons/font.md")),
     ("indenting", include_str!("lessons/indenting.md")),
     ("snippets", include_str!("lessons/snippets.md")),
@@ -369,6 +370,9 @@ mod tests {
             None
         }
         fn messages_shown(&self) -> bool {
+            false
+        }
+        fn rendered(&self) -> bool {
             false
         }
     }

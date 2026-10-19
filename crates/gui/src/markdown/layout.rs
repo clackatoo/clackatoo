@@ -146,6 +146,8 @@ pub(crate) struct Laid {
     /// Some of its code was laid out plain, as its colours were still to
     /// come: when they do, it's laid out again.
     pub(crate) waiting: bool,
+    /// How many of its blocks were laid out afresh, rather than kept.
+    pub(crate) fresh: usize,
     pub(crate) height: f32,
     /// The widest line.
     pub(crate) width: f32,
@@ -162,12 +164,16 @@ pub(crate) struct LaidBlock {
     /// From the top of what it belongs to.
     pub(crate) top: f32,
     /// A list item's marker, laid out, and where it goes from the left.
-    pub(crate) marker: Option<(Layout<Brush>, f32)>,
+    pub(crate) marker: Option<(Mark, f32)>,
     /// What it was laid out from, hashed: text laid out again as more of
     /// it comes keeps the blocks, and tables' cells, that haven't changed,
     /// so an answer streaming in lays out only its last paragraph again,
     /// not every one before it.
     pub(crate) key: u64,
+    /// Where it starts in the Markdown, in bytes (see [`markdown::Block`]).
+    pub(crate) at: usize,
+    /// Its links.
+    pub(crate) links: Vec<markdown::Link>,
 }
 
 /// Sizes, from the text's size.
@@ -197,6 +203,10 @@ pub(crate) enum Look {
     Plain(Tone),
     /// Plain text in the terminal's font, as a command's output is.
     Mono(Tone),
+    /// A Markdown file, as an editor's rendered view shows it: as the
+    /// agent's words are, with larger headings further apart, task lists'
+    /// boxes for their items' markers, and images said as such.
+    Page,
 }
 
 /// The fills and glyphs being drawn, and what they're cut off outside.
@@ -445,7 +455,7 @@ pub(crate) fn draw_scrolled(
             _ => {}
         }
         if let Some((marker, left)) = &block.marker {
-            canvas.text(marker, [origin[0] + left, y]);
+            canvas.text(&marker.layout, [origin[0] + left, y]);
         }
         canvas.text(&block.layout, [x, y]);
     }
@@ -480,27 +490,51 @@ pub(crate) fn lay_out_coloured(
     m: Measures,
     (text, look): (&str, Look),
     (width, cells): (f32, &mut Cells),
-    mut colours: Option<&mut Colours>,
+    colours: Option<&mut Colours>,
 ) -> Laid {
     let blocks = match look {
-        Look::Words | Look::Thought => markdown::blocks(text),
+        Look::Words | Look::Thought | Look::Page => markdown::blocks(text),
         Look::Plain(_) | Look::Mono(_) => vec![markdown::Block {
             kind: BlockKind::Paragraph,
             text: text.to_owned(),
             spans: Vec::new(),
             indent: 0,
+            at: 0,
+            links: Vec::new(),
+            starts_list: false,
         }],
     };
+    lay_out_blocks(
+        layout_cx,
+        fonts,
+        m,
+        (blocks, text.to_owned(), look),
+        (width, cells),
+        colours,
+    )
+}
+
+/// Lays out `blocks`, read from `source`, as [`lay_out_coloured`] lays
+/// out the blocks it reads.
+pub(crate) fn lay_out_blocks(
+    layout_cx: &mut parley::LayoutContext<Brush>,
+    fonts: &mut Fonts,
+    m: Measures,
+    (blocks, source, look): (Vec<markdown::Block>, String, Look),
+    (width, cells): (f32, &mut Cells),
+    mut colours: Option<&mut Colours>,
+) -> Laid {
     let tone = match look {
         Look::Plain(tone) | Look::Mono(tone) => tone,
-        Look::Words | Look::Thought => Tone::Plain,
+        Look::Words | Look::Thought | Look::Page => Tone::Plain,
     };
     let mut laid = Laid {
-        source: text.to_owned(),
+        source,
         tone,
         blocks: Vec::new(),
         tables: Vec::new(),
         waiting: false,
+        fresh: 0,
         height: 0.0,
         width: 0.0,
     };
@@ -509,14 +543,13 @@ pub(crate) fn lay_out_coloured(
     let mut first = true;
     let mut after_code = false;
     while let Some(block) = blocks.next() {
-        // Code's background reaches past its text: what's around it is as
-        // far from that as from other text.
+        let block = if look == Look::Page {
+            as_page(block)
+        } else {
+            block
+        };
         if !first {
-            laid.height += match block.kind {
-                BlockKind::Item(_) => m.em(0.3),
-                BlockKind::Code(_) => m.em(1.1),
-                _ => m.em(0.7),
-            } + if after_code { m.em(0.4) } else { 0.0 };
+            laid.height += gap(m, look, &block, after_code);
         }
         first = false;
         after_code = block.kind.code();
@@ -551,14 +584,15 @@ pub(crate) fn lay_out_coloured(
         let wrap = (width - indent).max(m.em(4.0));
         // As it was, if it was laid out before just so.
         let key = block_key(&block, &syntax, look, size, wrap);
-        let layout = cells.remove(&key).unwrap_or_else(|| {
+        let layout = cells.remove(key).unwrap_or_else(|| {
+            laid.fresh += 1;
             lay_out_block(layout_cx, fonts, (&block, &syntax), look, size, wrap)
         });
         let marker = match &block.kind {
             BlockKind::Item(marker) => {
-                let layout = lay_out_marker(layout_cx, fonts, marker, size);
-                let left = (indent - layout.width() - m.em(0.5)).max(0.0);
-                Some((layout, left))
+                let mark = Mark::of((layout_cx, fonts), cells, marker, size);
+                let left = (indent - mark.layout.width() - m.em(0.5)).max(0.0);
+                Some((mark, left))
             }
             _ => None,
         };
@@ -576,10 +610,90 @@ pub(crate) fn lay_out_coloured(
             top: laid.height,
             marker,
             key,
+            at: block.at,
+            links: block.links,
         });
         laid.height += height;
     }
     laid
+}
+
+/// What marks an image's text, said in its place on a page.
+const IMAGE: &str = "▣ ";
+
+/// `block` as a page shows it (see [`Look::Page`]): a task's box for its
+/// item's marker, and an image's text after a mark saying it's one.
+fn as_page(mut block: markdown::Block) -> markdown::Block {
+    let task = ["☐ ", "☑ "]
+        .into_iter()
+        .find(|task| block.text.starts_with(task));
+    if let (BlockKind::Item(marker), Some(task)) = (&mut block.kind, task) {
+        task.trim_end().clone_into(marker);
+        splice(&mut block, 0..task.len(), "", None);
+    }
+    let mut images: Vec<usize> = (block.spans.iter())
+        .filter(|span| span.style.image)
+        .map(|span| span.range.start)
+        .collect();
+    images.dedup();
+    let style = markdown::Style {
+        image: true,
+        ..markdown::Style::default()
+    };
+    for at in images.into_iter().rev() {
+        splice(&mut block, at..at, IMAGE, Some(style));
+    }
+    block
+}
+
+/// Puts `text` in place of `range` of `block`'s text, in `style` if it's
+/// given, moving its styles and links with what's after it.
+fn splice(
+    block: &mut markdown::Block,
+    range: std::ops::Range<usize>,
+    text: &str,
+    style: Option<markdown::Style>,
+) {
+    block.text.replace_range(range.clone(), text);
+    let moved = |at: usize, end: bool| {
+        // What ends where text goes in ends before it.
+        let after = at > range.end || (at == range.end && (!end || !range.is_empty()));
+        if after {
+            at - range.len() + text.len()
+        } else {
+            at.min(range.start)
+        }
+    };
+    for span in &mut block.spans {
+        span.range = moved(span.range.start, false)..moved(span.range.end, true);
+    }
+    for link in &mut block.links {
+        link.range = moved(link.range.start, false)..moved(link.range.end, true);
+    }
+    block.spans.retain(|span| !span.range.is_empty());
+    if let Some(style) = style.filter(|_| !text.is_empty()) {
+        let range = range.start..range.start + text.len();
+        let at = (block.spans.iter()).position(|span| span.range.start >= range.start);
+        let span = markdown::Span { range, style };
+        block.spans.insert(at.unwrap_or(block.spans.len()), span);
+    }
+}
+
+/// The space above `block`, after one of code if `after_code`, laid out
+/// as `look` says. Code's background reaches past its text: what's around
+/// it is as far from that as from other text. On a page, headings stand
+/// further from what's above them than in a chat, and a list from what's
+/// above it, as far as a paragraph would.
+pub(crate) fn gap(m: Measures, look: Look, block: &markdown::Block, after_code: bool) -> f32 {
+    let page = look == Look::Page;
+    let before = match block.kind {
+        BlockKind::Item(_) if page && block.starts_list && block.indent == 0 => m.em(0.7),
+        BlockKind::Item(_) => m.em(0.3),
+        BlockKind::Code(_) => m.em(1.1),
+        BlockKind::Heading(_) if page => m.em(1.4),
+        _ => m.em(0.7),
+    };
+    before + if after_code { m.em(0.4) } else { 0.0 }
 }
 
 /// What `block`, a block other than a table's cell, is laid out from,
@@ -603,6 +717,9 @@ fn block_key(
 fn text_size_of(kind: &BlockKind, look: Look, m: Measures) -> f32 {
     match kind {
         _ if matches!(look, Look::Mono(_)) => m.em * 0.93,
+        BlockKind::Heading(1) if look == Look::Page => m.em * 1.6,
+        BlockKind::Heading(2) if look == Look::Page => m.em * 1.35,
+        BlockKind::Heading(3) if look == Look::Page => m.em * 1.15,
         BlockKind::Heading(1) => m.em * 1.35,
         BlockKind::Heading(2) => m.em * 1.2,
         BlockKind::Heading(_) => m.em * 1.08,
@@ -654,11 +771,11 @@ fn draw_cut_off(
     }
     let (wide, top) = (m.em(1.2), origin[1] + table.top);
     let sides = [
-        (scroll > 0.5, origin[0], &table.marks[0]),
+        (scroll > 0.5, origin[0], &table.marks[0].layout),
         (
             scroll < most - 0.5,
             origin[0] + column - table.left - wide,
-            &table.marks[1],
+            &table.marks[1].layout,
         ),
     ];
     for (cut, left, mark) in sides {
@@ -702,7 +819,7 @@ pub(crate) fn lay_out_block(
     width: f32,
 ) -> Layout<Brush> {
     let tone = match look {
-        Look::Words => Tone::Plain,
+        Look::Words | Look::Page => Tone::Plain,
         Look::Thought => Tone::Muted,
         Look::Plain(tone) | Look::Mono(tone) => tone,
     };
@@ -772,6 +889,15 @@ pub(crate) fn lay_out_block(
                 syntax: None,
             };
             builder.push(StyleProperty::Brush(brush), range);
+        } else if style.image && look == Look::Page {
+            // In a link, it's the link's colour, to show it goes there.
+            let brush = Brush {
+                tone: Tone::Muted,
+                code: false,
+                syntax: None,
+            };
+            builder.push(StyleProperty::FontStyle(FontStyle::Italic), range.clone());
+            builder.push(StyleProperty::Brush(brush), range);
         }
     }
     for span in syntax {
@@ -790,8 +916,35 @@ pub(crate) fn lay_out_block(
     layout
 }
 
+/// A short text laid out on its own, as a list item's marker, or the mark
+/// of a side of a table where it's cut off, and what it was laid out from,
+/// hashed, to keep it by: the same for many.
+pub(crate) struct Mark {
+    pub(crate) layout: Layout<Brush>,
+    pub(crate) key: u64,
+}
+
+impl Mark {
+    /// `text` laid out as a list item's marker is, `size` pixels: as it was
+    /// in `cells`, if it was laid out before just so.
+    pub(crate) fn of(
+        (layout_cx, fonts): (&mut parley::LayoutContext<Brush>, &mut Fonts),
+        cells: &mut Cells,
+        text: &str,
+        size: f32,
+    ) -> Self {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        ("mark", text, size.to_bits()).hash(&mut hasher);
+        let key = hasher.finish();
+        let layout =
+            (cells.remove(key)).unwrap_or_else(|| lay_out_marker(layout_cx, fonts, text, size));
+        Self { layout, key }
+    }
+}
+
 /// Lays out a list item's marker, its text `size` pixels.
-pub(crate) fn lay_out_marker(
+fn lay_out_marker(
     layout_cx: &mut parley::LayoutContext<Brush>,
     fonts: &mut Fonts,
     marker: &str,

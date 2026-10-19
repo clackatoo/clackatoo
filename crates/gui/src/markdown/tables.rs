@@ -6,7 +6,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use parley::Layout;
 
-use super::layout::{Brush, LINE, Laid, LaidBlock, Look, Measures, lay_out_block, lay_out_marker};
+use super::layout::{Brush, LINE, Laid, LaidBlock, Look, Mark, Measures, lay_out_block};
 use crate::fonts::Fonts;
 use crate::markdown;
 
@@ -26,20 +26,72 @@ pub(crate) struct TableLaid {
     /// How far down the line under its head is, from its top.
     pub(crate) rule: f32,
     /// The marks of a side where it's cut off, scrolled: `‹` and `›`.
-    pub(crate) marks: [Layout<Brush>; 2],
+    pub(crate) marks: [Mark; 2],
 }
 
-/// Blocks, tables' cells among them, laid out, by what they were laid out
-/// from, hashed: see [`LaidBlock`]'s `key`.
-pub(crate) type Cells = HashMap<u64, Layout<Brush>>;
+/// Blocks, tables' cells among them, and marks laid out, by what they were
+/// laid out from, hashed (see [`LaidBlock`]'s `key`): several of the same,
+/// as a list's markers and many of its items are.
+#[derive(Default)]
+pub(crate) struct Cells(HashMap<u64, Vec<Layout<Brush>>>);
+
+impl Cells {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// One laid out from what's hashed as `key`, if one's kept.
+    pub(crate) fn remove(&mut self, key: u64) -> Option<Layout<Brush>> {
+        let kept = self.0.get_mut(&key)?;
+        let layout = kept.pop();
+        if kept.is_empty() {
+            self.0.remove(&key);
+        }
+        layout
+    }
+
+    /// Keeps `layout`, laid out from what's hashed as `key`.
+    pub(crate) fn insert(&mut self, key: u64, layout: Layout<Brush>) {
+        self.0.entry(key).or_default().push(layout);
+    }
+
+    /// How many are kept.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.0.values().map(Vec::len).sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl FromIterator<(u64, Layout<Brush>)> for Cells {
+    fn from_iter<I: IntoIterator<Item = (u64, Layout<Brush>)>>(laid: I) -> Self {
+        let mut cells = Self::new();
+        for (key, layout) in laid {
+            cells.insert(key, layout);
+        }
+        cells
+    }
+}
 
 impl Laid {
-    /// Its blocks, laid out, to lay it out again with, as more of it
-    /// comes.
+    /// Its blocks and marks, laid out, to lay it out again with, as more
+    /// of it comes.
     pub(crate) fn into_cells(self) -> Cells {
-        (self.blocks.into_iter())
-            .map(|block| (block.key, block.layout))
-            .collect()
+        let mut cells = Cells::new();
+        for block in self.blocks {
+            cells.insert(block.key, block.layout);
+            if let Some((mark, _)) = block.marker {
+                cells.insert(mark.key, mark.layout);
+            }
+        }
+        for mark in self.tables.into_iter().flat_map(|table| table.marks) {
+            cells.insert(mark.key, mark.layout);
+        }
+        cells
     }
 }
 
@@ -87,7 +139,8 @@ pub(crate) fn lay_out_table(
         .filter_map(|block| {
             let cell = block.kind.cell()?;
             let key = cell_key(&block, cell.row == 0);
-            let layout = laid_before.remove(&key).unwrap_or_else(|| {
+            let layout = laid_before.remove(key).unwrap_or_else(|| {
+                laid.fresh += 1;
                 lay_out_block(layout_cx, fonts, (&block, &[]), look, m.em, f32::INFINITY)
             });
             Some((cell, block, layout, key))
@@ -157,6 +210,8 @@ pub(crate) fn lay_out_table(
             top: top + ys[cell.row],
             marker: None,
             key,
+            at: block.at,
+            links: block.links,
         });
     }
     laid.tables.push(TableLaid {
@@ -166,7 +221,7 @@ pub(crate) fn lay_out_table(
         width,
         height,
         rule,
-        marks: ["‹", "›"].map(|mark| lay_out_marker(layout_cx, fonts, mark, m.em)),
+        marks: ["‹", "›"].map(|mark| Mark::of((layout_cx, fonts), laid_before, mark, m.em)),
     });
     laid.width = laid.width.max(left + width);
     laid.height += height;

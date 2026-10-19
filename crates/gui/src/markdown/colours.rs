@@ -101,6 +101,11 @@ impl Colours {
         }
     }
 
+    /// Whether it made the ask numbered `id`, which isn't answered yet.
+    pub(crate) fn waits_for(&self, id: u64) -> bool {
+        self.asked.contains_key(&id)
+    }
+
     /// The daemon's answer to the ask numbered `id`: each block's spans.
     /// Spans that don't fit their block's text are left out. Returns
     /// whether it was this chat's ask.

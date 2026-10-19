@@ -23,6 +23,7 @@
 //! | `recording R` | A macro is being recorded into register R. |
 //! | `messages` | `:messages` shows what the bar has said lately. |
 //! | `saved` | The practice file has no changes that aren't written. |
+//! | `rendered` | The focused editor shows its Markdown rendered. |
 //! | `not CHECK` | CHECK doesn't hold. |
 //!
 //! Text is written in double quotes, with `\n` a line break, `\t` a tab,
@@ -55,6 +56,7 @@ pub(crate) enum Check {
     Recording(char),
     Messages,
     Saved,
+    Rendered,
     Not(Box<Check>),
 }
 
@@ -150,6 +152,8 @@ pub(crate) trait Facts {
     fn recording(&self) -> Option<char>;
     /// Whether `:messages` shows what the bar has said lately.
     fn messages_shown(&self) -> bool;
+    /// Whether the focused editor shows its Markdown rendered.
+    fn rendered(&self) -> bool;
 }
 
 impl Check {
@@ -214,6 +218,7 @@ impl Check {
             ["recording", name] => Self::Recording(register(name)?),
             ["messages"] => Self::Messages,
             ["saved"] => Self::Saved,
+            ["rendered"] => Self::Rendered,
             _ => return Err("that isn't a check".into()),
         })
     }
@@ -256,6 +261,7 @@ impl Check {
             Self::Recording(name) => facts.recording() == Some(*name),
             Self::Messages => facts.messages_shown(),
             Self::Saved => facts.practice_saved() == Some(true),
+            Self::Rendered => facts.rendered(),
             Self::Not(check) => !check.holds(facts),
         }
     }
@@ -360,6 +366,7 @@ mod tests {
         file: Option<String>,
         recording: Option<char>,
         messages: bool,
+        rendered: bool,
     }
 
     impl Facts for Made {
@@ -418,6 +425,9 @@ mod tests {
         fn messages_shown(&self) -> bool {
             self.messages
         }
+        fn rendered(&self) -> bool {
+            self.rendered
+        }
     }
 
     fn holds(line: &str, facts: &Made) -> bool {
@@ -463,6 +473,12 @@ mod tests {
         assert!(!holds(r#"at "let""#, &facts));
         assert!(holds(r#"file "a.rs""#, &facts));
         assert!(Check::parse("line 0").is_err());
+        assert!(!holds("rendered", &facts));
+        let rendered = Made {
+            rendered: true,
+            ..Made::default()
+        };
+        assert!(holds("rendered", &rendered));
     }
 
     #[test]

@@ -21,6 +21,7 @@ mod hints;
 mod indent;
 mod mouse;
 mod prose;
+mod rendered;
 mod snippets;
 mod substitute;
 mod uses;

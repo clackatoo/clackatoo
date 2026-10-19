@@ -545,6 +545,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "A machine your desk is connected to comes into your bar too, as notes@server, unless desk said --no-share",
     },
+    News {
+        id: "markdown",
+        date: "2026-10-19",
+        lesson: "markdown",
+        what: "Markdown files rendered in the editor, with <Space>tm or :Markdown, and back to their text with any key that edits",
+    },
 ];
 
 impl News {

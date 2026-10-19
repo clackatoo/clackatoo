@@ -137,7 +137,7 @@ impl Desk {
 /// `path` made absolute against `cwd`, with its `.` and `..` worked out,
 /// if it's relative and `cwd` is known. A path from the home directory
 /// (`~/`) is left for the daemon, which knows where that is.
-fn absolute(path: &str, cwd: Option<&str>) -> String {
+pub(super) fn absolute(path: &str, cwd: Option<&str>) -> String {
     let relative = Path::new(path);
     if relative.is_absolute() || path.starts_with('~') {
         return path.to_owned();

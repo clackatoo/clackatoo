@@ -32,6 +32,8 @@
 //! deny` turns down those asking, `Devices revoke N` unpairs one, and
 //! `Devices unlock` lets devices pair with the password again, after too
 //! many wrong ones locked it.
+//! `Markdown` shows the focused editor's Markdown file rendered, as prose,
+//! or its text again.
 //! `PortForward 8080`, in a window on another machine, forwards that port
 //! here to the same port there, as `ssh -L` does; `PortForward 3000:8080`
 //! forwards port 3000 here to 8080 there, and `PortForward
@@ -156,6 +158,9 @@ pub(crate) enum Command {
     /// `:Format`: format the focused pane's file, as its language server
     /// does.
     Format,
+    /// `:Markdown`: show the focused editor's Markdown rendered, as prose,
+    /// or its text again.
+    Markdown,
     /// Run the config again, from the start.
     Reload,
     /// `:set`: change options, or say what they are, as these words say.
@@ -589,6 +594,7 @@ fn file_command(word: &str, argument: Option<&str>) -> Option<Result<Command, St
         "wq!" | "x!" => write(true, true),
         "e!" | "edit!" => Some(Ok(Command::Discard)),
         "Format" => Some(Ok(Command::Format)),
+        "Markdown" => Some(Ok(Command::Markdown)),
         "e" | "edit" => Some(Ok(argument.map_or(Command::EditBlank, |path| {
             Command::Edit {
                 place: Place::Here,
@@ -742,6 +748,7 @@ pub(crate) const NAMES: &[&str] = &[
     "Devices",
     "PortForward",
     "Format",
+    "Markdown",
     "AgentUndo",
     "AgentRedo",
     "Review",
@@ -910,6 +917,7 @@ mod tests {
         ("e", "edit"),
         ("edit", ""),
         ("Format", ""),
+        ("Markdown", ""),
         ("AgentUndo", ""),
         ("AgentRedo", ""),
         ("Review", ""),
