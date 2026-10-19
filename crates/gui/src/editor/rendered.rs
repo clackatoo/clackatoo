@@ -16,12 +16,15 @@
 //! The text is read as a whole each time it's changed, which takes about
 //! half a millisecond for a README of a few thousand lines.
 //!
-//! It's for reading. `j`, `k`, Ctrl+E and Ctrl+Y scroll it a line, or as
-//! many as a count says; Ctrl+D and Ctrl+U half a view, Ctrl+F and Ctrl+B
-//! nearly a whole one; `gg` to the top and `G` to the end, or either with
-//! a count, to the block holding that line; and so does the mouse's wheel.
-//! Any other key, such as `i`, `dd` or `/`, is the text's: the text comes
-//! back, at the view's place, and the key does there what it does. The
+//! It's for reading, as a pager: the focus arriving at it in insert mode
+//! leaves it in normal mode. `j`, `k`, `gj`, `gk`, Ctrl+E and Ctrl+Y scroll
+//! it a line, or as many as a count says; Ctrl+D and Ctrl+U half a view,
+//! Ctrl+F and Ctrl+B nearly a whole one; `gg` to the top and `G` to the end,
+//! or either with a count, to the block holding that line; and so does the
+//! mouse's wheel. A count, or `g`, waits in the editor's keys, as one typed
+//! in the text does. Any other key, such as `i`, `dd` or `/`, or a paste,
+//! is the text's: the text comes back, with the cursor at the start of the
+//! line the top block starts on, and the key does there what it does. The
 //! command line's commands, as `:w` and `:q`, are the same in both.
 //!
 //! A click on a link opens it (see `desk::markdown`), and `#` and a
@@ -61,8 +64,6 @@ pub(crate) struct Rendered {
     /// The byte of the text whose block is to go to the top of the view
     /// once it's laid out.
     go_to: Option<usize>,
-    /// A count, or `g`, typed, waiting for the rest of the command.
-    typed: Vec<Stroke>,
     /// How tall a line of its text is, the view, and the space above the
     /// page, and how far it can scroll, as drawn last: what keys scroll by.
     line_height: f32,
@@ -70,8 +71,10 @@ pub(crate) struct Rendered {
     margin: f32,
     most: f32,
     /// The blocks with links drawn last, each with where its text's top
-    /// left was, from the pane's top left, for clicks.
-    shown: Vec<(usize, [f32; 2])>,
+    /// left was, from the pane's top left, and what of it was drawn, its
+    /// left, top, width and height, as a table's cells are cut off at the
+    /// column's edge, for clicks.
+    shown: Vec<(usize, [f32; 2], [f32; 4])>,
     /// How many blocks it last laid out afresh, rather than kept.
     #[cfg(test)]
     pub(super) fresh: usize,
@@ -103,7 +106,6 @@ impl std::fmt::Debug for Rendered {
         f.debug_struct("Rendered")
             .field("scroll", &self.scroll)
             .field("go_to", &self.go_to)
-            .field("typed", &self.typed)
             .finish_non_exhaustive()
     }
 }
@@ -119,7 +121,6 @@ impl Rendered {
             recoloured: false,
             scroll: 0.0,
             go_to: Some(at),
-            typed: Vec::new(),
             // Until it's drawn, about what a pane's are.
             line_height: 20.0,
             view_height: 600.0,
@@ -135,15 +136,16 @@ impl Rendered {
     /// byte `at` of the text at the top.
     pub(super) fn open_at(&mut self, at: usize) {
         self.go_to = Some(at);
-        self.typed.clear();
     }
 
     /// Does what `stroke` does, if it's one of the view's keys, in a text
-    /// that's `text`.
-    pub(super) fn key(&mut self, stroke: Stroke, text: &Rope) -> Keyed {
+    /// that's `text`, after `typed`, the keys of a command typed before it:
+    /// a count, or `g`. The editor keeps them, as it keeps its own, so its
+    /// bar shows them, and leaving the pane forgets them.
+    pub(super) fn key(&mut self, stroke: Stroke, typed: &mut Vec<Stroke>, text: &Rope) -> Keyed {
         let g = Stroke::char('g');
-        let after_g = self.typed.last() == Some(&g);
-        let count: Option<usize> = (self.typed.iter())
+        let after_g = typed.last() == Some(&g);
+        let count: Option<usize> = (typed.iter())
             .filter_map(|&typed| digit(typed))
             .collect::<String>()
             .parse()
@@ -151,15 +153,25 @@ impl Rendered {
         // `0` goes on a count, but doesn't start one.
         let counting = digit(stroke).is_some_and(|digit| digit != '0' || count.is_some());
         if !after_g && (counting || stroke == g) {
-            self.typed.push(stroke);
+            typed.push(stroke);
             return Keyed::Took;
         }
-        let typed = std::mem::take(&mut self.typed);
+        let before = std::mem::take(typed);
+        // `gj` and `gk` go by screen rows, which here are lines, as `j`
+        // and `k` do: a config may map `j` to `gj`.
+        let rows = after_g
+            && matches!(
+                stroke,
+                Stroke::Char {
+                    ch: 'j' | 'k',
+                    ctrl: false
+                }
+            );
         let line =
             |count: usize| text.line_to_byte(count.saturating_sub(1).min(text.len_lines() - 1));
-        if after_g && stroke != g {
-            return Keyed::Text(typed);
-        } else if after_g || stroke == Stroke::char('G') {
+        if after_g && stroke != g && !rows {
+            return Keyed::Text(before);
+        } else if (after_g && !rows) || stroke == Stroke::char('G') {
             // To the block holding line `count`, or to the top or the end.
             match (count, after_g) {
                 (Some(count), _) => self.go_to = Some(line(count)),
@@ -172,7 +184,7 @@ impl Rendered {
         } else if let Some(lines) = self.lines_for(stroke, count) {
             self.scroll_by(lines * self.line_height);
         } else if stroke != Stroke::Escape {
-            return Keyed::Text(typed);
+            return Keyed::Text(before);
         }
         Keyed::Took
     }
@@ -312,19 +324,23 @@ impl Rendered {
     /// image.
     pub(super) fn link_at(&self, at: [f32; 2]) -> Option<&str> {
         let page = self.page.as_ref()?;
-        self.shown.iter().find_map(|&(index, origin)| {
-            let block = page.laid.blocks.get(index)?;
-            let (x, y) = (at[0] - origin[0], at[1] - origin[1]);
-            let layout = &block.layout;
-            if x < 0.0 || y < 0.0 || x > layout.width() || y > layout.height() {
-                return None;
-            }
-            let byte = parley::Cursor::from_point(layout, x, y).index();
-            (block.links.iter())
-                .rev()
-                .find(|link| link.range.contains(&byte))
-                .map(|link| link.to.as_str())
-        })
+        self.shown
+            .iter()
+            .find_map(|&(index, origin, [left, top, width, height])| {
+                let drawn =
+                    (left..left + width).contains(&at[0]) && (top..top + height).contains(&at[1]);
+                let block = page.laid.blocks.get(index).filter(|_| drawn)?;
+                let (x, y) = (at[0] - origin[0], at[1] - origin[1]);
+                let layout = &block.layout;
+                if x < 0.0 || y < 0.0 || x > layout.width() || y > layout.height() {
+                    return None;
+                }
+                let byte = parley::Cursor::from_point(layout, x, y).index();
+                (block.links.iter())
+                    .rev()
+                    .find(|link| link.range.contains(&byte))
+                    .map(|link| link.to.as_str())
+            })
     }
 
     /// Lays the text out, if it's changed, or how it's drawn has, and draws
@@ -379,7 +395,15 @@ impl Rendered {
             .filter(|(_, block)| block.top < to && block.top + block.layout.height() > from)
             .map(|(index, block)| {
                 let at = [left + block.left, self.margin - self.scroll + block.top];
-                (index, at)
+                // A table's cells, as far as the column goes.
+                let clip = match page.laid.table_of(index) {
+                    Some(table) => {
+                        let table = &page.laid.tables[table];
+                        [left + table.left, 0.0, column - table.left, size[1]]
+                    }
+                    None => [0.0, 0.0, size[0], size[1]],
+                };
+                (index, at, clip)
             })
             .collect();
         paint
@@ -527,7 +551,7 @@ impl Editor {
 
     /// Whether its file is one it can render: Markdown, and not a lesson's
     /// or a listing's, which are the window's own.
-    fn renders(&self, copy: &BufferCopy) -> bool {
+    pub(super) fn renders(&self, copy: &BufferCopy) -> bool {
         !self.lesson && !copy.is_scratch() && is_markdown(copy.path())
     }
 
@@ -563,12 +587,25 @@ impl Editor {
         self.rendered = Some(rendered);
     }
 
-    /// Shows the text itself again, if it's rendered, with the line the top
-    /// block starts on at the top, or as it was, if the top block holds the
-    /// line that was at the top. The cursor stays where it was if that's in
-    /// view, and else goes to that line, as any key typed next is to act
-    /// where the view was.
+    /// Shows the text itself again, if it's rendered, as `:Markdown` does:
+    /// with the line the top block starts on at the top, or as it was, if
+    /// the top block holds the line that was at the top. The cursor stays
+    /// where it was if that's in view, and else goes to that line.
     pub(crate) fn show_text(&mut self, copy: &BufferCopy) {
+        self.leave_rendered(copy, false);
+    }
+
+    /// Shows the text itself again, if it's rendered, to edit it where the
+    /// view was, as a key that isn't the view's does, or a paste: with the
+    /// cursor at the start of the line the top block starts on, at the top.
+    pub(crate) fn show_text_to_edit(&mut self, copy: &BufferCopy) {
+        self.leave_rendered(copy, true);
+    }
+
+    /// Shows the text itself again, if it's rendered, as
+    /// [`show_text`](Self::show_text) does, or with `to_edit`, as
+    /// [`show_text_to_edit`](Self::show_text_to_edit) does.
+    fn leave_rendered(&mut self, copy: &BufferCopy, to_edit: bool) {
         let Some(rendered) = self.rendered.take() else {
             return;
         };
@@ -576,7 +613,7 @@ impl Editor {
         let rope = copy.text();
         let was = usize::try_from(self.top.line).unwrap_or(usize::MAX);
         let was = rope.line_to_byte(was.min(rope.len_lines().saturating_sub(1)));
-        if rendered.top_holds(was) {
+        if !to_edit && rendered.top_holds(was) {
             return;
         }
         let Some((first, last)) = rendered.shown_bytes() else {
@@ -584,7 +621,7 @@ impl Editor {
         };
         let line = |byte: usize| rope.byte_to_line(byte.min(rope.len_bytes())) as u64;
         let (top, bottom) = (line(first), line(last));
-        if (top..=bottom).contains(&self.cursor.at.line) {
+        if !to_edit && (top..=bottom).contains(&self.cursor.at.line) {
             self.top = super::wrap::Top { line: top, cell: 0 };
             let text = self.text(copy);
             self.cursor_into_view(&text);
@@ -619,10 +656,10 @@ impl Editor {
         let rendered = self.rendered.as_mut()?;
         // What the bar said goes, as with any key.
         self.status = None;
-        match rendered.key(stroke, copy.text()) {
+        match rendered.key(stroke, &mut self.typed, copy.text()) {
             Keyed::Took => Some(Done::REDRAW),
             Keyed::Text(before) => {
-                self.show_text(copy);
+                self.show_text_to_edit(copy);
                 for stroke in before {
                     self.stroke(stroke, copy, shared);
                 }
@@ -667,7 +704,11 @@ impl Editor {
             return;
         }
         self.open_rendered = false;
-        if self.renders(copy) && self.mode == Mode::Normal {
+        // Nothing half typed, which showing it rendered would throw away,
+        // leaving the rest of its keys to edit the text: else it stays as
+        // its text.
+        let idle = self.mode == Mode::Normal && self.typed.is_empty() && self.prompt.is_none();
+        if self.renders(copy) && idle {
             self.show_rendered(copy);
         }
     }

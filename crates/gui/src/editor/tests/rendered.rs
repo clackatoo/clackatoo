@@ -317,3 +317,129 @@ fn markdownview_opens_markdown_files_rendered_once_theyve_come() {
     setup.editor.settle(&setup.copy);
     assert!(!setup.editor.rendered());
 }
+
+#[test]
+fn markdownview_leaves_a_file_as_its_text_while_a_command_is_half_typed() {
+    let options = Options {
+        markdownview: MarkdownView::Rendered,
+        ..Options::default()
+    };
+    // A search being typed as the text comes, a change waiting for its
+    // object, and a count: each goes on in the text, as typed.
+    for (before, after, text) in [
+        ("/Ins", "tall<CR>x", "# Notes\n\nTo nstall it.\n"),
+        ("ci", "w<Esc>", "# \n\nTo Install it.\n"),
+        ("3", "x", "# es\n\nTo Install it.\n"),
+    ] {
+        let mut setup = markdown("# Notes\n\nTo Install it.\n");
+        setup.editor = Editor::new(BufferId(1), &options);
+        setup.keys(&format!("w{before}"));
+        setup.editor.settle(&setup.copy);
+        assert!(!setup.editor.rendered(), "{before}");
+        setup.keys(after);
+        assert_eq!(setup.text(), text, "{before}{after}");
+        // And for good: it stays its text.
+        setup.editor.settle(&setup.copy);
+        assert!(!setup.editor.rendered());
+    }
+}
+
+#[test]
+fn a_count_or_g_typed_in_the_view_is_the_editors_and_goes_as_any_does() {
+    let mut fonts = crate::chat::fixtures::fonts();
+    let mut setup = markdown(&document(60));
+    toggle(&mut setup);
+    paint(&mut setup, &mut fonts);
+    setup.keys("3");
+    assert_eq!(setup.editor.counting(), Some(3));
+    assert!(
+        setup
+            .editor
+            .label(&setup.copy)
+            .starts_with("3  notes.md  rendered")
+    );
+    // Leaving the pane forgets it, as it does a count typed in the text.
+    setup.editor.leave();
+    assert!(!setup.editor.pending());
+    setup.keys("x");
+    assert!(
+        setup.text().starts_with("# Part 0\n"),
+        "one character, not three"
+    );
+    toggle(&mut setup);
+    paint(&mut setup, &mut fonts);
+    setup.keys("g");
+    assert!(setup.editor.pending());
+    setup.editor.forget_typed();
+    setup.keys("i");
+    assert_eq!(setup.editor.mode, Mode::Insert);
+}
+
+#[test]
+fn gj_and_gk_scroll_as_j_and_k_do() {
+    let mut fonts = crate::chat::fixtures::fonts();
+    let mut setup = markdown(&document(60));
+    toggle(&mut setup);
+    paint(&mut setup, &mut fonts);
+    setup.keys("<Esc>20gj");
+    paint(&mut setup, &mut fonts);
+    assert!(setup.editor.rendered());
+    let down = shown_lines(&setup).0;
+    assert!(down > 0, "scrolled down to line {down}");
+    setup.keys("20gk");
+    paint(&mut setup, &mut fonts);
+    assert!(setup.editor.rendered());
+    assert_eq!(shown_lines(&setup).0, 0);
+}
+
+#[test]
+fn a_key_that_edits_does_so_at_the_top_block_not_at_a_cursor_never_drawn() {
+    let mut fonts = crate::chat::fixtures::fonts();
+    let mut setup = markdown(&document(60));
+    // The cursor on line 2, in view; the view not scrolled.
+    setup.keys("2j");
+    toggle(&mut setup);
+    paint(&mut setup, &mut fonts);
+    setup.keys("x");
+    assert!(!setup.editor.rendered());
+    assert!(
+        setup.text().starts_with("# Part 0\n\nThe words"),
+        "{}",
+        setup.text()
+    );
+    // And a paste goes there too.
+    toggle(&mut setup);
+    paint(&mut setup, &mut fonts);
+    setup.keys("41G");
+    paint(&mut setup, &mut fonts);
+    setup.editor.paste("pasted ", &mut setup.copy);
+    setup.serve();
+    assert!(setup.text().contains("\npasted ## Part 10\n"));
+}
+
+#[test]
+fn a_link_in_a_tables_cell_cut_off_at_the_columns_edge_isnt_clicked() {
+    let mut fonts = crate::chat::fixtures::fonts();
+    let wide = "a long cell that is wider than the narrow column it's drawn in";
+    let text = format!("| One | Two |\n|---|---|\n| {wide} | [hidden](https://x.org) |\n");
+    let mut setup = markdown(&text);
+    toggle(&mut setup);
+    let painted = (setup.editor).paint_rendered(&mut fonts, [0.0; 2], [300.0, 480.0], &setup.copy);
+    assert!(painted.is_some());
+    let rendered = setup.editor.rendered.as_ref().unwrap();
+    let found = (0..200_u16)
+        .flat_map(|x| (0..120_u16).map(move |y| [f32::from(x) * 4.0, f32::from(y) * 4.0]))
+        .find_map(|at| rendered.link_at(at));
+    assert_eq!(found, None);
+}
+
+#[test]
+fn renamed_to_something_that_isnt_markdown_it_shows_its_text() {
+    let mut setup = markdown("# Notes\n");
+    toggle(&mut setup);
+    setup
+        .copy
+        .update(BufferUpdate::Moved("/p/notes.txt".into()));
+    setup.editor.settle(&setup.copy);
+    assert!(!setup.editor.rendered());
+}

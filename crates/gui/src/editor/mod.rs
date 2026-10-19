@@ -1077,16 +1077,16 @@ impl Editor {
             return status.clone();
         }
         let modified = if copy.modified() { " [+]" } else { "" };
-        if let Some(position) = self.rendered_position() {
-            return format!("{}{modified}  rendered  {position}", copy.name());
-        }
         let at = self.cursor.at;
-        let mut label = format!("{}{modified}  {}:{}", copy.name(), at.line + 1, at.col + 1);
+        let mut label = match self.rendered_position() {
+            Some(position) => format!("{}{modified}  rendered  {position}", copy.name()),
+            None => format!("{}{modified}  {}:{}", copy.name(), at.line + 1, at.col + 1),
+        };
         // A count waiting for its command shows first, as Vim's `showcmd`.
         if let Some(count) = self.counting() {
             label = format!("{count}  {label}");
         }
-        match self.diagnostic_here(copy) {
+        match self.diagnostic_here(copy).filter(|_| !self.rendered()) {
             Some(diagnostic) => format!("{label}  {}", diagnostic.described()),
             None => label,
         }
@@ -1246,7 +1246,7 @@ impl Editor {
     /// Puts `text` in at the cursor, as typed in insert mode.
     pub(crate) fn paste(&mut self, text: &str, copy: &mut BufferCopy) {
         // Rendered, it goes into the text, where the view was.
-        self.show_text(copy);
+        self.show_text_to_edit(copy);
         // Into a search or a name being typed, if one is.
         if let Some((line, _)) = self.prompt_line() {
             line.put(text);
@@ -4773,6 +4773,10 @@ impl Editor {
     )]
     pub(crate) fn settle(&mut self, copy: &BufferCopy) {
         self.open_as_wanted(copy);
+        // Renamed to something that isn't Markdown, it's its text again.
+        if self.rendered() && !self.renders(copy) {
+            self.show_text(copy);
+        }
         // Rendered, nothing of the text is drawn.
         if self.rendered() {
             return;

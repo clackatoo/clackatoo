@@ -18,10 +18,10 @@
 //! or a file the user didn't choose.
 //!
 //! Panes with no insert mode, the explorer, a review, a board, a chat's
-//! page and a lesson, show normal mode and leave the window's as it is,
-//! so going on to a terminal through one still types into it. What's
-//! opened or closed from one, by a key, a click or a command, leaves the
-//! window in normal mode, as the bar said. An editor showing a folder's
+//! page, a lesson and an editor showing its Markdown rendered, show normal
+//! mode and leave the window's as it is, so going on to a terminal through
+//! one still types into it. What's opened or closed from one, by a key, a
+//! click or a command, leaves the window in normal mode, as the bar said. An editor showing a folder's
 //! listing is an editor, and follows the mode. So does a chat, but in
 //! normal mode while it asks something, so typing can't answer it by
 //! chance; an answer's number, pressed twice, answers it there, but only
@@ -96,7 +96,7 @@ impl Desk {
             return Some(Mode::Insert);
         }
         if let Some((editor, _)) = self.focused_editor() {
-            return (!self.is_lesson_pane(pane)).then_some(editor.mode);
+            return (!self.has_no_insert_mode(pane)).then_some(editor.mode);
         }
         // An explorer, or an editor's folder whose listing hasn't come.
         if self.focused_explorer().is_some() {
@@ -123,7 +123,7 @@ impl Desk {
     /// Takes the window's mode from `mode`, the mode of the focused
     /// pane's editor, which is going though the pane stays.
     pub(super) fn remember_mode_of(&mut self, pane: PaneId, mode: Mode) {
-        if self.shown.is_some_and(|shown| shown.pane == pane) && !self.is_lesson_pane(pane) {
+        if self.shown.is_some_and(|shown| shown.pane == pane) && !self.has_no_insert_mode(pane) {
             self.mode = WindowMode::of(mode);
         }
     }
@@ -268,7 +268,8 @@ impl Desk {
     }
 
     /// The focus has arrived at the pane shown: it takes the window's
-    /// mode, but for a lesson, which stays in normal mode, a chat asking
+    /// mode, but for a lesson or rendered Markdown, which stay in normal
+    /// mode, a chat asking
     /// something, which arrives in normal mode, and an editor whose text
     /// hasn't come, which waits for it.
     pub(super) fn arrive(&mut self) {
@@ -278,7 +279,7 @@ impl Desk {
         self.arrived = Some(arrived);
         self.insert_on_load = None;
         let (pane, content) = arrived;
-        let insert = self.mode == WindowMode::Insert && !self.is_lesson_pane(pane);
+        let insert = self.mode == WindowMode::Insert && !self.has_no_insert_mode(pane);
         if insert && self.editor_unloaded(pane) {
             self.insert_on_load = Some((pane, Instant::now()));
         } else {

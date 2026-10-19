@@ -38,6 +38,17 @@ impl Desk {
         }
     }
 
+    /// Whether `pane` is an editor with no insert mode: a lesson, or one
+    /// showing its Markdown rendered, which is read, not typed in. The
+    /// focus arriving at one leaves it in normal mode, and the window's
+    /// mode as it was, as an explorer's arriving does.
+    pub(super) fn has_no_insert_mode(&self, pane: PaneId) -> bool {
+        self.is_lesson_pane(pane)
+            || self
+                .editor(pane)
+                .is_some_and(crate::editor::Editor::rendered)
+    }
+
     /// Lays out and draws the rendered Markdown of the editor `pane`, if it
     /// shows it so, in its tile, `size` pixels with its top left at
     /// `origin`.
@@ -98,12 +109,12 @@ impl Desk {
     /// Opens what a link in the rendered Markdown of the editor `pane` goes
     /// to, `to`, as written.
     pub(super) fn open_rendered_link(&mut self, pane: PaneId, to: &str) {
+        if to.trim().is_empty() {
+            self.say("the link goes nowhere".into());
+            return;
+        }
         if let Some(heading) = to.strip_prefix('#') {
-            let found = (self.editor_and_copy(pane))
-                .is_some_and(|(editor, _)| editor.rendered_heading(heading));
-            if !found {
-                self.say(format!("no heading ‘{heading}’"));
-            }
+            self.go_to_rendered_heading(pane, heading);
             return;
         }
         if has_scheme(to) {
@@ -119,14 +130,33 @@ impl Desk {
             }
             return;
         }
-        // A file, from the Markdown file's folder; which of its headings,
-        // if one's named, isn't looked for.
-        let path = to.split(['#', '?']).next().unwrap_or_default();
-        let folder = (self.editor_and_copy(pane))
-            .and_then(|(_, copy)| Path::new(copy.path()).parent().map(Path::to_owned));
-        let folder = folder.as_ref().and_then(|folder| folder.to_str());
-        let path = super::links::absolute(&links::percent_decode(path), folder);
-        self.open_here(pane, path);
+        // A file, from the Markdown file's folder. A heading of this file
+        // is scrolled to; another's isn't looked for.
+        let (file, heading) = to.split_once('#').unwrap_or((to, ""));
+        let file = file.split('?').next().unwrap_or_default();
+        let Some((_, copy)) = self.editor_and_copy(pane) else {
+            return;
+        };
+        let this = copy.path().to_owned();
+        let folder = Path::new(&this).parent().and_then(Path::to_str);
+        let path = super::links::absolute(&links::percent_decode(file), folder);
+        match (path == this, heading) {
+            (false, _) => {
+                self.open_here(pane, path);
+            }
+            (true, "") => self.say("nothing opened: it's the file shown".into()),
+            (true, heading) => self.go_to_rendered_heading(pane, heading),
+        }
+    }
+
+    /// Scrolls the rendered Markdown of the editor `pane` to the heading
+    /// `heading` names, or says there's none.
+    fn go_to_rendered_heading(&mut self, pane: PaneId, heading: &str) {
+        let found = (self.editor_and_copy(pane))
+            .is_some_and(|(editor, _)| editor.rendered_heading(heading));
+        if !found {
+            self.say(format!("no heading ‘{heading}’"));
+        }
     }
 
     /// Asks the daemon to colour the code editors' rendered Markdown laid

@@ -1430,7 +1430,7 @@ impl Desk {
         {
             if insert {
                 // Rendered Markdown isn't typed in: its text is.
-                editor.show_text(copy);
+                editor.show_text_to_edit(copy);
                 editor.enter_insert_mode();
                 return;
             }
