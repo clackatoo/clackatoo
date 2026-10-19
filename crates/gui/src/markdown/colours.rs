@@ -29,7 +29,7 @@ const MOST_KEPT: usize = 2048;
 
 /// What's known of a block's colours.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum Colouring<'a> {
+pub(crate) enum Colouring<'a> {
     /// Its spans, as bytes of its text: none if its language has none.
     Known(&'a [Span]),
     /// Asked for, or about to be.
@@ -40,7 +40,7 @@ pub(super) enum Colouring<'a> {
 
 /// The colours of a chat's code.
 #[derive(Debug, Default)]
-pub(super) struct Colours {
+pub(crate) struct Colours {
     known: HashMap<Code, Vec<Span>>,
     /// Blocks asked for but not yet answered, or about to be.
     waiting: HashSet<Code>,
@@ -53,7 +53,7 @@ pub(super) struct Colours {
 impl Colours {
     /// What's known of the colours of `text`, code in `language`: a block
     /// not asked about yet is wanted.
-    pub(super) fn of(&mut self, language: &str, text: &str) -> Colouring<'_> {
+    pub(crate) fn of(&mut self, language: &str, text: &str) -> Colouring<'_> {
         if text.len() > LONGEST || text.trim().is_empty() {
             return Colouring::Plain;
         }
@@ -71,7 +71,7 @@ impl Colours {
     }
 
     /// The blocks to ask for, in asks no bigger than the daemon colours.
-    pub(super) fn take_wanted(&mut self) -> Vec<Vec<Code>> {
+    pub(crate) fn take_wanted(&mut self) -> Vec<Vec<Code>> {
         let mut asks: Vec<Vec<Code>> = Vec::new();
         let mut bytes = 0;
         for code in std::mem::take(&mut self.wanted) {
@@ -89,13 +89,13 @@ impl Colours {
     }
 
     /// `code` was asked for, numbered `id`.
-    pub(super) fn asked(&mut self, id: u64, code: Vec<Code>) {
+    pub(crate) fn asked(&mut self, id: u64, code: Vec<Code>) {
         self.asked.insert(id, code);
     }
 
     /// `code` can't be asked for, as the daemon doesn't colour chats'
     /// code: it's plain.
-    pub(super) fn plain(&mut self, code: Vec<Code>) {
+    pub(crate) fn plain(&mut self, code: Vec<Code>) {
         for code in code {
             self.know(code, Vec::new());
         }
@@ -104,7 +104,7 @@ impl Colours {
     /// The daemon's answer to the ask numbered `id`: each block's spans.
     /// Spans that don't fit their block's text are left out. Returns
     /// whether it was this chat's ask.
-    pub(super) fn answered(&mut self, id: u64, spans: Vec<Vec<Span>>) -> bool {
+    pub(crate) fn answered(&mut self, id: u64, spans: Vec<Vec<Span>>) -> bool {
         let Some(code) = self.asked.remove(&id) else {
             return false;
         };
@@ -127,7 +127,7 @@ impl Colours {
     /// Forgets what was asked and not answered, as the daemon's gone out
     /// of reach and won't answer it: it's asked for again as it's laid
     /// out.
-    pub(super) fn forget_asked(&mut self) {
+    pub(crate) fn forget_asked(&mut self) {
         self.asked.clear();
         self.wanted.clear();
         self.waiting.clear();

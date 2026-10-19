@@ -23,107 +23,36 @@ use clackatoo_protocol::{
     ChatState, ChoiceKind, Item, Outcome, Said, Setting, SettingKind, ToolStatus, Turn, TurnFiles,
     TurnFilesState, code_span,
 };
-use parley::{
-    Alignment, AlignmentOptions, FontFamily, FontFamilyName, FontStyle, FontWeight, GenericFamily,
-    Layout, LineHeight, PositionedLayoutItem, StyleProperty,
-};
+use parley::Layout;
 
 use super::card::Card;
-use super::colours::{Colouring, Colours};
-use super::markdown::{self, BlockKind};
 use super::picker::{self, ChoiceRow, Row, SliderRow, Spot};
 use super::{Brush, ChatView, Hit, Menu, Tone};
 use crate::fonts::Fonts;
-use crate::render::{Fill, Ink, Paint, PlacedGlyph};
+use crate::markdown::layout::{
+    Canvas, LINE, Laid, Look, Measures, TextPaint, draw_laid, draw_scrolled, intersection, lay_out,
+    lay_out_coloured,
+};
+pub(super) use crate::markdown::layout::{body_style, text_size};
+use crate::markdown::tables::TableLaid;
+use crate::render::{Fill, Paint};
+// What the tests below use of what was moved to `markdown`.
+#[cfg(test)]
+use crate::markdown::{
+    layout::{LaidBlock, code_inset, quote_inset, warm_fonts},
+    tables::Cells,
+};
 pub(super) use select::{
     How, Picked, Position, Shown, TextKey, after, before, line_middle, line_of, within, x_of,
 };
-use tables::{Cells, TableLaid, lay_out_table};
 pub(super) use usage::Detail;
+#[cfg(test)]
+use {crate::render::Ink, parley::PositionedLayoutItem};
 
 /// The widest the column of turns gets, in ems.
 const COLUMN: f32 = 46.0;
-/// Space between lines of text, as a multiple of the text's size.
-const LINE: f32 = 1.45;
 /// The most lines the box a message is typed in grows to.
 const EDITOR_LINES: f32 = 10.0;
-
-/// What a chat pane draws.
-#[derive(Debug, Default)]
-pub(crate) struct ChatPaint {
-    pub(crate) fills: Vec<Fill>,
-    pub(crate) glyphs: Vec<PlacedGlyph>,
-    /// Fills over the text, as the cursor and a menu are.
-    pub(crate) over: Vec<Fill>,
-    /// Glyphs over those, as a menu's text is.
-    pub(crate) over_glyphs: Vec<PlacedGlyph>,
-    /// Where the cursor in the message being typed is, for an input
-    /// method's window: left, top, width and height.
-    pub(crate) ime: Option<[f32; 4]>,
-}
-
-/// The size of the chat's text, in pixels: the terminal's.
-pub(super) fn text_size(fonts: &Fonts) -> f32 {
-    fonts.ppem
-}
-
-/// The interface's font family, with others behind it for what it hasn't
-/// got: the terminal's, then emoji. Noto Sans, a common interface font,
-/// has no `▾`, which the terminal's fonts nearly all have.
-fn ui_family(fonts: &Fonts) -> FontFamily<'static> {
-    FontFamily::List(Cow::Owned(vec![
-        named_or(fonts.ui_family.as_ref(), GenericFamily::SansSerif),
-        named_or(fonts.mono_family.as_ref(), GenericFamily::Monospace),
-        FontFamilyName::Generic(GenericFamily::Monospace),
-        FontFamilyName::Generic(GenericFamily::Emoji),
-    ]))
-}
-
-/// The terminal's font family, for code, with the interface's and emoji
-/// behind it.
-fn mono_family(fonts: &Fonts) -> FontFamily<'static> {
-    FontFamily::List(Cow::Owned(vec![
-        named_or(fonts.mono_family.as_ref(), GenericFamily::Monospace),
-        FontFamilyName::Generic(GenericFamily::Monospace),
-        named_or(fonts.ui_family.as_ref(), GenericFamily::SansSerif),
-        FontFamilyName::Generic(GenericFamily::Emoji),
-    ]))
-}
-
-/// A character no font has: laid out, parley looks through every family
-/// of a stack for it, and the fonts behind them, as it would for any
-/// character the interface's font hasn't got, such as the send button's
-/// `↑` or a symbol in an agent's words.
-const IN_NO_FONT: char = '\u{10FFFD}';
-
-/// Has the families the chat lays its text out in found on a thread of
-/// their own, for its words and its code, all the way down each stack,
-/// so the first chat drawn doesn't wait for fontconfig, which the first
-/// look into each family behind the interface's takes milliseconds over
-/// (see [`Fonts::warm`]). Returns the thread, if it started.
-pub(crate) fn warm_fonts(fonts: &Fonts) -> Option<std::thread::JoinHandle<()>> {
-    let text = format!("Aa1 {IN_NO_FONT}");
-    fonts.warm(vec![ui_family(fonts), mono_family(fonts)], text)
-}
-
-/// The family called `name`, or `generic` without one.
-fn named_or(name: Option<&String>, generic: GenericFamily) -> FontFamilyName<'static> {
-    match name {
-        Some(name) => FontFamilyName::Named(Cow::Owned(name.clone())),
-        None => FontFamilyName::Generic(generic),
-    }
-}
-
-/// How the chat's ordinary text is styled, at `size` pixels.
-pub(super) fn body_style(fonts: &Fonts, size: f32) -> Vec<StyleProperty<'static, Brush>> {
-    vec![
-        StyleProperty::FontFamily(ui_family(fonts)),
-        StyleProperty::FontSize(size),
-        StyleProperty::LineHeight(LineHeight::FontSizeRelative(LINE)),
-        StyleProperty::Brush(Brush::default()),
-    ]
-}
-
 /// A turn's message is its piece 0.
 pub(super) const PROMPT: usize = 0;
 /// The line its work folds under is its piece 1.
@@ -234,23 +163,6 @@ struct FilesLaid {
     left: f32,
 }
 
-/// Something laid out: the text it was laid out from, and its blocks.
-struct Laid {
-    source: String,
-    /// The tone plain text was laid out in, which [`ChatView::box_label`]
-    /// keeps it by: plain, for Markdown.
-    tone: Tone,
-    blocks: Vec<LaidBlock>,
-    /// Its tables, whose cells are among its blocks.
-    tables: Vec<TableLaid>,
-    /// Some of its code was laid out plain, as its colours were still to
-    /// come: when they do, it's laid out again.
-    waiting: bool,
-    height: f32,
-    /// The widest line.
-    width: f32,
-}
-
 impl ChatView {
     /// Lays the turns whose code was waiting for colours out again, when
     /// next they're near the view, as some have come.
@@ -260,193 +172,6 @@ impl ChatView {
                 .is_some_and(|laid| laid.pieces.values().any(|piece| piece.waiting));
             if waiting {
                 self.restyled(index);
-            }
-        }
-    }
-}
-
-/// One block, placed within what it belongs to.
-struct LaidBlock {
-    layout: Layout<Brush>,
-    /// The text it shows, without its Markdown.
-    text: String,
-    kind: BlockKind,
-    /// From the left of the column.
-    left: f32,
-    /// From the top of what it belongs to.
-    top: f32,
-    /// A list item's marker, laid out, and where it goes from the left.
-    marker: Option<(Layout<Brush>, f32)>,
-    /// What it was laid out from, hashed: text laid out again as more of
-    /// it comes keeps the blocks, and tables' cells, that haven't changed,
-    /// so an answer streaming in lays out only its last paragraph again,
-    /// not every one before it.
-    key: u64,
-}
-
-/// Sizes, from the text's size.
-#[derive(Clone, Copy)]
-struct Measures {
-    em: f32,
-}
-
-impl Measures {
-    fn of(em: f32) -> Self {
-        Self { em }
-    }
-
-    fn em(self, ems: f32) -> f32 {
-        (self.em * ems).round()
-    }
-}
-
-/// What a piece of the chat is drawn as.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Look {
-    /// The agent's words: Markdown.
-    Words,
-    /// Its thinking: Markdown, quieter.
-    Thought,
-    /// Plain text, as a message sent is, in `Tone`.
-    Plain(Tone),
-    /// Plain text in the terminal's font, as a command's output is.
-    Mono(Tone),
-}
-
-/// The fills and glyphs being drawn, and what they're cut off outside.
-struct Canvas<'a> {
-    paint: &'a mut ChatPaint,
-    fonts: &'a mut Fonts,
-    clip: [f32; 4],
-    /// The text's size, which spacing is a share of.
-    em: f32,
-    /// What it draws goes over everything, as a menu does.
-    over: bool,
-}
-
-impl Canvas<'_> {
-    fn fill(&mut self, fill: Fill) {
-        let fill = fill.clipped(self.clip);
-        if self.over {
-            self.paint.over.push(fill);
-        } else {
-            self.paint.fills.push(fill);
-        }
-    }
-
-    /// Draws `layout` with its top left at `origin`.
-    fn text(&mut self, layout: &Layout<Brush>, origin: [f32; 2]) {
-        for line in layout.lines() {
-            let metrics = *line.metrics();
-            for item in line.items() {
-                let PositionedLayoutItem::GlyphRun(run) = item else {
-                    continue;
-                };
-                let brush = run.style().brush;
-                if brush.code {
-                    let pad =
-                        (metrics.line_height - metrics.ascent - metrics.descent).max(0.0) / 2.0;
-                    let side = (self.em * 0.2).round();
-                    self.fill(Fill::rounded(
-                        [
-                            origin[0] + run.offset() - side,
-                            origin[1] + metrics.block_min_coord + pad * 0.5,
-                            run.advance() + 2.0 * side,
-                            metrics.block_max_coord - metrics.block_min_coord - pad,
-                        ],
-                        Paint::Code,
-                        (self.em * 0.25).round(),
-                    ));
-                }
-                let font = run.run().font();
-                let Some(face) = self.fonts.face_for(font, run.run().synthesis()) else {
-                    continue;
-                };
-                let ppem = run.run().font_size();
-                let ink = match brush.tone {
-                    _ if let Some(kind) = brush.syntax => {
-                        Ink::Color(crate::colors::syntax(kind).fg)
-                    }
-                    Tone::Plain => Ink::Plain,
-                    Tone::Muted => Ink::Muted,
-                    Tone::Accent => Ink::Accent,
-                    Tone::Link => Ink::Link,
-                    Tone::Warning => Ink::Warning,
-                    Tone::Caution => Ink::Caution,
-                    Tone::Added => Ink::Added,
-                    Tone::Removed => Ink::Removed,
-                    Tone::OnAccent => Ink::OnColor,
-                };
-                for glyph in run.positioned_glyphs() {
-                    let Ok(id) = u16::try_from(glyph.id) else {
-                        continue;
-                    };
-                    let glyphs = if self.over {
-                        &mut self.paint.over_glyphs
-                    } else {
-                        &mut self.paint.glyphs
-                    };
-                    glyphs.push(PlacedGlyph {
-                        face,
-                        glyph: id,
-                        ppem,
-                        pen: [origin[0] + glyph.x, origin[1] + glyph.y],
-                        ink,
-                        clip: self.clip,
-                    });
-                }
-                if run.style().strikethrough.is_some() {
-                    self.fill(Fill::solid(
-                        [
-                            origin[0] + run.offset(),
-                            origin[1] + metrics.baseline - metrics.ascent * 0.3,
-                            run.advance(),
-                            1.0,
-                        ],
-                        Paint::Icon,
-                    ));
-                }
-            }
-        }
-    }
-}
-
-impl Canvas<'_> {
-    /// Draws the glyphs of `layout`, with its top left at `origin`, that
-    /// start inside `rect`, over everything, in `ink`: the character
-    /// under a solid cursor, in the colour that shows on it.
-    fn text_over(&mut self, layout: &Layout<Brush>, origin: [f32; 2], rect: [f32; 4], ink: Ink) {
-        let [left, top, width, height] = rect;
-        for line in layout.lines() {
-            for item in line.items() {
-                let PositionedLayoutItem::GlyphRun(run) = item else {
-                    continue;
-                };
-                let Some(face) = self.fonts.face_for(run.run().font(), run.run().synthesis())
-                else {
-                    continue;
-                };
-                let ppem = run.run().font_size();
-                for glyph in run.positioned_glyphs() {
-                    let pen = [origin[0] + glyph.x, origin[1] + glyph.y];
-                    let inside = pen[0] >= left - 0.5
-                        && pen[0] < left + width - 0.5
-                        && pen[1] > top
-                        && pen[1] <= top + height;
-                    let Ok(id) = u16::try_from(glyph.id) else {
-                        continue;
-                    };
-                    if inside {
-                        self.paint.over_glyphs.push(PlacedGlyph {
-                            face,
-                            glyph: id,
-                            ppem,
-                            pen,
-                            ink,
-                            clip: self.clip,
-                        });
-                    }
-                }
             }
         }
     }
@@ -463,7 +188,7 @@ impl ChatView {
         origin: [f32; 2],
         size: [f32; 2],
         caret: bool,
-    ) -> ChatPaint {
+    ) -> TextPaint {
         self.style_editor(fonts);
         let em = text_size(fonts);
         let m = Measures::of(em);
@@ -497,7 +222,7 @@ impl ChatView {
         let labels = &mut self.cache.labels;
         labels.last = std::mem::take(&mut labels.now);
 
-        let mut paint = ChatPaint::default();
+        let mut paint = TextPaint::default();
         self.hits.clear();
         self.shown.clear();
 
@@ -622,7 +347,7 @@ impl ChatView {
     /// height.
     fn draw_above_box(
         &mut self,
-        (paint, fonts): (&mut ChatPaint, &mut Fonts),
+        (paint, fonts): (&mut TextPaint, &mut Fonts),
         m: Measures,
         (origin, size): ([f32; 2], [f32; 2]),
         row: [f32; 4],
@@ -1243,7 +968,7 @@ impl ChatView {
     fn paint_box(
         &mut self,
         fonts: &mut Fonts,
-        paint: &mut ChatPaint,
+        paint: &mut TextPaint,
         m: Measures,
         place: Place,
         caret: bool,
@@ -1807,7 +1532,7 @@ impl ChatView {
     /// the chip that opened it, and the top of the box.
     fn draw_menu(
         &mut self,
-        paint: &mut ChatPaint,
+        paint: &mut TextPaint,
         fonts: &mut Fonts,
         m: Measures,
         place: Place,
@@ -2292,15 +2017,6 @@ fn turn_note(turn: &Turn) -> Option<(String, Tone)> {
     }
 }
 
-/// Where rectangles `a` and `b` overlap: nothing wide or high, if they
-/// don't.
-fn intersection(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
-    let (left, top) = (a[0].max(b[0]), a[1].max(b[1]));
-    let right = (a[0] + a[2]).min(b[0] + b[2]);
-    let bottom = (a[1] + a[3]).min(b[1] + b[3]);
-    [left, top, (right - left).max(0.0), (bottom - top).max(0.0)]
-}
-
 /// Draws what a turn changed in files, `files`, with the column's left
 /// and its top at `origin`, and notes where its buttons can be clicked,
 /// where they're in view.
@@ -2333,460 +2049,6 @@ pub(super) fn answer_to_copy(turn: &Turn) -> Option<usize> {
         Item::Words(words) if !words.trim().is_empty() => Some(last),
         _ => None,
     }
-}
-
-/// Draws `laid` with the column's left at `origin[0]`, its top at
-/// `origin[1]`: its blocks, and what goes with them.
-fn draw_laid(canvas: &mut Canvas<'_>, m: Measures, laid: &Laid, origin: [f32; 2], column: f32) {
-    draw_scrolled(canvas, m, laid, origin, column, &|_| 0.0);
-}
-
-/// Draws `laid` as [`draw_laid`] does, with each of its tables scrolled
-/// sideways as far as `scrolled` says, by the table's number.
-fn draw_scrolled(
-    canvas: &mut Canvas<'_>,
-    m: Measures,
-    laid: &Laid,
-    origin: [f32; 2],
-    column: f32,
-    scrolled: &dyn Fn(usize) -> f32,
-) {
-    for (number, table) in laid.tables.iter().enumerate() {
-        // The line under its head, as far across as it shows.
-        let shown = table.width.min(column - table.left);
-        let y = origin[1] + table.top + table.rule;
-        let rule = [origin[0] + table.left, y, shown, 1.0];
-        canvas.fill(Fill::solid(rule, Paint::Divider));
-        let scroll = scrolled(number).clamp(0.0, table.max_scroll(column));
-        let view = canvas.clip;
-        let room = [
-            origin[0] + table.left,
-            view[1],
-            column - table.left,
-            view[3],
-        ];
-        canvas.clip = intersection(view, room);
-        for block in &laid.blocks[table.blocks.clone()] {
-            let at = [origin[0] + block.left - scroll, origin[1] + block.top];
-            let size = [block.layout.width(), block.layout.height()];
-            if overlaps(canvas.clip, [at[0], at[1], size[0], size[1]]) {
-                canvas.text(&block.layout, at);
-            }
-        }
-        canvas.clip = view;
-        draw_cut_off(
-            canvas,
-            m,
-            table,
-            [origin[0] + table.left, origin[1]],
-            (column, scroll),
-        );
-    }
-    for (index, block) in laid.blocks.iter().enumerate() {
-        let x = origin[0] + block.left;
-        let y = origin[1] + block.top;
-        let height = block.layout.height();
-        // Out of view, as most of a long answer is, or a table's cell:
-        // nothing to draw here. What's drawn round a block reaches an em
-        // past it at most.
-        let reach = [x - m.em, y - m.em, column + 2.0 * m.em, height + 2.0 * m.em];
-        if laid.table_of(index).is_some() || !overlaps(canvas.clip, reach) {
-            continue;
-        }
-        match &block.kind {
-            // Its background from the left of the text around it, which
-            // is where the cards start too, to the column's right edge.
-            BlockKind::Code(_) => {
-                let inset = code_inset(m);
-                canvas.fill(Fill::rounded(
-                    [
-                        x - inset,
-                        y - m.em(0.4),
-                        column - block.left + inset,
-                        height + m.em(0.8),
-                    ],
-                    Paint::Code,
-                    m.em(0.5),
-                ));
-            }
-            // Its bar where the text around it starts.
-            BlockKind::Quote => canvas.fill(Fill::solid(
-                [x - quote_inset(m), y, quote_bar(m), height],
-                Paint::RaisedEdge,
-            )),
-            BlockKind::Rule => canvas.fill(Fill::solid(
-                [x, y + m.em(0.5), column - block.left, 1.0],
-                Paint::Divider,
-            )),
-            _ => {}
-        }
-        if let Some((marker, left)) = &block.marker {
-            canvas.text(marker, [origin[0] + left, y]);
-        }
-        canvas.text(&block.layout, [x, y]);
-    }
-}
-
-/// Lays out `text` as `look` says, `width` wide.
-fn lay_out(
-    layout_cx: &mut parley::LayoutContext<Brush>,
-    fonts: &mut Fonts,
-    m: Measures,
-    text: &str,
-    look: Look,
-    width: f32,
-) -> Laid {
-    lay_out_coloured(
-        layout_cx,
-        fonts,
-        m,
-        (text, look),
-        (width, &mut Cells::new()),
-        None,
-    )
-}
-
-/// Lays out `text` as `look` says, `width` wide, its code coloured as
-/// `colours` knows it, if it's given, and wanted from them if it isn't
-/// known, and its blocks, tables' cells among them, taken from `cells` where
-/// they're there, laid out just so.
-fn lay_out_coloured(
-    layout_cx: &mut parley::LayoutContext<Brush>,
-    fonts: &mut Fonts,
-    m: Measures,
-    (text, look): (&str, Look),
-    (width, cells): (f32, &mut Cells),
-    mut colours: Option<&mut Colours>,
-) -> Laid {
-    let blocks = match look {
-        Look::Words | Look::Thought => markdown::blocks(text),
-        Look::Plain(_) | Look::Mono(_) => vec![markdown::Block {
-            kind: BlockKind::Paragraph,
-            text: text.to_owned(),
-            spans: Vec::new(),
-            indent: 0,
-        }],
-    };
-    let tone = match look {
-        Look::Plain(tone) | Look::Mono(tone) => tone,
-        Look::Words | Look::Thought => Tone::Plain,
-    };
-    let mut laid = Laid {
-        source: text.to_owned(),
-        tone,
-        blocks: Vec::new(),
-        tables: Vec::new(),
-        waiting: false,
-        height: 0.0,
-        width: 0.0,
-    };
-    let step = m.em(1.5);
-    let mut blocks = blocks.into_iter().peekable();
-    let mut first = true;
-    let mut after_code = false;
-    while let Some(block) = blocks.next() {
-        // Code's background reaches past its text: what's around it is as
-        // far from that as from other text.
-        if !first {
-            laid.height += match block.kind {
-                BlockKind::Item(_) => m.em(0.3),
-                BlockKind::Code(_) => m.em(1.1),
-                _ => m.em(0.7),
-            } + if after_code { m.em(0.4) } else { 0.0 };
-        }
-        first = false;
-        after_code = block.kind.code();
-        if let Some(cell) = block.kind.cell() {
-            // The table's cells, all of them.
-            let mut table = vec![block];
-            while let Some(next) = blocks.next_if(|next| {
-                next.kind
-                    .cell()
-                    .is_some_and(|next| next.table == cell.table)
-            }) {
-                table.push(next);
-            }
-            lay_out_table((layout_cx, fonts), m, (look, cells), table, &mut laid);
-            continue;
-        }
-        let indent = f32::from(block.indent) * step
-            + match block.kind {
-                BlockKind::Item(_) => step,
-                _ => 0.0,
-            };
-        // A quote's text goes just after its bar, which is where the text
-        // around it starts; code goes inside its background, which starts
-        // there too.
-        let indent = match block.kind {
-            BlockKind::Quote => indent - step + quote_inset(m),
-            BlockKind::Code(_) => indent + code_inset(m),
-            _ => indent,
-        };
-        let size = text_size_of(&block.kind, look, m);
-        let syntax = code_colours(&block, colours.as_deref_mut(), &mut laid.waiting);
-        let wrap = (width - indent).max(m.em(4.0));
-        // As it was, if it was laid out before just so.
-        let key = block_key(&block, &syntax, look, size, wrap);
-        let layout = cells.remove(&key).unwrap_or_else(|| {
-            lay_out_block(layout_cx, fonts, (&block, &syntax), look, size, wrap)
-        });
-        let marker = match &block.kind {
-            BlockKind::Item(marker) => {
-                let layout = lay_out_marker(layout_cx, fonts, marker, size);
-                let left = (indent - layout.width() - m.em(0.5)).max(0.0);
-                Some((layout, left))
-            }
-            _ => None,
-        };
-        let height = if block.kind == BlockKind::Rule {
-            m.em(1.0)
-        } else {
-            layout.height()
-        };
-        laid.width = laid.width.max(layout.width() + indent);
-        laid.blocks.push(LaidBlock {
-            layout,
-            text: block.text,
-            kind: block.kind,
-            left: indent,
-            top: laid.height,
-            marker,
-            key,
-        });
-        laid.height += height;
-    }
-    laid
-}
-
-/// What `block`, a block other than a table's cell, is laid out from,
-/// hashed: its text, styles and kind, its code's colours, `syntax`, how it
-/// looks, and its text's size and the width it wraps to.
-fn block_key(
-    block: &markdown::Block,
-    syntax: &[clackatoo_protocol::Span],
-    look: Look,
-    size: f32,
-    width: f32,
-) -> u64 {
-    use std::hash::{DefaultHasher, Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    let sizes = (size.to_bits(), width.to_bits());
-    (&block.text, &block.spans, &block.kind, syntax, look, sizes).hash(&mut hasher);
-    hasher.finish()
-}
-
-/// How big the text of a block of `kind` is, laid out as `look` says.
-fn text_size_of(kind: &BlockKind, look: Look, m: Measures) -> f32 {
-    match kind {
-        _ if matches!(look, Look::Mono(_)) => m.em * 0.93,
-        BlockKind::Heading(1) => m.em * 1.35,
-        BlockKind::Heading(2) => m.em * 1.2,
-        BlockKind::Heading(_) => m.em * 1.08,
-        BlockKind::Code(_) => m.em * 0.93,
-        _ => m.em,
-    }
-}
-
-/// How `block` is coloured, if it's code `colours` know: none if it
-/// isn't, or they don't, and then, if they're to come, `waiting`.
-fn code_colours(
-    block: &markdown::Block,
-    colours: Option<&mut Colours>,
-    waiting: &mut bool,
-) -> Vec<clackatoo_protocol::Span> {
-    let (BlockKind::Code(Some(language)), Some(colours)) = (&block.kind, colours) else {
-        return Vec::new();
-    };
-    match colours.of(language, &block.text) {
-        Colouring::Known(spans) => spans.to_vec(),
-        Colouring::Waiting => {
-            *waiting = true;
-            Vec::new()
-        }
-        Colouring::Plain => Vec::new(),
-    }
-}
-
-/// Whether `rect`, its left, top, width and height, overlaps `clip`.
-fn overlaps(clip: [f32; 4], rect: [f32; 4]) -> bool {
-    let [width, height] = [intersection(clip, rect)[2], intersection(clip, rect)[3]];
-    width > 0.0 && height > 0.0
-}
-
-/// Marks the sides of `table`, drawn from `origin`, its left, and the top
-/// of what it belongs to, where it's cut off, scrolled `scroll` in a
-/// column `column` wide: a `‹` or `›` on the background, over the cells
-/// it hides.
-fn draw_cut_off(
-    canvas: &mut Canvas<'_>,
-    m: Measures,
-    table: &TableLaid,
-    origin: [f32; 2],
-    (column, scroll): (f32, f32),
-) {
-    let most = table.max_scroll(column);
-    if most <= 0.0 {
-        return;
-    }
-    let (wide, top) = (m.em(1.2), origin[1] + table.top);
-    let sides = [
-        (scroll > 0.5, origin[0], &table.marks[0]),
-        (
-            scroll < most - 0.5,
-            origin[0] + column - table.left - wide,
-            &table.marks[1],
-        ),
-    ];
-    for (cut, left, mark) in sides {
-        if !cut {
-            continue;
-        }
-        canvas.fill(Fill::solid([left, top, wide, table.height], Paint::Tile));
-        let at = [
-            left + (wide - mark.width()) / 2.0,
-            top + (table.height - mark.height()) / 2.0,
-        ];
-        canvas.text(mark, at);
-    }
-}
-
-/// How far a quote's text is from its bar's left, which is the left of
-/// the text around it: the bar, and a gap.
-fn quote_inset(m: Measures) -> f32 {
-    quote_bar(m) + m.em(0.75)
-}
-
-/// How wide a quote's bar is.
-fn quote_bar(m: Measures) -> f32 {
-    m.em(0.2).max(2.0)
-}
-
-/// How far a block of code's text is inside its background, whose left is
-/// the left of the text around it.
-fn code_inset(m: Measures) -> f32 {
-    m.em(0.75)
-}
-
-/// Lays out one block, its text `size` pixels, `width` wide, the code
-/// in it coloured as `syntax` says.
-fn lay_out_block(
-    layout_cx: &mut parley::LayoutContext<Brush>,
-    fonts: &mut Fonts,
-    (block, syntax): (&markdown::Block, &[clackatoo_protocol::Span]),
-    look: Look,
-    size: f32,
-    width: f32,
-) -> Layout<Brush> {
-    let tone = match look {
-        Look::Words => Tone::Plain,
-        Look::Thought => Tone::Muted,
-        Look::Plain(tone) | Look::Mono(tone) => tone,
-    };
-    let (body, mono) = (body_style(fonts, size), mono_family(fonts));
-    let mut builder = layout_cx.ranged_builder(&mut fonts.font_cx, &block.text, 1.0, true);
-    for property in body {
-        builder.push_default(property);
-    }
-    builder.push_default(StyleProperty::Brush(Brush {
-        tone,
-        code: false,
-        syntax: None,
-    }));
-    if matches!(look, Look::Thought) {
-        builder.push_default(StyleProperty::FontStyle(FontStyle::Italic));
-    }
-    if matches!(look, Look::Mono(_)) {
-        builder.push_default(StyleProperty::FontFamily(mono.clone()));
-        builder.push_default(StyleProperty::LineHeight(LineHeight::FontSizeRelative(
-            1.35,
-        )));
-    }
-    match block.kind {
-        BlockKind::Heading(_) => builder.push_default(StyleProperty::FontWeight(FontWeight::BOLD)),
-        BlockKind::Cell(cell) if cell.row == 0 => {
-            builder.push_default(StyleProperty::FontWeight(FontWeight::BOLD));
-        }
-        BlockKind::Code(_) => {
-            builder.push_default(StyleProperty::FontFamily(mono.clone()));
-            builder.push_default(StyleProperty::LineHeight(LineHeight::FontSizeRelative(
-                1.35,
-            )));
-        }
-        BlockKind::Quote => builder.push_default(StyleProperty::Brush(Brush {
-            tone: Tone::Muted,
-            code: false,
-            syntax: None,
-        })),
-        _ => {}
-    }
-    for span in &block.spans {
-        let (range, style) = (span.range.clone(), span.style);
-        if style.bold {
-            builder.push(StyleProperty::FontWeight(FontWeight::BOLD), range.clone());
-        }
-        if style.italic {
-            builder.push(StyleProperty::FontStyle(FontStyle::Italic), range.clone());
-        }
-        if style.strike {
-            builder.push(StyleProperty::Strikethrough(true), range.clone());
-        }
-        if style.code {
-            builder.push(StyleProperty::FontFamily(mono.clone()), range.clone());
-            builder.push(StyleProperty::FontSize(size * 0.93), range.clone());
-            builder.push(
-                StyleProperty::Brush(Brush {
-                    tone,
-                    code: true,
-                    syntax: None,
-                }),
-                range,
-            );
-        } else if style.link {
-            let brush = Brush {
-                tone: Tone::Link,
-                code: false,
-                syntax: None,
-            };
-            builder.push(StyleProperty::Brush(brush), range);
-        }
-    }
-    for span in syntax {
-        let brush = Brush {
-            tone,
-            code: false,
-            syntax: Some(span.kind),
-        };
-        builder.push(StyleProperty::Brush(brush), span.start..span.end);
-    }
-    let mut layout = builder.build(&block.text);
-    // Code keeps its lines, however long, and a table's cells theirs.
-    let unbroken = block.kind.code() || block.kind.cell().is_some();
-    layout.break_all_lines((!unbroken).then_some(width));
-    layout.align(Alignment::Start, AlignmentOptions::default());
-    layout
-}
-
-/// Lays out a list item's marker, its text `size` pixels.
-fn lay_out_marker(
-    layout_cx: &mut parley::LayoutContext<Brush>,
-    fonts: &mut Fonts,
-    marker: &str,
-    size: f32,
-) -> Layout<Brush> {
-    let body = body_style(fonts, size);
-    let mut builder = layout_cx.ranged_builder(&mut fonts.font_cx, marker, 1.0, true);
-    for property in body {
-        builder.push_default(property);
-    }
-    builder.push_default(StyleProperty::Brush(Brush {
-        tone: Tone::Muted,
-        code: false,
-        syntax: None,
-    }));
-    let mut layout = builder.build(marker);
-    layout.break_all_lines(None);
-    layout.align(Alignment::Start, AlignmentOptions::default());
-    layout
 }
 
 /// What's said of what a turn changed in files, as `files` says, and the
@@ -3115,12 +2377,12 @@ mod tests {
 
     /// `markdown` laid out as the agent's words, 600 pixels wide, and
     /// what drawing it at the window's top left draws.
-    pub(super) fn laid_and_drawn(markdown: &str) -> (Laid, ChatPaint) {
+    pub(super) fn laid_and_drawn(markdown: &str) -> (Laid, TextPaint) {
         let mut fonts = Fonts::load(&FontOptions::default(), 1.0).expect("a font");
         let m = Measures::of(16.0);
         let mut layout_cx = parley::LayoutContext::new();
         let laid = lay_out(&mut layout_cx, &mut fonts, m, markdown, Look::Words, 600.0);
-        let mut paint = ChatPaint::default();
+        let mut paint = TextPaint::default();
         let mut canvas = Canvas {
             paint: &mut paint,
             fonts: &mut fonts,
@@ -3195,7 +2457,7 @@ mod tests {
         let answer = "Here:\n\n```rust\nfn main() {}\n```\n\nand still coming:\n\n```rust\nlet";
         let mut chat = ChatView::new(String::new(), talk(&[("show me", answer)]));
         let keyword = Ink::Color(crate::colors::syntax(Kind::Keyword).fg);
-        let coloured = |paint: &ChatPaint| {
+        let coloured = |paint: &TextPaint| {
             paint
                 .glyphs
                 .iter()

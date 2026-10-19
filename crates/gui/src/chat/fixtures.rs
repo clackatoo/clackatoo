@@ -9,7 +9,7 @@ use std::fmt::Write;
 
 use winit::keyboard::{Key, KeyLocation, NamedKey};
 
-use super::{ChatPaint, ChatView};
+use super::{ChatView, TextPaint};
 use crate::fonts::{FontOptions, Fonts};
 use crate::input::{KeyPress, Modifiers};
 
@@ -20,7 +20,7 @@ pub(crate) fn fonts() -> Fonts {
 
 /// Draws `chat` in a pane 900 by 1000 pixels at the window's top left,
 /// with the keyboard.
-pub(crate) fn paint(chat: &mut ChatView, fonts: &mut Fonts) -> ChatPaint {
+pub(crate) fn paint(chat: &mut ChatView, fonts: &mut Fonts) -> TextPaint {
     chat.paint(fonts, [0.0; 2], [900.0, 1000.0], true)
 }
 

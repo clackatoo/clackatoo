@@ -13,10 +13,8 @@
 //! anything to the daemon and before drawing.
 
 mod card;
-mod colours;
 #[cfg(test)]
 pub(crate) mod fixtures;
-mod markdown;
 mod paint;
 mod picker;
 mod read;
@@ -30,43 +28,12 @@ use winit::keyboard::{Key, NamedKey};
 
 use crate::fonts::Fonts;
 use crate::input::{KeyPress, Modifiers};
+use crate::markdown::{self, colours};
 use crate::pane::Copy;
 use paint::{How, Picked, Position, Shown, TextKey};
 use picker::{Row, Spot};
 
-pub(crate) use paint::{ChatPaint, warm_fonts};
-
-/// How a piece of the chat's text is drawn, carried through layout.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct Brush {
-    pub(crate) tone: Tone,
-    /// It's code, on a background of its own.
-    pub(crate) code: bool,
-    /// It's code its language's grammar says is this, coloured as an
-    /// editor colours it, rather than in its tone.
-    pub(crate) syntax: Option<clackatoo_protocol::Kind>,
-}
-
-/// The colour of a piece of the chat's text.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub(crate) enum Tone {
-    #[default]
-    Plain,
-    Muted,
-    /// In clackatoo's own colour: focus and what to act on.
-    Accent,
-    /// A link, in the links' colour.
-    Link,
-    Warning,
-    /// Amber: getting close to what [`Tone::Warning`] says.
-    Caution,
-    /// On something in the accent colour.
-    OnAccent,
-    /// Added to a file.
-    Added,
-    /// Removed from a file.
-    Removed,
-}
+pub(crate) use crate::markdown::layout::{Brush, TextPaint, Tone, warm_fonts};
 
 /// Something done to the chat that waits for the fonts.
 #[derive(Debug)]

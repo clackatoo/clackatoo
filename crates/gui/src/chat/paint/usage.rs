@@ -22,7 +22,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
 use super::divider::local_zone;
-use super::{BoxFrame, Canvas, ChatPaint, Laid, Look, Measures, Place, draw_laid, lay_out};
+use super::{BoxFrame, Canvas, Laid, Look, Measures, Place, TextPaint, draw_laid, lay_out};
 use crate::chat::{ChatView, Hit, Tone};
 use crate::fonts::Fonts;
 use crate::render::{Fill, Paint};
@@ -219,7 +219,7 @@ impl ChatView {
     /// the meter's right, and the top of the box.
     pub(super) fn draw_detail(
         &mut self,
-        paint: &mut ChatPaint,
+        paint: &mut TextPaint,
         fonts: &mut Fonts,
         m: Measures,
         place: Place,

@@ -27,7 +27,7 @@ use winit::window::{
 };
 
 use crate::GraphicsApi;
-use crate::chat::{ChatPaint, Pointer};
+use crate::chat::{Pointer, TextPaint};
 use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, NoteKind, Scrolls, Status};
 use crate::cmdline::CARET;
 use crate::command::Forwarding;
@@ -2132,8 +2132,8 @@ impl App {
     /// Lays out and paints the shown tab's chats, which needs the fonts and
     /// each chat's view mutably, before the terminals are drawn. Returns
     /// the chats' terminals, and what to draw.
-    fn paint_chats(&mut self, chrome: &Chrome) -> (Vec<TerminalId>, ChatPaint) {
-        let mut all = ChatPaint::default();
+    fn paint_chats(&mut self, chrome: &Chrome) -> (Vec<TerminalId>, TextPaint) {
+        let mut all = TextPaint::default();
         let mut chats = Vec::new();
         let (Some(frame), Some(shown), Some(tab)) = (
             self.frame.as_mut(),

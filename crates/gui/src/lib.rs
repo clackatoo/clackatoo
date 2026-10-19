@@ -42,6 +42,7 @@ mod launch;
 mod layout;
 mod links;
 mod lua;
+mod markdown;
 mod motion;
 mod objects;
 mod options;

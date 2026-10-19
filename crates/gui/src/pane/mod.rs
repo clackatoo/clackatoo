@@ -21,7 +21,7 @@ use clackatoo_protocol::{
 use clackatoo_term::{Row, RowBuilder, Underline};
 use winit::keyboard::{Key, KeyCode, NamedKey};
 
-use crate::chat::{ChatPaint, ChatView};
+use crate::chat::{ChatView, TextPaint};
 use crate::fonts::Fonts;
 use crate::history::History;
 use crate::input::{self, KeyPress};
@@ -400,7 +400,7 @@ impl Pane {
         origin: [f32; 2],
         size: [f32; 2],
         caret: bool,
-    ) -> Option<ChatPaint> {
+    ) -> Option<TextPaint> {
         self.chat.as_ref()?;
         self.settle_chat(fonts);
         let reading = self.mode != Mode::Insert;

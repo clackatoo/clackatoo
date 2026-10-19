@@ -1,10 +1,15 @@
-//! The agent's words, read as Markdown: blocks of text, each with the
-//! styles of its pieces, ready to lay out.
+//! Markdown, read: blocks of text, each with the styles of its pieces,
+//! ready to lay out (see [`layout`]), as a chat shows its agent's words
+//! and an editor its rendered view of a Markdown file.
 //!
-//! Only what a chat needs is kept: paragraphs, headings, lists, quotes,
+//! Only what prose needs is kept: paragraphs, headings, lists, quotes,
 //! code, rules and tables, with bold, italic, struck-through, code and
 //! links inside them. Anything else is shown as its text. A table is a
 //! block for each cell, which says where in the table it goes.
+
+pub(crate) mod colours;
+pub(crate) mod layout;
+pub(crate) mod tables;
 
 use std::ops::Range;
 
@@ -12,18 +17,18 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Par
 
 /// One block of text.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Block {
-    pub(super) kind: BlockKind,
-    pub(super) text: String,
+pub(crate) struct Block {
+    pub(crate) kind: BlockKind,
+    pub(crate) text: String,
     /// The styles of its pieces. Text in no span is plain.
-    pub(super) spans: Vec<Span>,
+    pub(crate) spans: Vec<Span>,
     /// How many lists or quotes it's inside, which indent it.
-    pub(super) indent: u8,
+    pub(crate) indent: u8,
 }
 
 /// What a block is.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) enum BlockKind {
+pub(crate) enum BlockKind {
     Paragraph,
     /// A heading, from 1, the largest.
     Heading(u8),
@@ -43,19 +48,19 @@ pub(super) enum BlockKind {
 
 /// Where a cell goes in its table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) struct Cell {
+pub(crate) struct Cell {
     /// Which table of the text it's in, from 0.
-    pub(super) table: usize,
+    pub(crate) table: usize,
     /// Its row, from 0, the table's head.
-    pub(super) row: usize,
-    pub(super) column: usize,
+    pub(crate) row: usize,
+    pub(crate) column: usize,
     /// How its column lines its cells up.
-    pub(super) align: Align,
+    pub(crate) align: Align,
 }
 
 /// How a table's column lines its cells up.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub(super) enum Align {
+pub(crate) enum Align {
     #[default]
     Left,
     Middle,
@@ -64,12 +69,12 @@ pub(super) enum Align {
 
 impl BlockKind {
     /// Whether it's code.
-    pub(super) fn code(&self) -> bool {
+    pub(crate) fn code(&self) -> bool {
         matches!(self, Self::Code(_))
     }
 
     /// Where it goes in a table, if it's a cell of one.
-    pub(super) fn cell(&self) -> Option<Cell> {
+    pub(crate) fn cell(&self) -> Option<Cell> {
         match self {
             Self::Cell(cell) => Some(*cell),
             _ => None,
@@ -79,9 +84,9 @@ impl BlockKind {
 
 /// A piece of a block's text and its style.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) struct Span {
-    pub(super) range: Range<usize>,
-    pub(super) style: Style,
+pub(crate) struct Span {
+    pub(crate) range: Range<usize>,
+    pub(crate) style: Style,
 }
 
 /// How a piece of text is styled.
@@ -90,16 +95,16 @@ pub(super) struct Span {
     clippy::struct_excessive_bools,
     reason = "independent styles, as in Markdown"
 )]
-pub(super) struct Style {
-    pub(super) bold: bool,
-    pub(super) italic: bool,
-    pub(super) strike: bool,
-    pub(super) code: bool,
-    pub(super) link: bool,
+pub(crate) struct Style {
+    pub(crate) bold: bool,
+    pub(crate) italic: bool,
+    pub(crate) strike: bool,
+    pub(crate) code: bool,
+    pub(crate) link: bool,
 }
 
 /// The blocks `markdown` is made of.
-pub(super) fn blocks(markdown: &str) -> Vec<Block> {
+pub(crate) fn blocks(markdown: &str) -> Vec<Block> {
     let mut reader = Reader::default();
     let options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
