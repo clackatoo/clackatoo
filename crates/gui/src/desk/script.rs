@@ -397,7 +397,7 @@ impl Desk {
                 self.forwards_asked
                     .push(crate::command::Forwarding::Config(spec));
             }
-            FromLua::Connect(host) => self.config_connects(host),
+            FromLua::Connect { host, share } => self.config_connects(host, share),
             FromLua::Disconnect(host) => self.config_disconnects(host),
             FromLua::Set { option, value } => self.config_sets(option, value),
             FromLua::Error(text) => {

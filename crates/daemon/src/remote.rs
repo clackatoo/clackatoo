@@ -158,7 +158,7 @@ pub(crate) fn connect_with(
     asking: Option<Asking>,
     cancel: Option<&Arc<Cancel>>,
 ) -> Result<Client, RemoteError> {
-    let command = ssh_command(remote, ssh, replace, asking.as_ref());
+    let command = ssh_command(remote, ssh, replace, asking.as_ref(), false);
     let (stream, ssh_process, address) = dial(command, &remote.host, cancel)?;
     // Whenever ssh closes, as when it gives up on a network that went
     // away, the connection carries on through a new one, which never
@@ -169,7 +169,7 @@ pub(crate) fn connect_with(
         let ssh = ssh.to_owned();
         let cancel = cancel.cloned();
         Box::new(move || {
-            let command = ssh_command(&remote, &ssh, false, asking.as_ref());
+            let command = ssh_command(&remote, &ssh, false, asking.as_ref(), false);
             let (stream, ssh, _) =
                 dial(command, &remote.host, cancel.as_ref()).map_err(io::Error::other)?;
             Ok(Redialed::keeping(stream, ssh))
@@ -180,6 +180,7 @@ pub(crate) fn connect_with(
         address.map(UdpTarget::Host),
         Some(ssh_process),
         Some(redial),
+        clackatoo_protocol::PROTOCOL_VERSION,
     );
     if cancel.is_some_and(|cancel| cancel.cancelled()) {
         return Err(RemoteError::Unreachable {
@@ -193,20 +194,47 @@ pub(crate) fn connect_with(
 /// Why a connection [`Cancel`]led failed.
 const CANCELLED: &str = "it was stopped";
 
+/// Runs ssh, as `ssh`, to the bridge on `remote`'s machine, and waits for
+/// it to announce itself, as [`connect_with`] does before greeting the
+/// daemon there: the carrier, what keeps it running, and the address the
+/// machine was reached at. ssh asks its questions as `asking` says; with
+/// `batch`, it asks none, failing instead, as when it's only tried to see
+/// whether it gets there now. `cancel`, if given, can stop it from
+/// another thread.
+///
+/// # Errors
+///
+/// If ssh can't run, or can't reach clackatoo.
+pub(crate) fn dial_ssh(
+    remote: &Remote,
+    ssh: &OsStr,
+    asking: Option<&Asking>,
+    cancel: Option<&Arc<Cancel>>,
+    batch: bool,
+) -> Result<(UnixStream, Ssh, Option<IpAddr>), RemoteError> {
+    let command = ssh_command(remote, ssh, false, asking.filter(|_| !batch), batch);
+    dial(command, &remote.host, cancel)
+}
+
 /// The ssh command that runs the bridge on `remote`'s machine, running
 /// `program` as ssh, replacing the daemon there first with `replace`, and
-/// asking for passwords as `asking` says, if given.
+/// asking for passwords as `asking` says, if given, or, with `batch`,
+/// never asking at all.
 fn ssh_command(
     remote: &Remote,
     program: &OsStr,
     replace: bool,
     asking: Option<&Asking>,
+    batch: bool,
 ) -> Command {
     let mut ssh = Command::new(program);
     if let Some(asking) = asking {
         ssh.env("SSH_ASKPASS", &asking.program)
             .env("SSH_ASKPASS_REQUIRE", "force")
             .env(ASKPASS_VAR, &asking.socket);
+    }
+    if batch {
+        ssh.args(["-o", "BatchMode=yes"]);
     }
     ssh.args([
         "-T",
@@ -261,6 +289,7 @@ pub fn through(command: Command, host: &str) -> Result<Client, RemoteError> {
         address.map(UdpTarget::Host),
         Some(ssh),
         None,
+        clackatoo_protocol::PROTOCOL_VERSION,
     )?)
 }
 

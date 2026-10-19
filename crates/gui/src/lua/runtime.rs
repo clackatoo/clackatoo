@@ -658,8 +658,19 @@ fn acting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
     let s = state.clone();
     core.set(
         "connect",
-        lua.create_function(move |_, host: String| {
-            s.tell(FromLua::Connect(machine(&host, "connect")?));
+        lua.create_function(move |_, (host, options): (String, Option<Table>)| {
+            let host = machine(&host, "connect")?;
+            let share = match options.map(|options| options.get::<mlua::Value>("share")) {
+                None | Some(Ok(mlua::Value::Nil)) => None,
+                Some(Ok(mlua::Value::Boolean(share))) => Some(share),
+                Some(_) => {
+                    return Err(mlua::Error::runtime(
+                        "client.connect's share is true or false: client.connect(\"server\", \
+                         {share = false})",
+                    ));
+                }
+            };
+            s.tell(FromLua::Connect { host, share });
             Ok(())
         })?,
     )?;

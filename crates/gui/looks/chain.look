@@ -1,0 +1,28 @@
+# Machines passed on (CLACKA-117, phase 6): this machine connected to
+# desk, connected to server: server's workspace comes into the bar by its
+# own name, through desk; the mouse over it says the way; a terminal of
+# server's typed into through desk; and desk asked not to pass server on,
+# which takes it out of the bar.
+size 1280x800
+machine server build
+machine desk notes
+machine-connect desk server
+keys <C-;>:connect desk<CR>
+wait-for build
+sleep 500
+shot chained
+keys <C-;>:set showhost=always<CR>
+shot chained-always
+move 300 20
+shot chained-hover
+move 640 400
+keys <C-;>:workspace build<CR>
+sleep 500
+keys i
+shell echo typed into server through desk: $((6*7))
+wait-for desk: 42
+shot chained-terminal
+# Desk keeps server to itself from now on.
+machine-connect desk server --no-share
+sleep 2000
+shot unshared

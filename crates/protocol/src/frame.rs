@@ -971,6 +971,7 @@ mod tests {
             restored: Vec::new(),
             machine: None,
             others: Vec::new(),
+            passed: Vec::new(),
         }));
         let mut frames: Vec<_> = client
             .iter()
@@ -1216,6 +1217,7 @@ mod tests {
             restored: Vec::new(),
             machine: None,
             others: Vec::new(),
+            passed: Vec::new(),
         }));
         assert!(head(encode(PROTOCOL_VERSION, &workspaces).unwrap()).is_workspaces());
         let response = ServerMessage::Response(crate::Response::Done);

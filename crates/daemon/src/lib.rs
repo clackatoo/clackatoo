@@ -29,6 +29,7 @@ mod group;
 mod handoff;
 mod handover;
 mod hosted;
+mod known;
 pub mod launch;
 mod lsp;
 mod machine;
@@ -188,7 +189,25 @@ pub struct LinkConfig {
     /// [`remote::ASKPASS_VAR`] set. `None` leaves ssh to ask on a
     /// terminal, which the daemon hasn't, so it gets no answer.
     pub askpass: Option<PathBuf>,
+    /// How often a better way than the one a connection goes is tried,
+    /// while one may be there: ssh straight there, for a connection that
+    /// goes through another machine meanwhile ([`DEFAULT_BETTER_EVERY`]).
+    pub better_every: std::time::Duration,
+    /// For tests: the protocol the connections say they speak, as a build
+    /// of that version would, if it's older than this build's. `None` in
+    /// use.
+    pub speaks: Option<u32>,
+    /// For tests: a stream asking to reach another machine through this
+    /// daemon is answered by this daemon itself, in that machine's place,
+    /// signing its certificate as that machine with its own key, as a
+    /// daemon in the way could. `false` in use.
+    #[doc(hidden)]
+    pub impostor: bool,
 }
+
+/// How often a better way for a connection to go is tried, unless the
+/// configuration says: see [`LinkConfig::better_every`].
+pub const DEFAULT_BETTER_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How buffers' changes that aren't saved are kept on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -401,6 +420,9 @@ impl DaemonConfig {
                 ssh: remote::ssh_program(),
                 // Only the `clackatoo` program knows it can ask.
                 askpass: None,
+                better_every: DEFAULT_BETTER_EVERY,
+                speaks: None,
+                impostor: false,
             }),
         }
     }

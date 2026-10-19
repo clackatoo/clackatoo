@@ -672,10 +672,18 @@ impl Daemon {
                 .flat_map(|workspace| &mut workspace.tabs)
             {
                 tab.layout.for_each_pane_mut(&mut |pane| {
-                    if let Some(held) = mirror.held.get(&pane.id)
-                        && let Some(content) = self.held_content(layout, held, live)
-                    {
+                    let Some(held) = mirror.held.get(&pane.id) else {
+                        return;
+                    };
+                    if let Some(content) = self.held_content(layout, held, live) {
                         pane.content = content;
+                    } else if live
+                        && held.home != self.machine.id
+                        && !matches!(held.shown, Content::Other { .. })
+                    {
+                        // A third machine's, reached through the daemon
+                        // whose layout holds it, which reaches it.
+                        pane.content = held.shown;
                     }
                 });
             }

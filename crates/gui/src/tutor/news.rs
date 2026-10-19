@@ -539,6 +539,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: ":|Terminal@local puts a pane of this machine's in one of desk's workspaces, parked here while desk is away",
     },
+    News {
+        id: "chained",
+        date: "2026-10-19",
+        lesson: "remote",
+        what: "A machine your desk is connected to comes into your bar too, as notes@server, unless desk said --no-share",
+    },
 ];
 
 impl News {

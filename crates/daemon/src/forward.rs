@@ -297,6 +297,15 @@ pub(crate) enum Command {
     },
     /// Stop taking forward `id`'s connections, and reset those it has.
     Stop { id: u64 },
+    /// Pass what `socket` sends on a stream of its own, and what comes
+    /// back on the stream to it, as they are, unpaced and beside the
+    /// connection's own messages rather than below them: a carrier for
+    /// another connection, which reaches a daemon through this one's (see
+    /// [`Request::Reach`](clackatoo_protocol::Request::Reach)), whose
+    /// owner says what the stream is for itself.
+    Carry {
+        socket: std::os::unix::net::UnixStream,
+    },
 }
 
 /// A way to hand forwards to the thread carrying one connection to a
@@ -323,6 +332,24 @@ impl Forwarder {
     #[must_use]
     pub fn daemon_forwards(&self) -> bool {
         wire::daemon_has(self.wire, wire::FORWARDS)
+    }
+
+    /// The protocol version the connection runs at.
+    pub(crate) fn wire(&self) -> u32 {
+        self.wire
+    }
+
+    /// Whether `other` hands things to the same connection's thread.
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.waker, &other.waker)
+    }
+
+    /// Has the thread pass what `socket` sends to the daemon on a stream
+    /// of its own, and what comes back to it, as they are: see
+    /// [`Command::Carry`]. If the connection has ended, `socket`'s other
+    /// end finds it closed.
+    pub(crate) fn carry(&self, socket: std::os::unix::net::UnixStream) {
+        self.tell(Command::Carry { socket });
     }
 
     /// Tells the thread `command`. Nothing happens if it has ended, with

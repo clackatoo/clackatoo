@@ -1,7 +1,10 @@
 //! `clackatoo connect`, `disconnect`, `connections` and `machine`: the
 //! daemon's connections to the daemons on other machines, and which
 //! machine it is. Hidden for now: a way to drive and try the connections
-//! until windows have `:connect`.
+//! until windows have `:connect`. `connect --no-share` keeps a machine
+//! from being passed on to the daemons connected to this one, and
+//! `connections` says which go through other machines, and which aren't
+//! passed on.
 //!
 //! `connect` asks the daemon to connect, answers the questions ssh asks as
 //! it logs in (a password, a passphrase, whether to trust a new machine),
@@ -30,6 +33,13 @@ pub(crate) struct ConnectArgs {
     /// `clackatoo` on the PATH there.
     #[arg(long, value_name = "COMMAND")]
     command: Option<String>,
+    /// Don't pass the machine on to the daemons connected to this one, as
+    /// for a server others share.
+    #[arg(long, conflicts_with = "share")]
+    no_share: bool,
+    /// Pass it on again, after `--no-share`.
+    #[arg(long)]
+    share: bool,
     #[command(flatten)]
     connection: Connection,
 }
@@ -98,8 +108,18 @@ fn federating(connection: &Connection) -> anyhow::Result<clackatoo_daemon::Clien
 /// and says how the first try went.
 pub(crate) fn connect(args: &ConnectArgs) -> anyhow::Result<()> {
     let mut client = federating(&args.connection)?;
+    let share = match (args.share, args.no_share) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    };
+    anyhow::ensure!(
+        share.is_none() || client.daemon_has(wire::CHAIN),
+        "the daemon is from an older build, which passes no machine on: `clackatoo upgrade` \
+         moves it onto this one, which can be asked not to"
+    );
     client.watch_connections(true)?;
-    client.connect_to(&args.host, args.command.as_deref())?;
+    client.connect_sharing(&args.host, args.command.as_deref(), share)?;
     // As it is now: anything heard before is older.
     let find = |list: Vec<Link>| list.into_iter().find(|link| link.host == args.host);
     let mut link = find(client.watch_connections(true)?);
@@ -189,6 +209,26 @@ pub(crate) fn disconnect(args: &DisconnectArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Forgets the identity key the daemon knows the machine of its
+/// connection to `args.host` by.
+pub(crate) fn forget(args: &DisconnectArgs) -> anyhow::Result<()> {
+    let mut client = federating(&args.connection)?;
+    anyhow::ensure!(
+        client.daemon_has(wire::CHAIN),
+        "the daemon is from an older build, which keeps no keys: `clackatoo upgrade` moves it \
+         onto this one"
+    );
+    let forget = Request::Forget {
+        host: args.host.clone(),
+    };
+    match client.request(&forget)? {
+        Response::Text(said) => println!("{said}"),
+        Response::Error(err) => anyhow::bail!("{err}"),
+        other => anyhow::bail!("the daemon answered with {other:?}"),
+    }
+    Ok(())
+}
+
 /// Lists the daemon's connections, and how each is going.
 pub(crate) fn list(connection: &Connection) -> anyhow::Result<()> {
     let links = federating(connection)?.watch_connections(false)?;
@@ -203,12 +243,14 @@ pub(crate) fn list(connection: &Connection) -> anyhow::Result<()> {
             || ("-".to_owned(), "-".to_owned()),
             |machine| (machine.name, machine.id.to_string()),
         );
-        writeln!(
-            out,
-            "{:<24}  {name:<24}  {id:<32}  {}",
-            link.host,
-            state(&link.state)
-        )?;
+        let mut state = state(&link.state);
+        if !link.through.is_empty() {
+            state = format!("{state}; through {}", link.through.join(" and "));
+        }
+        if link.unshared {
+            state = format!("{state}; not passed on");
+        }
+        writeln!(out, "{:<24}  {name:<24}  {id:<32}  {state}", link.host)?;
     }
     Ok(())
 }

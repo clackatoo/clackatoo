@@ -56,6 +56,9 @@
 //! 23. Whether this daemon put such a pane in that daemon's layout itself,
 //!     as that daemon can't reach this one, and what the machines this
 //!     daemon's borrowed panes are on are called.
+//! 24. Which connections the daemon doesn't pass on to the daemons
+//!     connected to it, and the machine each was last connected to; the
+//!     machine's identity key; and the keys it knows other machines by.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -68,11 +71,11 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 23;
+pub(crate) const VERSION: u32 = 24;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, VERSION,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -169,6 +172,42 @@ pub(crate) struct State {
     /// What the machines the panes borrowed are on are called. Since
     /// version 23; before, none were known.
     pub(crate) lenders: Vec<Lender>,
+    /// Which of the connections aren't passed on, and the machine each
+    /// was last connected to, by host. Since version 24; before, every
+    /// one was passed on, and none's machine was known.
+    pub(crate) sharing: Vec<Sharing>,
+    /// The seed of the machine's identity key (see `crate::machine`).
+    /// Since version 24; before, the next build reads it from the
+    /// `machine` file, or chooses one.
+    pub(crate) key: Option<[u8; 32]>,
+    /// The identity keys of other machines the daemon knows. Since version
+    /// 24; before, none were known.
+    pub(crate) keys: Vec<Known>,
+}
+
+/// The identity key of another machine, as the daemon knows it. Since
+/// version 24.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Known {
+    /// The machine's ID.
+    pub(crate) machine: [u8; 16],
+    /// Its key.
+    pub(crate) key: [u8; 32],
+    /// Met straight, with ssh, rather than vouched for by a machine
+    /// passing it on.
+    pub(crate) met: bool,
+}
+
+/// Whether a connection is passed on, and the machine it was last
+/// connected to. Since version 24.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Sharing {
+    /// The connection's host.
+    pub(crate) host: String,
+    /// The daemon doesn't pass it on, as asked.
+    pub(crate) unshared: bool,
+    /// The machine's ID.
+    pub(crate) machine: Option<[u8; 16]>,
 }
 
 /// What a machine this daemon's borrowed panes are on is called. Since
@@ -830,8 +869,78 @@ impl State {
             // panes go on the end of `Layout`, so they read as it does.
             21 => Ok(postcard::from_bytes::<v21::State>(body)?.into()),
             22 => Ok(postcard::from_bytes::<v22::State>(body)?.into()),
+            23 => Ok(postcard::from_bytes::<v23::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
+        }
+    }
+}
+
+/// Version 23, as the builds that wrote it wrote it: every connection was
+/// passed on, and none's machine was kept.
+mod v23 {
+    use serde::Deserialize;
+
+    use super::{
+        Applied, Borrower, Buffer, Chat, Connection, EditLog, Files, Lender, Lent, Process,
+        Reviews, Shell, Terminal, Workspaces,
+    };
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+        edits: EditLog,
+        applied: Vec<Applied>,
+        daemon: u64,
+        reviews: Reviews,
+        recovery_lock: Option<u32>,
+        shells: Vec<Shell>,
+        machine: Option<[u8; 16]>,
+        connections: Vec<Connection>,
+        lent: Vec<Lent>,
+        borrowers: Vec<Borrower>,
+        lenders: Vec<Lender>,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: state.recovery_lock,
+                shells: state.shells,
+                machine: state.machine,
+                connections: state.connections,
+                lent: state.lent,
+                borrowers: state.borrowers,
+                lenders: state.lenders,
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
+            }
         }
     }
 }
@@ -910,6 +1019,9 @@ mod v22 {
                     .collect(),
                 borrowers: state.borrowers,
                 lenders: Vec::new(),
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
             }
         }
     }
@@ -972,6 +1084,9 @@ mod v21 {
                 lent: Vec::new(),
                 borrowers: Vec::new(),
                 lenders: Vec::new(),
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
             }
         }
     }
@@ -1032,6 +1147,9 @@ mod v20 {
                 lent: Vec::new(),
                 borrowers: Vec::new(),
                 lenders: Vec::new(),
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
             }
         }
     }
@@ -1088,6 +1206,9 @@ mod v19 {
                 lent: Vec::new(),
                 borrowers: Vec::new(),
                 lenders: Vec::new(),
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
             }
         }
     }
@@ -1144,6 +1265,9 @@ mod v18 {
                 lent: Vec::new(),
                 borrowers: Vec::new(),
                 lenders: Vec::new(),
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
             }
         }
     }
@@ -1665,6 +1789,9 @@ mod v7 {
                 lent: Vec::new(),
                 borrowers: Vec::new(),
                 lenders: Vec::new(),
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
             }
         }
     }
@@ -1745,6 +1872,9 @@ mod v8 {
                 lent: Vec::new(),
                 borrowers: Vec::new(),
                 lenders: Vec::new(),
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
             }
         }
     }
@@ -1795,6 +1925,9 @@ mod v9 {
                 lent: Vec::new(),
                 borrowers: Vec::new(),
                 lenders: Vec::new(),
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
             }
         }
     }
@@ -1847,6 +1980,9 @@ mod v11 {
                 lent: Vec::new(),
                 borrowers: Vec::new(),
                 lenders: Vec::new(),
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
             }
         }
     }
@@ -1948,6 +2084,9 @@ mod v15 {
                 lent: Vec::new(),
                 borrowers: Vec::new(),
                 lenders: Vec::new(),
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
             }
         }
     }
@@ -2003,6 +2142,9 @@ mod v14 {
                 lent: Vec::new(),
                 borrowers: Vec::new(),
                 lenders: Vec::new(),
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
             }
         }
     }
@@ -2056,6 +2198,9 @@ mod v13 {
                 lent: Vec::new(),
                 borrowers: Vec::new(),
                 lenders: Vec::new(),
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
             }
         }
     }
@@ -2151,6 +2296,9 @@ mod v12 {
                 lent: Vec::new(),
                 borrowers: Vec::new(),
                 lenders: Vec::new(),
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
             }
         }
     }
@@ -2244,6 +2392,9 @@ mod v10 {
                 lent: Vec::new(),
                 borrowers: Vec::new(),
                 lenders: Vec::new(),
+                sharing: Vec::new(),
+                key: None,
+                keys: Vec::new(),
             }
         }
     }
@@ -2451,6 +2602,17 @@ mod tests {
                 machine: [0xd5; 16],
                 name: "jack-ubuntu-server".to_owned(),
             }],
+            sharing: vec![Sharing {
+                host: "jack@laptop:2222".to_owned(),
+                unshared: true,
+                machine: Some([0xa1; 16]),
+            }],
+            key: Some([0x4b; 32]),
+            keys: vec![Known {
+                machine: [0xa1; 16],
+                key: [0x5c; 32],
+                met: true,
+            }],
         }
     }
 
@@ -2651,6 +2813,25 @@ mod tests {
     }
 
     #[test]
+    fn version_24_is_read_with_connections_not_passed_on_and_their_machines() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v24.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        let sharing = &state.sharing[0];
+        assert_eq!(
+            (sharing.host.as_str(), sharing.unshared, sharing.machine),
+            ("jack@laptop:2222", true, Some([0xa1; 16]))
+        );
+        assert_eq!(state.key, Some([0x4b; 32]));
+        let known = &state.keys[0];
+        assert_eq!(
+            (known.machine, known.key, known.met),
+            ([0xa1; 16], [0x5c; 32], true)
+        );
+    }
+
+    #[test]
     fn version_23_is_read_with_placed_workspaces_and_lenders_names() {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v23.bin"))
@@ -2666,6 +2847,9 @@ mod tests {
             (lender.machine, lender.name.as_str()),
             ([0xd5; 16], "jack-ubuntu-server")
         );
+        // Every connection was passed on, and none's machine kept, nor any
+        // key.
+        assert!(state.sharing.is_empty() && state.key.is_none() && state.keys.is_empty());
     }
 
     #[test]
@@ -2838,11 +3022,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v23.bin"]
+    #[ignore = "writes tests/fixtures/handover-v24.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v23.bin"
+            "/tests/fixtures/handover-v24.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();

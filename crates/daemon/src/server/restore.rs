@@ -307,10 +307,7 @@ impl Daemon {
             workspaces: Vec::new(),
             active: None,
             connections: (self.links.kept().into_iter())
-                .map(|(host, command)| saved::Connection {
-                    host,
-                    command: (command != "clackatoo").then_some(command),
-                })
+                .map(super::links::Kept::saved)
                 .collect(),
             borrowers: (self.workspaces.borrowers().iter())
                 .map(|(machine, borrower)| saved::Borrower {
@@ -319,6 +316,8 @@ impl Daemon {
                     last_seen: borrower.last_seen,
                 })
                 .collect(),
+            // Kept in a file of their own (see `crate::known`).
+            keys: Vec::new(),
         };
         for workspace in &workspaces.list {
             let mut tabs = Vec::new();
@@ -583,10 +582,8 @@ impl Daemon {
         }
         self.workspaces.set_restored(restored);
         self.restore_borrowers(&state.borrowers);
-        self.connect_kept(state.connections.iter().map(|connection| {
-            let command = connection.command.as_deref().unwrap_or("clackatoo");
-            (connection.host.clone(), command.to_owned())
-        }));
+        self.restore_keys(&state.keys);
+        self.connect_kept(state.connections.iter().map(super::links::Kept::from_saved));
         let panes = MOST_PANES - room;
         if room == 0 {
             log::warn!("no more than the first {MOST_PANES} panes kept were made again");
@@ -597,6 +594,23 @@ impl Daemon {
             started.elapsed().as_millis()
         );
         self.workspaces_changed();
+    }
+
+    /// Knows other machines by the identity keys `kept`, as a build that
+    /// kept them with the workspaces did, unless they're known already;
+    /// one that can't be read is passed over.
+    fn restore_keys(&self, kept: &[saved::Known]) {
+        for known in kept {
+            let machine = known.machine.parse();
+            let key = crate::machine::unhex(&known.key);
+            if let (Ok(machine), Some(key)) = (machine, key) {
+                let pin = super::links::Pin {
+                    key,
+                    met: known.met,
+                };
+                self.links.pins.learn(machine, pin);
+            }
+        }
     }
 
     /// Takes the machines the workspaces made again were lent to, as kept,

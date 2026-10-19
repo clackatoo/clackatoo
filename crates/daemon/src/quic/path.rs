@@ -198,6 +198,22 @@ impl Path {
         }
     }
 
+    /// The daemon can be tried over UDP now, as it couldn't before: a
+    /// connection carried through another machine has a carrier through
+    /// ssh now, which said where the machine is. Tried at once, if the
+    /// handshake is done.
+    pub(crate) fn udp_found(&mut self, now: Instant) -> Action {
+        if self.udp {
+            return Action::Nothing;
+        }
+        self.udp = true;
+        if matches!(self.way, Way::Carrier { .. }) {
+            self.try_udp(now)
+        } else {
+            Action::Nothing
+        }
+    }
+
     /// A packet went out, whichever way.
     pub(crate) fn sent(&mut self, now: Instant) {
         if self.answers == Answers::Answered {
@@ -382,6 +398,20 @@ mod tests {
     /// Times `ms` milliseconds after `start`.
     fn at(start: Instant, ms: u64) -> Instant {
         start + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn udp_found_later_is_tried_at_once() {
+        let start = Instant::now();
+        let mut path = Path::new(false, true);
+        assert_eq!(path.connected(start), Action::Nothing);
+        // A carrier through ssh, at last, says where the daemon is.
+        assert_eq!(path.udp_found(at(start, 100)), Action::Probe);
+        assert!(path.trying());
+        assert!(path.probe_answered() || path.route() == Route::Udp);
+        assert_eq!(path.route(), Route::Udp);
+        // Found again, nothing new.
+        assert_eq!(path.udp_found(at(start, 200)), Action::Nothing);
     }
 
     #[test]

@@ -105,7 +105,7 @@ pub use files::{
 };
 pub use find::{Done, Found, FoundBuffer, FoundLine, FoundSymbol, Search};
 pub use forward::{Forward, ForwardFailure, Forwarding};
-pub use machines::{BadMachineId, Connection, ConnectionState, Machine, MachineId, Secret};
+pub use machines::{BadMachineId, Connection, ConnectionState, Machine, MachineId, Passed, Secret};
 pub use review::{
     ChatName, CommentPlace, Hunks, Made, NewReview, ReviewAction, ReviewChat, ReviewComment,
     ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
@@ -121,7 +121,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 94;
+pub const PROTOCOL_VERSION: u32 = 95;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1138,6 +1138,21 @@ pub enum Request {
         /// The shell command that runs clackatoo there, if it isn't
         /// `clackatoo`.
         command: Option<String>,
+        /// Whether the daemon passes the machine on to the daemons
+        /// connected to it ([`Workspaces::passed`]): `Some(false)` to stop,
+        /// as for a server others share, `Some(true)` to start again, and
+        /// `None` to leave it as it is, which for a new connection is to
+        /// pass it on. Kept with the connection. `None` from a client
+        /// older than protocol 95, which never asks for either: a client
+        /// asks [`wire::daemon_has`] with [`wire::CHAIN`] before sending
+        /// `Some`, as an older daemon would read past it, and keep a
+        /// connection asked not to be passed on as one to pass on once
+        /// it's upgraded.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::CHAIN }, _>",
+            deserialize_with = "wire::since::<{ wire::CHAIN }, _, _>"
+        )]
+        share: Option<bool>,
     },
     /// Ends the daemon's connection to `host`, and forgets it. Answered
     /// with [`Response::Done`], or [`Error::Other`] if there's none. New
@@ -1249,6 +1264,40 @@ pub enum Request {
     /// was last connected. Answered with [`Response::Text`], a line each.
     /// New in protocol 93, as [`RelayAs`](Self::RelayAs).
     Lent,
+    /// Asks for the QUIC stream it's sent on, beside the one a daemon
+    /// connected to this one talks on, to carry on to the daemon on
+    /// `machine`, one this daemon passes on ([`Workspaces::passed`]), or
+    /// to this daemon itself if it's its own: a carrier, as `clackatoo
+    /// bridge` is through ssh, for the asking daemon's own connection to
+    /// that machine, which reaches it through this one. Only a daemon that
+    /// said which machine it is ([`Request::RelayAs`]) may ask. Sent as
+    /// the stream's first message, in place of [`Request::Forward`].
+    /// Answered on the stream, once, with [`Response::Done`], after which
+    /// the stream carries what goes to and from that daemon as it is, both
+    /// ways; or with an error, saying why it can't, such as this daemon
+    /// not passing that machine on. Each daemon on the way carries the
+    /// stream on through its own connection to the next. Each could read
+    /// or change what goes through as it likes, so what it carries is
+    /// QUIC, whose certificate the asking daemon checks against the
+    /// machine's identity key ([`Response::Carrying`]'s `signed`): a
+    /// daemon on the way can then only pass it on, hold it up, or drop
+    /// it. New in protocol 95: a daemon asks [`wire::daemon_has`] with
+    /// [`wire::CHAIN`] before sending it, as only such a daemon passes
+    /// machines on.
+    Reach {
+        /// The machine.
+        machine: MachineId,
+    },
+    /// Forgets the identity key the daemon knew the machine of its
+    /// connection to `host` by (see [`Response::Carrying`]), as when that
+    /// machine's daemon chose a new one, its `machine` file having been
+    /// deleted: the key the machine presents next is taken, and kept from
+    /// then on. Answered with [`Response::Text`], saying what was done.
+    /// New in protocol 95, as [`Request::Reach`].
+    Forget {
+        /// The machine, as its connection is named.
+        host: String,
+    },
 }
 
 /// How to start a terminal.
@@ -1354,14 +1403,26 @@ pub enum Response {
     /// packets.
     Carrying {
         /// The DER-encoded certificate the daemon's QUIC endpoint presents,
-        /// for the client to accept and no other. The client learned it
-        /// over SSH, which logged it in to this machine.
+        /// for the client to accept and no other. Over SSH, which logged
+        /// the client in to this machine, that's proof enough. Through
+        /// another daemon, which carries the stream on (see
+        /// [`Request::Reach`]) and could put a certificate of its own in
+        /// its place, only `signed` is: a client that has met the machine
+        /// before checks the signature against the key it knew it by.
         certificate: Vec<u8>,
         /// Where the daemon's QUIC endpoint takes packets over UDP, if it
         /// does. A client that reaches it there may move its connection off
         /// the carrier onto UDP, where it survives the client's network
         /// changing. New connections only ever come through a carrier.
         udp: Option<Udp>,
+        /// The certificate, signed by the key the daemon's machine keeps
+        /// as its identity from one run to the next. `None` from a daemon
+        /// older than protocol 95, which can't be reached through another.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::CHAIN }, _>",
+            deserialize_with = "wire::since::<{ wire::CHAIN }, _, _>"
+        )]
+        signed: Option<Signed>,
     },
     /// Answers [`Request::Review`]: what was done, to say in the bar.
     Reviewed(String),
@@ -1387,6 +1448,21 @@ pub struct Udp {
     /// ways before any of the connection's packets go that way. A probe
     /// without it gets no answer, so the port gives nothing away to a scan.
     pub probe_key: [u8; 16],
+}
+
+/// A daemon's QUIC certificate, signed by its machine's identity key: see
+/// [`Response::Carrying`]. The key is Ed25519, chosen with the machine's
+/// ID and kept beside it; the signature covers the words `clackatoo
+/// carries QUIC with this certificate`, a zero byte, the machine's ID and
+/// the certificate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Signed {
+    /// The machine whose key signed it.
+    pub machine: MachineId,
+    /// Its public key.
+    pub key: [u8; 32],
+    /// The signature, 64 bytes.
+    pub signature: Vec<u8>,
 }
 
 /// Why the daemon refused or failed a request.

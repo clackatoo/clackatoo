@@ -17,6 +17,11 @@
 //! longer the one the connection was made to, because it was upgraded or
 //! restarted, the connection is over, and says so.
 //!
+//! A better way may be offered while one is in use ([`Offerer`]), as
+//! ssh straight there once it works again, for a connection carried
+//! through another machine meanwhile: the thread moves onto it, letting
+//! go of the old, and QUIC sends again what was on its way.
+//!
 //! The thread also takes the connections made to the ports the window
 //! forwards, each on a stream of its own (see [`forward`](super::forward)),
 //! after the client's messages and the daemon's each time round.
@@ -49,7 +54,7 @@ use super::{
     CARRIER_BACKLOG, CarrierId, IDLE_TIMEOUT, KEEP_ALIVE, Loss, SERVER_NAME, STATS_EVERY,
     carrier_address, describe, frame_packet, transport,
 };
-use crate::client::{ClientError, open_carrier};
+use crate::client::{Carrying, ClientError, open_carrier};
 use crate::forward::{Command, Forwarder};
 use crate::remote::Ssh;
 
@@ -73,13 +78,24 @@ pub struct Redialed {
     /// Whatever carries it, such as the ssh process: kept while the
     /// carrier is in use, and dropped, ending it, once it isn't.
     keep: Option<Box<dyn Send>>,
+    /// Called once the connection takes it on, as it may not: see
+    /// [`when_used`](Self::when_used).
+    on_use: Option<Box<dyn FnOnce() + Send>>,
+    /// Where ssh reached the daemon's machine, for UDP to be tried at, if
+    /// it's ssh's and ssh says.
+    reached: Option<IpAddr>,
 }
 
 impl Redialed {
     /// A carrier that `stream` is, with nothing else to keep running.
     #[must_use]
     pub fn new(stream: UnixStream) -> Self {
-        Self { stream, keep: None }
+        Self {
+            stream,
+            keep: None,
+            on_use: None,
+            reached: None,
+        }
     }
 
     /// A carrier that `stream` is, kept going by `keep`, which is kept
@@ -89,7 +105,29 @@ impl Redialed {
         Self {
             stream,
             keep: Some(Box::new(keep)),
+            on_use: None,
+            reached: None,
         }
+    }
+
+    /// The same, with ssh having reached the daemon's machine at
+    /// `address`: a connection that couldn't try UDP before, as one
+    /// carried through another machine can't, tries it there once it
+    /// takes this carrier on.
+    #[must_use]
+    pub(crate) fn reached_at(mut self, address: Option<IpAddr>) -> Self {
+        self.reached = address;
+        self
+    }
+
+    /// The same, calling `used`, on the connection's thread, once the
+    /// connection takes it on. It isn't called for one let go instead: one
+    /// that reaches another run of the daemon, or one that opened after
+    /// another, offered as a better way, came into use meanwhile.
+    #[must_use]
+    pub(crate) fn when_used(mut self, used: impl FnOnce() + Send + 'static) -> Self {
+        self.on_use = Some(Box::new(used));
+        self
     }
 }
 
@@ -106,10 +144,54 @@ impl std::fmt::Debug for Redialed {
 /// called on a thread of its own.
 pub type Redial = Box<dyn FnMut() -> io::Result<Redialed> + Send>;
 
-/// What a try at a new carrier came to, with the way to try again.
+/// What a try at a new carrier came to, with the way to try again: or,
+/// with none, a better way offered (see [`Offerer`]).
 struct Dialed {
-    redial: Redial,
-    outcome: Result<(Redialed, Vec<u8>), ClientError>,
+    redial: Option<Redial>,
+    outcome: Result<(Redialed, Carrying), ClientError>,
+}
+
+/// A way to offer a connection's thread a better carrier than the one it
+/// uses: see [`Carried::offerer`].
+#[derive(Clone)]
+pub(crate) struct Offerer {
+    dialed: mpsc::Sender<Dialed>,
+    waker: Arc<Waker>,
+}
+
+impl Offerer {
+    /// Greets the daemon through `redialed`, as the thread would through a
+    /// carrier it opened, asking for it to carry QUIC, and offers it to
+    /// the thread, which moves onto it if it reaches the same run of the
+    /// daemon. On the caller's thread, as greeting it waits.
+    ///
+    /// # Errors
+    ///
+    /// If the daemon there can't be greeted, or the connection has ended.
+    /// Returns the certificate the daemon presented, and its signature of
+    /// it, if it signed it.
+    pub(crate) fn offer(
+        &self,
+        mut redialed: Redialed,
+    ) -> Result<(Vec<u8>, Option<clackatoo_protocol::Signed>), ClientError> {
+        let carrying = open_carrier(&mut redialed.stream)?;
+        let presented = (carrying.certificate.clone(), carrying.signed.clone());
+        let offered = Dialed {
+            redial: None,
+            outcome: Ok((redialed, carrying)),
+        };
+        self.dialed
+            .send(offered)
+            .map_err(|_| ClientError::Disconnected)?;
+        let _ = self.waker.wake();
+        Ok(presented)
+    }
+}
+
+impl std::fmt::Debug for Offerer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Offerer").finish_non_exhaustive()
+    }
 }
 
 /// How much of the daemon's messages may wait for the client to read them
@@ -137,6 +219,8 @@ pub(crate) struct Carried {
     /// to look.
     forwards: mpsc::Sender<Command>,
     waker: Arc<Waker>,
+    /// Where the thread is offered better carriers.
+    offers: mpsc::Sender<Dialed>,
 }
 
 /// Whether a daemon on another machine is in contact, for a window to show
@@ -234,6 +318,14 @@ impl Carried {
         Forwarder::new(self.forwards.clone(), Arc::clone(&self.waker), wire)
     }
 
+    /// A way to offer the thread a better carrier than the one it uses.
+    pub(crate) fn offerer(&self) -> Offerer {
+        Offerer {
+            dialed: self.offers.clone(),
+            waker: Arc::clone(&self.waker),
+        }
+    }
+
     /// Why the connection ended, in words for whoever uses it, once it has.
     pub(crate) fn ended(&self) -> Option<String> {
         self.ended
@@ -279,6 +371,7 @@ pub(crate) fn carry(
     let on_udp = Arc::clone(&driver.on_udp);
     let contact = driver.contact.clone();
     let forwards = driver.forward_commands.clone();
+    let offers = driver.dialed_sender.clone();
     let waker = Arc::clone(&driver.waker);
     let ended = Arc::new(Mutex::new(None));
     let thread = {
@@ -310,6 +403,7 @@ pub(crate) fn carry(
             ended,
             forwards,
             waker,
+            offers,
         },
     ))
 }
@@ -694,10 +788,14 @@ impl Driver {
                 let outcome = redial()
                     .map_err(ClientError::from)
                     .and_then(|mut redialed| {
-                        let (certificate, _) = open_carrier(&mut redialed.stream)?;
-                        Ok((redialed, certificate))
+                        let carrying = open_carrier(&mut redialed.stream)?;
+                        Ok((redialed, carrying))
                     });
-                if sender.send(Dialed { redial, outcome }).is_ok() {
+                let dialed = Dialed {
+                    redial: Some(redial),
+                    outcome,
+                };
+                if sender.send(dialed).is_ok() {
                     let _ = waker.wake();
                 }
             });
@@ -709,18 +807,29 @@ impl Driver {
 
     /// Takes on a new carrier, if one has opened, or tries again later if
     /// it failed. The connection is over if the daemon it reaches isn't
-    /// the one it was made to.
+    /// the one it was made to. A better carrier offered is moved onto, if
+    /// it reaches the same daemon, or else let go, whatever it came to.
     fn take_dialed(&mut self, now: Instant) -> io::Result<()> {
         let Ok(Dialed { redial, outcome }) = self.dialed.try_recv() else {
             return Ok(());
         };
-        self.redial = Some(redial);
+        let offered = redial.is_none();
+        if let Some(redial) = redial {
+            self.redial = Some(redial);
+        }
         let lost_for = self
             .carrier_lost_at
             .map(|at| now.saturating_duration_since(at))
             .unwrap_or_default();
         match outcome {
-            Ok((redialed, certificate)) if certificate == self.certificate => {
+            // Opened as a better one was taken meanwhile: that stays.
+            Ok(_) if !offered && self.carrier.is_some() => Ok(()),
+            Ok((mut redialed, carrying)) if carrying.certificate == self.certificate => {
+                // Where to try UDP, if it couldn't be tried before.
+                let udp = (redialed.reached)
+                    .zip(carrying.udp)
+                    .filter(|_| self.udp.is_none())
+                    .map(|(ip, udp)| (SocketAddr::new(ip, udp.port), udp.probe_key));
                 redialed.stream.set_nonblocking(true)?;
                 let mut carrier = mio::net::UnixStream::from_std(redialed.stream);
                 self.poll.registry().register(
@@ -728,19 +837,65 @@ impl Driver {
                     CARRIER,
                     Interest::READABLE | Interest::WRITABLE,
                 )?;
+                // The old one goes, with what was on its way through it,
+                // which QUIC sends again.
+                let replaced = if let Some(mut old) = self.carrier.take() {
+                    let _ = self.poll.registry().deregister(&mut old);
+                    true
+                } else {
+                    false
+                };
                 self.carrier = Some(carrier);
+                self.to_carrier.clear();
                 self.packets = FrameDecoder::new();
                 self.keep = redialed.keep;
                 self.redial_backoff = REDIAL_AT_FIRST;
                 self.carrier_lost_at = None;
-                log::info!(
-                    "a new ssh connection carries QUIC, {lost_for:.1?} after the last closed; {}",
-                    describe(&self.connection)
-                );
+                if let Some(used) = redialed.on_use.take() {
+                    used();
+                }
+                if replaced {
+                    log::info!(
+                        "a better way carries QUIC now; {}",
+                        describe(&self.connection)
+                    );
+                } else {
+                    log::info!(
+                        "a new carrier carries QUIC, {lost_for:.1?} after the last closed; {}",
+                        describe(&self.connection)
+                    );
+                }
                 // Something to go through it, for the daemon to follow.
                 self.connection.ping();
+                if let Some((daemon, probe_key)) = udp {
+                    match bind_udp(&self.poll, daemon) {
+                        Ok(socket) => {
+                            log::info!("QUIC can try UDP to {daemon} now");
+                            self.udp = Some(UdpWay {
+                                socket,
+                                daemon,
+                                probe_key,
+                                probes: 0,
+                            });
+                            let action = self.path.udp_found(now);
+                            self.act(action)?;
+                        }
+                        Err(err) => log::warn!("no UDP socket for QUIC: {err}"),
+                    }
+                }
+                if replaced {
+                    return Ok(());
+                }
                 let action = self.path.carrier_opened(now);
                 self.act(action)
+            }
+            Ok(_) if offered => {
+                log::info!("a better way offered reaches another run of the daemon: not taken");
+                Ok(())
+            }
+            Err(err) if offered => {
+                log::info!("a better way offered couldn't be taken: {err}");
+                Ok(())
             }
             Ok(_) => Err(io::Error::other(
                 "the daemon was restarted, or upgraded, since the connection was made",

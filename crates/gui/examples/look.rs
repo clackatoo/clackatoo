@@ -55,6 +55,7 @@
 //! | `machine NAME [WORKSPACE]...` | Starts the daemon of another machine, called NAME, with a workspace for each WORKSPACE, a shell in each, and written `WORKSPACE+FILE`, an editor of the project's FILE beside it: `:connect NAME` reaches it, through a stand-in for ssh |
 //! | `machine-stop NAME` | Stops that daemon, as when its machine goes away |
 //! | `machine-back NAME` | Starts that daemon again, as the machine coming back: with what it kept, its workspaces too |
+//! | `machine-connect NAME HOST [--no-share]` | Has that daemon connect to the machine HOST, another started so, passing it on to the daemons connected to it unless `--no-share` |
 //! | `password [TEXT]` | Has the stand-in for ssh ask for TEXT as a password from now on, or with none, ask for none |
 //!
 //! After each key, click, scroll or `open`, the window is left to settle,
@@ -256,6 +257,11 @@ enum Command {
     Machine(String, Vec<String>),
     MachineStop(String),
     MachineBack(String),
+    MachineConnect {
+        name: String,
+        host: String,
+        share: bool,
+    },
     Password(Option<String>),
 }
 
@@ -392,6 +398,19 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
                     _ => Command::MachineBack(name.to_owned()),
                 }
             }
+            "machine-connect" => match rest.split_whitespace().collect::<Vec<_>>()[..] {
+                [name, host] => Command::MachineConnect {
+                    name: name.to_owned(),
+                    host: host.to_owned(),
+                    share: true,
+                },
+                [name, host, "--no-share"] => Command::MachineConnect {
+                    name: name.to_owned(),
+                    host: host.to_owned(),
+                    share: false,
+                },
+                _ => bail!("line {line_number}: `machine-connect` takes NAME HOST [--no-share]"),
+            },
             "password" => Command::Password((!rest.is_empty()).then(|| rest.to_owned())),
             _ => bail!("line {line_number}: no command called `{word}`"),
         };
@@ -543,6 +562,14 @@ impl Machines {
         config.machine = Some(dir.join("machine"));
         config.machine_name = Some(name.to_owned());
         config.workspaces = Some(dir.join("workspaces"));
+        // It reaches the others as the window's own daemon does.
+        config.links = Some(LinkConfig {
+            ssh: self.root.join("ssh").into(),
+            askpass: Some(example("daemon")?),
+            better_every: clackatoo_daemon::DEFAULT_BETTER_EVERY,
+            speaks: None,
+            impostor: false,
+        });
         // Its files are read as the window's own daemon reads them.
         config.languages = Some(languages(&dir.join("languages"))?);
         let mut daemon = Daemon::bind(&runtime.socket_path(), config)?;
@@ -553,6 +580,16 @@ impl Machines {
         let client = Client::connect(&runtime.socket_path())?;
         self.running.push((name.to_owned(), running));
         Ok(client)
+    }
+
+    /// Has the daemon of the machine `name` connect to `host`, passing it
+    /// on if `share`.
+    fn connect(&mut self, name: &str, host: &str, share: bool) -> anyhow::Result<()> {
+        let socket =
+            RuntimeDir::at(self.root.join("hosts").join(name).join("clackatoo")).socket_path();
+        let mut client = Client::connect(&socket)?;
+        client.connect_sharing(host, None, Some(share))?;
+        Ok(())
     }
 
     /// Stops the daemon of the machine `name`, which then can't be
@@ -635,6 +672,9 @@ fn start_daemon(project: &Path, kept: Option<&str>, ssh: &Path) -> anyhow::Resul
     config.links = Some(LinkConfig {
         ssh: ssh.into(),
         askpass: Some(example("daemon")?),
+        better_every: clackatoo_daemon::DEFAULT_BETTER_EVERY,
+        speaks: None,
+        impostor: false,
     });
     config.workspaces = match kept {
         Some(kept) => {
@@ -856,6 +896,10 @@ impl Look {
             Command::MachineBack(name) => {
                 timed = false;
                 self.machines.back(name)?;
+            }
+            Command::MachineConnect { name, host, share } => {
+                timed = false;
+                self.machines.connect(name, host, *share)?;
             }
             Command::Password(password) => {
                 timed = false;

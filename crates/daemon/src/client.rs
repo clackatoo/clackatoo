@@ -5,14 +5,15 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::time::Duration;
 
 use clackatoo_protocol::frame::{self, FrameDecoder, FrameError, Head};
 use clackatoo_protocol::wire;
 use clackatoo_protocol::{
     Block, BufferId, Change, ChatAction, ClientMessage, Code, Connection, Error, Event, FileOp,
     FilesAction, FilesId, HistoryLines, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal, Place,
-    Query, Request, Response, Search, Secret, ServerMessage, Side, Size, TerminalId, TerminalInfo,
-    Udp, View, Which, WorkspaceId, Workspaces,
+    Query, Request, Response, Search, Secret, ServerMessage, Side, Signed, Size, TerminalId,
+    TerminalInfo, Udp, View, Which, WorkspaceId, Workspaces,
 };
 
 use crate::quic::{self, Carried, Contact, Redial, Route};
@@ -48,6 +49,22 @@ pub struct Client {
     /// The number this client attaches to buffers as: see
     /// [`Request::AttachBuffer`].
     window: u64,
+    /// The certificate a remote daemon's QUIC endpoint presented, and its
+    /// machine's signature of it, if it signed it.
+    certified: Option<Box<(Vec<u8>, Option<Signed>)>>,
+}
+
+/// What a daemon answers a connection asking to carry QUIC with (see
+/// [`open_carrier`]).
+#[derive(Debug)]
+pub(crate) struct Carrying {
+    /// The certificate its QUIC endpoint presents.
+    pub(crate) certificate: Vec<u8>,
+    /// Where it takes packets over UDP, if it does.
+    pub(crate) udp: Option<Udp>,
+    /// The certificate, signed by its machine's identity key, from a
+    /// daemon that signs it.
+    pub(crate) signed: Option<Signed>,
 }
 
 /// A number for a window to attach to buffers as, chosen at random.
@@ -78,6 +95,12 @@ impl Client {
     /// If the daemon doesn't answer, or speaks a version this build can't
     /// talk at, or won't talk to this build.
     pub fn over(stream: UnixStream) -> Result<Self, ClientError> {
+        Self::over_speaking(stream, PROTOCOL_VERSION)
+    }
+
+    /// As [`over`](Self::over), saying it speaks protocol `speaks`, at
+    /// most this build's, as an older build would.
+    pub(crate) fn over_speaking(stream: UnixStream, speaks: u32) -> Result<Self, ClientError> {
         let mut client = Self {
             stream,
             decoder: FrameDecoder::new(),
@@ -85,11 +108,12 @@ impl Client {
             events: VecDeque::new(),
             carried: None,
             window: random_window(),
+            certified: None,
         };
         // A socket nothing serves would otherwise hang the handshake.
         client.stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
         client.send(&ClientMessage::Hello {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: speaks.min(PROTOCOL_VERSION),
         })?;
         let wire = agree(client.receive()?)?;
         client.wire = wire;
@@ -121,7 +145,7 @@ impl Client {
     /// If the daemon doesn't answer, speaks another version, or the QUIC
     /// connection can't be set up.
     pub fn over_quic(stream: UnixStream) -> Result<Self, ClientError> {
-        Self::over_carrier(stream, None, None, None)
+        Self::over_carrier(stream, None, None, None, PROTOCOL_VERSION)
     }
 
     /// As [`over_quic`](Self::over_quic), moving the connection onto UDP
@@ -131,7 +155,13 @@ impl Client {
     ///
     /// As [`over_quic`](Self::over_quic).
     pub fn over_quic_via(stream: UnixStream, daemon_ip: IpAddr) -> Result<Self, ClientError> {
-        Self::over_carrier(stream, Some(UdpTarget::Host(daemon_ip)), None, None)
+        Self::over_carrier(
+            stream,
+            Some(UdpTarget::Host(daemon_ip)),
+            None,
+            None,
+            PROTOCOL_VERSION,
+        )
     }
 
     /// As [`over_quic`](Self::over_quic), moving the connection onto UDP
@@ -141,7 +171,7 @@ impl Client {
     ///
     /// As [`over_quic`](Self::over_quic).
     pub fn over_quic_to(stream: UnixStream, udp: UdpTarget) -> Result<Self, ClientError> {
-        Self::over_carrier(stream, Some(udp), None, None)
+        Self::over_carrier(stream, Some(udp), None, None, PROTOCOL_VERSION)
     }
 
     /// As [`over_quic_to`](Self::over_quic_to), opening a new carrier with
@@ -155,18 +185,24 @@ impl Client {
         udp: Option<UdpTarget>,
         redial: Redial,
     ) -> Result<Self, ClientError> {
-        Self::over_carrier(stream, udp, None, Some(redial))
+        Self::over_carrier(stream, udp, None, Some(redial), PROTOCOL_VERSION)
     }
 
     /// As [`over_quic_redialing`](Self::over_quic_redialing), with `ssh`
-    /// carrying `stream`, kept running as long as it's in use.
+    /// carrying `stream`, kept running as long as it's in use, saying it
+    /// speaks protocol `speaks`.
     pub(crate) fn over_carrier(
         mut stream: UnixStream,
         udp_target: Option<UdpTarget>,
         ssh: Option<Ssh>,
         redial: Option<Redial>,
+        speaks: u32,
     ) -> Result<Self, ClientError> {
-        let (certificate, udp) = open_carrier(&mut stream)?;
+        let Carrying {
+            certificate,
+            udp,
+            signed,
+        } = open_carrier(&mut stream)?;
         let udp = udp_target.zip(udp).map(|(target, udp)| {
             let address = match target {
                 UdpTarget::Host(ip) => SocketAddr::new(ip, udp.port),
@@ -174,10 +210,18 @@ impl Client {
             };
             (address, udp.probe_key)
         });
-        let (local, carried) = quic::carry(stream, certificate, udp, ssh, redial)?;
-        let mut client = Self::over(local)?;
+        let (local, carried) = quic::carry(stream, certificate.clone(), udp, ssh, redial)?;
+        let mut client = Self::over_speaking(local, speaks)?;
         client.carried = Some(carried);
+        client.certified = Some(Box::new((certificate, signed)));
         Ok(client)
+    }
+
+    /// The certificate a remote daemon's QUIC endpoint presented, and its
+    /// machine's signature of it, if it signed it: `None` for a daemon on
+    /// this machine.
+    pub(crate) fn certified(&self) -> Option<(&[u8], Option<&Signed>)> {
+        (self.certified.as_deref()).map(|(certificate, signed)| (&certificate[..], signed.as_ref()))
     }
 
     /// Whether a daemon on another machine is in contact, for showing when
@@ -197,6 +241,21 @@ impl Client {
         self.carried
             .as_ref()
             .map(|carried| carried.forwarder(self.wire))
+    }
+
+    /// Asks the daemon on another machine this connection reaches to
+    /// carry a stream on to the daemon on `machine`, one it passes on (see
+    /// [`Request::Reach`]): the stream, once it says it does, to greet
+    /// that daemon over, as a carrier of QUIC. Only a client that said
+    /// which machine it is ([`Request::RelayAs`]) may ask.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Daemon`] with why the daemon won't; or if this
+    /// connection is to a daemon on this machine, or has ended.
+    pub fn reach(&self, machine: clackatoo_protocol::MachineId) -> Result<UnixStream, ClientError> {
+        let forwarder = self.forwarder().ok_or(ClientError::Disconnected)?;
+        reach(&forwarder, machine)
     }
 
     /// How the connection reaches a daemon on another machine: through
@@ -856,9 +915,32 @@ impl Client {
     ///
     /// See [`ClientError`].
     pub fn connect_to(&mut self, host: &str, command: Option<&str>) -> Result<(), ClientError> {
+        self.connect_sharing(host, command, None)
+    }
+
+    /// As [`connect_to`](Self::connect_to), passing the machine on to the
+    /// daemons connected to this one, or not, as `share` says, if it says
+    /// (see [`Request::Connect`]). A daemon too old to pass machines on
+    /// is asked nothing, as it would connect and keep the connection as
+    /// one to pass on once it's upgraded.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`]: [`ClientError::Daemon`] with
+    /// [`Error::Unsupported`] for `share` asked of a daemon too old.
+    pub fn connect_sharing(
+        &mut self,
+        host: &str,
+        command: Option<&str>,
+        share: Option<bool>,
+    ) -> Result<(), ClientError> {
+        if share.is_some() && !self.daemon_has(wire::CHAIN) {
+            return Err(ClientError::Daemon(Error::Unsupported));
+        }
         self.done(&Request::Connect {
             host: host.to_owned(),
             command: command.map(str::to_owned),
+            share,
         })
     }
 
@@ -996,7 +1078,7 @@ fn why(err: ClientError, carried: Option<&Carried>) -> ClientError {
 /// build may hang up on a request it can't decode before answering a
 /// greeting that came with it, and then couldn't say which version it
 /// speaks.
-pub(crate) fn open_carrier(stream: &mut UnixStream) -> Result<(Vec<u8>, Option<Udp>), ClientError> {
+pub(crate) fn open_carrier(stream: &mut UnixStream) -> Result<Carrying, ClientError> {
     stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
     stream.write_all(&frame::encode(
         PROTOCOL_VERSION,
@@ -1009,7 +1091,15 @@ pub(crate) fn open_carrier(stream: &mut UnixStream) -> Result<(Vec<u8>, Option<U
     let carry = ClientMessage::Request(Request::CarryQuic);
     stream.write_all(&frame::encode(wire, &carry)?)?;
     let carrying = match receive(stream, &mut decoder, wire)? {
-        ServerMessage::Response(Response::Carrying { certificate, udp }) => (certificate, udp),
+        ServerMessage::Response(Response::Carrying {
+            certificate,
+            udp,
+            signed,
+        }) => Carrying {
+            certificate,
+            udp,
+            signed,
+        },
         ServerMessage::Response(response) => return Err(unexpected(response)),
         other => return Err(ClientError::UnexpectedMessage(Box::new(other))),
     };
@@ -1019,6 +1109,39 @@ pub(crate) fn open_carrier(stream: &mut UnixStream) -> Result<(Vec<u8>, Option<U
     }
     stream.set_read_timeout(None)?;
     Ok(carrying)
+}
+
+/// How long the daemon a stream reaching another machine goes through may
+/// take to answer.
+const REACH_WAIT: Duration = Duration::from_secs(10);
+
+/// Opens a stream on the connection `forwarder` hands things to, asking
+/// its daemon to carry it on to the daemon on `machine` (see
+/// [`Request::Reach`]). Returns it once that daemon answers that it did.
+pub(crate) fn reach(
+    forwarder: &crate::forward::Forwarder,
+    machine: clackatoo_protocol::MachineId,
+) -> Result<UnixStream, ClientError> {
+    let (mut ours, theirs) = UnixStream::pair()?;
+    forwarder.carry(theirs);
+    ours.set_read_timeout(Some(REACH_WAIT))?;
+    ours.set_write_timeout(Some(REACH_WAIT))?;
+    let wire = forwarder.wire();
+    let request = ClientMessage::Request(Request::Reach { machine });
+    ours.write_all(&frame::encode(wire, &request)?)?;
+    let mut decoder = FrameDecoder::new();
+    match receive(&mut ours, &mut decoder, wire)? {
+        ServerMessage::Response(Response::Done) => {}
+        ServerMessage::Response(Response::Error(err)) => return Err(ClientError::Daemon(err)),
+        other => return Err(ClientError::UnexpectedMessage(Box::new(other))),
+    }
+    // Nothing comes before this end greets the daemon it reached.
+    if decoder.has_partial_frame() {
+        return Err(ClientError::Disconnected);
+    }
+    ours.set_read_timeout(None)?;
+    ours.set_write_timeout(None)?;
+    Ok(ours)
 }
 
 /// The protocol version to run a connection at, from the daemon's answer

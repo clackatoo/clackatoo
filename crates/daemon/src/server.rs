@@ -58,6 +58,7 @@ mod agent_files;
 mod boards;
 mod browser;
 mod buffers;
+mod chain;
 mod chats;
 mod clipboard;
 mod disk;
@@ -405,6 +406,12 @@ struct Client {
     machine: Option<Machine>,
     /// Whether the client is told when the chats change.
     watching_chats: bool,
+    /// Made for a stream reaching this daemon from another machine: it may
+    /// only greet the daemon and carry QUIC.
+    carrier_only: bool,
+    /// For a test's daemon in the way: the machine it signs its QUIC
+    /// certificate as, in that machine's place, with its own key.
+    carrier_as: Option<MachineId>,
     /// Whether the client is told when the connections to other daemons
     /// change.
     watching_connections: bool,
@@ -647,6 +654,8 @@ impl Client {
             machine: None,
             watching_chats: false,
             watching_connections: false,
+            carrier_only: false,
+            carrier_as: None,
             present_until: None,
             later: Vec::new(),
             held: VecDeque::new(),
@@ -936,6 +945,8 @@ pub struct Daemon {
     keeping: restore::Keeping,
     /// Which daemon this is, kept from one run to the next.
     machine: Machine,
+    /// The key that proves it, which signs the QUIC certificate.
+    signer: crate::machine::Signer,
     /// The directory the daemon's socket is in, where ssh's askpass
     /// sockets go.
     runtime: Option<PathBuf>,
@@ -990,7 +1001,7 @@ impl Daemon {
         mut listener: UnixListener,
         config: DaemonConfig,
         afresh: bool,
-        machine: Option<MachineId>,
+        machine: Option<crate::machine::Handed>,
     ) -> io::Result<Self> {
         let poll = Poll::new()?;
         poll.registry()
@@ -1014,7 +1025,7 @@ impl Daemon {
         let keeping = restore::Keeping::new(&config, afresh);
         // Chosen afresh, unless the build before hands its own over.
         let id = crate::client::random_window();
-        let machine = crate::machine::identity(
+        let (machine, signer) = crate::machine::identity(
             config.machine.as_deref(),
             config.machine_name.as_deref(),
             machine,
@@ -1025,6 +1036,7 @@ impl Daemon {
             .and_then(|address| Some(address.as_pathname()?.parent()?.to_owned()));
         let mut workspaces = WorkspaceState::with_home(&config.home);
         workspaces.set_machine(machine.clone());
+        let links = links::Links::knowing(config.machine.as_deref());
         Ok(Self {
             poll,
             listener,
@@ -1086,8 +1098,9 @@ impl Daemon {
             recovery: recovery::Recovery::default(),
             keeping,
             machine,
+            signer,
             runtime,
-            links: links::Links::default(),
+            links,
         })
         .map(|mut daemon| {
             daemon.start_web();
@@ -1115,7 +1128,8 @@ impl Daemon {
         let state = &handover.state;
         let fds = &mut handover.fds;
         let listener = std::os::unix::net::UnixListener::from(fds.take(state.listener)?);
-        let machine = state.machine.map(MachineId);
+        let machine =
+            (state.machine).map(|id| (MachineId(id), state.key.map(crate::machine::Seed)));
         let mut daemon = Self::listening(UnixListener::from_std(listener), config, false, machine)?;
         daemon.next_id = state.next_terminal;
         daemon.workspaces =
@@ -1186,10 +1200,16 @@ impl Daemon {
             });
         daemon.start_recovery(lock);
         daemon.keep_places_kept();
-        // The connections the build before had, made again.
-        let connections = (state.connections.iter())
-            .map(|connection| (connection.host.clone(), connection.command.clone()));
-        daemon.connect_kept(connections.collect::<Vec<_>>());
+        // The keys it knew other machines by, and the connections it had,
+        // made again.
+        for known in &state.keys {
+            let pin = links::Pin {
+                key: known.key,
+                met: known.met,
+            };
+            daemon.links.pins.learn(MachineId(known.machine), pin);
+        }
+        daemon.connect_kept(links::Kept::taken_over(state));
         for orphan in &state.orphans {
             match Orphan::resume(orphan, fds) {
                 Ok(orphan) => daemon.watch_orphan(orphan),
@@ -1289,9 +1309,7 @@ impl Daemon {
             })
             .collect();
         // Their ssh processes end with them, rather than outlive the exec.
-        let connections = (self.end_links().into_iter())
-            .map(|(host, command)| handover::Connection { host, command })
-            .collect();
+        let (connections, sharing) = links::Kept::handed_over(self.end_links());
         Ok(Handover {
             state: handover::State {
                 listener,
@@ -1323,10 +1341,19 @@ impl Daemon {
                 recovery_lock,
                 shells,
                 machine: Some(self.machine.id.0),
+                key: Some(self.signer.seed().0),
+                keys: (self.links.pinned().into_iter())
+                    .map(|(machine, pin)| handover::Known {
+                        machine: machine.0,
+                        key: pin.key,
+                        met: pin.met,
+                    })
+                    .collect(),
                 connections,
                 lent,
                 borrowers,
                 lenders,
+                sharing,
             },
             fds,
         })
@@ -2454,6 +2481,24 @@ impl Daemon {
                         protocol_version: client.wire,
                     }
                 }
+                // A client made for a stream reaching this daemon from
+                // another machine (see `Request::Reach`) may only greet it
+                // and carry QUIC: it's not one of this machine's own,
+                // whatever its socket.
+                Some(ref message)
+                    if client.carrier_only
+                        && !matches!(
+                            message,
+                            ClientMessage::Hello { .. }
+                                | ClientMessage::Request(Request::CarryQuic)
+                        ) =>
+                {
+                    client.finished = true;
+                    ServerMessage::Response(Response::Error(Error::Other(
+                        "a stream reaching this daemon from another machine only carries QUIC"
+                            .to_owned(),
+                    )))
+                }
                 Some(ClientMessage::Upgrade {
                     protocol_version,
                     executable,
@@ -2885,12 +2930,21 @@ impl Daemon {
             Request::RevokeDevice { device } => self.revoke_device(device),
             Request::AnswerPairing { code } => self.answer_pairing(token, code.as_deref()),
             Request::UnlockPairing => self.unlock_pairing(token),
-            Request::Connect { host, command } => self.serve_connect(token, &host, command),
+            Request::Connect {
+                host,
+                command,
+                share,
+            } => self.serve_connect(token, &host, command, share),
             Request::Disconnect { host } => self.serve_disconnect(token, &host),
             Request::WatchConnections { answer } => self.watch_connections(token, answer),
+            Request::Forget { host } => self.serve_forget(token, &host),
             Request::Forward(_) => Err(Error::Forward(clackatoo_protocol::ForwardFailure::Other(
                 "a forwarded connection asks on a QUIC stream of its own".into(),
             ))),
+            Request::Reach { .. } => Err(Error::Other(
+                "a daemon is reached on a QUIC stream of its own, beside the one it talks on"
+                    .into(),
+            )),
             request @ (Request::Install { .. } | Request::Decline { .. }) => {
                 self.respond_about_installs(token, request);
                 Ok(Response::Done)
@@ -3332,16 +3386,26 @@ impl Daemon {
             });
         }
         client.carrying = true;
+        let signer_as = client.carrier_as.unwrap_or(self.machine.id);
         let quic = self.quic.as_ref();
         let udp = self.udp.as_ref().and_then(|udp| udp.local_addr().ok());
+        let certificate = quic
+            .map(|quic| quic.certificate().to_vec())
+            .unwrap_or_default();
+        // Signed, so a client reaching it through another machine, which
+        // could put a certificate of its own in its place, can tell.
+        let signed = clackatoo_protocol::Signed {
+            machine: signer_as,
+            key: self.signer.key(),
+            signature: self.signer.sign(signer_as, &certificate),
+        };
         Ok(Response::Carrying {
-            certificate: quic
-                .map(|quic| quic.certificate().to_vec())
-                .unwrap_or_default(),
+            certificate,
             udp: udp.zip(quic).map(|(address, quic)| Udp {
                 port: address.port(),
                 probe_key: quic.probe_key(),
             }),
+            signed: Some(signed),
         })
     }
 

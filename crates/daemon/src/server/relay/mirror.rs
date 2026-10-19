@@ -236,6 +236,11 @@ pub(crate) struct Held {
     pub(crate) key: u64,
     /// The pane, by the number of the daemon whose workspaces hold it.
     pub(crate) remote: PaneId,
+    /// What the daemon whose workspaces hold it shows in it, by this
+    /// daemon's numbers: what it reaches through its own connection to
+    /// that machine, which this daemon shows when it can't reach it
+    /// straight, as one machine passing another on to this one does.
+    pub(crate) shown: Content,
 }
 
 /// What this daemon's clients follow of another daemon's, by this daemon's
@@ -564,6 +569,8 @@ impl Mirror {
                 kept.panes.insert(pane.id.0);
                 let id = PaneId(self.pane_numbers.local_or_fresh(pane.id.0, || fresh.pane()));
                 let content = self.renumber_shown(pane, shown, fresh, kept);
+                let held_elsewhere =
+                    pane.key.is_some() && pane.home.is_some_and(|home| home != shown.machine.id);
                 // A pane lent it from another machine, or this one, is on
                 // that machine: shown as one to come, which this daemon
                 // shows what it shows in place of, if it reaches it. Of
@@ -571,12 +578,13 @@ impl Mirror {
                 // machine the workspace is, as far as this daemon shows
                 // it: one from elsewhere is shown as one to come.
                 if let (Some(home), Some(key)) = (pane.home, pane.key)
-                    && home != shown.machine.id
+                    && held_elsewhere
                 {
                     let held = Held {
                         home,
                         key,
                         remote: pane.id,
+                        shown: self.renumber_theirs(pane.content, shown, fresh, kept),
                     };
                     self.held.insert(id, held);
                     self.held_keys.insert((home, key));
@@ -672,6 +680,33 @@ impl Mirror {
             content if shown.relays && pane.home.is_none() => {
                 self.renumber_content(content, fresh, kept)
             }
+            content => Content::Other {
+                kind: PaneKind::new(content.kind_name()),
+            },
+        }
+    }
+
+    /// `content`, what one of the other daemon's panes shows, as it shows
+    /// it, renumbered as `shown` says, noting the numbers it used in
+    /// `kept`: a pane of another machine's it shows through its own
+    /// connection there, in a layout of its own.
+    fn renumber_theirs(
+        &mut self,
+        content: Content,
+        shown: Shown<'_>,
+        fresh: &mut dyn Fresh,
+        kept: &mut Kept,
+    ) -> Content {
+        match content {
+            Content::Terminal(terminal) if !kept.terminals.contains(&terminal.0) => {
+                kept.terminals.insert(terminal.0);
+                let local = (self.terminal_numbers).local_or_fresh(terminal.0, || fresh.terminal());
+                Content::Terminal(TerminalId(local))
+            }
+            Content::Terminal(_) => Content::Other {
+                kind: PaneKind::new(content.kind_name()),
+            },
+            content if shown.relays => self.renumber_content(content, fresh, kept),
             content => Content::Other {
                 kind: PaneKind::new(content.kind_name()),
             },
@@ -1102,6 +1137,39 @@ mod tests {
             true,
         );
         assert!(mirror.held.is_empty() && mirror.held_keys.is_empty());
+    }
+
+    #[test]
+    fn a_third_machines_pane_is_kept_as_its_layouts_daemon_shows_it_too() {
+        let mut mirror = Mirror::default();
+        let mut fresh = Counters::default();
+        let server = MachineId([3; 16]);
+        // Desk shows server's terminal, which it borrowed, by its number.
+        let borrowed = Layout::Pane(Pane {
+            id: PaneId(2),
+            content: Content::Terminal(TerminalId(8)),
+            home: Some(server),
+            key: Some(78),
+        });
+        let remote = workspaces(vec![workspace(1, "main", borrowed, 2)]);
+        mirror.take(
+            &remote,
+            &machine(5),
+            HERE,
+            &mut fresh,
+            &following(&[]),
+            true,
+        );
+        let pane = mirror.workspaces[0].tabs[0].layout.panes()[0];
+        // To come, on server, by its number there.
+        assert_eq!((pane.home, pane.key), (Some(server), Some(78)));
+        assert!(matches!(pane.content, Content::Other { .. }));
+        // And as desk shows it, renumbered, for when this daemon can't
+        // reach server but through desk.
+        let Content::Terminal(local) = mirror.held[&pane.id].shown else {
+            panic!("{:?}", mirror.held[&pane.id]);
+        };
+        assert_eq!(mirror.terminal_numbers.remote(local.0), Some(8));
     }
 
     #[test]

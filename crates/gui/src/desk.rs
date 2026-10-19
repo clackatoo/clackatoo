@@ -425,8 +425,9 @@ pub(crate) struct Desk {
     /// until the bar has said how that went.
     connecting: Option<String>,
     /// The machines the config asked the daemon to connect to, with
-    /// `client.connect`, asked again on each new connection to it.
-    config_hosts: Vec<String>,
+    /// `client.connect`, and whether to pass each on, if it said, asked
+    /// again on each new connection to it.
+    config_hosts: Vec<(String, Option<bool>)>,
     /// What `:PortForward` asked for, waiting for the window to do it, as
     /// the window keeps the forwards (see [`crate::forwards`]).
     forwards_asked: Vec<crate::command::Forwarding>,
@@ -2519,7 +2520,7 @@ impl Desk {
             Command::Reload => return self.reload_lua(),
             Command::Set(words) => return self.run_set(&words),
             Command::Update(host) => return self.ask_update(host),
-            Command::Connect(host) => return self.ask_connect(host),
+            Command::Connect { host, share } => return self.ask_connect(host, share),
             Command::Disconnect(host) => return self.ask_disconnect(host),
             Command::PortForward(forwarding) => return self.port_forward(forwarding),
             Command::On { host, command } => return self.run_on(&host, *command),
@@ -2630,7 +2631,7 @@ impl Desk {
             Command::Reload
             | Command::Set(_)
             | Command::Update(_)
-            | Command::Connect(_)
+            | Command::Connect { .. }
             | Command::Disconnect(_)
             | Command::PortForward(_)
             | Command::On { .. }
@@ -2808,6 +2809,7 @@ mod tests {
             restored: Vec::new(),
             machine: None,
             others: Vec::new(),
+            passed: Vec::new(),
         }
     }
 
@@ -8271,7 +8273,8 @@ mod tests {
             answer_all(&mut desk),
             [Request::Connect {
                 host: "server".into(),
-                command: None
+                command: None,
+                share: None,
             }]
         );
         assert!(note(&desk).starts_with("connecting to ‘server’"));

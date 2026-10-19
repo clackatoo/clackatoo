@@ -68,6 +68,14 @@ option showhost=always
 
 `:connect` alone still opens a window on another machine.
 
+## Machines your machines are connected to
+
+Your daemon passes on the machines it's connected to. If your laptop is connected to desk, and desk to a server, the laptop's bar has the server's workspaces too, as `notes@server`: named after the machine they live on, never the way there. They work as any machine's do, editors, chats, the finder and `@server` panes included, through a connection of the laptop's own to the server that goes through desk. Nothing is shown twice. Desk could read or change what it carries, so your laptop checks the server is the server, by the key it knows it by: from when it last reached it with ssh, or, for a server it has never reached itself, the key desk vouches for the first time, kept from then on. A server whose clackatoo chose a new key, as when its `machine` file was deleted, is refused, saying so, until `clackatoo forget server`. The mouse over such a workspace says the way, as `on server, through desk`.
+
+A machine reached more than one way is shown once, by the shortest. `:connect server` on the laptop too has it go straight there, and through desk only while ssh can't get there, moving back once it can, all without its panes noticing. `:disconnect server` then leaves it reached through desk; one only desk passes on goes when desk stops passing it on, or with `:disconnect desk`. Machines connected in a loop, as a laptop and desk connected to each other, each show the others once, and never themselves.
+
+A server you share with others needn't be passed on: `:connect server --no-share` keeps it from the daemons connected to yours, and refuses them a way through; `:connect server --share` passes it on again. Your daemon keeps the setting with the connection. In your config, `client.connect("server", {share = false})` does the same.
+
 ## A pane on another machine, beside your own
 
 A new pane goes on the machine of the pane you make it from: `:Terminal`, a split, `:e`, `:Explore` or the finder in one of desk's panes is desk's, wherever its workspace is. `@host` after a kind of pane picks the machine instead: `:Terminal@desk` opens a terminal on desk in a new tab of the workspace you're in, `:|Terminal@desk` splits one in beside the pane you're in, and `:Editor@desk notes.md`, `:Explore@desk` and the rest work the same. `@local`, or this machine's own name, is your daemon's machine. Tab after the `@` offers the machines your daemon is connected to.

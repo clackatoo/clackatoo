@@ -13,6 +13,14 @@
 //! a queue growing (see [`Pace`]), so an upload never fills a slow link's
 //! queue ahead of keys. Nothing here costs anything while no port is
 //! forwarded.
+//!
+//! A carrier for another connection, which reaches a daemon through this
+//! one's (see [`Command::Carry`]), goes the same way, but on a socket
+//! handed over rather than taken from a forward's, unpaced, and beside
+//! the window's messages rather than below them, as what it carries is
+//! keys and views too. Its stream carries what its socket sends as it
+//! is, the request first, and the answer back with the rest: the
+//! carrier's owner asks and reads the answer itself.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
@@ -106,15 +114,17 @@ enum Socket {
     Connection(Box<Pipe>),
 }
 
-/// A connection a forward took, and the stream it goes on.
+/// A connection a forward took, or a carrier handed over, and the
+/// stream it goes on.
 #[derive(Debug)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "how far each way has got, two steps each"
 )]
 struct Pipe {
-    forward: u64,
-    socket: mio::net::TcpStream,
+    /// The forward that took it: `None` for a carrier.
+    forward: Option<u64>,
+    socket: PipeSocket,
     stream: Option<StreamId>,
     /// The daemon's answer, until it has all come.
     answer: Option<Vec<u8>>,
@@ -133,6 +143,59 @@ struct Pipe {
     /// QUIC has had everything sent on the stream acknowledged.
     acked: bool,
     queued: bool,
+}
+
+/// A pipe's socket: a connection a forward took, or a carrier's.
+#[derive(Debug)]
+enum PipeSocket {
+    Tcp(mio::net::TcpStream),
+    Unix(mio::net::UnixStream),
+}
+
+impl PipeSocket {
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        match self {
+            Self::Tcp(socket) => socket.shutdown(how),
+            Self::Unix(socket) => socket.shutdown(how),
+        }
+    }
+
+    fn take_error(&self) -> io::Result<Option<io::Error>> {
+        match self {
+            Self::Tcp(socket) => socket.take_error(),
+            Self::Unix(socket) => socket.take_error(),
+        }
+    }
+
+    /// Has closing the socket reset it, so its other end knows it was cut
+    /// short. A Unix socket has no reset: its other end sees it close.
+    fn reset_on_close(&self) {
+        if let Self::Tcp(socket) = self {
+            let _ = rustix::net::sockopt::set_socket_linger(socket, Some(Duration::ZERO));
+        }
+    }
+}
+
+impl Read for PipeSocket {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(socket) => socket.read(buf),
+            Self::Unix(socket) => socket.read(buf),
+        }
+    }
+}
+
+impl Write for PipeSocket {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(socket) => socket.write(buf),
+            Self::Unix(socket) => socket.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// What became of a connection, each time round.
@@ -286,7 +349,41 @@ impl Local {
                 }
             }
             Command::Stop { id } => self.stop(id, Some(connection)),
+            Command::Carry { socket } => self.carry(socket, registry),
         }
+    }
+
+    /// Takes `socket`, a carrier for another connection, to pass on as it
+    /// is: see [`Command::Carry`].
+    fn carry(&mut self, socket: std::os::unix::net::UnixStream, registry: &Registry) {
+        if let Err(err) = socket.set_nonblocking(true) {
+            log::warn!("couldn't take a carrier: {err}");
+            return;
+        }
+        let mut socket = mio::net::UnixStream::from_std(socket);
+        let entry = self.sockets.vacant_entry();
+        let key = entry.key();
+        let both = Interest::READABLE | Interest::WRITABLE;
+        if let Err(err) = registry.register(&mut socket, Token(FIRST + key), both) {
+            log::warn!("couldn't watch a carrier: {err}");
+            return;
+        }
+        entry.insert(Socket::Connection(Box::new(Pipe {
+            forward: None,
+            socket: PipeSocket::Unix(socket),
+            stream: None,
+            answer: None,
+            to_stream: Vec::new(),
+            to_socket: Vec::new(),
+            daemon_done: false,
+            socket_shut: false,
+            socket_done: false,
+            stream_done: false,
+            acked: false,
+            queued: false,
+        })));
+        self.unstreamed.push_back(key);
+        self.queue(key);
     }
 
     /// Stops forward `id`, closing its sockets and resetting its
@@ -299,7 +396,9 @@ impl Local {
             self.sockets.try_remove(key);
         }
         let pipes: Vec<usize> = (self.sockets.iter())
-            .filter(|(_, socket)| matches!(socket, Socket::Connection(pipe) if pipe.forward == id))
+            .filter(|(_, socket)| {
+                matches!(socket, Socket::Connection(pipe) if pipe.forward == Some(id))
+            })
             .map(|(key, _)| key)
             .collect();
         for key in pipes {
@@ -309,11 +408,19 @@ impl Local {
     }
 
     /// Resets every connection, as the connection to the daemon has been
-    /// lost, and lets go of every socket.
+    /// lost, and lets go of every socket: carriers' too, whose other ends
+    /// see them close.
     pub(super) fn end(&mut self) {
         let ids: Vec<u64> = self.forwards.keys().copied().collect();
         for id in ids {
             self.stop(id, None);
+        }
+        let carriers: Vec<usize> = (self.sockets.iter())
+            .filter(|(_, socket)| matches!(socket, Socket::Connection(_)))
+            .map(|(key, _)| key)
+            .collect();
+        for key in carriers {
+            self.abandon(key, None);
         }
         self.lingering.clear();
     }
@@ -431,8 +538,8 @@ impl Local {
                 continue;
             }
             entry.insert(Socket::Connection(Box::new(Pipe {
-                forward: id,
-                socket,
+                forward: Some(id),
+                socket: PipeSocket::Tcp(socket),
                 stream: None,
                 answer: Some(Vec::new()),
                 to_stream: ask,
@@ -462,33 +569,67 @@ impl Local {
         budget: usize,
         scratch: &mut [u8],
     ) -> usize {
+        // Counted only for a connection still waiting for its stream.
+        let unstreamed = matches!(
+            self.sockets.get(key),
+            Some(Socket::Connection(pipe)) if pipe.stream.is_none()
+        );
+        let forwarding = if unstreamed {
+            (self.streams.values())
+                .filter(|&&other| {
+                    matches!(
+                        self.sockets.get(other),
+                        Some(Socket::Connection(other)) if other.forward.is_some()
+                    )
+                })
+                .count()
+                + self.lingering.len()
+        } else {
+            0
+        };
         let Some(Socket::Connection(pipe)) = self.sockets.get_mut(key) else {
             return 0;
         };
         if pipe.stream.is_none() {
+            // Forwards leave the streams kept for carriers to them.
+            if pipe.forward.is_some()
+                && forwarding >= usize::try_from(super::MOST_FORWARDED).unwrap_or(usize::MAX)
+            {
+                return 0;
+            }
             let Some(stream) = connection.streams().open(Dir::Bi) else {
                 // Tried again when the daemon allows another.
                 return 0;
             };
-            let _ = connection
-                .send_stream(stream)
-                .set_priority(super::FORWARD_PRIORITY);
+            // A carrier's goes beside the window's messages, at the
+            // priority streams start at.
+            if pipe.forward.is_some() {
+                let _ = connection
+                    .send_stream(stream)
+                    .set_priority(super::FORWARD_PRIORITY);
+            }
             pipe.stream = Some(stream);
             self.streams.insert(stream, key);
             self.unstreamed.retain(|&waiting| waiting != key);
-            if self.pace.is_none() {
+            if self.pace.is_none() && pipe.forward.is_some() {
                 let now = Instant::now();
                 let opened = self.opened.unwrap_or(now);
                 self.pace = Some(Pace::new(now, connection.rtt(), opened, End::Window));
             }
         }
-        let (Some(port), Some(pace)) = (self.forwards.get(&pipe.forward), self.pace.as_mut())
-        else {
-            self.abandon(key, Some(connection));
-            return 0;
+        let (wire, pace) = match pipe.forward {
+            // A carrier's answer is its owner's to read, and it's unpaced.
+            None => (0, None),
+            Some(forward) => {
+                let (Some(port), Some(pace)) = (self.forwards.get(&forward), self.pace.as_mut())
+                else {
+                    self.abandon(key, Some(connection));
+                    return 0;
+                };
+                (port.wire, port.shared.paced().then_some(pace))
+            }
         };
-        let pace = port.shared.paced().then_some(pace);
-        match pipe.relay(connection, port.wire, budget, pace, scratch) {
+        match pipe.relay(connection, wire, budget, pace, scratch) {
             Next::Used(used) => {
                 if pipe.answer.is_none() {
                     self.worked(key);
@@ -518,7 +659,7 @@ impl Local {
             Next::Abandon(problem) => {
                 if let Some(problem) = problem
                     && let Some(Socket::Connection(pipe)) = self.sockets.get(key)
-                    && let Some(port) = self.forwards.get_mut(&pipe.forward)
+                    && let Some(port) = (pipe.forward).and_then(|id| self.forwards.get_mut(&id))
                     && !std::mem::replace(&mut port.told, true)
                 {
                     port.shared.report(Report {
@@ -536,7 +677,7 @@ impl Local {
     /// works: what goes wrong next is told again.
     fn worked(&mut self, key: usize) {
         if let Some(Socket::Connection(pipe)) = self.sockets.get(key)
-            && let Some(port) = self.forwards.get_mut(&pipe.forward)
+            && let Some(port) = (pipe.forward).and_then(|id| self.forwards.get_mut(&id))
         {
             port.told = false;
         }
@@ -546,7 +687,7 @@ impl Local {
     /// it's still open, resetting its socket, and forgets it.
     fn abandon(&mut self, key: usize, connection: Option<&mut Connection>) {
         if let Some(Socket::Connection(pipe)) = self.sockets.get(key) {
-            let _ = rustix::net::sockopt::set_socket_linger(&pipe.socket, Some(Duration::ZERO));
+            pipe.socket.reset_on_close();
             if let (Some(stream), Some(connection)) = (pipe.stream, connection) {
                 let _ = connection.send_stream(stream).reset(VarInt::from_u32(0));
                 let _ = connection.recv_stream(stream).stop(VarInt::from_u32(0));
@@ -572,10 +713,12 @@ impl Local {
         self.ready.retain(|&queued| queued != key);
         self.unstreamed.retain(|&waiting| waiting != key);
         self.parked.retain(|&parked| parked != key);
-        if let Some(port) = self.forwards.get_mut(&pipe.forward) {
+        if let Some(forward) = pipe.forward
+            && let Some(port) = self.forwards.get_mut(&forward)
+        {
             let was_full = port.open >= MOST_EACH;
             port.open = port.open.saturating_sub(1);
-            port.shared.set_connections(pipe.forward, port.open);
+            port.shared.set_connections(forward, port.open);
             if was_full {
                 let listeners = port.listeners.clone();
                 for listener in listeners {
@@ -604,8 +747,8 @@ impl Pipe {
         };
         // Stopped by the daemon, it never reads what's sent, however quiet
         // the browser is.
-        if !self.stream_done && matches!(connection.send_stream(stream).stopped(), Ok(Some(_))) {
-            return Next::Abandon(self.why_stopped(connection, stream, wire));
+        if let Some(next) = self.stopped(connection, stream, wire) {
+            return next;
         }
         // Reset after it finished its side, which nothing reads any more
         // to find out.
@@ -705,6 +848,28 @@ impl Pipe {
                 };
             }
         }
+    }
+
+    /// What becomes of it, if the daemon stopped `stream`: a forwarded
+    /// connection is abandoned, saying why if there's anything to say; a
+    /// carrier sends nothing more, and still passes on what came, as its
+    /// owner reads why from that.
+    fn stopped(
+        &mut self,
+        connection: &mut Connection,
+        stream: StreamId,
+        wire: u32,
+    ) -> Option<Next> {
+        if self.stream_done || !matches!(connection.send_stream(stream).stopped(), Ok(Some(_))) {
+            return None;
+        }
+        if self.forward.is_some() {
+            return Some(Next::Abandon(self.why_stopped(connection, stream, wire)));
+        }
+        self.to_stream.clear();
+        self.socket_done = true;
+        self.stream_done = true;
+        None
     }
 
     /// What to tell of the daemon having stopped `stream` before it was

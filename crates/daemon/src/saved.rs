@@ -87,6 +87,24 @@ pub(crate) struct State {
     /// gone a long while are given back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) borrowers: Vec<Borrower>,
+    /// The identity keys other machines are known by, as a build before
+    /// they had a file of their own kept them here (see `crate::known`):
+    /// read, to be known from then on, and never written.
+    #[serde(default, skip_serializing)]
+    pub(crate) keys: Vec<Known>,
+}
+
+/// The identity key of another machine, as the daemon knows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Known {
+    /// Its ID, as 32 hex digits.
+    pub(crate) machine: String,
+    /// Its key, as 64 hex digits.
+    pub(crate) key: String,
+    /// Met straight, with ssh, rather than vouched for by a machine
+    /// passing it on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) met: bool,
 }
 
 /// A machine whose daemon workspaces are lent to.
@@ -109,6 +127,16 @@ pub(crate) struct Connection {
     /// `clackatoo`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) command: Option<String>,
+    /// The daemon doesn't pass the machine on to the daemons connected to
+    /// it, as asked. Builds before passing machines on pass it over, and
+    /// write the file without it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) unshared: bool,
+    /// The machine it was last connected to, by its ID, as 32 hex digits:
+    /// so the daemon knows it before it's reached, and connects to it
+    /// once, if it's passed on too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) machine: Option<String>,
 }
 
 /// A workspace.
@@ -647,6 +675,7 @@ mod tests {
             active: Some(0),
             connections: Vec::new(),
             borrowers: Vec::new(),
+            keys: Vec::new(),
         }
     }
 
@@ -727,10 +756,14 @@ mod tests {
                 Connection {
                     host: "laptop".into(),
                     command: None,
+                    unshared: false,
+                    machine: None,
                 },
                 Connection {
                     host: "jack@server:2222".into(),
                     command: Some("~/.cargo/bin/clackatoo".into()),
+                    unshared: true,
+                    machine: Some("5e".repeat(16)),
                 },
             ],
             ..state()
@@ -739,6 +772,9 @@ mod tests {
         assert_eq!(State::decode(&encoded).unwrap(), kept);
         let text = String::from_utf8(encoded).unwrap();
         assert_eq!(text.matches("\"command\"").count(), 1, "{text}");
+        // Passed on and machine unknown, neither written.
+        assert_eq!(text.matches("\"unshared\"").count(), 1, "{text}");
+        assert_eq!(text.matches("\"machine\"").count(), 1, "{text}");
         // None, none written: a file an older build reads as it wrote it.
         assert!(
             !String::from_utf8(state().encode())

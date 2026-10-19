@@ -211,6 +211,15 @@ gates! {
     /// reaches that machine shows it; and what the machines a daemon isn't
     /// connected to are called, `Workspaces`' `others` (`OtherMachine`).
     MIXED = 94,
+    /// Machines passed on through the daemons connected to them: what a
+    /// daemon passes on, `Workspaces`' `passed` (`Passed`), with the key it
+    /// knows each by; a stream carrying a daemon's connection on to one of
+    /// them, `Request::Reach`; the QUIC certificate signed by the
+    /// machine's identity key, `Response::Carrying`'s `signed` (`Signed`);
+    /// forgetting a machine's key, `Request::Forget`; a connection not to
+    /// pass on, `Request::Connect`'s `share`; and how each connection goes,
+    /// `Connection`'s `through` and `unshared`.
+    CHAIN = 95,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

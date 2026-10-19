@@ -16,10 +16,17 @@
 //! survive its network changing: see [`carry`].
 //!
 //! SSH is what authenticates. The daemon takes new QUIC connections only
-//! from carriers, which only someone logged in over SSH can open, and the
-//! client accepts only the certificate the daemon gave it over SSH. Over
-//! UDP, the daemon only takes packets for connections already open, which
-//! only the keys agreed inside SSH can make.
+//! from carriers, which only someone logged in over SSH can open: through
+//! ssh, or, for a daemon reaching this one through another machine's (see
+//! [`Request::Reach`](clackatoo_protocol::Request::Reach)), a stream that
+//! machine's daemon opened on its own connection, which came through ssh.
+//! The client accepts only the certificate the daemon gave it on the
+//! carrier. Over ssh, that's proof enough; through another daemon, which
+//! could put a certificate of its own in its place, the client checks the
+//! certificate's signature by the identity key it knows the machine by
+//! (see `crate::machine` and the server's `links::ways`). Over UDP, the
+//! daemon only takes packets for connections already open, which only
+//! the keys agreed on the carrier can make.
 //!
 //! quinn-proto, a QUIC implementation with no networking of its own, is
 //! driven by the daemon's event loop ([`QuicServer`]) and, on the client,
@@ -39,7 +46,7 @@ use clackatoo_protocol::frame;
 use quinn_proto::congestion::BbrConfig;
 use quinn_proto::{TransportConfig, VarInt};
 
-pub(crate) use client::{Carried, carry};
+pub(crate) use client::{Carried, Offerer, carry};
 pub use client::{Contact, Redial, Redialed};
 pub(crate) use pace::{End, Pace};
 pub use path::Route;
@@ -206,6 +213,12 @@ const SEND_WINDOW: u64 = 8 * STREAM_WINDOW as u64;
 /// most [`STREAM_WINDOW`] at either end that the other hasn't read.
 pub(crate) const MOST_FORWARDED: u32 = 64;
 
+/// The streams kept for carriers of other connections (see
+/// [`forward::Command::Carry`](crate::forward::Command::Carry)), beside
+/// those for connections forwarded, so ports forwarded never leave a
+/// connection to another machine without a way through.
+pub(crate) const MOST_CARRIED: u32 = 8;
+
 /// What a forwarded connection's streams send with: less than
 /// everything else, which sends with 0, so a download through a forward
 /// only ever takes what's left after terminals' updates, answers and keys.
@@ -240,9 +253,9 @@ fn transport() -> TransportConfig {
         .mtu_discovery_config(None)
         // A stream for each terminal a client follows.
         .max_concurrent_uni_streams(VarInt::from_u32(1024))
-        // The one a client talks over, and one for each connection it
-        // forwards.
-        .max_concurrent_bidi_streams(VarInt::from_u32(1 + MOST_FORWARDED))
+        // The one a client talks over, one for each connection it
+        // forwards, and those kept for carriers.
+        .max_concurrent_bidi_streams(VarInt::from_u32(1 + MOST_FORWARDED + MOST_CARRIED))
         .stream_receive_window(VarInt::from_u32(STREAM_WINDOW))
         .send_window(SEND_WINDOW);
     transport

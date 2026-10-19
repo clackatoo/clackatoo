@@ -551,6 +551,16 @@ impl QuicServer {
             )
     }
 
+    /// Sends what goes on `stream`, a forwarded connection's, beside the
+    /// client's messages rather than below them, as it carries another
+    /// connection's keys and views (see
+    /// [`Request::Reach`](clackatoo_protocol::Request::Reach)).
+    pub(crate) fn raise_forwarded(&mut self, handle: ConnectionHandle, stream: StreamId) {
+        if let Some(remote) = self.connections.get_mut(&handle) {
+            let _ = remote.connection.send_stream(stream).set_priority(0);
+        }
+    }
+
     /// Tells the client to send no more on `stream`, a forwarded
     /// connection's, which the daemon has given up on.
     pub(crate) fn stop_reading(&mut self, handle: ConnectionHandle, stream: StreamId) {

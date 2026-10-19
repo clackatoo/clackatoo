@@ -1118,6 +1118,7 @@ mod tests {
             active: None,
             machine: None,
             others: Vec::new(),
+            passed: Vec::new(),
         };
         state.chats = vec![
             summary(1, Some(1), false, 5 * 60_000),
@@ -1435,6 +1436,7 @@ mod tests {
             active: None,
             machine: None,
             others: Vec::new(),
+            passed: Vec::new(),
         };
         state.terminals = vec![TerminalInfo {
             id: TerminalId(2),

@@ -33,15 +33,22 @@ const PATIENCE: Duration = Duration::from_secs(20);
 
 /// The stand-in for ssh: `$0`'s directory holds `hosts/HOST`, the
 /// runtime directory of each daemon it reaches, and `password`, if it's
-/// to ask for one. It writes its process's ID to `ssh.pid`, which, once
-/// it has logged in, is the bridge's, and its askpass's to
-/// `askpass.pid`.
+/// to ask for one, unless told `BatchMode=yes`, when it fails instead. It
+/// writes its process's ID to `ssh.pid`, and to `ssh.HOST.pid`, which,
+/// once it has logged in, is the bridge's, and its askpass's to
+/// `askpass.pid`. A file `down/HOST` has it fail to reach HOST, as when
+/// the network to it has gone.
 const FAKE_SSH: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 echo $$ > "$dir/ssh.pid"
-while [ "$1" != "--" ]; do shift; done; shift
+batch=
+while [ "$1" != "--" ]; do [ "$1" = BatchMode=yes ] && batch=1; shift; done; shift
 host=$1; shift
+echo $$ > "$dir/ssh.$host.pid"
 [ -d "$dir/hosts/$host" ] || { echo "ssh: Could not resolve hostname $host" >&2; exit 255; }
+[ -e "$dir/down/$host" ] && { echo "ssh: connect to host $host port 22: No route to host" >&2; exit 255; }
+# BatchMode asks nothing: a password wanted is a failure.
+[ -f "$dir/password" ] && [ -n "$batch" ] && { echo "Permission denied (password)." >&2; exit 255; }
 if [ -f "$dir/password" ]; then
     "$SSH_ASKPASS" "$host's password: " > "$dir/answer.$$" &
     echo $! > "$dir/askpass.pid"
@@ -64,7 +71,19 @@ impl World {
         let dir = tempfile::tempdir().expect("temp dir");
         write_program(&dir.path().join("ssh"), FAKE_SSH.as_bytes());
         std::fs::create_dir(dir.path().join("hosts")).unwrap();
+        std::fs::create_dir(dir.path().join("down")).unwrap();
         Self { dir }
+    }
+
+    /// Has the stand-in for ssh fail to reach `host` while `down`, as when
+    /// the network to it has gone, from its next try on.
+    fn down(&self, host: &str, down: bool) {
+        let file = self.path().join("down").join(host);
+        if down {
+            std::fs::write(file, "").unwrap();
+        } else {
+            drop(std::fs::remove_file(file));
+        }
     }
 
     fn path(&self) -> &Path {
@@ -161,6 +180,9 @@ impl World {
             links: Some(LinkConfig {
                 ssh: self.path().join("ssh").into(),
                 askpass: Some(example("daemon")),
+                better_every: clackatoo_daemon::DEFAULT_BETTER_EVERY,
+                speaks: None,
+                impostor: false,
             }),
         };
         configure(&mut config);
@@ -3819,4 +3841,970 @@ fn a_third_machine_reaching_both_shows_a_pane_of_one_in_the_others_layout_from_i
         (shown.find_pane(pane))
             .is_some_and(|(_, _, pane)| matches!(pane.content, Content::Buffer(b) if b != buffer))
     });
+}
+
+// --- Machines passed on ---------------------------------------------------
+
+/// Laptop, connected to desk, connected to server, which has a workspace
+/// `srv` with a shell in it: `window`, a client of laptop's, is shown it
+/// through a connection of laptop's own to server, which goes through
+/// desk. Laptop's daemon is configured by what it's started `with`.
+struct Chain {
+    world: World,
+    server: TestDaemon,
+    desk: TestDaemon,
+    laptop: TestDaemon,
+    window: Client,
+    srv: Workspace,
+}
+
+impl Chain {
+    fn new() -> Self {
+        Self::with(|_| {})
+    }
+
+    fn with(configure: impl FnOnce(&mut DaemonConfig)) -> Self {
+        let world = World::new();
+        let server = world.start("server");
+        server
+            .client()
+            .new_workspace(Some("srv".into()), shell())
+            .unwrap();
+        let desk = world.start("desk");
+        let mut at_desk = desk.client();
+        connect(&mut at_desk, "server");
+        wait_for_workspaces(&mut at_desk, |shown| theirs(shown, "srv").is_some());
+        let laptop = world.start_configured("laptop", false, configure);
+        let mut window = laptop.client();
+        window.watch_connections(false).unwrap();
+        connect(&mut window, "desk");
+        let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "srv").is_some());
+        let srv = theirs(&shown, "srv").unwrap().clone();
+        Self {
+            world,
+            server,
+            desk,
+            laptop,
+            window,
+            srv,
+        }
+    }
+}
+
+/// Laptop's daemon tries a better way for a connection every 200 ms, so a
+/// test needn't wait 30 s for one.
+fn quick_to_better(config: &mut DaemonConfig) {
+    if let Some(links) = &mut config.links {
+        links.better_every = Duration::from_millis(200);
+    }
+}
+
+/// The connection to `host` `client` is told of, once it's connected and
+/// goes `through` those machines.
+fn going(client: &mut Client, host: &str, through: &[&str]) -> Connection {
+    let deadline = Instant::now() + PATIENCE;
+    let mut list = client.watch_connections(false).unwrap();
+    loop {
+        if let Some(connection) = list.iter().find(|link| link.host == host)
+            && connected(&connection.state)
+            && connection.through == through
+        {
+            return connection.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{host} never went through {through:?}: {list:?}"
+        );
+        match client.next_event().expect("an event") {
+            Event::Connections(now) => list = now,
+            Event::View { terminal, .. } => client.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    }
+}
+
+/// Types `typed` into `terminal`, which `client` follows, and waits for it
+/// to show `text`.
+fn typed_shows(client: &mut Client, terminal: TerminalId, typed: &str, text: &str) {
+    client.send_input(terminal, typed.as_bytes()).unwrap();
+    wait_for_view(client, terminal, text);
+}
+
+#[test]
+fn a_machine_connected_to_a_machine_connected_to_this_one_is_shown_as_its_own() {
+    let mut chain = Chain::new();
+    let server = chain.server.machine();
+    // Server's, by its own name, never as desk's, and once.
+    assert_eq!(chain.srv.home, Some(server.id));
+    let shown = chain.window.watch_workspaces().unwrap();
+    let named: Vec<(&str, Option<MachineId>)> = (shown.list.iter())
+        .map(|workspace| (workspace.name.as_str(), workspace.home))
+        .collect();
+    assert_eq!(
+        named,
+        [("srv", Some(server.id))],
+        "desk has none of its own"
+    );
+    let link = going(&mut chain.window, "server", &["desk"]);
+    assert_eq!(link.machine.map(|machine| machine.id), Some(server.id));
+    assert!(!link.unshared);
+    // Never kept: it's there while desk passes server on.
+    let kept = chain.laptop.client().watch_connections(false).unwrap();
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    // Its terminal runs there, through desk.
+    let terminal = first_terminal(&chain.srv);
+    attach_to(&mut chain.window, terminal);
+    typed_shows(
+        &mut chain.window,
+        terminal,
+        "echo chained-$(basename $PWD)\r",
+        "chained-server",
+    );
+    // Desk's windows aren't told what it passes on; a daemon is, as one it
+    // reaches straight, with the key desk knows it by.
+    assert!(
+        chain
+            .desk
+            .client()
+            .watch_workspaces()
+            .unwrap()
+            .passed
+            .is_empty()
+    );
+    let mut daemon = remote_client(&chain.world, "desk");
+    relay_as(&mut daemon, MachineId([0xd1; 16]));
+    let passed = loop {
+        if let Event::Workspaces(shown) = daemon.next_event().unwrap()
+            && !shown.passed.is_empty()
+        {
+            break shown.passed;
+        }
+    };
+    assert_eq!(passed.len(), 1);
+    let one = &passed[0];
+    assert_eq!(
+        (one.id, one.name.as_str(), one.run, one.reached),
+        (server.id, "server", server.run, true)
+    );
+    assert!(one.through.is_empty() && one.key.is_some());
+}
+
+/// A client of the daemon on `host`, over ssh and QUIC, as a daemon
+/// connected to it is.
+fn remote_client(world: &World, host: &str) -> Client {
+    let mut ssh = Command::new(world.path().join("ssh"));
+    ssh.args(["--", host])
+        .arg(format!("{} bridge", example("daemon").display()));
+    let mut client = clackatoo_daemon::remote::through(ssh, host).expect("reached");
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    client
+}
+
+/// Has `client` say it's a daemon relaying, on `machine`, watching the
+/// workspaces first, as one does.
+fn relay_as(client: &mut Client, machine: MachineId) {
+    client.watch_workspaces().unwrap();
+    let relay = Request::RelayAs {
+        machine: clackatoo_protocol::Machine {
+            id: machine,
+            name: "probe".into(),
+            run: 1,
+        },
+    };
+    assert_eq!(client.request(&relay).unwrap(), Response::Done);
+}
+
+/// Waits for the connection to `host`, as `client` is told of it, to be
+/// stopped, and returns why.
+fn stopped_for(client: &mut Client, host: &str) -> String {
+    let connection = wait_for_state(client, host, stopped);
+    reason(&connection.state).to_owned()
+}
+
+#[test]
+fn a_daemon_in_the_way_answering_for_a_machine_met_straight_is_refused() {
+    let world = World::new();
+    let server = world.start("server");
+    server
+        .client()
+        .new_workspace(Some("srv".into()), shell())
+        .unwrap();
+    // Desk answers streams reaching server itself, in its place.
+    let desk = world.start_configured("desk", false, |config| {
+        if let Some(links) = &mut config.links {
+            links.impostor = true;
+        }
+    });
+    connect(&mut desk.client(), "server");
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    // Met straight first, so its key is known.
+    connect(&mut window, "server");
+    going(&mut window, "server", &[]);
+    connect(&mut window, "desk");
+    going(&mut window, "desk", &[]);
+    // Then only desk's way is left: desk signs as server with its own
+    // key, which isn't the one server is known by. That way is ruled
+    // out, loudly; ssh straight there is still tried.
+    window.watch_workspaces().unwrap();
+    world.down("server", true);
+    kill(&pid(&world, "ssh.server.pid"));
+    let said = next_said(&mut window);
+    assert!(said.contains("another identity key"), "{said}");
+    let connection = wait_for_state(
+        &mut window,
+        "server",
+        |state| matches!(state, ConnectionState::Down { reason } if reason.contains("another identity key")),
+    );
+    assert!(connection.through.is_empty(), "{connection:?}");
+    world.down("server", false);
+    going(&mut window, "server", &[]);
+}
+
+/// The next thing `client` is told to say in the bar.
+fn next_said(client: &mut Client) -> String {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "nothing was said");
+        match client.next_event().expect("an event") {
+            Event::Said(said) => return said,
+            Event::View { terminal, .. } => client.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn a_machines_key_is_kept_apart_from_the_workspaces() {
+    let world = World::new();
+    let server = world.start("server");
+    // Laptop keeps no workspaces, nor connections.
+    let without = |config: &mut DaemonConfig| config.workspaces = None;
+    let laptop = world.start_configured("laptop", false, without);
+    let mut window = laptop.client();
+    connect(&mut window, "server");
+    going(&mut window, "server", &[]);
+    drop(window);
+    drop(laptop);
+    assert!(world.host("laptop").join("known_machines").exists());
+    // Server chooses a new key; laptop, started again, still knows the old.
+    drop(server);
+    let file = world.host("server").join("machine");
+    let kept = std::fs::read_to_string(&file).unwrap();
+    let key = kept.split("\"key\":\"").nth(1).unwrap()[..64].to_owned();
+    std::fs::write(&file, kept.replace(&key, &"6b".repeat(32))).unwrap();
+    let server = world.start("server");
+    let laptop = world.start_configured("laptop", false, without);
+    let mut window = laptop.client();
+    connect(&mut window, "server");
+    let why = stopped_for(&mut window, "server");
+    assert!(why.contains("another identity key"), "{why}");
+    drop(server);
+}
+
+#[test]
+fn a_machine_passed_on_by_a_daemon_in_the_way_is_never_shown() {
+    let world = World::new();
+    let server = world.start("server");
+    server
+        .client()
+        .new_workspace(Some("srv".into()), shell())
+        .unwrap();
+    let desk = world.start_configured("desk", false, |config| {
+        if let Some(links) = &mut config.links {
+            links.impostor = true;
+        }
+    });
+    let mut at_desk = desk.client();
+    connect(&mut at_desk, "server");
+    wait_for_workspaces(&mut at_desk, |shown| theirs(shown, "srv").is_some());
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    window.watch_workspaces().unwrap();
+    connect(&mut window, "desk");
+    // What desk vouched for isn't what signed: that way is refused,
+    // loudly, and it's the only one.
+    let said = next_said(&mut window);
+    assert!(said.contains("vouched for"), "{said}");
+    wait_for_state(
+        &mut window,
+        "server",
+        |state| matches!(state, ConnectionState::Down { reason } if reason.contains("vouched for")),
+    );
+    let shown = window.watch_workspaces().unwrap();
+    assert!(theirs(&shown, "srv").is_none(), "{shown:?}");
+}
+
+#[test]
+fn a_machines_key_is_kept_through_restarts_and_a_new_one_taken_once_forgotten() {
+    let world = World::new();
+    let server = world.start("server");
+    server
+        .client()
+        .new_workspace(Some("srv".into()), shell())
+        .unwrap();
+    let laptop = world.start_with("laptop", true);
+    let mut window = laptop.client();
+    connect(&mut window, "server");
+    going(&mut window, "server", &[]);
+    // Laptop restarts, keeping the key it knows server by.
+    drop(window);
+    drop(laptop);
+    let laptop = world.start_with("laptop", true);
+    let mut window = laptop.client();
+    window.watch_connections(false).unwrap();
+    going(&mut window, "server", &[]);
+    // Server's daemon chooses a new key, its ID kept.
+    drop(server);
+    let file = world.host("server").join("machine");
+    let kept = std::fs::read_to_string(&file).unwrap();
+    let key = kept.split("\"key\":\"").nth(1).unwrap()[..64].to_owned();
+    std::fs::write(&file, kept.replace(&key, &"5a".repeat(32))).unwrap();
+    let server = world.start("server");
+    let why = stopped_for(&mut window, "server");
+    assert!(why.contains("another identity key"), "{why}");
+    assert!(why.contains("clackatoo forget server"), "{why}");
+    let forget = Request::Forget {
+        host: "server".into(),
+    };
+    // A daemon relaying can't forget it.
+    let mut relaying = remote_client(&world, "laptop");
+    relay_as(&mut relaying, MachineId([0x77; 16]));
+    let refused = relaying.request(&forget);
+    assert!(
+        matches!(
+            refused,
+            Err(ClientError::Daemon(_)) | Ok(Response::Error(_))
+        ),
+        "{refused:?}"
+    );
+    drop(relaying);
+    // Forgotten, the new one is taken, and kept.
+    let Response::Text(said) = window.request(&forget).unwrap() else {
+        panic!("not forgotten");
+    };
+    assert!(said.contains("forgot"), "{said}");
+    going(&mut window, "server", &[]);
+    drop(server);
+}
+
+#[test]
+fn keys_kept_with_the_workspaces_by_an_older_build_are_known_still() {
+    let world = World::new();
+    let server = world.start("server");
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    connect(&mut window, "server");
+    going(&mut window, "server", &[]);
+    drop(window);
+    drop(laptop);
+    // As an older build kept it: the key with the workspaces, and no file
+    // of its own.
+    let known = world.host("laptop").join("known_machines");
+    let kept: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&known).unwrap()).unwrap();
+    std::fs::remove_file(&known).unwrap();
+    let saved = world.host("laptop").join("workspaces");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+    assert!(state.get("keys").is_none(), "{state}");
+    state["keys"] = kept["machines"].clone();
+    std::fs::write(&saved, state.to_string()).unwrap();
+    // Server chooses a new key; laptop, started again, knows the old.
+    drop(server);
+    let file = world.host("server").join("machine");
+    let machine = std::fs::read_to_string(&file).unwrap();
+    let key = machine.split("\"key\":\"").nth(1).unwrap()[..64].to_owned();
+    std::fs::write(&file, machine.replace(&key, &"6c".repeat(32))).unwrap();
+    let server = world.start("server");
+    let laptop = world.start_with("laptop", true);
+    let mut window = laptop.client();
+    window.watch_connections(false).unwrap();
+    let why = stopped_for(&mut window, "server");
+    assert!(why.contains("another identity key"), "{why}");
+    drop(window);
+    drop(laptop);
+    // Known from then on in a file of its own, and not with the workspaces.
+    assert!(known.exists());
+    let state = std::fs::read_to_string(&saved).unwrap();
+    assert!(!state.contains("\"keys\""), "{state}");
+    drop(server);
+}
+
+#[test]
+fn a_chain_through_a_daemon_of_protocol_94_passes_nothing_on() {
+    let world = World::new();
+    let server = world.start("server");
+    server
+        .client()
+        .new_workspace(Some("srv".into()), shell())
+        .unwrap();
+    // Desk talks at 94 to server; and laptop to desk, as to a desk of 94.
+    let at_94 = |config: &mut DaemonConfig| {
+        if let Some(links) = &mut config.links {
+            links.speaks = Some(94);
+        }
+    };
+    let desk = world.start_configured("desk", false, at_94);
+    let mut at_desk = desk.client();
+    connect(&mut at_desk, "server");
+    wait_for_workspaces(&mut at_desk, |shown| theirs(shown, "srv").is_some());
+    let laptop = world.start_configured("laptop", false, at_94);
+    let mut window = laptop.client();
+    connect(&mut window, "desk");
+    let link = going(&mut window, "desk", &[]);
+    assert!(matches!(
+        link.state,
+        ConnectionState::Connected { wire: 94 }
+    ));
+    std::thread::sleep(Duration::from_secs(1));
+    // Desk's own still work; server isn't passed on.
+    let shown = window.watch_workspaces().unwrap();
+    assert!(theirs(&shown, "srv").is_none(), "{shown:?}");
+    assert_eq!(window.watch_connections(false).unwrap().len(), 1);
+}
+
+#[test]
+fn a_better_way_tried_never_asks_for_a_password() {
+    let mut chain = Chain::with(quick_to_better);
+    // Server wants a password from now on, which only a question gets.
+    chain.world.password(Some("hunter2"));
+    let mut answering = chain.laptop.client();
+    answering.watch_connections(true).unwrap();
+    connect(&mut chain.window, "server");
+    // Tried straight again and again, it never asks, and stays through
+    // desk.
+    asked_nothing(&mut answering);
+    going(&mut chain.window, "server", &["desk"]);
+}
+
+#[test]
+fn only_a_daemon_reaches_a_machine_through_another_and_never_round_a_loop() {
+    let chain = Chain::new();
+    let server = chain.server.machine().id;
+    // A window, which said no machine.
+    let window = remote_client(&chain.world, "desk");
+    let refused = window.reach(server).unwrap_err();
+    assert!(refused.to_string().contains("only a daemon"), "{refused}");
+    // A daemon saying it's server itself: back round a loop.
+    let mut looping = remote_client(&chain.world, "desk");
+    relay_as(&mut looping, server);
+    let refused = looping.reach(server).unwrap_err();
+    assert!(refused.to_string().contains("round a loop"), "{refused}");
+    // A machine desk isn't connected to.
+    let mut daemon = remote_client(&chain.world, "desk");
+    relay_as(&mut daemon, MachineId([0xd2; 16]));
+    let refused = daemon.reach(MachineId([0xee; 16])).unwrap_err();
+    assert!(refused.to_string().contains("isn't connected"), "{refused}");
+    // Server, through desk: a stream to greet server over.
+    daemon.reach(server).unwrap();
+}
+
+#[test]
+fn a_machine_not_passed_on_refuses_streams_and_cuts_those_open() {
+    use std::io::Read as _;
+
+    let chain = Chain::new();
+    let server = chain.server.machine().id;
+    let mut daemon = remote_client(&chain.world, "desk");
+    relay_as(&mut daemon, MachineId([0xd3; 16]));
+    let mut open = daemon.reach(server).unwrap();
+    let share = |share| Request::Connect {
+        host: "server".into(),
+        command: Some(example("daemon").display().to_string()),
+        share: Some(share),
+    };
+    assert_eq!(
+        chain.desk.client().request(&share(false)).unwrap(),
+        Response::Done
+    );
+    // Refused from now on.
+    let refused = daemon.reach(server).unwrap_err();
+    assert!(
+        refused.to_string().contains("asked not to pass"),
+        "{refused}"
+    );
+    // And the one open is cut.
+    open.set_read_timeout(Some(PATIENCE)).unwrap();
+    let mut buffer = [0; 64];
+    match open.read(&mut buffer) {
+        Ok(0) => {}
+        Err(err) => assert_ne!(err.kind(), std::io::ErrorKind::WouldBlock, "never cut"),
+        Ok(read) => panic!("{read} bytes came on a stream never greeted"),
+    }
+}
+
+/// Opens `path` in an editor beside the first pane of `workspace`, from
+/// `client`: the pane, and its buffer, once it shows one.
+fn open_beside(client: &mut Client, workspace: &Workspace, path: &Path) -> (PaneId, BufferId) {
+    let first = workspace.tabs[0].layout.panes()[0].id;
+    let editor = PaneTerminal::File(OpenFile {
+        path: path.display().to_string(),
+        cwd: None,
+    });
+    let pane = client.split_pane(first, Side::Right, editor).unwrap();
+    let shown = wait_for_workspaces(client, |shown| {
+        (shown.find_pane(pane)).is_some_and(|(_, _, pane)| pane.content.buffer().is_some())
+    });
+    let (_, _, found) = shown.find_pane(pane).unwrap();
+    (pane, found.content.buffer().unwrap())
+}
+
+#[test]
+fn a_file_on_a_machine_passed_on_is_edited_there_and_its_finder_greps_there() {
+    let mut chain = Chain::new();
+    let home = chain.world.host("server");
+    let file = home.join("notes.txt");
+    std::fs::write(&file, "notes\n").unwrap();
+    let srv = chain.srv.clone();
+    let (pane, buffer) = open_beside(&mut chain.window, &srv, &file);
+    let base = attach_to_buffer(&mut chain.window, buffer, 1).version;
+    chain
+        .window
+        .edit(buffer, 1, insert(6, 0, "my ", base))
+        .unwrap();
+    assert!(matches!(
+        next_change(&mut chain.window, buffer),
+        BufferUpdate::Acked { seq: 1, .. }
+    ));
+    // Server made it, and keeps it.
+    let mut there = chain.server.client();
+    let shown = there.watch_workspaces().unwrap();
+    let theirs = (shown.list.iter())
+        .flat_map(|workspace| &workspace.tabs)
+        .flat_map(|tab| tab.layout.panes())
+        .find_map(|pane| pane.content.buffer())
+        .unwrap();
+    assert_eq!(attach_to_buffer(&mut there, theirs, 7).text, "my notes\n");
+    // The finder greps server's files, from its pane.
+    std::fs::write(home.join("todo.md"), "frobnicate the chain\n").unwrap();
+    std::fs::write(
+        chain.world.host("laptop").join("todo.md"),
+        "frobnicate here\n",
+    )
+    .unwrap();
+    let grep = Search::Grep {
+        pattern: "frobnicate".into(),
+        exact: true,
+    };
+    chain.window.find(3, Some(pane), grep).unwrap();
+    let mut lines = Vec::new();
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "the search never ended");
+        match chain.window.next_event().unwrap() {
+            Event::Found {
+                id: 3,
+                found: Found::Lines(found),
+            } => lines.extend(found),
+            Event::Found {
+                id: 3,
+                found: Found::Done(done),
+            } => {
+                assert_eq!(done, Done::All);
+                break;
+            }
+            Event::View { terminal, .. } => chain.window.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    }
+    let texts: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
+    assert_eq!(texts, ["frobnicate the chain"]);
+}
+
+#[test]
+fn reached_straight_too_a_machine_goes_straight_falls_back_through_another_and_comes_back() {
+    let mut chain = Chain::with(quick_to_better);
+    let terminal = first_terminal(&chain.srv);
+    attach_to(&mut chain.window, terminal);
+    going(&mut chain.window, "server", &["desk"]);
+    // Asked for here by the name desk gives it, the same connection goes
+    // straight there, without ending: the same terminal, no new snapshot.
+    connect(&mut chain.window, "server");
+    going(&mut chain.window, "server", &[]);
+    typed_shows(
+        &mut chain.window,
+        terminal,
+        "echo straight-$((6 * 7))\r",
+        "straight-42",
+    );
+    let shown = chain.window.watch_workspaces().unwrap();
+    assert_eq!(theirs(&shown, "srv").map(|srv| srv.id), Some(chain.srv.id));
+    // The network to server goes: through desk at once, still the same.
+    chain.world.down("server", true);
+    kill(&pid(&chain.world, "ssh.server.pid"));
+    going(&mut chain.window, "server", &["desk"]);
+    typed_shows(
+        &mut chain.window,
+        terminal,
+        "echo fallen-$((7 * 7))\r",
+        "fallen-49",
+    );
+    // Back, it goes straight there again.
+    chain.world.down("server", false);
+    going(&mut chain.window, "server", &[]);
+    typed_shows(
+        &mut chain.window,
+        terminal,
+        "echo back-$((8 * 8))\r",
+        "back-64",
+    );
+    let shown = chain.window.watch_workspaces().unwrap();
+    let srvs = (shown.list.iter()).filter(|workspace| workspace.name == "srv");
+    assert_eq!(srvs.count(), 1, "shown once");
+}
+
+#[test]
+fn a_machine_asked_for_by_another_name_takes_over_what_it_showed_through_another() {
+    let mut chain = Chain::new();
+    // Another name for server, which ssh reaches the same.
+    std::os::unix::fs::symlink(
+        chain.world.host("server"),
+        chain.world.path().join("hosts").join("srv.lan"),
+    )
+    .unwrap();
+    let terminal = first_terminal(&chain.srv);
+    attach_to(&mut chain.window, terminal);
+    connect(&mut chain.window, "srv.lan");
+    going(&mut chain.window, "srv.lan", &[]);
+    // The same numbers, as though it had dropped and come back.
+    let shown = wait_for_workspaces(&mut chain.window, |shown| {
+        theirs(shown, "srv").is_some()
+            && !(shown.list.iter())
+                .any(|workspace| workspace.name == "srv" && workspace.id != chain.srv.id)
+    });
+    assert_eq!(theirs(&shown, "srv").map(|srv| srv.id), Some(chain.srv.id));
+    let list = chain.window.watch_connections(false).unwrap();
+    let hosts: Vec<&str> = list.iter().map(|link| link.host.as_str()).collect();
+    assert_eq!(hosts, ["desk", "srv.lan"], "server's through desk has gone");
+    attach_to(&mut chain.window, terminal);
+    typed_shows(
+        &mut chain.window,
+        terminal,
+        "echo taken-$((3 * 5))\r",
+        "taken-15",
+    );
+}
+
+#[test]
+fn machines_in_a_ring_each_show_the_others_once_and_never_themselves() {
+    let world = World::new();
+    let names = ["laptop", "desk", "server"];
+    let daemons: Vec<TestDaemon> = names.iter().map(|name| world.start(name)).collect();
+    let ids: Vec<MachineId> = daemons.iter().map(|daemon| daemon.machine().id).collect();
+    for (daemon, name) in daemons.iter().zip(names) {
+        daemon
+            .client()
+            .new_workspace(Some(format!("{name}-work")), shell())
+            .unwrap();
+    }
+    // laptop → desk → server → laptop.
+    for (at, next) in [(0, "desk"), (1, "server"), (2, "laptop")] {
+        connect(&mut daemons[at].client(), next);
+    }
+    for (at, daemon) in daemons.iter().enumerate() {
+        let mut client = daemon.client();
+        let whole = |shown: &Workspaces| shown.list.len() == 3;
+        wait_for_workspaces(&mut client, whole);
+        // A while later, still each once.
+        std::thread::sleep(Duration::from_millis(1500));
+        let shown = client.watch_workspaces().unwrap();
+        let mut each: Vec<(String, Option<MachineId>)> = (shown.list.iter())
+            .map(|workspace| (workspace.name.clone(), workspace.home))
+            .collect();
+        each.sort();
+        let mut wanted: Vec<(String, Option<MachineId>)> = (0..3)
+            .map(|other| {
+                let home = (other != at).then_some(ids[other]);
+                (format!("{}-work", names[other]), home)
+            })
+            .collect();
+        wanted.sort();
+        assert_eq!(each, wanted, "at {}", names[at]);
+        // The next straight there, the one after through it.
+        let next = names[(at + 1) % 3];
+        let after = names[(at + 2) % 3];
+        going(&mut client, next, &[]);
+        going(&mut client, after, &[next]);
+        let list = client.watch_connections(false).unwrap();
+        assert_eq!(list.len(), 2, "at {}: {list:?}", names[at]);
+    }
+}
+
+#[test]
+fn a_machine_two_machines_pass_on_is_shown_once_and_goes_through_either() {
+    let mut chain = Chain::new();
+    // Nas reaches server too, and passes it on.
+    let nas = chain.world.start("nas");
+    let mut at_nas = nas.client();
+    connect(&mut at_nas, "server");
+    wait_for_workspaces(&mut at_nas, |shown| theirs(shown, "srv").is_some());
+    connect(&mut chain.window, "nas");
+    going(&mut chain.window, "nas", &[]);
+    let terminal = first_terminal(&chain.srv);
+    attach_to(&mut chain.window, terminal);
+    std::thread::sleep(Duration::from_secs(1));
+    let shown = chain.window.watch_workspaces().unwrap();
+    let srvs = (shown.list.iter()).filter(|workspace| workspace.name == "srv");
+    assert_eq!(srvs.count(), 1, "shown once");
+    let list = chain.window.watch_connections(false).unwrap();
+    let hosts: Vec<&str> = list.iter().map(|link| link.host.as_str()).collect();
+    assert_eq!(hosts, ["desk", "server", "nas"]);
+    going(&mut chain.window, "server", &["desk"]);
+    // Desk's way goes: through nas, the same connection.
+    chain.desk.client().disconnect("server").unwrap();
+    going(&mut chain.window, "server", &["nas"]);
+    typed_shows(
+        &mut chain.window,
+        terminal,
+        "echo through-nas-$((4 * 4))\r",
+        "through-nas-16",
+    );
+}
+
+#[test]
+fn daemons_connected_both_ways_pass_nothing_back() {
+    let world = World::new();
+    let desk = world.start("desk");
+    let laptop = world.start("laptop");
+    let mut at_desk = desk.client();
+    let mut at_laptop = laptop.client();
+    connect(&mut at_desk, "laptop");
+    connect(&mut at_laptop, "desk");
+    going(&mut at_desk, "laptop", &[]);
+    going(&mut at_laptop, "desk", &[]);
+    std::thread::sleep(Duration::from_secs(1));
+    for client in [&mut at_desk, &mut at_laptop] {
+        let list = client.watch_connections(false).unwrap();
+        assert_eq!(list.len(), 1, "{list:?}");
+    }
+}
+
+#[test]
+fn a_connection_asked_not_to_be_passed_on_isnt_and_is_again_once_asked() {
+    let world = World::new();
+    let server = world.start("server");
+    server
+        .client()
+        .new_workspace(Some("srv".into()), shell())
+        .unwrap();
+    let desk = world.start("desk");
+    let mut at_desk = desk.client();
+    let share = |share| Request::Connect {
+        host: "server".into(),
+        command: Some(example("daemon").display().to_string()),
+        share: Some(share),
+    };
+    assert_eq!(at_desk.request(&share(false)).unwrap(), Response::Done);
+    wait_for_workspaces(&mut at_desk, |shown| theirs(shown, "srv").is_some());
+    let link = going(&mut at_desk, "server", &[]);
+    assert!(link.unshared);
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    connect(&mut window, "desk");
+    going(&mut window, "desk", &[]);
+    std::thread::sleep(Duration::from_secs(1));
+    let shown = window.watch_workspaces().unwrap();
+    assert!(theirs(&shown, "srv").is_none(), "{shown:?}");
+    assert_eq!(window.watch_connections(false).unwrap().len(), 1);
+    // Passed on again, it comes; and not, it goes, saying so in the bar.
+    assert_eq!(at_desk.request(&share(true)).unwrap(), Response::Done);
+    wait_for_workspaces(&mut window, |shown| theirs(shown, "srv").is_some());
+    going(&mut window, "server", &["desk"]);
+    assert_eq!(at_desk.request(&share(false)).unwrap(), Response::Done);
+    let deadline = Instant::now() + PATIENCE;
+    let said = loop {
+        assert!(Instant::now() < deadline, "nothing was said");
+        if let Event::Said(said) = window.next_event().unwrap() {
+            break said;
+        }
+    };
+    assert!(said.contains("no longer passed on"), "{said}");
+    wait_for_workspaces(&mut window, |shown| theirs(shown, "srv").is_none());
+    let list = window.watch_connections(false).unwrap();
+    assert_eq!(list.len(), 1, "{list:?}");
+    // Desk keeps it so, from one run to the next.
+    let kept = std::fs::read_to_string(world.host("desk").join("workspaces")).unwrap_or_default();
+    let deadline = Instant::now() + PATIENCE;
+    let mut kept = kept;
+    while !kept.contains("\"unshared\": true") {
+        assert!(Instant::now() < deadline, "never kept: {kept}");
+        std::thread::sleep(Duration::from_millis(50));
+        kept = std::fs::read_to_string(world.host("desk").join("workspaces")).unwrap_or_default();
+    }
+}
+
+#[test]
+fn a_machine_passed_on_isnt_disconnected_here_but_one_asked_for_falls_back_to_it() {
+    let mut chain = Chain::with(quick_to_better);
+    let refused = chain.window.disconnect("server").unwrap_err();
+    assert!(
+        refused.to_string().contains("passed on by ‘desk’"),
+        "{refused}"
+    );
+    // Asked for here, then ended here, it's still shown through desk.
+    connect(&mut chain.window, "server");
+    going(&mut chain.window, "server", &[]);
+    chain.window.disconnect("server").unwrap();
+    going(&mut chain.window, "server", &["desk"]);
+    let shown = chain.window.watch_workspaces().unwrap();
+    assert_eq!(theirs(&shown, "srv").map(|srv| srv.id), Some(chain.srv.id));
+}
+
+#[test]
+fn panes_lent_and_placed_work_through_a_machine_passed_on() {
+    let mut chain = Chain::new();
+    let server = chain.server.machine().id;
+    let laptop = chain.laptop.machine().id;
+    // A terminal on server, beside one of laptop's own.
+    let first = chain
+        .window
+        .new_workspace(Some("here".into()), shell())
+        .unwrap();
+    let split = Request::Split {
+        pane: first,
+        side: Side::Right,
+        terminal: shell(),
+        on: Some(server),
+    };
+    let there = made(&mut chain.window, &split);
+    let terminal = terminal_of(wait_for_borrowed(&mut chain.window, there));
+    let shown = chain.window.watch_workspaces().unwrap();
+    assert_eq!(found(&shown, there).1.home, Some(server));
+    attach_to(&mut chain.window, terminal);
+    typed_shows(
+        &mut chain.window,
+        terminal,
+        "echo lent-$(basename $PWD)\r",
+        "lent-server",
+    );
+    // A terminal of laptop's in server's workspace, which server can't
+    // reach.
+    let beside = chain.srv.tabs[0].layout.panes()[0].id;
+    let place = Request::Split {
+        pane: beside,
+        side: Side::Below,
+        terminal: shell(),
+        on: Some(laptop),
+    };
+    let placed = made(&mut chain.window, &place);
+    let terminal = terminal_of(wait_for_borrowed(&mut chain.window, placed));
+    attach_to(&mut chain.window, terminal);
+    typed_shows(
+        &mut chain.window,
+        terminal,
+        "echo placed-$(basename $PWD)\r",
+        "placed-laptop",
+    );
+    // Server's own windows show it as out of reach, with its machine.
+    let at_server = chain.server.client().watch_workspaces().unwrap();
+    let held = (at_server.list.iter())
+        .flat_map(|workspace| &workspace.tabs)
+        .flat_map(|tab| tab.layout.panes())
+        .find(|pane| pane.home == Some(laptop))
+        .expect("server's layout holds it");
+    assert!(matches!(held.content, Content::Other { .. }), "{held:?}");
+    // A terminal on server in desk's workspace, which desk borrows from
+    // server, as it passes server on.
+    chain
+        .desk
+        .client()
+        .new_workspace(Some("desk-work".into()), shell())
+        .unwrap();
+    let shown = wait_for_workspaces(&mut chain.window, |shown| {
+        theirs(shown, "desk-work").is_some()
+    });
+    let beside = theirs(&shown, "desk-work").unwrap().tabs[0].layout.panes()[0].id;
+    let borrow = Request::Split {
+        pane: beside,
+        side: Side::Right,
+        terminal: shell(),
+        on: Some(server),
+    };
+    let borrowed = made(&mut chain.window, &borrow);
+    let terminal = terminal_of(wait_for_borrowed(&mut chain.window, borrowed));
+    let shown = chain.window.watch_workspaces().unwrap();
+    assert_eq!(found(&shown, borrowed).1.home, Some(server));
+    attach_to(&mut chain.window, terminal);
+    typed_shows(
+        &mut chain.window,
+        terminal,
+        "echo borrowed-$(basename $PWD)\r",
+        "borrowed-server",
+    );
+}
+
+#[test]
+#[ignore = "measures latency: cargo test --profile quick -p clackatoo-daemon --test links -- --ignored --nocapture what_a_machine_between_adds"]
+fn what_a_machine_between_adds_to_a_keys_echo() {
+    let world = World::new();
+    let server = world.start("server");
+    let echo = PaneTerminal::New(NewTerminal {
+        size: Size::new(80, 24).unwrap(),
+        command: Some(vec![
+            "sh".into(),
+            "-c".into(),
+            "stty raw -echo; exec cat".into(),
+        ]),
+        cwd: None,
+        record_to: None,
+    });
+    // A terminal for each way, so none sees another's echoes.
+    let mut there = server.client();
+    for name in ["near", "straight", "chained"] {
+        there
+            .new_workspace(Some(name.into()), echo.clone())
+            .unwrap();
+    }
+    // Desk, connected to server: one machine between a window and it.
+    let desk = world.start("desk");
+    let mut near = desk.client();
+    connect(&mut near, "server");
+    let shown = wait_for_workspaces(&mut near, |shown| theirs(shown, "near").is_some());
+    let near_terminal = first_terminal(theirs(&shown, "near").unwrap());
+    attach_to(&mut near, near_terminal);
+    // A laptop connected to server straight, and one through desk: the
+    // same relay, two ways there.
+    let straight = world.start("laptop");
+    let mut straight_window = straight.client();
+    connect(&mut straight_window, "server");
+    let shown = wait_for_workspaces(&mut straight_window, |shown| {
+        theirs(shown, "straight").is_some()
+    });
+    let straight_terminal = first_terminal(theirs(&shown, "straight").unwrap());
+    attach_to(&mut straight_window, straight_terminal);
+    let chained = world.start("tablet");
+    let mut chained_window = chained.client();
+    connect(&mut chained_window, "desk");
+    let shown = wait_for_workspaces(&mut chained_window, |shown| {
+        theirs(shown, "chained").is_some()
+    });
+    going(&mut chained_window, "server", &["desk"]);
+    let chained_terminal = first_terminal(theirs(&shown, "chained").unwrap());
+    attach_to(&mut chained_window, chained_terminal);
+    let (mut a, mut b, mut c) = (Vec::new(), Vec::new(), Vec::new());
+    for key in 0..KEYS + 50 {
+        let one = time_echo(&mut near, near_terminal);
+        let two = time_echo(&mut straight_window, straight_terminal);
+        let three = time_echo(&mut chained_window, chained_terminal);
+        if key >= 50 {
+            a.push(one);
+            b.push(two);
+            c.push(three);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    println!("keys echoed, {KEYS} each way, in microseconds:");
+    println!(
+        "  desk's relay, straight to server:       {}",
+        summed(&mut a)
+    );
+    println!(
+        "  laptop's relay, straight to server:     {}",
+        summed(&mut b)
+    );
+    println!(
+        "  tablet's relay, through desk to server: {}",
+        summed(&mut c)
+    );
 }

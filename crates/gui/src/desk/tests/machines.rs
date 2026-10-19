@@ -45,6 +45,8 @@ fn to_desk(state: ConnectionState) -> Vec<Connection> {
             run: 1,
         }),
         state,
+        through: Vec::new(),
+        unshared: false,
     }]
 }
 
@@ -289,6 +291,7 @@ fn a_new_pane_with_no_workspace_shown_makes_one_on_the_machine_named() {
         restored: Vec::new(),
         machine: None,
         others: Vec::new(),
+        passed: Vec::new(),
     };
     let mut desk = desk(here(none));
     desk.connections_changed(to_desk(connected()));
@@ -480,7 +483,8 @@ fn connect_says_how_it_went() {
         answer_all(&mut desk),
         [Request::Connect {
             host: "desk".into(),
-            command: None
+            command: None,
+            share: None,
         }]
     );
     desk.connections_changed(to_desk(ConnectionState::Connecting));
@@ -495,12 +499,80 @@ fn connect_says_how_it_went() {
 }
 
 #[test]
+fn connect_no_share_asks_the_daemon_not_to_pass_the_machine_on_if_it_knows_how() {
+    let mut desk = desk(three());
+    normal_mode(&mut desk);
+    command(&mut desk, "connect shared --no-share");
+    assert_eq!(
+        answer_all(&mut desk),
+        [Request::Connect {
+            host: "shared".into(),
+            command: None,
+            share: Some(false),
+        }]
+    );
+    // Connected already, it says what changed.
+    desk.connections_changed(to_desk(connected()));
+    command(&mut desk, "connect desk --share");
+    answer_all(&mut desk);
+    assert_eq!(note_of(&desk), "‘desk’ is passed on from now on");
+    // A daemon too old would keep it as one to pass on, once upgraded.
+    desk.daemon_is(
+        clackatoo_protocol::wire::CHAIN - 1,
+        Some("2026.10.59".into()),
+    );
+    command(&mut desk, "connect shared --no-share");
+    assert_eq!(answer_all(&mut desk), []);
+    assert!(note_of(&desk).contains("newer"), "{}", note_of(&desk));
+}
+
+#[test]
+fn the_configs_connections_say_whether_to_pass_them_on() {
+    let mut desk = desk(three());
+    desk.lua_from(r#"client.connect("shared", {share = false}) client.connect("desk")"#);
+    let asked = answer_all(&mut desk);
+    assert_eq!(
+        asked,
+        [
+            Request::Connect {
+                host: "shared".into(),
+                command: None,
+                share: Some(false),
+            },
+            Request::Connect {
+                host: "desk".into(),
+                command: None,
+                share: None,
+            },
+        ]
+    );
+    desk.lua_from(r#"client.connect("shared", {share = "no"})"#);
+    assert_eq!(answer_all(&mut desk), []);
+    // An older daemon passes nothing on: it's asked to connect, and no more.
+    desk.daemon_is(clackatoo_protocol::wire::CHAIN - 1, None);
+    desk.lost();
+    desk.connected(three(), false);
+    desk.daemon_is(clackatoo_protocol::wire::CHAIN - 1, None);
+    desk.connect_config_hosts();
+    let again = answer_all(&mut desk);
+    assert!(
+        again.contains(&Request::Connect {
+            host: "shared".into(),
+            command: None,
+            share: None,
+        }),
+        "{again:?}"
+    );
+}
+
+#[test]
 fn the_configs_connections_are_asked_for_on_each_new_connection() {
     let mut desk = desk(three());
-    desk.config_connects("desk".into());
+    desk.config_connects("desk".into(), None);
     let connect = Request::Connect {
         host: "desk".into(),
         command: None,
+        share: None,
     };
     assert_eq!(answer_all(&mut desk), std::slice::from_ref(&connect));
     desk.lost();

@@ -96,6 +96,18 @@ pub struct Workspaces {
         deserialize_with = "wire::since::<{ wire::MIXED }, _, _>"
     )]
     pub others: Vec<OtherMachine>,
+    /// The machines the daemon passes on to the daemons connected to it:
+    /// those it's connected to, but for any it was asked not to pass on.
+    /// A daemon connected to this one may connect to each through it,
+    /// unless it reaches that machine a shorter way, to show its
+    /// workspaces as `name@host` (see
+    /// [`Request::Reach`](crate::Request::Reach)). Empty from a daemon
+    /// older than protocol 95.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::CHAIN }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAIN }, _, _>"
+    )]
+    pub passed: Vec<crate::Passed>,
 }
 
 /// A machine a daemon isn't connected to, but whose panes it shows: see

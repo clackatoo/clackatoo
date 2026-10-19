@@ -44,6 +44,16 @@
 //! An upgrade doesn't carry them over: the QUIC connections close as the
 //! new build starts, and the sockets with them. The window connects again
 //! and forwards new connections to the new build.
+//!
+//! A stream may instead ask to reach the daemon on another machine
+//! ([`Request::Reach`]): a daemon connected to this one connecting
+//! through it to a machine it passes on (see [`chain`](super::chain)).
+//! Then the socket is a carrier on this daemon's own connection to that
+//! machine, the request is passed on, and the stream is answered with
+//! what comes back; or, for this daemon itself, the socket is a new
+//! client of its own, as `clackatoo bridge` would make. Either way, the
+//! bytes then go as a forwarded connection's do, but unpaced and beside
+//! everything else rather than below it, as they're keys and views.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -54,9 +64,10 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::FrameDecoder;
 use clackatoo_protocol::{
-    ClientMessage, Error, Forward, ForwardFailure, Request, Response, ServerMessage, frame, wire,
+    ClientMessage, Error, Forward, ForwardFailure, MachineId, Request, Response, ServerMessage,
+    frame, wire,
 };
-use mio::net::TcpStream;
+use mio::net::{TcpStream, UnixStream};
 use mio::{Interest, Token};
 use quinn_proto::{ConnectionHandle, StreamId};
 
@@ -79,6 +90,10 @@ const TURN_BUDGET: usize = 64 * 1024;
 /// The longest a request to connect may be: a name of at most 253 bytes,
 /// and a port, with room to spare.
 const MOST_ASKED: usize = 1024;
+
+/// The longest answer to a stream passed on to reach another machine that
+/// the daemon passing it on reads: an error's words, with room to spare.
+const MOST_ANSWER: usize = 4096;
 
 /// How long each address may take to answer before the next is tried, or
 /// the connection is given up on.
@@ -121,11 +136,17 @@ pub(super) struct Pipe {
     /// written at.
     wire: u32,
     stage: Stage,
-    /// The TCP connection, once one is being made.
-    socket: Option<TcpStream>,
+    /// The TCP connection, once one is being made; or the socket the
+    /// daemon it reaches is behind.
+    socket: Option<PipeSocket>,
     /// The window asked for what comes from the socket to go as fast as
     /// it can, rather than as background traffic.
     unpaced: bool,
+    /// The machine it reaches, for one asked to reach a daemon.
+    pub(super) reach: Option<MachineId>,
+    /// The connection it's carried on through, by its host, for one
+    /// reaching another machine than this.
+    via: Option<String>,
     /// What the window sent, waiting for the socket to take it: the
     /// request first, until it's whole.
     to_socket: Vec<u8>,
@@ -160,8 +181,73 @@ enum Stage {
         /// Why the last address failed, if one did.
         last: Option<ForwardFailure>,
     },
+    /// Waiting for the daemon on another machine to answer the request
+    /// passed on to it, in protocol `wire`: what has come of its answer.
+    Reaching { answer: Vec<u8>, wire: u32 },
     /// Connected: bytes go both ways.
     Open,
+}
+
+/// A forwarded connection's socket: a TCP connection made where it asked,
+/// or one the daemon it reaches is behind.
+#[derive(Debug)]
+enum PipeSocket {
+    Tcp(TcpStream),
+    Unix(UnixStream),
+}
+
+impl PipeSocket {
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        match self {
+            Self::Tcp(socket) => socket.shutdown(how),
+            Self::Unix(socket) => socket.shutdown(how),
+        }
+    }
+
+    fn take_error(&self) -> io::Result<Option<io::Error>> {
+        match self {
+            Self::Tcp(socket) => socket.take_error(),
+            Self::Unix(socket) => socket.take_error(),
+        }
+    }
+}
+
+impl Read for PipeSocket {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(socket) => socket.read(buf),
+            Self::Unix(socket) => socket.read(buf),
+        }
+    }
+}
+
+impl Write for PipeSocket {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(socket) => socket.write(buf),
+            Self::Unix(socket) => socket.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Where a stream asking to reach a daemon goes (see
+/// [`Request::Reach`]).
+#[derive(Debug)]
+pub(super) enum Reaching {
+    /// To this daemon itself: the other end of `socket` is a new client.
+    Here(std::os::unix::net::UnixStream),
+    /// On, through `socket`, a carrier on this daemon's connection to the
+    /// machine, `via`, which is sent `request`, in protocol `wire`, first.
+    On {
+        socket: std::os::unix::net::UnixStream,
+        request: Vec<u8>,
+        wire: u32,
+        via: String,
+    },
 }
 
 /// What the loop does with a forwarded connection next.
@@ -178,6 +264,8 @@ enum Next {
     Paced(usize),
     /// Connect where it asked.
     Connect(Forward),
+    /// Reach the daemon on this machine.
+    Reach(MachineId),
     /// It's connected: its address's time runs no more, and it's done
     /// again next turn, to start passing bytes.
     Connected,
@@ -185,6 +273,8 @@ enum Next {
     Retry(Option<ForwardFailure>),
     /// Tell the window it can't be made, and why, and forget it.
     Fail(ForwardFailure),
+    /// The same, in words of the daemon's own.
+    Refuse(Error),
     /// Both sides have finished: forget it.
     Done,
     /// Abandon it both ways, and forget it.
@@ -200,6 +290,8 @@ impl Pipe {
             stage: Stage::Asking,
             socket: None,
             unpaced: false,
+            reach: None,
+            via: None,
             to_socket: Vec::new(),
             to_stream: Vec::new(),
             window_done: false,
@@ -249,8 +341,88 @@ impl Pipe {
         self.to_socket = rest;
         match decoder.decode::<ClientMessage>(self.wire) {
             Ok(Some(ClientMessage::Request(Request::Forward(forward)))) => Next::Connect(forward),
+            Ok(Some(ClientMessage::Request(Request::Reach { machine })))
+                if wire::daemon_has(self.wire, wire::CHAIN) =>
+            {
+                Next::Reach(machine)
+            }
             _ => Next::Fail(ForwardFailure::Other(
                 "a forwarded connection's stream must start by saying where it goes".into(),
+            )),
+        }
+    }
+
+    /// Passes the request on to the daemon on another machine, and reads
+    /// its answer, once it has all come: the stream's answer is the same,
+    /// in the window's protocol.
+    fn reaching(&mut self, quic: &mut crate::quic::QuicServer, scratch: &mut [u8]) -> Next {
+        if self.gone(quic) {
+            return Next::Abandon;
+        }
+        let Some(socket) = &mut self.socket else {
+            return Next::Abandon;
+        };
+        let Stage::Reaching { answer, wire } = &mut self.stage else {
+            return Next::Wait;
+        };
+        while !self.to_socket.is_empty() {
+            match socket.write(&self.to_socket) {
+                Ok(written) => {
+                    self.to_socket.drain(..written);
+                }
+                Err(err) if is_wait(&err) => break,
+                Err(_) => return Next::Abandon,
+            }
+        }
+        loop {
+            let room = MOST_ANSWER.saturating_sub(answer.len()).min(scratch.len());
+            if room == 0 {
+                break;
+            }
+            match socket.read(&mut scratch[..room]) {
+                Ok(0) => {
+                    return Next::Refuse(Error::Other(
+                        "the connection there ended before the daemon answered".into(),
+                    ));
+                }
+                Ok(read) => answer.extend_from_slice(&scratch[..read]),
+                Err(err) if is_wait(&err) => break,
+                Err(_) => return Next::Abandon,
+            }
+        }
+        let Some(header) = answer.first_chunk::<4>() else {
+            return Next::Wait;
+        };
+        let len = usize::try_from(u32::from_le_bytes(*header)).unwrap_or(usize::MAX);
+        let Some(end) = len.checked_add(4).filter(|&end| end <= MOST_ANSWER) else {
+            return Next::Refuse(Error::Other("the daemon there answered at length".into()));
+        };
+        if answer.len() < end {
+            return Next::Wait;
+        }
+        let rest = answer.split_off(end);
+        let mut decoder = FrameDecoder::new();
+        decoder.push(answer);
+        let said = decoder.decode::<ServerMessage>(*wire);
+        match said {
+            Ok(Some(ServerMessage::Response(Response::Done))) => {
+                let done = ServerMessage::Response(Response::Done);
+                match frame::encode(self.wire, &done) {
+                    Ok(mut bytes) => {
+                        bytes.extend_from_slice(&rest);
+                        self.to_stream = bytes;
+                        self.stage = Stage::Open;
+                        Next::Connected
+                    }
+                    Err(err) => {
+                        log::error!("encoding a reached daemon's answer failed: {err}");
+                        Next::Abandon
+                    }
+                }
+            }
+            Ok(Some(ServerMessage::Response(Response::Error(err)))) => Next::Refuse(err),
+            _ => Next::Refuse(Error::Other(
+                "the daemon there answered with what isn't an answer".into(),
             )),
         }
     }
@@ -264,7 +436,10 @@ impl Pipe {
             Ok(Some(err)) | Err(err) => return Next::Retry(Some(failure(&err))),
             Ok(None) => {}
         }
-        match socket.peer_addr() {
+        let PipeSocket::Tcp(tcp) = socket else {
+            return Next::Retry(None);
+        };
+        match tcp.peer_addr() {
             Ok(_) => {
                 self.stage = Stage::Open;
                 let answer = ServerMessage::Response(Response::Done);
@@ -403,9 +578,10 @@ impl Pipe {
     }
 
     /// Resets the socket rather than closing it, so its other end knows
-    /// the connection was cut short.
+    /// the connection was cut short. A Unix socket has no reset: its other
+    /// end sees it close.
     fn reset_socket(&mut self) {
-        if let Some(socket) = self.socket.take() {
+        if let Some(PipeSocket::Tcp(socket)) = self.socket.take() {
             let _ = rustix::net::sockopt::set_socket_linger(&socket, Some(Duration::ZERO));
         }
     }
@@ -553,6 +729,7 @@ impl Daemon {
             Stage::Resolving { .. } | Stage::Connecting { .. } if pipe.gone(quic) => Next::Abandon,
             Stage::Resolving { .. } => Next::Wait,
             Stage::Connecting { .. } => pipe.check_connected(),
+            Stage::Reaching { .. } => pipe.reaching(quic, &mut self.buffer),
             Stage::Open => match quic.pace_inputs(pipe.handle) {
                 Some((rtt, opened, moved)) => {
                     let now = Instant::now();
@@ -592,6 +769,10 @@ impl Daemon {
                 self.connect_forward(token, forward);
                 0
             }
+            Next::Reach(machine) => {
+                self.reach_forward(token, machine);
+                0
+            }
             Next::Connected => {
                 self.forwards.deadlines.retain(|&(_, of)| of != token);
                 self.queue_forward(token);
@@ -603,6 +784,10 @@ impl Daemon {
             }
             Next::Fail(why) => {
                 self.fail_forward(token, why);
+                0
+            }
+            Next::Refuse(why) => {
+                self.refuse_forward(token, why);
                 0
             }
             Next::Done => {
@@ -648,6 +833,85 @@ impl Daemon {
         if let Some(Source::Forward(pipe)) = self.sources.get_mut(token.0) {
             pipe.stage = Stage::Resolving { host, port };
         }
+    }
+
+    /// Has the stream at `token`, which asked to reach the daemon on
+    /// `machine`, reach it: through this daemon's connection to it, which
+    /// is asked the same and answers for it, or as a new client of this
+    /// daemon, if it's this one; or tells the asker why it can't.
+    fn reach_forward(&mut self, token: Token, machine: MachineId) {
+        let Some(Source::Forward(pipe)) = self.sources.get(token.0) else {
+            return;
+        };
+        let handle = pipe.handle;
+        let reaching = match self.reaching(handle, machine) {
+            Ok(reaching) => reaching,
+            Err(why) => {
+                self.refuse_forward(token, why);
+                return;
+            }
+        };
+        let (socket, then, via) = match reaching {
+            Reaching::Here(socket) => (socket, None, None),
+            Reaching::On {
+                socket,
+                request,
+                wire,
+                via,
+            } => (socket, Some((request, wire)), Some(via)),
+        };
+        let registered = socket.set_nonblocking(true).and_then(|()| {
+            let mut socket = UnixStream::from_std(socket);
+            let both = Interest::READABLE | Interest::WRITABLE;
+            self.poll.registry().register(&mut socket, token, both)?;
+            Ok(socket)
+        });
+        let socket = match registered {
+            Ok(socket) => socket,
+            Err(err) => {
+                let why = Error::Other(format!("the daemon couldn't watch a socket: {err}"));
+                self.refuse_forward(token, why);
+                return;
+            }
+        };
+        let Some(Source::Forward(pipe)) = self.sources.get_mut(token.0) else {
+            return;
+        };
+        pipe.socket = Some(PipeSocket::Unix(socket));
+        pipe.unpaced = true;
+        pipe.reach = Some(machine);
+        pipe.via = via;
+        if let Some(quic) = self.quic.as_mut() {
+            quic.raise_forwarded(handle, pipe.stream);
+        }
+        match then {
+            None => {
+                let done = ServerMessage::Response(Response::Done);
+                match frame::encode(pipe.wire, &done) {
+                    Ok(bytes) => {
+                        pipe.to_stream = bytes;
+                        pipe.stage = Stage::Open;
+                    }
+                    Err(err) => {
+                        log::error!("encoding a forwarded connection's answer failed: {err}");
+                        self.abandon_forward(token);
+                        return;
+                    }
+                }
+            }
+            Some((mut request, wire)) => {
+                // What came after the request goes on after it.
+                request.append(&mut pipe.to_socket);
+                pipe.to_socket = request;
+                pipe.stage = Stage::Reaching {
+                    answer: Vec::new(),
+                    wire,
+                };
+                let due = Instant::now() + CONNECT_WAIT;
+                self.forwards.deadlines.push((due, token));
+            }
+        }
+        self.queue_forward(token);
     }
 
     /// Takes the names the lookups have found, and connects the
@@ -722,7 +986,7 @@ impl Daemon {
             });
             match connected {
                 Ok(socket) => {
-                    pipe.socket = Some(socket);
+                    pipe.socket = Some(PipeSocket::Tcp(socket));
                     let due = Instant::now() + CONNECT_WAIT;
                     self.forwards.deadlines.push((due, token));
                     return;
@@ -751,14 +1015,14 @@ impl Daemon {
             .map(|&(_, token)| token)
             .collect();
         for token in late {
-            let resolving = matches!(
+            let waiting = matches!(
                 self.sources.get(token.0),
                 Some(Source::Forward(Pipe {
-                    stage: Stage::Resolving { .. },
+                    stage: Stage::Resolving { .. } | Stage::Reaching { .. },
                     ..
                 }))
             );
-            if resolving {
+            if waiting {
                 self.fail_forward(token, ForwardFailure::TimedOut);
             } else {
                 self.try_next_address(token, Some(ForwardFailure::TimedOut));
@@ -800,11 +1064,21 @@ impl Daemon {
     /// Tells the window the forwarded connection at `token` couldn't be
     /// made, and why, and forgets it.
     fn fail_forward(&mut self, token: Token, why: ForwardFailure) {
+        log::info!("a forwarded connection couldn't be made: {why}");
+        self.refuse_forward(token, Error::Forward(why));
+    }
+
+    /// Answers the forwarded connection at `token` with `why` it couldn't
+    /// be made, and forgets it.
+    fn refuse_forward(&mut self, token: Token, why: Error) {
         if let (Some(Source::Forward(pipe)), Some(quic)) =
-            (self.sources.get(token.0), self.quic.as_mut())
+            (self.sources.get_mut(token.0), self.quic.as_mut())
         {
-            log::info!("a forwarded connection couldn't be made: {why}");
-            let answer = ServerMessage::Response(Response::Error(Error::Forward(why)));
+            if !matches!(why, Error::Forward(_)) {
+                log::info!("a stream asking to reach a daemon was refused: {why}");
+            }
+            pipe.reset_socket();
+            let answer = ServerMessage::Response(Response::Error(why));
             match frame::encode(pipe.wire, &answer) {
                 // A new stream always has room for it.
                 Ok(bytes) => {
@@ -893,6 +1167,40 @@ impl Daemon {
                 .count();
         if let Some(quic) = self.quic.as_mut() {
             quic.set_forwarded(handle, count);
+        }
+    }
+
+    /// Abandons every stream reaching the daemon on `machine`, as this
+    /// daemon was asked not to pass it on, or no longer connects to it.
+    pub(super) fn abandon_reaching(&mut self, machine: MachineId) {
+        let tokens: Vec<Token> = (self.forwards.streams.values())
+            .copied()
+            .filter(|token| {
+                matches!(
+                    self.sources.get(token.0),
+                    Some(Source::Forward(pipe)) if pipe.reach == Some(machine)
+                )
+            })
+            .collect();
+        for token in tokens {
+            self.abandon_forward(token);
+        }
+    }
+
+    /// Abandons every stream carried on through the connection to `host`,
+    /// which has ended.
+    pub(super) fn abandon_carried_by(&mut self, host: &str) {
+        let tokens: Vec<Token> = (self.forwards.streams.values())
+            .copied()
+            .filter(|token| {
+                matches!(
+                    self.sources.get(token.0),
+                    Some(Source::Forward(pipe)) if pipe.via.as_deref() == Some(host)
+                )
+            })
+            .collect();
+        for token in tokens {
+            self.abandon_forward(token);
         }
     }
 

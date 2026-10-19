@@ -191,6 +191,10 @@ enum Command {
     /// End the daemon's connection to another machine.
     #[command(hide = true)]
     Disconnect(connections::DisconnectArgs),
+    /// Forget the identity key the daemon knows another machine by, as
+    /// after that machine's clackatoo chose a new one: the key it shows
+    /// next is taken, and kept.
+    Forget(connections::DisconnectArgs),
     /// List the daemon's connections to other machines, and how each is
     /// going.
     #[command(hide = true)]
@@ -490,6 +494,7 @@ fn run(command: Command) -> anyhow::Result<()> {
         }
         Command::Connect(args) => connections::connect(&args),
         Command::Disconnect(args) => connections::disconnect(&args),
+        Command::Forget(args) => connections::forget(&args),
         Command::Connections(connection) => connections::list(&connection),
         Command::Lent(args) => connections::lent(&args),
         Command::Machine(connection) => connections::machine(&connection),

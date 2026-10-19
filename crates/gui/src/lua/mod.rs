@@ -198,8 +198,12 @@ pub(crate) enum FromLua {
     Forward(clackatoo_daemon::forward::Spec),
     /// Have the daemon connect to another machine, as `:connect HOST`
     /// does, but saying nothing unless it fails: a config runs in every
-    /// window.
-    Connect(String),
+    /// window. `share` is `false` for `{share = false}`, as
+    /// `--no-share`, and `true` for `{share = true}`.
+    Connect {
+        host: String,
+        share: Option<bool>,
+    },
     /// Have the daemon end its connection to another machine, as
     /// `:disconnect HOST` does.
     Disconnect(String),
@@ -368,6 +372,7 @@ mod tests {
                     home: None,
                     lent: None,
                 }],
+                passed: Vec::new(),
                 machine: None,
                 others: Vec::new(),
             },

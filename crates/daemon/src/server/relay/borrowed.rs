@@ -127,10 +127,14 @@ impl Daemon {
         let request = without_on(request);
         if let Some(at) = mirrored {
             // Another machine's layout: made there, or here, for one of
-            // this machine's, which it's asked to show; unless asked of a
-            // third.
+            // this machine's, which it's asked to show; or for a third's,
+            // which that machine borrows, if it passes it on, and so
+            // reaches it.
             return match on {
                 Some(machine) if machine == own => self.place_here(token, at, request, from),
+                Some(machine) if self.passes_on(at, machine) => {
+                    self.route_waited_for(token, with_on(request, Some(machine)))
+                }
                 Some(machine) if Some(machine) != self.machine_of(at) => {
                     Routed::Answered(Response::Error(self.unreachable_from(at, machine)))
                 }
@@ -626,6 +630,15 @@ impl Daemon {
             .position(|linked| (linked.machine.as_ref()).is_some_and(|known| known.id == machine))
     }
 
+    /// Whether the daemon of the connection at `at` passes `machine` on,
+    /// being connected to it now, and lends, as of protocol 93: it can
+    /// borrow a pane of that machine's for a layout of its own.
+    fn passes_on(&self, at: usize, machine: MachineId) -> bool {
+        self.link_wire(at) >= wire::LEND
+            && (self.links.list[at].passed.iter())
+                .any(|passed| passed.id == machine && passed.reached)
+    }
+
     /// The machine of the connection at `at`, once it has said.
     pub(super) fn machine_of(&self, at: usize) -> Option<MachineId> {
         (self.links.list[at].machine.as_ref()).map(|machine| machine.id)
@@ -660,7 +673,7 @@ impl Daemon {
     }
 
     /// Has every window watching the workspaces say `said` in its bar.
-    pub(super) fn say_to_windows(&mut self, said: String) {
+    pub(in crate::server) fn say_to_windows(&mut self, said: String) {
         let event = ServerMessage::Event(Event::Said(said));
         let mut event = crate::server::Broadcast::new(&event, "what's said");
         let mut told = Vec::new();
@@ -705,12 +718,15 @@ impl Daemon {
 /// `request` with no machine named: as it's asked of the machine named,
 /// or of this daemon.
 fn without_on(request: Request) -> Request {
+    with_on(request, None)
+}
+
+/// `request` naming the machine `on`, or none.
+fn with_on(request: Request, on: Option<MachineId>) -> Request {
     match request {
-        Request::NewWorkspace { name, terminal, .. } => Request::NewWorkspace {
-            name,
-            terminal,
-            on: None,
-        },
+        Request::NewWorkspace { name, terminal, .. } => {
+            Request::NewWorkspace { name, terminal, on }
+        }
         Request::NewTab {
             workspace,
             terminal,
@@ -718,7 +734,7 @@ fn without_on(request: Request) -> Request {
         } => Request::NewTab {
             workspace,
             terminal,
-            on: None,
+            on,
         },
         Request::Split {
             pane,
@@ -729,7 +745,7 @@ fn without_on(request: Request) -> Request {
             pane,
             side,
             terminal,
-            on: None,
+            on,
         },
         Request::SplitTab {
             tab,
@@ -742,7 +758,7 @@ fn without_on(request: Request) -> Request {
             side,
             terminal,
             share,
-            on: None,
+            on,
         },
         request => request,
     }

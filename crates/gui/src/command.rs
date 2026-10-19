@@ -203,8 +203,13 @@ pub(crate) enum Command {
     /// or with a name, on that machine, the one the window's daemon is on.
     Update(Option<String>),
     /// `:connect`: the picker of a machine to open a new window on; or,
-    /// with a name, that machine's workspaces brought into this daemon's.
-    Connect(Option<String>),
+    /// with a name, that machine's workspaces brought into this daemon's,
+    /// passed on to the daemons connected to it unless `share` says not
+    /// to (`--no-share`), or again if it says to (`--share`).
+    Connect {
+        host: Option<String>,
+        share: Option<bool>,
+    },
     /// `:disconnect`: the daemon's connection to the machine named, or to
     /// the one the workspace shown is on, ended, and its workspaces gone.
     Disconnect(Option<String>),
@@ -338,7 +343,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             };
         }
         "update" => return Ok(Command::Update(argument.map(str::to_owned))),
-        "connect" => return Ok(Command::Connect(argument.map(str::to_owned))),
+        "connect" => return connect_command(argument),
         "disconnect" => return Ok(Command::Disconnect(argument.map(str::to_owned))),
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
         "Devices" => return devices_command(argument).map(Command::Devices),
@@ -461,6 +466,38 @@ fn unknown(mark: &str, name: &str, at: &str, place: Place) -> String {
 const CLOSING: [&str; 2] = ["quit", "wq"];
 
 /// `:Devices`, with what to do as `argument` says.
+/// `:connect`'s argument: a machine, if any, and `--no-share` or
+/// `--share`, before or after it, which need one.
+fn connect_command(argument: Option<&str>) -> Result<Command, String> {
+    let mut host = None;
+    let mut share = None;
+    for word in argument.unwrap_or_default().split_whitespace() {
+        match word {
+            "--no-share" => share = Some(false),
+            "--share" => share = Some(true),
+            flag if flag.starts_with("--") => {
+                return Err(format!(
+                    "connect takes HOST, and --no-share or --share, not {flag}"
+                ));
+            }
+            word => {
+                if let Some(first) = host.replace(word.to_owned()) {
+                    return Err(format!(
+                        "connect takes one machine, but has {first} and {word}"
+                    ));
+                }
+            }
+        }
+    }
+    if host.is_none()
+        && let Some(share) = share
+    {
+        let flag = if share { "--share" } else { "--no-share" };
+        return Err(format!("{flag} is said of a machine: :connect HOST {flag}"));
+    }
+    Ok(Command::Connect { host, share })
+}
+
 fn devices_command(argument: Option<&str>) -> Result<DevicesCommand, String> {
     let usage = "Devices, then allow CODE, deny, or revoke N";
     let Some(argument) = argument else {
@@ -1355,10 +1392,35 @@ mod tests {
 
     #[test]
     fn connect_picks_a_machine_or_names_one() {
-        assert_eq!(parse("connect").unwrap(), Command::Connect(None));
+        let connect = |host: Option<&str>, share| Command::Connect {
+            host: host.map(str::to_owned),
+            share,
+        };
+        assert_eq!(parse("connect").unwrap(), connect(None, None));
         assert_eq!(
             parse("connect  jack@desk ").unwrap(),
-            Command::Connect(Some("jack@desk".into()))
+            connect(Some("jack@desk"), None)
+        );
+        // Whether it's passed on, before or after the machine.
+        assert_eq!(
+            parse("connect shared --no-share").unwrap(),
+            connect(Some("shared"), Some(false))
+        );
+        assert_eq!(
+            parse("connect --share shared").unwrap(),
+            connect(Some("shared"), Some(true))
+        );
+        assert_eq!(
+            parse("connect --no-share").unwrap_err(),
+            "--no-share is said of a machine: :connect HOST --no-share"
+        );
+        assert_eq!(
+            parse("connect desk --noshare").unwrap_err(),
+            "connect takes HOST, and --no-share or --share, not --noshare"
+        );
+        assert_eq!(
+            parse("connect desk server").unwrap_err(),
+            "connect takes one machine, but has desk and server"
         );
         assert_eq!(parse("disconnect").unwrap(), Command::Disconnect(None));
         assert_eq!(

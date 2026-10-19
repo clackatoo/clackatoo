@@ -1829,6 +1829,9 @@ fn a_device_cant_drive_or_watch_the_daemons_connections() {
             config.links = Some(clackatoo_daemon::LinkConfig {
                 ssh: "false".into(),
                 askpass: None,
+                better_every: clackatoo_daemon::DEFAULT_BETTER_EVERY,
+                speaks: None,
+                impostor: false,
             });
         },
     );
@@ -1838,6 +1841,7 @@ fn a_device_cant_drive_or_watch_the_daemons_connections() {
         Request::Connect {
             host: "laptop".into(),
             command: None,
+            share: None,
         },
         Request::Disconnect {
             host: "laptop".into(),

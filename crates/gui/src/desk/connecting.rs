@@ -7,8 +7,12 @@
 //! and after it restarts, so this window only asks, and shows what it's
 //! told (see [`Desk::connections_changed`]). Each such workspace has a
 //! ring in place of its dot, saying how its connection is, and the mouse
-//! over it says which machine it's on; `showhost` says when its name says
-//! too, as `notes@desk`.
+//! over it says which machine it's on, and the machines its connection
+//! goes through, for one passed on, as `server, through desk`;
+//! `showhost` says when its name says too, as `notes@desk`.
+//!
+//! The daemon passes each machine on to the daemons connected to it,
+//! unless `:connect HOST --no-share` asked it not to.
 //!
 //! `:connect` alone, or Ctrl+B r, opens the picker of a machine to open
 //! a new window on (see [`crate::connect`]): the desk doesn't open it
@@ -36,16 +40,22 @@ pub(crate) struct Elsewhere {
     pub(crate) machine: Option<String>,
     /// How the connection is.
     pub(crate) reach: Reach,
+    /// The machines the connection goes through, nearest first, by what
+    /// they're called: none while it goes straight there.
+    pub(crate) through: Vec<String>,
 }
 
 impl Elsewhere {
     /// What the mouse over its workspace says: which machine, and how its
     /// connection is.
     pub(crate) fn said(&self) -> String {
-        let machine = match &self.machine {
+        let mut machine = match &self.machine {
             Some(machine) if *machine != self.host => format!("on {machine} ({})", self.host),
             _ => format!("on {}", self.host),
         };
+        if !self.through.is_empty() {
+            machine = format!("{machine}, through {}", self.through.join(" and "));
+        }
         let how = match &self.reach {
             Reach::Connected => "connected".to_owned(),
             Reach::Connecting => "connecting".to_owned(),
@@ -73,8 +83,9 @@ impl Elsewhere {
 
 impl Desk {
     /// Carries out `:connect`: with no machine, asks the window for the
-    /// picker; with one, has the daemon connect to it.
-    pub(super) fn ask_connect(&mut self, host: Option<String>) {
+    /// picker; with one, has the daemon connect to it, passing it on or
+    /// not as `share` says, if it says.
+    pub(super) fn ask_connect(&mut self, host: Option<String>, share: Option<bool>) {
         let Some(host) = host else {
             self.connect_asked = true;
             return;
@@ -82,14 +93,31 @@ impl Desk {
         if !self.needs_daemon(":connect HOST", wire::FEDERATION) {
             return;
         }
+        // An older daemon would read past it, and pass the machine on
+        // once it's upgraded.
+        if share.is_some() && !self.needs_daemon(":connect HOST --no-share", wire::CHAIN) {
+            return;
+        }
         // Asked again, one that's down is tried again at once.
         self.request(
             Request::Connect {
                 host: host.clone(),
                 command: None,
+                share,
             },
             Asked::Command,
         );
+        let connected = (self.connections.iter()).any(|connection| {
+            connection.host == host && matches!(connection.state, ConnectionState::Connected { .. })
+        });
+        if connected {
+            self.say(match share {
+                Some(false) => format!("‘{host}’ isn't passed on from now on"),
+                Some(true) => format!("‘{host}’ is passed on from now on"),
+                None => format!("connected to ‘{host}’ already"),
+            });
+            return;
+        }
         self.say(format!(
             "connecting to ‘{host}’: its workspaces come into the bar once it's reached"
         ));
@@ -128,30 +156,31 @@ impl Desk {
             return;
         }
         self.request(Request::Disconnect { host: host.clone() }, Asked::Command);
-        self.say(format!("disconnected from ‘{host}’"));
+        // One passed on may be refused, which the daemon says.
+        let passed = (self.connections.iter())
+            .any(|connection| connection.host == host && !connection.through.is_empty());
+        if !passed {
+            self.say(format!("disconnected from ‘{host}’"));
+        }
     }
 
     /// Carries out the config's `client.connect(host)`: asks the daemon
     /// to connect to `host` now, if this window is connected to it, and
-    /// on each new connection to it, saying nothing unless it fails.
-    pub(super) fn config_connects(&mut self, host: String) {
-        if !self.config_hosts.contains(&host) {
-            self.config_hosts.push(host.clone());
+    /// on each new connection to it, saying nothing unless it fails;
+    /// passing it on or not as `share` says, if it says.
+    pub(super) fn config_connects(&mut self, host: String, share: Option<bool>) {
+        match (self.config_hosts.iter_mut()).find(|(asked, _)| *asked == host) {
+            Some(asked) => asked.1 = share,
+            None => self.config_hosts.push((host.clone(), share)),
         }
-        if self.connected && self.daemon_has(wire::FEDERATION) {
-            self.request(
-                Request::Connect {
-                    host,
-                    command: None,
-                },
-                Asked::Command,
-            );
+        if self.connected {
+            self.connect_configured(host, share, Asked::Command);
         }
     }
 
     /// Carries out the config's `client.disconnect(host)`.
     pub(super) fn config_disconnects(&mut self, host: String) {
-        self.config_hosts.retain(|asked| *asked != host);
+        self.config_hosts.retain(|(asked, _)| *asked != host);
         if self.connected && self.daemon_has(wire::FEDERATION) {
             self.request(Request::Disconnect { host }, Asked::Command);
         }
@@ -160,18 +189,25 @@ impl Desk {
     /// Asks the daemon, newly connected to, for the connections the config
     /// asked for.
     pub(super) fn connect_config_hosts(&mut self) {
+        for (host, share) in self.config_hosts.clone() {
+            self.connect_configured(host, share, Asked::Quiet);
+        }
+    }
+
+    /// Asks the daemon to connect to `host`, as the config did, passing
+    /// it on or not as `share` says, if the daemon knows how: one that
+    /// doesn't passes nothing on, so that much is as asked.
+    fn connect_configured(&mut self, host: String, share: Option<bool>, asked: Asked) {
         if !self.daemon_has(wire::FEDERATION) {
             return;
         }
-        for host in self.config_hosts.clone() {
-            self.request(
-                Request::Connect {
-                    host,
-                    command: None,
-                },
-                Asked::Quiet,
-            );
-        }
+        let share = share.filter(|_| self.daemon_has(wire::CHAIN));
+        let request = Request::Connect {
+            host,
+            command: None,
+            share,
+        };
+        self.request(request, asked);
     }
 
     /// Takes the daemon's connections to other machines, as it says they
@@ -248,10 +284,12 @@ impl Desk {
                 } else {
                     Reach::Connecting
                 },
+                through: Vec::new(),
             };
         };
         Elsewhere {
             host: connection.host.clone(),
+            through: connection.through.clone(),
             machine: connection
                 .machine
                 .as_ref()
@@ -411,7 +449,22 @@ mod tests {
             host: "desk".into(),
             machine: Some("jack-ubuntu-desktop".into()),
             reach,
+            through: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_mouse_over_a_workspace_passed_on_says_the_way_too() {
+        let mut passed = elsewhere(Reach::Connected);
+        passed.host = "server".into();
+        passed.machine = Some("jack-server".into());
+        passed.through = vec!["desk".into()];
+        assert_eq!(
+            passed.said(),
+            "on jack-server (server), through desk · connected"
+        );
+        passed.through.push("nas".into());
+        assert!(passed.said().contains(", through desk and nas ·"));
     }
 
     #[test]

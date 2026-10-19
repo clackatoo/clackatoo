@@ -306,6 +306,7 @@ impl WorkspaceState {
         }
         Ok(Self {
             workspaces: Workspaces {
+                passed: Vec::new(),
                 list,
                 active,
                 home: None,

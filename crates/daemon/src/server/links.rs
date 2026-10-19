@@ -59,6 +59,21 @@
 //! The same goes for a new ssh carrying a connection on: if its question
 //! can't be answered, the connection ends, rather than ssh asking again
 //! every little while.
+//!
+//! # Machines passed on
+//!
+//! A daemon passes on the machines it's connected to, to the daemons
+//! connected to it ([`Workspaces::passed`]), but for those it was asked
+//! not to: a laptop connected to a desk connected to a server shows the
+//! server's workspaces too, as `name@server`, by a connection of its own
+//! to the server that goes through the desk (see [`chain`](super::chain)).
+//! Such a connection is a connection like any other, but asked for by no
+//! one here and never kept: it comes and goes with what's passed on. A
+//! machine is connected to once, however many ways reach it, and by the
+//! shortest: ssh straight there for one asked for here, then through the
+//! fewest machines. What carries a connection may move from one way to
+//! another as they come and go, without the connection ending (see
+//! [`ways`]).
 
 use std::collections::VecDeque;
 use std::io::{self, Read};
@@ -70,20 +85,25 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{FrameDecoder, FrameError, Head};
 use clackatoo_protocol::{
-    Connection, ConnectionState, Error, Event, Machine, Response, ServerMessage, WorkspaceId,
-    Workspaces,
+    Connection, ConnectionState, Error, Event, Machine, MachineId, Passed, Response, ServerMessage,
+    WorkspaceId, Workspaces,
 };
 use mio::net::UnixStream;
 use mio::{Interest, Token};
 
 use super::relay::{Relayed, Upstream};
 use super::{Broadcast, Daemon, FIRST_LOOK, Flood, Link, Reading, Source};
-use crate::client::ClientError;
-use crate::quic::Carried;
-use crate::remote::{self, Asking, Askpass, Cancel, Remote, RemoteError};
+use crate::client::{Client, ClientError, UdpTarget};
+use crate::forward::Forwarder;
+use crate::handover;
+use crate::quic::{Carried, Offerer};
+use crate::remote::{Askpass, Cancel, Remote, RemoteError};
+pub(super) use ways::{Direct, Pin, Pins, Way, Ways};
+
+pub(super) mod ways;
 
 /// How long after a first failure a connection is tried again.
-const FIRST_RETRY: Duration = Duration::from_secs(1);
+pub(super) const FIRST_RETRY: Duration = Duration::from_secs(1);
 
 /// The longest a connection waits between tries.
 const LONGEST_RETRY: Duration = Duration::from_mins(1);
@@ -140,7 +160,7 @@ pub(super) struct Links {
     told: Option<Vec<Connection>>,
     /// The threads of tries at connections since ended, and those ending
     /// connections, while they run: waited for as the daemon stops.
-    ending: Vec<JoinHandle<()>>,
+    pub(super) ending: Vec<JoinHandle<()>>,
     /// How many requests have been relayed for clients, which numbers the
     /// answer each waits for.
     pub(super) tickets: u64,
@@ -167,6 +187,28 @@ pub(super) struct Links {
     /// given back rather than closed should the layout come back without
     /// them (see [`relay::held`](super::relay::held)).
     pub(super) typed_parked: std::collections::BTreeSet<(clackatoo_protocol::MachineId, u64)>,
+    /// What the daemons connected to this one were last told it passes on.
+    pub(super) passed_told: Vec<Passed>,
+    /// Connections to machines no longer passed on, or reached another
+    /// way, are to be ended, at the end of the turn, rather than while
+    /// what found them holds places in the list.
+    pub(super) unpassed: bool,
+    /// The identity keys other machines are known by, kept from one run
+    /// to the next in a file of their own (see [`crate::known`]).
+    pub(super) pins: Pins,
+}
+
+impl Links {
+    /// No connections, knowing other machines by the keys kept beside the
+    /// `machine` file, if there's one (see [`crate::known`]).
+    pub(super) fn knowing(machine: Option<&std::path::Path>) -> Self {
+        Self {
+            pins: Arc::new(crate::known::Known::load(
+                machine.map(crate::known::Known::beside),
+            )),
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for Links {
@@ -190,6 +232,9 @@ impl Default for Links {
             changes: 0,
             forward_news: Arc::default(),
             typed_parked: std::collections::BTreeSet::new(),
+            passed_told: Vec::new(),
+            unpassed: false,
+            pins: Pins::default(),
         }
     }
 }
@@ -197,28 +242,63 @@ impl Default for Links {
 /// One connection.
 #[derive(Debug)]
 pub(super) struct Linked {
+    /// Its host, as asked for, and the command that runs clackatoo there.
+    /// For one to a machine passed on, what the daemon passing it on
+    /// calls it, or another name if another connection has that one.
     pub(super) remote: Remote,
+    /// Asked for here, with ssh, as `:connect` asks: kept from one run to
+    /// the next. `false` for one to a machine a daemon connected to this
+    /// one passes on, which goes through it, and isn't kept.
+    pub(super) asked: bool,
+    /// Not passed on to the daemons connected to this one, as asked.
+    pub(super) unshared: bool,
+    /// The machine it's to, until it says: as it was when it was kept,
+    /// or as passed on.
+    pub(super) expected: Option<MachineId>,
+    /// The ways it may go, for its threads to read.
+    pub(super) ways: Arc<Ways>,
+    /// The machines it goes through now, nearest first: none while it
+    /// goes straight there.
+    pub(super) through: Vec<MachineId>,
+    /// What the daemon there passes on, as it last said, taken in: kept
+    /// while the connection is down, as what's shown of it is.
+    pub(super) passed: Vec<Passed>,
+    /// A way to offer its connection a better carrier, while connected.
+    offerer: Option<Offerer>,
+    /// Its connection's way to carry other connections on, while
+    /// connected.
+    pub(super) forwarder: Option<Forwarder>,
+    /// When a better way than the one it goes is tried next, while there
+    /// may be one.
+    pub(super) better_at: Option<Instant>,
+    /// The thread trying one, while it does.
+    pub(super) bettering: Option<JoinHandle<()>>,
+    /// Why a way through another machine was last refused, as said to
+    /// every window, until it connects: said once, not at each try.
+    pub(super) suspected: Option<String>,
+    /// The protocol it last ran at, once connected.
+    pub(super) wire: Option<u32>,
     /// How it's going, but for questions waiting, which make it
     /// [`ConnectionState::Asking`].
-    state: ConnectionState,
+    pub(super) state: ConnectionState,
     /// The daemon there, once it has said.
     pub(super) machine: Option<Machine>,
     /// The client that last asked for it, which ssh's questions go to
     /// first.
     asker: Option<Token>,
     /// The number of the try under way, if there is one.
-    trying: Option<u64>,
+    pub(super) trying: Option<u64>,
     /// The try's thread, until the next.
     thread: Option<JoinHandle<()>>,
     /// What stops its tries, and the new ssh processes its connection
     /// opens to carry on: once it ends.
-    cancel: Arc<Cancel>,
+    pub(super) cancel: Arc<Cancel>,
     /// The connection, once made, and when.
     pub(super) connected: Option<(Token, Instant)>,
     /// When it's tried again, while it waits to be.
-    retry_at: Option<Instant>,
+    pub(super) retry_at: Option<Instant>,
     /// How long after its next failure it's tried again.
-    backoff: Duration,
+    pub(super) backoff: Duration,
     /// Where ssh asks its questions for it, made with its first try.
     askpass: Option<Askpass>,
     /// What its last question came to, since its try started.
@@ -275,6 +355,11 @@ enum News {
     /// The question numbered `asking` at the askpass of the connection to
     /// `host` needs no answer: its asker hung up, as when ssh gave up.
     Withdrawn { host: String, asking: u64 },
+    /// The connection to `host` goes `through` these machines now.
+    Through {
+        host: String,
+        through: Vec<MachineId>,
+    },
 }
 
 /// What a try came to.
@@ -287,6 +372,13 @@ enum Outcome {
     /// The daemon there can't be talked to, for this reason, and isn't
     /// tried again until asked.
     Refused(String),
+    /// The daemon there isn't the machine it's known as, for this reason:
+    /// as refused, and said to every window.
+    Distrusted(String),
+    /// It failed, and a way through another machine answered with one
+    /// that isn't the machine it's known as, for this reason: tried
+    /// again, as a failure is, and said to every window, once.
+    Suspect(String),
 }
 
 /// A connection made, taken from the client a try made it with.
@@ -302,6 +394,84 @@ struct Made {
     /// The daemon there's workspaces, which say which daemon it is, if
     /// it's one that says.
     workspaces: Workspaces,
+    /// The machines it goes through, nearest first.
+    through: Vec<MachineId>,
+    /// The machine, as it proved, and the key to know it by from now on,
+    /// if it proved itself (see [`ways`]).
+    pin: Option<(MachineId, Pin)>,
+}
+
+/// A connection as it's kept from one run of the daemon to the next.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Kept {
+    pub(super) host: String,
+    /// The command that runs clackatoo there.
+    pub(super) command: String,
+    /// Not passed on, as asked.
+    pub(super) unshared: bool,
+    /// The machine it was last connected to.
+    pub(super) machine: Option<MachineId>,
+}
+
+impl Kept {
+    /// `connection`, as the saved workspaces' file keeps it.
+    pub(super) fn from_saved(connection: &crate::saved::Connection) -> Self {
+        Self {
+            host: connection.host.clone(),
+            command: (connection.command.as_deref())
+                .unwrap_or(COMMAND)
+                .to_owned(),
+            unshared: connection.unshared,
+            machine: (connection.machine.as_deref()).and_then(|machine| machine.parse().ok()),
+        }
+    }
+
+    /// It, as the saved workspaces' file keeps it.
+    pub(super) fn saved(self) -> crate::saved::Connection {
+        crate::saved::Connection {
+            host: self.host,
+            command: (self.command != COMMAND).then_some(self.command),
+            unshared: self.unshared,
+            machine: self.machine.map(|machine| machine.to_string()),
+        }
+    }
+
+    /// `kept`, as a handover holds them: each one's host and command, and
+    /// beside them, whether each is passed on and its machine.
+    pub(super) fn handed_over(
+        kept: Vec<Self>,
+    ) -> (Vec<handover::Connection>, Vec<handover::Sharing>) {
+        let sharing = (kept.iter())
+            .map(|kept| handover::Sharing {
+                host: kept.host.clone(),
+                unshared: kept.unshared,
+                machine: kept.machine.map(|machine| machine.0),
+            })
+            .collect();
+        let connections = (kept.into_iter())
+            .map(|kept| handover::Connection {
+                host: kept.host,
+                command: kept.command,
+            })
+            .collect();
+        (connections, sharing)
+    }
+
+    /// The connections the build before handed over in `state`.
+    pub(super) fn taken_over(state: &handover::State) -> Vec<Self> {
+        (state.connections.iter())
+            .map(|connection| {
+                let sharing =
+                    (state.sharing.iter()).find(|sharing| sharing.host == connection.host);
+                Self {
+                    host: connection.host.clone(),
+                    command: connection.command.clone(),
+                    unshared: sharing.is_some_and(|sharing| sharing.unshared),
+                    machine: (sharing.and_then(|sharing| sharing.machine)).map(MachineId),
+                }
+            })
+            .collect()
+    }
 }
 
 /// A connection to another daemon, made, as the loop reads it.
@@ -319,8 +489,9 @@ pub(super) struct Reached {
 }
 
 impl Links {
-    /// The connections, as clients are told them.
-    fn list(&self) -> Vec<Connection> {
+    /// The connections, as clients are told them, but for whether each
+    /// goes over UDP, which `on_udp` says.
+    fn list(&self, on_udp: impl Fn(&Linked) -> bool) -> Vec<Connection> {
         (self.list.iter())
             .map(|linked| Connection {
                 host: linked.remote.host.clone(),
@@ -330,8 +501,79 @@ impl Links {
                 } else {
                     linked.state.clone()
                 },
+                // Over UDP, it goes straight there, whatever ssh's place.
+                through: (linked.through.iter())
+                    .filter(|_| !on_udp(linked))
+                    .map(|&machine| self.called(machine))
+                    .collect(),
+                unshared: linked.unshared,
             })
             .collect()
+    }
+
+    /// What `machine` is called here: its connection's host, or the
+    /// start of its ID.
+    pub(super) fn called(&self, machine: MachineId) -> String {
+        match self.to(machine) {
+            Some(at) => self.list[at].remote.host.clone(),
+            None => machine.to_string()[..8].to_owned(),
+        }
+    }
+
+    /// A way for a thread to tell the loop that the connection to a host
+    /// goes through these machines now.
+    pub(super) fn teller(&self) -> impl Fn(String, Vec<MachineId>) + Send + Sync + use<> {
+        let tell = self.tell.clone();
+        move |host, through| {
+            let _ = tell.send(News::Through { host, through });
+        }
+    }
+
+    /// Lets go of `linked`, whose connection has gone elsewhere: its
+    /// threads are waited for as the daemon stops, as any ending are.
+    pub(super) fn retire(&mut self, mut linked: Linked) {
+        self.ending.extend(linked.thread.take());
+        self.ending.extend(linked.bettering.take());
+    }
+
+    /// A connection to `remote`, asked for by `asker`, if a client asked:
+    /// asked for here if `asked`, or else to a machine passed on. Its
+    /// threads check who's there by the keys this daemon knows.
+    pub(super) fn new_link(
+        &self,
+        remote: Remote,
+        asker: Option<Token>,
+        asked_here: bool,
+    ) -> Linked {
+        let mut linked = Linked::new(remote, asker, asked_here);
+        linked.ways = Arc::new(Ways::new(&self.pins));
+        linked
+    }
+
+    /// The identity key `machine` is known by, if it is.
+    pub(super) fn pin(&self, machine: MachineId) -> Option<Pin> {
+        self.pins.get(machine)
+    }
+
+    /// Every identity key known, by machine.
+    pub(super) fn pinned(&self) -> Vec<(MachineId, Pin)> {
+        self.pins.all()
+    }
+
+    /// Knows `machine` by `pin` from now on, returning whether that's new.
+    pub(super) fn set_pin(&self, machine: MachineId, pin: Pin) -> bool {
+        self.pins.insert(machine, pin)
+    }
+
+    /// Forgets the key `machine` is known by, returning whether it was.
+    pub(super) fn forget_pin(&self, machine: MachineId) -> bool {
+        self.pins.remove(machine)
+    }
+
+    /// Where the connection to `machine` is in the list, by what it said
+    /// it is, or else what it's expected to be.
+    pub(super) fn to(&self, machine: MachineId) -> Option<usize> {
+        (self.list.iter()).position(|linked| linked.machine_id() == Some(machine))
     }
 
     /// Where the connection to `host` is in the list.
@@ -339,16 +581,28 @@ impl Links {
         (self.list.iter()).position(|linked| linked.remote.host == host)
     }
 
-    /// When the next connection waiting to be tried again is due.
+    /// When the next connection waiting to be tried again is due, or a
+    /// better way for one to go is to be tried.
     pub(super) fn due(&self) -> Option<Instant> {
-        self.list.iter().filter_map(|linked| linked.retry_at).min()
+        let now = self.unpassed.then(Instant::now);
+        (self.list.iter())
+            .flat_map(|linked| [linked.retry_at, linked.better_at])
+            .flatten()
+            .chain(now)
+            .min()
     }
 
     /// The connections, as they're kept from one run of the daemon to the
-    /// next: each one's host, and the command that runs clackatoo there.
-    pub(super) fn kept(&self) -> Vec<(String, String)> {
+    /// next: those asked for here.
+    pub(super) fn kept(&self) -> Vec<Kept> {
         (self.list.iter())
-            .map(|linked| (linked.remote.host.clone(), linked.remote.command.clone()))
+            .filter(|linked| linked.asked)
+            .map(|linked| Kept {
+                host: linked.remote.host.clone(),
+                command: linked.remote.command.clone(),
+                unshared: linked.unshared,
+                machine: linked.machine_id(),
+            })
             .collect()
     }
 }
@@ -356,12 +610,16 @@ impl Links {
 impl Daemon {
     /// Answers [`Request::Connect`](clackatoo_protocol::Request::Connect)
     /// from the client at `token`: connects to `host`, running `command`
-    /// there, or tries again at once if the connection is waiting to be.
+    /// there, or tries again at once if the connection is waiting to be;
+    /// passing it on or not as `share` says, if it says. A connection to a
+    /// machine passed on by that name becomes one asked for here, which
+    /// goes straight there once ssh gets there.
     pub(super) fn serve_connect(
         &mut self,
         token: Token,
         host: &str,
         command: Option<String>,
+        share: Option<bool>,
     ) -> Result<Response, Error> {
         if self.config.links.is_none() {
             return Err(Error::Other(
@@ -386,25 +644,41 @@ impl Daemon {
             linked.asker = Some(token);
             // From its next try on.
             linked.remote.command = command;
+            if let Some(share) = share {
+                linked.unshared = !share;
+            }
+            if !linked.asked {
+                linked.asked = true;
+                self.set_direct(at);
+                // Straight there, as soon as ssh gets there.
+                self.links.list[at].better_at = Some(Instant::now());
+            }
+            let linked = &mut self.links.list[at];
             (linked.trying.is_none() && linked.connected.is_none()).then(|| {
                 linked.backoff = FIRST_RETRY;
                 at
             })
         } else {
-            self.links.list.push(Linked::new(
+            let mut linked = self.links.new_link(
                 Remote {
                     host: host.to_owned(),
                     command,
                 },
                 Some(token),
-            ));
-            Some(self.links.list.len() - 1)
+                true,
+            );
+            linked.unshared = share == Some(false);
+            self.links.list.push(linked);
+            let at = self.links.list.len() - 1;
+            self.set_direct(at);
+            Some(at)
         };
         if let Some(at) = at {
             self.try_link(at);
         }
         self.keep_soon();
         self.tell_connections();
+        self.sharing_changed();
         Ok(Response::Done)
     }
 
@@ -423,12 +697,23 @@ impl Daemon {
                 host.escape_debug()
             )));
         };
+        if !self.links.list[at].asked {
+            return Err(self.passed_on_by(at));
+        }
         self.take_back_asks(host);
-        let linked = self.links.list.remove(at);
-        self.end_link(linked, false);
-        log::info!("the connection to {host} has ended, as asked");
+        if self.passed_to_here(at) {
+            // Shown still, through the daemon passing it on.
+            self.unask(at);
+            log::info!("{host} is reached only through the machines passing it on now, as asked");
+        } else {
+            let linked = self.links.list.remove(at);
+            self.end_link(linked, false);
+            log::info!("the connection to {host} has ended, as asked");
+            self.sync_chained();
+        }
         self.keep_soon();
         self.tell_connections();
+        self.sharing_changed();
         Ok(Response::Done)
     }
 
@@ -468,7 +753,7 @@ impl Daemon {
             self.route_asks();
             self.tell_connections();
         }
-        Ok(Response::Connections(self.links.list()))
+        Ok(Response::Connections(self.connections()))
     }
 
     /// Takes the answer the client at `token` gave to ssh's question
@@ -561,6 +846,7 @@ impl Daemon {
                 News::Withdrawn { host, asking } => {
                     self.take_back_asks_where(|ask| ask.host == host && ask.asking == asking);
                 }
+                News::Through { host, through } => self.link_goes(&host, through),
             }
         }
         if any {
@@ -569,8 +855,11 @@ impl Daemon {
         }
     }
 
-    /// Tries again each connection whose time has come.
+    /// Tries again each connection whose time has come, and a better way
+    /// for each whose time for that has.
     pub(super) fn retry_links(&mut self) {
+        self.drop_unpassed();
+        self.try_better_ways();
         let now = Instant::now();
         let due: Vec<usize> = (self.links.list.iter().enumerate())
             .filter(|(_, linked)| linked.retry_at.is_some_and(|due| due <= now))
@@ -585,34 +874,44 @@ impl Daemon {
         self.tell_connections();
     }
 
-    /// Connects to each of `kept`, a host and the command that runs
-    /// clackatoo there, as the daemon starts afresh or carries on from an
-    /// upgrade: asked for by no client, so ssh's questions go to any
-    /// window that answers them.
-    pub(super) fn connect_kept(&mut self, kept: impl IntoIterator<Item = (String, String)>) {
+    /// Connects to each of `kept`, as the daemon starts afresh or carries
+    /// on from an upgrade: asked for by no client, so ssh's questions go
+    /// to any window that answers them.
+    pub(super) fn connect_kept(&mut self, kept: impl IntoIterator<Item = Kept>) {
         if self.config.links.is_none() {
             return;
         }
-        for (host, command) in kept {
+        for kept in kept {
+            let Kept {
+                host,
+                command,
+                unshared,
+                machine,
+            } = kept;
             if self.links.find(&host).is_some()
                 || host.trim().is_empty()
                 || host.chars().any(char::is_control)
             {
                 continue;
             }
-            self.links
-                .list
-                .push(Linked::new(Remote { host, command }, None));
-            self.try_link(self.links.list.len() - 1);
+            let mut linked = self.links.new_link(Remote { host, command }, None, true);
+            linked.unshared = unshared;
+            linked.expected = machine.filter(|&machine| machine != self.machine.id);
+            self.links.list.push(linked);
+            let at = self.links.list.len() - 1;
+            self.set_direct(at);
+            self.try_link(at);
         }
         self.tell_connections();
     }
 
     /// Ends every connection, as the daemon stops or upgrades, waiting for
-    /// each to close, so no ssh of theirs is left running. Returns them, a
-    /// host and command each, for the next build.
-    pub(super) fn end_links(&mut self) -> Vec<(String, String)> {
+    /// each to close, so no ssh of theirs is left running. Returns those
+    /// to keep, for the next build.
+    pub(super) fn end_links(&mut self) -> Vec<Kept> {
         let kept = self.links.kept();
+        // The keys learned, written before the daemon goes.
+        self.links.pins.kept();
         for ask in std::mem::take(&mut self.links.asks) {
             let _ = ask.reply.send(None);
         }
@@ -639,9 +938,16 @@ impl Daemon {
     /// Ends `linked`: stops its try, if one is under way, and closes its
     /// connection, waiting for that only if `now`. Its askpass goes with
     /// it, and the socket with that, and what was shown of its workspaces.
-    fn end_link(&mut self, mut linked: Linked, now: bool) {
-        // Its try's ssh, and any its connection opened to carry on.
+    pub(super) fn end_link(&mut self, mut linked: Linked, now: bool) {
+        // Its try's ssh, and any its connection opened to carry on; and
+        // nothing waits for a way to it now.
         linked.cancel.cancel();
+        linked.ways.end();
+        if let Some(thread) = linked.bettering.take() {
+            self.links.ending.push(thread);
+        }
+        // What was carried on through it for others goes with it.
+        self.abandon_carried_by(&linked.remote.host);
         if let Some((token, _)) = linked.connected
             && let Some(Source::Reached(mut reached)) = self.sources.try_remove(token.0)
         {
@@ -666,10 +972,11 @@ impl Daemon {
     /// Ends the connection made for the connection at `at` in the list,
     /// as a new ssh to carry it on can't log in: it's tried again as its
     /// state says.
-    fn end_connection(&mut self, at: usize) {
+    pub(super) fn end_connection(&mut self, at: usize) {
         let Some((token, _)) = self.links.list[at].connected.take() else {
             return;
         };
+        self.link_down(at);
         if let Some(Source::Reached(mut reached)) = self.sources.try_remove(token.0) {
             let _ = self.poll.registry().deregister(&mut reached.stream);
             self.unread
@@ -682,9 +989,31 @@ impl Daemon {
         }
     }
 
+    /// Makes somewhere for ssh to ask its questions for the connection at
+    /// `at`, if it goes by ssh and has none.
+    pub(super) fn serve_its_askpass(&mut self, at: usize) {
+        let linked = &mut self.links.list[at];
+        if linked.asked
+            && linked.askpass.is_none()
+            && (self.config.links.as_ref()).is_some_and(|config| config.askpass.is_some())
+            && let Some(dir) = &self.runtime
+        {
+            self.links.sockets += 1;
+            linked.askpass = serve_askpass(
+                dir.join(format!(
+                    "askpass-{:016x}-{}.sock",
+                    self.id, self.links.sockets
+                )),
+                &linked.remote.host,
+                self.links.tell.clone(),
+                Arc::clone(&self.waker),
+            );
+        }
+    }
+
     /// Ends what carries a connection, on a thread of its own, as that
     /// waits for the connection's own thread to finish.
-    fn let_carried_go(&mut self, carried: Option<Carried>) {
+    pub(super) fn let_carried_go(&mut self, carried: Option<Carried>) {
         let Some(carried) = carried else {
             return;
         };
@@ -702,49 +1031,34 @@ impl Daemon {
 
     /// Starts a try at the connection at `at` in the list, on a thread of
     /// its own.
-    fn try_link(&mut self, at: usize) {
-        let Some(config) = self.config.links.clone() else {
+    pub(super) fn try_link(&mut self, at: usize) {
+        if self.config.links.is_none() {
             return;
-        };
+        }
         self.links.tries += 1;
         let number = self.links.tries;
         let linked = &mut self.links.list[at];
         linked.retry_at = None;
         linked.answered = None;
         linked.state = ConnectionState::Connecting;
-        if linked.askpass.is_none()
-            && config.askpass.is_some()
-            && let Some(dir) = &self.runtime
-        {
-            self.links.sockets += 1;
-            linked.askpass = serve_askpass(
-                dir.join(format!(
-                    "askpass-{:016x}-{}.sock",
-                    self.id, self.links.sockets
-                )),
-                &linked.remote.host,
-                self.links.tell.clone(),
-                Arc::clone(&self.waker),
-            );
-        }
-        let asking =
-            (config.askpass.clone())
-                .zip(linked.askpass.as_ref())
-                .map(|(program, askpass)| Asking {
-                    program,
-                    socket: askpass.path().to_owned(),
-                });
-        let cancel = Arc::clone(&linked.cancel);
+        // ssh asks through the askpass made for it now, if it goes by ssh.
+        self.set_direct(at);
+        let linked = &mut self.links.list[at];
         linked.trying = Some(number);
-        let remote = linked.remote.clone();
+        let host = linked.remote.host.clone();
+        let ways = Arc::clone(&linked.ways);
         let tell = self.links.tell.clone();
         let waker = Arc::clone(&self.waker);
+        let used = self.used_for(&host);
+        let speaks = (self.config.links.as_ref())
+            .and_then(|config| config.speaks)
+            .unwrap_or(clackatoo_protocol::PROTOCOL_VERSION);
         let spawned = std::thread::Builder::new()
             .name("connecting".into())
             .spawn(move || {
-                let outcome = try_connecting(&remote, &config.ssh, asking, &cancel);
+                let outcome = try_connecting(&ways, &used, speaks);
                 let _ = tell.send(News::Tried {
-                    host: remote.host,
+                    host,
                     number,
                     outcome,
                 });
@@ -795,6 +1109,21 @@ impl Daemon {
                 Some(Answered::Given) | None => self.link_failed(at, reason),
             },
             Outcome::Refused(reason) => self.link_stopped(at, &reason),
+            Outcome::Distrusted(reason) => {
+                log::error!("the connection to {host} is refused: {reason}");
+                self.link_stopped(at, &reason);
+                self.say_to_windows(reason);
+            }
+            Outcome::Suspect(reason) => {
+                log::error!("a way to {host} is refused: {reason}");
+                let linked = &mut self.links.list[at];
+                let said = linked.suspected.as_ref() == Some(&reason);
+                linked.suspected = Some(reason.clone());
+                self.link_failed(at, reason.clone());
+                if !said {
+                    self.say_to_windows(reason);
+                }
+            }
         }
     }
 
@@ -807,18 +1136,38 @@ impl Daemon {
             wire,
             carried,
             workspaces,
+            through,
+            pin,
         } = made;
         let host = self.links.list[at].remote.host.clone();
         let machine = (workspaces.machine.as_ref()).map(|machine| shown_machine(machine, &host));
         let refused = machine
             .as_ref()
-            .and_then(|machine| self.same_machine(machine));
-        self.links.list[at].machine = machine;
+            .and_then(|machine| self.refused(at, machine))
+            .or_else(|| {
+                // The machine that signed its certificate is the one it says.
+                let (proved, _) = pin?;
+                (machine.as_ref().map(|machine| machine.id) != Some(proved))
+                    .then(|| "it says it's another machine than the one its key proves".to_owned())
+            });
+        self.links.list[at].machine.clone_from(&machine);
         if let Some(reason) = refused {
             self.let_carried_go(carried);
-            self.link_stopped(at, reason);
+            self.link_stopped(at, &reason);
             return;
         }
+        self.links.list[at].suspected = None;
+        // Known by its key from now on.
+        if let Some((proved, pin)) = pin {
+            self.links.set_pin(proved, pin);
+        }
+        // A machine passed on, reached straight now: its connection through
+        // the daemon passing it on gives way, and what it showed is shown
+        // from this one, numbered as it was.
+        let at = match machine.as_ref() {
+            Some(machine) => self.take_over_passed(at, machine.id),
+            None => at,
+        };
         // Nothing else is put among the sources before it.
         let token = Token(self.sources.vacant_key());
         let registered = stream.set_nonblocking(true).and_then(|()| {
@@ -835,6 +1184,8 @@ impl Daemon {
                 return;
             }
         };
+        let offerer = carried.as_ref().map(Carried::offerer);
+        let forwarder = carried.as_ref().map(|carried| carried.forwarder(wire));
         self.sources.insert(Source::Reached(Reached {
             host: host.clone(),
             stream,
@@ -846,6 +1197,12 @@ impl Daemon {
         let linked = &mut self.links.list[at];
         linked.connected = Some((token, Instant::now()));
         linked.state = ConnectionState::Connected { wire };
+        linked.offerer = offerer;
+        linked.forwarder = forwarder;
+        linked.ways.set_current(through.clone());
+        linked.through = through;
+        linked.better_at = None;
+        linked.wire = Some(wire);
         log::info!(
             "connected to {host}{}, at protocol {wire}",
             (linked.machine.as_ref())
@@ -855,6 +1212,10 @@ impl Daemon {
         self.relay_linked(at, &workspaces);
         // What came after the answer, read already, is taken in too.
         self.queue_flood(Flood::Reached(token));
+        // Connections it can carry on, and others' ways to it.
+        self.sync_chained();
+        self.better_soon(at);
+        self.sharing_changed();
     }
 
     /// The connection at `at` in the list failed, or was lost, for
@@ -983,6 +1344,37 @@ impl Daemon {
         }
     }
 
+    /// Why the connection at `at`, which reached `machine`, is refused, if
+    /// it is: as [`same_machine`](Self::same_machine) says, or because
+    /// another connection asked for here reaches that machine already,
+    /// by another name. A machine is shown once, however many ways reach
+    /// it.
+    fn refused(&self, at: usize, machine: &Machine) -> Option<String> {
+        if let Some(reason) = self.same_machine(machine) {
+            return Some(reason.to_owned());
+        }
+        // One asked for here takes over from one through others, rather.
+        let asked = self.links.list[at].asked;
+        let other = (self.links.list.iter().enumerate()).find(|&(other, linked)| {
+            other != at
+                && (linked.asked || !asked)
+                && (linked.machine.as_ref()).is_some_and(|known| known.id == machine.id)
+        });
+        other.map(|(_, linked)| {
+            if asked {
+                format!(
+                    "it's the machine ‘{}’ reaches already: :disconnect one of them",
+                    linked.remote.host
+                )
+            } else {
+                format!(
+                    "it's reached another way already, as ‘{}’",
+                    linked.remote.host
+                )
+            }
+        })
+    }
+
     /// The daemon connected to as `host` says it's `machine`, as its
     /// workspaces changed. One that turns out to be this daemon itself is
     /// let go.
@@ -996,14 +1388,16 @@ impl Daemon {
         }
         let refused = machine
             .as_ref()
-            .and_then(|machine| self.same_machine(machine));
+            .and_then(|machine| self.refused(at, machine));
         self.links.list[at].machine = machine;
         if let Some(reason) = refused {
             self.take_back_asks(host);
             self.end_connection(at);
-            self.link_stopped(at, reason);
+            self.link_stopped(at, &reason);
         }
         self.tell_connections();
+        self.sync_chained();
+        self.sharing_changed();
     }
 
     /// The connection at `token` was lost, for `why`, or as the QUIC
@@ -1023,6 +1417,7 @@ impl Daemon {
             return;
         };
         self.relay_lost(at, reached.upstream);
+        self.link_down(at);
         let linked = &mut self.links.list[at];
         if let Some((_, since)) = linked.connected.take()
             && since.elapsed() >= LASTED
@@ -1033,6 +1428,8 @@ impl Daemon {
         self.take_back_asks(&reached.host);
         self.link_failed(at, reason);
         self.tell_connections();
+        self.sync_chained();
+        self.sharing_changed();
     }
 
     /// Puts each of ssh's questions waiting to a client that answers them,
@@ -1139,8 +1536,10 @@ impl Daemon {
 
     /// Tells every client watching the connections how they are, if that
     /// changed since they were last told.
-    fn tell_connections(&mut self) {
-        let list = self.links.list();
+    pub(super) fn tell_connections(&mut self) {
+        // What's passed on follows the connections.
+        self.sharing_changed();
+        let list = self.connections();
         if self.links.told.as_ref() == Some(&list) {
             return;
         }
@@ -1163,6 +1562,24 @@ impl Daemon {
         }
     }
 
+    /// The connections, as clients are told them.
+    fn connections(&self) -> Vec<Connection> {
+        self.links.list(|linked| self.on_udp(linked))
+    }
+
+    /// Whether `linked`'s connection goes over UDP now, its carrier only
+    /// waiting in case UDP stops getting through.
+    pub(super) fn on_udp(&self, linked: &Linked) -> bool {
+        let Some((token, _)) = linked.connected else {
+            return false;
+        };
+        matches!(
+            self.sources.get(token.0),
+            Some(Source::Reached(Reached { carried: Some(carried), .. }))
+                if carried.route() == crate::quic::Route::Udp
+        )
+    }
+
     /// Whether the client at `token` is a device on the web app.
     fn is_web_device(&self, token: Token) -> bool {
         matches!(
@@ -1174,10 +1591,23 @@ impl Daemon {
 
 impl Linked {
     /// A connection to `remote`, asked for by `asker`, if a client asked,
-    /// not yet tried.
-    fn new(remote: Remote, asker: Option<Token>) -> Self {
+    /// not yet tried: asked for here if `asked`, or else to a machine
+    /// passed on.
+    pub(super) fn new(remote: Remote, asker: Option<Token>, asked_here: bool) -> Self {
         Self {
             remote,
+            asked: asked_here,
+            unshared: false,
+            expected: None,
+            ways: Arc::default(),
+            through: Vec::new(),
+            passed: Vec::new(),
+            offerer: None,
+            forwarder: None,
+            better_at: None,
+            bettering: None,
+            suspected: None,
+            wire: None,
             state: ConnectionState::Connecting,
             machine: None,
             asker,
@@ -1192,47 +1622,134 @@ impl Linked {
             relayed: Relayed::default(),
         }
     }
+
+    /// Where ssh asks its questions for it, once it has made somewhere.
+    pub(super) fn askpass(&self) -> Option<PathBuf> {
+        (self.askpass.as_ref()).map(|askpass| askpass.path().to_owned())
+    }
+
+    /// Lets go of where ssh asks its questions for it, which goes with
+    /// its socket, as it no longer goes by ssh.
+    pub(super) fn drop_askpass(&mut self) {
+        self.askpass = None;
+    }
+
+    /// A way to offer its connection a better carrier, while connected.
+    pub(super) fn offerer(&self) -> Option<Offerer> {
+        self.offerer.clone()
+    }
+
+    /// Forgets the way to offer its connection a better carrier, as the
+    /// connection has gone.
+    pub(super) fn offerer_gone(&mut self) {
+        self.offerer = None;
+    }
+
+    /// The machine it's to: as it said, or else as expected.
+    pub(super) fn machine_id(&self) -> Option<MachineId> {
+        (self.machine.as_ref())
+            .map(|machine| machine.id)
+            .or(self.expected)
+    }
 }
 
-/// Connects to `remote`, running `ssh` as ssh, which asks its questions
-/// as `asking` says: logs in, greets the daemon there, and starts watching
-/// its workspaces, which say which daemon it is. On a thread of its own:
-/// it may take minutes. `cancel` stops it.
+/// Connects by the best of `ways` that opens and proves to be the machine
+/// it's known as, calling `used` as each carrier it goes by is taken on,
+/// saying it speaks protocol `speaks`: logs in, greets the daemon there,
+/// checks who's there, and starts watching its workspaces, which say which
+/// daemon it is. On a thread of its own: it may take minutes.
 fn try_connecting(
-    remote: &Remote,
-    ssh: &std::ffi::OsStr,
-    asking: Option<Asking>,
-    cancel: &Arc<Cancel>,
+    ways: &Arc<Ways>,
+    used: &Arc<dyn Fn(Vec<MachineId>) + Send + Sync>,
+    speaks: u32,
 ) -> Outcome {
-    let mut client = match remote::connect_with(remote, ssh, false, asking, Some(cancel)) {
-        Ok(client) => client,
-        Err(RemoteError::Client(ClientError::VersionMismatch { ours, daemon })) => {
-            return Outcome::Refused(format!(
-                "the daemon there speaks protocol {daemon}, and this one {ours}, too far apart \
-                 to talk: `clackatoo update` on the older machine brings them together"
-            ));
+    let mut failed = "there's no way there now".to_owned();
+    // A way through another machine that answered for the machine with
+    // another key: that way alone is ruled out.
+    let mut suspect = None;
+    for attempt in ways.attempts() {
+        let opened = match ways.open_attempt(&attempt) {
+            Ok(opened) => opened,
+            Err(err) => {
+                log::info!("a way to a machine failed: {err}");
+                failed = with_causes(&err);
+                continue;
+            }
+        };
+        let (through, vouched) = (opened.through.clone(), opened.vouched);
+        let ways::Opened {
+            stream,
+            ssh,
+            address,
+            ..
+        } = opened;
+        let redial = ways::redial(Arc::clone(ways), Arc::clone(used));
+        let carried = Client::over_carrier(
+            stream,
+            address.map(UdpTarget::Host),
+            ssh,
+            Some(redial),
+            speaks,
+        );
+        let mut client = match carried.map_err(RemoteError::from) {
+            Ok(client) => client,
+            Err(RemoteError::Client(ClientError::VersionMismatch { ours, daemon })) => {
+                return Outcome::Refused(format!(
+                    "the daemon there speaks protocol {daemon}, and this one {ours}, too far \
+                     apart to talk: `clackatoo update` on the older machine brings them together"
+                ));
+            }
+            Err(err) => {
+                failed = with_causes(&err);
+                continue;
+            }
+        };
+        // Nothing more is asked of it before it proves who it is.
+        let checked = (client.certified())
+            .map(|(certificate, signed)| ways.trusts(&through, vouched, certificate, signed));
+        let pin = match checked {
+            None => None,
+            Some(Ok(pin)) => pin,
+            Some(Err(ways::Untrusted { reason, loud: true })) if through.is_empty() => {
+                return Outcome::Distrusted(reason);
+            }
+            Some(Err(ways::Untrusted { reason, loud: true })) => {
+                log::error!("a way to a machine answered as another: {reason}");
+                suspect = Some(reason);
+                continue;
+            }
+            Some(Err(ways::Untrusted { reason, .. })) => {
+                log::info!("a way to a machine didn't prove who's there: {reason}");
+                failed = reason;
+                continue;
+            }
+        };
+        let watched = (client.set_read_timeout(Some(ANSWER_WAIT)))
+            .map_err(ClientError::from)
+            .and_then(|()| client.watch_workspaces())
+            .and_then(|workspaces| {
+                client.set_read_timeout(None)?;
+                Ok(workspaces)
+            });
+        match watched {
+            Ok(workspaces) => {
+                let (stream, decoder, wire, carried) = client.into_parts();
+                return Outcome::Made(Box::new(Made {
+                    stream,
+                    decoder,
+                    wire,
+                    carried,
+                    workspaces,
+                    through,
+                    pin,
+                }));
+            }
+            Err(err) => failed = with_causes(&err),
         }
-        Err(err) => return Outcome::Failed(with_causes(&err)),
-    };
-    let watched = (client.set_read_timeout(Some(ANSWER_WAIT)))
-        .map_err(ClientError::from)
-        .and_then(|()| client.watch_workspaces())
-        .and_then(|workspaces| {
-            client.set_read_timeout(None)?;
-            Ok(workspaces)
-        });
-    match watched {
-        Ok(workspaces) => {
-            let (stream, decoder, wire, carried) = client.into_parts();
-            Outcome::Made(Box::new(Made {
-                stream,
-                decoder,
-                wire,
-                carried,
-                workspaces,
-            }))
-        }
-        Err(err) => Outcome::Failed(with_causes(&err)),
+    }
+    match suspect {
+        Some(reason) => Outcome::Suspect(reason),
+        None => Outcome::Failed(failed),
     }
 }
 
@@ -1361,12 +1878,13 @@ impl Daemon {
         machine: Machine,
     ) -> (Token, std::os::unix::net::UnixStream) {
         let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
-        let mut linked = Linked::new(
+        let mut linked = self.links.new_link(
             Remote {
                 host: host.to_owned(),
                 command: COMMAND.to_owned(),
             },
             None,
+            true,
         );
         linked.machine = Some(machine.clone());
         self.links.list.push(linked);
@@ -1383,6 +1901,8 @@ impl Daemon {
                 wire: clackatoo_protocol::PROTOCOL_VERSION,
                 carried: None,
                 workspaces,
+                through: Vec::new(),
+                pin: None,
             },
         );
         let token = self.links.list[at].connected.unwrap().0;
@@ -1412,6 +1932,8 @@ impl Daemon {
                 wire: clackatoo_protocol::PROTOCOL_VERSION,
                 carried: None,
                 workspaces,
+                through: Vec::new(),
+                pin: None,
             },
         );
         let token = self.links.list[at].connected.unwrap().0;

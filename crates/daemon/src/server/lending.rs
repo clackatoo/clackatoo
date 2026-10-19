@@ -133,14 +133,12 @@ impl Daemon {
         self.held_reach_changed();
         // It watches the workspaces already, as it learned which machine
         // this is from them: those lent it, kept from before, come now.
+        // With what this daemon passes on, which only a daemon saying which
+        // machine it is is told.
         if watching {
-            let mut shown = self.shown_workspaces();
-            if let Some(without) = self.without_parked(&shown) {
-                shown = without;
-            }
-            if let Some(with) = self.with_lent(token, &shown) {
-                self.send_event(token, Event::Workspaces(with));
-            }
+            let shown = self.relays_shown(&self.shown_workspaces());
+            let with = self.with_lent(token, &shown).unwrap_or(shown);
+            self.send_event(token, Event::Workspaces(with));
         }
         Ok(done)
     }

@@ -27,9 +27,9 @@ use clackatoo_text::{
 
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
-    BLANK, BLOCK_MARKS, BLOCKS, COLOURS, EXITED, FALLBACKS, FEDERATION, FORWARD_PACE, FORWARDS,
-    HOVER, INLAY_HINTS, LEND, LIMITS, MIXED, PHONE_TERMINALS, PREVIEW_COLOURS, RECOVER, RELAY,
-    RESTORED, SYMBOLS, USES, WORDS,
+    BLANK, BLOCK_MARKS, BLOCKS, CHAIN, COLOURS, EXITED, FALLBACKS, FEDERATION, FORWARD_PACE,
+    FORWARDS, HOVER, INLAY_HINTS, LEND, LIMITS, MIXED, PHONE_TERMINALS, PREVIEW_COLOURS, RECOVER,
+    RELAY, RESTORED, SYMBOLS, USES, WORDS,
 };
 use crate::{
     AgentSession, AgentTools, Author, Axis, BlockMarks, BoardId, BufferId, BufferSnapshot,
@@ -570,6 +570,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 restored: Vec::new(),
                 machine: None,
                 others: Vec::new(),
+                passed: Vec::new(),
             }))),
         ),
         (
@@ -940,7 +941,82 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
     samples.extend(relay().into_iter().map(|sample| (RELAY, sample)));
     samples.extend(lend().into_iter().map(|sample| (LEND, sample)));
     samples.extend(mixed().into_iter().map(|sample| (MIXED, sample)));
+    samples.extend(chain().into_iter().map(|sample| (CHAIN, sample)));
     samples
+}
+
+/// Samples of protocol 95: a daemon's workspaces saying which machines it
+/// passes on, one straight there, vouched for, and one through yet
+/// another, not connected now; a daemon asking for a stream to carry its
+/// connection on to one of them, the answer, and the certificate signed
+/// that comes through it; forgetting a machine's key; a connection asked
+/// not to be passed on; and the connections, one to a machine passed on,
+/// going through the daemon that passes it on, and one not passed on.
+fn chain() -> Vec<Sample> {
+    use Sample::{Client, Server};
+    let server = MachineId([0x5e; 16]);
+    let nas = MachineId([0x0a; 16]);
+    let mut workspaces = workspaces();
+    workspaces.passed = vec![
+        crate::Passed {
+            id: server,
+            name: "server".into(),
+            run: 0x5e5e,
+            through: Vec::new(),
+            reached: true,
+            key: Some([0x4b; 32]),
+        },
+        crate::Passed {
+            id: nas,
+            name: "nas".into(),
+            run: 0x0a0a,
+            through: vec![server],
+            reached: false,
+            key: None,
+        },
+    ];
+    vec![
+        Server(ServerMessage::Event(Event::Workspaces(workspaces))),
+        Client(ClientMessage::Request(Request::Reach { machine: server })),
+        Server(ServerMessage::Response(Response::Done)),
+        Server(ServerMessage::Response(Response::Carrying {
+            certificate: vec![1, 2, 3],
+            udp: None,
+            signed: Some(crate::Signed {
+                machine: server,
+                key: [0x4b; 32],
+                signature: vec![0x51; 64],
+            }),
+        })),
+        Client(ClientMessage::Request(Request::Forget {
+            host: "server".into(),
+        })),
+        Client(ClientMessage::Request(Request::Connect {
+            host: "shared.example.org".into(),
+            command: None,
+            share: Some(false),
+        })),
+        Server(ServerMessage::Event(Event::Connections(vec![
+            Connection {
+                host: "server".into(),
+                machine: Some(Machine {
+                    id: server,
+                    name: "jack-server".into(),
+                    run: 0x5e5e,
+                }),
+                state: ConnectionState::Connected { wire: 95 },
+                through: vec!["desk".into()],
+                unshared: false,
+            },
+            Connection {
+                host: "shared.example.org".into(),
+                machine: None,
+                state: ConnectionState::Connecting,
+                through: Vec::new(),
+                unshared: true,
+            },
+        ]))),
+    ]
 }
 
 /// Samples of protocol 94: a daemon putting a pane of its machine's in a
@@ -1158,6 +1234,8 @@ fn federation() -> Vec<Sample> {
         host: "jack@laptop:2222".into(),
         machine: Some(laptop.clone()),
         state,
+        through: Vec::new(),
+        unshared: false,
     };
     let reason = || "ssh: connect to host laptop port 2222: Connection refused".to_owned();
     vec![
@@ -1165,6 +1243,7 @@ fn federation() -> Vec<Sample> {
         Client(ClientMessage::Request(Request::Connect {
             host: "jack@laptop:2222".into(),
             command: Some("~/.cargo/bin/clackatoo".into()),
+            share: None,
         })),
         Server(ServerMessage::Response(Response::Done)),
         Client(ClientMessage::Request(Request::WatchConnections {
@@ -1515,6 +1594,7 @@ fn more() -> Vec<Sample> {
                 port: 60000,
                 probe_key: [7; 16],
             }),
+            signed: None,
         }),
         response(Response::Reviewed("kept".into())),
         // Workspaces: what a new pane can show, every kind.
@@ -2215,6 +2295,7 @@ fn workspaces() -> Workspaces {
         restored: Vec::new(),
         machine: None,
         others: Vec::new(),
+        passed: Vec::new(),
     }
 }
 

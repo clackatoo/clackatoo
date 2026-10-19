@@ -202,8 +202,10 @@ local client = {
 	-- `:connect HOST` does, saying nothing unless it fails:
 	-- `client.connect("desk")`. The daemon keeps its connections, so
 	-- asking again, as a config does in every window, leaves one as it is.
-	connect = function(host)
-		call(core.connect, tostring(host))
+	-- `client.connect("server", {share = false})` keeps it from the
+	-- daemons connected to this one, as `:connect HOST --no-share` does.
+	connect = function(host, options)
+		call(core.connect, tostring(host), options)
 	end,
 	-- Ends the daemon's connection to another machine, as
 	-- `:disconnect HOST` does: `client.disconnect("desk")`.

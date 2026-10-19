@@ -417,7 +417,7 @@ impl Desk {
             }
             Action::PickWorkspace => self.open_palette(Purpose::Workspace),
             Action::CommandLine => self.open_palette(Purpose::Command),
-            Action::Connect => self.ask_connect(None),
+            Action::Connect => self.ask_connect(None, None),
             Action::Find(kind) => self.open_finder(kind, String::new()),
             Action::Hunk(action) => self.editor_hunk(action),
             Action::Explore => self.toggle_explorer(),

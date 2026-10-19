@@ -511,22 +511,19 @@ impl Daemon {
     /// own is kept again for it.
     pub(super) fn tell_workspaces(&mut self) {
         let shown = self.shown_workspaces();
-        // A daemon relaying is never shown what's parked here.
-        let for_relays = self.without_parked(&shown);
-        let relayed = for_relays.as_ref().unwrap_or(&shown);
+        let relayed = self.relays_shown(&shown);
         // A daemon lent workspaces is told them, and no one else.
         let lent: BTreeMap<Token, Vec<u8>> = if (self.workspaces.get().list.iter())
             .any(|workspace| workspace.lent.is_some())
         {
             (self.sources.iter())
-                .filter_map(|(key, _)| Some((Token(key), self.lent_frame(Token(key), relayed)?)))
+                .filter_map(|(key, _)| Some((Token(key), self.lent_frame(Token(key), &relayed)?)))
                 .collect()
         } else {
             BTreeMap::new()
         };
-        let to_relays = for_relays.map(|shown| ServerMessage::Event(Event::Workspaces(shown)));
-        let mut to_relays =
-            (to_relays.as_ref()).map(|event| Broadcast::new(event, "the workspaces"));
+        let to_relays = ServerMessage::Event(Event::Workspaces(relayed));
+        let mut to_relays = Some(Broadcast::new(&to_relays, "the workspaces"));
         let event = ServerMessage::Event(Event::Workspaces(shown));
         let mut event = Broadcast::new(&event, "the workspaces");
         let mut watchers = Vec::new();
@@ -555,6 +552,15 @@ impl Daemon {
         for token in watchers {
             self.flush_client(token);
         }
+    }
+
+    /// `shown`, as a daemon relaying for clients of its own is told it:
+    /// without what's parked here, and with the machines this daemon
+    /// passes on, which only such a daemon is told.
+    pub(super) fn relays_shown(&self, shown: &Workspaces) -> Workspaces {
+        let mut relayed = self.without_parked(shown).unwrap_or_else(|| shown.clone());
+        relayed.passed = self.passed_on();
+        relayed
     }
 
     /// `shown`, without the workspaces panes parked here are shown in, if
@@ -938,13 +944,14 @@ impl Daemon {
             Request::NewTab {
                 workspace: local,
                 terminal: content,
-                ..
+                on,
             } => self.relayed_workspace(*local).map(|(at, workspace)| {
                 let renumbered = self.relayed_content(at, content).map(|terminal| {
+                    // A third machine the daemon there passes on, if named.
                     let tab = Request::NewTab {
                         workspace,
                         terminal,
-                        on: None,
+                        on: *on,
                     };
                     (tab, Then::Created)
                 });
@@ -954,14 +961,14 @@ impl Daemon {
                 pane: local,
                 side,
                 terminal: content,
-                ..
+                on,
             } => self.relayed_pane(*local).map(|(at, pane)| {
                 let renumbered = self.relayed_content(at, content).map(|terminal| {
                     let split = Request::Split {
                         pane,
                         side: *side,
                         terminal,
-                        on: None,
+                        on: *on,
                     };
                     (split, Then::Created)
                 });
@@ -972,7 +979,7 @@ impl Daemon {
                 side,
                 terminal: content,
                 share,
-                ..
+                on,
             } => self.relayed_tab(*local).map(|(at, tab)| {
                 let renumbered = self.relayed_content(at, content).map(|terminal| {
                     let split = Request::SplitTab {
@@ -980,7 +987,7 @@ impl Daemon {
                         side: *side,
                         terminal,
                         share: *share,
-                        on: None,
+                        on: *on,
                     };
                     (split, Then::Created)
                 });
@@ -1960,6 +1967,12 @@ impl Daemon {
                      doesn't: its workspaces aren't shown"
                 );
             }
+            return;
+        };
+        // The machines it passes on, which this daemon may connect to
+        // through it.
+        self.take_passed(at, &workspaces.passed);
+        let Some(at) = self.links.find(&host) else {
             return;
         };
         let own = self.machine.id;
