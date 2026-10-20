@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026.10.62 (2026-10-20)
+
+### Features
+
+- **daemon:** the display follows the desktop's login (50449cc)
+
+### Fixes
+
+- **daemon:** the display followed is one that's still there, and read more often (3515f4c)
+
 ## 2026.10.61 (2026-10-19)
 
 ### Features
