@@ -57,6 +57,8 @@ pub(super) struct Backgrounds {
     ports: Option<crate::ports::Finder>,
     /// The clients waiting for the ports, which they're sent once found.
     waiting: Vec<Token>,
+    /// Whether the ports are being looked for.
+    scanning: bool,
 }
 
 impl Daemon {
@@ -313,7 +315,7 @@ impl Daemon {
         if !self.background.waiting.contains(&token) {
             self.background.waiting.push(token);
         }
-        if self.background.waiting.len() > 1 {
+        if self.background.scanning {
             return;
         }
         let mut asked = Vec::new();
@@ -337,7 +339,9 @@ impl Daemon {
                 crate::ports::Finder::start(proc, std::sync::Arc::clone(&self.waker));
         }
         // A thread that has gone is started again at the next ask.
-        if !(self.background.ports.as_ref()).is_some_and(|finder| finder.ask(asked)) {
+        self.background.scanning =
+            (self.background.ports.as_ref()).is_some_and(|finder| finder.ask(asked));
+        if !self.background.scanning {
             self.background.ports = None;
             self.background.waiting.clear();
         }
@@ -350,6 +354,7 @@ impl Daemon {
         else {
             return;
         };
+        self.background.scanning = false;
         let mut listening: Vec<Listening> = (self.workspaces.get().list.iter())
             .flat_map(|workspace| &workspace.background)
             .map(|background| Listening {

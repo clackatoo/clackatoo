@@ -15,6 +15,14 @@ shell true
 keys <C-;>:keep always<CR>
 sleep 34000
 shot keep-given-up
+# Marked again, its shell exiting: a new shell takes its place in the same
+# pane, running the command.
+keys <C-;>:keep always<CR>
+sleep 300
+keys i
+shell exit
+sleep 2500
+shot keep-respawned
 # The kept tab in the background, and its mark in the list.
 keys <C-b>1
 keys <C-b>bt

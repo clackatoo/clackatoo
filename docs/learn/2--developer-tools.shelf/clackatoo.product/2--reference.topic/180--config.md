@@ -19,6 +19,11 @@ client.keys.map("niv", "<C-b>%", function(ev) ev.pane:split("right") end)
 -- Closing a pane takes :close, not a key.
 client.keys.unmap("niv", "<C-b>x")
 
+-- The list of background tabs on Ctrl+B Space, rather than Ctrl+B b l.
+client.keys.unmap("niv", "<C-b>bl")
+client.keys.map("niv", "<C-b><Space>", function() client.cmd("Background") end,
+  {desc = "background tabs"})
+
 -- x in normal mode closes a chat, and does what it always did elsewhere.
 client.keys.map("n", "x", function(ev)
   if ev.pane.kind ~= "chat" then return ev:propagate() end
