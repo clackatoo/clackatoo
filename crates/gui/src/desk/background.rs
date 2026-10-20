@@ -38,6 +38,10 @@ use crate::options::Case;
 /// while the list is open: what a server prints shows soon enough.
 pub(super) const PREVIEW_AGAIN: Duration = Duration::from_secs(2);
 
+/// How long a second Ctrl+D has, after the first, to dismiss a background
+/// tab still running.
+pub(super) const DISMISS_FOR: Duration = Duration::from_secs(3);
+
 impl Desk {
     /// Carries out `:bg`, `:bgpane` or `:Background`.
     pub(super) fn background_command(&mut self, command: BackgroundCommand) {
@@ -50,6 +54,17 @@ impl Desk {
             BackgroundCommand::Pane => BackgroundAction::Pane { pane: shown.pane },
             BackgroundCommand::List => return self.open_background_list(),
         };
+        // A chat isn't something left running.
+        let panes = match command {
+            BackgroundCommand::Pane => vec![shown.pane],
+            _ => (self.shown_tab()).map_or_else(Vec::new, |tab| {
+                tab.layout.panes().iter().map(|pane| pane.id).collect()
+            }),
+        };
+        if panes.iter().any(|&pane| self.shows_chat(pane)) {
+            self.refuse("only terminals go to the background, not chats".into());
+            return;
+        }
         self.request(Request::Background(action), Asked::Command);
     }
 
@@ -86,9 +101,20 @@ impl Desk {
         );
     }
 
+    /// Whether `pane` shows a chat.
+    fn shows_chat(&self, pane: clackatoo_protocol::PaneId) -> bool {
+        let Some((_, _, found)) = self.workspaces.find_pane(pane) else {
+            return false;
+        };
+        (found.content.terminal())
+            .and_then(|terminal| self.panes.get(&terminal))
+            .is_some_and(crate::pane::Pane::is_chat)
+    }
+
     /// What a tab or a background tab laid out as `layout` is marked with
-    /// for a terminal of its kept running: ` ↻`, or ` ↻✗` once running it
-    /// again was given up.
+    /// for a terminal of its kept running: ` ↻`; ` ↻‖` while running it
+    /// again as it ends is paused, as it was typed into; or ` ↻✗` once it
+    /// was given up.
     pub(super) fn kept_mark(&self, layout: &clackatoo_protocol::Layout) -> Option<&'static str> {
         let kept = &self.workspaces.kept;
         if kept.is_empty() {
@@ -101,6 +127,8 @@ impl Desk {
             None
         } else if marks.iter().any(|kept| kept.given_up) {
             Some(" ↻✗")
+        } else if marks.iter().any(|kept| kept.always && kept.paused) {
+            Some(" ↻‖")
         } else {
             Some(" ↻")
         }
@@ -327,15 +355,39 @@ impl Desk {
     /// When the window must wake for the list's preview to be asked for
     /// again, while it's open.
     pub(crate) fn background_wakes(&self) -> Option<Instant> {
-        let (_, asked) = self.background_preview?;
         let open = (self.finder.as_ref()).is_some_and(|finder| finder.kind() == Kind::Background);
-        open.then_some(asked + PREVIEW_AGAIN)
+        if !open {
+            return None;
+        }
+        let dismissing = self.dismissing.map(|(_, at)| at + DISMISS_FOR);
+        (self.preview_due().into_iter()).chain(dismissing).min()
+    }
+
+    /// When the list's preview is to be asked for again.
+    fn preview_due(&self) -> Option<Instant> {
+        let (_, asked) = self.background_preview?;
+        Some(asked + PREVIEW_AGAIN)
+    }
+
+    /// Forgets the first Ctrl+D on a background tab still running, if the
+    /// second has had its time, as of `now`.
+    pub(super) fn expire_dismissing(&mut self, now: Instant) {
+        if self
+            .dismissing
+            .is_some_and(|(_, at)| now >= at + DISMISS_FOR)
+        {
+            self.dismissing = None;
+            if let Some(finder) = &mut self.finder {
+                finder.set_note(None);
+            }
+        }
     }
 
     /// Asks again for the list's preview, if it's open and it's time to.
     /// Returns whether anything was asked.
     pub(crate) fn tick_background(&mut self, now: Instant) -> bool {
-        if self.background_wakes().is_none_or(|due| due > now) {
+        let open = (self.finder.as_ref()).is_some_and(|finder| finder.kind() == Kind::Background);
+        if !open || self.preview_due().is_none_or(|due| due > now) {
             return false;
         }
         let Some(tab) = self.picked_background() else {
@@ -403,16 +455,23 @@ impl Desk {
             return;
         };
         let running = !background.state.ended();
-        if running && self.dismissing != Some(tab) {
-            self.dismissing = Some(tab);
-            let name = match background.name.trim() {
-                "" => format!("tab {tab}"),
-                name => format!("‘{name}’"),
-            };
+        let name = match background.name.trim() {
+            "" => format!("tab {tab}"),
+            name => format!("‘{name}’"),
+        };
+        self.expire_dismissing(Instant::now());
+        if running && self.dismissing.is_none_or(|(asked, _)| asked != tab) {
+            self.dismissing = Some((tab, Instant::now()));
+            if let Some(finder) = &mut self.finder {
+                finder.set_note(Some("still running: Ctrl+D again ends it".into()));
+            }
             self.say(format!("{name} is still running: Ctrl+D again ends it"));
             return;
         }
         self.dismissing = None;
+        if let Some(finder) = &mut self.finder {
+            finder.set_note(None);
+        }
         self.request(
             Request::Background(BackgroundAction::Dismiss { tab }),
             Asked::Command,

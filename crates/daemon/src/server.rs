@@ -245,6 +245,18 @@ impl Hosted {
         }
     }
 
+    /// Whether its shell is in front, at its prompt or running a command
+    /// in its own process group, rather than a program it started in a
+    /// group of its own, as one with job control does: the pty's
+    /// foreground process group is the shell's, which leads its session.
+    /// Never for a chat, nor a terminal whose program has ended.
+    fn shell_in_front(&self) -> bool {
+        match self {
+            Self::Pty(terminal) => terminal.is_idle_shell(),
+            Self::Chat(_) => false,
+        }
+    }
+
     /// Whether its program is still running, or how it ended: a chat runs
     /// until it's closed.
     fn status(&self) -> TerminalStatus {
@@ -1139,6 +1151,7 @@ impl Daemon {
     /// # Errors
     ///
     /// If the listening socket is missing, or can't be watched.
+    #[allow(clippy::too_many_lines, reason = "each part of the state in turn")]
     pub(crate) fn resume(
         mut handover: Handover,
         config: DaemonConfig,
@@ -1176,7 +1189,16 @@ impl Daemon {
                 daemon.workspaces.remove_terminal(id);
             }
         }
+        // What each shell is known to have run, as its own.
+        for trusted in &state.trusted {
+            let slot = daemon.terminals.get_mut(&TerminalId(trusted.terminal));
+            if let Some(pty) = slot.and_then(|slot| slot.terminal.pty()) {
+                pty.trust_blocks(&trusted.blocks);
+            }
+        }
         daemon.restate_backgrounds();
+        // The terminals kept running always, as they were.
+        daemon.refresh_kept();
         for chat in chats {
             let agent = daemon.agent_spec(&chat.agent);
             daemon.add_chat(HostedChat::resume(chat, &agent));
@@ -1298,13 +1320,21 @@ impl Daemon {
         let listener = fds.add(self.listener.as_fd().try_clone_to_owned()?);
         let mut terminals = Vec::new();
         let mut shells = Vec::new();
+        let mut trusted = Vec::new();
         let mut chats = Vec::new();
         self.abandon_clipboard_asks();
         self.put_back_fits();
         for slot in std::mem::take(&mut self.terminals).into_values() {
             match slot.terminal {
                 Hosted::Pty(terminal) => {
+                    let blocks = terminal.emulator().trusted_blocks();
                     let (terminal, shell) = terminal.hand_over(&mut fds);
+                    if !blocks.is_empty() {
+                        trusted.push(handover::Trusted {
+                            terminal: terminal.id,
+                            blocks,
+                        });
+                    }
                     terminals.push(terminal);
                     shells.extend(shell);
                 }
@@ -1398,6 +1428,7 @@ impl Daemon {
                 borrowers,
                 lenders,
                 sharing,
+                trusted,
             },
             fds,
         })
@@ -1507,6 +1538,7 @@ impl Daemon {
                     .chain(self.relay_due())
                     .chain(self.next_lent_due())
                     .chain(self.next_restart_due())
+                    .chain(self.next_restate_due())
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
@@ -1550,6 +1582,7 @@ impl Daemon {
             self.take_found();
             self.take_ports();
             self.restart_kept();
+            self.tell_restated();
             self.explore();
             // After what the daemon's own threads wrote has been taken, so
             // it isn't taken for a change from outside.
@@ -2294,7 +2327,8 @@ impl Daemon {
                 if slot.terminal.info().status != TerminalStatus::Running {
                     return Err(Error::TerminalExited(id));
                 }
-                if self.workspaces.get().pane_showing(id).is_some() {
+                // In a pane, or a background tab's.
+                if self.pane_of(id).is_some() {
                     return Err(Error::TerminalInPane(id));
                 }
                 id
@@ -2435,6 +2469,13 @@ impl Daemon {
     fn workspaces_changed(&mut self) {
         self.workspaces.refresh_lent();
         self.workspaces.refresh_background();
+        self.forget_backgrounds_gone();
+        // A background tab brought back in place of a workspace's last tab
+        // is as one brought back by hand.
+        for tab in self.workspaces.take_promoted() {
+            self.renew_ended(tab);
+            self.workspaces.refresh_background();
+        }
         // The ended background tabs of a workspace gone with its last tab.
         for terminal in self.workspaces.take_dropped() {
             if let Err(err) = self.close_terminal(terminal) {
@@ -2867,6 +2908,20 @@ impl Daemon {
         if let Some(answer) = self.parked_request(token, &request) {
             return answer.unwrap_or_else(Response::Error);
         }
+        // A window from before background tabs never saw them, so closing
+        // the workspace would end what it didn't know was there.
+        if let Request::CloseWorkspace { workspace } = request
+            && self
+                .client_wire(token)
+                .is_some_and(|at| at < wire::BACKGROUND)
+            && let Some(found) = self.workspaces.get().get(workspace)
+            && !found.background.is_empty()
+        {
+            return Response::Error(Error::Other(format!(
+                "‘{}’ has background tabs: close it from a newer window",
+                found.name
+            )));
+        }
         let response = match request {
             Request::Version => Ok(Response::Text(env!("CARGO_PKG_VERSION").to_owned())),
             Request::ListTerminals => Ok(Response::Terminals(self.terminal_infos(token))),
@@ -3025,7 +3080,7 @@ impl Daemon {
             } => self.serve_unlend(token, workspace, close_idle),
             Request::Lent => Ok(self.list_lent()),
             Request::Background(action) => self.serve_background(token, &action),
-            Request::Keep { pane, how } => self.serve_keep(pane, how),
+            Request::Keep { pane, how } => self.serve_keep(token, pane, how),
             Request::Lend {
                 key,
                 beside,

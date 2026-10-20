@@ -339,6 +339,7 @@ impl Desk {
             return Some(page.view(list, preview));
         }
         self.grep_if_due(Instant::now());
+        self.expire_dismissing(Instant::now());
         let mut view = self.finder.as_mut()?.view(list, preview);
         // What's typed hasn't been looked for yet, as a grep waits for
         // typing to pause: nothing's sure not to match it.

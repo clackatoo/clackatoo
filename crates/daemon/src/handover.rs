@@ -195,6 +195,11 @@ pub(crate) struct State {
     /// before, none was. How running each again was going isn't handed
     /// over: it starts again.
     pub(crate) kept: Vec<Kept>,
+    /// Each terminal's blocks whose commands its shell's integration said,
+    /// with its secret, so the command a shell ran last is still known to
+    /// be its own: [`Shell::trusted`] says only the latest block's. Since
+    /// version 26; before, only that one was.
+    pub(crate) trusted: Vec<Trusted>,
 }
 
 /// A terminal the user marked to keep running (see
@@ -209,6 +214,18 @@ pub(crate) struct Kept {
     pub(crate) always: bool,
     /// Running it again was given up.
     pub(crate) given_up: bool,
+    /// Running it again as it ends is paused.
+    pub(crate) paused: bool,
+}
+
+/// The blocks of a terminal's whose commands its shell's integration said,
+/// with the terminal's secret (see [`State::trusted`]). Since version 26.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Trusted {
+    /// The terminal, by its ID.
+    pub(crate) terminal: u32,
+    /// The blocks, by their numbers, oldest first.
+    pub(crate) blocks: Vec<u32>,
 }
 
 /// A tab a workspace keeps running out of its tab bar (see
@@ -986,6 +1003,7 @@ mod v25 {
                 keys: state.keys,
                 background: state.background,
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -1059,6 +1077,7 @@ mod v24 {
                 keys: state.keys,
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -1130,6 +1149,7 @@ mod v23 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -1214,6 +1234,7 @@ mod v22 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -1281,6 +1302,7 @@ mod v21 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -1346,6 +1368,7 @@ mod v20 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -1407,6 +1430,7 @@ mod v19 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -1468,6 +1492,7 @@ mod v18 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -1994,6 +2019,7 @@ mod v7 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -2079,6 +2105,7 @@ mod v8 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -2134,6 +2161,7 @@ mod v9 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -2191,6 +2219,7 @@ mod v11 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -2297,6 +2326,7 @@ mod v15 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -2357,6 +2387,7 @@ mod v14 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -2415,6 +2446,7 @@ mod v13 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -2515,6 +2547,7 @@ mod v12 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -2613,6 +2646,7 @@ mod v10 {
                 keys: Vec::new(),
                 background: Vec::new(),
                 kept: Vec::new(),
+                trusted: Vec::new(),
             }
         }
     }
@@ -2859,6 +2893,11 @@ mod tests {
                 command: "trail serve".to_owned(),
                 always: true,
                 given_up: false,
+                paused: true,
+            }],
+            trusted: vec![Trusted {
+                terminal: 4,
+                blocks: vec![2, 5],
             }],
         }
     }
@@ -3069,6 +3108,12 @@ mod tests {
         assert_eq!(
             (kept.pane, kept.command.as_str(), kept.always, kept.given_up),
             (12, "trail serve", true, false)
+        );
+        assert!(kept.paused);
+        let trusted = &state.trusted[0];
+        assert_eq!(
+            (trusted.terminal, trusted.blocks.as_slice()),
+            (4, &[2, 5][..])
         );
         assert_eq!(state.background[0].tab.id, 3);
     }

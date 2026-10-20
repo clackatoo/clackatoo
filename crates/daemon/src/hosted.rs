@@ -216,6 +216,20 @@ impl HostedTerminal {
         })
     }
 
+    /// Its emulator, to feed what a program would print, in a test.
+    #[cfg(test)]
+    pub(crate) fn emulator_mut(&mut self) -> &mut Terminal {
+        &mut self.emulator
+    }
+
+    /// Takes `blocks` as those whose commands the shell's integration said,
+    /// as the build that handed this terminal over knew they were.
+    pub(crate) fn trust_blocks(&mut self, blocks: &[u32]) {
+        for &block in blocks {
+            self.emulator.trust_block(block);
+        }
+    }
+
     /// Whether its program is still running, or how it ended.
     pub(crate) fn status(&self) -> TerminalStatus {
         self.status

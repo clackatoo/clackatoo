@@ -1339,11 +1339,14 @@ impl Daemon {
             due: Instant::now() + wait,
             marked,
         };
+        // Whose it is, and what it's called, stay: a command kept running
+        // run again in a terminal an agent started is still the agent's.
+        let before = self.tools.commanded.remove(&terminal).unwrap_or_default();
         self.tools.commanded.insert(
             terminal,
             Commanded {
-                owner,
-                name,
+                owner: owner.or(before.owner),
+                name: name.or(before.name),
                 typing: Some(typing),
                 ..Commanded::default()
             },
@@ -1439,8 +1442,17 @@ impl Daemon {
         self.answer_finished(terminal, false);
     }
 
-    /// Types the command waiting for `terminal`'s shell's first prompt.
+    /// Types the command waiting for `terminal`'s shell's first prompt, if
+    /// the shell is in front: the pty's foreground process group is the
+    /// shell's own. The marks that say a prompt began aren't signed, so a
+    /// program can print them; typed then, the command would go to it.
+    /// Otherwise it waits on, for the next prompt.
     fn type_command(&mut self, terminal: TerminalId) {
+        let in_front =
+            (self.terminals.get(&terminal)).is_some_and(|slot| slot.terminal.shell_in_front());
+        if !in_front {
+            return;
+        }
         let Some(Typing { command, .. }) =
             (self.tools.commanded.get_mut(&terminal)).and_then(|commanded| commanded.typing.take())
         else {
@@ -1459,8 +1471,20 @@ impl Daemon {
             bytes.extend_from_slice(command.replace('\n', "\r").as_bytes());
         }
         bytes.push(b'\r');
-        if let Err(why) = self.type_into(terminal, &bytes, true) {
-            log::warn!("terminal {terminal}: the agent's command couldn't be typed: {why}");
+        // The daemon's own typing, which takes nothing over.
+        self.typing_into(terminal, true);
+        let typed = self.type_into(terminal, &bytes, true);
+        self.typing_into(terminal, false);
+        match typed {
+            Ok(()) => {
+                let commanded = self.tools.commanded.get(&terminal);
+                let block = commanded.and_then(|commanded| commanded.expect);
+                let renumbered = commanded.map_or(0, |commanded| commanded.renumbered);
+                self.kept_typed(terminal, block, renumbered);
+            }
+            Err(why) => {
+                log::warn!("terminal {terminal}: the command couldn't be typed: {why}");
+            }
         }
     }
 
@@ -1623,6 +1647,8 @@ impl Daemon {
             let Some(commanded) = self.tools.commanded.get_mut(&terminal) else {
                 continue;
             };
+            let in_front =
+                (self.terminals.get(&terminal)).is_some_and(|slot| slot.terminal.shell_in_front());
             match commanded.typing.take() {
                 // Typed now, it would go to whatever is still starting,
                 // or be typed again at the prompt that comes.
@@ -1634,6 +1660,13 @@ impl Daemon {
                     commanded.failed = Some(format!(
                         "the shell didn't show a prompt within {wait} s, so `{command}` wasn't \
                          typed: it may still be starting. Try run_in_terminal again"
+                    ));
+                    self.answer_finished(terminal, false);
+                }
+                // Another program is in front: typed, it would go to it.
+                Some(Typing { command, .. }) if !in_front => {
+                    commanded.failed = Some(format!(
+                        "another program was in front of the shell, so `{command}` wasn't typed"
                     ));
                     self.answer_finished(terminal, false);
                 }
@@ -1998,6 +2031,32 @@ fn shorten(path: &Path, dir: &str) -> String {
     match path.strip_prefix(dir) {
         Ok(rest) if !rest.as_os_str().is_empty() => rest.display().to_string(),
         _ => path.display().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod keeping_whose {
+    use clackatoo_protocol::{NewTerminal, Size};
+
+    use crate::server::agent_files::tests::daemon_with_chat;
+
+    #[test]
+    fn a_command_typed_again_keeps_the_terminal_its_agents_and_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = daemon_with_chat(dir.path());
+        let request = NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(vec!["cat".into()]),
+            cwd: None,
+            record_to: None,
+        };
+        let terminal = daemon.new_terminal(&request).unwrap();
+        daemon.type_at_first_prompt(terminal, "make".into(), Some(chat), Some("build".into()));
+        // As a command kept running is run again, by nobody's agent.
+        daemon.type_at_first_prompt(terminal, "make".into(), None, None);
+        let commanded = &daemon.tools.commanded[&terminal];
+        assert_eq!(commanded.owner, Some(chat));
+        assert_eq!(commanded.name.as_deref(), Some("build"));
     }
 }
 

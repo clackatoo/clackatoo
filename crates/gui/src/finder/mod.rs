@@ -253,6 +253,9 @@ pub(crate) struct Finder {
     /// The preview of each thing, by its index, for a list the window
     /// makes itself.
     local_previews: Vec<Vec<String>>,
+    /// What the list says in place of how many things match, for now: as
+    /// that a second key is needed.
+    note: Option<String>,
 }
 
 /// Something for a list the window makes itself: what [`Opening::path`]
@@ -300,7 +303,14 @@ impl Finder {
             rows: 1,
             preview: Preview::default(),
             local_previews: Vec::new(),
+            note: None,
         }
+    }
+
+    /// Has the list say `note` in place of how many things match, or with
+    /// none, say that again.
+    pub(crate) fn set_note(&mut self, note: Option<String>) {
+        self.note = note;
     }
 
     /// A finder of `kind` listing `items`, in their order, made by the
@@ -930,7 +940,7 @@ impl Finder {
             title: self.kind.title(),
             place: self.root.as_ref().map(|(_, name)| name.clone()),
             query: format!("{}▏", self.query),
-            count: self.count(),
+            count: self.note.clone().unwrap_or_else(|| self.count()),
             selected: (count > 0).then(|| self.selected - self.top),
             rows: shown,
             preview,

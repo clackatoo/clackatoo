@@ -2169,7 +2169,7 @@ impl Daemon {
     }
 
     /// The protocol version the client at `token` speaks, if it's there.
-    fn client_wire(&self, token: Token) -> Option<u32> {
+    pub(super) fn client_wire(&self, token: Token) -> Option<u32> {
         match self.sources.get(token.0) {
             Some(Source::Client(client)) => Some(client.wire),
             _ => None,

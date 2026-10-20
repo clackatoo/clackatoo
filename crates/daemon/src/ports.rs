@@ -14,6 +14,7 @@
 //! asks, and never on the daemon's loop.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -26,6 +27,9 @@ const MOST_PROCESSES: usize = 100_000;
 
 /// The most descriptors looked at of each process.
 const MOST_DESCRIPTORS: usize = 10_000;
+
+/// The most of each of `/proc/net/tcp` and `tcp6` read, in bytes.
+const MOST_TABLE: usize = 16 * 1024 * 1024;
 
 /// The longest name of a program kept, in characters: as long as Linux
 /// keeps them.
@@ -136,16 +140,30 @@ pub(crate) fn listening(proc: &Path, asked: &Asked) -> Found {
 fn listening_sockets(proc: &Path) -> HashMap<u64, u16> {
     let mut sockets = HashMap::new();
     for table in ["net/tcp", "net/tcp6"] {
-        let Ok(text) = std::fs::read_to_string(proc.join(table)) else {
+        let Ok(file) = std::fs::File::open(proc.join(table)) else {
             continue;
         };
-        for line in text.lines().skip(1) {
-            if let Some((inode, port)) = listening_line(line) {
-                sockets.insert(inode, port);
-            }
-        }
+        read_table(std::io::BufReader::new(file), &mut sockets);
     }
     sockets
+}
+
+/// Notes the sockets listening that the lines of a table of `/proc/net`
+/// say, read from `table`, in `sockets`: no more than [`MOST_TABLE`] bytes
+/// of it, so a machine with a great many connections can't hold the
+/// thread for long.
+fn read_table(table: impl BufRead, sockets: &mut HashMap<u64, u16>) {
+    let mut read = 0;
+    for line in table.split(b'\n').skip(1) {
+        let Ok(line) = line else { break };
+        read += line.len() + 1;
+        if read > MOST_TABLE {
+            break;
+        }
+        if let Some((inode, port)) = std::str::from_utf8(&line).ok().and_then(listening_line) {
+            sockets.insert(inode, port);
+        }
+    }
 }
 
 /// The inode and port of the socket a line of `/proc/net/tcp` is about,
@@ -217,6 +235,25 @@ mod tests {
                    00000000  1000        0 42 1 0000000000000000 100 0 0 10 0";
         assert_eq!(listening_line(six), Some((42, 3000)));
         assert_eq!(listening_line("garbage"), None);
+    }
+
+    #[test]
+    fn a_table_is_read_no_further_than_the_most() {
+        let row = |port: u16, inode: u64| {
+            format!(
+                "   0: 00000000:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 \
+                 00000000  1000        0 {inode} 1 0000000000000000 100 0 0 10 0\n"
+            )
+        };
+        let mut table = String::from("  sl  local_address ...\n");
+        table.push_str(&row(8080, 1));
+        // Past the most, nothing more is read.
+        table.push_str(&" ".repeat(MOST_TABLE));
+        table.push('\n');
+        table.push_str(&row(9090, 2));
+        let mut sockets = HashMap::new();
+        read_table(table.as_bytes(), &mut sockets);
+        assert_eq!(sockets, HashMap::from([(1, 8080)]));
     }
 
     #[test]

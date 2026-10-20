@@ -44,6 +44,10 @@ pub(crate) const SERVER_NAME: &str = "clackatoo";
 /// gets the newest, and decides itself whether it can go on.
 const VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
+/// Why a command running `clackatoo keep` or `clackatoo bg` isn't run.
+const KEPT_BY_THE_USER: &str = "only the user has clackatoo keep things running, or start them \
+    in the background, from their window or their own terminal: not this tool";
+
 /// How many lines of a terminal `read_terminal` gives unless asked for
 /// another number, and the most it gives.
 pub(crate) const DEFAULT_LINES: usize = 50;
@@ -761,6 +765,9 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
                     "the command is over {MAX_SEND} bytes: write it to a file and run that"
                 )));
             }
+            if crate::shell::arranges_running(&command) {
+                return Err(Bad(KEPT_BY_THE_USER.to_owned()));
+            }
             Tool::RunInTerminal { command, cwd, name }
         }
         "run_in_background" => {
@@ -772,6 +779,9 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
                 return Err(Bad(format!(
                     "the command is over {MAX_SEND} bytes: write it to a file and run that"
                 )));
+            }
+            if crate::shell::arranges_running(&command) {
+                return Err(Bad(KEPT_BY_THE_USER.to_owned()));
             }
             Tool::RunInBackground { command, cwd, name }
         }

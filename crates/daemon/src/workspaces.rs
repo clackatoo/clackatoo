@@ -68,6 +68,10 @@ pub(crate) struct WorkspaceState {
     /// Terminals of background tabs that went with their workspace, for
     /// the server to close (see [`take_dropped`](Self::take_dropped)).
     dropped: Vec<TerminalId>,
+    /// Background tabs brought back in place of a workspace's last tab,
+    /// whose terminals that have ended the server makes again (see
+    /// [`take_promoted`](Self::take_promoted)).
+    promoted: Vec<TabId>,
 }
 
 /// A machine whose daemon this one lends workspaces to.
@@ -112,6 +116,7 @@ impl WorkspaceState {
             lenders: BTreeMap::new(),
             background_terminals: HashMap::new(),
             dropped: Vec::new(),
+            promoted: Vec::new(),
         }
     }
 
@@ -625,6 +630,7 @@ impl WorkspaceState {
             command,
             always,
             given_up: false,
+            paused: false,
         });
     }
 
@@ -657,6 +663,7 @@ impl WorkspaceState {
                 command: kept.command.clone(),
                 always: kept.always,
                 given_up: kept.given_up,
+                paused: kept.paused,
             })
             .collect()
     }
@@ -670,6 +677,7 @@ impl WorkspaceState {
                 command: kept.command.clone(),
                 always: kept.always,
                 given_up: kept.given_up,
+                paused: kept.paused,
             })
             .collect();
         self.sweep_kept();
@@ -844,8 +852,10 @@ impl WorkspaceState {
         let shown = self.workspace_mut(workspace);
         if let Some(index) = (shown.background.iter()).position(|b| !b.state.ended()) {
             let background = shown.background.remove(index);
-            shown.active_tab = background.tab.id;
+            let id = background.tab.id;
+            shown.active_tab = id;
             shown.tabs.push(background.tab);
+            self.promoted.push(id);
             return true;
         }
         // Those that have ended go with it.
@@ -877,6 +887,7 @@ impl WorkspaceState {
     pub(crate) fn check_background_tab(&self, tab: TabId) -> Result<(WorkspaceId, bool), Error> {
         let (workspace, found) = self.workspaces.find_tab(tab).ok_or(Error::NoSuchTab(tab))?;
         unlent(workspace)?;
+        room_for_background(workspace)?;
         backgroundable(&found.layout.panes())?;
         Ok((workspace.id, workspace.tabs.len() == 1))
     }
@@ -890,6 +901,7 @@ impl WorkspaceState {
         let (workspace, tab, found) =
             (self.workspaces.find_pane(pane)).ok_or(Error::NoSuchPane(pane))?;
         unlent(workspace)?;
+        room_for_background(workspace)?;
         backgroundable(&[found])?;
         Ok((tab.id, tab.layout.panes().len() == 1))
     }
@@ -982,7 +994,9 @@ impl WorkspaceState {
     /// not one lent to another machine's daemon, which holds its one pane
     /// alone.
     pub(crate) fn check_new_background(&self, workspace: WorkspaceId) -> Result<(), Error> {
-        unlent(self.check_workspace(workspace)?)
+        let workspace = self.check_workspace(workspace)?;
+        unlent(workspace)?;
+        room_for_background(workspace)
     }
 
     /// Adds a background tab showing `content`, a terminal, to
@@ -1036,6 +1050,13 @@ impl WorkspaceState {
     /// which had ended, for the server to close.
     pub(crate) fn take_dropped(&mut self) -> Vec<TerminalId> {
         std::mem::take(&mut self.dropped)
+    }
+
+    /// The background tabs brought back in place of a workspace's last
+    /// tab, for the server to make again their terminals that have ended,
+    /// as bringing one back does.
+    pub(crate) fn take_promoted(&mut self) -> Vec<TabId> {
+        std::mem::take(&mut self.promoted)
     }
 
     /// Notes which terminals are in background tabs, as they are now:
@@ -1690,6 +1711,20 @@ fn unlent(workspace: &Workspace) -> Result<(), Error> {
     }
 }
 
+/// The most background tabs a workspace keeps.
+pub(crate) const MOST_BACKGROUND: usize = 64;
+
+/// Refuses another background tab in `workspace` if it has
+/// [`MOST_BACKGROUND`] already.
+fn room_for_background(workspace: &Workspace) -> Result<(), Error> {
+    if workspace.background.len() >= MOST_BACKGROUND {
+        return Err(Error::Other(format!(
+            "this workspace has {MOST_BACKGROUND} background tabs, as many as it can"
+        )));
+    }
+    Ok(())
+}
+
 /// Refuses to send `panes` to the background unless they're all
 /// terminals of this daemon's own: what else a pane shows isn't something
 /// left running, and a pane from another machine is that machine's to
@@ -2142,6 +2177,24 @@ mod tests {
         assert_eq!(shown.active_tab, tab);
         assert!(state.get().find_pane(one).is_some());
         assert_eq!(state.background_of(TerminalId(3)), None);
+    }
+
+    #[test]
+    fn a_workspace_keeps_so_many_background_tabs_and_no_more() {
+        let mut state = WorkspaceState::new();
+        state.new_workspace("site".into(), TerminalId(1));
+        let workspace = state.get().list[0].id;
+        let two = state.new_tab(workspace, TerminalId(2));
+        let tab = state.get().find_pane(two).unwrap().1.id;
+        for terminal in 0..MOST_BACKGROUND {
+            assert!(state.check_new_background(workspace).is_ok());
+            let terminal = TerminalId(100 + u32::try_from(terminal).unwrap());
+            state.new_background(workspace, Content::Terminal(terminal));
+        }
+        let full = |refused: Result<_, Error>| matches!(refused, Err(Error::Other(why)) if why.contains("as many as it can"));
+        assert!(full(state.check_new_background(workspace)));
+        assert!(full(state.check_background_tab(tab).map(|_| ())));
+        assert!(full(state.check_background_pane(two).map(|_| ())));
     }
 
     #[test]

@@ -274,8 +274,9 @@ pub(crate) struct Desk {
     /// and when (see [`background`]).
     background_preview: Option<(TabId, std::time::Instant)>,
     /// The background tab still running that Ctrl+D in the list was
-    /// pressed on once, which a second press dismisses.
-    dismissing: Option<TabId>,
+    /// pressed on once, which a second press dismisses, and when it was:
+    /// see [`background::DISMISS_FOR`].
+    dismissing: Option<(TabId, std::time::Instant)>,
     /// The failures of background tabs the list said were seen as it
     /// opened, by tab, which it goes on saying while it's open.
     background_seen: Vec<(TabId, i32)>,

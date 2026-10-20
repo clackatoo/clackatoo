@@ -135,6 +135,10 @@ pub struct Kept {
     /// Running it again was given up, as it kept ending soon after it
     /// started: until it's marked again.
     pub given_up: bool,
+    /// Running it again as it ends is paused, as something was typed into
+    /// it while it ran: until the user runs it again there, or marks it
+    /// again. It still runs as the daemon starts afresh.
+    pub paused: bool,
 }
 
 /// How a terminal is kept running: see [`Request::Keep`](crate::Request::Keep).

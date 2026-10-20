@@ -4810,3 +4810,37 @@ fn what_a_machine_between_adds_to_a_keys_echo() {
         summed(&mut c)
     );
 }
+
+#[test]
+fn what_a_machine_lent_is_never_kept_running_nor_sent_to_the_background_but_by_its_borrower() {
+    use clackatoo_protocol::{BackgroundAction, Keeping};
+    let mut pair = Pair::new();
+    let (_, _) = borrow(&mut pair, shell());
+    let mut plain = pair.laptop().client();
+    // The panes laptop's windows are shown are their own; any other there
+    // is lent, or no pane at all.
+    let shown: Vec<PaneId> = (plain.watch_workspaces().unwrap().list.iter())
+        .flat_map(|workspace| workspace.tabs.iter())
+        .flat_map(|tab| tab.layout.panes())
+        .map(|pane| pane.id)
+        .collect();
+    let hidden: Vec<PaneId> = (1..=32)
+        .map(PaneId)
+        .filter(|pane| !shown.contains(pane))
+        .collect();
+    for pane in hidden {
+        for request in [
+            Request::Keep {
+                pane,
+                how: Keeping::Always,
+            },
+            Request::Background(BackgroundAction::Pane { pane }),
+        ] {
+            let answer = plain.request(&request).unwrap();
+            assert!(
+                matches!(answer, Response::Error(Error::NoSuchPane(_))),
+                "{request:?}: {answer:?}"
+            );
+        }
+    }
+}

@@ -1057,12 +1057,14 @@ fn kept() -> Vec<Sample> {
                     command: "trail serve".into(),
                     always: false,
                     given_up: false,
+                    paused: true,
                 },
                 crate::Kept {
                     pane: PaneId(12),
                     command: "cargo watch -x run".into(),
                     always: true,
                     given_up: true,
+                    paused: false,
                 },
             ],
             ..self::workspaces()

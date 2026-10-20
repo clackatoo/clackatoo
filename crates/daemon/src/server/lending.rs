@@ -52,8 +52,8 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant, SystemTime};
 
 use clackatoo_protocol::{
-    ChatSummary, Error, Event, Lent, Machine, MachineId, PaneId, PaneTerminal, Request, Response,
-    ServerMessage, TerminalId, WorkspaceId, Workspaces, wire,
+    BackgroundAction, ChatSummary, Error, Event, Lent, Machine, MachineId, PaneId, PaneTerminal,
+    Request, Response, ServerMessage, TerminalId, WorkspaceId, Workspaces, wire,
 };
 use mio::Token;
 
@@ -340,7 +340,8 @@ impl Daemon {
             }
             Request::ClosePane { pane: id }
             | Request::Focus { pane: id }
-            | Request::Split { pane: id, .. } => pane(id, false),
+            | Request::Split { pane: id, .. }
+            | Request::Keep { pane: id, .. } => pane(id, false),
             Request::OpenHere { pane: id, .. }
             | Request::BlankHere { pane: id, .. }
             | Request::Recover { pane: id, .. }
@@ -353,6 +354,15 @@ impl Daemon {
             Request::CloseWorkspace { workspace: id }
             | Request::RenameWorkspace { workspace: id, .. }
             | Request::NewTab { workspace: id, .. } => workspace(id),
+            Request::Background(ref action) => match *action {
+                BackgroundAction::Tab { tab: id }
+                | BackgroundAction::Bring { tab: id }
+                | BackgroundAction::Dismiss { tab: id } => tab(id),
+                BackgroundAction::Pane { pane: id } => pane(id, false),
+                BackgroundAction::Seen { workspace: id }
+                | BackgroundAction::Start { workspace: id, .. } => workspace(id),
+                BackgroundAction::Ports => Ok(()),
+            },
             _ => Ok(()),
         }
     }

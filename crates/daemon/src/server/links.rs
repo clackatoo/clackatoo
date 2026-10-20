@@ -1581,7 +1581,7 @@ impl Daemon {
     }
 
     /// Whether the client at `token` is a device on the web app.
-    fn is_web_device(&self, token: Token) -> bool {
+    pub(super) fn is_web_device(&self, token: Token) -> bool {
         matches!(
             self.sources.get(token.0),
             Some(Source::Client(client)) if matches!(client.link, Link::Web(_))

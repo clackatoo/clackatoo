@@ -269,8 +269,35 @@ pub(crate) fn marks(shell: &OsStr, dir: Option<&Path>) -> bool {
     }
 }
 
+/// Whether `command` would have clackatoo arrange for something to run by
+/// itself, by running `clackatoo keep` or `clackatoo bg` anywhere in it:
+/// never kept running, nor run by an agent's tools. A guard against
+/// mistakes, not a boundary: a script can run them.
+pub(crate) fn arranges_running(command: &str) -> bool {
+    let words: Vec<&str> = (command
+        .split(|ch: char| ch.is_whitespace() || ";|&()`$\"'".contains(ch)))
+    .filter(|word| !word.is_empty())
+    .collect();
+    (words.iter().enumerate()).any(|(at, word)| {
+        word.rsplit('/').next() == Some("clackatoo")
+            && (words[at + 1..].iter()).any(|later| matches!(*later, "keep" | "bg"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_command_that_has_clackatoo_run_something_by_itself_is_known() {
+        use super::arranges_running;
+        assert!(arranges_running("clackatoo keep 3 always"));
+        assert!(arranges_running(
+            "sleep 1; /usr/bin/clackatoo --remote x bg -- make"
+        ));
+        assert!(arranges_running("echo $(clackatoo keep 1)"));
+        assert!(!arranges_running("clackatoo list"));
+        assert!(!arranges_running("trail serve --keep"));
+    }
+
     use std::ffi::OsString;
 
     #[test]

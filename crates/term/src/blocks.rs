@@ -362,6 +362,9 @@ pub struct Block {
     pub exit: Option<i32>,
 }
 
+/// The most blocks [`Terminal::trusted_blocks`] says.
+pub(crate) const MOST_TRUSTED: usize = 1024;
+
 /// Which block [`Terminal::block`] finds, from a line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -458,10 +461,33 @@ impl Terminal {
     /// what a program printed, to offer to run again, or keep running.
     #[must_use]
     pub fn trusted_last_command(&self) -> Option<&str> {
+        self.trusted_commands().next()
+    }
+
+    /// The commands the shell ran, newest first, of those clackatoo's own
+    /// shell integration said, with the terminal's secret, while rows are
+    /// still marked with them: the one it runs, if it's running one, first.
+    pub fn trusted_commands(&self) -> impl Iterator<Item = &str> {
         let (_, entries) = self.emulator_blocks().parts();
         (entries.iter().rev())
-            .find(|entry| entry.trusted && entry.phase != Phase::Prompt && entry.command.is_some())
-            .and_then(|entry| entry.command.as_deref())
+            .filter(|entry| entry.trusted && entry.phase != Phase::Prompt)
+            .filter_map(|entry| entry.command.as_deref())
+    }
+
+    /// The numbers of the blocks whose commands clackatoo's own shell
+    /// integration said, oldest first, the newest [`MOST_TRUSTED`] at most:
+    /// for the next build to know, with [`trust_block`](Self::trust_block),
+    /// as snapshots don't say.
+    #[must_use]
+    pub fn trusted_blocks(&self) -> Vec<u32> {
+        let (first, entries) = self.emulator_blocks().parts();
+        let mut blocks: Vec<u32> = (entries.iter().enumerate().rev())
+            .filter(|(_, entry)| entry.trusted)
+            .filter_map(|(index, _)| first.checked_add(u32::try_from(index).ok()?))
+            .take(MOST_TRUSTED)
+            .collect();
+        blocks.reverse();
+        blocks
     }
 
     /// The number of the shell's latest block, if clackatoo's own shell
@@ -818,6 +844,19 @@ mod tests {
         t.advance(b"x\r\n\x1b]133;C;cmdline_url=rm%20-rf%20~\x07\x1b]133;D;0\x07");
         t.advance(PROMPT.as_bytes());
         assert_eq!(t.trusted_last_command(), Some("trail serve"));
+        // Newest first, every one the shell said.
+        let commands: Vec<&str> = t.trusted_commands().collect();
+        assert_eq!(commands, ["trail serve"]);
+        // Handed to a terminal made again from a snapshot, which says no
+        // block is trusted, they're trusted again.
+        let blocks = t.trusted_blocks();
+        let mut again = Terminal::restore(&t.snapshot(), &Config::default()).unwrap();
+        again.restore_blocks(&t.blocks_snapshot());
+        assert_eq!(again.trusted_last_command(), None);
+        for block in blocks {
+            again.trust_block(block);
+        }
+        assert_eq!(again.trusted_last_command(), Some("trail serve"));
         // And each block says its own, if it's trusted.
         let (latest, _) = t.latest_block().unwrap();
         assert_eq!(t.trusted_command_of(latest - 1), None, "printed");

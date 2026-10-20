@@ -29,6 +29,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
     BackgroundAction, BackgroundState, Error, Event, Listening, ListeningPort, NewTerminal, PaneId,
@@ -42,9 +43,27 @@ use super::{Daemon, Source};
 /// The longest name a background tab is given, in characters.
 const LONGEST_NAME: usize = 100;
 
+/// `name`, safe to show as a background tab's: one line, with nothing that
+/// goes unseen or turns the text round, of [`LONGEST_NAME`] characters at
+/// most.
+fn shown_name(name: &str) -> String {
+    let name: String = (name.chars())
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .filter(|&ch| !super::tools::invisible(ch))
+        .take(LONGEST_NAME)
+        .collect();
+    name.trim().to_owned()
+}
+
 /// The most of a terminal's blocks looked at for failures at once: far
 /// more than finish between two reads of its output.
 const MOST_BLOCKS: u32 = 64;
+
+/// How often a change of how background tabs are getting on, which the
+/// marks programs print drive, is told: at most once in so long, so a
+/// program printing them over and over can't flood the windows, nor the
+/// disk the workspaces are kept on.
+const RESTATE_EVERY: Duration = Duration::from_millis(250);
 
 /// What the daemon keeps of each terminal in a background tab, besides
 /// the workspaces.
@@ -59,6 +78,10 @@ pub(super) struct Backgrounds {
     waiting: Vec<Token>,
     /// Whether the ports are being looked for.
     scanning: bool,
+    /// When a change of how background tabs are getting on was last told.
+    restated: Option<Instant>,
+    /// When one waiting to be told is, if one is.
+    pub(super) restate_due: Option<Instant>,
 }
 
 impl Daemon {
@@ -112,6 +135,7 @@ impl Daemon {
         let Some(found) = found else {
             return Err(Error::NoSuchTab(tab));
         };
+        self.no_chats(&found.terminals())?;
         if only {
             self.tab_in_place(workspace, found.focused)?;
         }
@@ -129,6 +153,9 @@ impl Daemon {
         let (tab, only) = self.workspaces.check_background_pane(pane)?;
         if only {
             return self.send_tab_to_background(tab);
+        }
+        if let Some(terminal) = self.terminal_of_pane(pane) {
+            self.no_chats(&[terminal])?;
         }
         let Some((_, _, found)) = self.workspaces.get().find_pane(pane) else {
             return Err(Error::NoSuchPane(pane));
@@ -183,43 +210,62 @@ impl Daemon {
     /// of its terminals whose program has ended becomes a new shell in its
     /// directory, offering to run again what it ran.
     fn bring_back(&mut self, tab: TabId) -> Result<Response, Error> {
-        let Some((_, background)) = self.workspaces.get().find_background(tab) else {
+        if self.workspaces.get().find_background(tab).is_none() {
             return Err(Error::NoSuchTab(tab));
+        }
+        let focused = self.workspaces.bring_back(tab)?;
+        self.renew_ended(tab);
+        self.workspaces_changed();
+        Ok(Response::PaneCreated(focused))
+    }
+
+    /// Makes again each terminal of tab `tab`, just brought into its
+    /// workspace's tab bar, whose program has ended: a new shell in its
+    /// directory, offering to run again what it ran, or running it, if
+    /// it's kept running always. A restart one was waiting for is dropped:
+    /// this is it.
+    pub(super) fn renew_ended(&mut self, tab: TabId) {
+        let Some((_, found)) = self.workspaces.get().find_tab(tab) else {
+            return;
         };
-        let ended: Vec<(PaneId, TerminalId)> = (background.tab.layout.panes().into_iter())
+        let panes: Vec<PaneId> = found.layout.panes().iter().map(|pane| pane.id).collect();
+        let ended: Vec<(PaneId, TerminalId)> = (found.layout.panes().into_iter())
             .filter_map(|pane| Some((pane.id, pane.content.terminal()?)))
             .filter(|&(_, terminal)| {
                 (self.terminals.get(&terminal))
                     .is_none_or(|slot| slot.terminal.status() != TerminalStatus::Running)
             })
             .collect();
-        let focused = self.workspaces.bring_back(tab)?;
+        self.drop_restarts(&panes);
         for (pane, old) in ended {
-            // One kept running runs its command again.
             if let Some(new) = self.start_again_in(pane, old)
-                && self.workspaces.kept(pane).is_some()
+                && self.runs_again(pane)
             {
                 self.run_kept(pane, new);
             }
         }
-        for terminal in self
-            .workspaces
-            .get()
-            .find_tab(tab)
-            .map(|(_, tab)| tab.terminals())
-            .unwrap_or_default()
-        {
-            self.background.checked.remove(&terminal);
+    }
+
+    /// Refuses to send `terminals` to the background if one is a chat:
+    /// only terminals go there.
+    fn no_chats(&self, terminals: &[TerminalId]) -> Result<(), Error> {
+        let chat = (terminals.iter()).any(|terminal| {
+            (self.terminals.get(terminal)).is_some_and(|slot| slot.terminal.grid().is_none())
+        });
+        if chat {
+            return Err(Error::Other(
+                "only terminals of this machine's own go to the background".into(),
+            ));
         }
-        self.workspaces_changed();
-        Ok(Response::PaneCreated(focused))
+        Ok(())
     }
 
     /// Shows a new shell in `pane`, in a tab or a background tab, in place
     /// of terminal `old`, whose program has ended, in the directory it was
-    /// in; and closes `old`. Unless the pane is kept running, which runs
-    /// its own command, the new shell offers to run again the last command
-    /// `old`'s shell said it ran. Returns the new shell's terminal.
+    /// in; and closes `old`, and whatever else the pane showed. Unless the
+    /// pane runs its command again by itself, the new shell offers to run
+    /// again the last command `old`'s shell said it ran. Returns the new
+    /// shell's terminal.
     pub(super) fn start_again_in(&mut self, pane: PaneId, old: TerminalId) -> Option<TerminalId> {
         let (cwd, ran, size) = match self.terminals.get(&old) {
             Some(slot) => {
@@ -238,18 +284,33 @@ impl Daemon {
             cwd,
             record_to: None,
         };
-        let new = match self.new_terminal(&request) {
-            Ok(new) => self.workspaces.replace_terminal(pane, new).map(|_| new),
+        let (new, replaced) = match self.new_terminal(&request) {
+            Ok(new) => {
+                let replaced = self.workspaces.replace_terminal(pane, new);
+                // Its pane has gone meanwhile: so does the new shell.
+                if replaced.is_none() && self.close_terminal(new).is_err() {
+                    log::warn!("terminal {new} couldn't be closed");
+                }
+                (replaced.map(|_| new), replaced)
+            }
             Err(err) => {
                 log::warn!("pane {pane}: a new shell couldn't be started: {err}");
-                None
+                (None, None)
             }
         };
-        if let Some(ran) = ran.filter(|_| new.is_some() && self.workspaces.kept(pane).is_none()) {
+        if let Some(ran) = ran.filter(|_| new.is_some() && !self.runs_again(pane)) {
             self.workspaces.offer_again(pane, ran);
         }
-        if self.terminals.contains_key(&old) && self.close_terminal(old).is_err() {
-            log::warn!("terminal {old} couldn't be closed");
+        // What the pane showed, which may be another terminal than `old`,
+        // goes, and `old`, unless a pane shows it.
+        for gone in replaced.into_iter().chain([old]) {
+            if Some(gone) != new
+                && self.terminals.contains_key(&gone)
+                && self.pane_of(gone).is_none()
+                && self.close_terminal(gone).is_err()
+            {
+                log::warn!("terminal {gone} couldn't be closed");
+            }
         }
         new
     }
@@ -259,8 +320,12 @@ impl Daemon {
         let Some((_, background)) = self.workspaces.get().find_background(tab) else {
             return Err(Error::NoSuchTab(tab));
         };
-        for terminal in background.tab.terminals() {
-            self.background.checked.remove(&terminal);
+        let panes: Vec<PaneId> = (background.tab.layout.panes().iter())
+            .map(|pane| pane.id)
+            .collect();
+        let terminals = background.tab.terminals();
+        self.drop_restarts(&panes);
+        for terminal in terminals {
             self.close_terminal(terminal)?;
         }
         self.workspaces_changed();
@@ -301,7 +366,7 @@ impl Daemon {
             let state = self.background_state(&tab);
             if let Some(background) = self.workspaces.background_mut(tab.id) {
                 background.state = state;
-                background.name = command.chars().take(LONGEST_NAME).collect();
+                background.name = shown_name(command);
             }
         }
         self.workspaces_changed();
@@ -432,7 +497,9 @@ impl Daemon {
             return;
         };
         let state = self.background_state(&background.tab);
-        if state == background.state && failed.is_none() {
+        if state == background.state
+            && failed.is_none_or(|failed| background.failed == Some(failed))
+        {
             return;
         }
         let name = self.background_name(&background.tab);
@@ -443,7 +510,50 @@ impl Daemon {
                 background.failed = failed;
             }
         }
-        self.workspaces_changed();
+        self.background_restated();
+    }
+
+    /// Tells the windows how background tabs are getting on now, unless
+    /// that was told less than [`RESTATE_EVERY`] ago: then once it's been.
+    fn background_restated(&mut self) {
+        let now = Instant::now();
+        match self.background.restated {
+            Some(last) if now < last + RESTATE_EVERY => {
+                self.background
+                    .restate_due
+                    .get_or_insert(last + RESTATE_EVERY);
+            }
+            _ => {
+                self.background.restated = Some(now);
+                self.workspaces_changed();
+            }
+        }
+    }
+
+    /// Tells the windows how background tabs are getting on, if a change
+    /// waited to be told and its time has come.
+    pub(super) fn tell_restated(&mut self) {
+        let now = Instant::now();
+        if self.background.restate_due.is_some_and(|due| due <= now) {
+            self.background.restated = Some(now);
+            self.workspaces_changed();
+        }
+    }
+
+    /// When a change of how background tabs are getting on is to be told,
+    /// if one waits.
+    pub(super) fn next_restate_due(&self) -> Option<Instant> {
+        self.background.restate_due
+    }
+
+    /// Forgets what's kept of terminals no longer in background tabs, as
+    /// the workspaces change: those brought back, closed, or gone with
+    /// their workspace.
+    pub(super) fn forget_backgrounds_gone(&mut self) {
+        let workspaces = &self.workspaces;
+        (self.background.checked)
+            .retain(|terminal, _| workspaces.background_of(*terminal).is_some());
+        self.background.restate_due = None;
     }
 
     /// The exit status of the latest command of terminal `id`'s that
@@ -531,12 +641,7 @@ impl Daemon {
         } else {
             title.to_owned()
         };
-        let name: String = (name.chars())
-            .map(|ch| if ch.is_control() { ' ' } else { ch })
-            .filter(|&ch| !super::tools::invisible(ch))
-            .take(LONGEST_NAME)
-            .collect();
-        name.trim().to_owned()
+        shown_name(&name)
     }
 
     /// Says how each background tab is getting on, as a daemon carrying

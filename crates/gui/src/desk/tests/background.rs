@@ -6,7 +6,10 @@ use clackatoo_protocol::{
     Background, BackgroundAction, BackgroundState, GridNode, Node, TerminalStatus,
 };
 
+use std::time::{Duration, Instant};
+
 use super::*;
+use crate::desk::background::DISMISS_FOR;
 
 /// A background tab, tab `id` showing terminal `id`, getting on as `state`
 /// says, called `name`.
@@ -163,10 +166,33 @@ fn the_list_shows_this_workspaces_first_previews_the_screen_and_brings_one_back(
         Modifiers::default(),
     );
     assert!(desk.finder.is_none());
+    let requests: Vec<Request> = (desk.take_outbox().into_iter())
+        .filter_map(|message| match message {
+            ClientMessage::Request(request) => Some(request),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        asked(&answer_all(&mut desk)),
+        asked(&requests),
         [BackgroundAction::Bring { tab: TabId(5) }]
     );
+    // The daemon brings it in, after the other tabs, then answers with its
+    // pane: the window goes to it.
+    let mut brought = with_background(
+        Vec::new(),
+        vec![background(
+            6,
+            BackgroundState::Ended(TerminalStatus::Exited(3)),
+            Some(3),
+            "make",
+        )],
+    );
+    brought.list[0].tabs.push(tab(5, pane(5)));
+    brought.list[0].active_tab = TabId(5);
+    desk.workspaces_changed(brought);
+    assert_ne!(shown_pane(&desk), PaneId(5));
+    desk.answered(Response::PaneCreated(PaneId(5)));
+    assert_eq!(shown_pane(&desk), PaneId(5));
 }
 
 #[test]
@@ -198,6 +224,63 @@ fn ctrl_d_dismisses_one_ended_at_once_and_one_running_on_the_second_press() {
     assert_eq!(
         asked(&answer_all(&mut desk)),
         [BackgroundAction::Dismiss { tab: TabId(6) }]
+    );
+}
+
+#[test]
+fn a_second_ctrl_d_has_a_few_seconds_and_the_list_says_its_needed() {
+    let mut desk = desk(with_background(
+        vec![background(5, BackgroundState::Running, None, "trail serve")],
+        Vec::new(),
+    ));
+    normal_mode(&mut desk);
+    command(&mut desk, "Background");
+    answer_all(&mut desk);
+    ctrl(&mut desk, "d");
+    let count = |desk: &mut Desk| desk.finder_view((10, 60), None).unwrap().count;
+    assert_eq!(count(&mut desk), "still running: Ctrl+D again ends it");
+    // The window wakes to take it back.
+    let wakes = desk.background_wakes().unwrap();
+    assert!(wakes <= Instant::now() + DISMISS_FOR);
+    // Too late, the first press is forgotten, and the list says so no
+    // more.
+    let long_ago = Instant::now().checked_sub(Duration::from_secs(4)).unwrap();
+    desk.dismissing = Some((TabId(5), long_ago));
+    assert_eq!(count(&mut desk), "1 / 1");
+    ctrl(&mut desk, "d");
+    assert!(asked(&answer_all(&mut desk)).is_empty(), "it asks again");
+    assert_eq!(count(&mut desk), "still running: Ctrl+D again ends it");
+    ctrl(&mut desk, "d");
+    assert_eq!(
+        asked(&answer_all(&mut desk)),
+        [BackgroundAction::Dismiss { tab: TabId(5) }]
+    );
+}
+
+#[test]
+fn a_tab_with_a_chat_isnt_sent_to_the_background() {
+    let mut desk = desk(with_background(Vec::new(), Vec::new()));
+    snapshot(&mut desk, 1);
+    let chat = clackatoo_protocol::ChatNode {
+        agent: "Claude Code".into(),
+        ..clackatoo_protocol::ChatNode::default()
+    };
+    desk.view_changed(
+        TerminalId(2),
+        &ViewUpdate::Snapshot(View {
+            title: "a chat".into(),
+            cwd: None,
+            root: Node::Chat(Box::new(chat)),
+        }),
+    );
+    normal_mode(&mut desk);
+    command(&mut desk, "bg");
+    assert!(asked(&answer_all(&mut desk)).is_empty());
+    // The terminal beside it alone may go.
+    command(&mut desk, "bgpane");
+    assert_eq!(
+        asked(&answer_all(&mut desk)),
+        [BackgroundAction::Pane { pane: PaneId(1) }]
     );
 }
 
@@ -305,19 +388,32 @@ fn keep_marks_the_focused_terminal_and_its_tab_says_so() {
         command: "trail serve".into(),
         always: true,
         given_up,
+        paused: false,
     };
     let mut marked = with_background(
         vec![background(5, BackgroundState::Running, None, "trail serve")],
         Vec::new(),
     );
     marked.kept = vec![mark(2, false), mark(5, true)];
-    desk.workspaces_changed(marked);
+    desk.workspaces_changed(marked.clone());
     let names: Vec<String> = desk
         .tab_names()
         .into_iter()
         .map(|(_, name, _)| name)
         .collect();
     assert!(names[0].ends_with(" ↻"), "{names:?}");
+    // Paused, as it was typed into, it says that.
+    let mut paused = with_background(Vec::new(), Vec::new());
+    paused.kept = vec![Kept {
+        paused: true,
+        ..mark(2, false)
+    }];
+    desk.workspaces_changed(paused);
+    let names: Vec<String> = (desk.tab_names().into_iter())
+        .map(|(_, name, _)| name)
+        .collect();
+    assert!(names[0].ends_with(" ↻‖"), "{names:?}");
+    desk.workspaces_changed(marked);
     command(&mut desk, "Background");
     answer_all(&mut desk);
     let shown = desk.finder_view((10, 60), None).unwrap();

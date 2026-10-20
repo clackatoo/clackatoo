@@ -1861,3 +1861,37 @@ fn a_device_cant_drive_or_watch_the_daemons_connections() {
     let mut window = daemon.window();
     assert!(window.watch_connections(false).unwrap().is_empty());
 }
+
+#[test]
+fn a_device_can_start_background_tabs_but_never_keep_a_terminal_running() {
+    use clackatoo_protocol::{BackgroundAction, Keeping};
+    let daemon = TestDaemon::start();
+    let mut window = daemon.window();
+    let cat = PaneTerminal::New(NewTerminal {
+        size: Size::new(40, 10).unwrap(),
+        command: Some(vec!["cat".into()]),
+        cwd: None,
+        record_to: None,
+    });
+    let pane = window.new_workspace(None, cat).unwrap();
+    let workspace = window.watch_workspaces().unwrap().list[0].id;
+    let cookie = daemon.pair();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    for how in [Keeping::Restore, Keeping::Always, Keeping::Off] {
+        let refused = phone.request(Request::Keep { pane, how });
+        assert!(
+            matches!(&refused, Response::Error(Error::Other(why)) if why.contains("web app")),
+            "{how:?}: {refused:?}"
+        );
+    }
+    // What runs in the background, the user sees from the phone too.
+    let start = BackgroundAction::Start {
+        workspace,
+        command: "true".into(),
+        cwd: None,
+        pane: None,
+        size: Size::new(40, 10).unwrap(),
+    };
+    let started = phone.request(Request::Background(start));
+    assert!(matches!(started, Response::PaneCreated(_)), "{started:?}");
+}

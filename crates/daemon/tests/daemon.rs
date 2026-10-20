@@ -16590,7 +16590,16 @@ impl TestDaemon {
         seen: &Path,
         change: impl FnOnce(&mut DaemonConfig),
     ) -> Self {
-        let script = secret_shell(seen);
+        Self::keeping_with_shell(file, secret_shell(seen), change)
+    }
+
+    /// As [`keeping_with_secret_shell_and`](Self::keeping_with_secret_shell_and),
+    /// whose shell is `script`.
+    fn keeping_with_shell(
+        file: &Path,
+        script: String,
+        change: impl FnOnce(&mut DaemonConfig),
+    ) -> Self {
         Self::start_with_restoring(
             |dir, config| {
                 change(config);
@@ -17644,6 +17653,13 @@ fn background_tabs_are_kept_and_come_back_after_a_restart_offering_what_ran() {
     let shown = client.watch_workspaces().unwrap();
     assert_eq!(shown.restored.len(), 1);
     assert_eq!(shown.restored[0].pane, pane);
+    // Sent back, and typed into there, as an agent's tools can, it's
+    // forgotten, as in a tab.
+    background(&mut client, BackgroundAction::Tab { tab });
+    assert_eq!(client.watch_workspaces().unwrap().restored.len(), 1);
+    client.send_input(terminal, b"ec").unwrap();
+    let left = wait_for_workspaces(&mut client, |workspaces| workspaces.restored.is_empty());
+    assert!(left.restored.is_empty());
 }
 
 #[test]
@@ -17871,6 +17887,7 @@ fn a_terminal_kept_running_runs_its_signed_command_again_after_a_restart() {
                 command: "sleep 60".into(),
                 always: false,
                 given_up: false,
+                paused: false,
             }]
         );
         // What runs later is never what's kept: the mark keeps its command.
@@ -17924,12 +17941,16 @@ fn wait_for_answer_text(
 }
 
 #[test]
-fn a_command_kept_running_always_runs_again_as_it_ends_but_not_after_the_users_own() {
+fn a_command_kept_running_always_runs_again_as_it_ends_until_its_typed_into() {
     use clackatoo_protocol::Keeping;
     let kept = tempfile::tempdir().unwrap();
     let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
     let count = kept.path().join("count");
-    let daemon = TestDaemon::keeping_with_secret_shell(&file, &seen);
+    // Waiting 100 ms at first, then 200, 400 and 800, as each run ends at
+    // once.
+    let daemon = TestDaemon::keeping_with_secret_shell_and(&file, &seen, |config| {
+        config.keep_wait = Duration::from_millis(100);
+    });
     let mut client = daemon.client();
     let pane = (client.new_workspace(None, shell_in(kept.path()))).unwrap();
     let terminal = terminal_of(&client.watch_workspaces().unwrap(), pane);
@@ -17951,19 +17972,27 @@ fn a_command_kept_running_always_runs_again_as_it_ends_but_not_after_the_users_o
         std::thread::sleep(Duration::from_millis(20));
     }
     wait_for_answer_text(&mut client, pane, Keeping::Always);
-    // Its end having been seen, it runs again a moment later, by itself.
-    let deadline = Instant::now() + Duration::from_secs(8);
-    while runs() < 2 {
-        assert!(Instant::now() < deadline, "it never ran again");
-        std::thread::sleep(Duration::from_millis(50));
+    // Its end having been seen, it runs again by itself, and again.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while runs() < 3 {
+        assert!(Instant::now() < deadline, "it ran {} times", runs());
+        std::thread::sleep(Duration::from_millis(20));
     }
-    // A command of the user's own, taken over, ends without it running
-    // again after: only the command kept running counts.
-    let taken = runs();
+    // Typed into, as the user taking over, it runs again no more: paused,
+    // its tab says.
     client.send_input(terminal, b"true\r").unwrap();
-    std::thread::sleep(Duration::from_millis(2500));
-    // It may have run once more for its own end before the user's.
-    assert!(runs() <= taken + 1, "{} runs", runs());
+    wait_for_workspaces(&mut client, |workspaces| {
+        workspaces.kept.first().is_some_and(|kept| kept.paused)
+    });
+    // A run already typed may finish; none starts after, over longer than
+    // any wait it could be in.
+    std::thread::sleep(Duration::from_secs(1));
+    let taken = runs();
+    std::thread::sleep(Duration::from_millis(1800));
+    assert_eq!(runs(), taken);
+    // The mark stays, for the next fresh start.
+    let marked = &client.watch_workspaces().unwrap().kept[0];
+    assert!(marked.always && marked.command == command, "{marked:?}");
 }
 
 #[test]
@@ -18068,4 +18097,512 @@ fn a_shell_kept_running_always_that_exits_comes_back_in_its_pane_running_the_com
         assert!(Instant::now() < deadline, "never given up: {marked:?}");
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+// --- Review fixes (CLACKA-121) ---------------------------------------------
+
+/// The lines in `path`, a file a command appends a line to each time it
+/// runs.
+fn runs_in(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+/// Waits until `path` says its command ran at least `runs` times.
+fn wait_for_runs(path: &Path, runs: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while runs_in(path) < runs {
+        assert!(Instant::now() < deadline, "it ran {} times", runs_in(path));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Whether python3 is there to run, for the tests that need a program of
+/// their own.
+fn has_python() -> bool {
+    std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// A program that, after a moment, takes the terminal for its own process
+/// group, as a program a shell with job control runs, prints the marks
+/// that say its command ended and a prompt began, then notes in the file
+/// named by its argument whatever was typed into it, and gives the
+/// terminal back.
+const FORGER: &str = r"
+import os, select, signal, sys, time
+time.sleep(1.0)
+signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+shell = os.getpgrp()
+os.setpgid(0, 0)
+os.tcsetpgrp(0, os.getpid())
+sys.stdout.write('\033]133;D;0\007\033]133;A\007$ ')
+sys.stdout.flush()
+time.sleep(1.5)
+got = b''
+while select.select([0], [], [], 0)[0]:
+    chunk = os.read(0, 4096)
+    if not chunk:
+        break
+    got += chunk
+with open(sys.argv[1], 'ab') as noted:
+    noted.write(b'got:' + got + b'\n')
+os.tcsetpgrp(0, shell)
+";
+
+#[test]
+fn marks_a_program_prints_never_have_a_kept_command_typed_into_it() {
+    use clackatoo_protocol::Keeping;
+    if !has_python() {
+        eprintln!("no python3 to forge marks with: skipped");
+        return;
+    }
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    std::fs::write(kept.path().join("forge.py"), FORGER).unwrap();
+    let got = kept.path().join("got");
+    let daemon = TestDaemon::keeping_with_secret_shell_and(&file, &seen, |config| {
+        config.keep_wait = Duration::from_millis(50);
+    });
+    let mut client = daemon.client();
+    let pane = (client.new_workspace(None, shell_in(kept.path()))).unwrap();
+    let terminal = terminal_of(&client.watch_workspaces().unwrap(), pane);
+    wait_for_prompt(&mut client, terminal);
+    let command = format!("python3 forge.py {}", got.display());
+    client
+        .send_input(terminal, format!("{command}\r").as_bytes())
+        .unwrap();
+    wait_for_screen(&mut client, terminal, |text| text.contains("forge.py"));
+    // Kept running always while it runs, before it forges anything.
+    let said = wait_for_answer_text(&mut client, pane, Keeping::Always);
+    assert!(said.contains("forge.py"), "{said}");
+    // Its forged end, while it holds the terminal, starts nothing: what it
+    // read is nothing the daemon typed.
+    wait_for_runs(&got, 1);
+    let noted = std::fs::read_to_string(&got).unwrap();
+    let first = noted.lines().next().unwrap();
+    assert_eq!(first, "got:", "{noted}");
+}
+
+#[test]
+fn a_program_printing_marks_over_and_over_tells_the_windows_now_and_then() {
+    use clackatoo_protocol::BackgroundAction;
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    let daemon = TestDaemon::keeping_with_secret_shell(&file, &seen);
+    let mut client = daemon.client();
+    let first = (client.new_workspace(None, shell_in(kept.path()))).unwrap();
+    let workspace = client.watch_workspaces().unwrap().list[0].id;
+    let mut watcher = daemon.client();
+    watcher.watch_workspaces().unwrap();
+    // Running and finishing, and failing, 300 times as fast as it can.
+    let flood = "sleep 1; i=0; while [ $i -lt 300 ]; do \
+                 printf '\\033]133;C\\007\\033]133;D;1\\007'; i=$((i+1)); done; sleep 30";
+    let start = BackgroundAction::Start {
+        workspace,
+        command: flood.into(),
+        cwd: None,
+        pane: Some(first),
+        size: Size::new(80, 10).unwrap(),
+    };
+    background(&mut client, start);
+    std::thread::sleep(Duration::from_millis(500));
+    // What came of starting it is passed over.
+    drop(watcher.take_events());
+    watcher
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let mut told = 0;
+    let until = Instant::now() + Duration::from_millis(2500);
+    while Instant::now() < until {
+        if let Ok(Event::Workspaces(_)) = watcher.next_event() {
+            told += 1;
+        }
+    }
+    // A few times a second at most, not 600.
+    assert!((1..=12).contains(&told), "told {told} times");
+}
+
+/// [`secret_shell`], but leaving a command run twice in a row unsigned, as
+/// bash with `HISTCONTROL=ignoredups` leaves it out of its history.
+fn ignoring_dups_shell(seen: &Path) -> String {
+    let signed = r#"printf '\033]133;C;clackatoo=%s;cmdline_url=%s\007' "$secret" "$url""#;
+    let script = secret_shell(seen);
+    assert!(script.contains(signed));
+    script.replace(
+        signed,
+        &format!(
+            r#"if [ "$line" = "$last" ]; then printf '\033]133;C;cmdline_url=%s\007' "$url"; else {signed}; fi; last=$line"#
+        ),
+    )
+}
+
+#[test]
+fn a_command_kept_running_its_shell_leaves_unsigned_the_second_time_runs_again_all_the_same() {
+    use clackatoo_protocol::Keeping;
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    let count = kept.path().join("count");
+    let daemon = TestDaemon::keeping_with_shell(&file, ignoring_dups_shell(&seen), |config| {
+        config.keep_wait = Duration::from_millis(50);
+    });
+    let mut client = daemon.client();
+    let pane = (client.new_workspace(None, shell_in(kept.path()))).unwrap();
+    let terminal = terminal_of(&client.watch_workspaces().unwrap(), pane);
+    wait_for_prompt(&mut client, terminal);
+    let command = format!("echo run >> {}", count.display());
+    client
+        .send_input(terminal, format!("{command}\r").as_bytes())
+        .unwrap();
+    wait_for_runs(&count, 1);
+    wait_for_answer_text(&mut client, pane, Keeping::Always);
+    // The daemon typed it, so each end is its own, signed or not.
+    wait_for_runs(&count, 4);
+}
+
+#[test]
+fn typed_ahead_into_a_command_kept_running_always_it_ends_offering_to_run_it_again() {
+    use clackatoo_protocol::Keeping;
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    let count = kept.path().join("count");
+    let daemon = TestDaemon::keeping_with_secret_shell_and(&file, &seen, |config| {
+        config.keep_wait = Duration::from_millis(50);
+    });
+    let mut client = daemon.client();
+    let pane = (client.new_workspace(None, shell_in(kept.path()))).unwrap();
+    let terminal = terminal_of(&client.watch_workspaces().unwrap(), pane);
+    wait_for_prompt(&mut client, terminal);
+    let command = format!("sleep 1; echo run >> {}", count.display());
+    client
+        .send_input(terminal, format!("{command}\r").as_bytes())
+        .unwrap();
+    wait_for_screen(&mut client, terminal, |text| text.contains("sleep 1;"));
+    wait_for_answer_text(&mut client, pane, Keeping::Always);
+    // Half a line typed ahead, which the command would land after.
+    client.send_input(terminal, b"ec").unwrap();
+    wait_for_runs(&count, 1);
+    let offered = wait_for_workspaces(&mut client, |workspaces| {
+        (workspaces.restored.iter())
+            .any(|restored| restored.pane == pane && restored.ran.as_deref() == Some(&command))
+    });
+    assert!(offered.kept[0].paused, "{:?}", offered.kept);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(runs_in(&count), 1, "it ran again");
+    // Run again there by the user, it's no longer paused.
+    client
+        .send_input(terminal, format!("\x15{command}\r").as_bytes())
+        .unwrap();
+    wait_for_workspaces(&mut client, |workspaces| {
+        workspaces.kept.first().is_some_and(|kept| !kept.paused)
+    });
+}
+
+/// A workspace whose second tab, in the background, runs `sleep 1; exit` in
+/// the secret shell, kept running always: its shell ends a second later,
+/// and a new one is to take its place after `wait`. Returns the daemon,
+/// the client, the background tab, its pane and its terminal.
+fn kept_shell_ending(
+    kept: &Path,
+    wait: Duration,
+    background_it: bool,
+) -> (
+    TestDaemon,
+    Client,
+    clackatoo_protocol::TabId,
+    PaneId,
+    TerminalId,
+) {
+    use clackatoo_protocol::{BackgroundAction, Keeping};
+    let (file, seen) = (kept.join("workspaces"), kept.join("seen"));
+    let daemon = TestDaemon::keeping_with_secret_shell_and(&file, &seen, |config| {
+        config.keep_wait = wait;
+    });
+    let mut client = daemon.client();
+    client.new_workspace(None, shell_in(kept)).unwrap();
+    let workspace = client.watch_workspaces().unwrap().list[0].id;
+    let pane = client.new_tab(workspace, shell_in(kept)).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let tab = workspaces.find_pane(pane).unwrap().1.id;
+    let terminal = terminal_of(&workspaces, pane);
+    wait_for_prompt(&mut client, terminal);
+    client.send_input(terminal, b"sleep 1; exit\r").unwrap();
+    wait_for_screen(&mut client, terminal, |text| text.contains("sleep 1; exit"));
+    wait_for_answer_text(&mut client, pane, Keeping::Always);
+    if background_it {
+        background(&mut client, BackgroundAction::Tab { tab });
+    }
+    wait_for_status(&mut client, terminal);
+    (daemon, client, tab, pane, terminal)
+}
+
+/// Every terminal there is, but chats, is in a pane, of a tab or a
+/// background tab.
+fn every_terminal_in_a_pane(client: &mut Client) {
+    let workspaces = client.watch_workspaces().unwrap();
+    let shown: Vec<TerminalId> = (workspaces.list.iter())
+        .flat_map(|workspace| {
+            let background = workspace.background.iter().map(|b| &b.tab);
+            workspace.tabs.iter().chain(background)
+        })
+        .flat_map(clackatoo_protocol::Tab::terminals)
+        .collect();
+    let running: Vec<TerminalId> = (client.list_terminals().unwrap().into_iter())
+        .map(|info| info.id)
+        .collect();
+    for terminal in &running {
+        assert!(
+            shown.contains(terminal),
+            "{terminal} is in no pane: {workspaces:#?}"
+        );
+    }
+}
+
+#[test]
+fn bringing_back_a_tab_waiting_to_run_again_leaves_no_terminal_behind() {
+    use clackatoo_protocol::BackgroundAction;
+    let kept = tempfile::tempdir().unwrap();
+    let (_daemon, mut client, tab, pane, ended) =
+        kept_shell_ending(kept.path(), Duration::from_secs(1), true);
+    // Brought back before the new shell it waits for comes.
+    background(&mut client, BackgroundAction::Bring { tab });
+    let brought = terminal_of(&client.watch_workspaces().unwrap(), pane);
+    assert_ne!(brought, ended);
+    std::thread::sleep(Duration::from_secs(2));
+    // The restart it was waiting for didn't come as well.
+    assert_eq!(
+        terminal_of(&client.watch_workspaces().unwrap(), pane),
+        brought
+    );
+    every_terminal_in_a_pane(&mut client);
+}
+
+#[test]
+fn a_mark_taken_away_as_a_new_shell_waits_leaves_the_pane_as_its_shells_end_would() {
+    use clackatoo_protocol::Keeping;
+    let kept = tempfile::tempdir().unwrap();
+    let (_daemon, mut client, _, pane, ended) =
+        kept_shell_ending(kept.path(), Duration::from_secs(3), false);
+    let Response::Text(_) = keep(&mut client, pane, Keeping::Off) else {
+        panic!("not taken away");
+    };
+    // Its pane closed, as its shell's end would have closed it.
+    let workspaces = client.watch_workspaces().unwrap();
+    assert!(workspaces.find_pane(pane).is_none(), "{workspaces:#?}");
+    let terminals: Vec<TerminalId> = (client.list_terminals().unwrap().into_iter())
+        .map(|info| info.id)
+        .collect();
+    assert!(!terminals.contains(&ended));
+    std::thread::sleep(Duration::from_millis(3500));
+    every_terminal_in_a_pane(&mut client);
+}
+
+#[test]
+fn clackatoo_run_in_the_terminal_itself_is_never_what_it_keeps_running() {
+    use clackatoo_protocol::Keeping;
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    // A clackatoo of its own, which takes a moment.
+    let clackatoo = kept.path().join("clackatoo");
+    std::fs::write(&clackatoo, "#!/bin/sh\nsleep 2\n").unwrap();
+    std::fs::set_permissions(
+        &clackatoo,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let daemon = TestDaemon::keeping_with_secret_shell(&file, &seen);
+    let mut client = daemon.client();
+    let pane = (client.new_workspace(None, shell_in(kept.path()))).unwrap();
+    let terminal = terminal_of(&client.watch_workspaces().unwrap(), pane);
+    wait_for_prompt(&mut client, terminal);
+    // Nothing but clackatoo itself: nothing to keep running.
+    client
+        .send_input(terminal, b"./clackatoo keep 1 always\r")
+        .unwrap();
+    wait_for_screen(&mut client, terminal, |text| {
+        text.contains("./clackatoo keep")
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    let refused = keep(&mut client, pane, Keeping::Always);
+    assert!(matches!(refused, Response::Error(_)), "{refused:?}");
+    wait_for_screen(&mut client, terminal, |text| text.matches('$').count() >= 2);
+    // With a command before it, that's what's kept running, though
+    // clackatoo runs still.
+    client.send_input(terminal, b"echo served\r").unwrap();
+    wait_for_screen(&mut client, terminal, |text| text.contains("\nserved"));
+    client
+        .send_input(terminal, b"./clackatoo keep 1 always\r")
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let said = wait_for_answer_text(&mut client, pane, Keeping::Always);
+    assert!(said.contains("`echo served`"), "{said}");
+    assert_eq!(
+        client.watch_workspaces().unwrap().kept[0].command,
+        "echo served"
+    );
+}
+
+#[test]
+fn a_tab_kept_running_only_as_the_daemon_starts_brought_back_offers_its_command() {
+    use clackatoo_protocol::{BackgroundAction, Keeping};
+    let kept = tempfile::tempdir().unwrap();
+    let (_daemon, mut client, tab, pane, _) =
+        kept_shell_ending(kept.path(), Duration::from_secs(1), true);
+    // Kept running as the daemon starts, but not as it ends.
+    let Response::Text(_) = keep(&mut client, pane, Keeping::Restore) else {
+        panic!("not kept");
+    };
+    background(&mut client, BackgroundAction::Bring { tab });
+    let workspaces = client.watch_workspaces().unwrap();
+    let offered: Vec<Option<&str>> = (workspaces.restored.iter())
+        .filter(|restored| restored.pane == pane)
+        .map(|restored| restored.ran.as_deref())
+        .collect();
+    assert_eq!(offered, [Some("sleep 1; exit")]);
+    let brought = terminal_of(&workspaces, pane);
+    wait_for_prompt(&mut client, brought);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!screen_text(&client.capture(brought).unwrap()).contains("sleep 1"));
+}
+
+#[test]
+fn a_chat_never_goes_to_the_background() {
+    use clackatoo_protocol::BackgroundAction;
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let workspaces = client.watch_workspaces().unwrap();
+    let workspace = workspaces.list[0].id;
+    let tab = workspaces.list[0].tabs[0].id;
+    let pane = workspaces.list[0].tabs[0].layout.panes()[0].id;
+    client.new_tab(workspace, new_pane(&["cat"])).unwrap();
+    for action in [
+        BackgroundAction::Tab { tab },
+        BackgroundAction::Pane { pane },
+    ] {
+        let refused = background(&mut client, action.clone());
+        assert!(
+            matches!(refused, Response::Error(_)),
+            "{action:?}: {refused:?}"
+        );
+    }
+    let workspaces = client.watch_workspaces().unwrap();
+    assert!(workspaces.list[0].background.is_empty());
+    assert!(workspaces.list[0].terminals().contains(&chat));
+}
+
+#[test]
+fn a_background_tab_started_is_named_safely_and_its_terminal_shown_nowhere_else() {
+    use clackatoo_protocol::BackgroundAction;
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    let daemon = TestDaemon::keeping_with_secret_shell(&file, &seen);
+    let mut client = daemon.client();
+    let first = (client.new_workspace(None, shell_in(kept.path()))).unwrap();
+    let workspace = client.watch_workspaces().unwrap().list[0].id;
+    let start = BackgroundAction::Start {
+        workspace,
+        command: "echo a\u{202e}b\u{7}c".into(),
+        cwd: None,
+        pane: Some(first),
+        size: Size::new(60, 10).unwrap(),
+    };
+    background(&mut client, start);
+    let workspaces = client.watch_workspaces().unwrap();
+    let started = &workspaces.list[0].background[0];
+    assert_eq!(started.name, "echo ab c");
+    // Its terminal can't be put in a pane of a tab as well.
+    let terminal = started.tab.terminals()[0];
+    let refused = client.new_tab(workspace, PaneTerminal::Existing(terminal));
+    assert!(
+        matches!(refused, Err(ClientError::Daemon(Error::TerminalInPane(_)))),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn an_agents_command_that_would_keep_something_running_is_refused() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let words = last_words(&ask(
+        &mut client,
+        chat,
+        "mcp run_in_terminal {\"command\":\"clackatoo keep 1 always\"}\n\
+         mcp run_in_background {\"command\":\"sleep 1 && clackatoo bg -- make\"}",
+    ));
+    assert_eq!(
+        words.matches("only the user has clackatoo keep").count(),
+        2,
+        "{words}"
+    );
+    assert_eq!(tab_contents(&mut client).len(), 1, "nothing ran");
+}
+
+#[test]
+fn a_background_tab_brought_in_for_the_last_tab_makes_its_ended_terminals_again() {
+    use clackatoo_protocol::BackgroundAction;
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let only = (client.new_workspace(None, new_pane(&["cat"]))).unwrap();
+    let workspace = client.watch_workspaces().unwrap().list[0].id;
+    let left = client.new_tab(workspace, new_pane(&["cat"])).unwrap();
+    let right = (client.split_pane(left, Side::Right, new_pane(&["cat"]))).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let tab = workspaces.find_pane(left).unwrap().1.id;
+    let ended = terminal_of(&workspaces, right);
+    background(&mut client, BackgroundAction::Tab { tab });
+    // One of its terminals ends, in the background, and stays.
+    client.send_input(ended, b"\x04").unwrap();
+    wait_for_status(&mut client, ended);
+    // The last tab closing brings it back: the terminal that ended is a new
+    // shell, not a pane frozen on its last screen.
+    client.close_pane(only).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    assert_eq!(workspaces.list[0].tabs[0].id, tab);
+    let again = terminal_of(&workspaces, right);
+    assert_ne!(again, ended);
+    let info = (client.list_terminals().unwrap().into_iter()).find(|info| info.id == again);
+    assert_eq!(info.map(|info| info.status), Some(TerminalStatus::Running));
+    every_terminal_in_a_pane(&mut client);
+}
+
+#[test]
+fn a_window_from_before_background_tabs_cant_close_a_workspace_with_them() {
+    use clackatoo_protocol::BackgroundAction;
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    client
+        .new_workspace(Some("site".into()), new_pane(&["cat"]))
+        .unwrap();
+    let workspace = client.watch_workspaces().unwrap().list[0].id;
+    let pane = client.new_tab(workspace, new_pane(&["cat"])).unwrap();
+    let tab = client
+        .watch_workspaces()
+        .unwrap()
+        .find_pane(pane)
+        .unwrap()
+        .1
+        .id;
+    background(&mut client, BackgroundAction::Tab { tab });
+    let old = wire::BACKGROUND - 1;
+    let mut raw = Raw::open(&daemon, old);
+    raw.hello(old);
+    raw.request(Request::CloseWorkspace { workspace });
+    assert_eq!(raw.next(), Some(hello(old)));
+    let answer = raw.next();
+    assert!(
+        matches!(&answer, Some(ServerMessage::Response(Response::Error(Error::Other(why))))
+            if why.contains("‘site’ has background tabs")),
+        "{answer:?}"
+    );
+    assert_eq!(client.list_terminals().unwrap().len(), 2);
+    // A window of now closes it, background tabs and all.
+    let request = Request::CloseWorkspace { workspace };
+    assert_eq!(client.request(&request).unwrap(), Response::Done);
+    assert!(client.list_terminals().unwrap().is_empty());
 }

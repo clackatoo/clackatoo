@@ -238,7 +238,7 @@ impl Daemon {
             return;
         }
         self.kept_typed_into(id);
-        if let Some(pane) = self.workspaces.get().pane_showing(id)
+        if let Some(pane) = self.pane_of(id)
             && self.workspaces.forget_ran(pane)
         {
             self.workspaces_changed();
@@ -281,7 +281,7 @@ impl Daemon {
             .insert(id, (cwd.map(str::to_owned), block));
         self.keep_soon();
         if started
-            && let Some(pane) = self.workspaces.get().pane_showing(id)
+            && let Some(pane) = self.pane_of(id)
             && self.workspaces.forget_ran(pane)
         {
             self.workspaces_changed();
