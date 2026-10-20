@@ -149,7 +149,11 @@ To start once with none, run `clackatoo stop`, then [`clackatoo daemon --fresh`]
 | `:keep always` | That, and runs it again as it ends: a second after its shell's prompt comes back after that very command, never after one you ran since, and in a new shell in its pane if the shell itself ends. Each time it ends again within ten seconds of starting it waits twice as long, up to a minute, and after five such ends in a row it gives up until you mark it again. |
 | `:keep off` | Takes the mark away. |
 
-A tab holding a terminal kept running says ` ↻` after its name, and ` ↻✗` once it has given up; so does a [background tab](#background-tabs) in the list. Only you mark a terminal, here or with [`clackatoo keep`](~clackatoo/reference/cli#keep): no [agent's tool](~clackatoo/reference/agents#what-the-agent-can-show-you) can, so nothing an agent does arranges for anything to run by itself later. The mark is kept with the workspaces, and handed over as the daemon upgrades, which keeps terminals running anyway. A terminal on another machine can't be marked from here yet.
+It's only ever typed at the shell's prompt, while the shell has the terminal: the marks that say a command ended and a prompt began aren't signed, so a program can print them, and a command's end is taken for one only once the shell is back in front, never while a program holds the terminal. A run the daemon typed is the command's even if your shell doesn't sign it, as bash doesn't sign a command it leaves out of its history with `ignoredups`.
+
+Typing into a terminal kept running always, as Ctrl+C to stop it, or a command typed ahead while it runs, pauses running it again: the user has taken over. Its tab says ` ↻‖`, and as the command ends it offers `R` to run it again, as after a restart. Running the command there again yourself, or marking it again, ends the pause; the mark stays for the next fresh start meanwhile.
+
+A tab holding a terminal kept running says ` ↻` after its name, ` ↻‖` while paused, and ` ↻✗` once it has given up; so does a [background tab](#background-tabs) in the list. Only you set the mark, from a window or with [`clackatoo keep`](~clackatoo/reference/cli#keep), and a device on the [web app](~clackatoo/reference/phone) can't. [Agents' tools](~clackatoo/reference/agents#what-the-agent-can-show-you) don't set it, and refuse a command line that runs `clackatoo keep` or `clackatoo bg`; but that's a guard against mistakes, not a boundary: a command an agent types into a terminal follows the [ask-before-running rules](~clackatoo/reference/agents#what-the-agent-can-show-you), and a script it runs could do anything you could. `clackatoo keep` run in the terminal itself keeps the command before it, never itself. The mark is kept with the workspaces, and handed over as the daemon upgrades, which keeps terminals running anyway. A terminal on another machine can't be marked from here yet.
 
 A pane closes when its program exits, as in other terminals. A tab closes with its last pane, and a workspace with its last tab, unless it has a [background tab](#background-tabs) still running, which comes back in its place. When the last workspace closes, so does the window.
 
@@ -171,11 +175,11 @@ The list is the [finder's](#the-finder), with this workspace's background tabs f
 | Key, in the list | Does |
 |---|---|
 | Enter | Brings it back as a tab of its workspace, after the others, going there. A terminal of it whose shell has exited starts again as a new shell in its folder, offering `R` to put what it ran at the prompt. |
-| Ctrl+D | Dismisses it, closing its terminals. One still running asks first: a second Ctrl+D ends it. |
+| Ctrl+D | Dismisses it, closing its terminals. One still running asks first, in the list's top right: a second Ctrl+D within three seconds ends it. |
 | Ctrl+F | In a window on [another machine](~clackatoo/reference/remote#forwarding-ports) than the daemon, forwards the ports it listens on here, each to the same port, as `:PortForward 8080` does. |
 | Esc | Closes the list. |
 
-A background tab whose terminals have ended stays, its last screen readable, until it's dismissed or brought back: nothing vanishes by itself. Closing a workspace closes its background tabs with it. A workspace on [another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar) keeps its background tabs to itself for now: they aren't listed here, and its tabs can't be sent to the background from here.
+A background tab whose terminals have ended stays, its last screen readable, until it's dismissed or brought back: nothing vanishes by itself. Closing a workspace closes its background tabs with it; a window from before protocol 96, which doesn't know they're there, can't. A workspace keeps 64 background tabs at most, and chats don't go to the background, only terminals. A workspace on [another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar) keeps its background tabs to itself for now: they aren't listed here, and its tabs can't be sent to the background from here.
 
 ### The command line
 
