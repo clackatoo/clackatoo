@@ -319,7 +319,15 @@ mod tests {
         let proc = Path::new("/proc");
         let ours = std::process::id();
         assert!(children_of(proc, ours).contains(&child.id()));
-        let stat = stat_of(proc, child.id()).unwrap();
+        // The child can be seen before its exec has renamed it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let stat = loop {
+            let stat = stat_of(proc, child.id()).unwrap();
+            if stat.program == "sleep" || std::time::Instant::now() > deadline {
+                break stat;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         assert_eq!((stat.program.as_str(), stat.ppid), ("sleep", ours));
         assert_eq!(stat.pgrp, stat_of(proc, ours).unwrap().pgrp);
         child.kill().unwrap();
