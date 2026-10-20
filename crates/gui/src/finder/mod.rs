@@ -1,8 +1,8 @@
 //! The finder: a picker over the panes, as Telescope's and fzf's are, for
 //! the files in a project, the lines in them a pattern matches, the files
 //! open, the places a language server's answer gives, and the symbols in a
-//! file or a project; and for the tutor's lessons, and what's new, which
-//! the window lists itself.
+//! file or a project; and for the tutor's lessons, what's new, and the
+//! background tabs, which the window lists itself.
 //!
 //! The daemon owns the files, so it lists and greps them, and sends what it
 //! finds a batch at a time (see `clackatoo_protocol::Found`). The finder
@@ -23,6 +23,9 @@
 //! | Ctrl+V, Ctrl+X | Opens it beside the focused pane, or below |
 //! | Ctrl+T | Opens it in a new tab |
 //! | Esc, Ctrl+C | Closes the finder |
+//!
+//! Listing the background tabs, Enter, Ctrl+V, Ctrl+X and Ctrl+T bring the
+//! one picked back, and Ctrl+D dismisses it (see `desk::background`).
 
 pub(crate) mod rank;
 pub(crate) mod view;
@@ -72,6 +75,8 @@ pub(crate) enum Kind {
     /// The symbols in the project whose names match what's typed, as the
     /// focused editor's language server finds them.
     ProjectSymbols,
+    /// The background tabs: the workspace shown's, then the others'.
+    Background,
 }
 
 impl Kind {
@@ -88,6 +93,7 @@ impl Kind {
             Self::News => "What's new",
             Self::Symbols => "Symbols",
             Self::ProjectSymbols => "Project symbols",
+            Self::Background => "Background",
         }
     }
 
@@ -101,7 +107,7 @@ impl Kind {
     /// Whether the window lists it itself, previews and all, with no help
     /// from the daemon.
     fn local(self) -> bool {
-        matches!(self, Self::Lessons | Self::News)
+        matches!(self, Self::Lessons | Self::News | Self::Background)
     }
 }
 
@@ -133,6 +139,9 @@ struct Entry {
     /// indented by, and how much of its text is its name, which is drawn
     /// plainly and the rest quieter.
     symbol: Option<(u8, usize)>,
+    /// A byte range of its text saying something went wrong, drawn as a
+    /// failed command is marked: a background tab's failure.
+    alert: Option<(usize, usize)>,
 }
 
 /// A file to open, and where.
@@ -159,6 +168,9 @@ pub(crate) enum Outcome {
     NothingPicked,
     /// It's to close, opening a file.
     Open(Opening),
+    /// The background tab picked, by what [`Opening::path`] would say, is
+    /// to be dismissed.
+    Dismiss(String),
 }
 
 /// A preview of the file picked.
@@ -248,6 +260,8 @@ pub(crate) struct LocalItem {
     pub(crate) text: String,
     pub(crate) name_len: usize,
     pub(crate) preview: Vec<String>,
+    /// A byte range of its text to draw as something gone wrong.
+    pub(crate) alert: Option<(usize, usize)>,
 }
 
 impl Finder {
@@ -289,21 +303,73 @@ impl Finder {
     /// window rather than found by the daemon.
     pub(crate) fn local(kind: Kind, items: Vec<LocalItem>, case: Case) -> Self {
         let mut finder = Self::new(kind, String::new(), case);
+        finder.push_local(items);
+        finder
+    }
+
+    /// Adds `items` to a list the window makes itself.
+    fn push_local(&mut self, items: Vec<LocalItem>) {
         for item in items {
-            finder.items.push(&item.text);
-            finder.entries.push(Entry {
+            self.items.push(&item.text);
+            self.entries.push(Entry {
                 path: item.name,
                 at: None,
                 path_len: item.name_len,
                 matched: Vec::new(),
                 in_line: 0,
                 symbol: None,
+                alert: item.alert,
             });
-            finder.local_previews.push(item.preview);
+            self.local_previews.push(item.preview);
         }
-        finder.ranking.add(&finder.items);
-        finder.done = Some(Done::All);
-        finder
+        self.ranking.add(&self.items);
+        self.done = Some(Done::All);
+    }
+
+    /// Lists `items` in place of what a list the window makes itself
+    /// listed, keeping what's typed, and the thing picked if it's still
+    /// there, by what [`Opening::path`] says of it, and its preview if
+    /// it has none.
+    pub(crate) fn relist(&mut self, mut items: Vec<LocalItem>) {
+        let picked = self.picked().map(|entry| entry.path.clone());
+        let previews: Vec<(String, Vec<String>)> = (self.entries.iter())
+            .map(|entry| entry.path.clone())
+            .zip(std::mem::take(&mut self.local_previews))
+            .collect();
+        for item in &mut items {
+            if item.preview.is_empty()
+                && let Some((_, kept)) = previews.iter().find(|(path, _)| *path == item.name)
+            {
+                item.preview.clone_from(kept);
+            }
+        }
+        self.items.clear();
+        self.entries.clear();
+        self.ranking.clear();
+        self.push_local(items);
+        self.ranking.set_query(&self.query, &self.items);
+        let rank = picked.and_then(|picked| {
+            (0..self.ranking.len()).find(|&rank| {
+                (self.ranking.get(rank)).is_some_and(|index| self.entries[index].path == picked)
+            })
+        });
+        self.selected = rank.unwrap_or(0);
+    }
+
+    /// What [`Opening::path`] would say of the thing picked, if anything
+    /// is.
+    pub(crate) fn picked_path(&mut self) -> Option<String> {
+        self.picked().map(|entry| entry.path.clone())
+    }
+
+    /// Shows `lines` as the preview of the thing whose [`Opening::path`]
+    /// is `path`, in a list the window makes itself.
+    pub(crate) fn set_local_preview(&mut self, path: &str, lines: Vec<String>) {
+        if let Some(index) = self.entries.iter().position(|entry| entry.path == path)
+            && let Some(preview) = self.local_previews.get_mut(index)
+        {
+            *preview = lines;
+        }
     }
 
     /// A finder of `kind` listing `found`, places given it about the file
@@ -414,6 +480,7 @@ impl Finder {
                         matched: Vec::new(),
                         in_line: 0,
                         symbol: None,
+                        alert: None,
                     });
                 }
             }
@@ -444,6 +511,7 @@ impl Finder {
                         matched: Vec::new(),
                         in_line: 0,
                         symbol: None,
+                        alert: None,
                     });
                 }
             }
@@ -466,6 +534,7 @@ impl Finder {
                         matched: Vec::new(),
                         in_line: 0,
                         symbol: None,
+                        alert: None,
                     });
                 }
             }
@@ -516,6 +585,7 @@ impl Finder {
             matched,
             in_line,
             symbol: None,
+            alert: None,
         });
     }
 
@@ -542,6 +612,7 @@ impl Finder {
             in_line: 0,
             // A project's are in no outline.
             symbol: Some((if with_path { 0 } else { symbol.depth }, name_len)),
+            alert: None,
         });
     }
 
@@ -569,9 +640,16 @@ impl Finder {
             }
             _ => None,
         };
+        let background = self.kind == Kind::Background;
         match (press.key, ctrl(press)) {
             (Key::Named(NamedKey::Escape), _) | (_, Some('c')) => Outcome::Close,
             (Key::Named(NamedKey::Enter), _) => self.open(Place::Here),
+            // A background tab comes back as a tab, however it's opened.
+            (_, Some('v' | 'x' | 't')) if background => self.open(Place::Here),
+            (_, Some('d')) if background => match self.picked() {
+                Some(entry) => Outcome::Dismiss(entry.path.clone()),
+                None => Outcome::NothingPicked,
+            },
             (_, Some('v')) => self.open(Place::Beside(Side::Right)),
             (_, Some('x')) => self.open(Place::Beside(Side::Below)),
             (_, Some('t')) => self.open(Place::Tab),
@@ -912,12 +990,16 @@ impl Finder {
             .then(|| severity(&text[entry.path_len..]))
             .flatten()
             .map(|(len, ink)| (entry.path_len..entry.path_len + len, ink));
+        let alert = entry.alert;
         let inks: Vec<Ink> = (text.char_indices().zip(0_u32..))
             .map(|((at, _), char_index)| {
                 let picked = accents.binary_search(&char_index).is_ok()
                     || (entry.matched.iter()).any(|&(start, end)| (start..end).contains(&at));
                 match &severity {
                     _ if picked => Ink::Matched,
+                    _ if alert.is_some_and(|(start, end)| (start..end).contains(&at)) => {
+                        Ink::Color(crate::colors::diagnostic(clackatoo_text::Severity::Error))
+                    }
                     Some((word, ink)) if word.contains(&at) => *ink,
                     _ if at < quiet_to || (entry.at.is_none() && at >= modified_from) => Ink::Muted,
                     _ => Ink::Plain,
@@ -940,6 +1022,10 @@ impl Finder {
         if self.kind.local() {
             let index = self.ranking.get(self.selected)?;
             let lines = self.local_previews.get(index)?;
+            // A background tab's screen, as it is: no line numbers.
+            if self.kind == Kind::Background {
+                return Some(PreviewView::screen(lines, (rows, cols)));
+            }
             return Some(PreviewView::new(0, lines, None, (rows, cols)));
         }
         let entry = self.picked()?.clone();

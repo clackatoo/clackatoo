@@ -46,9 +46,9 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{self, Head};
 use clackatoo_protocol::{
-    BoardId, BufferId, ChatSummary, ClientMessage, Error, Event, FilesId, PROTOCOL_VERSION, PaneId,
-    PaneTerminal, Request, Response, ReviewId, ServerMessage, TabId, TerminalId, WorkspaceId,
-    Workspaces, wire,
+    BackgroundAction, BoardId, BufferId, ChatSummary, ClientMessage, Error, Event, FilesId,
+    PROTOCOL_VERSION, PaneId, PaneTerminal, Request, Response, ReviewId, ServerMessage, TabId,
+    TerminalId, WorkspaceId, Workspaces, wire,
 };
 use mio::Token;
 
@@ -1135,6 +1135,17 @@ impl Daemon {
             &Request::AttachBrowser { chat, .. } => self
                 .relayed_terminal(chat)
                 .map(|(at, _)| (at, Err(self.not_yet(at, "a chat's browser")))),
+            // Another machine's background tabs aren't shown here: what
+            // it keeps in the background is its own (CLACKA-121).
+            Request::Background(action) => match *action {
+                BackgroundAction::Tab { tab } => self.relayed_tab(tab).map(|(at, _)| at),
+                BackgroundAction::Pane { pane } => self.relayed_pane(pane).map(|(at, _)| at),
+                BackgroundAction::Seen { workspace } => {
+                    self.relayed_workspace(workspace).map(|(at, _)| at)
+                }
+                BackgroundAction::Bring { .. } | BackgroundAction::Dismiss { .. } => None,
+            }
+            .map(|at| (at, Err(self.not_yet(at, "background tabs")))),
             _ => None,
         };
         match renumbered {
@@ -2927,6 +2938,7 @@ mod tests {
             active_tab: TabId(1),
             home: None,
             lent: None,
+            background: Vec::new(),
         };
         say(&mut there, &ServerMessage::Response(Response::Done));
         say(

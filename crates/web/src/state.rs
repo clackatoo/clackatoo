@@ -1328,6 +1328,7 @@ mod tests {
                     active_tab: TabId(1),
                     home: None,
                     lent: None,
+                    background: Vec::new(),
                 }],
                 active: None,
                 machine: None,

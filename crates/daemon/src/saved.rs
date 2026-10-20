@@ -11,6 +11,8 @@
 //! board; a review; and a chat's agent and session, which the agent kept.
 //! Beside the workspaces, the daemon's connections to the daemons on other
 //! machines: each one's host, and the command that runs clackatoo there.
+//! Each workspace's background tabs, as its tabs are, in order: terminals
+//! alone (CLACKA-121).
 //! A pane showing what's on another machine, a pane its daemon lent this
 //! one, is kept as that machine and the number this daemon gave the pane,
 //! which the daemon there keeps with it: a workspace this daemon lent
@@ -153,6 +155,10 @@ pub(crate) struct Workspace {
     /// as a workspace of their own, with no name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) lent: Option<Lent>,
+    /// Its background tabs, in order, which hold terminals alone. Builds
+    /// before them pass them over, and write the file without them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) background: Vec<Tab>,
 }
 
 /// Who a workspace is lent to, and how that daemon knows its pane.
@@ -641,6 +647,7 @@ mod tests {
                     ],
                     active_tab: 1,
                     lent: None,
+                    background: Vec::new(),
                 },
                 Workspace {
                     name: "notes".into(),
@@ -670,6 +677,7 @@ mod tests {
                     }],
                     active_tab: 0,
                     lent: None,
+                    background: Vec::new(),
                 },
             ],
             active: Some(0),
@@ -682,6 +690,23 @@ mod tests {
     #[test]
     fn a_state_reads_back_as_written() {
         let state = state();
+        assert_eq!(State::decode(&state.encode()).unwrap(), state);
+    }
+
+    #[test]
+    fn background_tabs_read_back_and_are_left_out_when_there_are_none() {
+        let mut state = state();
+        let encoded = String::from_utf8(state.encode()).unwrap();
+        assert!(!encoded.contains("background"), "{encoded}");
+        state.workspaces[1].background = vec![Tab {
+            name: Some("site".into()),
+            layout: Layout::Pane(Pane::Terminal {
+                cwd: Some("/home/jack/site".into()),
+                ran: Some("trail serve".into()),
+                elsewhere: None,
+            }),
+            focused: 0,
+        }];
         assert_eq!(State::decode(&state.encode()).unwrap(), state);
     }
 

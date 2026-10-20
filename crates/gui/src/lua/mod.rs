@@ -371,6 +371,7 @@ mod tests {
                     tabs: vec![tab],
                     home: None,
                     lent: None,
+                    background: Vec::new(),
                 }],
                 passed: Vec::new(),
                 machine: None,

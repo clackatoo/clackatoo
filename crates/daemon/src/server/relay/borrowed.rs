@@ -813,6 +813,7 @@ mod tests {
             active_tab: TabId(id),
             home: None,
             lent,
+            background: Vec::new(),
         };
         let mut list = vec![workspace(1, None)];
         list.extend(lent.map(|lent| workspace(2, Some(lent))));

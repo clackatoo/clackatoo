@@ -452,6 +452,18 @@ impl Terminal {
         last.command.as_deref()
     }
 
+    /// The command the shell runs, or else the last it ran, of those
+    /// clackatoo's own shell integration said, with the terminal's secret,
+    /// while a row is still marked with it: what the shell ran, never
+    /// what a program printed, to offer to run again, or keep running.
+    #[must_use]
+    pub fn trusted_last_command(&self) -> Option<&str> {
+        let (_, entries) = self.emulator_blocks().parts();
+        (entries.iter().rev())
+            .find(|entry| entry.trusted && entry.phase != Phase::Prompt && entry.command.is_some())
+            .and_then(|entry| entry.command.as_deref())
+    }
+
     /// The number of the shell's latest block, if clackatoo's own shell
     /// integration said what its command is: for the next build to know,
     /// with [`trust_block`](Self::trust_block), as snapshots don't say.
@@ -773,6 +785,28 @@ mod tests {
             text(&t, 0, 20)
         );
         assert!(!t.title().contains("0123456789"));
+    }
+
+    #[test]
+    fn the_last_command_kept_is_the_last_the_shell_said_with_the_secret() {
+        let mut t = terminal(60, 10, 100);
+        t.expect_secret(Some(SECRET));
+        assert_eq!(t.trusted_last_command(), None);
+        t.advance(PROMPT.as_bytes());
+        t.advance(
+            format!("trail serve\r\n\x1b]133;C;clackatoo={SECRET};cmdline_url=trail%20serve\x07")
+                .as_bytes(),
+        );
+        assert_eq!(t.trusted_last_command(), Some("trail serve"));
+        // Once it has finished, and the next prompt shows, it's still the
+        // last.
+        t.advance(b"\x1b]133;D;1\x07");
+        t.advance(PROMPT.as_bytes());
+        assert_eq!(t.trusted_last_command(), Some("trail serve"));
+        // What a program prints after it never takes its place.
+        t.advance(b"x\r\n\x1b]133;C;cmdline_url=rm%20-rf%20~\x07\x1b]133;D;0\x07");
+        t.advance(PROMPT.as_bytes());
+        assert_eq!(t.trusted_last_command(), Some("trail serve"));
     }
 
     #[test]

@@ -55,6 +55,7 @@ impl Desk {
             Kind::Marks => return self.pick_mark(),
             Kind::Lessons => return self.tutor(None),
             Kind::News => return self.tutor(Some("new")),
+            Kind::Background => return self.open_background_list(),
             Kind::Symbols if !self.needs_daemon("listing a file's symbols", SYMBOLS) => return,
             Kind::ProjectSymbols if !self.needs_daemon("finding symbols", SYMBOLS) => return,
             _ => {}
@@ -81,7 +82,12 @@ impl Desk {
             Kind::Diagnostics => self.search(Search::Diagnostics),
             Kind::Boards => self.search(Search::Boards),
             // Their places are given them, or asked for above.
-            Kind::Places | Kind::Marks | Kind::Lessons | Kind::News | Kind::Symbols => {}
+            Kind::Places
+            | Kind::Marks
+            | Kind::Lessons
+            | Kind::News
+            | Kind::Symbols
+            | Kind::Background => {}
         }
     }
 
@@ -182,10 +188,13 @@ impl Desk {
             Outcome::Close => self.close_finder(),
             // Said, and a macro typing it stops, as at a key that fails.
             Outcome::NothingPicked => self.refuse("nothing in the finder is picked".into()),
+            Outcome::Dismiss(path) => self.dismiss_background(&path),
             Outcome::Open(opening) => {
                 let kind = self.finder.as_ref().map(Finder::kind);
                 self.close_finder();
-                if kind == Some(Kind::Boards) {
+                if kind == Some(Kind::Background) {
+                    self.bring_background(&opening.path);
+                } else if kind == Some(Kind::Boards) {
                     self.open_picked_board(&opening);
                 } else if matches!(kind, Some(Kind::Lessons | Kind::News)) {
                     // A lesson, or what's new, goes to the lesson.
@@ -195,6 +204,8 @@ impl Desk {
                 }
             }
         }
+        // A background tab picked shows its screen.
+        self.ask_background_preview();
     }
 
     /// Greps for what's typed in the finder, instead of what was, unless

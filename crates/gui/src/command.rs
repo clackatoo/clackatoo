@@ -40,6 +40,10 @@
 //! 3000:somehost:8080` to a machine the daemon's reaches. `PortForward`
 //! alone lists the forwards, and `PortForward! 8080` stops one, or with no
 //! port, all of them.
+//! `bg` sends the tab shown to the background, where it keeps running out
+//! of the tab bar, and `bgpane` the focused pane alone, in a background
+//! tab of its own; `Background` lists the background tabs, as the finder
+//! lists files.
 //! `Board NAME` opens the board called that, made if there's none, in a
 //! tab or with a mark beside; `Board` alone, or `Boards`, picks one in
 //! the finder. `Browser` opens the focused chat's page in clackatoo's
@@ -227,6 +231,20 @@ pub(crate) enum Command {
     Devices(DevicesCommand),
     /// `:PortForward`: forwarding ports from this machine to the daemon's.
     PortForward(Forwarding),
+    /// Something to do with background tabs.
+    Background(BackgroundCommand),
+}
+
+/// What `:bg`, `:bgpane` and `:Background` do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BackgroundCommand {
+    /// `:bg`: the tab shown goes to the background.
+    Tab,
+    /// `:bgpane`: the focused pane goes to the background, in a tab of
+    /// its own.
+    Pane,
+    /// `:Background`: the background tabs, listed.
+    List,
 }
 
 /// What `:PortForward` does.
@@ -355,6 +373,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "PortForward" | "PortForward!" => {
             return forwarding(word.ends_with('!'), argument).map(Command::PortForward);
         }
+        "bg" | "bgpane" | "Background" => return background_command(word, argument),
         _ => {}
     }
     let (place, rest) = place(word);
@@ -394,6 +413,21 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
     };
     let agent = agent_named(word, rest, argument)?;
     Ok(Command::Open { place, kind, agent })
+}
+
+/// `:bg`, `:bgpane` or `:Background`, as `word` says, with `argument`
+/// after it.
+fn background_command(word: &str, argument: Option<&str>) -> Result<Command, String> {
+    if let Some(argument) = argument {
+        return Err(format!(
+            "{word} takes nothing after it, but has {argument:?}"
+        ));
+    }
+    Ok(Command::Background(match word {
+        "bg" => BackgroundCommand::Tab,
+        "bgpane" => BackgroundCommand::Pane,
+        _ => BackgroundCommand::List,
+    }))
 }
 
 /// What `word`, with `argument` after it, asks for, if it names a machine
@@ -722,6 +756,9 @@ pub(crate) const NAMES: &[&str] = &[
     "workspace",
     "rename",
     "close",
+    "bg",
+    "bgpane",
+    "Background",
     "reload",
     "set",
     "registers",
@@ -908,6 +945,9 @@ mod tests {
         ("Tutor", ""),
         ("Devices", ""),
         ("PortForward", ""),
+        ("bg", ""),
+        ("bgpane", ""),
+        ("Background", ""),
         ("q", "quit"),
         ("quit", ""),
         ("w", "write"),

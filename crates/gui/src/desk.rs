@@ -128,6 +128,9 @@ enum Asked {
     /// A terminal attached to again after a newer daemon sent a change to
     /// its view as this window couldn't read: refused, no snapshot comes.
     Reattached(TerminalId),
+    /// The screen of a background tab's terminal, for the list's preview
+    /// of the tab.
+    BackgroundPreview(TabId),
 }
 
 /// What the window attaches to again, or asks for again, when a newer
@@ -150,6 +153,7 @@ const BLANK_KEPT: &str = "[No Name] has changes: :w NAME writes them, :e! in it 
 /// The time those are counted over.
 const MISSED_OVER: std::time::Duration = std::time::Duration::from_mins(1);
 
+mod background;
 mod badges;
 mod bindings;
 mod boards;
@@ -264,6 +268,15 @@ const POINTED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 pub(crate) struct Desk {
     /// The daemon's workspaces, as last heard.
     workspaces: Workspaces,
+    /// The background tab whose screen the list of them last asked for,
+    /// and when (see [`background`]).
+    background_preview: Option<(TabId, std::time::Instant)>,
+    /// The background tab still running that Ctrl+D in the list was
+    /// pressed on once, which a second press dismisses.
+    dismissing: Option<TabId>,
+    /// The failures of background tabs the list said were seen as it
+    /// opened, by tab, which it goes on saying while it's open.
+    background_seen: Vec<(TabId, i32)>,
     /// The pane an agent last pointed out, and until when it's lit.
     pointed: Option<(PaneId, std::time::Instant)>,
     /// The chats, as a list, to mark the tabs and workspaces with.
@@ -1466,6 +1479,7 @@ impl Desk {
         self.forget_gone_handlers();
         self.close_leftovers();
         self.settle_lesson();
+        self.relist_background();
     }
 
     /// A view update for `terminal` from a newer daemon couldn't be read,
@@ -1661,6 +1675,9 @@ impl Desk {
                 true
             }
             Some(Asker::Window(Asked::Devices)) => self.devices_answered(response),
+            Some(Asker::Window(Asked::BackgroundPreview(tab))) => {
+                self.background_preview_came(tab, response)
+            }
             Some(Asker::Window(Asked::ChatChoices)) => self.chat_choices(response),
             Some(Asker::Window(Asked::Chats)) => self.chats_answered(response),
             Some(Asker::Window(Asked::Reattached(terminal))) => {
@@ -2637,6 +2654,7 @@ impl Desk {
             Command::Board { place, name } => self.open_board(name, place),
             Command::Browser(place) => self.open_browser(place),
             Command::Review(review) => self.run_review(review),
+            Command::Background(command) => self.background_command(command),
             Command::Reload
             | Command::Set(_)
             | Command::Update(_)
@@ -2753,6 +2771,7 @@ pub(super) fn shown_in_names(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod background;
     mod blank;
     mod folders;
     mod lessons;
@@ -2808,6 +2827,7 @@ mod tests {
             tabs,
             home: None,
             lent: None,
+            background: Vec::new(),
         }
     }
 
@@ -4113,9 +4133,25 @@ mod tests {
                 ("a", "agent chat"),
                 ("w", "workspaces"),
                 ("r", "connect"),
+                ("b", "+background"),
                 ("^B", "send Ctrl+B"),
             ]
         );
+        type_keys(&mut desk, "b");
+        let which = desk.which_keys().unwrap();
+        let rows: Vec<(&str, &str)> = (which.rows.iter())
+            .map(|(keys, does)| (keys.as_str(), does.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("t", "tab to background"),
+                ("p", "pane to background"),
+                ("l", "background tabs"),
+            ]
+        );
+        assert!(desk.cancel_keys());
+        ctrl(&mut desk, "b");
         type_keys(&mut desk, "p");
         assert!(desk.numbering_panes(), "asked for, it's numbered");
         assert!(desk.cancel_keys());

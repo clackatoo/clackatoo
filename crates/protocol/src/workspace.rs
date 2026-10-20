@@ -182,6 +182,109 @@ pub struct Workspace {
         deserialize_with = "wire::since::<{ wire::LEND }, _, _>"
     )]
     pub lent: Option<Lent>,
+    /// Its background tabs, in the order they went there: tabs kept
+    /// running out of its tab bar, such as a web server's, which no
+    /// window shows until one is brought back (see
+    /// [`BackgroundAction`](crate::BackgroundAction)). They hold
+    /// terminals alone. Their panes are no others': no request about a
+    /// pane or a tab but [`Request::Background`](crate::Request::Background)
+    /// finds them. Empty from a daemon older than protocol 96, which has
+    /// none, and to a client older than that, which shows none.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::BACKGROUND }, _>",
+        deserialize_with = "wire::since::<{ wire::BACKGROUND }, _, _>"
+    )]
+    pub background: Vec<Background>,
+}
+
+/// A tab a workspace keeps running out of its tab bar: see
+/// [`Workspace::background`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Background {
+    /// The tab, with its own ID, and its panes, laid out as they were.
+    pub tab: Tab,
+    /// How it's getting on.
+    pub state: BackgroundState,
+    /// The exit status of a command of its that failed, or of a shell of
+    /// its that exited with one, that no window has said was seen since
+    /// ([`BackgroundAction::Seen`](crate::BackgroundAction::Seen)): the
+    /// latest, if there were several.
+    pub failed: Option<i32>,
+    /// What to call it, as a tab is called after its focused pane: the
+    /// title its focused terminal's program set, or else the command its
+    /// shell runs or ran last, or else its directory's name, from `~`.
+    /// Always one line, of at most a hundred characters. Made as it goes
+    /// to the background and as its state changes, not as its title does.
+    pub name: String,
+}
+
+/// How a background tab is getting on: see [`Background::state`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BackgroundState {
+    /// A command is running in one of its terminals, as their shells'
+    /// marks say, or a terminal whose shell doesn't mark its commands is.
+    Running,
+    /// Its shells are at their prompts.
+    Idle,
+    /// Its terminals' programs have ended, the focused one's with this
+    /// status, or by a signal, as [`TerminalStatus`](crate::TerminalStatus)
+    /// says. It stays, its last screen readable, until it's dismissed.
+    Ended(crate::TerminalStatus),
+}
+
+impl BackgroundState {
+    /// Whether its terminals' programs have all ended.
+    #[must_use]
+    pub fn ended(self) -> bool {
+        matches!(self, Self::Ended(_))
+    }
+}
+
+/// What [`Request::Background`](crate::Request::Background) asks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BackgroundAction {
+    /// Sends a tab to the background, its splits and all. A workspace
+    /// keeps a tab in its tab bar: sending its only one makes a new tab
+    /// first, a shell in the directory the tab's focused pane is in.
+    /// Refused for a tab holding anything but terminals of this daemon's
+    /// own. Answered with [`Response::Done`](crate::Response::Done):
+    /// windows showing it show the workspace's tab last switched to.
+    Tab {
+        /// The tab.
+        tab: TabId,
+    },
+    /// Takes a terminal's pane out of its tab, into a background tab of
+    /// its own; the tab goes with its last pane, as for
+    /// [`BackgroundAction::Tab`]. Answered as that is.
+    Pane {
+        /// The pane.
+        pane: PaneId,
+    },
+    /// Brings a background tab back into its workspace's tab bar, after
+    /// its other tabs, as the tab last switched to. Each of its terminals
+    /// whose program has ended becomes a new shell in the directory it
+    /// was in, offering to run again what it ran
+    /// ([`Workspaces::restored`]). Answered with
+    /// [`Response::PaneCreated`](crate::Response::PaneCreated): the tab's
+    /// focused pane.
+    Bring {
+        /// The background tab.
+        tab: TabId,
+    },
+    /// Closes a background tab, and its terminals, as
+    /// [`Request::CloseTab`](crate::Request::CloseTab) closes a tab.
+    /// Answered with [`Response::Done`](crate::Response::Done).
+    Dismiss {
+        /// The background tab.
+        tab: TabId,
+    },
+    /// Says that the failures of a workspace's background tabs have been
+    /// seen ([`Background::failed`]), as when a window lists them.
+    /// Answered with [`Response::Done`](crate::Response::Done).
+    Seen {
+        /// The workspace.
+        workspace: WorkspaceId,
+    },
 }
 
 /// Who a workspace holding a pane lent to another daemon is lent to, and
@@ -672,6 +775,27 @@ impl Workspaces {
             .iter()
             .find_map(|workspace| workspace.tab(id).map(|tab| (workspace, tab)))
     }
+
+    /// The workspace holding the background tab with `id`, and the tab.
+    #[must_use]
+    pub fn find_background(&self, id: TabId) -> Option<(&Workspace, &Background)> {
+        self.list.iter().find_map(|workspace| {
+            workspace
+                .background_tab(id)
+                .map(|background| (workspace, background))
+        })
+    }
+
+    /// The background tab showing `terminal`, if one does, and its
+    /// workspace.
+    #[must_use]
+    pub fn background_showing(&self, terminal: TerminalId) -> Option<(&Workspace, &Background)> {
+        self.list.iter().find_map(|workspace| {
+            (workspace.background.iter())
+                .find(|background| background.tab.terminals().contains(&terminal))
+                .map(|background| (workspace, background))
+        })
+    }
 }
 
 impl Tab {
@@ -689,6 +813,32 @@ impl Workspace {
     #[must_use]
     pub fn tab(&self, id: TabId) -> Option<&Tab> {
         self.tabs.iter().find(|tab| tab.id == id)
+    }
+
+    /// The background tab with `id`.
+    #[must_use]
+    pub fn background_tab(&self, id: TabId) -> Option<&Background> {
+        self.background
+            .iter()
+            .find(|background| background.tab.id == id)
+    }
+
+    /// How many of its background tabs are running a command.
+    #[must_use]
+    pub fn background_running(&self) -> usize {
+        (self.background.iter())
+            .filter(|background| background.state == BackgroundState::Running)
+            .count()
+    }
+
+    /// The exit status of the latest failure among its background tabs
+    /// that no window has said was seen, if there is one.
+    #[must_use]
+    pub fn background_failed(&self) -> Option<i32> {
+        self.background
+            .iter()
+            .rev()
+            .find_map(|background| background.failed)
     }
 
     /// The terminals its panes show, in every tab.
@@ -783,6 +933,46 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_tabs_reach_only_a_peer_that_knows_of_them() {
+        let pane = Pane {
+            id: PaneId(3),
+            content: Content::Terminal(TerminalId(4)),
+            home: None,
+            key: None,
+        };
+        let tab = |id| Tab {
+            id: TabId(id),
+            layout: Layout::Pane(pane),
+            focused: pane.id,
+            name: None,
+        };
+        let workspace = Workspace {
+            id: WorkspaceId(1),
+            name: "site".into(),
+            tabs: vec![tab(1)],
+            active_tab: TabId(1),
+            home: None,
+            lent: None,
+            background: vec![Background {
+                tab: tab(2),
+                state: BackgroundState::Ended(crate::TerminalStatus::Exited(1)),
+                failed: Some(1),
+                name: "trail serve".into(),
+            }],
+        };
+        let at = |version| {
+            let bytes = wire::speaking(version, || postcard::to_allocvec(&workspace)).unwrap();
+            wire::speaking(version, || postcard::from_bytes::<Workspace>(&bytes)).unwrap()
+        };
+        assert_eq!(at(wire::BACKGROUND), workspace);
+        // An older window is shown the workspace without them: it never
+        // takes them for tabs of its own, and closes none.
+        let older = at(wire::BACKGROUND - 1);
+        assert!(older.background.is_empty());
+        assert_eq!(older.tabs, workspace.tabs);
+    }
 
     #[test]
     fn a_pane_kind_goes_as_a_string_and_keeps_what_fits() {

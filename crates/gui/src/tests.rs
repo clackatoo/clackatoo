@@ -453,6 +453,7 @@ fn two_pane_window(
             messages: None,
             waiting: None,
             which_keys: None,
+            background: None,
         },
         &mut |text, bold| fonts.ui_width(text, bold),
     );
@@ -2063,6 +2064,7 @@ fn the_finder_is_drawn_over_the_panes_with_a_preview() {
             messages: None,
             waiting: None,
             which_keys: None,
+            background: None,
         },
         &mut |text, bold| fonts.ui_width(text, bold),
     );
@@ -2806,6 +2808,7 @@ fn crowded_bars_at(
             messages: None,
             waiting: None,
             which_keys: None,
+            background: None,
         },
         &mut |text, bold| fonts.ui_width(text, bold),
     );

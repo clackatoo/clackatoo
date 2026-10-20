@@ -1574,6 +1574,7 @@ mod tests {
             active_tab: TabId(2),
             home: None,
             lent: None,
+            background: Vec::new(),
         };
         say(
             &mut there,

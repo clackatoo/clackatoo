@@ -16,13 +16,24 @@
 //! one this daemon put in a layout of that daemon's itself, as that daemon
 //! can't reach this one ([`Lent::placed`]). No window sees one as a
 //! workspace, and no other workspace's name has to differ from its.
+//!
+//! A workspace keeps *background tabs* beside its tabs
+//! ([`Workspace::background`]): tabs of terminals kept running out of its
+//! tab bar, as a web server's. They're a list of their own rather than
+//! tabs with a flag, so nothing that walks a workspace's tabs, here, in
+//! the relay or in a window older than them, takes one for a tab: no
+//! request about a pane or a tab finds their panes, and a window shows
+//! none of them. A terminal of one whose program ends stays, its screen
+//! readable, until the tab is dismissed. A workspace keeps a tab in its
+//! tab bar: one whose last tab closes brings back its first background
+//! tab still running, if it has one, rather than close it.
 
 use std::collections::{BTreeMap, HashMap};
 
 use clackatoo_protocol::{
-    Axis, BoardId, BufferId, Content, Error, FilesId, Layout, Lent, MAX_NESTING, MachineId, Pane,
-    PaneId, PaneKind, Restored, ReviewId, Side, Tab, TabId, TerminalId, Workspace, WorkspaceId,
-    Workspaces,
+    Axis, Background, BackgroundState, BoardId, BufferId, Content, Error, FilesId, Layout, Lent,
+    MAX_NESTING, MachineId, Pane, PaneId, PaneKind, Restored, ReviewId, Side, Tab, TabId,
+    TerminalId, Workspace, WorkspaceId, Workspaces,
 };
 
 use crate::handover::{self, HandoverError};
@@ -50,6 +61,13 @@ pub(crate) struct WorkspaceState {
     /// windows to name them by when this daemon isn't connected to them
     /// ([`Workspaces::others`]).
     lenders: BTreeMap<MachineId, String>,
+    /// The terminals of background tabs, and the tab each is in, as of the
+    /// last change: looked up as each terminal's output is read, so a
+    /// map rather than a walk of the workspaces.
+    background_terminals: HashMap<TerminalId, TabId>,
+    /// Terminals of background tabs that went with their workspace, for
+    /// the server to close (see [`take_dropped`](Self::take_dropped)).
+    dropped: Vec<TerminalId>,
 }
 
 /// A machine whose daemon this one lends workspaces to.
@@ -92,6 +110,8 @@ impl WorkspaceState {
             any_lent: false,
             borrowers: BTreeMap::new(),
             lenders: BTreeMap::new(),
+            background_terminals: HashMap::new(),
+            dropped: Vec::new(),
         }
     }
 
@@ -215,6 +235,63 @@ impl WorkspaceState {
         (workspaces, lent)
     }
 
+    /// The workspaces' background tabs, for the next build.
+    pub(crate) fn hand_over_background(&self) -> Vec<handover::Background> {
+        let mut handed = Vec::new();
+        for workspace in &self.workspaces.list {
+            for background in &workspace.background {
+                // Only terminals go to the background.
+                let Some(layout) = handed_terminals(&background.tab.layout) else {
+                    continue;
+                };
+                handed.push(handover::Background {
+                    workspace: workspace.id.0,
+                    tab: handover::Tab {
+                        id: background.tab.id.0,
+                        layout,
+                        focused: background.tab.focused.0,
+                        name: background.tab.name.clone(),
+                    },
+                    failed: background.failed,
+                });
+            }
+        }
+        handed
+    }
+
+    /// Takes the background tabs the last build handed over, each into
+    /// its workspace, as idle until the server says how each is getting
+    /// on. One whose workspace is gone, or that's damaged, is passed over,
+    /// and its terminals closed with the others in no pane.
+    pub(crate) fn resume_background(&mut self, handed: &[handover::Background]) {
+        for background in handed {
+            let tab = resumed_terminals(&background.tab.layout).and_then(|layout| {
+                let focused = PaneId(background.tab.focused);
+                layout.contains(focused).then(|| Tab {
+                    id: TabId(background.tab.id),
+                    layout,
+                    focused,
+                    name: background.tab.name.clone(),
+                })
+            });
+            let workspace = (self.workspaces.list.iter_mut())
+                .find(|workspace| workspace.id.0 == background.workspace);
+            match (tab, workspace) {
+                (Some(tab), Some(workspace)) => workspace.background.push(Background {
+                    tab,
+                    state: BackgroundState::Idle,
+                    failed: background.failed,
+                    name: String::new(),
+                }),
+                _ => log::error!(
+                    "background tab {} couldn't be taken over",
+                    background.tab.id
+                ),
+            }
+        }
+        self.refresh_background();
+    }
+
     /// The workspaces the last build handed over, and those it had lent
     /// to other machines' daemons.
     pub(crate) fn resume(
@@ -298,6 +375,7 @@ impl WorkspaceState {
                 active_tab,
                 home: None,
                 lent,
+                background: Vec::new(),
             });
         }
         let active = handed.active.map(WorkspaceId);
@@ -361,6 +439,7 @@ impl WorkspaceState {
             tabs: vec![tab],
             home: None,
             lent: None,
+            background: Vec::new(),
         });
         self.workspaces.active = Some(id);
         pane
@@ -605,8 +684,36 @@ impl WorkspaceState {
     pub(crate) fn remove_terminal(&mut self, terminal: TerminalId) -> bool {
         match self.workspaces.pane_showing(terminal) {
             Some(pane) => self.remove_pane(pane),
-            None => false,
+            None => self.remove_background_terminal(terminal),
         }
+    }
+
+    /// Takes the pane showing `terminal` out of its background tab, if
+    /// one does, dismissing the tab with its last pane. Returns whether a
+    /// pane did.
+    fn remove_background_terminal(&mut self, terminal: TerminalId) -> bool {
+        let Some(tab) = self.background_terminals.get(&terminal).copied() else {
+            return false;
+        };
+        let Some(workspace) = (self.workspaces.list.iter_mut())
+            .find(|workspace| workspace.background_tab(tab).is_some())
+        else {
+            return false;
+        };
+        let index = (workspace.background.iter())
+            .position(|background| background.tab.id == tab)
+            .expect("the tab is the workspace's");
+        let background = &mut workspace.background[index];
+        let pane = (background.tab.layout.panes().into_iter())
+            .find(|pane| pane.content == Content::Terminal(terminal));
+        let Some(pane) = pane else {
+            return false;
+        };
+        if !remove(&mut background.tab, pane.id) {
+            workspace.background.remove(index);
+        }
+        self.background_terminals.remove(&terminal);
+        true
     }
 
     /// Takes `pane` out of its tab, closing the tab if it was the last
@@ -632,7 +739,22 @@ impl WorkspaceState {
             }
             return true;
         }
-        // And the workspace's only tab.
+        // And the workspace's only tab: its first background tab still
+        // running takes its place, rather than go with it.
+        let shown = self.workspace_mut(workspace);
+        if let Some(index) = (shown.background.iter()).position(|b| !b.state.ended()) {
+            let background = shown.background.remove(index);
+            shown.active_tab = background.tab.id;
+            shown.tabs.push(background.tab);
+            return true;
+        }
+        // Those that have ended go with it.
+        let ended = std::mem::take(&mut shown.background);
+        self.dropped.extend(
+            ended
+                .iter()
+                .flat_map(|background| background.tab.terminals()),
+        );
         let list = &mut self.workspaces.list;
         let index = list
             .iter()
@@ -648,6 +770,164 @@ impl WorkspaceState {
         true
     }
 
+    /// Checks that `tab` can go to the background: a tab, of a workspace
+    /// not lent to another machine's daemon, holding terminals alone, of
+    /// this daemon's own. Returns its workspace, and whether it's the
+    /// workspace's only tab, which needs another in its place first.
+    pub(crate) fn check_background_tab(&self, tab: TabId) -> Result<(WorkspaceId, bool), Error> {
+        let (workspace, found) = self.workspaces.find_tab(tab).ok_or(Error::NoSuchTab(tab))?;
+        unlent(workspace)?;
+        backgroundable(&found.layout.panes())?;
+        Ok((workspace.id, workspace.tabs.len() == 1))
+    }
+
+    /// Checks that `pane` can go to the background, in a tab of its own:
+    /// a terminal of this daemon's own, of a workspace not lent. Returns
+    /// its tab, and whether it's the tab's only pane, as which its tab
+    /// goes, as [`check_background_tab`](Self::check_background_tab)
+    /// says.
+    pub(crate) fn check_background_pane(&self, pane: PaneId) -> Result<(TabId, bool), Error> {
+        let (workspace, tab, found) =
+            (self.workspaces.find_pane(pane)).ok_or(Error::NoSuchPane(pane))?;
+        unlent(workspace)?;
+        backgroundable(&[found])?;
+        Ok((tab.id, tab.layout.panes().len() == 1))
+    }
+
+    /// Sends `tab`, which [`check_background_tab`](Self::check_background_tab)
+    /// checked, and found not its workspace's only tab, to the
+    /// background, getting on as `state` says, called `name`.
+    pub(crate) fn background_tab(&mut self, tab: TabId, state: BackgroundState, name: String) {
+        let Some(workspace) =
+            (self.workspaces.list.iter_mut()).find(|workspace| workspace.tab(tab).is_some())
+        else {
+            return;
+        };
+        if workspace.tabs.len() == 1 {
+            return;
+        }
+        let index = (workspace.tabs.iter().position(|t| t.id == tab)).expect("its tab");
+        let tab = workspace.tabs.remove(index);
+        if workspace.active_tab == tab.id {
+            workspace.active_tab = workspace.tabs[index.saturating_sub(1)].id;
+        }
+        for terminal in tab.terminals() {
+            self.background_terminals.insert(terminal, tab.id);
+        }
+        workspace.background.push(Background {
+            tab,
+            state,
+            failed: None,
+            name,
+        });
+    }
+
+    /// Takes `pane`, which [`check_background_pane`](Self::check_background_pane)
+    /// checked, and found not its tab's only one, out of its tab, into a
+    /// background tab of its own, getting on as `state` says, called
+    /// `name`. Returns the new tab.
+    pub(crate) fn background_pane(
+        &mut self,
+        pane: PaneId,
+        state: BackgroundState,
+        name: String,
+    ) -> Option<TabId> {
+        let (workspace, tab, found) = self.workspaces.find_pane(pane)?;
+        let (workspace, tab) = (workspace.id, tab.id);
+        let id = self.fresh_tab()?;
+        let shown = (self.workspace_mut(workspace).tabs.iter_mut())
+            .find(|t| t.id == tab)
+            .expect("its tab");
+        if !remove(shown, pane) {
+            return None;
+        }
+        if let Content::Terminal(terminal) = found.content {
+            self.background_terminals.insert(terminal, id);
+        }
+        self.workspace_mut(workspace).background.push(Background {
+            tab: Tab {
+                id,
+                layout: Layout::Pane(found),
+                focused: pane,
+                name: None,
+            },
+            state,
+            failed: None,
+            name,
+        });
+        Some(id)
+    }
+
+    /// Brings background tab `tab` back into its workspace's tab bar,
+    /// after its other tabs, as the tab last switched to. Returns its
+    /// focused pane.
+    pub(crate) fn bring_back(&mut self, tab: TabId) -> Result<PaneId, Error> {
+        let workspace = (self.workspaces.list.iter_mut())
+            .find(|workspace| workspace.background_tab(tab).is_some())
+            .ok_or(Error::NoSuchTab(tab))?;
+        let index = (workspace.background.iter())
+            .position(|background| background.tab.id == tab)
+            .expect("the tab is the workspace's");
+        let background = workspace.background.remove(index);
+        let focused = background.tab.focused;
+        for terminal in background.tab.terminals() {
+            self.background_terminals.remove(&terminal);
+        }
+        workspace.active_tab = background.tab.id;
+        workspace.tabs.push(background.tab);
+        Ok(focused)
+    }
+
+    /// The background tab `tab`, to change how it's getting on.
+    pub(crate) fn background_mut(&mut self, tab: TabId) -> Option<&mut Background> {
+        (self.workspaces.list.iter_mut())
+            .flat_map(|workspace| &mut workspace.background)
+            .find(|background| background.tab.id == tab)
+    }
+
+    /// The background tab `terminal` is in, if it's in one, as of the last
+    /// change.
+    pub(crate) fn background_of(&self, terminal: TerminalId) -> Option<TabId> {
+        self.background_terminals.get(&terminal).copied()
+    }
+
+    /// Forgets the failures of `workspace`'s background tabs, as seen.
+    /// Returns whether there were any.
+    pub(crate) fn seen(&mut self, workspace: WorkspaceId) -> Result<bool, Error> {
+        self.check_workspace(workspace)?;
+        let mut any = false;
+        for background in &mut self.workspace_mut(workspace).background {
+            any |= background.failed.take().is_some();
+        }
+        Ok(any)
+    }
+
+    /// The terminals of background tabs that went with their workspace,
+    /// which had ended, for the server to close.
+    pub(crate) fn take_dropped(&mut self) -> Vec<TerminalId> {
+        std::mem::take(&mut self.dropped)
+    }
+
+    /// Notes which terminals are in background tabs, as they are now:
+    /// after every change to the workspaces.
+    pub(crate) fn refresh_background(&mut self) {
+        self.background_terminals.clear();
+        for background in (self.workspaces.list.iter()).flat_map(|w| &w.background) {
+            for terminal in background.tab.terminals() {
+                self.background_terminals
+                    .insert(terminal, background.tab.id);
+            }
+        }
+    }
+
+    /// Every pane of `workspace`'s background tabs.
+    pub(crate) fn background_panes(&self, workspace: WorkspaceId) -> Result<Vec<Pane>, Error> {
+        let workspace = self.check_workspace(workspace)?;
+        Ok((workspace.background.iter())
+            .flat_map(|background| background.tab.layout.panes())
+            .collect())
+    }
+
     /// A pane showing `content`, with an ID of its own, to put in a layout
     /// made for [`add_restored`](Self::add_restored).
     pub(crate) fn fresh_pane(&mut self, content: Content) -> Pane {
@@ -659,40 +939,38 @@ impl WorkspaceState {
     /// with `tabs`: each one's name, its layout of panes from
     /// [`fresh_pane`](Self::fresh_pane), which it tidies, and its focused
     /// pane, or else its first. Tab `active_tab`, by its place, is shown,
-    /// or the first if there's no such tab. `tabs` mustn't be empty.
+    /// or the first if there's no such tab. Its background tabs are
+    /// `background`, made as `tabs` are, idle until the server says how
+    /// each is getting on: one holding anything but terminals is made a
+    /// tab, and the first is if there are no tabs. `tabs` and `background`
+    /// mustn't both be empty.
     pub(crate) fn add_restored(
         &mut self,
         name: &str,
         tabs: Vec<(Option<String>, Layout, Option<PaneId>)>,
         active_tab: usize,
+        background: Vec<(Option<String>, Layout, Option<PaneId>)>,
     ) -> WorkspaceId {
         let name = (self.name_for_new(Some(name)))
             .or_else(|_| self.name_for_new(None))
             .expect("some number is free");
-        let tabs: Vec<Tab> = (tabs.into_iter())
-            .map(|(name, mut layout, focused)| {
-                // Shares are kept as they were unless the layout breaks
-                // its rules, which tidying puts right.
-                if untidy(&layout) {
-                    tidy(&mut layout);
-                }
-                if layout.depth() > MAX_NESTING {
-                    within(&mut layout, MAX_NESTING);
-                    tidy(&mut layout);
-                }
-                let id = TabId(self.next_tab);
-                self.next_tab += 1;
-                Tab {
-                    id,
-                    focused: (focused.filter(|&focused| layout.contains(focused)))
-                        .unwrap_or_else(|| layout.panes()[0].id),
-                    layout,
-                    name: name.filter(|name| {
-                        !name.trim().is_empty() && !name.chars().any(char::is_control)
-                    }),
-                }
-            })
+        let mut tabs: Vec<Tab> = (tabs.into_iter())
+            .map(|tab| self.restored_tab(tab))
             .collect();
+        let mut kept = Vec::new();
+        for tab in background {
+            let tab = self.restored_tab(tab);
+            if backgroundable(&tab.layout.panes()).is_err() || tabs.is_empty() {
+                tabs.push(tab);
+            } else {
+                kept.push(Background {
+                    tab,
+                    state: BackgroundState::Idle,
+                    failed: None,
+                    name: String::new(),
+                });
+            }
+        }
         let id = WorkspaceId(self.next_workspace);
         self.next_workspace += 1;
         self.workspaces.list.push(Workspace {
@@ -702,8 +980,37 @@ impl WorkspaceState {
             tabs,
             home: None,
             lent: None,
+            background: kept,
         });
         id
+    }
+
+    /// A tab made again from those kept: its name, its layout of panes
+    /// from [`fresh_pane`](Self::fresh_pane), which it tidies, and its
+    /// focused pane, or else its first.
+    fn restored_tab(
+        &mut self,
+        (name, mut layout, focused): (Option<String>, Layout, Option<PaneId>),
+    ) -> Tab {
+        // Shares are kept as they were unless the layout breaks its rules,
+        // which tidying puts right.
+        if untidy(&layout) {
+            tidy(&mut layout);
+        }
+        if layout.depth() > MAX_NESTING {
+            within(&mut layout, MAX_NESTING);
+            tidy(&mut layout);
+        }
+        let id = TabId(self.next_tab);
+        self.next_tab += 1;
+        Tab {
+            id,
+            focused: (focused.filter(|&focused| layout.contains(focused)))
+                .unwrap_or_else(|| layout.panes()[0].id),
+            layout,
+            name: name
+                .filter(|name| !name.trim().is_empty() && !name.chars().any(char::is_control)),
+        }
     }
 
     /// Makes `workspace` the one last switched to, for new windows.
@@ -723,6 +1030,20 @@ impl WorkspaceState {
     /// for it, if anything.
     pub(crate) fn restored(&self, pane: PaneId) -> Option<&Restored> {
         (self.workspaces.restored.iter()).find(|restored| restored.pane == pane)
+    }
+
+    /// Offers, in windows showing `pane`, to put `ran` at its new shell's
+    /// prompt, as what its terminal ran before it was made again.
+    pub(crate) fn offer_again(&mut self, pane: PaneId, ran: String) {
+        let list = &mut self.workspaces.restored;
+        match list.iter_mut().find(|restored| restored.pane == pane) {
+            Some(restored) => restored.ran = Some(ran),
+            None => list.push(Restored {
+                pane,
+                ran: Some(ran),
+                place: None,
+            }),
+        }
     }
 
     /// Forgets the command `pane`'s terminal was running, which was to be
@@ -758,8 +1079,12 @@ impl WorkspaceState {
         if self.workspaces.restored.is_empty() {
             return;
         }
+        let background = (self.workspaces.list.iter())
+            .flat_map(|workspace| &workspace.background)
+            .map(|background| &background.tab);
         let panes: Vec<Pane> = (self.workspaces.list.iter())
             .flat_map(|workspace| &workspace.tabs)
+            .chain(background)
             .flat_map(|tab| tab.layout.panes())
             .collect();
         self.workspaces.restored.retain_mut(|restored| {
@@ -819,6 +1144,7 @@ impl WorkspaceState {
             tabs: vec![tab],
             home: None,
             lent: Some(lent),
+            background: Vec::new(),
         });
         pane
     }
@@ -1140,6 +1466,67 @@ impl WorkspaceState {
     }
 }
 
+/// `layout`, a background tab's, as it's handed over: `None` if it shows
+/// anything but terminals, which no background tab does.
+fn handed_terminals(layout: &Layout) -> Option<handover::Layout> {
+    match layout {
+        Layout::Pane(Pane {
+            id,
+            content: Content::Terminal(terminal),
+            home: None,
+            ..
+        }) => Some(handover::Layout::Pane {
+            id: id.0,
+            terminal: terminal.0,
+        }),
+        Layout::Pane(_) => None,
+        Layout::Split {
+            axis,
+            parts,
+            shares,
+        } => Some(handover::Layout::Split {
+            left_to_right: *axis == Axis::LeftToRight,
+            parts: (parts.iter())
+                .map(handed_terminals)
+                .collect::<Option<_>>()?,
+            shares: shares.clone(),
+        }),
+    }
+}
+
+/// A background tab's layout, as handed over: `None` if it's damaged, or
+/// shows anything but terminals.
+fn resumed_terminals(node: &handover::Layout) -> Option<Layout> {
+    match node {
+        handover::Layout::Pane { id, terminal } => Some(Layout::Pane(Pane {
+            id: PaneId(*id),
+            content: Content::Terminal(TerminalId(*terminal)),
+            home: None,
+            key: None,
+        })),
+        handover::Layout::Split {
+            left_to_right,
+            parts,
+            shares,
+        } => {
+            if parts.len() < 2 || shares.len() != parts.len() || shares.contains(&0) {
+                return None;
+            }
+            let layout = Layout::Split {
+                axis: if *left_to_right {
+                    Axis::LeftToRight
+                } else {
+                    Axis::TopToBottom
+                },
+                parts: parts.iter().map(resumed_terminals).collect::<Option<_>>()?,
+                shares: shares.clone(),
+            };
+            (layout.depth() <= MAX_NESTING).then_some(layout)
+        }
+        _ => None,
+    }
+}
+
 /// The pane `node` is, as handed over, if it's a pane rather than a split.
 fn handed_pane(node: &handover::Layout) -> Option<Pane> {
     let (id, content) = match *node {
@@ -1171,6 +1558,21 @@ fn unlent(workspace: &Workspace) -> Result<(), Error> {
         )),
         None => Ok(()),
     }
+}
+
+/// Refuses to send `panes` to the background unless they're all
+/// terminals of this daemon's own: what else a pane shows isn't something
+/// left running, and a pane from another machine is that machine's to
+/// keep.
+fn backgroundable(panes: &[Pane]) -> Result<(), Error> {
+    for pane in panes {
+        if pane.home.is_some() || !matches!(pane.content, Content::Terminal(_)) {
+            return Err(Error::Other(
+                "only terminals of this machine's own go to the background".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Who workspace `id` was lent to, as `lent` handed it over, if it was.
@@ -1573,6 +1975,154 @@ mod tests {
         assert!(state.remove_terminal(TerminalId(3)));
         assert!(state.get().list.is_empty());
         assert_eq!(state.get().active, None);
+    }
+
+    #[test]
+    fn a_tab_goes_to_the_background_with_its_splits_and_comes_back_after_the_others() {
+        let mut state = WorkspaceState::new();
+        let one = state.new_workspace("site".into(), TerminalId(1));
+        let workspace = state.get().list[0].id;
+        let two = state.new_tab(workspace, TerminalId(2));
+        state.split(two, Side::Below, TerminalId(3));
+        let tab = state.get().list[0].tabs[1].id;
+        assert_eq!(state.check_background_tab(tab).unwrap(), (workspace, false));
+        state.background_tab(tab, BackgroundState::Running, "trail serve".into());
+        state.refresh_background();
+        let shown = &state.get().list[0];
+        assert_eq!(shown.tabs.len(), 1);
+        assert_eq!(shown.active_tab, shown.tabs[0].id, "the tab before it");
+        let background = &shown.background[0];
+        assert_eq!(shape(&background.tab.layout), "(2 / 3)");
+        assert_eq!(background.name, "trail serve");
+        // Its panes are no others': nothing asked of a pane finds them.
+        assert!(state.get().find_pane(two).is_none());
+        assert_eq!(state.check_pane(two), Err(Error::NoSuchPane(two)));
+        assert_eq!(state.focus(two), Err(Error::NoSuchPane(two)));
+        assert_eq!(state.background_of(TerminalId(3)), Some(tab));
+        assert_eq!(state.background_of(TerminalId(1)), None);
+        // The workspace's only tab needs another in its place first.
+        let only = state.get().list[0].tabs[0].id;
+        assert_eq!(state.check_background_tab(only).unwrap(), (workspace, true));
+
+        let focused = state.bring_back(tab).unwrap();
+        assert_eq!(focused, PaneId(3), "the pane last focused in it");
+        let shown = &state.get().list[0];
+        assert!(shown.background.is_empty());
+        assert_eq!(shown.tabs[1].id, tab, "after the others");
+        assert_eq!(shown.active_tab, tab);
+        assert!(state.get().find_pane(one).is_some());
+        assert_eq!(state.background_of(TerminalId(3)), None);
+    }
+
+    #[test]
+    fn a_pane_goes_to_the_background_in_a_tab_of_its_own() {
+        let mut state = WorkspaceState::new();
+        let one = state.new_workspace("site".into(), TerminalId(1));
+        let two = state.split(one, Side::Right, TerminalId(2));
+        let (tab, only) = state.check_background_pane(two).unwrap();
+        assert_eq!((tab, only), (only_tab(&state).id, false));
+        let new = (state.background_pane(two, BackgroundState::Idle, String::new())).unwrap();
+        assert_eq!(shape(&only_tab(&state).layout), "1");
+        assert_eq!(only_tab(&state).focused, one);
+        let background = &state.get().list[0].background[0];
+        assert_eq!((background.tab.id, background.tab.focused), (new, two));
+        assert_ne!(new, tab);
+        // The last pane of a tab goes as its tab does.
+        assert_eq!(state.check_background_pane(one).unwrap(), (tab, true));
+    }
+
+    #[test]
+    fn only_this_machines_terminals_go_to_the_background() {
+        let mut state = WorkspaceState::new();
+        let one = state.new_workspace("work".into(), TerminalId(1));
+        let workspace = state.get().list[0].id;
+        state.split(one, Side::Right, BufferId(1));
+        let tab = only_tab(&state).id;
+        assert!(state.check_background_tab(tab).is_err(), "an editor in it");
+        let lent = state.new_lent(
+            Lent {
+                to: MachineId([1; 16]),
+                key: 7,
+                placed: false,
+            },
+            Content::Terminal(TerminalId(2)),
+        );
+        assert!(state.check_background_pane(lent).is_err(), "lent");
+        assert!(state.check_background_pane(PaneId(99)).is_err());
+        assert!(state.seen(workspace).is_ok());
+    }
+
+    #[test]
+    fn a_workspaces_last_tab_closing_brings_back_one_still_running_or_takes_the_rest() {
+        let mut state = WorkspaceState::new();
+        let one = state.new_workspace("site".into(), TerminalId(1));
+        let workspace = state.get().list[0].id;
+        for (terminal, running) in [(2, false), (3, true)] {
+            let pane = state.new_tab(workspace, TerminalId(terminal));
+            let tab = state.get().find_pane(pane).unwrap().1.id;
+            let how = if running {
+                BackgroundState::Running
+            } else {
+                BackgroundState::Ended(clackatoo_protocol::TerminalStatus::Exited(1))
+            };
+            state.background_tab(tab, how, String::new());
+        }
+        state.refresh_background();
+        assert!(state.remove_pane(one));
+        let shown = &state.get().list[0];
+        assert_eq!(
+            shown.tabs[0].terminals(),
+            vec![TerminalId(3)],
+            "the running one"
+        );
+        assert_eq!(shown.active_tab, shown.tabs[0].id);
+        assert_eq!(shown.background.len(), 1);
+        state.refresh_background();
+        // With none running, the workspace goes, and the server is to close
+        // what has ended.
+        assert!(state.remove_terminal(TerminalId(3)));
+        assert!(state.get().list.is_empty());
+        assert_eq!(state.take_dropped(), vec![TerminalId(2)]);
+        assert!(state.take_dropped().is_empty());
+    }
+
+    #[test]
+    fn a_background_tab_goes_with_its_last_terminal() {
+        let mut state = WorkspaceState::new();
+        state.new_workspace("site".into(), TerminalId(1));
+        let workspace = state.get().list[0].id;
+        let two = state.new_tab(workspace, TerminalId(2));
+        state.split(two, Side::Right, TerminalId(3));
+        let tab = state.get().find_pane(two).unwrap().1.id;
+        state.background_tab(tab, BackgroundState::Idle, String::new());
+        state.refresh_background();
+        assert!(state.remove_terminal(TerminalId(2)));
+        assert_eq!(shape(&state.get().list[0].background[0].tab.layout), "3");
+        assert!(state.remove_terminal(TerminalId(3)));
+        assert!(state.get().list[0].background.is_empty());
+        assert!(!state.remove_terminal(TerminalId(3)));
+    }
+
+    #[test]
+    fn background_tabs_are_handed_over_with_their_failures() {
+        let mut state = WorkspaceState::new();
+        state.new_workspace("site".into(), TerminalId(1));
+        let workspace = state.get().list[0].id;
+        let two = state.new_tab(workspace, TerminalId(2));
+        state.split(two, Side::Below, TerminalId(3));
+        let tab = state.get().find_pane(two).unwrap().1.id;
+        state.background_tab(tab, BackgroundState::Running, "x".into());
+        state.background_mut(tab).unwrap().failed = Some(2);
+        let (handed, lent) = state.hand_over();
+        let background = state.hand_over_background();
+        let mut resumed = WorkspaceState::resume(&handed, &lent).unwrap();
+        resumed.resume_background(&background);
+        let shown = &resumed.get().list[0].background[0];
+        assert_eq!(shown.tab, state.get().list[0].background[0].tab);
+        assert_eq!(shown.failed, Some(2));
+        assert_eq!(resumed.background_of(TerminalId(3)), Some(tab));
+        assert!(resumed.seen(workspace).unwrap());
+        assert!(!resumed.seen(workspace).unwrap(), "seen once");
     }
 
     #[test]

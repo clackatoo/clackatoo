@@ -647,6 +647,7 @@ impl Daemon {
                 active_tab: first.active_tab,
                 home: None,
                 lent: None,
+                background: Vec::new(),
             });
         }
         parked
@@ -756,6 +757,7 @@ mod tests {
             active_tab: TabId(id),
             home: None,
             lent: None,
+            background: Vec::new(),
         };
         let mut list = vec![workspace(
             1,

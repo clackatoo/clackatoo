@@ -545,6 +545,9 @@ impl Mirror {
             active_tab: active_tab.unwrap_or(first),
             home: Some(machine.id),
             lent: None,
+            // What another machine keeps in the background is its own, not
+            // shown here: its numbers aren't renumbered (CLACKA-121).
+            background: Vec::new(),
         })
     }
 
@@ -896,6 +899,7 @@ mod tests {
             active_tab: TabId(id),
             home: None,
             lent: None,
+            background: Vec::new(),
         }
     }
 

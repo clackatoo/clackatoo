@@ -657,6 +657,7 @@ impl App {
                 messages: None,
                 waiting: None,
                 which_keys: None,
+                background: None,
             }
         } else {
             let mut status = self.desk.status();
@@ -691,6 +692,7 @@ impl App {
                 messages: self.desk.messages_listed(),
                 waiting: self.desk.keys_waiting(),
                 which_keys: self.desk.which_keys(),
+                background: self.desk.background_icon(),
             }
         };
         let fonts = &mut self.frame.as_mut()?.fonts;
@@ -797,6 +799,7 @@ impl App {
             | Hit::Tab(_)
             | Hit::NewWorkspace
             | Hit::NewTab
+            | Hit::Background
             | Hit::Hidden(..)
             | Hit::Menu(_)
             | Hit::Finder(Some(_)) => CursorIcon::Pointer,
@@ -840,6 +843,7 @@ impl App {
                     | Hit::Tab(_)
                     | Hit::NewWorkspace
                     | Hit::NewTab
+                    | Hit::Background
                     | Hit::Hidden(..)
                     | Hit::Note
                     | Hit::Menu(_)
@@ -1109,6 +1113,10 @@ impl App {
             }
             Hit::NewTab => {
                 self.desk.new_tab();
+                Ok(())
+            }
+            Hit::Background => {
+                self.desk.open_background_list();
                 Ok(())
             }
             // A count of names hidden scrolls its strip that way.
@@ -2455,6 +2463,7 @@ fn frame_clicked(window: &Window, hit: Hit, double: bool) -> Result<(), External
         | Hit::Panes
         | Hit::NewWorkspace
         | Hit::NewTab
+        | Hit::Background
         | Hit::Hidden(..)
         | Hit::Note
         | Hit::Menu(_)
@@ -3057,6 +3066,11 @@ impl App {
         if self.desk.tell_places(Instant::now()) {
             self.send_outbox();
         }
+        // The background tabs' list's preview is looked at again now and
+        // then while it's open.
+        if self.desk.tick_background(Instant::now()) {
+            self.send_outbox();
+        }
         // A terminal's guess at the echo of a key may have waited long
         // enough to be taken as wrong.
         if self.desk.tick_panes(Instant::now()) {
@@ -3084,6 +3098,7 @@ impl App {
             .chain(self.desk.flash_ends())
             .chain(self.desk.notice_ends().filter(|_| self.noticing))
             .chain(self.desk.grep_at())
+            .chain(self.desk.background_wakes())
             .chain(self.desk.format_at())
             .chain(self.desk.editor_wakes())
             .chain(self.desk.places_to_tell())
@@ -3673,6 +3688,7 @@ mod tests {
                     messages: None,
                     waiting: None,
                     which_keys: None,
+                    background: None,
                 },
                 &mut |_, _| 0.0,
             )
@@ -3716,6 +3732,7 @@ mod tests {
                 messages: None,
                 waiting: None,
                 which_keys: None,
+                background: None,
             },
             &mut |_, _| 0.0,
         );

@@ -59,6 +59,8 @@
 //! 24. Which connections the daemon doesn't pass on to the daemons
 //!     connected to it, and the machine each was last connected to; the
 //!     machine's identity key; and the keys it knows other machines by.
+//! 25. Background tabs: the tabs each workspace keeps running out of its
+//!     tab bar, and the failure of each no window has said was seen.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -71,11 +73,11 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 24;
+pub(crate) const VERSION: u32 = 25;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, VERSION,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -183,6 +185,21 @@ pub(crate) struct State {
     /// The identity keys of other machines the daemon knows. Since version
     /// 24; before, none were known.
     pub(crate) keys: Vec<Known>,
+    /// The workspaces' background tabs. Since version 25; before, there
+    /// were none.
+    pub(crate) background: Vec<Background>,
+}
+
+/// A tab a workspace keeps running out of its tab bar (see
+/// [`clackatoo_protocol::Background`]). How it's getting on, and what
+/// it's called, are made again from its terminals. Since version 25.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Background {
+    /// Its workspace, by its ID.
+    pub(crate) workspace: u32,
+    pub(crate) tab: Tab,
+    /// The exit status of a failure of its no window has said was seen.
+    pub(crate) failed: Option<i32>,
 }
 
 /// The identity key of another machine, as the daemon knows it. Since
@@ -870,8 +887,81 @@ impl State {
             21 => Ok(postcard::from_bytes::<v21::State>(body)?.into()),
             22 => Ok(postcard::from_bytes::<v22::State>(body)?.into()),
             23 => Ok(postcard::from_bytes::<v23::State>(body)?.into()),
+            24 => Ok(postcard::from_bytes::<v24::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
+        }
+    }
+}
+
+/// Version 24, as the builds that wrote it wrote it: no background tabs.
+mod v24 {
+    use serde::Deserialize;
+
+    use super::{
+        Applied, Borrower, Buffer, Chat, Connection, EditLog, Files, Known, Lender, Lent, Process,
+        Reviews, Sharing, Shell, Terminal, Workspaces,
+    };
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+        edits: EditLog,
+        applied: Vec<Applied>,
+        daemon: u64,
+        reviews: Reviews,
+        recovery_lock: Option<u32>,
+        shells: Vec<Shell>,
+        machine: Option<[u8; 16]>,
+        connections: Vec<Connection>,
+        lent: Vec<Lent>,
+        borrowers: Vec<Borrower>,
+        lenders: Vec<Lender>,
+        sharing: Vec<Sharing>,
+        key: Option<[u8; 32]>,
+        keys: Vec<Known>,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: state.recovery_lock,
+                shells: state.shells,
+                machine: state.machine,
+                connections: state.connections,
+                lent: state.lent,
+                borrowers: state.borrowers,
+                lenders: state.lenders,
+                sharing: state.sharing,
+                key: state.key,
+                keys: state.keys,
+                background: Vec::new(),
+            }
         }
     }
 }
@@ -940,6 +1030,7 @@ mod v23 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -1022,6 +1113,7 @@ mod v22 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -1087,6 +1179,7 @@ mod v21 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -1150,6 +1243,7 @@ mod v20 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -1209,6 +1303,7 @@ mod v19 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -1268,6 +1363,7 @@ mod v18 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -1792,6 +1888,7 @@ mod v7 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -1875,6 +1972,7 @@ mod v8 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -1928,6 +2026,7 @@ mod v9 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -1983,6 +2082,7 @@ mod v11 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -2087,6 +2187,7 @@ mod v15 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -2145,6 +2246,7 @@ mod v14 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -2201,6 +2303,7 @@ mod v13 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -2299,6 +2402,7 @@ mod v12 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -2395,6 +2499,7 @@ mod v10 {
                 sharing: Vec::new(),
                 key: None,
                 keys: Vec::new(),
+                background: Vec::new(),
             }
         }
     }
@@ -2613,6 +2718,29 @@ mod tests {
                 key: [0x5c; 32],
                 met: true,
             }],
+            background: vec![Background {
+                workspace: 1,
+                tab: Tab {
+                    id: 3,
+                    layout: Layout::Split {
+                        left_to_right: false,
+                        parts: vec![
+                            Layout::Pane {
+                                id: 11,
+                                terminal: 3,
+                            },
+                            Layout::Pane {
+                                id: 12,
+                                terminal: 4,
+                            },
+                        ],
+                        shares: vec![1, 1],
+                    },
+                    focused: 12,
+                    name: Some("server".to_owned()),
+                },
+                failed: Some(137),
+            }],
         }
     }
 
@@ -2813,6 +2941,30 @@ mod tests {
     }
 
     #[test]
+    fn version_25_is_read_with_background_tabs() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v25.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        let background = &state.background[0];
+        assert_eq!(
+            (background.workspace, background.tab.id, background.failed),
+            (1, 3, Some(137))
+        );
+        let Layout::Split { parts, .. } = &background.tab.layout else {
+            panic!("not split");
+        };
+        assert!(matches!(
+            parts[1],
+            Layout::Pane {
+                id: 12,
+                terminal: 4
+            }
+        ));
+        assert_eq!(background.tab.focused, 12);
+    }
+
+    #[test]
     fn version_24_is_read_with_connections_not_passed_on_and_their_machines() {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v24.bin"))
@@ -2829,6 +2981,8 @@ mod tests {
             (known.machine, known.key, known.met),
             ([0xa1; 16], [0x5c; 32], true)
         );
+        // There were no background tabs.
+        assert!(state.background.is_empty());
     }
 
     #[test]
@@ -3022,11 +3176,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v24.bin"]
+    #[ignore = "writes tests/fixtures/handover-v25.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v24.bin"
+            "/tests/fixtures/handover-v25.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();

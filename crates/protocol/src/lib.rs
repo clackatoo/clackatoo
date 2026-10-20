@@ -115,13 +115,14 @@ pub use view::{
     Links, Node, NodeId, Patch, Run, View, ViewUpdate,
 };
 pub use workspace::{
-    Axis, Content, Layout, Lent, MAX_NESTING, OtherMachine, Pane, PaneId, PaneKind, PaneTerminal,
-    Place, Restored, Side, Tab, TabId, Workspace, WorkspaceId, Workspaces,
+    Axis, Background, BackgroundAction, BackgroundState, Content, Layout, Lent, MAX_NESTING,
+    OtherMachine, Pane, PaneId, PaneKind, PaneTerminal, Place, Restored, Side, Tab, TabId,
+    Workspace, WorkspaceId, Workspaces,
 };
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 95;
+pub const PROTOCOL_VERSION: u32 = 96;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1298,6 +1299,12 @@ pub enum Request {
         /// The machine, as its connection is named.
         host: String,
     },
+    /// Does something with background tabs: sends a tab or a pane to the
+    /// background, brings one back, dismisses one, or says their failures
+    /// were seen. Answered as [`BackgroundAction`] says. New in protocol
+    /// 96: a client asks [`wire::daemon_has`] with [`wire::BACKGROUND`]
+    /// before sending it.
+    Background(BackgroundAction),
 }
 
 /// How to start a terminal.

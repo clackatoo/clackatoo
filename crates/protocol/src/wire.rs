@@ -220,6 +220,11 @@ gates! {
     /// pass on, `Request::Connect`'s `share`; and how each connection goes,
     /// `Connection`'s `through` and `unshared`.
     CHAIN = 95,
+    /// Background tabs: tabs a workspace keeps running out of its tab
+    /// bar, `Workspace`'s `background` (`Background`, `BackgroundState`),
+    /// and what's asked of them, `Request::Background`
+    /// (`BackgroundAction`).
+    BACKGROUND = 96,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -602,8 +607,10 @@ pub fn newest(message: &ServerMessage) -> u32 {
 }
 
 fn newest_in_workspaces(workspaces: &Workspaces) -> u32 {
+    let background = (workspaces.list.iter()).flat_map(|workspace| &workspace.background);
     let contents = (workspaces.list.iter())
         .flat_map(|workspace| &workspace.tabs)
+        .chain(background.map(|background| &background.tab))
         .flat_map(|tab| tab.layout.panes())
         .map(|pane| pane.content.since())
         .max()
@@ -1419,6 +1426,7 @@ mod tests {
             active_tab: TabId(id),
             home: None,
             lent,
+            background: Vec::new(),
         };
         let lent = Lent {
             to: crate::MachineId([7; 16]),
@@ -1464,6 +1472,7 @@ mod tests {
             active_tab: TabId(1),
             home: Some(crate::MachineId([7; 16])),
             lent: None,
+            background: Vec::new(),
         };
         let workspaces = |held| Workspaces {
             list: vec![desk(held)],
@@ -1531,6 +1540,7 @@ mod tests {
             active_tab: TabId(id),
             home,
             lent: None,
+            background: Vec::new(),
         };
         let desk = crate::MachineId([7; 16]);
         let workspaces = Workspaces {

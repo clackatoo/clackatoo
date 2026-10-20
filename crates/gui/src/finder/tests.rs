@@ -498,6 +498,7 @@ fn every_list_picks_out_the_letters_typed_as_files_does() {
             text: "basics  The basics".into(),
             name_len: 6,
             preview: Vec::new(),
+            alert: None,
         }],
         Case::default(),
     );

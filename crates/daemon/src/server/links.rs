@@ -1990,6 +1990,7 @@ mod tests {
                 active_tab: clackatoo_protocol::TabId(1),
                 home: None,
                 lent: None,
+                background: Vec::new(),
             }],
             ..Workspaces::default()
         }))

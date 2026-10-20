@@ -557,6 +557,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "Terminals and agents find your desktop's display once you log in, even if the daemon started first",
     },
+    News {
+        id: "background",
+        date: "2026-10-20",
+        lesson: "background",
+        what: "Background tabs: Ctrl+B b t keeps a tab running out of the tab bar, and Ctrl+B b l lists them",
+    },
 ];
 
 impl News {

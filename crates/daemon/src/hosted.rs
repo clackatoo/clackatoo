@@ -216,6 +216,11 @@ impl HostedTerminal {
         })
     }
 
+    /// Whether its program is still running, or how it ended.
+    pub(crate) fn status(&self) -> TerminalStatus {
+        self.status
+    }
+
     pub(crate) fn info(&self) -> TerminalInfo {
         TerminalInfo {
             id: self.id,

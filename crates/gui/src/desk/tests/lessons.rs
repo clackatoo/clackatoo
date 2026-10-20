@@ -86,6 +86,7 @@ fn with_lesson(lesson: Layout, more: Vec<Tab>, active: u32) -> Workspace {
         tabs,
         home: None,
         lent: None,
+        background: Vec::new(),
     }
 }
 

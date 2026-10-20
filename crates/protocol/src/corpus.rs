@@ -27,9 +27,9 @@ use clackatoo_text::{
 
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
-    BLANK, BLOCK_MARKS, BLOCKS, CHAIN, COLOURS, EXITED, FALLBACKS, FEDERATION, FORWARD_PACE,
-    FORWARDS, HOVER, INLAY_HINTS, LEND, LIMITS, MIXED, PHONE_TERMINALS, PREVIEW_COLOURS, RECOVER,
-    RELAY, RESTORED, SYMBOLS, USES, WORDS,
+    BACKGROUND, BLANK, BLOCK_MARKS, BLOCKS, CHAIN, COLOURS, EXITED, FALLBACKS, FEDERATION,
+    FORWARD_PACE, FORWARDS, HOVER, INLAY_HINTS, LEND, LIMITS, MIXED, PHONE_TERMINALS,
+    PREVIEW_COLOURS, RECOVER, RELAY, RESTORED, SYMBOLS, USES, WORDS,
 };
 use crate::{
     AgentSession, AgentTools, Author, Axis, BlockMarks, BoardId, BufferId, BufferSnapshot,
@@ -564,6 +564,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     active_tab: TabId(2),
                     home: None,
                     lent: None,
+                    background: Vec::new(),
                 }],
                 active: None,
                 home: None,
@@ -942,7 +943,59 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
     samples.extend(lend().into_iter().map(|sample| (LEND, sample)));
     samples.extend(mixed().into_iter().map(|sample| (MIXED, sample)));
     samples.extend(chain().into_iter().map(|sample| (CHAIN, sample)));
+    samples.extend(background().into_iter().map(|sample| (BACKGROUND, sample)));
     samples
+}
+
+/// Samples of protocol 96: a workspace's background tabs, one running, one
+/// whose program ended by a signal, and one whose shell is idle after a
+/// command failed; and what's asked of them: a tab and a pane sent to the
+/// background, one brought back, one dismissed, and their failures seen.
+fn background() -> Vec<Sample> {
+    use Sample::{Client, Server};
+    let tab = |id, pane, terminal| Tab {
+        id: TabId(id),
+        layout: Layout::Pane(Pane {
+            id: PaneId(pane),
+            content: Content::Terminal(TerminalId(terminal)),
+            home: None,
+            key: None,
+        }),
+        focused: PaneId(pane),
+        name: Some("server".into()),
+    };
+    let mut workspaces = workspaces();
+    workspaces.list[0].background = vec![
+        crate::Background {
+            tab: tab(8, 9, 10),
+            state: crate::BackgroundState::Running,
+            failed: None,
+            name: "trail serve".into(),
+        },
+        crate::Background {
+            tab: tab(11, 12, 13),
+            state: crate::BackgroundState::Ended(TerminalStatus::Killed(9)),
+            failed: Some(137),
+            name: "~/src/site".into(),
+        },
+        crate::Background {
+            tab: tab(14, 15, 16),
+            state: crate::BackgroundState::Idle,
+            failed: Some(2),
+            name: "cargo build".into(),
+        },
+    ];
+    let asked = |action| Client(ClientMessage::Request(Request::Background(action)));
+    vec![
+        Server(ServerMessage::Event(Event::Workspaces(workspaces))),
+        asked(crate::BackgroundAction::Tab { tab: TabId(2) }),
+        asked(crate::BackgroundAction::Pane { pane: PaneId(1) }),
+        asked(crate::BackgroundAction::Bring { tab: TabId(8) }),
+        asked(crate::BackgroundAction::Dismiss { tab: TabId(11) }),
+        asked(crate::BackgroundAction::Seen {
+            workspace: WorkspaceId(1),
+        }),
+    ]
 }
 
 /// Samples of protocol 95: a daemon's workspaces saying which machines it
@@ -2289,6 +2342,7 @@ fn workspaces() -> Workspaces {
             active_tab: TabId(2),
             home: None,
             lent: None,
+            background: Vec::new(),
         }],
         active: Some(WorkspaceId(1)),
         home: None,

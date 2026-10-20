@@ -965,6 +965,7 @@ mod tests {
                 active_tab: TabId(0),
                 home: None,
                 lent: None,
+                background: Vec::new(),
             }],
             active: None,
             home: None,

@@ -258,6 +258,7 @@ impl Desk {
                     text: format!("{name}  {}", lesson.summary),
                     name_len: name.len(),
                     preview: preview(lesson, state.steps.get(lesson.id).copied()),
+                    alert: None,
                 }
             })
             .collect();
@@ -284,6 +285,7 @@ impl Desk {
                 preview: lesson.map_or_else(Vec::new, |lesson| {
                     preview(lesson, state.steps.get(lesson.id).copied())
                 }),
+                alert: None,
             }
         };
         let items = (unread.iter().map(|news| item(news, true)))
@@ -1239,6 +1241,12 @@ impl Facts for DeskFacts<'_> {
         Some(self.desk.workspaces.get(shown.workspace)?.name.clone())
     }
 
+    fn background_tabs(&self) -> usize {
+        (self.desk.shown)
+            .and_then(|shown| self.desk.workspaces.get(shown.workspace))
+            .map_or(0, |workspace| workspace.background.len())
+    }
+
     fn last_exit(&self) -> Option<i32> {
         match self.open()?.exit {
             LastCommand::Exited(status) => Some(status),
@@ -1267,6 +1275,7 @@ impl Facts for DeskFacts<'_> {
             finder::Kind::News => "news",
             finder::Kind::Symbols => "symbols",
             finder::Kind::ProjectSymbols => "projectsymbols",
+            finder::Kind::Background => "background",
         })
     }
 

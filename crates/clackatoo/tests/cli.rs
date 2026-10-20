@@ -859,7 +859,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let flagless = script(
         bin.path(),
         "flagless",
-        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24"#,
+        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25"#,
     );
     not_upgrading(ask_to_upgrade(runtime.path(), &flagless), "can't take over");
     // Failed after everything was handed over: it says it can take over,
@@ -868,7 +868,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let vanishing = script(
         bin.path(),
         "vanishing",
-        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; rm -- "$0";; esac"#,
+        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25; rm -- "$0";; esac"#,
     );
     not_upgrading(
         ask_to_upgrade(runtime.path(), &vanishing),

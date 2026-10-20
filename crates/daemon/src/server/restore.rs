@@ -35,6 +35,7 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::{
     AgentTools, Axis, BoardId, BufferId, Content, Layout, NewReview, NewTerminal, OpenFile,
     OpenFiles, PaneId, PaneTerminal, Place, Restored, ResumeSession, ReviewScope, Size, TerminalId,
+    TerminalStatus,
 };
 
 use clackatoo_term::Progress;
@@ -323,22 +324,20 @@ impl Daemon {
             let mut tabs = Vec::new();
             let mut active_tab = 0;
             for tab in &workspace.tabs {
-                let mut kept = Vec::new();
-                let Some(layout) = self.kept_layout(&tab.layout, &mut kept) else {
+                let Some(kept) = self.kept_tab(tab) else {
                     continue;
                 };
                 if tab.id == workspace.active_tab {
                     active_tab = tabs.len();
                 }
-                tabs.push(saved::Tab {
-                    name: tab.name.clone(),
-                    layout,
-                    focused: (kept.iter().position(|&pane| pane == tab.focused)).unwrap_or(0),
-                });
+                tabs.push(kept);
             }
             if tabs.is_empty() {
                 continue;
             }
+            let background = (workspace.background.iter())
+                .filter_map(|background| self.kept_tab(&background.tab))
+                .collect();
             if workspaces.active == Some(workspace.id) {
                 state.active = Some(state.workspaces.len());
             }
@@ -346,6 +345,7 @@ impl Daemon {
                 name: workspace.name.clone(),
                 tabs,
                 active_tab,
+                background,
                 lent: workspace.lent.map(|lent| saved::Lent {
                     to: lent.to.to_string(),
                     key: lent.key,
@@ -354,6 +354,17 @@ impl Daemon {
             });
         }
         state
+    }
+
+    /// `tab`, as it's kept: `None` if none of its panes is.
+    fn kept_tab(&self, tab: &clackatoo_protocol::Tab) -> Option<saved::Tab> {
+        let mut kept = Vec::new();
+        let layout = self.kept_layout(&tab.layout, &mut kept)?;
+        Some(saved::Tab {
+            name: tab.name.clone(),
+            layout,
+            focused: (kept.iter().position(|&pane| pane == tab.focused)).unwrap_or(0),
+        })
     }
 
     /// `layout`, as it's kept, with the IDs of the panes kept added to
@@ -413,9 +424,15 @@ impl Daemon {
                         // An offer still open stays open after a restart.
                         // Otherwise, what the shell's integration said it
                         // runs, with the terminal's secret, never what a
-                        // program printed.
-                        ran: (restored.and_then(|restored| restored.ran.clone()))
-                            .or_else(|| emulator.trusted_running_command().and_then(kept_command)),
+                        // program printed: or for a background tab's
+                        // terminal whose shell has ended, what it ran last.
+                        ran: (restored.and_then(|restored| restored.ran.clone())).or_else(|| {
+                            match terminal.status() {
+                                TerminalStatus::Running => emulator.trusted_running_command(),
+                                _ => emulator.trusted_last_command(),
+                            }
+                            .and_then(kept_command)
+                        }),
                         elsewhere: None,
                     })
                 }
@@ -533,28 +550,23 @@ impl Daemon {
             let mut tabs = Vec::new();
             let mut active_tab = 0;
             for (index, tab) in workspace.tabs.iter().enumerate() {
-                let mut panes = Vec::new();
-                let Some(layout) = self.restore_layout(
-                    &tab.layout,
-                    &mut chats,
-                    &mut room,
-                    &mut panes,
-                    &mut restored,
-                ) else {
+                let Some(made) = self.restore_tab(tab, &mut chats, &mut room, &mut restored) else {
                     continue;
                 };
                 if index == workspace.active_tab {
                     active_tab = tabs.len();
                 }
-                let focused = panes.get(tab.focused).copied().flatten();
-                tabs.push((tab.name.clone(), layout, focused));
+                tabs.push(made);
             }
-            made.push(if tabs.is_empty() {
+            let background: Vec<_> = (workspace.background.iter())
+                .filter_map(|tab| self.restore_tab(tab, &mut chats, &mut room, &mut restored))
+                .collect();
+            made.push(if tabs.is_empty() && background.is_empty() {
                 None
             } else {
-                let made = self
-                    .workspaces
-                    .add_restored(&workspace.name, tabs, active_tab);
+                let made =
+                    self.workspaces
+                        .add_restored(&workspace.name, tabs, active_tab, background);
                 // Lent to another machine's daemon, it still is, as that
                 // daemon finds its pane again by the number it gave it.
                 let lent = (workspace.lent.as_ref()).and_then(|lent| {
@@ -581,6 +593,8 @@ impl Daemon {
             self.workspaces.set_active(active);
         }
         self.workspaces.set_restored(restored);
+        self.workspaces.refresh_background();
+        self.restate_backgrounds();
         self.restore_borrowers(&state.borrowers);
         self.restore_keys(&state.keys);
         self.connect_kept(state.connections.iter().map(super::links::Kept::from_saved));
@@ -724,6 +738,22 @@ impl Daemon {
             }
             saved::Layout::Pane(_) => {}
         }
+    }
+
+    /// Makes `tab` again: its name, layout and focused pane, or `None` if
+    /// none of its panes could be made, noting what each has to show for
+    /// the restart in `restored`.
+    fn restore_tab(
+        &mut self,
+        tab: &saved::Tab,
+        chats: &mut HashMap<u32, (TerminalId, bool)>,
+        room: &mut usize,
+        restored: &mut Vec<Restored>,
+    ) -> Option<(Option<String>, Layout, Option<PaneId>)> {
+        let mut panes = Vec::new();
+        let layout = self.restore_layout(&tab.layout, chats, room, &mut panes, restored)?;
+        let focused = panes.get(tab.focused).copied().flatten();
+        Some((tab.name.clone(), layout, focused))
     }
 
     /// Makes `layout` again: `None` if none of its panes could be. Each

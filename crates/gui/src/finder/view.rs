@@ -113,6 +113,25 @@ impl PreviewView {
         Self { lines: shown, at }
     }
 
+    /// A preview of a terminal's screen, as `lines` say it is: the last
+    /// `rows` of them, unnumbered, cut to `cols` cells, as the bottom of a
+    /// screen is where a program writes last.
+    pub(crate) fn screen(lines: &[String], (rows, cols): (usize, usize)) -> Self {
+        let shown = (lines.iter().skip(lines.len().saturating_sub(rows)))
+            .map(|line| {
+                let line: String = (line.chars())
+                    .map(|ch| if ch.is_control() { ' ' } else { ch })
+                    .collect();
+                let inks = vec![Ink::Plain; line.chars().count()];
+                fit(&line, &inks, cols, false)
+            })
+            .collect();
+        Self {
+            lines: shown,
+            at: None,
+        }
+    }
+
     /// A preview saying `why` there's nothing to show.
     pub(crate) fn note(why: String) -> Self {
         Self {

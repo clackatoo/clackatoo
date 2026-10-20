@@ -446,6 +446,10 @@ pub(crate) struct Chrome {
     pub(crate) new_workspace: Option<Rect>,
     /// The `+` after the tabs, which opens one.
     pub(crate) new_tab: Option<Rect>,
+    /// The background tabs' icon after it, saying how many of the
+    /// workspace's are running, and where: in the failed marks' red if
+    /// one failed unseen. A click lists them.
+    pub(crate) background: Option<(String, Rect, bool)>,
     /// A menu, if one is open: its box, and its items.
     pub(crate) menu: Option<(Rect, Vec<(String, Rect)>)>,
     /// Something gone wrong, such as the daemon being out of contact, and
@@ -490,6 +494,31 @@ pub(crate) struct Contents<'a> {
     pub(crate) waiting: Option<String>,
     /// What can come next, while keys wait for the rest of a binding.
     pub(crate) which_keys: Option<crate::keymap::WhichKeys>,
+    /// The shown workspace's background tabs, for their icon after the
+    /// tabs: shown only while one is running, or failed unseen.
+    pub(crate) background: Option<BackgroundIcon>,
+}
+
+/// What the icon after the tabs says of the shown workspace's background
+/// tabs (see [`Chrome::background`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BackgroundIcon {
+    /// How many are running.
+    pub(crate) running: usize,
+    /// The exit status of the latest that failed unseen, if one did.
+    pub(crate) failed: Option<i32>,
+}
+
+impl BackgroundIcon {
+    /// What it says: a gear and how many are running, and how one failed,
+    /// as `⚙ 2` or `⚙ 2 ✗ 1`.
+    pub(crate) fn text(self) -> String {
+        match self.failed {
+            Some(code) if self.running > 0 => format!("⚙ {} ✗ {code}", self.running),
+            Some(code) => format!("⚙ ✗ {code}"),
+            None => format!("⚙ {}", self.running),
+        }
+    }
 }
 
 /// Where the strips of workspaces and of tabs are scrolled to, which the
@@ -620,7 +649,7 @@ impl Chrome {
         let bottom = lay_out_bottom(
             &geometry,
             (&status, contents.waiting.as_deref()),
-            &contents.tabs,
+            (&contents.tabs, contents.background),
             contents.bottom_shown,
             contents.scrolls.tabs,
         );
@@ -680,6 +709,7 @@ impl Chrome {
             choices,
             new_workspace,
             new_tab: bottom.new_tab,
+            background: bottom.background,
             menu,
             alert,
             bottom_shown: contents.bottom_shown,
@@ -712,6 +742,9 @@ impl Chrome {
         }
         if self.new_tab.is_some_and(|rect| rect.contains(point)) {
             return Hit::NewTab;
+        }
+        if (self.background.as_ref()).is_some_and(|(_, rect, _)| rect.contains(point)) {
+            return Hit::Background;
         }
         if let Some(count) = self.hidden.iter().find(|count| count.rect.contains(point))
             && (count.bar == Bar::Top || self.bottom_shown)
@@ -800,6 +833,7 @@ impl Chrome {
 
     /// The frame's rectangles and text, with `hover` under the mouse: those
     /// of the bars, under the tiles, and those of the palette, over them.
+    #[allow(clippy::too_many_lines, reason = "each part of the frame in turn")]
     pub(crate) fn paint(&self, hover: Hit) -> Painted<'_> {
         let metrics = self.geometry.metrics;
         let mut painted = Painted::default();
@@ -823,6 +857,27 @@ impl Chrome {
         }
         if let Some(rect) = self.new_tab {
             paint_plus(rect, hover == Hit::NewTab, metrics, &mut painted);
+        }
+        if let Some((text, rect, failed)) = &self.background {
+            if hover == Hit::Background {
+                self.push_bottom_fill(*rect, Paint::Hover, &mut painted.fills);
+            }
+            let bottom = self.geometry.bottom;
+            painted.texts.push(Text {
+                origin: [
+                    rect.x + 2.0 * metrics.padding,
+                    (bottom.y + (bottom.height - metrics.cell[1]) / 2.0).round(),
+                ],
+                content: text,
+                // Red as a failed command's mark, never gold: it asks
+                // nothing of you until it fails.
+                ink: if *failed {
+                    Ink::Color(crate::colors::diagnostic(clackatoo_text::Severity::Error))
+                } else {
+                    Ink::Muted
+                },
+                font: TextFont::Mono,
+            });
         }
         if self.bottom_shown {
             let bottom = self.geometry.bottom;
@@ -1228,6 +1283,7 @@ struct Bottom {
     waiting: Option<(String, Rect)>,
     tabs: Vec<Item<TabId>>,
     new_tab: Option<Rect>,
+    background: Option<(String, Rect, bool)>,
     notes: Vec<Note>,
     /// The tabs' strip, and where it's scrolled to now.
     strip: strip::Strip,
@@ -1252,9 +1308,10 @@ const NOTE_ROOM: (f32, f32, f32) = (16.0, 0.25, 48.0);
 /// Lays out the bottom bar, as `status` has it, in the terminal's font, a
 /// cell per character: the mode at its left, and after it the keys
 /// `waiting` for the rest of a binding, if any, written short; then the
-/// `tabs`, scrolled from `scroll`, and if `shown`, a `+`, and at its right
-/// the note, how many panes the tab has, and a hint. While something's
-/// typed, what's under it, if anything.
+/// `tabs`, scrolled from `scroll`, and if `shown`, a `+`, and the icon of
+/// the background tabs, if it says anything; and at its right the note,
+/// how many panes the tab has, and a hint. While something's typed, what's
+/// under it, if anything.
 ///
 /// The tabs come first, with all the bar if they need it. When there are
 /// more than fit, their strip ends short of the bar's end, keeping room for
@@ -1268,7 +1325,7 @@ const NOTE_ROOM: (f32, f32, f32) = (16.0, 0.25, 48.0);
 fn lay_out_bottom(
     geometry: &Geometry,
     (status, waiting): (&Status, Option<&str>),
-    tabs: &[(TabId, String, bool)],
+    (tabs, background): (&[(TabId, String, bool)], Option<BackgroundIcon>),
     shown: bool,
     scroll: Scroll,
 ) -> Bottom {
@@ -1327,7 +1384,12 @@ fn lay_out_bottom(
         .map_or(mode_end, |(_, rect)| rect.x + rect.width);
     let right = bottom.width - 3.0 * padding;
     let gap = 4.0 * padding;
-    let plus = if shown { bottom.height } else { 0.0 };
+    let icon = (background.filter(|_| shown)).map(|icon| {
+        let text = icon.text();
+        let width = (mono(&text) + 4.0 * padding).round();
+        (text, width, icon.failed.is_some())
+    });
+    let plus = if shown { bottom.height } else { 0.0 } + icon.as_ref().map_or(0.0, |icon| icon.1);
     let cell = metrics.cell[0];
     let full = (tabs_start, (right - plus).max(tabs_start));
     let tab_width = |text: &str| (mono(text) + 6.0 * padding).round();
@@ -1387,6 +1449,15 @@ fn lay_out_bottom(
         y: bottom.y,
         width: bottom.height,
         height: bottom.height,
+    });
+    let background = icon.map(|(text, width, failed)| {
+        let rect = Rect {
+            x: strip.end + bottom.height,
+            y: bottom.y,
+            width,
+            height: bottom.height,
+        };
+        (text, rect, failed)
     });
     // The note, the panes and the hint, from the right, in the room left.
     let zone = (strip.end + plus + gap).min(right);
@@ -1456,6 +1527,7 @@ fn lay_out_bottom(
         waiting,
         tabs: items,
         new_tab,
+        background,
         notes,
         strip,
         cut,
@@ -2364,6 +2436,8 @@ pub(crate) enum Hit {
     NewWorkspace,
     /// The `+` that opens a tab.
     NewTab,
+    /// The background tabs' icon, which lists them.
+    Background,
     /// The count of workspaces or tabs hidden at one end of their strip,
     /// which scrolls it that way.
     Hidden(Bar, End),
@@ -2437,6 +2511,7 @@ mod tests {
                 messages: None,
                 waiting: None,
                 which_keys: None,
+                background: None,
             },
             &mut measure,
         )
@@ -2464,6 +2539,7 @@ mod tests {
                 messages: None,
                 waiting: None,
                 which_keys: None,
+                background: None,
             },
             &mut measure,
         );
@@ -2515,6 +2591,7 @@ mod tests {
                 messages: None,
                 waiting: None,
                 which_keys: None,
+                background: None,
             },
             &mut measure,
         );
@@ -2682,6 +2759,7 @@ mod tests {
                 messages: None,
                 waiting: None,
                 which_keys: None,
+                background: None,
             },
             &mut measure,
         );
@@ -2736,6 +2814,7 @@ mod tests {
                 messages: None,
                 waiting: None,
                 which_keys: None,
+                background: None,
             };
             let chrome = Chrome::new(Geometry::new([width, 600], METRICS), contents, &mut measure);
             (chrome.workspaces.iter())
@@ -2897,6 +2976,7 @@ mod tests {
                 messages: None,
                 waiting: which.as_ref().map(|_| "^B".to_owned()),
                 which_keys: which,
+                background: None,
             },
             &mut measure,
         )
@@ -3126,6 +3206,7 @@ mod tests {
                     messages: None,
                     waiting: Some("^B".into()),
                     which_keys: Some(ctrl_b()),
+                    background: None,
                 },
                 &mut measure,
             );
@@ -3302,6 +3383,7 @@ mod tests {
                 messages: Some(&messages),
                 waiting: None,
                 which_keys: None,
+                background: None,
             },
             &mut measure,
         );
@@ -3335,6 +3417,7 @@ mod tests {
                     messages: None,
                     waiting: None,
                     which_keys: None,
+                    background: None,
                 },
                 &mut measure,
             )
@@ -3384,6 +3467,7 @@ mod tests {
                         messages: None,
                         waiting: None,
                         which_keys: None,
+                        background: None,
                     },
                     &mut measure,
                 );
@@ -3444,6 +3528,7 @@ mod tests {
                 messages: None,
                 waiting: None,
                 which_keys: None,
+                background: None,
             },
             &mut measure,
         );

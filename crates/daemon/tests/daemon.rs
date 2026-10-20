@@ -17390,3 +17390,244 @@ fn agents_are_started_on_the_desktops_display() {
     start_chat(&mut client);
     assert_eq!(std::fs::read_to_string(&seen).unwrap(), "wayland-4");
 }
+
+// --- Background tabs (CLACKA-121) ------------------------------------------
+
+/// Asks the daemon to do `action` with background tabs.
+fn background(client: &mut Client, action: clackatoo_protocol::BackgroundAction) -> Response {
+    client
+        .request(&Request::Background(action))
+        .expect("an answer")
+}
+
+/// The first workspace's background tabs, once `done` holds for them.
+fn wait_for_background(
+    client: &mut Client,
+    done: impl Fn(&[clackatoo_protocol::Background]) -> bool,
+) -> Workspaces {
+    wait_for_workspaces(client, |workspaces| {
+        workspaces
+            .list
+            .first()
+            .is_some_and(|workspace| done(&workspace.background))
+    })
+}
+
+/// Waits until `terminal`'s shell shows its prompt.
+fn wait_for_prompt(client: &mut Client, terminal: TerminalId) {
+    wait_for_screen(client, terminal, |text| text.contains('$'));
+}
+
+#[test]
+#[allow(clippy::too_many_lines, reason = "one tab, all the way through")]
+fn a_background_tab_keeps_running_says_how_it_gets_on_and_comes_back() {
+    use clackatoo_protocol::{BackgroundAction, BackgroundState};
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    let daemon = TestDaemon::keeping_with_secret_shell(&file, &seen);
+    let dir = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    client
+        .new_workspace(Some("site".into()), shell_in(&dir))
+        .unwrap();
+    let workspace = client.watch_workspaces().unwrap().list[0].id;
+    let server = client.new_tab(workspace, shell_in(&dir)).unwrap();
+    let below = (client.split_pane(server, Side::Below, shell_in(&dir))).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let tab = workspaces.find_pane(server).unwrap().1.id;
+    let (top, bottom) = (
+        terminal_of(&workspaces, server),
+        terminal_of(&workspaces, below),
+    );
+    wait_for_prompt(&mut client, top);
+    wait_for_prompt(&mut client, bottom);
+    client.send_input(top, b"sleep 1\r").unwrap();
+    wait_for_screen(&mut client, top, |text| text.contains("sleep 1"));
+    assert_eq!(
+        background(&mut client, BackgroundAction::Tab { tab }),
+        Response::Done
+    );
+    // Out of the tab bar, splits and all, running while its command runs.
+    let shown = wait_for_background(&mut client, |background| {
+        background.len() == 1 && background[0].state == BackgroundState::Running
+    });
+    let site = &shown.list[0];
+    assert_eq!(site.tabs.len(), 1);
+    assert_eq!(site.active_tab, site.tabs[0].id);
+    assert_eq!(site.background[0].tab.layout.panes().len(), 2);
+    // Its panes are no others': nothing asked of a pane finds them.
+    assert!(client.focus(server).is_err());
+    assert!(client.close_pane(below).is_err());
+    // Idle once its shells are at their prompts again.
+    wait_for_background(&mut client, |background| {
+        background[0].state == BackgroundState::Idle && background[0].failed.is_none()
+    });
+    // A command that fails is kept until a window says it was seen.
+    client.send_input(top, b"(exit 3)\r").unwrap();
+    wait_for_background(&mut client, |background| background[0].failed == Some(3));
+    assert_eq!(
+        background(&mut client, BackgroundAction::Seen { workspace }),
+        Response::Done
+    );
+    wait_for_background(&mut client, |background| background[0].failed.is_none());
+    // Its shells exiting leaves it, and their screens, until it's dismissed
+    // or brought back.
+    client.send_input(top, b"exec true\r").unwrap();
+    client.send_input(bottom, b"exec sh -c 'exit 2'\r").unwrap();
+    let shown = wait_for_background(&mut client, |background| {
+        background[0].state == BackgroundState::Ended(TerminalStatus::Exited(2))
+    });
+    assert_eq!(shown.list[0].background[0].failed, Some(2));
+    let screen = screen_text(&client.capture(bottom).unwrap());
+    assert!(screen.contains("exit 2"), "{screen}");
+    // Brought back, each ended shell is a new one, offering what it ran.
+    let back = background(&mut client, BackgroundAction::Bring { tab });
+    assert_eq!(back, Response::PaneCreated(below));
+    let shown = client.watch_workspaces().unwrap();
+    let site = &shown.list[0];
+    assert!(site.background.is_empty());
+    assert_eq!((site.tabs.len(), site.active_tab), (2, tab));
+    let fresh = terminal_of(&shown, below);
+    assert_ne!(fresh, bottom);
+    wait_for_prompt(&mut client, fresh);
+    let offered: Vec<(PaneId, Option<&str>)> = (shown.restored.iter())
+        .map(|restored| (restored.pane, restored.ran.as_deref()))
+        .collect();
+    assert!(
+        offered.contains(&(below, Some("exec sh -c 'exit 2'"))),
+        "{offered:?}"
+    );
+    let terminals: Vec<TerminalId> = (client.list_terminals().unwrap().iter())
+        .map(|info| info.id)
+        .collect();
+    assert!(!terminals.contains(&bottom) && !terminals.contains(&top));
+}
+
+#[test]
+fn a_pane_goes_to_the_background_alone_and_a_dismissed_tab_closes_its_terminals() {
+    use clackatoo_protocol::BackgroundAction;
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let first = (client.new_workspace(None, new_pane(&["cat"]))).unwrap();
+    let second = (client.split_pane(first, Side::Right, new_pane(&["cat"]))).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let cat = terminal_of(&workspaces, second);
+    assert_eq!(
+        background(&mut client, BackgroundAction::Pane { pane: second }),
+        Response::Done
+    );
+    let shown = client.watch_workspaces().unwrap();
+    assert_eq!(first_tab_panes(&shown), [first]);
+    let alone = &shown.list[0].background[0];
+    assert_eq!(alone.tab.terminals(), [cat]);
+    let tab = alone.tab.id;
+    assert_ne!(tab, shown.list[0].tabs[0].id, "a tab of its own");
+    // A terminal with no shell marks counts as running while it's alive.
+    assert_eq!(alone.state, clackatoo_protocol::BackgroundState::Running);
+    assert_eq!(
+        background(&mut client, BackgroundAction::Dismiss { tab }),
+        Response::Done
+    );
+    let shown = client.watch_workspaces().unwrap();
+    assert!(shown.list[0].background.is_empty());
+    assert_eq!(client.list_terminals().unwrap().len(), 1);
+    // Only terminals go to the background.
+    let open = OpenFile {
+        path: daemon.dir.path().join("notes.txt").display().to_string(),
+        cwd: None,
+    };
+    let editor = (client.split_pane(first, Side::Right, PaneTerminal::File(open))).unwrap();
+    let refused = background(&mut client, BackgroundAction::Pane { pane: editor });
+    assert!(matches!(refused, Response::Error(_)), "{refused:?}");
+}
+
+#[test]
+fn the_only_tab_going_to_the_background_leaves_a_shell_and_the_last_tab_closing_brings_one_back() {
+    use clackatoo_protocol::BackgroundAction;
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let only = (client.new_workspace(None, new_pane(&["cat"]))).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let tab = workspaces.list[0].tabs[0].id;
+    let cat = terminal_of(&workspaces, only);
+    assert_eq!(
+        background(&mut client, BackgroundAction::Tab { tab }),
+        Response::Done
+    );
+    let shown = client.watch_workspaces().unwrap();
+    let site = &shown.list[0];
+    assert_eq!(site.tabs.len(), 1, "a shell in its place");
+    assert_ne!(site.tabs[0].id, tab);
+    assert_eq!(site.background[0].tab.terminals(), [cat]);
+    // The tab bar's last tab closing brings back the one still running,
+    // rather than close the workspace.
+    let shell = site.tabs[0].layout.panes()[0].id;
+    client.close_pane(shell).unwrap();
+    let shown = client.watch_workspaces().unwrap();
+    let site = &shown.list[0];
+    assert_eq!(site.tabs[0].id, tab);
+    assert!(site.background.is_empty());
+    // Closing a workspace closes its background tabs with it.
+    let pane = (client.new_tab(site.id, new_pane(&["cat"]))).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let second = workspaces.find_pane(pane).unwrap().1.id;
+    background(&mut client, BackgroundAction::Tab { tab: second });
+    let request = Request::CloseWorkspace { workspace: site.id };
+    assert_eq!(client.request(&request).unwrap(), Response::Done);
+    assert!(client.watch_workspaces().unwrap().list.is_empty());
+    assert!(client.list_terminals().unwrap().is_empty());
+}
+
+#[test]
+fn background_tabs_are_kept_and_come_back_after_a_restart_offering_what_ran() {
+    use clackatoo_protocol::{BackgroundAction, BackgroundState};
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    let dir = kept.path().to_owned();
+    {
+        let daemon = TestDaemon::keeping_with_secret_shell(&file, &seen);
+        let mut client = daemon.client();
+        client
+            .new_workspace(Some("site".into()), shell_in(&dir))
+            .unwrap();
+        let workspace = client.watch_workspaces().unwrap().list[0].id;
+        let server = client.new_tab(workspace, shell_in(&dir)).unwrap();
+        let workspaces = client.watch_workspaces().unwrap();
+        let tab = workspaces.find_pane(server).unwrap().1.id;
+        let terminal = terminal_of(&workspaces, server);
+        wait_for_prompt(&mut client, terminal);
+        client.send_input(terminal, b"sleep 60\r").unwrap();
+        background(&mut client, BackgroundAction::Tab { tab });
+        wait_for_background(&mut client, |background| {
+            background[0].state == BackgroundState::Running
+        });
+        wait_for_kept(&file, |kept| {
+            kept.contains("\"background\"") && kept.contains("\"ran\": \"sleep 60\"")
+        });
+    }
+    let daemon = TestDaemon::keeping_with_secret_shell(&file, &seen);
+    let mut client = daemon.client();
+    let workspaces = client.watch_workspaces().unwrap();
+    let site = &workspaces.list[0];
+    assert_eq!(site.tabs.len(), 1);
+    let again = &site.background[0];
+    let pane = again.tab.layout.panes()[0].id;
+    // A new shell, never running it by itself, but offering it.
+    assert_eq!(
+        workspaces.restored,
+        [Restored {
+            pane,
+            ran: Some("sleep 60".into()),
+            place: None,
+        }]
+    );
+    let tab = again.tab.id;
+    let terminal = again.tab.terminals()[0];
+    wait_for_prompt(&mut client, terminal);
+    assert!(!screen_text(&client.capture(terminal).unwrap()).contains("sleep"));
+    // Brought back, the offer goes with it.
+    background(&mut client, BackgroundAction::Bring { tab });
+    let shown = client.watch_workspaces().unwrap();
+    assert_eq!(shown.restored.len(), 1);
+    assert_eq!(shown.restored[0].pane, pane);
+}

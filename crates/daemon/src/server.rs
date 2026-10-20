@@ -55,6 +55,7 @@ use crate::upgrade::Upgrade;
 use crate::workspaces::WorkspaceState;
 
 mod agent_files;
+mod background;
 mod boards;
 mod browser;
 mod buffers;
@@ -240,6 +241,15 @@ impl Hosted {
         match self {
             Self::Pty(terminal) => terminal.info(),
             Self::Chat(chat) => chat.info(),
+        }
+    }
+
+    /// Whether its program is still running, or how it ended: a chat runs
+    /// until it's closed.
+    fn status(&self) -> TerminalStatus {
+        match self {
+            Self::Pty(terminal) => terminal.status(),
+            Self::Chat(_) => TerminalStatus::Running,
         }
     }
 
@@ -943,6 +953,8 @@ pub struct Daemon {
     recovery: recovery::Recovery,
     /// Keeping the workspaces from one run of the daemon to the next.
     keeping: restore::Keeping,
+    /// What's kept of the terminals in background tabs.
+    background: background::Backgrounds,
     /// Which daemon this is, kept from one run to the next.
     machine: Machine,
     /// The key that proves it, which signs the QUIC certificate.
@@ -1066,6 +1078,7 @@ impl Daemon {
             renames: rename::Renames::default(),
             finds,
             tools: Tools::default(),
+            background: background::Backgrounds::default(),
             explorers: Explorers::default(),
             boards,
             signs: Signs::default(),
@@ -1143,6 +1156,7 @@ impl Daemon {
                 WorkspaceState::new()
             });
         daemon.workspaces.set_home(&daemon.config.home);
+        daemon.workspaces.resume_background(&state.background);
         daemon.resume_machines(state);
 
         for terminal in &state.terminals {
@@ -1156,6 +1170,7 @@ impl Daemon {
                 daemon.workspaces.remove_terminal(id);
             }
         }
+        daemon.restate_backgrounds();
         for chat in chats {
             let agent = daemon.agent_spec(&chat.agent);
             daemon.add_chat(HostedChat::resume(chat, &agent));
@@ -1268,6 +1283,7 @@ impl Daemon {
     /// left with nothing to hang up when it's dropped. The listening socket
     /// is shared: closing this daemon's copy leaves it open. Language
     /// servers are waited for until `servers_until`.
+    #[allow(clippy::too_many_lines, reason = "each part of the state in turn")]
     fn hand_over(&mut self, servers_until: Instant) -> io::Result<Handover> {
         // Written, for the next build to keep on from, before anything
         // goes over to it.
@@ -1371,6 +1387,7 @@ impl Daemon {
                     .collect(),
                 connections,
                 lent,
+                background: self.workspaces.hand_over_background(),
                 borrowers,
                 lenders,
                 sharing,
@@ -1913,6 +1930,7 @@ impl Daemon {
         self.schedule_compaction(id);
         self.collect_damage(id);
         self.terminal_moved_on(id);
+        self.background_moved_on(id);
         self.note_shell(id);
     }
 
@@ -2103,6 +2121,9 @@ impl Daemon {
             for token in viewers {
                 self.send_event(token, clackatoo_protocol::Event::Exited { terminal: id });
             }
+            // A background tab's terminal stays, its screen readable, until
+            // the tab is dismissed.
+            self.background_ended(id);
             if self.workspaces.get().pane_showing(id).is_some()
                 && let Err(err) = self.close_terminal(id)
             {
@@ -2399,6 +2420,13 @@ impl Daemon {
     /// which is queued after this.
     fn workspaces_changed(&mut self) {
         self.workspaces.refresh_lent();
+        self.workspaces.refresh_background();
+        // The ended background tabs of a workspace gone with its last tab.
+        for terminal in self.workspaces.take_dropped() {
+            if let Err(err) = self.close_terminal(terminal) {
+                log::warn!("terminal {terminal}: closing it failed: {err}");
+            }
+        }
         self.workspaces.sweep_restored();
         // A pane borrowed from another machine that has closed here is
         // closed there.
@@ -2980,6 +3008,7 @@ impl Daemon {
                 close_idle,
             } => self.serve_unlend(token, workspace, close_idle),
             Request::Lent => Ok(self.list_lent()),
+            Request::Background(action) => self.serve_background(&action),
             Request::Lend {
                 key,
                 beside,
@@ -3121,7 +3150,10 @@ impl Daemon {
                 self.close_panes(&panes)
             }
             Request::CloseWorkspace { workspace } => {
-                let panes = self.workspaces.workspace_panes(workspace)?;
+                // Its background tabs first: none takes the place of its
+                // last tab as that closes.
+                let mut panes = self.workspaces.background_panes(workspace)?;
+                panes.extend(self.workspaces.workspace_panes(workspace)?);
                 self.close_panes(&panes)
             }
             other => unreachable!("{other:?} isn't about workspaces"),

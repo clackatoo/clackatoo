@@ -16,7 +16,7 @@
 //! | `workspace "NAME"` | The workspace shown is called NAME. |
 //! | `exited N` | The practice terminal's last command exited with status N. |
 //! | `option SETTING` | An option is as `:set` writes it: `option nowrap`, `option tabstop=8`. |
-//! | `finder`, `finder KIND` | The finder is open: any, or `files`, `grep`, `buffers`, `diagnostics`, `marks`, `places` or `boards`; or `agent`, the start page `:Agent` opens. |
+//! | `finder`, `finder KIND` | The finder is open: any, or `files`, `grep`, `buffers`, `diagnostics`, `marks`, `places`, `boards` or `background`; or `agent`, the start page `:Agent` opens. |
 //! | `listed "PATH"` | A file explorer in the lesson's tab lists PATH, from its root. |
 //! | `rooted "PATH"` | A file explorer in the lesson's tab is rooted at PATH, from the lesson's folder: `.` for the folder itself. |
 //! | `file "NAME"` | The focused editor's file is called NAME. |
@@ -24,6 +24,7 @@
 //! | `messages` | `:messages` shows what the bar has said lately. |
 //! | `saved` | The practice file has no changes that aren't written. |
 //! | `rendered` | The focused editor shows its Markdown rendered. |
+//! | `background N` | The workspace shown has N background tabs. |
 //! | `not CHECK` | CHECK doesn't hold. |
 //!
 //! Text is written in double quotes, with `\n` a line break, `\t` a tab,
@@ -57,6 +58,7 @@ pub(crate) enum Check {
     Messages,
     Saved,
     Rendered,
+    Background(usize),
     Not(Box<Check>),
 }
 
@@ -99,7 +101,8 @@ pub(crate) enum Focus {
 
 /// The finder's kinds, as checks name them, and the start page `:Agent`
 /// opens, which is drawn as the finder is.
-const FINDERS: [&str; 10] = [
+const FINDERS: [&str; 11] = [
+    "background",
     "files",
     "grep",
     "buffers",
@@ -154,6 +157,8 @@ pub(crate) trait Facts {
     fn messages_shown(&self) -> bool;
     /// Whether the focused editor shows its Markdown rendered.
     fn rendered(&self) -> bool;
+    /// How many background tabs the workspace shown has.
+    fn background_tabs(&self) -> usize;
 }
 
 impl Check {
@@ -219,6 +224,7 @@ impl Check {
             ["messages"] => Self::Messages,
             ["saved"] => Self::Saved,
             ["rendered"] => Self::Rendered,
+            ["background", count] => Self::Background(number(count)?),
             _ => return Err("that isn't a check".into()),
         })
     }
@@ -262,6 +268,7 @@ impl Check {
             Self::Messages => facts.messages_shown(),
             Self::Saved => facts.practice_saved() == Some(true),
             Self::Rendered => facts.rendered(),
+            Self::Background(count) => facts.background_tabs() == *count,
             Self::Not(check) => !check.holds(facts),
         }
     }
@@ -367,6 +374,7 @@ mod tests {
         recording: Option<char>,
         messages: bool,
         rendered: bool,
+        background: usize,
     }
 
     impl Facts for Made {
@@ -427,6 +435,9 @@ mod tests {
         }
         fn rendered(&self) -> bool {
             self.rendered
+        }
+        fn background_tabs(&self) -> usize {
+            self.background
         }
     }
 

@@ -49,6 +49,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("finder", include_str!("lessons/finder.md")),
     ("agents", include_str!("lessons/agents.md")),
     ("remote", include_str!("lessons/remote.md")),
+    ("background", include_str!("lessons/background.md")),
 ];
 
 /// Every lesson, parsed once. One that doesn't parse is left out, and
@@ -374,6 +375,9 @@ mod tests {
         }
         fn rendered(&self) -> bool {
             false
+        }
+        fn background_tabs(&self) -> usize {
+            0
         }
     }
 

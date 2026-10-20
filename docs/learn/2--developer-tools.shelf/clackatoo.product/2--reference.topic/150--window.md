@@ -139,7 +139,29 @@ A terminal whose shell was running a command shows "was running: cargo watch" at
 
 To start once with none, run `clackatoo stop`, then [`clackatoo daemon --fresh`](~clackatoo/reference/cli#daemon).
 
-A pane closes when its program exits, as in other terminals. A tab closes with its last pane, and a workspace with its last tab. When the last workspace closes, so does the window.
+A pane closes when its program exits, as in other terminals. A tab closes with its last pane, and a workspace with its last tab, unless it has a [background tab](#background-tabs) still running, which comes back in its place. When the last workspace closes, so does the window.
+
+### Background tabs
+
+A background tab is a tab kept running out of the tab bar, as a web server or a `trail serve` you only glance at now and then, so it doesn't take a tab's place. It keeps its splits, and holds terminals alone. Each workspace has its own; the daemon keeps them, so every window and the [web app](~clackatoo/reference/phone) sees them, they're handed over as the daemon upgrades, and they come back after a restart as tabs do, each terminal a new shell offering `R` to put what it ran at its prompt. A window from before protocol 96 doesn't show them, and leaves them be.
+
+| Keys | Command | Does |
+|---|---|---|
+| Ctrl+B `b` `t` | `:bg` | Sends the tab shown to the background. The workspace's only tab can go too: a shell in its folder takes its place. |
+| Ctrl+B `b` `p` | `:bgpane` | Sends the focused pane to the background, in a tab of its own. A tab's last pane takes the tab with it. |
+| Ctrl+B `b` `l` | `:Background` | Lists the background tabs. A click on the icon after the tabs does too. |
+
+After the tabs, an icon says how many of the workspace's background tabs are running: `⚙ 2`. A tab counts as running while a command runs in one of its terminals, as their shells' marks say, which bash, zsh and fish 4 make when clackatoo starts them as your shell; one whose shell is at its prompt again is idle, and a terminal whose shell doesn't mark its commands counts as running while it's alive. With none running, the icon goes. A command in one that fails, or a shell in one that exits with a failure, turns the icon red with its exit status, as a failed command's mark is, `⚙ 1 ✗ 2`, until a window lists them.
+
+The list is the [finder's](#the-finder), with this workspace's background tabs first, then the other workspaces': each with its name (its program's title, else the command its shell runs or ran last, else its folder), how it's getting on (`running`, `idle`, `exited 2`, with any failure since in red), and its workspace. Beside them is the last screenful of the one picked, looked at again every two seconds while the list is open. Typing narrows them.
+
+| Key, in the list | Does |
+|---|---|
+| Enter | Brings it back as a tab of its workspace, after the others, going there. A terminal of it whose shell has exited starts again as a new shell in its folder, offering `R` to put what it ran at the prompt. |
+| Ctrl+D | Dismisses it, closing its terminals. One still running asks first: a second Ctrl+D ends it. |
+| Esc | Closes the list. |
+
+A background tab whose terminals have ended stays, its last screen readable, until it's dismissed or brought back: nothing vanishes by itself. Closing a workspace closes its background tabs with it. A workspace on [another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar) keeps its background tabs to itself for now: they aren't listed here, and its tabs can't be sent to the background from here.
 
 ### The command line
 
@@ -172,6 +194,7 @@ Up and Down go back through the commands you've typed, in this window and others
 | `:g/pattern/d`, `:v/…`, `:d`, `:y`, `:m`, `:t`, `:normal` | Vim's [commands for lines](~clackatoo/reference/editor#lines), in the focused editor. |
 | `:workspace NAME`, `:ws NAME` | Switches to the workspace called NAME, making it if there's none. Without a name, makes a new workspace, named with the lowest number no workspace has. `:ws new@desk NAME` makes one on desk, as does `:ws NAME@desk` if desk has none of that name. |
 | `:rename NAME` | Renames the workspace shown. |
+| `:bg`, `:bgpane`, `:Background` | Sends the tab shown, or the focused pane, to the [background](#background-tabs), or lists the background tabs. |
 | `:close` | Closes the focused pane, hanging up its program. |
 | `:q` | The same, unless the pane is the last showing a file with changes that aren't written. `:q!` closes it anyway, throwing them away. |
 | `:w`, `:wq`, `:e!`… | Write the focused pane's file, and the rest of Vim's commands for files: see [Editing files](~clackatoo/reference/editor#writing). |
@@ -226,6 +249,7 @@ Ctrl+B and one more key work in either mode, as tmux's prefix does. While Ctrl+B
 | `x` | Closes the pane. |
 | `w` | Opens the workspace picker. |
 | `o` `i` | Back and forward through the tab's places, as Ctrl+O and Ctrl+I do in normal mode. |
+| `b`, then `t` `p` `l` | Sends the tab or the pane to the [background](#background-tabs), or lists the background tabs. |
 | Ctrl+B | Sends Ctrl+B to the program. |
 
 The workspace picker lists the workspaces whose names hold what you type, those starting with it first. Up and Down, or Tab and Shift+Tab, pick one, and Enter moves to it. If nothing matches, Enter makes a workspace by the name typed.

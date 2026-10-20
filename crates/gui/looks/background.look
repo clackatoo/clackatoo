@@ -1,0 +1,26 @@
+# Background tabs: the icon after the tabs, gone while none runs, counting
+# those running, red with a failure until they're listed; and the list,
+# with the screen of the one picked beside it.
+size 1280x800
+shot icon-none
+keys <C-b>c
+shell python3 -m http.server 8080
+wait-for Serving HTTP
+keys <C-b>bt
+sleep 500
+shot icon-running
+keys <C-b>c
+keys i
+shell sleep 1; false
+keys <C-b>bt
+sleep 2500
+shot icon-failed
+keys <C-b>bl
+sleep 1000
+shot list
+keys <C-n>
+sleep 1000
+shot list-failed
+keys <Esc>
+sleep 300
+shot icon-seen

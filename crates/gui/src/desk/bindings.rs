@@ -15,6 +15,9 @@
 //! | `a` | Opens a chat with an agent, to the right |
 //! | `w` | Picks a workspace, or makes one, in the palette |
 //! | `r` | Picks a machine to open a new window on, as `:connect` does |
+//! | `b` `t` | Sends the tab to the background, as `:bg` does (see [`super::background`]) |
+//! | `b` `p` | Sends the focused pane to the background, in a tab of its own, as `:bgpane` does |
+//! | `b` `l` | Lists the background tabs, as `:Background` does |
 //! | Ctrl+B | Sends Ctrl+B to the program |
 //!
 //! Esc, or any other key, cancels. While Ctrl+B waits, the bottom bar
@@ -123,6 +126,8 @@ pub(crate) enum Action {
     /// Shows the focused editor's Markdown rendered, or its text again, as
     /// `:Markdown` does.
     ToggleMarkdown,
+    /// Background tabs, as `:bg`, `:bgpane` and `:Background` do.
+    Background(crate::command::BackgroundCommand),
 }
 
 /// What a key does in reviewing what agents changed.
@@ -206,6 +211,9 @@ fn defaults() -> Keymap<Binding> {
     bind("niv", "<C-b>a", agent, Some("agent chat"));
     bind("niv", "<C-b>w", Action::PickWorkspace, Some("workspaces"));
     bind("niv", "<C-b>r", Action::Connect, Some("connect"));
+    for (keys, command, label) in BACKGROUND_KEYS {
+        bind("niv", keys, Action::Background(command), Some(label));
+    }
     bind("niv", "<C-b><C-b>", Action::SendCtrlB, Some("send Ctrl+B"));
 
     bind("nv", ":", Action::CommandLine, None);
@@ -278,9 +286,32 @@ fn defaults() -> Keymap<Binding> {
     map
 }
 
+/// The keys for background tabs, after Ctrl+B's `b`: the `t`ab, the
+/// `p`ane, or the `l`ist.
+const BACKGROUND_KEYS: [(&str, crate::command::BackgroundCommand, &str); 3] = [
+    (
+        "<C-b>bt",
+        crate::command::BackgroundCommand::Tab,
+        "tab to background",
+    ),
+    (
+        "<C-b>bp",
+        crate::command::BackgroundCommand::Pane,
+        "pane to background",
+    ),
+    (
+        "<C-b>bl",
+        crate::command::BackgroundCommand::List,
+        "background tabs",
+    ),
+];
+
 /// Names the keys after Space that start several in `map`, as
-/// which-key.nvim's groups are named.
+/// which-key.nvim's groups are named, and Ctrl+B's `b`.
 fn name_groups(map: &mut Keymap<Binding>) {
+    let modes = parse_modes("niv").expect("the defaults' modes are valid");
+    let keys = parse_keys("<C-b>b").expect("the defaults' keys are valid");
+    map.name_group(&modes, &keys, Some("background"));
     let modes = parse_modes("nv").expect("the defaults' modes are valid");
     for (keys, name) in [
         ("<Space>p", "project"),
@@ -457,6 +488,7 @@ impl Desk {
                 );
             }
             Action::ToggleMarkdown => self.run(Command::Markdown),
+            Action::Background(command) => self.run(Command::Background(command)),
         }
     }
 
