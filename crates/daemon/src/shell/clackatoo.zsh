@@ -8,7 +8,16 @@
 # apart, and knows when typing is read by the shell. See
 # `clackatoo_term::blocks`.
 
-[[ -z ${__clackatoo_integrated-} ]] || return 0
+[[ -z ${__clackatoo_integrated-} ]] || 'builtin' 'return' 0
+
+# Read with aliases off, put back at the end: the user's .zshenv, read
+# first, may alias the commands the hooks below run (`export`, `print`).
+'builtin' 'typeset' -gi __clackatoo_aliases=0
+if [[ -o aliases ]]; then
+    __clackatoo_aliases=1
+    'builtin' 'setopt' no_aliases
+fi
+
 typeset -g __clackatoo_integrated=1
 
 # Marks are written to the terminal itself, not to stdout: powerlevel10k's
@@ -157,3 +166,8 @@ if zmodload zsh/sched 2>/dev/null; then
 else
     __clackatoo_install
 fi
+
+if (( __clackatoo_aliases )); then
+    'builtin' 'setopt' aliases
+fi
+'builtin' 'unset' __clackatoo_aliases

@@ -1282,18 +1282,25 @@ fn bash_sharing_its_history_offers_only_its_own_lines() {
 /// Shells already open follow the display the daemon writes for them,
 /// at their next prompt, setting and unsetting the variables as it
 /// changes, but never one set by hand: in the user's startup files, or at
-/// the prompt. A shell with `set -eu` keeps working.
+/// the prompt. A shell with `set -eu` keeps working, the commands the
+/// integration runs can't be aliased away, and the prompt keeps the last
+/// command's status.
 #[test]
 fn shells_follow_the_display_but_never_a_variable_set_by_hand() {
     const SEEN: &str = "env | grep -E '^(WAYLAND_DISPLAY|DISPLAY|XAUTHORITY|XDG_SESSION_TYPE)=' \
                         | sort | tr '\\n' ' '; echo";
+    // Aliases a user's startup files might make of what the integration
+    // runs.
+    const ALIASES: &str = "alias export='echo ALIASED' unset='echo ALIASED' \
+                           read='echo ALIASED' printf='echo ALIASED' local='echo ALIASED' \
+                           typeset='echo ALIASED' print='echo ALIASED'\n";
     for (shell, zshenv) in integrated_shells() {
         let name = shell.file_name().unwrap().to_string_lossy().into_owned();
         let home = tempfile::tempdir().unwrap();
-        std::fs::write(home.path().join(".zshenv"), zshenv).unwrap();
+        std::fs::write(home.path().join(".zshenv"), format!("{zshenv}{ALIASES}")).unwrap();
         // Set in the user's own startup files.
-        let mine = "export XAUTHORITY=/mine\n";
-        std::fs::write(home.path().join(".bashrc"), mine).unwrap();
+        let mine = "builtin export XAUTHORITY=/mine\n";
+        std::fs::write(home.path().join(".bashrc"), format!("{mine}{ALIASES}")).unwrap();
         std::fs::write(home.path().join(".zshrc"), mine).unwrap();
         let fish = home.path().join(".config/fish");
         std::fs::create_dir_all(&fish).unwrap();
@@ -1303,10 +1310,13 @@ fn shells_follow_the_display_but_never_a_variable_set_by_hand() {
         let file = user.runtime.path().join("clackatoo/shell/display");
         // Written as the daemon writes it, then taken at the prompt after
         // the next command.
-        let display = |user: &mut UserShell, text: &str| {
+        let write = |text: &str| {
             let partial = file.with_extension("new");
             std::fs::write(&partial, text).unwrap();
             std::fs::rename(&partial, &file).unwrap();
+        };
+        let display = |user: &mut UserShell, text: &str| {
+            write(text);
             user.run("true");
         };
         let seen = |user: &mut UserShell| {
@@ -1333,11 +1343,20 @@ fn shells_follow_the_display_but_never_a_variable_set_by_hand() {
         user.run(if name == "fish" {
             "set -gx DISPLAY :7"
         } else {
-            "export DISPLAY=:7"
+            "builtin export DISPLAY=:7"
         });
+        // Taken at the prompt after a command that failed, which still
+        // says so.
         let again = "#systemd\nWAYLAND_DISPLAY=wayland-1\nDISPLAY=:0\nXAUTHORITY=/run/xauth\n\
                      XDG_SESSION_TYPE=wayland\n";
-        display(&mut user, again);
+        write(again);
+        assert_eq!(user.run("false").exit, Some(1), "{name}");
+        let status = user.run(if name == "fish" {
+            "echo st=$status"
+        } else {
+            "echo st=$?"
+        });
+        assert_eq!(user.output(&status).trim(), "st=1", "{name}");
         assert_eq!(
             seen(&mut user),
             "DISPLAY=:7 WAYLAND_DISPLAY=wayland-1 XAUTHORITY=/mine XDG_SESSION_TYPE=wayland",
@@ -1362,6 +1381,7 @@ fn shells_follow_the_display_but_never_a_variable_set_by_hand() {
         assert!(!text.contains("unbound"), "{name}: {text}");
         assert!(!text.contains("not set"), "{name}: {text}");
         assert!(!text.contains("no such file"), "{name}: {text}");
+        assert!(!text.contains("ALIASED"), "{name}: {text}");
     }
 }
 
@@ -1387,7 +1407,17 @@ fn display_says_what_the_daemon_follows_and_where_from() {
     failed("no daemon is listening");
     // Not following the display, it takes away what another left.
     let daemon = daemon(runtime.path());
-    failed("isn't following the desktop's display");
+    failed("hasn't written the display it follows");
+    // One older than the daemon is another's.
+    std::fs::write(shell.join("display"), logged_in).unwrap();
+    let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+    let left = std::fs::File::options()
+        .write(true)
+        .open(shell.join("display"))
+        .unwrap();
+    left.set_modified(old).unwrap();
+    drop(left);
+    failed("hasn't written the display it follows");
     std::fs::write(shell.join("display"), logged_in).unwrap();
     let shown = clackatoo(runtime.path(), &["display"]);
     assert_eq!(

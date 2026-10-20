@@ -21,8 +21,23 @@ pub(crate) fn show() -> anyhow::Result<()> {
         );
     }
     let file = runtime.path().join("shell/display");
-    let Some(written) = display::read_file(&file)? else {
-        anyhow::bail!("the daemon isn't following the desktop's display: CLACKATOO_DISPLAY is off");
+    // A daemon that follows the display writes the file after it starts
+    // listening, and one that doesn't removes it, so a file older than the
+    // socket is an earlier daemon's.
+    let modified =
+        |path: &std::path::Path| std::fs::metadata(path).and_then(|meta| meta.modified());
+    let earlier = matches!(
+        (modified(&file), modified(&socket)),
+        (Ok(file), Ok(socket)) if file < socket
+    );
+    let written = display::read_file(&file)?.filter(|_| !earlier);
+    let Some(written) = written else {
+        anyhow::bail!(
+            "the daemon hasn't written the display it follows to {}: it's off \
+             (CLACKATOO_DISPLAY=off where the daemon started), not read yet, or couldn't be \
+             written (see the daemon's log)",
+            file.display()
+        );
     };
     print!("{}", shown(&written));
     Ok(())

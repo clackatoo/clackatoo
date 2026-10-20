@@ -40,11 +40,13 @@ if [[ $- == *i* && -z ${__clackatoo_integrated-} ]]; then
     __clackatoo_integrated=1
 
     # First of the prompt commands, while $? is still the command's status.
+    # These functions are read after ~/.bashrc, so their commands are
+    # `builtin`, out of reach of any alias it makes.
     __clackatoo_precmd() {
-        local status=$?
-        printf '\e]133;D;%s\a\e]7;file://%s%s\a' "$status" "$HOSTNAME" "${PWD//%/%25}"
+        builtin local status=$?
+        builtin printf '\e]133;D;%s\a\e]7;file://%s%s\a' "$status" "$HOSTNAME" "${PWD//%/%25}"
         __clackatoo_display
-        return "$status"
+        builtin return "$status"
     }
 
     # The display the desktop's login gives the programs clackatoo starts,
@@ -56,9 +58,9 @@ if [[ $- == *i* && -z ${__clackatoo_integrated-} ]]; then
     # shell started with it, or as this last made it: one you've set
     # yourself is yours, and stays.
     __clackatoo_display() {
-        local text= name kept want
-        { IFS= read -r -d '' text <"$__clackatoo_display_file" || :; } 2>/dev/null
-        [[ -n $text && $text != "${__clackatoo_display_text-}" ]] || return 0
+        builtin local text= name kept want
+        { IFS= builtin read -r -d '' text <"$__clackatoo_display_file" || builtin :; } 2>/dev/null
+        [[ -n $text && $text != "${__clackatoo_display_text-}" ]] || builtin return 0
         __clackatoo_display_text=$text
         text=$'\n'$text
         for name in "${__clackatoo_display_names[@]}"; do
@@ -68,12 +70,13 @@ if [[ $- == *i* && -z ${__clackatoo_integrated-} ]]; then
                 want=${text#*$'\n'$name=}
                 want="=${want%%$'\n'*}"
             fi
-            [[ ${!name+=}${!name-} == "${!kept-}" && $want != "${!kept-}" ]] || continue
+            [[ ${!name+=}${!name-} == "${!kept-}" && $want != "${!kept-}" ]] || builtin continue
             if [[ -n $want ]]; then
-                printf -v "$name" '%s' "${want#=}" 2>/dev/null && export "$name" &&
-                    printf -v "$kept" '%s' "$want" || :
+                builtin printf -v "$name" '%s' "${want#=}" 2>/dev/null &&
+                    builtin export "$name" &&
+                    builtin printf -v "$kept" '%s' "$want" || builtin :
             else
-                unset "$name" 2>/dev/null && unset "$kept" || :
+                builtin unset "$name" 2>/dev/null && builtin unset "$kept" || builtin :
             fi
         done
     }
@@ -106,8 +109,8 @@ if [[ $- == *i* && -z ${__clackatoo_integrated-} ]]; then
     __clackatoo_command() {
         # Not traced, which would print the secret: this runs in a
         # subshell, so the shell itself is still traced.
-        set +x
-        local LC_ALL=C line= url= char i
+        builtin set +x
+        builtin local LC_ALL=C line= url= char i
         if [[ $HISTCMD != "${__clackatoo_history-}" ]]; then
             line=$(HISTTIMEFORMAT= builtin history 1)
             # `  NUMBER  LINE`, or `  NUMBER* LINE` for a changed entry.
@@ -121,10 +124,10 @@ if [[ $- == *i* && -z ${__clackatoo_integrated-} ]]; then
             char=${line:i:1}
             case $char in
                 [A-Za-z0-9/._~-]) url+=$char ;;
-                *) printf -v char '%%%02X' "'$char"; url+=$char ;;
+                *) builtin printf -v char '%%%02X' "'$char"; url+=$char ;;
             esac
         done
-        printf '\e]133;C;clackatoo=%s%s\a' "$__clackatoo_secret" "${url:+;cmdline_url=$url}"
+        builtin printf '\e]133;C;clackatoo=%s%s\a' "$__clackatoo_secret" "${url:+;cmdline_url=$url}"
     }
 
     if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == 'declare -a'* ]]; then

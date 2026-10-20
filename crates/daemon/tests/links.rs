@@ -57,7 +57,7 @@ if [ -f "$dir/password" ]; then
     [ "$answer" = "$(cat "$dir/password")" ] || { echo "Permission denied (password)." >&2; exit 255; }
 fi
 # Real ssh never passes its environment on.
-exec env -u CLACKATOO_ASKPASS -u SSH_ASKPASS -u SSH_ASKPASS_REQUIRE XDG_RUNTIME_DIR="$dir/hosts/$host" sh -c "exec $*"
+exec env -u CLACKATOO_ASKPASS -u SSH_ASKPASS -u SSH_ASKPASS_REQUIRE CLACKATOO_DISPLAY=off XDG_RUNTIME_DIR="$dir/hosts/$host" sh -c "exec $*"
 "#;
 
 /// Where the "machines" are: the stand-in for ssh, and each daemon's

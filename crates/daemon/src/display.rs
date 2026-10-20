@@ -11,22 +11,27 @@
 //!
 //! ## When it's read
 //!
-//! On a thread of its own, which runs `systemctl --user show-environment`
-//! ([`DisplayConfig::source`]): once as the daemon starts, and again
-//! whenever a Wayland socket (`wayland-*` in `$XDG_RUNTIME_DIR`) or an X
-//! socket (`X*` in `/tmp/.X11-unix`) appears or goes, as inotify says, and
-//! a few times in the seconds after ([`AGAIN_AFTER`]), as a desktop puts
-//! the variables there a moment after it makes its socket. Nothing is read
-//! on a timer otherwise. Without inotify, it's read again as each terminal
-//! is made instead, which its shell picks up by its first prompt.
+//! `systemctl --user show-environment` ([`DisplayConfig::source`]) is run
+//! once as the daemon starts, waiting for it up to [`FIRST_WAIT`] so the
+//! terminals it makes again have the display. From then on it's run on a
+//! thread of its own: whenever a Wayland socket (`wayland-*` in
+//! `$XDG_RUNTIME_DIR`) or an X socket (`X*` in `/tmp/.X11-unix`) appears
+//! or goes, as inotify says, and a few times in the seconds after
+//! ([`AGAIN_AFTER`]), as a desktop puts the variables there a moment after
+//! it makes its socket; and as each terminal is made, since systemd's can
+//! change with no socket coming or going, which its shell picks up by its
+//! first prompt. Nothing is read on a timer.
 //!
 //! ## What's taken
 //!
 //! Only [`VARIABLES`], each checked ([`valid`]):
 //!
-//! - **From systemd**, when it has a display (`WAYLAND_DISPLAY` or
-//!   `DISPLAY`): its values, and none of the daemon's own, but for
-//!   `XDG_SESSION_TYPE` when systemd has none.
+//! - **From systemd**, when one of its displays' sockets (`WAYLAND_DISPLAY`
+//!   or `DISPLAY`) is there: its values, and none of the daemon's own, but
+//!   for `XDG_SESSION_TYPE` when systemd has none. A display whose socket
+//!   has gone is left out, and with neither left, none of systemd's are
+//!   taken: sway and Hyprland tell systemd as they start, and never take
+//!   it back.
 //! - **Else the daemon's own**, as it was started with, if one of their
 //!   displays' sockets is still there, so a desktop that tells systemd
 //!   nothing, as sway started by hand, keeps working when the daemon was
@@ -34,15 +39,19 @@
 //! - **Else none**: the displays' variables are taken out of what the
 //!   daemon starts, but `XDG_SESSION_TYPE`, which stays the daemon's own.
 //!
+//! A display on another host, as ssh's X forwarding gives
+//! (`localhost:10.0`), can't be checked, and is kept.
+//!
 //! `XDG_SESSION_TYPE` says what kind of session a program is in, and
 //! toolkits read it to choose Wayland or X: Qt, Chromium and Electron
 //! choose Wayland only when it says `wayland`. The daemon's own is
 //! `tty` when ssh started it, which beside a `WAYLAND_DISPLAY` sends them
 //! to X, or nowhere. GNOME puts `wayland` in systemd's environment as it
 //! logs in (its shell's unit refuses to start without it), so it's taken
-//! from there with the display. It isn't taken from the daemon's own
-//! display, which already came with it, and it's never taken away: with
-//! no display, `tty` is still true.
+//! from there with the display. Beside a display, a session type that's
+//! missing or `tty`, as with sway, becomes `wayland`, or `x11` with only
+//! an X display. With no display it's left as it was: `tty` is still
+//! true then.
 //!
 //! ## Who gets it
 //!
@@ -65,7 +74,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -114,6 +123,11 @@ pub const AGAIN_AFTER: [Duration; 3] = [
 /// How long the command reading systemd's environment has to answer
 /// before it's killed, and taken to have none.
 const SOURCE_WAIT: Duration = Duration::from_secs(5);
+
+/// How long the daemon waits for systemd's environment as it starts,
+/// before making again the terminals it kept, before leaving it to the
+/// thread: `systemctl` takes a few milliseconds.
+const FIRST_WAIT: Duration = Duration::from_millis(300);
 
 /// The most of its answer read, in bytes.
 const MOST_READ: usize = 1 << 20;
@@ -445,92 +459,113 @@ impl Sockets<'_> {
         }
         (self.x11_dir).is_some_and(|dir| dir.join(format!("X{number}")).exists())
     }
-}
 
-/// Whether `values` have a display.
-fn has_display(values: &Values) -> bool {
-    values[WAYLAND].is_some() || values[X].is_some()
+    /// `values` without the displays whose sockets have gone, if a display
+    /// is left; else `None`, the rest of them going with it.
+    fn live(&self, values: &Values) -> Option<Values> {
+        let mut values = values.clone();
+        if values[WAYLAND]
+            .as_deref()
+            .is_some_and(|name| !self.wayland(name))
+        {
+            values[WAYLAND] = None;
+        }
+        if values[X].as_deref().is_some_and(|display| !self.x(display)) {
+            values[X] = None;
+        }
+        (values[WAYLAND].is_some() || values[X].is_some()).then_some(values)
+    }
 }
 
 /// The values programs are started with: `systemd`'s, if it was read and
-/// has a display; else `inherited`, the daemon's own, if one of their
-/// displays' sockets is still there; else none (see the [module
-/// docs](self)).
+/// one of its displays' sockets is there; else `inherited`, the daemon's
+/// own, if one of theirs is; else none (see the [module docs](self)).
 fn effective(systemd: Option<&Values>, inherited: &Values, sockets: &Sockets<'_>) -> Env {
-    if let Some(systemd) = systemd.filter(|values| has_display(values)) {
-        let mut values = systemd.clone();
-        if values[SESSION_TYPE].is_none() {
-            values[SESSION_TYPE].clone_from(&inherited[SESSION_TYPE]);
+    let (origin, mut values) = if let Some(values) = systemd.and_then(|values| sockets.live(values))
+    {
+        (Origin::Systemd, values)
+    } else if let Some(values) = sockets.live(inherited) {
+        (Origin::Inherited, values)
+    } else {
+        (Origin::None, Values::default())
+    };
+    if values[SESSION_TYPE].is_none() {
+        values[SESSION_TYPE].clone_from(&inherited[SESSION_TYPE]);
+    }
+    // A display beside a session type that says there's none, as the
+    // daemon's own `tty` beside a desktop that didn't say, as sway and
+    // Hyprland don't, would send toolkits elsewhere.
+    if matches!(values[SESSION_TYPE].as_deref(), None | Some("tty")) {
+        if values[WAYLAND].is_some() {
+            values[SESSION_TYPE] = Some("wayland".to_owned());
+        } else if values[X].is_some() {
+            values[SESSION_TYPE] = Some("x11".to_owned());
         }
-        return Env {
-            origin: Origin::Systemd,
-            values,
-        };
     }
-    let mut values = inherited.clone();
-    if values[WAYLAND]
-        .as_deref()
-        .is_some_and(|name| !sockets.wayland(name))
-    {
-        values[WAYLAND] = None;
-    }
-    if values[X]
-        .as_deref()
-        .is_some_and(|display| !sockets.x(display))
-    {
-        values[X] = None;
-    }
-    if has_display(&values) {
-        return Env {
-            origin: Origin::Inherited,
-            values,
-        };
-    }
-    let mut none = Values::default();
-    none[SESSION_TYPE].clone_from(&inherited[SESSION_TYPE]);
-    Env {
-        origin: Origin::None,
-        values: none,
-    }
+    Env { origin, values }
+}
+
+/// What the thread following the display shares with the daemon.
+#[derive(Debug, Default)]
+struct Shared {
+    /// Set as the daemon lets the display go: nothing more is written.
+    stopped: AtomicBool,
+    /// The command reading systemd's environment, by its pidfd, while one
+    /// runs, to be killed as the daemon lets the display go.
+    reading: Mutex<Option<OwnedFd>>,
 }
 
 /// The display followed, by a thread of its own (see the [module
-/// docs](self)). The thread ends once this is dropped.
+/// docs](self)). The thread ends, and is waited for, once this is
+/// dropped, killing any command it's waiting on, so none is left behind
+/// unreaped across an upgrade's exec.
 #[derive(Debug)]
 pub(crate) struct Display {
     current: Arc<Mutex<Arc<Env>>>,
-    /// Whether socket changes are watched. If not, the environment is
-    /// read again as each terminal is made.
-    watching: Arc<AtomicBool>,
+    shared: Arc<Shared>,
     /// Written to, to have the thread read the environment again; closed,
     /// to have it end. `None` if there's no thread.
     wake: Option<OwnedFd>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Display {
-    /// Follows the display as `config` says, with the daemon's own values
-    /// to begin with, until systemd's have been read.
+    /// Follows the display as `config` says. systemd's environment is read
+    /// first, here, for up to [`FIRST_WAIT`], so the terminals a daemon
+    /// makes again as it starts have the display; if it takes longer, the
+    /// thread reads it, and they begin with the daemon's own values.
     pub(crate) fn start(config: DisplayConfig) -> Self {
         let inherited = values_of(
             (config.inherited.iter()).map(|(name, value)| (name.as_str(), value.as_str())),
         );
+        let shared = Arc::new(Shared::default());
+        let first = read_source(&config.source, FIRST_WAIT, &shared.reading);
+        let first = match first {
+            Err(err) if err.kind() == io::ErrorKind::TimedOut => {
+                log::debug!("display: systemd's user manager is slow to answer");
+                None
+            }
+            first => Some(first),
+        };
         let sockets = Sockets {
             runtime_dir: config.runtime_dir.as_deref(),
             x11_dir: config.x11_dir.as_deref(),
         };
-        let first = effective(None, &inherited, &sockets);
-        let current = Arc::new(Mutex::new(Arc::new(first)));
-        let watching = Arc::new(AtomicBool::new(false));
+        let systemd = (first.as_ref())
+            .and_then(|first| first.as_ref().ok())
+            .map(|text| parse_systemd(text));
+        let env = effective(systemd.as_ref(), &inherited, &sockets);
+        let current = Arc::new(Mutex::new(Arc::new(env)));
         let pipe = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC);
         let (read, write) = match pipe {
             Ok(pipe) => pipe,
             Err(err) => {
                 log::warn!("the display won't be followed: {err}");
-                // The daemon's own values stay.
                 return Self {
                     current,
-                    watching,
+                    shared,
                     wake: None,
+                    thread: None,
                 };
             }
         };
@@ -542,23 +577,23 @@ impl Display {
             config,
             inherited,
             current: Arc::clone(&current),
-            watching: Arc::clone(&watching),
+            shared: Arc::clone(&shared),
             wake: read,
             inotify: None,
             watches: HashMap::new(),
             written: false,
             systemd_failed: false,
         };
-        let started = std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("display".to_owned())
-            .spawn(move || follower.run());
-        if let Err(err) = started {
-            log::warn!("the display won't be followed: {err}");
-        }
+            .spawn(move || follower.run(first))
+            .map_err(|err| log::warn!("the display won't be followed: {err}"))
+            .ok();
         Self {
             current,
-            watching,
+            shared,
             wake: Some(write),
+            thread,
         }
     }
 
@@ -567,14 +602,33 @@ impl Display {
         Arc::clone(&self.current.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
-    /// Has the environment read again if socket changes aren't watched, as
-    /// a terminal is made: it's read by the time its shell first prompts.
+    /// Has the environment read again, as a terminal is made, as systemd's
+    /// can change without any socket coming or going: by the time its
+    /// shell first prompts, the shell has it. However many terminals are
+    /// made at once, one read runs at a time, and one more after it for
+    /// all those asked for meanwhile. Nothing waits for it.
     pub(crate) fn terminal_made(&self) {
-        if let Some(wake) = &self.wake
-            && !self.watching.load(Ordering::Relaxed)
-        {
+        if let Some(wake) = &self.wake {
             // Full means a read is coming anyway.
             let _ = rustix::io::write(wake, &[0]);
+        }
+    }
+}
+
+impl Drop for Display {
+    fn drop(&mut self) {
+        self.shared.stopped.store(true, Ordering::SeqCst);
+        // The thread hears the pipe close, and the command it's waiting on
+        // ends.
+        self.wake = None;
+        let reading = self.shared.reading.lock();
+        if let Some(pidfd) = reading.unwrap_or_else(PoisonError::into_inner).as_ref() {
+            let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+        }
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            log::warn!("display: its thread panicked");
         }
     }
 }
@@ -593,7 +647,7 @@ struct Follower {
     config: DisplayConfig,
     inherited: Values,
     current: Arc<Mutex<Arc<Env>>>,
-    watching: Arc<AtomicBool>,
+    shared: Arc<Shared>,
     wake: OwnedFd,
     inotify: Option<OwnedFd>,
     watches: HashMap<i32, Watched>,
@@ -605,9 +659,15 @@ struct Follower {
 }
 
 impl Follower {
-    fn run(mut self) {
+    /// Follows the display, starting from `first`, what systemd's
+    /// environment was read as as the daemon started, or reading it if
+    /// that took too long.
+    fn run(mut self, first: Option<io::Result<Vec<u8>>>) {
         self.watch();
-        self.read();
+        match first {
+            Some(first) => self.take(first),
+            None => self.read(),
+        }
         // When to read again, soonest last.
         let mut again: Vec<Instant> = Vec::new();
         loop {
@@ -631,12 +691,15 @@ impl Follower {
             }
             let woken = fds[0].revents();
             let changed = fds.get(1).is_some_and(|fd| !fd.revents().is_empty());
-            if woken.intersects(PollFlags::HUP | PollFlags::ERR) {
+            if woken.intersects(PollFlags::HUP | PollFlags::ERR)
+                || self.shared.stopped.load(Ordering::SeqCst)
+            {
                 return;
             }
             let mut read = false;
             if woken.contains(PollFlags::IN) {
-                let mut bytes = [0; 64];
+                // Everything asked so far, in one read.
+                let mut bytes = [0; 256];
                 let _ = rustix::io::read(&self.wake, &mut bytes);
                 read = true;
             }
@@ -661,7 +724,7 @@ impl Follower {
 
     /// Watches the runtime directory for Wayland's sockets, and X's
     /// sockets' directory. If that can't be done, says so: then the
-    /// environment is read again as terminals are made.
+    /// environment is read again only as terminals are made.
     fn watch(&mut self) {
         let flags = inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK;
         let inotify = match inotify::init(flags) {
@@ -669,7 +732,7 @@ impl Follower {
             Err(err) => {
                 log::info!(
                     "display: sockets can't be watched ({err}), so the display is read again \
-                     as each terminal is made"
+                     only as terminals are made"
                 );
                 return;
             }
@@ -694,17 +757,12 @@ impl Follower {
                     log::debug!("display: {} isn't there to watch", dir.display());
                 }
                 Err(err) => log::info!(
-                    "display: {} can't be watched ({err}), so the display is read again as \
-                     each terminal is made",
+                    "display: {} can't be watched ({err}), so the display is read again only \
+                     as terminals are made",
                     dir.display()
                 ),
             }
         }
-        let wayland = self
-            .watches
-            .values()
-            .any(|&watched| watched == Watched::Wayland);
-        self.watching.store(wayland, Ordering::Relaxed);
         self.inotify = Some(inotify);
     }
 
@@ -746,18 +804,24 @@ impl Follower {
             if self.watches.remove(&watch) == Some(Watched::Wayland) {
                 log::info!(
                     "display: the runtime directory is no longer watched, so the display is read \
-                     again as each terminal is made"
+                     again only as terminals are made"
                 );
-                self.watching.store(false, Ordering::Relaxed);
             }
         }
         changed
     }
 
-    /// Reads systemd's environment, and if what programs are given has
-    /// changed, or it's the first time, says so, and writes the file.
+    /// Reads systemd's environment, and takes what it says.
     fn read(&mut self) {
-        let systemd = match read_source(&self.config.source) {
+        let read = read_source(&self.config.source, SOURCE_WAIT, &self.shared.reading);
+        self.take(read);
+    }
+
+    /// Takes what systemd's environment was `read` as: if what programs
+    /// are given has changed, or it's the first time, says so, and writes
+    /// the file, unless the daemon has let the display go.
+    fn take(&mut self, read: io::Result<Vec<u8>>) {
+        let systemd = match read {
             Ok(text) => {
                 if std::mem::take(&mut self.systemd_failed) {
                     log::info!("display: systemd's user manager can be read again");
@@ -775,6 +839,9 @@ impl Follower {
                 None
             }
         };
+        if self.shared.stopped.load(Ordering::SeqCst) {
+            return;
+        }
         let sockets = Sockets {
             runtime_dir: self.config.runtime_dir.as_deref(),
             x11_dir: self.config.x11_dir.as_deref(),
@@ -811,8 +878,14 @@ fn socket(watched: Watched, name: &[u8]) -> bool {
 }
 
 /// Runs `command` and returns what it printed, if it exits with 0 within
-/// [`SOURCE_WAIT`], printing at most [`MOST_READ`] bytes.
-fn read_source(command: &[OsString]) -> io::Result<Vec<u8>> {
+/// `wait`, printing at most [`MOST_READ`] bytes; else it's killed. It's
+/// always waited for. While it runs, its pidfd is in `reading`, for the
+/// daemon to kill it as it lets the display go.
+fn read_source(
+    command: &[OsString],
+    wait: Duration,
+    reading: &Mutex<Option<OwnedFd>>,
+) -> io::Result<Vec<u8>> {
     let (program, args) = command
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no command"))?;
@@ -822,13 +895,22 @@ fn read_source(command: &[OsString]) -> io::Result<Vec<u8>> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
+    let pid = rustix::process::Pid::from_child(&child);
+    if let Ok(pidfd) = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()) {
+        *reading.lock().unwrap_or_else(PoisonError::into_inner) = Some(pidfd);
+    }
     let mut stdout = child.stdout.take().expect("piped");
     let mut text = Vec::new();
-    let read = read_until(&mut stdout, &mut text, Instant::now() + SOURCE_WAIT);
+    let read = read_until(&mut stdout, &mut text, Instant::now() + wait);
     if read.is_err() {
         let _ = child.kill();
     }
-    let status = child.wait()?;
+    let status = child.wait();
+    reading
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    let status = status?;
     read?;
     if !status.success() {
         return Err(io::Error::other(format!("it {status}")));
@@ -874,12 +956,15 @@ fn read_until(
 }
 
 /// Writes `text` to `path`, whole or not at all, as shells may be reading
-/// it, for the user alone, never through a link.
+/// it, for the user alone, never through a link. Each write goes through
+/// a file of its own, so two writers can't mix theirs.
 fn write_file(path: &Path, text: &str) -> io::Result<()> {
+    static WRITES: AtomicU64 = AtomicU64::new(0);
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let partial = dir.join(format!(".{name}.{}", std::process::id()));
+    let write = WRITES.fetch_add(1, Ordering::Relaxed);
+    let partial = dir.join(format!(".{name}.{}.{write}", std::process::id()));
     let open = || {
         OpenOptions::new()
             .write(true)
@@ -968,7 +1053,7 @@ mod tests {
     }
 
     #[test]
-    fn systemds_display_wins_whole_and_the_daemons_own_is_kept_only_while_its_socket_is() {
+    fn systemds_display_wins_whole_while_its_socket_is_there_and_the_daemons_own_after() {
         let dir = tempfile::tempdir().unwrap();
         let (runtime, x11) = (dir.path().join("run"), dir.path().join("x11"));
         std::fs::create_dir_all(&runtime).unwrap();
@@ -986,49 +1071,61 @@ mod tests {
         ]);
         let desktop = values(&[
             ("WAYLAND_DISPLAY", "wayland-0"),
+            ("XAUTHORITY", "/run/xauth"),
             ("XDG_CURRENT_DESKTOP", "GNOME"),
         ]);
 
-        // No sockets, and systemd has no display: none, but the session
-        // type, which is still true.
-        let none = effective(
-            Some(&values(&[("XDG_CURRENT_DESKTOP", "GNOME")])),
-            &own,
-            &sockets,
-        );
+        // No sockets: systemd's display, as sway and Hyprland leave it
+        // after logging out, is gone with all that came with it, and the
+        // daemon's own too. None, but the session type, still true.
+        let none = effective(Some(&desktop), &own, &sockets);
         assert_eq!(none.origin, Origin::None);
         assert_eq!(none.file(), "#none\nXDG_SESSION_TYPE=tty\n");
         assert_eq!(effective(None, &own, &sockets), none);
+        let no_display = values(&[("XDG_CURRENT_DESKTOP", "GNOME")]);
+        assert_eq!(effective(Some(&no_display), &own, &sockets), none);
 
         // Its X display's socket is there: the daemon's own, without the
-        // Wayland display whose socket isn't.
+        // Wayland display whose socket isn't, with only an X display.
         std::fs::write(x11.join("X3"), "").unwrap();
-        let inherited = effective(None, &own, &sockets);
+        let inherited = effective(Some(&desktop), &own, &sockets);
         assert_eq!(inherited.origin, Origin::Inherited);
         assert_eq!(
             inherited.file(),
-            "#inherited\nDISPLAY=:3.0\nXDG_SESSION_TYPE=tty\nSWAYSOCK=/run/sway.sock\n"
+            "#inherited\nDISPLAY=:3.0\nXDG_SESSION_TYPE=x11\nSWAYSOCK=/run/sway.sock\n"
         );
         std::fs::write(runtime.join("wayland-1"), "").unwrap();
-        assert_eq!(
-            effective(None, &own, &sockets).values[WAYLAND].as_deref(),
-            Some("wayland-1")
-        );
+        let sway = effective(None, &own, &sockets);
+        assert_eq!(sway.values[WAYLAND].as_deref(), Some("wayland-1"));
+        assert_eq!(sway.values[SESSION_TYPE].as_deref(), Some("wayland"));
 
-        // The desktop logged in: systemd's, whole, with the daemon's own
-        // session type only as systemd has none.
+        // The desktop logged in: systemd's, whole. Without a session type
+        // of its own, as sway and Hyprland tell systemd none, it's
+        // Wayland's, not the daemon's `tty`.
+        std::fs::write(runtime.join("wayland-0"), "").unwrap();
         let logged_in = effective(Some(&desktop), &own, &sockets);
         assert_eq!(logged_in.origin, Origin::Systemd);
         assert_eq!(
             logged_in.file(),
-            "#systemd\nWAYLAND_DISPLAY=wayland-0\nXDG_SESSION_TYPE=tty\nXDG_CURRENT_DESKTOP=GNOME\n"
+            "#systemd\nWAYLAND_DISPLAY=wayland-0\nXAUTHORITY=/run/xauth\n\
+             XDG_SESSION_TYPE=wayland\nXDG_CURRENT_DESKTOP=GNOME\n"
         );
         let mut gnome = desktop.clone();
         gnome[SESSION_TYPE] = Some("wayland".to_owned());
-        assert_eq!(
-            effective(Some(&gnome), &own, &sockets).values[SESSION_TYPE].as_deref(),
-            Some("wayland")
-        );
+        assert_eq!(effective(Some(&gnome), &own, &sockets), logged_in);
+        // One of its displays gone, it's left out, and the rest kept.
+        let mut both = desktop.clone();
+        both[X] = Some(":9".to_owned());
+        assert_eq!(effective(Some(&both), &own, &sockets), logged_in);
+        // An X display only, from systemd, is X11's; one on another host
+        // can't be checked, and is kept.
+        let forwarded = values(&[("DISPLAY", "localhost:10.0"), ("XDG_SESSION_TYPE", "tty")]);
+        let x = effective(Some(&forwarded), &own, &sockets);
+        assert_eq!(x.origin, Origin::Systemd);
+        assert_eq!(x.values[SESSION_TYPE].as_deref(), Some("x11"));
+        let mut kde = forwarded.clone();
+        kde[SESSION_TYPE] = Some("x11".to_owned());
+        assert_eq!(effective(Some(&kde), &own, &sockets), x);
     }
 
     #[test]
@@ -1133,11 +1230,90 @@ mod tests {
     }
 
     #[test]
-    fn a_source_that_fails_gives_nothing() {
-        let said = read_source(&["sh".into(), "-c".into(), "printf 'A=1\\n'".into()]).unwrap();
+    fn a_source_that_fails_hangs_or_says_too_much_gives_nothing_and_is_reaped() {
+        let reading = Mutex::new(None);
+        let read = |command: &[&str], wait: Duration| {
+            let command: Vec<OsString> = command.iter().map(OsString::from).collect();
+            read_source(&command, wait, &reading)
+        };
+        let long = Duration::from_secs(5);
+        let said = read(&["sh", "-c", "printf 'A=1\\n'"], long).unwrap();
         assert_eq!(said, b"A=1\n");
-        assert!(read_source(&["sh".into(), "-c".into(), "exit 1".into()]).is_err());
-        assert!(read_source(&["/nonexistent/systemctl".into()]).is_err());
-        assert!(read_source(&[]).is_err());
+        assert!(read(&["sh", "-c", "exit 1"], long).is_err());
+        assert!(read(&["/nonexistent/systemctl"], long).is_err());
+        assert!(read(&[], long).is_err());
+        // One that hangs is killed at the deadline, and waited for.
+        let started = Instant::now();
+        let hung = read(&["sleep", "30"], Duration::from_millis(100)).unwrap_err();
+        assert_eq!(hung.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // One that says more than any environment is cut off.
+        let flood = read(&["sh", "-c", "head -c 2000000 /dev/zero"], long).unwrap_err();
+        assert!(flood.to_string().contains("too much"), "{flood}");
+        assert!(reading.lock().unwrap().is_none(), "nothing's left running");
+    }
+
+    #[test]
+    fn two_writers_in_one_process_never_mix_their_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("display");
+        let texts = ["#systemd\nDISPLAY=:0\n", "#none\n"];
+        std::thread::scope(|scope| {
+            for text in texts {
+                let path = &path;
+                scope.spawn(move || {
+                    for _ in 0..200 {
+                        write_file(path, text).unwrap();
+                    }
+                });
+            }
+        });
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(texts.contains(&text.as_str()), "{text:?}");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no partial left"
+        );
+    }
+
+    #[test]
+    fn letting_the_display_go_ends_its_thread_and_the_command_it_waits_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let script = format!("echo $$ > '{}'; exec sleep 30", pid_file.display());
+        let display = Display::start(DisplayConfig {
+            source: vec!["sh".into(), "-c".into(), script.into()],
+            runtime_dir: None,
+            x11_dir: None,
+            inherited: Vec::new(),
+            file: Some(dir.path().join("display")),
+            again_after: Vec::new(),
+        });
+        // Slower than the first wait: the thread reads it again.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pid = loop {
+            let pid = std::fs::read_to_string(&pid_file).unwrap_or_default();
+            let running = display.shared.reading.lock().unwrap().is_some();
+            if running && let Ok(pid) = pid.trim().parse::<i32>() {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "it never ran again");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let started = Instant::now();
+        drop(display);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Killed and reaped: it's no longer this process's child at all.
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+        assert!(!status.contains("State:\tZ"), "{status}");
+        assert!(
+            status.is_empty() || !status.contains(&format!("PPid:\t{}", std::process::id())),
+            "{status}"
+        );
+        assert!(
+            !dir.path().join("display").exists(),
+            "nothing was written after"
+        );
     }
 }

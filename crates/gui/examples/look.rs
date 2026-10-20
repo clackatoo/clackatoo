@@ -628,6 +628,7 @@ fn machine_config() -> anyhow::Result<DaemonConfig> {
     config.servers = None;
     config.machine = None;
     config.links = None;
+    config.display = None;
     config.agents.custom = vec![CustomAgent {
         name: "claude".into(),
         title: None,
