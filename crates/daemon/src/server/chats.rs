@@ -612,7 +612,8 @@ impl Daemon {
         spec: AgentSpec,
         command: Vec<OsString>,
     ) -> io::Result<AgentId> {
-        let agent = Agent::start(&spec.name, &command, &self.parser)?;
+        let display = self.display_env();
+        let agent = Agent::start(&spec.name, &command, display.as_deref(), &self.parser)?;
         let id = AgentId(self.agents.next);
         self.agents.next += 1;
         let mut tokens: Vec<Token> = Vec::new();

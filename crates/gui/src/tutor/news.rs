@@ -551,6 +551,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "markdown",
         what: "Markdown files rendered in the editor, with <Space>tm or :Markdown, and back to their text with any key that edits",
     },
+    News {
+        id: "display",
+        date: "2026-10-20",
+        lesson: "remote",
+        what: "Terminals and agents find your desktop's display once you log in, even if the daemon started first",
+    },
 ];
 
 impl News {

@@ -61,6 +61,7 @@ impl HostedTerminal {
         id: TerminalId,
         request: &NewTerminal,
         config: &DaemonConfig,
+        display: Option<&crate::display::Env>,
     ) -> Result<Self, Error> {
         // Open the recording first: failing then leaves nothing to clean up.
         let recording = match &request.record_to {
@@ -106,6 +107,7 @@ impl HostedTerminal {
             path,
             args,
             env: &integration.env,
+            display,
             cwd,
         };
         let spawned = pty::spawn(&program, request.size)

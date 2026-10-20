@@ -21,6 +21,7 @@ mod buffer;
 mod changes;
 mod chat;
 pub mod client;
+pub mod display;
 mod explorer;
 mod find;
 pub mod forward;
@@ -57,6 +58,7 @@ use std::path::{Path, PathBuf};
 pub use agents::{AgentConfig, CustomAgent};
 pub use browser::{BrowserConfig, check_browser, snap_of};
 pub use client::{Client, ClientError, Receiver, Sender, UdpTarget, random_window};
+pub use display::DisplayConfig;
 pub use quic::{Contact, Redial, Redialed, Route};
 pub use runtime::{DaemonLock, LockError, RuntimeDir};
 pub use server::{Daemon, ShutdownHandle};
@@ -176,6 +178,10 @@ pub struct DaemonConfig {
     /// [`Request::Connect`](clackatoo_protocol::Request::Connect)). `None`
     /// connects to none: it's refused.
     pub links: Option<LinkConfig>,
+    /// How the programs the daemon starts follow the desktop's display as
+    /// you log in and out (see [`display`]). `None` leaves them the
+    /// daemon's own environment.
+    pub display: Option<DisplayConfig>,
 }
 
 /// How the daemon connects to the daemons on other machines.
@@ -309,8 +315,10 @@ impl DaemonConfig {
     /// `clackatoo/browser` in the data directory, or for a snap, in its
     /// own folder), the web app as `daemon/web.toml` in [`config_dir`]
     /// says, keeping its devices in `clackatoo/web` in the data directory,
-    /// and `$CLACKATOO_LSP_TRACE`: a file to trace language servers'
-    /// messages to (or else none).
+    /// `$CLACKATOO_LSP_TRACE`: a file to trace language servers'
+    /// messages to (or else none), and `$CLACKATOO_DISPLAY`: `off` to
+    /// leave the programs the daemon starts its own display, rather than
+    /// follow the desktop's login (see [`display`]).
     #[must_use]
     #[allow(clippy::too_many_lines, reason = "one field each")]
     pub fn from_env() -> Self {
@@ -424,6 +432,16 @@ impl DaemonConfig {
                 speaks: None,
                 impostor: false,
             }),
+            display: match non_empty("CLACKATOO_DISPLAY") {
+                Some(off) if off == "off" => None,
+                other => {
+                    if let Some(other) = other {
+                        log::warn!("CLACKATOO_DISPLAY isn't `off`: {}", other.display());
+                    }
+                    let shell = RuntimeDir::for_current_user().path().join("shell");
+                    Some(DisplayConfig::from_env(Some(shell.join("display"))))
+                }
+            },
         }
     }
 }

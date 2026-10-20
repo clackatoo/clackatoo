@@ -14,6 +14,7 @@ fn clackatoo(runtime: &Path, args: &[&str]) -> Output {
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
+        .env("CLACKATOO_DISPLAY", "off")
         .args(args)
         .env("XDG_RUNTIME_DIR", runtime)
         .output()
@@ -33,6 +34,7 @@ fn daemon_with(runtime: &Path, args: &[&str]) -> Child {
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
+        .env("CLACKATOO_DISPLAY", "off")
         .arg("daemon")
         .args(args)
         .env("XDG_RUNTIME_DIR", runtime)
@@ -152,6 +154,7 @@ fn remote(runtime: &Path, ssh: &Path, remote_command: &str, args: &[&str]) -> Ou
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
+        .env("CLACKATOO_DISPLAY", "off")
         .args(args)
         .args(["--remote", "box", "--remote-command", remote_command])
         .args(command)
@@ -271,6 +274,7 @@ fn the_bridge_relays_over_pipes() {
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
+        .env("CLACKATOO_DISPLAY", "off")
         .arg("bridge")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .stdin(std::process::Stdio::piped())
@@ -355,6 +359,7 @@ fn config_sets_shows_and_unsets_settings() {
             .env("CLACKATOO_BOARDS", "off")
             .env("CLACKATOO_RECOVERY", "off")
             .env("CLACKATOO_MACHINE", "off")
+            .env("CLACKATOO_DISPLAY", "off")
             .arg("config")
             .args(args)
             .env("XDG_CONFIG_HOME", home.path())
@@ -389,6 +394,7 @@ fn edit_shows_a_folder_as_its_listing_and_the_current_one_with_no_path() {
             .env("CLACKATOO_BOARDS", "off")
             .env("CLACKATOO_RECOVERY", "off")
             .env("CLACKATOO_MACHINE", "off")
+            .env("CLACKATOO_DISPLAY", "off")
             .arg("edit")
             .args(args)
             .env("XDG_RUNTIME_DIR", runtime.path())
@@ -538,6 +544,7 @@ fn upgrading_keeps_terminals_and_their_programs_running() {
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
+        .env("CLACKATOO_DISPLAY", "off")
         .arg("upgrade")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
@@ -622,6 +629,7 @@ fn upgrading_puts_a_fit_back_at_the_size_last_asked_for() {
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
+        .env("CLACKATOO_DISPLAY", "off")
         .arg("upgrade")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
@@ -648,6 +656,7 @@ fn upgrading_keeps_chats_and_reaps_their_agent() {
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
+        .env("CLACKATOO_DISPLAY", "off")
         .arg("daemon")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env("CLACKATOO_AGENT", "cat")
@@ -709,6 +718,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
+        .env("CLACKATOO_DISPLAY", "off")
         .arg("daemon")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env("CLACKATOO_AGENT", "cat")
@@ -737,6 +747,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
+        .env("CLACKATOO_DISPLAY", "off")
         .args(["mcp", "--chat", &chat.0.to_string()])
         .env("XDG_RUNTIME_DIR", runtime.path())
         .stdin(std::process::Stdio::piped())
@@ -765,6 +776,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
         .env("CLACKATOO_BOARDS", "off")
         .env("CLACKATOO_RECOVERY", "off")
         .env("CLACKATOO_MACHINE", "off")
+        .env("CLACKATOO_DISPLAY", "off")
         .args(["mcp", "--chat", "99"])
         .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
@@ -890,11 +902,18 @@ impl UserShell {
         use clackatoo_protocol::{NewTerminal, Which};
 
         let runtime = Runtime::new();
-        let daemon = Command::new(BINARY)
+        let mut daemon = Command::new(BINARY);
+        // No display of this machine's reaches the shell, but as `env`
+        // says.
+        for name in clackatoo_daemon::display::VARIABLES {
+            daemon.env_remove(name);
+        }
+        let daemon = daemon
             .env("CLACKATOO_WORKSPACES", "off")
             .env("CLACKATOO_BOARDS", "off")
             .env("CLACKATOO_RECOVERY", "off")
             .env("CLACKATOO_MACHINE", "off")
+            .env("CLACKATOO_DISPLAY", "off")
             .arg("daemon")
             .env("XDG_RUNTIME_DIR", runtime.path())
             .env("SHELL", shell)
@@ -1258,6 +1277,126 @@ fn bash_sharing_its_history_offers_only_its_own_lines() {
     user.wait_kept(&kept, "\"ran\": \"", false);
     user.type_in(b"sleep 702\r");
     user.wait_kept(&kept, "\"ran\": \"sleep 702\"", true);
+}
+
+/// Shells already open follow the display the daemon writes for them,
+/// at their next prompt, setting and unsetting the variables as it
+/// changes, but never one set by hand: in the user's startup files, or at
+/// the prompt. A shell with `set -eu` keeps working.
+#[test]
+fn shells_follow_the_display_but_never_a_variable_set_by_hand() {
+    const SEEN: &str = "env | grep -E '^(WAYLAND_DISPLAY|DISPLAY|XAUTHORITY|XDG_SESSION_TYPE)=' \
+                        | sort | tr '\\n' ' '; echo";
+    for (shell, zshenv) in integrated_shells() {
+        let name = shell.file_name().unwrap().to_string_lossy().into_owned();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(".zshenv"), zshenv).unwrap();
+        // Set in the user's own startup files.
+        let mine = "export XAUTHORITY=/mine\n";
+        std::fs::write(home.path().join(".bashrc"), mine).unwrap();
+        std::fs::write(home.path().join(".zshrc"), mine).unwrap();
+        let fish = home.path().join(".config/fish");
+        std::fs::create_dir_all(&fish).unwrap();
+        std::fs::write(fish.join("config.fish"), "set -gx XAUTHORITY /mine\n").unwrap();
+        let tty = Path::new("tty");
+        let mut user = UserShell::start(&shell, home.path(), &[("XDG_SESSION_TYPE", tty)]);
+        let file = user.runtime.path().join("clackatoo/shell/display");
+        // Written as the daemon writes it, then taken at the prompt after
+        // the next command.
+        let display = |user: &mut UserShell, text: &str| {
+            let partial = file.with_extension("new");
+            std::fs::write(&partial, text).unwrap();
+            std::fs::rename(&partial, &file).unwrap();
+            user.run("true");
+        };
+        let seen = |user: &mut UserShell| {
+            let ran = user.run(SEEN);
+            user.output(&ran).trim().to_owned()
+        };
+        assert_eq!(
+            seen(&mut user),
+            "XAUTHORITY=/mine XDG_SESSION_TYPE=tty",
+            "{name}"
+        );
+
+        // The desktop logs in.
+        let logged_in = "#systemd\nWAYLAND_DISPLAY=wayland-0\nXAUTHORITY=/run/xauth\n\
+                         XDG_SESSION_TYPE=wayland\n";
+        display(&mut user, logged_in);
+        assert_eq!(
+            seen(&mut user),
+            "WAYLAND_DISPLAY=wayland-0 XAUTHORITY=/mine XDG_SESSION_TYPE=wayland",
+            "{name}"
+        );
+
+        // A display set at the prompt is the user's.
+        user.run(if name == "fish" {
+            "set -gx DISPLAY :7"
+        } else {
+            "export DISPLAY=:7"
+        });
+        let again = "#systemd\nWAYLAND_DISPLAY=wayland-1\nDISPLAY=:0\nXAUTHORITY=/run/xauth\n\
+                     XDG_SESSION_TYPE=wayland\n";
+        display(&mut user, again);
+        assert_eq!(
+            seen(&mut user),
+            "DISPLAY=:7 WAYLAND_DISPLAY=wayland-1 XAUTHORITY=/mine XDG_SESSION_TYPE=wayland",
+            "{name}"
+        );
+
+        // It logs out, with the shell stopping at anything unset or
+        // failing.
+        if name != "fish" {
+            user.run("set -eu");
+        }
+        display(&mut user, "#none\nXDG_SESSION_TYPE=tty\n");
+        let after = "DISPLAY=:7 XAUTHORITY=/mine XDG_SESSION_TYPE=tty";
+        assert_eq!(seen(&mut user), after, "{name}");
+
+        // With no file, as from a daemon not following the display, it
+        // stays as it was.
+        std::fs::remove_file(&file).unwrap();
+        user.run("true");
+        assert_eq!(seen(&mut user), after, "{name}");
+        let text = user.text();
+        assert!(!text.contains("unbound"), "{name}: {text}");
+        assert!(!text.contains("not set"), "{name}: {text}");
+        assert!(!text.contains("no such file"), "{name}: {text}");
+    }
+}
+
+/// `display` says what the daemon follows, from the file it writes for
+/// its shells, and fails while no daemon is running, or it follows
+/// nothing, whatever a file another left behind says.
+#[test]
+fn display_says_what_the_daemon_follows_and_where_from() {
+    let runtime = Runtime::new();
+    let shell = runtime.path().join("clackatoo/shell");
+    std::fs::create_dir_all(&shell).unwrap();
+    // As the daemon makes it, or it won't start there.
+    let private = std::os::unix::fs::PermissionsExt::from_mode(0o700);
+    std::fs::set_permissions(runtime.path().join("clackatoo"), private).unwrap();
+    let logged_in = "#systemd\nWAYLAND_DISPLAY=wayland-0\nXDG_SESSION_TYPE=wayland\n";
+    std::fs::write(shell.join("display"), logged_in).unwrap();
+    let failed = |what: &str| {
+        let output = clackatoo(runtime.path(), &["display"]);
+        assert!(!output.status.success());
+        let said = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(said.contains(what), "{said}");
+    };
+    failed("no daemon is listening");
+    // Not following the display, it takes away what another left.
+    let daemon = daemon(runtime.path());
+    failed("isn't following the desktop's display");
+    std::fs::write(shell.join("display"), logged_in).unwrap();
+    let shown = clackatoo(runtime.path(), &["display"]);
+    assert_eq!(
+        stdout(&shown),
+        "from: systemd (the desktop you're logged in to)\nWAYLAND_DISPLAY=wayland-0\n\
+         XDG_SESSION_TYPE=wayland\n"
+    );
+    drop(runtime);
+    wait(daemon);
 }
 
 /// `program`, if it's on `PATH`.

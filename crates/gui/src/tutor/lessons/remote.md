@@ -22,6 +22,12 @@ In a window, `:connect`, or Ctrl+B r, opens the same picker over your panes, and
 
 clackatoo, of the same release or one a little older or newer. A window and a daemon a release or so apart talk at the older one's protocol, so your laptop's window keeps working when your desktop's daemon is updated before it, and the other way round. Panes of a kind the window doesn't have yet say they need a newer clackatoo, and what it offers that the daemon doesn't have yet says the daemon needs updating, naming its release. Further apart, a window meeting a daemon from a newer build offers to update this clackatoo to the latest release, and opens again as it, connected where it was; one meeting an older daemon offers to upgrade it in place. The other machine needs clackatoo on the `PATH` ssh's commands get, which is often shorter than your shell's: `--remote-command` names it otherwise, as `--remote-command ~/.cargo/bin/clackatoo`. On a server nobody's logged in to, run `loginctl enable-linger` there once, so the daemon's socket stays.
 
+## Your desktop's display
+
+The daemon on your desktop was most likely started over ssh, before you'd logged in to the desktop itself, yet what it starts still opens its windows there. As you log in, your desktop tells systemd its display (`WAYLAND_DISPLAY`, `DISPLAY` and the like), and the daemon gives it to every terminal, agent and language server it starts from then on. Shells already open take it at their next prompt, but for a variable you've set yourself in that shell, which stays yours; programs already running keep what they started with, as on any Unix. Once you log out, what starts gets no display again. A desktop that tells systemd nothing, as sway started by hand, still works for a daemon started from inside it.
+
+`clackatoo display`, on the desktop, says what programs get now and where it came from: `systemd` while you're logged in, `inherited` for the daemon's own, or `none`. `CLACKATOO_DISPLAY=off` where the daemon starts leaves everything the daemon's own environment, as before.
+
 ## Surviving the network
 
 Once connected, the connection moves out of ssh onto UDP if it can, so it carries on when your network changes or your laptop sleeps a moment, and when ssh dies a new ssh connection is opened behind it. A firewall on the other machine has to let UDP in on ports 60000 to 61000, as for mosh. `clackatoo ping --remote HOST` says how long the daemon takes to answer, and which way each round went.

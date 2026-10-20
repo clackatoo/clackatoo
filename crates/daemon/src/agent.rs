@@ -220,12 +220,18 @@ pub(crate) struct Agent {
 }
 
 impl Agent {
-    /// Starts `command`, the agent called `name`, and introduces the
-    /// daemon to it. Its big messages are parsed by `parser`.
-    pub(crate) fn start(name: &str, command: &[OsString], parser: &Parser) -> io::Result<Self> {
+    /// Starts `command`, the agent called `name`, on the desktop's
+    /// `display` if it's followed, and introduces the daemon to it. Its
+    /// big messages are parsed by `parser`.
+    pub(crate) fn start(
+        name: &str,
+        command: &[OsString],
+        display: Option<&crate::display::Env>,
+        parser: &Parser,
+    ) -> io::Result<Self> {
         let logged = format!("agent {name}");
         let mut agent = Self {
-            peer: Peer::start(&logged, command, None, Framing::Lines, parser)?,
+            peer: Peer::start(&logged, command, None, display, Framing::Lines, parser)?,
             next_id: 0,
             pending: BTreeMap::new(),
             held: None,

@@ -173,6 +173,7 @@ impl TestDaemon {
             links: None,
             machine: None,
             machine_name: None,
+            display: None,
         };
         daemon(&mut config);
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");

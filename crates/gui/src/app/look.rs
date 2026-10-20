@@ -782,6 +782,7 @@ mod tests {
             // Never the machine of the user running the tests.
             machine: None,
             machine_name: None,
+            display: None,
             links: None,
             ..DaemonConfig::from_env()
         };

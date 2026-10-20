@@ -28,6 +28,63 @@ if set -q CLACKATOO_SECRET_FILE
     set -e CLACKATOO_SECRET_FILE
 end
 
+# The display variables clackatoo follows as the desktop logs in and out
+# (see __clackatoo_display), and each as fish was started with it, before
+# its startup files could set it, as /proc keeps that: `=VALUE`, or unset
+# if it had none.
+set -g __clackatoo_display_names WAYLAND_DISPLAY DISPLAY XAUTHORITY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP DESKTOP_SESSION SWAYSOCK I3SOCK HYPRLAND_INSTANCE_SIGNATURE NIRI_SOCKET
+set -g __clackatoo_display_file (string replace -r '/[^/]*$' '' -- (status filename))/display
+if test -r /proc/$fish_pid/environ
+    while read -lz entry
+        set -l pair (string split -m1 = -- $entry)
+        if contains -- $pair[1] $__clackatoo_display_names
+            set -g __clackatoo_display_$pair[1] "=$pair[2]"
+        end
+    end </proc/$fish_pid/environ
+else
+    for name in $__clackatoo_display_names
+        if set -q $name
+            set -g __clackatoo_display_$name "=$$name"
+        end
+    end
+end
+
+# The display the desktop's login gives the programs clackatoo starts,
+# which the daemon writes to a small file whenever it changes: where it
+# came from on a `#` line, then `NAME=VALUE` a line each, a name above
+# that isn't there being unset. It's read before each prompt, by `read`
+# alone, and only once it has changed are the variables set or erased,
+# as text, never run. A variable is changed only while it's as fish
+# started with it, or as this last made it: one you've set yourself is
+# yours, and stays.
+function __clackatoo_display --on-event fish_prompt
+    test -f $__clackatoo_display_file; or return
+    read -lz text <$__clackatoo_display_file
+    if test -z "$text"; or test "$text" = "$__clackatoo_display_text"
+        return
+    end
+    set -g __clackatoo_display_text $text
+    set -l lines (string split \n -- $text)
+    for name in $__clackatoo_display_names
+        set -l kept __clackatoo_display_$name
+        set -l want (string replace -rf -- "^$name=" = $lines)[1]
+        set -l now
+        if set -q $name
+            set now "=$$name"
+        end
+        if test "$now" != "$$kept"; or test "$want" = "$$kept"
+            continue
+        end
+        if test -n "$want"
+            set -gx $name (string sub -s 2 -- $want)
+            set -g $kept $want
+        else
+            set -e -g $name
+            set -e -g $kept
+        end
+    end
+end
+
 # fish before 4 marks nothing itself, and a C alone would start a command
 # that never ends.
 set -l major (string split -m1 . -- $version)[1]

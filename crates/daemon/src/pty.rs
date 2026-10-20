@@ -117,6 +117,9 @@ pub(crate) struct Program<'a> {
     pub(crate) args: &'a [String],
     /// Variables to set in its environment, besides the daemon's own.
     pub(crate) env: &'a [(&'static str, OsString)],
+    /// The desktop's display, in place of the daemon's own, if it's
+    /// followed (see [`crate::display`]).
+    pub(crate) display: Option<&'a crate::display::Env>,
     pub(crate) cwd: &'a Path,
 }
 
@@ -144,6 +147,9 @@ pub(crate) fn spawn(program: &Program<'_>, size: Size) -> io::Result<Spawned> {
         .stderr(Stdio::from(slave));
     for variable in OUTER_TERMINAL_VARIABLES {
         command.env_remove(variable);
+    }
+    if let Some(display) = program.display {
+        display.apply(&mut command);
     }
     command
         .env("TERM", "xterm-256color")

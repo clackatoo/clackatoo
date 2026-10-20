@@ -35,7 +35,46 @@ __clackatoo_precmd() {
     emulate -L zsh
     print -rnu $__clackatoo_fd -- \
         $'\e]133;D;'$ret$'\a\e]7;file://'$HOST${PWD//\%/%25}$'\a'
+    __clackatoo_display
     return ret
+}
+
+# The display the desktop's login gives the programs clackatoo starts,
+# which the daemon writes to a small file whenever it changes: where it
+# came from on a `#` line, then `NAME=VALUE` a line each, a name in
+# __clackatoo_display_names (set by .zshenv) that isn't there being
+# unset. It's read at each prompt, with `$(<FILE)`, which zsh reads
+# itself, starting nothing, and in one go, where `read` reads a byte at a
+# time; only once it has changed are the variables set or unset, as
+# text, never run. A variable is changed only while it's as this shell
+# started with it, or as this last made it: one you've set yourself is
+# yours, and stays.
+__clackatoo_display() {
+    emulate -L zsh
+    local text= name kept want now
+    { text=$(<$__clackatoo_display_file) } 2>/dev/null
+    [[ -n $text && $text != "${__clackatoo_display_text-}" ]] || return 0
+    typeset -g __clackatoo_display_text=$text
+    text=$'\n'$text
+    for name in $__clackatoo_display_names; do
+        kept=__clackatoo_display_$name
+        want=
+        if [[ $text == *$'\n'$name=* ]]; then
+            want=${text#*$'\n'$name=}
+            want="=${want%%$'\n'*}"
+        fi
+        now=
+        if (( ${(P)+name} )); then
+            now="=${(P)name}"
+        fi
+        [[ $now == "${(P)kept-}" && $want != "${(P)kept-}" ]] || continue
+        if [[ -n $want ]]; then
+            typeset -gx -- "$name=${want#=}" 2>/dev/null && typeset -g -- "$kept=$want"
+        else
+            unset -- $name 2>/dev/null && unset -- $kept
+        fi
+    done
+    return 0
 }
 
 # Last of the prompt hooks, after anything that sets PS1 afresh for each
@@ -80,7 +119,7 @@ __clackatoo_mark_prompt() {
 __clackatoo_preexec() {
     setopt local_options no_xtrace
     local hook line=$1
-    for hook in zshaddhistory $zshaddhistory_functions; do
+    for hook in zshaddhistory ${zshaddhistory_functions-}; do
         if functions -- $hook >/dev/null 2>&1 && ! ( $hook "$1"$'\n' ) >/dev/null 2>&1; then
             line=
             break

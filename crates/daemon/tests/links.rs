@@ -177,6 +177,7 @@ impl World {
             trash: None,
             machine: Some(dir.join("machine")),
             machine_name: Some(host.to_owned()),
+            display: None,
             links: Some(LinkConfig {
                 ssh: self.path().join("ssh").into(),
                 askpass: Some(example("daemon")),

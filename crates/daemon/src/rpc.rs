@@ -147,12 +147,14 @@ const LAST_ERRORS: usize = 4;
 const LAST_ERROR_LEN: usize = 300;
 
 impl Peer {
-    /// Starts `command`, in `cwd` if given, called `name` in the log.
-    /// Its big messages are parsed by `parser`.
+    /// Starts `command`, in `cwd` if given, called `name` in the log,
+    /// on the desktop's `display` if it's followed (see
+    /// [`crate::display`]). Its big messages are parsed by `parser`.
     pub(crate) fn start(
         name: &str,
         command: &[OsString],
         cwd: Option<&Path>,
+        display: Option<&crate::display::Env>,
         framing: Framing,
         parser: &Parser,
     ) -> io::Result<Self> {
@@ -167,6 +169,9 @@ impl Peer {
             .stderr(Stdio::piped());
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
+        }
+        if let Some(display) = display {
+            display.apply(&mut command);
         }
         // In a process group of its own, so stopping it reaches whatever
         // it starts too, as `npx` starts node (see [`crate::group`]). The
@@ -1742,7 +1747,7 @@ mod tests {
         ];
         let command: Vec<OsString> = flood.iter().map(OsString::from).collect();
         let parser = Parser::idle();
-        let mut peer = Peer::start("flood", &command, None, Framing::Lines, &parser).unwrap();
+        let mut peer = Peer::start("flood", &command, None, None, Framing::Lines, &parser).unwrap();
         let mut buffer = vec![0; 64 * 1024];
         let deadline = Instant::now() + Duration::from_secs(5);
         // Once a budget's worth is waiting, a read stops there, saying
@@ -1770,7 +1775,7 @@ mod tests {
         let script = format!("printf '%s' '{said}'; sleep 5");
         let command: Vec<OsString> = ["sh", "-c", &script].iter().map(OsString::from).collect();
         let parser = Parser::idle();
-        let mut peer = Peer::start("gone", &command, None, Framing::Lines, &parser).unwrap();
+        let mut peer = Peer::start("gone", &command, None, None, Framing::Lines, &parser).unwrap();
         peer.send(&json!({ "jsonrpc": "2.0", "method": "hello" }));
         assert!(peer.has_outgoing());
         // As when writing to it failed: what's queued is thrown away, and

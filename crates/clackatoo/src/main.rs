@@ -5,6 +5,7 @@
 mod config;
 mod connections;
 mod desktop;
+mod display;
 mod language;
 mod logs;
 mod ping;
@@ -205,6 +206,11 @@ enum Command {
     /// List the workspaces this daemon lent the daemons on other machines,
     /// holding the panes they show of this machine's, or give one back.
     Lent(connections::LentArgs),
+    /// Show the desktop's display the daemon on this machine gives the
+    /// programs it starts (`WAYLAND_DISPLAY` and the like), and where it came
+    /// from: the desktop you're logged in to, the daemon's own
+    /// environment, or none.
+    Display,
 }
 
 #[derive(Debug, Args)]
@@ -498,6 +504,7 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::Connections(connection) => connections::list(&connection),
         Command::Lent(args) => connections::lent(&args),
         Command::Machine(connection) => connections::machine(&connection),
+        Command::Display => display::show(),
         Command::Mcp(args) => {
             let socket =
                 (args.socket).unwrap_or_else(|| RuntimeDir::for_current_user().socket_path());

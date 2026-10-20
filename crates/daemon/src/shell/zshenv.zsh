@@ -12,6 +12,25 @@
 
 'builtin' 'typeset' -g __clackatoo_zsh=$ZDOTDIR/clackatoo.zsh
 
+# The display variables clackatoo follows as the desktop logs in and out
+# (see __clackatoo_display in clackatoo.zsh), and each as this shell was
+# started with it, before the user's own startup files could set it:
+# `=VALUE`, or unset if it had none.
+if [[ -o interactive ]]; then
+    'builtin' 'typeset' -ga __clackatoo_display_names
+    __clackatoo_display_names=(WAYLAND_DISPLAY DISPLAY XAUTHORITY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP DESKTOP_SESSION SWAYSOCK I3SOCK HYPRLAND_INSTANCE_SIGNATURE NIRI_SOCKET)
+    'builtin' 'typeset' -g __clackatoo_display_file=${ZDOTDIR%/*}/display
+    () {
+        'builtin' 'emulate' -L zsh
+        'builtin' 'local' name
+        for name in $__clackatoo_display_names; do
+            if (( ${(P)+name} )); then
+                'builtin' 'typeset' -g "__clackatoo_display_$name==${(P)name}"
+            fi
+        done
+    }
+fi
+
 # Before anything else runs, the user's .zshenv included: the secret
 # clackatoo gave this terminal, which the C mark carries to say it's the
 # shell's and not something a program printed. It's in a file only

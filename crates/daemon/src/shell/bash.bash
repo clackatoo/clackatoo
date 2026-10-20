@@ -20,6 +20,18 @@ if [[ -n ${CLACKATOO_SECRET_FILE-} ]]; then
     [[ ${__clackatoo_secret-} =~ ^[0-9a-f]{32}$ ]] || unset __clackatoo_secret
 fi
 
+# The display variables clackatoo follows as the desktop logs in and out
+# (see __clackatoo_display), and each as this shell was started with it,
+# before ~/.bashrc could set it: `=VALUE`, or unset if it had none.
+__clackatoo_display_names=(WAYLAND_DISPLAY DISPLAY XAUTHORITY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP DESKTOP_SESSION SWAYSOCK I3SOCK HYPRLAND_INSTANCE_SIGNATURE NIRI_SOCKET)
+__clackatoo_display_file=${BASH_SOURCE[0]%/*}/display
+for __clackatoo_name in "${__clackatoo_display_names[@]}"; do
+    if [[ -n ${!__clackatoo_name+set} ]]; then
+        printf -v "__clackatoo_display_$__clackatoo_name" '=%s' "${!__clackatoo_name}"
+    fi
+done
+unset __clackatoo_name
+
 if [[ -f ~/.bashrc ]]; then
     . ~/.bashrc
 fi
@@ -31,7 +43,39 @@ if [[ $- == *i* && -z ${__clackatoo_integrated-} ]]; then
     __clackatoo_precmd() {
         local status=$?
         printf '\e]133;D;%s\a\e]7;file://%s%s\a' "$status" "$HOSTNAME" "${PWD//%/%25}"
+        __clackatoo_display
         return "$status"
+    }
+
+    # The display the desktop's login gives the programs clackatoo starts,
+    # which the daemon writes to a small file whenever it changes: where it
+    # came from on a `#` line, then `NAME=VALUE` a line each, a name above
+    # that isn't there being unset. It's read at each prompt, by `read`
+    # alone, and only once it has changed are the variables set or unset,
+    # as text, never run. A variable is changed only while it's as this
+    # shell started with it, or as this last made it: one you've set
+    # yourself is yours, and stays.
+    __clackatoo_display() {
+        local text= name kept want
+        { IFS= read -r -d '' text <"$__clackatoo_display_file" || :; } 2>/dev/null
+        [[ -n $text && $text != "${__clackatoo_display_text-}" ]] || return 0
+        __clackatoo_display_text=$text
+        text=$'\n'$text
+        for name in "${__clackatoo_display_names[@]}"; do
+            kept=__clackatoo_display_$name
+            want=
+            if [[ $text == *$'\n'$name=* ]]; then
+                want=${text#*$'\n'$name=}
+                want="=${want%%$'\n'*}"
+            fi
+            [[ ${!name+=}${!name-} == "${!kept-}" && $want != "${!kept-}" ]] || continue
+            if [[ -n $want ]]; then
+                printf -v "$name" '%s' "${want#=}" 2>/dev/null && export "$name" &&
+                    printf -v "$kept" '%s' "$want" || :
+            else
+                unset "$name" 2>/dev/null && unset "$kept" || :
+            fi
+        done
     }
 
     # Last, after anything that sets PS1 afresh for each prompt. The marks

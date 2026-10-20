@@ -952,6 +952,8 @@ pub struct Daemon {
     runtime: Option<PathBuf>,
     /// The connections to the daemons on other machines.
     links: links::Links,
+    /// The desktop's display the programs it starts follow, if they do.
+    display: Option<crate::display::Display>,
 }
 
 /// Stops a running [`Daemon`] from another thread.
@@ -997,6 +999,7 @@ impl Daemon {
     /// if it's held (see [`saved::lock`](crate::saved::lock)). It's the
     /// machine `machine`, handed over by the build before, or else the one
     /// its config keeps.
+    #[allow(clippy::too_many_lines, reason = "a field each")]
     fn listening(
         mut listener: UnixListener,
         config: DaemonConfig,
@@ -1037,6 +1040,7 @@ impl Daemon {
         let mut workspaces = WorkspaceState::with_home(&config.home);
         workspaces.set_machine(machine.clone());
         let links = links::Links::knowing(config.machine.as_deref());
+        let display = config.display.clone().map(crate::display::Display::start);
         Ok(Self {
             poll,
             listener,
@@ -1101,6 +1105,7 @@ impl Daemon {
             signer,
             runtime,
             links,
+            display,
         })
         .map(|mut daemon| {
             daemon.start_web();
@@ -1239,9 +1244,24 @@ impl Daemon {
     /// daemon that crashed left there; one that took over from an upgrade
     /// keeps its terminals'.
     pub fn install_shell_integration(&mut self, dir: PathBuf, afresh: bool) {
+        // Not following the display, a file a daemon that did left would
+        // have shells follow what it last said.
+        let display = dir.join("display");
+        if self.display.is_none()
+            && let Err(err) = std::fs::remove_file(&display)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            log::warn!("{}: removing it failed: {err}", display.display());
+        }
         self.config.shell_integration = crate::shell::install(dir, afresh)
             .map_err(|err| log::warn!("shells won't mark their commands: {err}"))
             .ok();
+    }
+
+    /// The display the programs it starts now are given, if they follow
+    /// the desktop's (see [`crate::display`]).
+    pub(crate) fn display_env(&self) -> Option<Arc<crate::display::Env>> {
+        self.display.as_ref().map(crate::display::Display::current)
     }
 
     /// Everything the next build needs, taken out of this daemon, which is
@@ -2113,7 +2133,11 @@ impl Daemon {
         request: &clackatoo_protocol::NewTerminal,
     ) -> Result<TerminalId, Error> {
         let id = TerminalId(self.next_id);
-        let terminal = HostedTerminal::start(id, request, &self.config)?;
+        let display = self.display_env();
+        let terminal = HostedTerminal::start(id, request, &self.config, display.as_deref())?;
+        if let Some(display) = &self.display {
+            display.terminal_made();
+        }
         self.next_id += 1;
         // Dropping `terminal` on failure hangs up the program just started.
         self.add_terminal(terminal)

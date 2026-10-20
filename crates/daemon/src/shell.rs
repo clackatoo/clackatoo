@@ -420,6 +420,18 @@ mod tests {
     }
 
     #[test]
+    fn every_script_follows_the_variables_the_daemon_writes() {
+        let names = crate::display::VARIABLES.join(" ");
+        for script in [BASH, ZSHENV, FISH] {
+            let listed = script
+                .lines()
+                .find(|line| line.contains("__clackatoo_display_names") && line.contains("DISPLAY"))
+                .expect("the script lists them");
+            assert!(listed.contains(&names), "{listed}");
+        }
+    }
+
+    #[test]
     fn installing_again_replaces_the_scripts() {
         let dir = tempfile::tempdir().unwrap();
         let shell = dir.path().join("shell");

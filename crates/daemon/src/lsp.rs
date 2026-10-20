@@ -334,18 +334,19 @@ struct Offers {
 }
 
 impl LanguageServer {
-    /// Starts `command` for the project in `root`, and introduces the
-    /// daemon to it. Every message either way is written to the file at
-    /// `trace`, if given (see [`Peer::trace_to`]). Its big messages are
-    /// parsed by `parser`.
+    /// Starts `command` for the project in `root`, on the desktop's
+    /// `display` if it's followed, and introduces the daemon to it. Every
+    /// message either way is written to the file at `trace`, if given
+    /// (see [`Peer::trace_to`]). Its big messages are parsed by `parser`.
     pub(crate) fn start(
         name: &str,
         command: &[OsString],
         root: &Path,
         trace: Option<&Path>,
+        display: Option<&crate::display::Env>,
         parser: &Parser,
     ) -> io::Result<Self> {
-        let mut peer = Peer::start(name, command, Some(root), Framing::Headers, parser)?;
+        let mut peer = Peer::start(name, command, Some(root), display, Framing::Headers, parser)?;
         if let Some(trace) = trace {
             peer.trace_to(trace);
         }

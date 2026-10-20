@@ -115,6 +115,7 @@ impl TestDaemon {
             links: None,
             machine: None,
             machine_name: None,
+            display: None,
         };
         change(dir.path(), &mut config);
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
@@ -17179,4 +17180,178 @@ fn a_folder_named_for_the_workspaces_is_left_as_it_is() {
     wait_for_kept(&file, |kept| kept.contains("\"w\""));
     let mode = std::fs::metadata(&shared).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o755, "as it was");
+}
+
+/// A daemon whose programs follow the display as `systemd`, a file
+/// standing in for what `systemctl --user show-environment` prints,
+/// says, or with no systemd to ask if `None`, with Wayland's sockets in
+/// `run` in its directory, and `inherited` as its own environment's
+/// values. It writes the values for shells to `display` in its directory.
+fn following_the_display(inherited: &[(&str, &str)], systemd: Option<&str>) -> TestDaemon {
+    let inherited: Vec<(String, String)> = (inherited.iter())
+        .map(|&(name, value)| (name.to_owned(), value.to_owned()))
+        .collect();
+    let systemd = systemd.map(str::to_owned);
+    TestDaemon::start_with(move |dir, config| {
+        std::fs::create_dir(dir.join("run")).unwrap();
+        let source = match systemd {
+            Some(text) => {
+                std::fs::write(dir.join("systemd"), text).unwrap();
+                vec!["cat".into(), dir.join("systemd").into()]
+            }
+            None => vec!["false".into()],
+        };
+        config.display = Some(clackatoo_daemon::DisplayConfig {
+            source,
+            runtime_dir: Some(dir.join("run")),
+            // Not there: a Wayland desktop makes none.
+            x11_dir: Some(dir.join("x11")),
+            inherited,
+            file: Some(dir.join("display")),
+            again_after: vec![Duration::from_millis(100), Duration::from_millis(400)],
+        });
+    })
+}
+
+impl TestDaemon {
+    /// Waits until the file the daemon writes for shells says `what`.
+    fn wait_for_display(&self, what: &str) {
+        let file = self.dir.path().join("display");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let text = std::fs::read_to_string(&file).unwrap_or_default();
+            if text == what {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the display never became {what:?}: {text:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// What a new terminal's program finds of the display.
+fn display_seen(client: &mut Client) -> String {
+    let terminal = spawn(
+        client,
+        &[
+            "sh",
+            "-c",
+            "printf '[%s|%s|%s]' \"${WAYLAND_DISPLAY-unset}\" \"${DISPLAY-unset}\" \
+             \"${XDG_SESSION_TYPE-unset}\"",
+        ],
+    );
+    let text = wait_for_screen(client, terminal, |text| text.contains(']'));
+    // Long ones wrap.
+    let text = text.replace('\n', "");
+    text[text.find('[').unwrap()..=text.find(']').unwrap()].to_owned()
+}
+
+/// Programs started after the desktop logs in get its display from
+/// systemd's user manager, read again a moment after its socket appears,
+/// as the desktop tells systemd after making it; those started after it
+/// logs out get none. The daemon's own session type stays when there's
+/// no display.
+#[test]
+fn new_programs_follow_the_desktops_display_as_it_logs_in_and_out() {
+    let daemon = following_the_display(
+        &[("XDG_SESSION_TYPE", "tty"), ("DISPLAY", ":5")],
+        Some("HOME=/home/someone\n"),
+    );
+    let mut client = daemon.client();
+    // The daemon's own X display has no socket: it's gone.
+    daemon.wait_for_display("#none\nXDG_SESSION_TYPE=tty\n");
+    assert_eq!(display_seen(&mut client), "[unset|unset|tty]");
+
+    // The desktop makes its socket, then tells systemd.
+    let run = daemon.dir.path().join("run");
+    let socket = std::os::unix::net::UnixListener::bind(run.join("wayland-0")).unwrap();
+    std::fs::write(run.join("wayland-0.lock"), "").unwrap();
+    std::thread::sleep(Duration::from_millis(30));
+    let logged_in = "HOME=/home/someone\nWAYLAND_DISPLAY=wayland-0\nXDG_SESSION_TYPE=wayland\n\
+                     XDG_CURRENT_DESKTOP=GNOME\n";
+    std::fs::write(daemon.dir.path().join("systemd"), logged_in).unwrap();
+    daemon.wait_for_display(
+        "#systemd\nWAYLAND_DISPLAY=wayland-0\nXDG_SESSION_TYPE=wayland\n\
+         XDG_CURRENT_DESKTOP=GNOME\n",
+    );
+    assert_eq!(display_seen(&mut client), "[wayland-0|unset|wayland]");
+    let mode = std::fs::metadata(daemon.dir.path().join("display"))
+        .unwrap()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+
+    // It logs out: systemd forgets, and the socket goes.
+    std::fs::write(daemon.dir.path().join("systemd"), "HOME=/home/someone\n").unwrap();
+    drop(socket);
+    std::fs::remove_file(run.join("wayland-0")).unwrap();
+    daemon.wait_for_display("#none\nXDG_SESSION_TYPE=tty\n");
+    assert_eq!(display_seen(&mut client), "[unset|unset|tty]");
+}
+
+/// Without systemd's user manager, a display the daemon was started on,
+/// as sway started by hand, is handed on while its socket is there, and
+/// no longer once it's gone.
+#[test]
+fn the_daemons_own_display_is_handed_on_while_its_socket_is_there() {
+    let socket_dir = tempfile::tempdir().unwrap();
+    let socket = socket_dir.path().join("sway-wayland");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let daemon = following_the_display(
+        &[
+            ("WAYLAND_DISPLAY", socket.to_str().unwrap()),
+            ("SWAYSOCK", "/run/sway.sock"),
+        ],
+        None,
+    );
+    let mut client = daemon.client();
+    let own = format!(
+        "#inherited\nWAYLAND_DISPLAY={}\nSWAYSOCK=/run/sway.sock\n",
+        socket.display()
+    );
+    daemon.wait_for_display(&own);
+    assert_eq!(
+        display_seen(&mut client),
+        format!("[{}|unset|unset]", socket.display())
+    );
+
+    // Its socket is in no directory watched, so it's noticed gone only
+    // once a socket that is appears or goes.
+    drop(listener);
+    std::fs::remove_file(&socket).unwrap();
+    std::fs::write(daemon.dir.path().join("run/wayland-9"), "").unwrap();
+    daemon.wait_for_display("#none\n");
+    assert_eq!(display_seen(&mut client), "[unset|unset|unset]");
+}
+
+/// Agents are started on the display too, as language servers are: an
+/// agent started after the desktop logged in finds it.
+#[test]
+fn agents_are_started_on_the_desktops_display() {
+    let seen = tempfile::tempdir().unwrap();
+    let seen = seen.path().join("seen");
+    let record = format!(
+        "printf '%s' \"${{WAYLAND_DISPLAY-unset}}\" > '{}'; exec \"$0\" \"$@\"",
+        seen.display()
+    );
+    let daemon = TestDaemon::start_with(|dir, config| {
+        std::fs::create_dir(dir.join("run")).unwrap();
+        std::fs::write(dir.join("systemd"), "WAYLAND_DISPLAY=wayland-4\n").unwrap();
+        config.display = Some(clackatoo_daemon::DisplayConfig {
+            source: vec!["cat".into(), dir.join("systemd").into()],
+            runtime_dir: Some(dir.join("run")),
+            x11_dir: None,
+            inherited: Vec::new(),
+            file: Some(dir.join("display")),
+            again_after: Vec::new(),
+        });
+        let agent = vec!["sh".into(), "-c".into(), record.into(), fake_agent().into()];
+        config.agents.custom = vec![custom_agent("claude", agent)];
+    });
+    daemon.wait_for_display("#systemd\nWAYLAND_DISPLAY=wayland-4\n");
+    let mut client = daemon.client();
+    start_chat(&mut client);
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "wayland-4");
 }

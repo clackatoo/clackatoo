@@ -543,7 +543,16 @@ impl Daemon {
             args[0] = program.into_os_string();
         }
         let trace = self.config.lsp_trace.as_deref();
-        let server = match LanguageServer::start(name, &args, &root, trace, &self.parser) {
+        // Not `display_env`: `servers` is borrowed.
+        let display = self.display.as_ref().map(crate::display::Display::current);
+        let server = match LanguageServer::start(
+            name,
+            &args,
+            &root,
+            trace,
+            display.as_deref(),
+            &self.parser,
+        ) {
             Ok(server) => server,
             Err(err) => {
                 log::warn!("{name} couldn't start for {}: {err}", root.display());

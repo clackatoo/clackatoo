@@ -177,6 +177,7 @@ impl TestDaemon {
             links: None,
             machine: None,
             machine_name: None,
+            display: None,
         };
         let mut daemon = Daemon::bind(&dir.join("daemon.sock"), config).unwrap();
         let shutdown = daemon.shutdown_handle();
