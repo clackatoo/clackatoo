@@ -664,6 +664,7 @@ impl WorkspaceState {
                 always: kept.always,
                 given_up: kept.given_up,
                 paused: kept.paused,
+                restart: None,
             })
             .collect()
     }

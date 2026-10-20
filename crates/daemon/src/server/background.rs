@@ -228,7 +228,6 @@ impl Daemon {
         let Some((_, found)) = self.workspaces.get().find_tab(tab) else {
             return;
         };
-        let panes: Vec<PaneId> = found.layout.panes().iter().map(|pane| pane.id).collect();
         let ended: Vec<(PaneId, TerminalId)> = (found.layout.panes().into_iter())
             .filter_map(|pane| Some((pane.id, pane.content.terminal()?)))
             .filter(|&(_, terminal)| {
@@ -236,7 +235,10 @@ impl Daemon {
                     .is_none_or(|slot| slot.terminal.status() != TerminalStatus::Running)
             })
             .collect();
-        self.drop_restarts(&panes);
+        // Only those made again here: the others, still running, keep how
+        // running their commands again goes, a pause too.
+        let renewed: Vec<PaneId> = ended.iter().map(|&(pane, _)| pane).collect();
+        self.drop_restarts(&renewed);
         for (pane, old) in ended {
             if let Some(new) = self.start_again_in(pane, old)
                 && self.runs_again(pane)

@@ -18606,3 +18606,118 @@ fn a_window_from_before_background_tabs_cant_close_a_workspace_with_them() {
     assert_eq!(client.request(&request).unwrap(), Response::Done);
     assert!(client.list_terminals().unwrap().is_empty());
 }
+
+/// [`FORGER`], but staying in its shell's process group, as a program a
+/// shell without job control runs does.
+const FORGER_IN_GROUP: &str = r"
+import os, select, sys, time
+time.sleep(1.0)
+sys.stdout.write('\033]133;D;0\007\033]133;A\007$ ')
+sys.stdout.flush()
+time.sleep(1.5)
+got = b''
+while select.select([0], [], [], 0)[0]:
+    chunk = os.read(0, 4096)
+    if not chunk:
+        break
+    got += chunk
+with open(sys.argv[1], 'ab') as noted:
+    noted.write(b'got:' + got + b'\n')
+";
+
+/// Runs `line` in a new terminal of the secret shell, which forges a
+/// command's end with [`FORGER_IN_GROUP`], kept running always as it
+/// runs, and returns the first line of what the forger noted it read.
+fn forged_in_group(line: impl Fn(&Path) -> String) -> String {
+    use clackatoo_protocol::Keeping;
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    std::fs::write(kept.path().join("forge.py"), FORGER_IN_GROUP).unwrap();
+    let got = kept.path().join("got");
+    let daemon = TestDaemon::keeping_with_secret_shell_and(&file, &seen, |config| {
+        config.keep_wait = Duration::from_millis(50);
+    });
+    let mut client = daemon.client();
+    client.new_workspace(None, shell_in(kept.path())).unwrap();
+    let workspace = client.watch_workspaces().unwrap().list[0].id;
+    let pane = client.new_tab(workspace, shell_in(kept.path())).unwrap();
+    let terminal = terminal_of(&client.watch_workspaces().unwrap(), pane);
+    wait_for_prompt(&mut client, terminal);
+    client
+        .send_input(terminal, format!("{}\r", line(&got)).as_bytes())
+        .unwrap();
+    wait_for_screen(&mut client, terminal, |text| text.contains("forge.py"));
+    wait_for_answer_text(&mut client, pane, Keeping::Always);
+    wait_for_runs(&got, 1);
+    let noted = std::fs::read_to_string(&got).unwrap();
+    noted.lines().next().unwrap().to_owned()
+}
+
+#[test]
+fn a_shell_without_job_control_running_a_forger_isnt_typed_at() {
+    if !has_python() {
+        eprintln!("no python3 to forge marks with: skipped");
+        return;
+    }
+    // In the shell's own process group, which is in front.
+    let first = forged_in_group(|got| format!("python3 forge.py {}", got.display()));
+    assert_eq!(first, "got:");
+}
+
+#[test]
+fn a_shell_become_a_forger_by_exec_isnt_typed_at() {
+    if !has_python() {
+        eprintln!("no python3 to forge marks with: skipped");
+        return;
+    }
+    // The shell's own process, and group, but another program.
+    let first = forged_in_group(|got| format!("exec python3 forge.py {}", got.display()));
+    assert_eq!(first, "got:");
+}
+
+/// A shell that starts the marking shell rather than becoming it, as
+/// `sh -c fish` does: the marking shell takes the terminal for a process
+/// group of its own.
+const WRAPPER: &str = r"#!/usr/bin/env python3
+import os, signal, sys
+marking = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), 'marking-sh')
+child = os.fork()
+if child == 0:
+    signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+    os.setpgid(0, 0)
+    os.tcsetpgrp(0, os.getpid())
+    os.execv('/bin/sh', ['sh', marking])
+os.waitpid(child, 0)
+";
+
+#[test]
+fn a_shell_that_starts_another_says_so_and_types_nothing() {
+    if !has_python() {
+        eprintln!("no python3 to wrap the shell with: skipped");
+        return;
+    }
+    let daemon = TestDaemon::start_with(move |dir, config| {
+        config.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::write(bin.join("marking-sh"), MARKING_SHELL).unwrap();
+        let shell = bin.join("zsh");
+        std::fs::write(&shell, WRAPPER).unwrap();
+        std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        config.shell = shell.into();
+        config.shell_integration = Some(dir.join("integration"));
+        config.prompt_wait = Duration::from_secs(1);
+    });
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let prompt = "mcp run_in_terminal {\"command\":\"echo wrapped\"}\n\
+                  mcp wait_for_terminal {\"pane\":2,\"timeout\":5}";
+    let words = last_words(&ask_for(&mut client, chat, prompt, Duration::from_secs(10)));
+    assert!(words.contains("`echo wrapped` wasn't typed"), "{words}");
+    assert!(words.contains("set `$SHELL` to that one"), "{words}");
+    let terminal = client.watch_workspaces().unwrap().list[0].terminals()[1];
+    let screen = screen_text(&client.capture(terminal).unwrap());
+    assert!(!screen.contains("echo wrapped"), "{screen}");
+}

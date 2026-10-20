@@ -54,6 +54,48 @@ pub(crate) struct HostedTerminal {
     /// The secret the shell's integration adds to its marks, if it has
     /// one (see [`shell`]).
     secret: Option<shell::Secret>,
+    /// The device and inode of the program it was started as, once it had
+    /// started: another, as after `exec prog`, is no longer its shell.
+    /// `None` if it couldn't be read.
+    exe: Option<(u64, u64)>,
+}
+
+/// Why a terminal's shell doesn't have it to itself, to be typed into:
+/// see [`HostedTerminal::shell_has_terminal`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Taken {
+    /// A process group other than the shell's is in front: a program it
+    /// runs, with job control, or another shell it started.
+    Program,
+    /// The shell runs a program in its own process group, as a shell
+    /// without job control does.
+    Child(u32),
+    /// The shell has become another program, as with `exec prog`.
+    Exec,
+    /// Its program has ended, or it's no terminal of a shell's.
+    Ended,
+}
+
+impl Taken {
+    /// What it says, in a clause: why a command wasn't typed.
+    pub(crate) fn why(self) -> &'static str {
+        match self {
+            Self::Program => {
+                "a program other than the shell was in front of its prompt; if the daemon's \
+                 `$SHELL` starts another shell, as `sh -c fish` does, set `$SHELL` to that one"
+            }
+            Self::Child(_) => "a program the shell started was still running",
+            Self::Exec => "the shell had become another program, as `exec` makes it",
+            Self::Ended => "the shell had ended",
+        }
+    }
+}
+
+/// The device and inode of process `pid`'s program.
+fn exe_of(pid: u32) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::metadata(format!("/proc/{pid}/exe")).ok()?;
+    Some((meta.dev(), meta.ino()))
 }
 
 impl HostedTerminal {
@@ -114,6 +156,8 @@ impl HostedTerminal {
             .map_err(|err| Error::SpawnFailed(err.to_string()))?;
         let pid = spawned.process.pid().as_raw_pid().cast_unsigned();
         log::info!("terminal {id} started: pid {pid}");
+        // Spawning waited for it to start its program, so this is it.
+        let exe = exe_of(pid);
 
         let mut emulator = Terminal::new(request.size, &config.terminal);
         emulator.expect_secret(secret.as_ref().map(|secret| secret.text.as_str()));
@@ -127,6 +171,7 @@ impl HostedTerminal {
             input: Vec::new(),
             recording,
             secret,
+            exe,
         })
     }
 
@@ -213,6 +258,7 @@ impl HostedTerminal {
             input: terminal.input.clone(),
             recording: None,
             secret,
+            exe: None,
         })
     }
 
@@ -261,6 +307,47 @@ impl HostedTerminal {
             .and_then(|pid| cwd(pid.as_raw_nonzero().get()))
             .or_else(|| cwd(self.pid.cast_signed()))?;
         cwd.into_os_string().into_string().ok()
+    }
+
+    /// Whether its shell has the terminal to itself, to be typed into, as
+    /// its prompt says it's waiting: its process group is in front, it's
+    /// still the program it was started as, and it runs no program in its
+    /// own group, as a shell without job control does. A child in a group
+    /// of its own, as a job sent to the background, can't read the
+    /// terminal. Reads `/proc`, so asked only as something's to be typed,
+    /// or a command's end taken for one, not as output is read.
+    pub(crate) fn shell_has_terminal(&self) -> Result<(), Taken> {
+        if self.pty.is_none() || self.status != TerminalStatus::Running {
+            return Err(Taken::Ended);
+        }
+        if !self.is_idle_shell() {
+            return Err(Taken::Program);
+        }
+        if let Some(started) = self.exe
+            && exe_of(self.pid).is_some_and(|now| now != started)
+        {
+            return Err(Taken::Exec);
+        }
+        let proc = Path::new("/proc");
+        let in_its_group = (crate::ports::children_of(proc, self.pid).into_iter()).find(|&child| {
+            crate::ports::stat_of(proc, child).is_some_and(|stat| stat.pgrp == self.pid)
+        });
+        match in_its_group {
+            Some(child) => Err(Taken::Child(child)),
+            None => Ok(()),
+        }
+    }
+
+    /// The device and inode of the program it was started as, for the next
+    /// build to know.
+    pub(crate) fn exe(&self) -> Option<(u64, u64)> {
+        self.exe
+    }
+
+    /// Takes `exe` as the program it was started as, as the build that
+    /// handed it over knew.
+    pub(crate) fn started_as(&mut self, exe: Option<(u64, u64)>) {
+        self.exe = exe;
     }
 
     /// Whether its program is a shell at its prompt, running nothing: the

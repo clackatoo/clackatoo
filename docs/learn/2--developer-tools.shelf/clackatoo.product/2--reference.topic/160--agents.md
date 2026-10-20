@@ -226,6 +226,8 @@ The chat's box has a Tools setting, Ask, Allow or Off, that you can change at an
 
 Waiting for a command relies on the shell marking where each one ends, as bash, zsh and fish do in clackatoo; such a shell gets up to 30 seconds to show its first prompt before the agent is told it didn't. In other shells the agent gets the terminal's last lines, and is told it can't know when a command finishes.
 
+A command is typed only while the shell has the terminal to itself, as for a terminal [kept running](~clackatoo/reference/window#keeping-a-terminal-running): a `$SHELL` that starts another shell rather than becoming it, as `sh -c fish` does, never has, so the agent is told its command wasn't typed, and why; set the daemon's `$SHELL` to the real shell.
+
 A command typed while the shell is still drawing its next prompt is waited for from that prompt on, and a command that clears the screen and scrollback, as `clear` does, doesn't end the wait.
 
 The tools are an MCP server (the [Model Context Protocol](https://modelcontextprotocol.io)), which the agent starts as `clackatoo mcp`, for Claude Code and Codex alike. It talks to the daemon for the one chat it was started for.

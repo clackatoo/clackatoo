@@ -181,21 +181,75 @@ fn listening_line(line: &str) -> Option<(u64, u16)> {
     Some((inode, port))
 }
 
-/// The name of process `pid`'s program, and the session it's in, as
-/// `proc/PID/stat` says: `pid (comm) state ppid pgrp session …`, where
-/// the name may hold anything, spaces and brackets included, so it's read
-/// up to the last `)`.
-fn session_of(proc: &Path, pid: u32) -> Option<(String, u32)> {
+/// What `proc/PID/stat` says of a process: see [`stat_of`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Stat {
+    /// The name its program goes by, made safe to show.
+    pub(crate) program: String,
+    /// Its parent.
+    pub(crate) ppid: u32,
+    /// Its process group.
+    pub(crate) pgrp: u32,
+    /// Its session.
+    pub(crate) session: u32,
+}
+
+/// What `proc/PID/stat` says of process `pid`: `pid (comm) state ppid pgrp
+/// session …`, where the name may hold anything, spaces and brackets
+/// included, so it's read up to the last `)`.
+pub(crate) fn stat_of(proc: &Path, pid: u32) -> Option<Stat> {
     let stat = std::fs::read(proc.join(pid.to_string()).join("stat")).ok()?;
     let stat = String::from_utf8_lossy(&stat);
     let (head, rest) = stat.rsplit_once(')')?;
     let (_, program) = head.split_once('(')?;
-    let session = rest.split_whitespace().nth(3)?.parse().ok()?;
+    let mut fields = rest.split_whitespace().skip(1);
+    let mut next = || fields.next()?.parse().ok();
+    let (parent, group, session) = (next()?, next()?, next()?);
     let program = (program.chars())
         .map(|ch| if ch.is_control() { '?' } else { ch })
         .take(LONGEST_PROGRAM)
         .collect();
-    Some((program, session))
+    Some(Stat {
+        program,
+        ppid: parent,
+        pgrp: group,
+        session,
+    })
+}
+
+/// The name of process `pid`'s program, and the session it's in.
+fn session_of(proc: &Path, pid: u32) -> Option<(String, u32)> {
+    let stat = stat_of(proc, pid)?;
+    Some((stat.program, stat.session))
+}
+
+/// The children of process `pid`, as `proc` says: from each of its
+/// threads' `children`, or, where the kernel keeps none, every process
+/// whose parent it is, of the first [`MOST_PROCESSES`].
+pub(crate) fn children_of(proc: &Path, pid: u32) -> Vec<u32> {
+    let tasks = proc.join(pid.to_string()).join("task");
+    if let Ok(threads) = std::fs::read_dir(&tasks) {
+        let mut children = Vec::new();
+        let mut known = true;
+        for thread in threads.flatten() {
+            match std::fs::read_to_string(thread.path().join("children")) {
+                Ok(listed) => (children).extend(
+                    listed
+                        .split_whitespace()
+                        .filter_map(|child| child.parse::<u32>().ok()),
+                ),
+                Err(_) => known = false,
+            }
+        }
+        if known {
+            return children;
+        }
+    }
+    (std::fs::read_dir(proc).into_iter().flatten().flatten())
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .take(MOST_PROCESSES)
+        .filter(|&process| stat_of(proc, process).is_some_and(|stat| stat.ppid == pid))
+        .collect()
 }
 
 /// The ports of `sockets` process `pid` holds a socket listening on.
@@ -254,6 +308,22 @@ mod tests {
         let mut sockets = HashMap::new();
         read_table(table.as_bytes(), &mut sockets);
         assert_eq!(sockets, HashMap::from([(1, 8080)]));
+    }
+
+    #[test]
+    fn a_process_s_children_and_their_groups_are_read() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let proc = Path::new("/proc");
+        let ours = std::process::id();
+        assert!(children_of(proc, ours).contains(&child.id()));
+        let stat = stat_of(proc, child.id()).unwrap();
+        assert_eq!((stat.program.as_str(), stat.ppid), ("sleep", ours));
+        assert_eq!(stat.pgrp, stat_of(proc, ours).unwrap().pgrp);
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 
     #[test]

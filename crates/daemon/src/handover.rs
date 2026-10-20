@@ -200,6 +200,10 @@ pub(crate) struct State {
     /// be its own: [`Shell::trusted`] says only the latest block's. Since
     /// version 26; before, only that one was.
     pub(crate) trusted: Vec<Trusted>,
+    /// The program each terminal was started as, so one its shell has
+    /// become another program in, as with `exec`, is still known to have
+    /// no shell to type into. Since version 26; before, none was known.
+    pub(crate) exes: Vec<Exe>,
 }
 
 /// A terminal the user marked to keep running (see
@@ -216,6 +220,45 @@ pub(crate) struct Kept {
     pub(crate) given_up: bool,
     /// Running it again as it ends is paused.
     pub(crate) paused: bool,
+    /// How running it again was going, if it was kept running always.
+    pub(crate) restart: Option<Restarting>,
+}
+
+/// How running a terminal's command again was going (see [`Kept`]), so the
+/// pause, the blocks the daemon typed it as, and its waits outlast an
+/// upgrade. Since version 26.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct Restarting {
+    /// The block running as it was typed into, pausing it.
+    pub(crate) paused_during: Option<u32>,
+    /// The block the daemon typed the command as, and how many times the
+    /// terminal had numbered its blocks from 0 again then.
+    pub(crate) ours: Option<(u32, u64)>,
+    /// The block last seen running the command, as the user ran it.
+    pub(crate) running: Option<u32>,
+    /// The block whose end was taken for the command's.
+    pub(crate) handled: Option<u32>,
+    /// How many times in a row it ended soon after it started.
+    pub(crate) quick: u32,
+    /// How long it waits next time, in milliseconds.
+    pub(crate) wait_ms: u64,
+    /// How long until it runs again, in milliseconds, if it's to.
+    pub(crate) due_in_ms: Option<u64>,
+    /// The terminal whose shell ended, which a new shell is to take the
+    /// place of.
+    pub(crate) ended: Option<u32>,
+    /// How long ago the daemon last ran it, in milliseconds, if it did.
+    pub(crate) started_ms_ago: Option<u64>,
+}
+
+/// The program a terminal was started as, by its device and inode (see
+/// [`State::exes`]). Since version 26.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Exe {
+    /// The terminal, by its ID.
+    pub(crate) terminal: u32,
+    pub(crate) dev: u64,
+    pub(crate) ino: u64,
 }
 
 /// The blocks of a terminal's whose commands its shell's integration said,
@@ -1004,6 +1047,7 @@ mod v25 {
                 background: state.background,
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -1078,6 +1122,7 @@ mod v24 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -1150,6 +1195,7 @@ mod v23 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -1235,6 +1281,7 @@ mod v22 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -1303,6 +1350,7 @@ mod v21 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -1369,6 +1417,7 @@ mod v20 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -1431,6 +1480,7 @@ mod v19 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -1493,6 +1543,7 @@ mod v18 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -2020,6 +2071,7 @@ mod v7 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -2106,6 +2158,7 @@ mod v8 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -2162,6 +2215,7 @@ mod v9 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -2220,6 +2274,7 @@ mod v11 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -2327,6 +2382,7 @@ mod v15 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -2388,6 +2444,7 @@ mod v14 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -2447,6 +2504,7 @@ mod v13 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -2548,6 +2606,7 @@ mod v12 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -2647,6 +2706,7 @@ mod v10 {
                 background: Vec::new(),
                 kept: Vec::new(),
                 trusted: Vec::new(),
+                exes: Vec::new(),
             }
         }
     }
@@ -2894,10 +2954,26 @@ mod tests {
                 always: true,
                 given_up: false,
                 paused: true,
+                restart: Some(Restarting {
+                    paused_during: Some(5),
+                    ours: Some((4, 1)),
+                    running: Some(5),
+                    handled: Some(3),
+                    quick: 2,
+                    wait_ms: 4000,
+                    due_in_ms: None,
+                    ended: None,
+                    started_ms_ago: Some(1500),
+                }),
             }],
             trusted: vec![Trusted {
                 terminal: 4,
                 blocks: vec![2, 5],
+            }],
+            exes: vec![Exe {
+                terminal: 4,
+                dev: 0x803,
+                ino: 1_234_567,
             }],
         }
     }
@@ -3110,6 +3186,18 @@ mod tests {
             (12, "trail serve", true, false)
         );
         assert!(kept.paused);
+        let restart = kept.restart.as_ref().unwrap();
+        assert_eq!(
+            (
+                restart.paused_during,
+                restart.ours,
+                restart.quick,
+                restart.wait_ms
+            ),
+            (Some(5), Some((4, 1)), 2, 4000)
+        );
+        let exe = &state.exes[0];
+        assert_eq!((exe.terminal, exe.dev, exe.ino), (4, 0x803, 1_234_567));
         let trusted = &state.trusted[0];
         assert_eq!(
             (trusted.terminal, trusted.blocks.as_slice()),

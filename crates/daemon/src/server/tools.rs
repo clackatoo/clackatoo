@@ -229,7 +229,19 @@ struct Typing {
     /// Whether the shell is known to mark its prompts: then it's never
     /// typed before one, and the agent is told if none comes.
     marked: bool,
+    /// When the shell, found at its prompt with the terminal to itself,
+    /// is looked at again, to be typed at if it still is: so bytes aren't
+    /// left queued in the terminal between two programs of one command
+    /// line, for whatever reads next. See [`TYPING_AGAIN`].
+    again: Option<Instant>,
+    /// Why it wasn't typed when the shell's prompt last came, if it
+    /// wasn't: for what's said if it never is.
+    refused: Option<crate::hosted::Taken>,
 }
+
+/// How long a shell found at its prompt, with the terminal to itself, is
+/// looked at again after, before a command is typed at it.
+const TYPING_AGAIN: Duration = Duration::from_millis(100);
 
 impl Daemon {
     // --- Connections -----------------------------------------------------
@@ -1338,6 +1350,8 @@ impl Daemon {
             command,
             due: Instant::now() + wait,
             marked,
+            again: None,
+            refused: None,
         };
         // Whose it is, and what it's called, stay: a command kept running
         // run again in a terminal an agent started is still the agent's.
@@ -1431,28 +1445,54 @@ impl Daemon {
                 .map_or(0, Terminal::block_renumberings);
             commanded.expect_first = false;
         }
-        if commanded.typing.is_some() {
-            let prompting = (self.terminals.get(&terminal))
-                .and_then(|slot| slot.terminal.grid())
-                .is_some_and(|grid| matches!(grid.latest_block(), Some((_, Progress::Prompt))));
-            if prompting {
-                self.type_command(terminal);
-            }
+        let looking = (commanded.typing.as_ref()).is_some_and(|typing| typing.again.is_none());
+        if looking && self.prompting(terminal) {
+            self.look_to_type(terminal);
         }
         self.answer_finished(terminal, false);
     }
 
-    /// Types the command waiting for `terminal`'s shell's first prompt, if
-    /// the shell is in front: the pty's foreground process group is the
-    /// shell's own. The marks that say a prompt began aren't signed, so a
-    /// program can print them; typed then, the command would go to it.
-    /// Otherwise it waits on, for the next prompt.
-    fn type_command(&mut self, terminal: TerminalId) {
-        let in_front =
-            (self.terminals.get(&terminal)).is_some_and(|slot| slot.terminal.shell_in_front());
-        if !in_front {
+    /// Whether `terminal`'s shell has marked a prompt, and is at it.
+    fn prompting(&self, terminal: TerminalId) -> bool {
+        (self.terminals.get(&terminal))
+            .and_then(|slot| slot.terminal.grid())
+            .is_some_and(|grid| matches!(grid.latest_block(), Some((_, Progress::Prompt))))
+    }
+
+    /// Looks at `terminal`'s shell, at its prompt, with a command waiting:
+    /// if it has the terminal to itself, it's looked at again in a moment,
+    /// to be typed at then; if not, the command waits on, for its next
+    /// prompt.
+    fn look_to_type(&mut self, terminal: TerminalId) {
+        let taken = (self.terminals.get(&terminal))
+            .map_or(Err(crate::hosted::Taken::Ended), |slot| {
+                slot.terminal.shell_has_terminal()
+            });
+        let Some(typing) = (self.tools.commanded.get_mut(&terminal))
+            .and_then(|commanded| commanded.typing.as_mut())
+        else {
             return;
+        };
+        match taken {
+            Ok(()) => typing.again = Some(Instant::now() + TYPING_AGAIN),
+            Err(why) => {
+                log::debug!(
+                    "terminal {terminal}: not typed at its prompt: {}",
+                    why.why()
+                );
+                typing.refused = Some(why);
+            }
         }
+    }
+
+    /// Types the command waiting for `terminal`'s shell's first prompt,
+    /// which its caller found the shell has the terminal to itself at (see
+    /// [`HostedTerminal::shell_has_terminal`]): the marks that say a
+    /// prompt began aren't signed, so a program can print them; typed
+    /// then, the command would go to it.
+    ///
+    /// [`HostedTerminal::shell_has_terminal`]: crate::hosted::HostedTerminal::shell_has_terminal
+    fn type_command(&mut self, terminal: TerminalId) {
         let Some(Typing { command, .. }) =
             (self.tools.commanded.get_mut(&terminal)).and_then(|commanded| commanded.typing.take())
         else {
@@ -1601,7 +1641,12 @@ impl Daemon {
     /// prompt given up on, or a wait timing out.
     pub(super) fn next_tool_due(&self) -> Option<Instant> {
         let typing = (self.tools.commanded.values())
-            .filter_map(|commanded| commanded.typing.as_ref().map(|typing| typing.due));
+            .filter_map(|commanded| commanded.typing.as_ref())
+            .map(|typing| {
+                typing
+                    .again
+                    .map_or(typing.due, |again| again.min(typing.due))
+            });
         let waits = (self.tools.waiting.iter()).filter_map(|waiting| match waiting.what {
             Wait::Finish { due, .. }
             | Wait::Turn { due, .. }
@@ -1615,6 +1660,104 @@ impl Daemon {
                 _ => None,
             });
         typing.chain(waits).chain(finished).min()
+    }
+
+    /// Types the commands whose shells' prompts haven't come, or haven't
+    /// come with the shell having its terminal to itself, by `now`, if a
+    /// shell that marks none has it; or else gives them up, saying why.
+    fn type_or_give_up_late(&mut self, now: Instant) {
+        let late: Vec<TerminalId> = (self.tools.commanded.iter())
+            .filter(|(_, commanded)| {
+                commanded
+                    .typing
+                    .as_ref()
+                    .is_some_and(|typing| typing.due <= now)
+            })
+            .map(|(&terminal, _)| terminal)
+            .collect();
+        let wait = self.config.prompt_wait.as_secs_f64();
+        for terminal in late {
+            let taken = (self.terminals.get(&terminal))
+                .map_or(Err(crate::hosted::Taken::Ended), |slot| {
+                    slot.terminal.shell_has_terminal()
+                });
+            let Some(commanded) = self.tools.commanded.get_mut(&terminal) else {
+                continue;
+            };
+            match commanded.typing.take() {
+                // Its prompt came, but never with the shell having the
+                // terminal to itself: say why.
+                Some(Typing {
+                    command,
+                    refused: Some(why),
+                    ..
+                }) => {
+                    commanded.failed = Some(format!("`{command}` wasn't typed: {}", why.why()));
+                    log::info!(
+                        "terminal {terminal}: `{command}` wasn't typed: {}",
+                        why.why()
+                    );
+                    self.answer_finished(terminal, false);
+                }
+                // Typed now, it would go to whatever is still starting,
+                // or be typed again at the prompt that comes.
+                Some(Typing {
+                    command,
+                    marked: true,
+                    ..
+                }) => {
+                    commanded.failed = Some(format!(
+                        "the shell didn't show a prompt within {wait} s, so `{command}` wasn't \
+                         typed: it may still be starting. Try run_in_terminal again"
+                    ));
+                    self.answer_finished(terminal, false);
+                }
+                // Another program has the terminal: typed, it would go to it.
+                Some(Typing { command, .. }) if taken.is_err() => {
+                    let why = taken.err().map_or("", crate::hosted::Taken::why);
+                    commanded.failed = Some(format!("`{command}` wasn't typed: {why}"));
+                    self.answer_finished(terminal, false);
+                }
+                typing => {
+                    commanded.typing = typing;
+                    self.type_command(terminal);
+                }
+            }
+        }
+    }
+
+    /// Looks again at the shells found at their prompts a moment ago, as
+    /// of `now`: each is typed at if it still has its terminal to itself.
+    fn type_where_looked_again(&mut self, now: Instant) {
+        let again: Vec<TerminalId> = (self.tools.commanded.iter())
+            .filter(|(_, commanded)| {
+                (commanded.typing.as_ref())
+                    .is_some_and(|typing| typing.again.is_some_and(|again| again <= now))
+            })
+            .map(|(&terminal, _)| terminal)
+            .collect();
+        for terminal in again {
+            if let Some(typing) = (self.tools.commanded.get_mut(&terminal))
+                .and_then(|commanded| commanded.typing.as_mut())
+            {
+                typing.again = None;
+            }
+            let taken = (self.terminals.get(&terminal))
+                .map_or(Err(crate::hosted::Taken::Ended), |slot| {
+                    slot.terminal.shell_has_terminal()
+                });
+            match taken {
+                Ok(()) if self.prompting(terminal) => self.type_command(terminal),
+                Ok(()) => {}
+                Err(why) => {
+                    if let Some(typing) = (self.tools.commanded.get_mut(&terminal))
+                        .and_then(|commanded| commanded.typing.as_mut())
+                    {
+                        typing.refused = Some(why);
+                    }
+                }
+            }
+        }
     }
 
     /// Types commands whose shells never showed a prompt, and answers
@@ -1633,49 +1776,8 @@ impl Daemon {
         for token in finished {
             self.flush_tools(token);
         }
-        let late: Vec<TerminalId> = (self.tools.commanded.iter())
-            .filter(|(_, commanded)| {
-                commanded
-                    .typing
-                    .as_ref()
-                    .is_some_and(|typing| typing.due <= now)
-            })
-            .map(|(&terminal, _)| terminal)
-            .collect();
-        let wait = self.config.prompt_wait.as_secs_f64();
-        for terminal in late {
-            let Some(commanded) = self.tools.commanded.get_mut(&terminal) else {
-                continue;
-            };
-            let in_front =
-                (self.terminals.get(&terminal)).is_some_and(|slot| slot.terminal.shell_in_front());
-            match commanded.typing.take() {
-                // Typed now, it would go to whatever is still starting,
-                // or be typed again at the prompt that comes.
-                Some(Typing {
-                    command,
-                    marked: true,
-                    ..
-                }) => {
-                    commanded.failed = Some(format!(
-                        "the shell didn't show a prompt within {wait} s, so `{command}` wasn't \
-                         typed: it may still be starting. Try run_in_terminal again"
-                    ));
-                    self.answer_finished(terminal, false);
-                }
-                // Another program is in front: typed, it would go to it.
-                Some(Typing { command, .. }) if !in_front => {
-                    commanded.failed = Some(format!(
-                        "another program was in front of the shell, so `{command}` wasn't typed"
-                    ));
-                    self.answer_finished(terminal, false);
-                }
-                typing => {
-                    commanded.typing = typing;
-                    self.type_command(terminal);
-                }
-            }
-        }
+        self.type_where_looked_again(now);
+        self.type_or_give_up_late(now);
         let (timed_out, kept) = std::mem::take(&mut self.tools.waiting)
             .into_iter()
             .partition(|waiting| {
@@ -2057,6 +2159,41 @@ mod keeping_whose {
         let commanded = &daemon.tools.commanded[&terminal];
         assert_eq!(commanded.owner, Some(chat));
         assert_eq!(commanded.name.as_deref(), Some("build"));
+    }
+
+    #[test]
+    fn a_command_is_typed_at_a_prompt_only_once_the_shell_still_has_it_a_moment_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = daemon_with_chat(dir.path());
+        let request = NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(vec!["cat".into()]),
+            cwd: None,
+            record_to: None,
+        };
+        let terminal = daemon.new_terminal(&request).unwrap();
+        let slot = daemon.terminals.get_mut(&terminal).unwrap();
+        slot.terminal
+            .pty()
+            .unwrap()
+            .emulator_mut()
+            .advance(b"\x1b]133;A\x07$ ");
+        daemon.type_at_first_prompt(terminal, "make".into(), None, None);
+        // At its prompt, with its terminal to itself: looked at again in a
+        // moment, not typed yet.
+        let commanded = &daemon.tools.commanded[&terminal];
+        let typing = commanded.typing.as_ref().expect("still waiting");
+        assert!(typing.again.is_some());
+        assert_eq!(commanded.expect, None);
+        // A moment later, it still has: typed.
+        let typing = (daemon.tools.commanded.get_mut(&terminal))
+            .and_then(|commanded| commanded.typing.as_mut())
+            .unwrap();
+        typing.again = Some(std::time::Instant::now());
+        daemon.time_out_tools();
+        let commanded = &daemon.tools.commanded[&terminal];
+        assert!(commanded.typing.is_none());
+        assert_eq!(commanded.expect, Some(0));
     }
 }
 

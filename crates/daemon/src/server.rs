@@ -245,15 +245,12 @@ impl Hosted {
         }
     }
 
-    /// Whether its shell is in front, at its prompt or running a command
-    /// in its own process group, rather than a program it started in a
-    /// group of its own, as one with job control does: the pty's
-    /// foreground process group is the shell's, which leads its session.
-    /// Never for a chat, nor a terminal whose program has ended.
-    fn shell_in_front(&self) -> bool {
+    /// Whether its shell has it to itself, to be typed into (see
+    /// [`HostedTerminal::shell_has_terminal`]). Never a chat.
+    fn shell_has_terminal(&self) -> Result<(), crate::hosted::Taken> {
         match self {
-            Self::Pty(terminal) => terminal.is_idle_shell(),
-            Self::Chat(_) => false,
+            Self::Pty(terminal) => terminal.shell_has_terminal(),
+            Self::Chat(_) => Err(crate::hosted::Taken::Ended),
         }
     }
 
@@ -1189,15 +1186,24 @@ impl Daemon {
                 daemon.workspaces.remove_terminal(id);
             }
         }
-        // What each shell is known to have run, as its own.
+        // What each shell is known to have run, as its own, and the program
+        // it was started as.
         for trusted in &state.trusted {
             let slot = daemon.terminals.get_mut(&TerminalId(trusted.terminal));
             if let Some(pty) = slot.and_then(|slot| slot.terminal.pty()) {
                 pty.trust_blocks(&trusted.blocks);
             }
         }
+        for exe in &state.exes {
+            let slot = daemon.terminals.get_mut(&TerminalId(exe.terminal));
+            if let Some(pty) = slot.and_then(|slot| slot.terminal.pty()) {
+                pty.started_as(Some((exe.dev, exe.ino)));
+            }
+        }
         daemon.restate_backgrounds();
-        // The terminals kept running always, as they were.
+        // The terminals kept running always, as they were, and how running
+        // each again was going.
+        daemon.resume_restarts(&state.kept);
         daemon.refresh_kept();
         for chat in chats {
             let agent = daemon.agent_spec(&chat.agent);
@@ -1321,6 +1327,7 @@ impl Daemon {
         let mut terminals = Vec::new();
         let mut shells = Vec::new();
         let mut trusted = Vec::new();
+        let mut exes = Vec::new();
         let mut chats = Vec::new();
         self.abandon_clipboard_asks();
         self.put_back_fits();
@@ -1328,7 +1335,15 @@ impl Daemon {
             match slot.terminal {
                 Hosted::Pty(terminal) => {
                     let blocks = terminal.emulator().trusted_blocks();
+                    let exe = terminal.exe();
                     let (terminal, shell) = terminal.hand_over(&mut fds);
+                    if let Some((dev, ino)) = exe {
+                        exes.push(handover::Exe {
+                            terminal: terminal.id,
+                            dev,
+                            ino,
+                        });
+                    }
                     if !blocks.is_empty() {
                         trusted.push(handover::Trusted {
                             terminal: terminal.id,
@@ -1424,11 +1439,12 @@ impl Daemon {
                 connections,
                 lent,
                 background: self.workspaces.hand_over_background(),
-                kept: self.workspaces.hand_over_kept(),
+                kept: self.hand_over_kept(),
                 borrowers,
                 lenders,
                 sharing,
                 trusted,
+                exes,
             },
             fds,
         })

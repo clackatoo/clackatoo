@@ -22,20 +22,34 @@
 //!
 //! The marks that say a block ended, and a prompt began, aren't signed, so
 //! a program can print them. A command's end is taken for one only while
-//! the pty's foreground process group is the shell's again, and the
-//! command is typed only while it is and the shell's at its prompt (see
-//! `type_command`), so what a program prints never has the command typed
-//! into it. A block the daemon itself started, by typing the command at a
-//! prompt so checked, is the command's, whether the shell signed it or
-//! not, as bash doesn't sign a command it leaves out of its history, as it
-//! does the same command twice in a row with `ignoredups`.
+//! the shell has the terminal to itself again (see
+//! `HostedTerminal::shell_has_terminal`): the pty's foreground process
+//! group is the shell's, the shell is still the program it was started as,
+//! not one it `exec`'d, and it runs nothing in its own group, as a shell
+//! without job control does. The command is typed only while that holds,
+//! the shell's at its prompt, and still holds a moment later (see
+//! `type_command`). What's left: a program that has left the shell's
+//! session or group yet reads the terminal, or bytes queued between two
+//! programs of one command line faster than the moment. A shell that starts
+//! another rather than becoming it, as `sh -c fish` does, never has its
+//! terminal to itself, so nothing is typed at all, and what's said names
+//! it.
+//!
+//! A block the daemon itself started, by typing the command at a prompt so
+//! checked, is the command's, whether the shell signed it or not, as bash
+//! doesn't sign a command it leaves out of its history, as it does the
+//! same command twice in a row with `ignoredups`.
 //!
 //! Anything typed into the terminal while it's kept running always, but
 //! the daemon's own typing, pauses running it again (see [`Kept::paused`]):
 //! the user has taken over, as with Ctrl+C, or typed ahead, which the
 //! command would be typed after. Its end then offers to run it again, as
-//! after a restart; the user running it again there, or marking it again,
-//! ends the pause. The mark itself stays, for the next fresh start.
+//! after a restart. Marking it again ends the pause; so does running it
+//! again there, but only as the shell signs it, which bash with
+//! `ignoredups` doesn't do for the same command twice in a row, offered or
+//! not. The mark itself stays, for the next fresh start. How running it
+//! again goes, the pause with it, outlasts an upgrade and its tab going to
+//! the background and back.
 //!
 //! [`Kept::paused`]: clackatoo_protocol::Kept::paused
 //!
@@ -49,6 +63,7 @@ use clackatoo_protocol::{Content, Error, Keeping, PaneId, Response, TerminalId};
 use clackatoo_term::{Progress, Terminal};
 
 use super::Daemon;
+use crate::handover;
 use crate::shell::arranges_running;
 
 /// The longest a command kept running waits to run again after it ends,
@@ -279,6 +294,70 @@ impl Daemon {
         }
     }
 
+    /// How running each kept terminal's command again was going, with its
+    /// mark, for the next build.
+    pub(super) fn hand_over_kept(&self) -> Vec<handover::Kept> {
+        let now = Instant::now();
+        let ms = |duration: Duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+        let mut kept = self.workspaces.hand_over_kept();
+        for handed in &mut kept {
+            let Some(restart) = self.keeps.restarts.get(&PaneId(handed.pane)) else {
+                continue;
+            };
+            handed.restart = Some(handover::Restarting {
+                paused_during: restart.paused_during,
+                ours: restart.ours,
+                running: restart.running,
+                handled: restart.handled,
+                quick: restart.quick,
+                wait_ms: ms(restart.wait),
+                due_in_ms: restart
+                    .due
+                    .map(|due| ms(due.saturating_duration_since(now))),
+                ended: restart.ended.map(|terminal| terminal.0),
+                started_ms_ago: restart
+                    .started
+                    .map(|at| ms(now.saturating_duration_since(at))),
+            });
+        }
+        kept
+    }
+
+    /// Takes how running each kept terminal's command again was going, as
+    /// the last build handed it over, after its marks and terminals.
+    pub(super) fn resume_restarts(&mut self, handed: &[handover::Kept]) {
+        let now = Instant::now();
+        for kept in handed {
+            let pane = PaneId(kept.pane);
+            if self.workspaces.kept(pane).is_none() {
+                continue;
+            }
+            let mut restart = Restart::new(self.config.keep_wait);
+            if let Some(was) = &kept.restart {
+                restart.paused_during = was.paused_during;
+                restart.ours = was.ours;
+                restart.running = was.running;
+                restart.handled = was.handled;
+                restart.quick = was.quick;
+                restart.wait =
+                    Duration::from_millis(was.wait_ms).clamp(restart.first, LONGEST_WAIT);
+                restart.due =
+                    (was.due_in_ms).map(|ms| now + Duration::from_millis(ms).min(LONGEST_WAIT));
+                restart.ended = was.ended.map(TerminalId);
+                restart.started =
+                    (was.started_ms_ago).and_then(|ms| now.checked_sub(Duration::from_millis(ms)));
+            } else if kept.paused {
+                // Paused, with nothing said of when: the block running now,
+                // whose output mustn't lift it.
+                restart.paused_during = (self.terminal_of_pane(pane))
+                    .and_then(|terminal| self.terminals.get(&terminal)?.terminal.grid())
+                    .and_then(Terminal::latest_block)
+                    .and_then(|(block, progress)| (progress == Progress::Running).then_some(block));
+            }
+            self.keeps.restarts.insert(pane, restart);
+        }
+    }
+
     /// Drops the pending restarts of the panes of a background tab being
     /// brought back, which brings back what has ended itself.
     pub(super) fn drop_restarts(&mut self, panes: &[PaneId]) {
@@ -302,7 +381,6 @@ impl Daemon {
         let Some(slot) = self.terminals.get(&id) else {
             return;
         };
-        let in_front = slot.terminal.shell_in_front();
         let Some(grid) = slot.terminal.grid() else {
             return;
         };
@@ -347,7 +425,15 @@ impl Daemon {
                 let finished = matches!(grid.block_progress(ended), Some(Progress::Finished(_)));
                 let its = ours(ended, restart)
                     || grid.trusted_command_of(ended) == Some(command.as_str());
-                if !finished || !its || !in_front {
+                if !finished || !its {
+                    return;
+                }
+                // Read only now, once a block of its has ended.
+                if let Err(taken) = slot.terminal.shell_has_terminal() {
+                    log::debug!(
+                        "pane {pane}: its command's end isn't taken: {}",
+                        taken.why()
+                    );
                     return;
                 }
                 restart.handled = Some(ended);
@@ -494,13 +580,17 @@ impl Daemon {
                 }
                 Some(_) => None,
                 None => self.terminal_of_pane(pane).filter(|&terminal| {
-                    // Only ever typed at a prompt, the shell in front,
-                    // never into what runs.
+                    // Only ever typed at a prompt, the shell having the
+                    // terminal to itself, never into what runs.
                     (self.terminals.get(&terminal)).is_some_and(|slot| {
-                        slot.terminal.shell_in_front()
-                            && (slot.terminal.grid())
-                                .and_then(Terminal::latest_block)
-                                .is_some_and(|(_, progress)| progress == Progress::Prompt)
+                        let prompting = (slot.terminal.grid())
+                            .and_then(Terminal::latest_block)
+                            .is_some_and(|(_, progress)| progress == Progress::Prompt);
+                        let taken = slot.terminal.shell_has_terminal();
+                        if let Err(taken) = taken {
+                            log::info!("pane {pane}: its command isn't run again: {}", taken.why());
+                        }
+                        prompting && taken.is_ok()
                     })
                 }),
             };
@@ -575,7 +665,7 @@ fn runs_clackatoo(command: &str) -> bool {
 mod tests {
     use std::path::Path;
 
-    use clackatoo_protocol::{NewTerminal, Size};
+    use clackatoo_protocol::{BackgroundAction, NewTerminal, Size};
     use mio::Token;
 
     use super::*;
@@ -634,6 +724,148 @@ mod tests {
         assert_eq!(grid.trusted_last_command(), Some("trail serve"));
         let again = resumed.serve_keep(Token(usize::MAX), pane, Keeping::Restore);
         assert!(matches!(again, Ok(Response::Text(_))), "{again:?}");
+    }
+
+    /// Has `terminal`'s shell say, with its secret, that it runs `command`,
+    /// written as a URL's path, which hasn't ended.
+    fn runs(daemon: &mut Daemon, terminal: TerminalId, command: &str) {
+        let slot = daemon.terminals.get_mut(&terminal).unwrap();
+        let emulator = slot.terminal.pty().unwrap().emulator_mut();
+        emulator.expect_secret(Some(SECRET));
+        emulator.advance(
+            format!("{command}\r\n\x1b]133;C;clackatoo={SECRET};cmdline_url={command}\x07")
+                .as_bytes(),
+        );
+    }
+
+    /// Has `terminal`'s program print `bytes`, as it's read.
+    fn prints(daemon: &mut Daemon, terminal: TerminalId, bytes: &[u8]) {
+        let slot = daemon.terminals.get_mut(&terminal).unwrap();
+        slot.terminal.pty().unwrap().emulator_mut().advance(bytes);
+        daemon.kept_moved_on(terminal);
+    }
+
+    /// The daemon of `daemon`, handed over to the next build.
+    fn upgraded(daemon: Daemon) -> Daemon {
+        let config = daemon.config.clone();
+        let mut daemon = daemon;
+        let handover = daemon.hand_over(Instant::now()).unwrap();
+        drop(daemon);
+        Daemon::resume(handover, config).unwrap()
+    }
+
+    /// A daemon whose terminal runs `trail serve`, kept running always,
+    /// typed into as it runs, which pauses it.
+    fn paused_daemon(dir: &Path) -> (Daemon, TerminalId, PaneId) {
+        let (mut daemon, terminal, pane) = kept_daemon(dir);
+        runs(&mut daemon, terminal, "trail%20serve");
+        daemon
+            .serve_keep(Token(usize::MAX), pane, Keeping::Always)
+            .unwrap();
+        // Half a command typed ahead.
+        daemon.typed_into(terminal, b"git push");
+        assert!(daemon.workspaces.kept(pane).unwrap().paused);
+        (daemon, terminal, pane)
+    }
+
+    /// Checks `pane`'s command, paused, stays paused through more of its
+    /// output, and its end offers it rather than running it.
+    fn stays_paused(daemon: &mut Daemon, terminal: TerminalId, pane: PaneId) {
+        prints(daemon, terminal, b"still serving\r\n");
+        assert!(daemon.workspaces.kept(pane).unwrap().paused, "lifted");
+        prints(daemon, terminal, b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+        assert!(daemon.workspaces.kept(pane).unwrap().paused);
+        assert_eq!(daemon.keeps.restarts[&pane].due, None, "run again");
+        assert_eq!(
+            daemon
+                .workspaces
+                .restored(pane)
+                .and_then(|restored| restored.ran.clone()),
+            Some("trail serve".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_pause_outlasts_an_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let (daemon, terminal, pane) = paused_daemon(dir.path());
+        let mut resumed = upgraded(daemon);
+        stays_paused(&mut resumed, terminal, pane);
+    }
+
+    #[test]
+    fn a_pause_outlasts_its_tab_going_to_the_background_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, pane) = paused_daemon(dir.path());
+        // Another tab, so this one can go.
+        let workspace = daemon.workspaces.get().list[0].id;
+        let request = NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(vec!["cat".into()]),
+            cwd: None,
+            record_to: None,
+        };
+        let other = daemon.new_terminal(&request).unwrap();
+        daemon.workspaces.new_tab(workspace, other);
+        let tab = daemon.workspaces.get().find_pane(pane).unwrap().1.id;
+        let token = Token(usize::MAX);
+        daemon
+            .serve_background(token, &BackgroundAction::Tab { tab })
+            .unwrap();
+        daemon
+            .serve_background(token, &BackgroundAction::Bring { tab })
+            .unwrap();
+        stays_paused(&mut daemon, terminal, pane);
+    }
+
+    #[test]
+    fn a_run_the_daemon_typed_is_its_commands_after_an_upgrade_though_unsigned() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, pane) = kept_daemon(dir.path());
+        daemon
+            .serve_keep(Token(usize::MAX), pane, Keeping::Always)
+            .unwrap();
+        // As if its run again had been typed at the prompt, block 1.
+        let restart = daemon.keeps.restarts.get_mut(&pane).unwrap();
+        restart.due = None;
+        daemon.kept_typed(terminal, Some(1), 0);
+        let mut resumed = upgraded(daemon);
+        // The shell leaves it unsigned, as bash with ignoredups does a
+        // command run twice in a row.
+        prints(
+            &mut resumed,
+            terminal,
+            b"trail serve\r\n\x1b]133;C;cmdline_url=trail%20serve\x07out\r\n\
+              \x1b]133;D;0\x07\x1b]133;A\x07$ ",
+        );
+        assert!(resumed.keeps.restarts[&pane].due.is_some(), "not run again");
+    }
+
+    #[test]
+    fn a_shell_running_a_program_in_its_own_group_or_become_another_hasnt_its_terminal() {
+        use crate::hosted::Taken;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, terminal, _) = kept_daemon(dir.path());
+        let check =
+            |daemon: &Daemon, terminal| daemon.terminals[&terminal].terminal.shell_has_terminal();
+        assert_eq!(check(&daemon, terminal), Ok(()));
+        // Not the program it started as, as after `exec`.
+        let slot = daemon.terminals.get_mut(&terminal).unwrap();
+        slot.terminal.pty().unwrap().started_as(Some((1, 1)));
+        assert_eq!(check(&daemon, terminal), Err(Taken::Exec));
+        // A shell without job control running a program: in its own group.
+        let request = NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(vec!["sh".into(), "-c".into(), "sleep 5; true".into()]),
+            cwd: None,
+            record_to: None,
+        };
+        let shell = daemon.new_terminal(&request).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !matches!(check(&daemon, shell), Err(Taken::Child(_))) {
+            assert!(Instant::now() < deadline, "{:?}", check(&daemon, shell));
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
