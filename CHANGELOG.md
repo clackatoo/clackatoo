@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026.10.64 (2026-10-20)
+
+### Features
+
+- background tabs, kept running out of the tab bar (CLACKA-121) (2b61f17)
+- start commands in the background, and see the ports they listen on (CLACKA-121) (a8fbaa2)
+- keep a terminal running, by a mark only the user sets (CLACKA-121) (715f4c5)
+
+### Fixes
+
+- **daemon:** the boards' lock waits a moment for a copy a starting process holds, as the workspaces' does (a2c94d5)
+- one look for background tabs' ports at a time; the shell's marks and rebinding Ctrl+B b in the docs (6050928)
+- kept commands only ever typed into their own shell, and the review's other findings (CLACKA-121) (7bea120)
+- **docs:** what keeping a terminal running guards against, and what it doesn't (CLACKA-121) (5ccd770)
+- a shell has its terminal to itself before anything's typed, and a pause outlasts an upgrade (CLACKA-121) (660bce8)
+
 ## 2026.10.63 (2026-10-20)
 
 ### Fixes
