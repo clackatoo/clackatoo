@@ -583,13 +583,25 @@ fn lock(dir: &Path) -> Result<File, String> {
         .mode(0o600)
         .open(dir.join(LOCK))
         .map_err(failed)?;
-    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => Ok(file),
-        Err(rustix::io::Errno::WOULDBLOCK) => Err(format!(
-            "another clackatoo daemon keeps the boards in {}: this one has none",
-            dir.display()
-        )),
-        Err(err) => Err(failed(err.into())),
+    // A lock just let go of may still be held a moment by a copy of its
+    // file a process starting meanwhile took, until it runs its program,
+    // as the workspaces' may (see `saved::lock`): this is the boards'
+    // thread, which may wait.
+    let patient = std::time::Instant::now() + crate::saved::LOCK_PATIENCE;
+    loop {
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(file),
+            Err(rustix::io::Errno::WOULDBLOCK) if std::time::Instant::now() < patient => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(rustix::io::Errno::WOULDBLOCK) => {
+                return Err(format!(
+                    "another clackatoo daemon keeps the boards in {}: this one has none",
+                    dir.display()
+                ));
+            }
+            Err(err) => return Err(failed(err.into())),
+        }
     }
 }
 
