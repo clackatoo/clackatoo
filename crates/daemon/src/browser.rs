@@ -1514,7 +1514,13 @@ fn snap_name(program: &Path) -> Result<Option<String>, String> {
         .canonicalize()
         .map_err(|err| format!("{} can't be found: {err}", program.display()))?;
     let named = |name: &str| name.split('.').next().unwrap_or(name).to_owned();
-    if real.file_name().is_some_and(|name| name == "snap") || program.starts_with("/snap/bin") {
+    // snap itself, which on some systems is a link to a program of another
+    // name.
+    let snap = Path::new("/usr/bin/snap").canonicalize().ok();
+    if real.file_name().is_some_and(|name| name == "snap")
+        || snap.as_deref() == Some(real.as_path())
+        || program.starts_with("/snap/bin")
+    {
         let name = program.file_name().and_then(|name| name.to_str());
         return Ok(Some(named(name.unwrap_or("chromium"))));
     }

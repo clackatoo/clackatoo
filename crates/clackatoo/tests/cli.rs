@@ -1297,7 +1297,14 @@ fn shells_follow_the_display_but_never_a_variable_set_by_hand() {
     for (shell, zshenv) in integrated_shells() {
         let name = shell.file_name().unwrap().to_string_lossy().into_owned();
         let home = tempfile::tempdir().unwrap();
-        std::fs::write(home.path().join(".zshenv"), format!("{zshenv}{ALIASES}")).unwrap();
+        // The system's own files read after `.zshenv` (Debian's zshrc) would
+        // trip over the aliases too, which isn't the integration's to answer
+        // for, so they aren't read.
+        std::fs::write(
+            home.path().join(".zshenv"),
+            format!("{zshenv}unsetopt GLOBAL_RCS\n{ALIASES}"),
+        )
+        .unwrap();
         // Set in the user's own startup files.
         let mine = "builtin export XAUTHORITY=/mine\n";
         std::fs::write(home.path().join(".bashrc"), format!("{mine}{ALIASES}")).unwrap();
