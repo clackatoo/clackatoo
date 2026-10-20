@@ -1,0 +1,82 @@
+---
+title: Your phone
+type: reference
+description: "The web app the daemon serves, for your phone or any browser: setting it up over Tailscale or the network, pairing devices, notifications, and what's kept where."
+related:
+  - clackatoo/reference/remote
+  - clackatoo/reference/config
+---
+
+The daemon can serve a web app: your chats by workspace, with those that need you first, and each chat as a window shows it, with its questions, the message box, Stop, the model, mode and effort menus, how much context it fills, and the cards of the chats its agent started. A phone can answer anything a window can, tool approvals included. And your terminals, to read and type into.
+
+## Turning it on
+
+It's off until `~/.config/clackatoo/daemon/web.toml` says otherwise. The daemon reads it when it starts or upgrades (`clackatoo upgrade`).
+
+    mode = "tailscale"   # or "public", or "off"
+    login = "you@github" # tailscale: who's let in
+    origin = "https://desktop.example.ts.net"
+    expire_days = 90     # unpair devices unused this long
+    password_days = 0    # ask for the password again after this many days
+    ask = true           # devices may ask a window to let them in
+    lock_after = 50      # wrong passwords in a row before password pairing locks
+
+### Through Tailscale
+
+The daemon listens on a socket only you can open, `~/.local/share/clackatoo/web/web.sock`. Give it to your tailnet over HTTPS with
+
+    tailscale serve --bg unix:$HOME/.local/share/clackatoo/web/web.sock
+
+and open `https://<machine>.<tailnet>.ts.net`. A request must come through `tailscale serve`, carrying Tailscale's `Tailscale-User-Login`, and that login must be `login`. Without `login` set, only a window can let the first device in. The socket keeps other users of the machine out, but not your own programs: what lets a device in is the token it's given when it pairs.
+
+### Straight from the network
+
+    mode = "public"
+    address = "0.0.0.0"
+    port = 8765
+    certificate = "/path/fullchain.pem"
+    key = "/path/privkey.pem"
+    origin = "https://example.com:8765"
+
+This needs a password and `origin`, and `ask` is off unless you turn it on. Getting certificates by ACME isn't built yet, so you bring your own; it's read again when its files change.
+
+## Pairing a device
+
+A device pairs once:
+
+- **with the password**, which `clackatoo web password` sets. Only its Argon2id hash is kept, in web.toml. Tries are limited to five at once, then one a minute, from each address (IPv6 by /64), and to about twenty a minute from everywhere together. After `lock_after` wrong passwords in a row, password pairing locks, and stays locked after a restart, until `:Devices unlock` or `clackatoo devices unlock`; every window's bar says so. Anyone can lock it this way, but devices already paired keep working.
+- **by asking a window.** The phone shows a code, and every window's bar says a device asks. Type `:Devices allow CODE` to let it in, or `:Devices deny`. The window never shows the code, so only someone holding the phone can let it in.
+
+The device then keeps a token in a cookie its scripts can't read; the daemon keeps only its hash. `:Devices` (or `clackatoo devices`) lists paired devices, and `:Devices revoke N` unpairs one, cutting it off at once. A device unused for `expire_days` is unpaired, and one past `password_days` is asked for the password again; either cuts off a device that's connected.
+
+On an iPhone, add the app to the home screen first (Share → Add to Home Screen) and pair it from there: the home-screen app keeps its own cookies, and only it can get notifications.
+
+What a phone does in a chat is logged with the device's number.
+
+While the agent works, the bar at the foot of a chat says what it's doing and for how long, beside three pulsing dots, however far up you've scrolled. The seconds count only while the page is on screen and the app is connected, and the dots keep still if your phone asks for less motion. In the list of chats, those whose agent is starting or working show the dots too.
+
+At the end of the box's menus is how much of its context the chat fills, as `42% context` over a thin bar that turns amber past 80% and red past 95%, as in a window, with a Claude account's 5-hour or weekly limit before it once that's past 80%. Tap it for the detail above the menus: the tokens, and each limit, how much is used and when it resets, in your phone's time. Tap it again to hide it.
+
+## Terminals
+
+Each workspace lists its terminals under its chats, with what each is running, where, and its size; terminals in no workspace are under Elsewhere. Tap one to follow it.
+
+A terminal is shown at its own size, the one your windows gave it: as wide as the phone allows, but never in type under 7 pixels, so a wider one pans sideways under your finger. Pinch to zoom. Scroll up for its history, fetched as you go. A command that failed ends its prompt's line with a dim red `✗` and its exit status, as in a window, on the screen and in history.
+
+**Fit** makes the terminal the phone's size instead, and says Fitted while it lasts; it's fitted again when the keyboard comes up or goes. It goes back when you tap Fitted, leave the terminal or put the phone away, or type into it from a window; windows' resizes wait till then, and it takes the latest they asked for. A phone that stops asking for the fit, as one asleep does, loses it within a minute. The phone never resizes a terminal any other way.
+
+Tap the rows for the keyboard. What you type goes as you type it, a key at a time, with the keyboard's corrections off and curly quotes made straight. Two rows above the keyboard have Esc, Tab, Ctrl (for the next key: Ctrl then c is Ctrl+C), ^C, the arrows, `|`, `~`, `/`, `-` and Paste; a keyboard attached to the phone works too. A paste of several lines into a program that hasn't asked for pastes marked as such asks first, since each line would run as you'd typed it; a paste over a megabyte is turned down. When the daemon can't be reached, or hasn't answered for three seconds, keys are turned down and the phone says how many, rather than reach a shell long after you meant them. Nothing is kept to send later.
+
+The log notes the device that fits a terminal, or starts typing into one, never what it typed.
+
+## Notifications
+
+Tap **Turn on** in the app. The phone is then told when a chat finishes a turn, or asks you something, while no window you're using shows it. A window counts as in use while it has the focus and has been used in the last five minutes. A notification carries only the chat's title and a few words, sealed for your device, and goes only to Apple's, Google's, Mozilla's or Microsoft's push services.
+
+## What's kept
+
+`~/.local/share/clackatoo/web/`: `devices.json`, with names, token hashes, push subscriptions and whether password pairing is locked, and `vapid.p8`, the key notifications are signed with. Only you can read either.
+
+## Building it
+
+The web app is built into the program when it's compiled, which needs the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` 0.2.129. A build without them serves a page saying the app is missing; `CLACKATOO_WEB_APP=off` leaves it out on purpose. Releases always include it.

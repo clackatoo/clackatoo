@@ -1,0 +1,5 @@
+sitename = "clackatoo Docs"
+title = "clackatoo Docs"
+description = "Using and developing clackatoo, a fast, lightweight terminal workspace."
+footer = "Peios Learn"
+featured = ["clackatoo"]

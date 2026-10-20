@@ -1,5 +1,9 @@
 /target
 
+# Trail's build cache and default output, beside the docs it builds
+/docs/learn/.trail-cache/
+/docs/learn/dist/
+
 # Claude Code's session locks and agent worktrees, but for the project's
 # settings. Each worktree has a .git of its own, so `git add -A` would
 # stage it as an embedded repository.

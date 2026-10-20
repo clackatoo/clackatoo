@@ -1,0 +1,5 @@
+title = "clackatoo"
+monogram = "Ck"
+color = "#f97316"
+
+description = "A fast, lightweight terminal workspace, built around a daemon that owns every terminal."
