@@ -277,6 +277,9 @@ pub(crate) struct Desk {
     /// The failures of background tabs the list said were seen as it
     /// opened, by tab, which it goes on saying while it's open.
     background_seen: Vec<(TabId, i32)>,
+    /// The TCP ports each background tab's programs listen on, as the
+    /// daemon last said, while the list of them is open.
+    background_ports: Vec<clackatoo_protocol::Listening>,
     /// The pane an agent last pointed out, and until when it's lit.
     pointed: Option<(PaneId, std::time::Instant)>,
     /// The chats, as a list, to mark the tabs and workspaces with.
@@ -2655,6 +2658,7 @@ impl Desk {
             Command::Browser(place) => self.open_browser(place),
             Command::Review(review) => self.run_review(review),
             Command::Background(command) => self.background_command(command),
+            Command::BackgroundStart(command) => self.start_in_background(command),
             Command::Reload
             | Command::Set(_)
             | Command::Update(_)

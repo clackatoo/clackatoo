@@ -1140,10 +1140,13 @@ impl Daemon {
             Request::Background(action) => match *action {
                 BackgroundAction::Tab { tab } => self.relayed_tab(tab).map(|(at, _)| at),
                 BackgroundAction::Pane { pane } => self.relayed_pane(pane).map(|(at, _)| at),
-                BackgroundAction::Seen { workspace } => {
+                BackgroundAction::Seen { workspace }
+                | BackgroundAction::Start { workspace, .. } => {
                     self.relayed_workspace(workspace).map(|(at, _)| at)
                 }
-                BackgroundAction::Bring { .. } | BackgroundAction::Dismiss { .. } => None,
+                BackgroundAction::Bring { .. }
+                | BackgroundAction::Dismiss { .. }
+                | BackgroundAction::Ports => None,
             }
             .map(|at| (at, Err(self.not_yet(at, "background tabs")))),
             _ => None,

@@ -129,17 +129,22 @@ fn the_list_shows_this_workspaces_first_previews_the_screen_and_brings_one_back(
             _ => None,
         })
         .collect();
+    // And the ports it listens on.
     assert_eq!(
         requests,
-        [Request::Capture {
-            terminal: TerminalId(5)
-        }]
+        [
+            Request::Capture {
+                terminal: TerminalId(5)
+            },
+            Request::Background(BackgroundAction::Ports)
+        ]
     );
     let mut screen = Terminal::new(Size::new(30, 4).unwrap(), &Config::default());
     screen.advance(b"$ trail serve\r\nlistening on :8080");
     let view = View::capture(&screen);
     assert!(matches!(view.root, Node::Grid(GridNode { .. })));
     assert!(desk.answered(Response::View(view)));
+    desk.answered(Response::Done);
     let shown = desk.finder_view((10, 40), Some((10, 40))).unwrap();
     let rows: Vec<&str> = shown.rows.iter().map(|row| row.text.as_str()).collect();
     // The workspace shown's go without saying it.
@@ -203,4 +208,67 @@ fn a_daemon_without_background_tabs_is_never_asked() {
     normal_mode(&mut desk);
     command(&mut desk, "bg");
     assert!(asked(&answer_all(&mut desk)).is_empty());
+}
+
+#[test]
+fn bg_with_a_command_starts_it_in_a_new_background_tab_from_the_focused_pane() {
+    let mut desk = desk(with_background(Vec::new(), Vec::new()));
+    snapshot(&mut desk, 1);
+    normal_mode(&mut desk);
+    command(&mut desk, "bg trail serve --port 8080");
+    let asked = asked(&answer_all(&mut desk));
+    let [
+        BackgroundAction::Start {
+            workspace,
+            command,
+            cwd: None,
+            pane: Some(pane),
+            ..
+        },
+    ] = &asked[..]
+    else {
+        panic!("{asked:?}");
+    };
+    assert_eq!(
+        (*workspace, command.as_str(), *pane),
+        (WorkspaceId(1), "trail serve --port 8080", PaneId(1))
+    );
+}
+
+#[test]
+fn the_list_says_the_ports_each_listens_on_and_ctrl_f_forwards_them() {
+    use clackatoo_protocol::{Listening, ListeningPort};
+    let mut desk = desk(with_background(
+        vec![background(5, BackgroundState::Running, None, "trail serve")],
+        Vec::new(),
+    ));
+    normal_mode(&mut desk);
+    command(&mut desk, "Background");
+    // The ports are asked for as it opens.
+    assert!(asked(&answer_all(&mut desk)).contains(&BackgroundAction::Ports));
+    assert!(desk.listening(vec![Listening {
+        tab: TabId(5),
+        ports: vec![
+            ListeningPort {
+                port: 8080,
+                program: "trail".into(),
+            },
+            ListeningPort {
+                port: 35729,
+                program: "trail".into(),
+            },
+        ],
+    }]));
+    let shown = desk.finder_view((10, 60), None).unwrap();
+    assert_eq!(shown.rows[0].text, "trail serve  running · :8080 :35729");
+    ctrl(&mut desk, "f");
+    assert!(desk.finder.is_none());
+    let forwards = desk.take_forwards_asked();
+    let ports: Vec<u16> = (forwards.iter())
+        .map(|forwarding| match forwarding {
+            crate::command::Forwarding::Add(spec) => spec.port,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(ports, [8080, 35729]);
 }

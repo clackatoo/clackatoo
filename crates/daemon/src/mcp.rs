@@ -138,6 +138,12 @@ pub(crate) enum Tool {
         cwd: Option<String>,
         name: Option<String>,
     },
+    /// Run a command in a new background tab of the chat's workspace.
+    RunInBackground {
+        command: String,
+        cwd: Option<String>,
+        name: Option<String>,
+    },
     /// Read a terminal: its last command's output, its last `lines`
     /// lines.
     ReadTerminal { pane: PaneId, lines: usize },
@@ -757,6 +763,18 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
             }
             Tool::RunInTerminal { command, cwd, name }
         }
+        "run_in_background" => {
+            let Run { command, cwd, name } = args(arguments)?;
+            if command.trim().is_empty() {
+                return Err(Bad("the command is empty".to_owned()));
+            }
+            if command.len() > MAX_SEND {
+                return Err(Bad(format!(
+                    "the command is over {MAX_SEND} bytes: write it to a file and run that"
+                )));
+            }
+            Tool::RunInBackground { command, cwd, name }
+        }
         "read_terminal" => {
             let Read { pane, lines } = args(arguments)?;
             Tool::ReadTerminal {
@@ -1129,6 +1147,23 @@ fn clackatoo_tools() -> Value {
                 "command": { "type": "string", "description": "The command line, as typed at the shell's prompt." },
                 "cwd": { "type": "string", "description": "The directory to run it in. Defaults to the chat's working directory." },
                 "name": { "type": "string", "description": "A short name for the terminal, as list_panes shows it." },
+            }, "required": ["command"] },
+            "annotations": { "destructiveHint": true, "openWorldHint": true },
+        },
+        {
+            "name": "run_in_background",
+            "title": "Run a command in a background tab",
+            "description": "Runs a shell command in a new background tab of this chat's workspace: a \
+                terminal kept running out of the user's tab bar, which they find in their list of \
+                background tabs, without their focus moving. Use it for what runs on by itself, as a \
+                dev server or a watcher, that the user needn't watch. Returns at once with the \
+                terminal's pane number: read_terminal reads its output, wait_for_terminal waits for \
+                the command to finish, and list_panes lists the workspace's background tabs. The \
+                user may be asked first.",
+            "inputSchema": { "type": "object", "properties": {
+                "command": { "type": "string", "description": "The command line, as typed at the shell's prompt." },
+                "cwd": { "type": "string", "description": "The directory to run it in. Defaults to the chat's working directory." },
+                "name": { "type": "string", "description": "A short name for the terminal." },
             }, "required": ["command"] },
             "annotations": { "destructiveHint": true, "openWorldHint": true },
         },

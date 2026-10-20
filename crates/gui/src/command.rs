@@ -42,8 +42,9 @@
 //! port, all of them.
 //! `bg` sends the tab shown to the background, where it keeps running out
 //! of the tab bar, and `bgpane` the focused pane alone, in a background
-//! tab of its own; `Background` lists the background tabs, as the finder
-//! lists files.
+//! tab of its own; `bg CMD` starts the command in a new background tab, in
+//! the focused pane's folder; `Background` lists the background tabs, as
+//! the finder lists files.
 //! `Board NAME` opens the board called that, made if there's none, in a
 //! tab or with a mark beside; `Board` alone, or `Boards`, picks one in
 //! the finder. `Browser` opens the focused chat's page in clackatoo's
@@ -233,6 +234,9 @@ pub(crate) enum Command {
     PortForward(Forwarding),
     /// Something to do with background tabs.
     Background(BackgroundCommand),
+    /// `:bg CMD`: the command started in a new background tab of the
+    /// workspace shown, in the focused pane's folder.
+    BackgroundStart(String),
 }
 
 /// What `:bg`, `:bgpane` and `:Background` do.
@@ -418,10 +422,14 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
 /// `:bg`, `:bgpane` or `:Background`, as `word` says, with `argument`
 /// after it.
 fn background_command(word: &str, argument: Option<&str>) -> Result<Command, String> {
-    if let Some(argument) = argument {
-        return Err(format!(
-            "{word} takes nothing after it, but has {argument:?}"
-        ));
+    match argument {
+        Some(command) if word == "bg" => return Ok(Command::BackgroundStart(command.to_owned())),
+        Some(argument) => {
+            return Err(format!(
+                "{word} takes nothing after it, but has {argument:?}"
+            ));
+        }
+        None => {}
     }
     Ok(Command::Background(match word {
         "bg" => BackgroundCommand::Tab,

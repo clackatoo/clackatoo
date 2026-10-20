@@ -40,6 +40,26 @@ Press Enter.
 background 0
 ```
 
+## Start one in the background
+
+`:bg CMD` starts a command straight in a new background tab, in the focused pane's folder, typed at a new shell's prompt as you'd type it, without showing it. `clackatoo bg -- CMD` does the same from a shell, and agents start dev servers so with their `run_in_background` tool.
+
+In normal mode, type `:bg python3 -m http.server 8000`.
+
+```check
+background 1
+```
+
+## Ports
+
+The list says the ports each one's programs listen on, as `· :8000`, looked at again every two seconds while it's open. In a window on another machine than the daemon, Ctrl+F in the list forwards them here, as `:PortForward 8000` does.
+
+Press Ctrl+B, then `b`, then `l`, and look for `:8000` beside it.
+
+```check
+finder background
+```
+
 ## A pane alone
 
 Ctrl+B b p sends only the focused pane to the background, in a tab of its own; a tab's last pane takes the tab with it. `:bg` and `:bgpane` do what the keys do. The workspace's only tab can go too: a shell takes its place.

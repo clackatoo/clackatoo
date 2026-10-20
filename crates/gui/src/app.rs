@@ -3352,6 +3352,11 @@ impl App {
                 self.desk.daemon_said(&said);
                 self.request_redraw();
             }
+            SessionEvent::Message(ServerMessage::Event(Event::Listening(listening))) => {
+                if self.desk.listening(listening) {
+                    self.request_redraw();
+                }
+            }
             SessionEvent::Message(ServerMessage::Event(Event::View { terminal, update })) => {
                 if self.desk.view_changed(terminal, &update) {
                     self.request_redraw();

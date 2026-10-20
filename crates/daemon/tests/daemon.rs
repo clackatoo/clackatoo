@@ -4532,7 +4532,8 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Connections(_)
             | Event::Login { .. }
             | Event::Forwarded(_)
-            | Event::Said(_)) => {
+            | Event::Said(_)
+            | Event::Listening(_)) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }
@@ -11402,6 +11403,7 @@ fn the_tools_speak_mcp_over_the_relays_stdio() {
         [
             "open_file",
             "run_in_terminal",
+            "run_in_background",
             "read_terminal",
             "wait_for_terminal",
             "send_to_terminal",
@@ -17630,4 +17632,187 @@ fn background_tabs_are_kept_and_come_back_after_a_restart_offering_what_ran() {
     let shown = client.watch_workspaces().unwrap();
     assert_eq!(shown.restored.len(), 1);
     assert_eq!(shown.restored[0].pane, pane);
+}
+
+#[test]
+fn a_command_starts_in_a_new_background_tab_typed_at_its_shells_prompt() {
+    use clackatoo_protocol::{BackgroundAction, BackgroundState};
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    let daemon = TestDaemon::keeping_with_secret_shell(&file, &seen);
+    let dir = kept.path().join("site");
+    std::fs::create_dir(&dir).unwrap();
+    let mut client = daemon.client();
+    let first = (client.new_workspace(Some("site".into()), shell_in(&dir))).unwrap();
+    let workspace = client.watch_workspaces().unwrap().list[0].id;
+    let start = BackgroundAction::Start {
+        workspace,
+        command: "sleep 60".into(),
+        cwd: None,
+        pane: Some(first),
+        size: Size::new(60, 10).unwrap(),
+    };
+    let Response::PaneCreated(pane) = background(&mut client, start) else {
+        panic!("no pane");
+    };
+    // Running, as its shell says, out of the tab bar, the focus where it
+    // was.
+    let shown = wait_for_background(&mut client, |background| {
+        background.len() == 1 && background[0].state == BackgroundState::Running
+    });
+    let site = &shown.list[0];
+    assert_eq!(site.tabs.len(), 1);
+    assert_eq!(site.tabs[0].focused, first);
+    let started = &site.background[0];
+    assert_eq!(started.tab.layout.panes()[0].id, pane);
+    assert_eq!(started.name, "sleep 60");
+    let terminal = started.tab.terminals()[0];
+    // Typed at its shell's first prompt.
+    wait_for_screen(&mut client, terminal, |text| text.contains("$ sleep 60"));
+    wait_for_background(&mut client, |background| {
+        background[0].state == BackgroundState::Running
+    });
+    assert_eq!(
+        client
+            .list_terminals()
+            .unwrap()
+            .iter()
+            .find(|info| info.id == terminal)
+            .and_then(|info| info.command.clone())
+            .as_deref(),
+        Some("sleep 60")
+    );
+    // A workspace that isn't there, or a command that's empty, starts
+    // nothing.
+    let nowhere = BackgroundAction::Start {
+        workspace: clackatoo_protocol::WorkspaceId(99),
+        command: "true".into(),
+        cwd: None,
+        pane: None,
+        size: Size::new(60, 10).unwrap(),
+    };
+    assert!(matches!(
+        background(&mut client, nowhere),
+        Response::Error(_)
+    ));
+    let empty = BackgroundAction::Start {
+        workspace,
+        command: "  ".into(),
+        cwd: None,
+        pane: None,
+        size: Size::new(60, 10).unwrap(),
+    };
+    assert!(matches!(background(&mut client, empty), Response::Error(_)));
+    assert_eq!(
+        client.watch_workspaces().unwrap().list[0].background.len(),
+        1
+    );
+}
+
+/// The ports the daemon next says background tabs listen on.
+fn next_listening(client: &mut Client) -> Vec<clackatoo_protocol::Listening> {
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    loop {
+        if let Event::Listening(listening) = client.next_event().expect("the ports") {
+            return listening;
+        }
+    }
+}
+
+#[test]
+fn the_ports_a_background_tabs_programs_listen_on_are_found_when_asked() {
+    use clackatoo_protocol::BackgroundAction;
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("no python3 to listen with: skipped");
+        return;
+    }
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    let daemon = TestDaemon::keeping_with_secret_shell(&file, &seen);
+    let mut client = daemon.client();
+    let first = (client.new_workspace(None, shell_in(kept.path()))).unwrap();
+    let workspace = client.watch_workspaces().unwrap().list[0].id;
+    let listen = "python3 -c 'import socket,time; s=socket.socket(); \
+                  s.bind((\"127.0.0.1\",0)); s.listen(); \
+                  print(\"port\", s.getsockname()[1], flush=True); time.sleep(60)'";
+    let start = BackgroundAction::Start {
+        workspace,
+        command: listen.into(),
+        cwd: None,
+        pane: Some(first),
+        size: Size::new(80, 10).unwrap(),
+    };
+    background(&mut client, start);
+    let workspaces = client.watch_workspaces().unwrap();
+    let started = &workspaces.list[0].background[0];
+    let (tab, terminal) = (started.tab.id, started.tab.terminals()[0]);
+    let screen = wait_for_screen(&mut client, terminal, |text| {
+        text.lines().any(|line| line.starts_with("port "))
+    });
+    let port: u16 = (screen.lines())
+        .find_map(|line| line.strip_prefix("port "))
+        .and_then(|port| port.trim().parse().ok())
+        .unwrap();
+    assert_eq!(
+        background(&mut client, BackgroundAction::Ports),
+        Response::Done
+    );
+    let listening = next_listening(&mut client);
+    assert_eq!(listening.len(), 1);
+    assert_eq!(listening[0].tab, tab);
+    let found: Vec<(u16, &str)> = (listening[0].ports.iter())
+        .map(|port| (port.port, port.program.as_str()))
+        .collect();
+    assert_eq!(found, [(port, "python3")]);
+}
+
+#[test]
+fn an_agent_starts_a_command_in_a_background_tab_asking_first_and_reads_it() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let prompt = "mcp run_in_background {\"command\":\"echo serving\"}\n\
+                  mcp wait_for_terminal {\"pane\":2}\n\
+                  mcp list_panes\n\
+                  mcp show_pane {\"pane\":2}";
+    client
+        .chat(chat, ChatAction::Send(prompt.to_owned()))
+        .unwrap();
+    let asking = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    assert_eq!(
+        asking.question.unwrap().title,
+        "run `echo serving` in a new background tab, out of your tab bar"
+    );
+    assert!(
+        client.watch_workspaces().unwrap().list[0]
+            .background
+            .is_empty()
+    );
+    answer(&mut client, chat, Some("allow".to_owned()));
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    let words = last_words(&node);
+    assert!(
+        words.contains("run_in_background: Running `echo serving` in pane 2, in a background tab"),
+        "{words}"
+    );
+    assert!(
+        words.contains("wait_for_terminal: $ echo serving\nserving\n[exited with status 0]"),
+        "{words}"
+    );
+    assert!(words.contains("Background tab"), "{words}");
+    assert!(words.contains("  pane 2: terminal"), "{words}");
+    assert!(
+        words.contains("show_pane: failed: pane 2 is in a background tab"),
+        "{words}"
+    );
+    // Out of the tab bar: the chat's tab is as it was.
+    let workspaces = client.watch_workspaces().unwrap();
+    assert_eq!(workspaces.list[0].tabs[0].layout.panes().len(), 1);
+    assert_eq!(workspaces.list[0].background.len(), 1);
 }

@@ -685,6 +685,17 @@ impl Daemon {
                     .unwrap_or_default();
                 Some(asked("run", command, &format!("in a new terminal{place}")))
             }
+            Tool::RunInBackground { command, cwd, .. } => {
+                if tools == AgentTools::Allow {
+                    return None;
+                }
+                let place = cwd
+                    .as_ref()
+                    .map(|cwd| format!(" in {}", visible(cwd)))
+                    .unwrap_or_default();
+                let then = format!("in a new background tab{place}, out of your tab bar");
+                Some(asked("run", command, &then))
+            }
             Tool::SendToTerminal { pane, text } => {
                 // Out of reach, it fails without asking.
                 let terminal = self.terminal_in(chat, *pane).ok()?;
@@ -793,6 +804,9 @@ impl Daemon {
             Tool::OpenFile { path, line } => self.open_file(chat, &path, line),
             Tool::RunInTerminal { command, cwd, name } => {
                 self.run_in_terminal(chat, command, cwd.as_deref(), name)
+            }
+            Tool::RunInBackground { command, cwd, name } => {
+                self.run_in_background(chat, command, cwd.as_deref(), name)
             }
             Tool::ReadTerminal { pane, lines } => (self.terminal_in(chat, pane))
                 .map(|terminal| self.describe_terminal(pane, terminal, lines)),
@@ -947,10 +961,16 @@ impl Daemon {
     }
 
     /// Checks `pane` is in the chat `chat`'s workspace, which is as far as
-    /// its agent's tools reach.
+    /// its agent's tools reach: in one of its tabs, or its background tabs.
     fn in_reach(&self, chat: TerminalId, pane: PaneId) -> Result<Content, String> {
         let workspaces = self.workspaces.get();
-        let Some((workspace, _, found)) = workspaces.find_pane(pane) else {
+        let found = (workspaces.find_pane(pane))
+            .map(|(workspace, _, found)| (workspace, found))
+            .or_else(|| {
+                (workspaces.find_background_pane(pane))
+                    .map(|(workspace, _, found)| (workspace, found))
+            });
+        let Some((workspace, found)) = found else {
             return Err(format!("there's no pane {pane}: list_panes lists them"));
         };
         let theirs = (self.anchor_pane(chat))
@@ -1079,6 +1099,12 @@ impl Daemon {
     /// where it is.
     fn show_pane(&mut self, chat: TerminalId, pane: PaneId) -> Result<String, String> {
         self.in_reach(chat, pane)?;
+        if self.workspaces.get().find_pane(pane).is_none() {
+            return Err(format!(
+                "pane {pane} is in a background tab, out of the user's tab bar: they find it \
+                 in their list of background tabs"
+            ));
+        }
         self.show(pane, None);
         Ok(format!(
             "Pane {pane} is pointed out to the user. Their typing stays where it was."
@@ -1120,6 +1146,22 @@ impl Daemon {
                     ""
                 };
                 let _ = writeln!(text, "  pane {}: {what}{focused}", pane.id);
+            }
+        }
+        for background in &workspace.background {
+            let name = background.tab.name.as_ref().or(Some(&background.name));
+            let name = name
+                .filter(|name| !name.is_empty())
+                .map(|name| format!(" {name:?}"))
+                .unwrap_or_default();
+            let _ = writeln!(
+                text,
+                "Background tab{name}, out of the user's tab bar ({}):",
+                background_said(background.state)
+            );
+            for pane in background.tab.layout.panes() {
+                let what = self.describe_pane(pane.content, &dir);
+                let _ = writeln!(text, "  pane {}: {what}", pane.id);
             }
         }
         let others: Vec<&str> = (workspaces.list.iter())
@@ -1230,6 +1272,61 @@ impl Daemon {
             return Err("the terminal closed at once".to_owned());
         };
         let shown = format!("`{command}`");
+        self.type_at_first_prompt(terminal, command, Some(chat), name);
+        Ok(format!(
+            "Running {shown} in pane {pane}, which the user can see. wait_for_terminal waits for \
+             it to finish; read_terminal reads its output."
+        ))
+    }
+
+    /// `run_in_background`: starts a shell in a new background tab of the
+    /// chat's workspace, and types `command` at its first prompt. Nothing
+    /// is shown: the user finds it in their list of background tabs.
+    fn run_in_background(
+        &mut self,
+        chat: TerminalId,
+        command: String,
+        cwd: Option<&str>,
+        name: Option<String>,
+    ) -> Result<String, String> {
+        let dir = self.chat_dir(chat)?;
+        let cwd = match cwd {
+            Some(cwd) => super::buffers::resolve(cwd, Path::new(&dir), &self.config.home),
+            None => dir.into(),
+        };
+        if !cwd.is_dir() {
+            return Err(format!("there's no directory {}", cwd.display()));
+        }
+        let own = self.anchor_pane(chat).ok_or("the chat isn't in a pane")?;
+        let (workspace, _, _) =
+            (self.workspaces.get().find_pane(own)).ok_or("the chat isn't in a pane")?;
+        let workspace = workspace.id;
+        let size = self.chat(chat).ok_or("the chat has closed")?.size();
+        let cwd = cwd.to_string_lossy().into_owned();
+        let shown = format!("`{command}`");
+        let (pane, terminal) =
+            (self.start_background(workspace, (Some(cwd), None), size, &command))
+                .map_err(|err| err.to_string())?;
+        self.type_at_first_prompt(terminal, command, Some(chat), name);
+        Ok(format!(
+            "Running {shown} in pane {pane}, in a background tab: out of the user's tab bar, \
+             in their list of background tabs. wait_for_terminal waits for it to finish; \
+             read_terminal reads its output."
+        ))
+    }
+
+    /// Types `command` at `terminal`'s shell's first prompt, and Enter, as
+    /// the user would, once it shows one: so the shell's own marks say
+    /// when it runs and how it ends. A shell that doesn't mark its prompts
+    /// has it typed after a moment. It's `owner`'s, a chat's, if a chat's
+    /// agent asked, called `name`.
+    pub(super) fn type_at_first_prompt(
+        &mut self,
+        terminal: TerminalId,
+        command: String,
+        owner: Option<TerminalId>,
+        name: Option<String>,
+    ) {
         let marked =
             crate::shell::marks(&self.config.shell, self.config.shell_integration.as_deref());
         let wait = if marked {
@@ -1245,7 +1342,7 @@ impl Daemon {
         self.tools.commanded.insert(
             terminal,
             Commanded {
-                owner: Some(chat),
+                owner,
                 name,
                 typing: Some(typing),
                 ..Commanded::default()
@@ -1253,10 +1350,6 @@ impl Daemon {
         );
         // Its shell may have drawn its prompt already.
         self.terminal_moved_on(terminal);
-        Ok(format!(
-            "Running {shown} in pane {pane}, which the user can see. wait_for_terminal waits for \
-             it to finish; read_terminal reads its output."
-        ))
     }
 
     /// Whether `pane`'s command is still to finish: then the terminal to
@@ -1390,12 +1483,24 @@ impl Daemon {
             let Wait::Finish { lines, .. } = waiting.what else {
                 continue;
             };
-            let result = match self.workspaces.get().pane_showing(terminal) {
+            let result = match self.pane_of(terminal) {
                 Some(pane) if !ended => Ok(self.describe_terminal(pane, terminal, lines)),
                 _ => Err("the terminal closed".to_owned()),
             };
             self.answer_tool(waiting.token, &waiting.id, result);
         }
+    }
+
+    /// The pane showing `terminal`, in a tab or a background tab, if one
+    /// does.
+    pub(super) fn pane_of(&self, terminal: TerminalId) -> Option<PaneId> {
+        let workspaces = self.workspaces.get();
+        workspaces.pane_showing(terminal).or_else(|| {
+            let (_, background) = workspaces.background_showing(terminal)?;
+            (background.tab.layout.panes().into_iter())
+                .find(|pane| pane.content == Content::Terminal(terminal))
+                .map(|pane| pane.id)
+        })
     }
 
     /// What `terminal`, in `pane`, has done: its last command, how it
@@ -1567,7 +1672,7 @@ impl Daemon {
                 }
                 Wait::Permission { .. } | Wait::Browser { .. } => continue,
             };
-            let result = match self.workspaces.get().pane_showing(terminal) {
+            let result = match self.pane_of(terminal) {
                 Some(pane) => {
                     let shows = self.describe_terminal(pane, terminal, lines);
                     Ok(format!("It hasn't finished yet. So far:\n{shows}"))
@@ -1801,6 +1906,16 @@ pub(super) fn invisible(ch: char) -> bool {
             | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
             | 0xFEFF | 0xFFA0 | 0xFFF9..=0xFFFB | 0xE0000..=0xE0FFF
     )
+}
+
+/// How a background tab getting on as `state` says is, for an agent.
+fn background_said(state: clackatoo_protocol::BackgroundState) -> String {
+    use clackatoo_protocol::BackgroundState;
+    match state {
+        BackgroundState::Running => "running".to_owned(),
+        BackgroundState::Idle => "at its prompt".to_owned(),
+        BackgroundState::Ended(status) => format!("ended: {status}"),
+    }
 }
 
 /// The command running in `grid`, if the shell said what it is.

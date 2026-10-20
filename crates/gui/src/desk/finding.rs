@@ -189,6 +189,7 @@ impl Desk {
             // Said, and a macro typing it stops, as at a key that fails.
             Outcome::NothingPicked => self.refuse("nothing in the finder is picked".into()),
             Outcome::Dismiss(path) => self.dismiss_background(&path),
+            Outcome::Forward(path) => self.forward_background(&path),
             Outcome::Open(opening) => {
                 let kind = self.finder.as_ref().map(Finder::kind);
                 self.close_finder();

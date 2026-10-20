@@ -238,6 +238,7 @@ A program on the other machine that listens on `localhost`, such as a dev server
 - **Forwards last as long as the window.** When the connection drops, or the daemon there is upgraded, connections through them are reset, so a browser knows a page was cut short; the ports here stay open, and connections made meanwhile go through once the window is back.
 - **A forwarded download sends after terminals' updates and keys**, and only as fast as the browser reads. On a slow link it also holds itself back so the network's queue stays short: keys typed while it runs, even the first after a pause, wait about 15 ms more, and the download still takes most of the link. Uploads do the same, and a download and an upload at once each keep to their own direction's speed, though keys may then wait about twice as long. On a link that slows down whenever it's busy, as bad Wi-Fi can, a forward goes more slowly than the link could carry. `:set noforwardpace` lets forwards take the whole link instead, at the cost of keys waiting behind them.
 - **`client.forward(8080)`** in the [config](~clackatoo/reference/config) forwards a port each time a window opens on another machine; a window on this machine passes it over without a word.
+- **A background tab's ports** show in the [list of background tabs](~clackatoo/reference/window#background-tabs), and Ctrl+F there forwards them all, each to the same port here.
 - A daemon older than protocol 82 doesn't forward ports, and the bar says how to update it. A window on this machine has nothing to forward.
 
 ## From your phone

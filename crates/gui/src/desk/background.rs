@@ -11,16 +11,21 @@
 //! again now and then while the list is open ([`PREVIEW_AGAIN`]). Opening
 //! the list says the workspace's failures were seen.
 //!
+//! The list also says the TCP ports each one's programs listen on, as the
+//! daemon finds them, asked as the preview is: only while the list is
+//! open.
+//!
 //! | Key, in the list | Does |
 //! |---|---|
 //! | Enter | Brings it back as a tab of its workspace, going there |
 //! | Ctrl+D | Dismisses it: twice for one still running |
+//! | Ctrl+F | Forwards the ports it listens on here, in a window on another machine, as `:PortForward` does |
 
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    BackgroundAction, BackgroundState, Node, Request, Response, TabId, TerminalStatus, Workspace,
-    wire,
+    BackgroundAction, BackgroundState, Listening, Node, Request, Response, TabId, TerminalStatus,
+    Workspace, wire,
 };
 
 use super::{Asked, Desk};
@@ -46,6 +51,65 @@ impl Desk {
             BackgroundCommand::List => return self.open_background_list(),
         };
         self.request(Request::Background(action), Asked::Command);
+    }
+
+    /// Carries out `:bg CMD`: starts `command` in a new background tab of
+    /// the workspace shown, in the focused pane's folder, showing nothing.
+    pub(super) fn start_in_background(&mut self, command: String) {
+        if !self.needs_daemon("background tabs", wire::BACKGROUND) {
+            return;
+        }
+        let Some(shown) = self.shown else { return };
+        let start = BackgroundAction::Start {
+            workspace: shown.workspace,
+            command,
+            cwd: None,
+            pane: Some(shown.pane),
+            size: self.new_pane_size(None),
+        };
+        self.request(Request::Background(start), Asked::Command);
+    }
+
+    /// Takes in the ports background tabs listen on, as the daemon found
+    /// them. Returns whether to draw again.
+    pub(crate) fn listening(&mut self, listening: Vec<Listening>) -> bool {
+        self.background_ports = listening;
+        let open = (self.finder.as_ref()).is_some_and(|finder| finder.kind() == Kind::Background);
+        if open {
+            self.relist_background();
+        }
+        open
+    }
+
+    /// The ports background tab `tab`'s programs listen on, as the daemon
+    /// last said.
+    fn ports_of(&self, tab: TabId) -> &[clackatoo_protocol::ListeningPort] {
+        (self.background_ports.iter())
+            .find(|listening| listening.tab == tab)
+            .map_or(&[], |listening| &listening.ports)
+    }
+
+    /// Forwards here the ports the background tab the list's `path` names
+    /// listens on, each to the same port, as `:PortForward PORT` does: in
+    /// a window on another machine than the daemon.
+    pub(super) fn forward_background(&mut self, path: &str) {
+        let Ok(tab) = path.parse().map(TabId) else {
+            return;
+        };
+        let ports: Vec<u16> = self.ports_of(tab).iter().map(|port| port.port).collect();
+        if ports.is_empty() {
+            self.say("it listens on no port to forward".into());
+            return;
+        }
+        self.close_finder();
+        for port in ports {
+            let spec = clackatoo_daemon::forward::Spec {
+                local: port,
+                host: "localhost".to_owned(),
+                port,
+            };
+            self.port_forward(crate::command::Forwarding::Add(spec));
+        }
     }
 
     /// The icon after the tabs, for the shown workspace's background tabs:
@@ -79,6 +143,12 @@ impl Desk {
         self.background_seen.clear();
         self.see_background_failures();
         self.ask_background_preview();
+        self.ask_ports();
+    }
+
+    /// Asks the daemon for the ports background tabs listen on.
+    fn ask_ports(&mut self) {
+        self.request(Request::Background(BackgroundAction::Ports), Asked::Quiet);
     }
 
     /// Says the shown workspace's background failures were seen, if it has
@@ -131,6 +201,13 @@ impl Desk {
                 let mut text = format!("{name}  ");
                 let alert = failed.then(|| (text.len(), text.len() + state.len()));
                 text.push_str(&state);
+                let ports = self.ports_of(background.tab.id);
+                if !ports.is_empty() {
+                    let ports: Vec<String> =
+                        ports.iter().map(|port| format!(":{}", port.port)).collect();
+                    text.push_str(" · ");
+                    text.push_str(&ports.join(" "));
+                }
                 if !place.is_empty() {
                     text.push_str("  ");
                     text.push_str(&place);
@@ -226,6 +303,7 @@ impl Desk {
             return false;
         };
         self.preview_background(tab);
+        self.ask_ports();
         true
     }
 

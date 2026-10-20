@@ -1540,6 +1540,7 @@ impl Daemon {
             }
             self.ask_again();
             self.take_found();
+            self.take_ports();
             self.explore();
             // After what the daemon's own threads wrote has been taken, so
             // it isn't taken for a change from outside.
@@ -3008,7 +3009,7 @@ impl Daemon {
                 close_idle,
             } => self.serve_unlend(token, workspace, close_idle),
             Request::Lent => Ok(self.list_lent()),
-            Request::Background(action) => self.serve_background(&action),
+            Request::Background(action) => self.serve_background(token, &action),
             Request::Lend {
                 key,
                 beside,

@@ -208,11 +208,12 @@ Each chat's agent is given tools of clackatoo's own, so it can show you things i
 |---|---|
 | `open_file` | Shows a file in an editor beside the chat, at a line if it gives one. The next file it opens takes that pane's place. Your typing stays where it is. |
 | `run_in_terminal` | Opens a terminal beside the chat, running your own shell, and types a command at its first prompt. You can watch it, and type into it yourself. |
+| `run_in_background` | Does the same in a new [background tab](~clackatoo/reference/window#background-tabs) of the chat's workspace, out of your tab bar, for what runs on by itself, as a dev server. Nothing moves your focus; it shows in your list of background tabs. |
 | `read_terminal` | Reads a terminal: its last command, whether it's still running or how it exited, and the end of its output. |
 | `wait_for_terminal` | Waits until the command in a terminal finishes, for a minute unless it asks for longer, up to ten. |
 | `send_to_terminal` | Types into a terminal, as you would: an answer to a prompt, or another command. |
 | `explore` | Opens a file explorer beside the chat. |
-| `list_panes`, `show_pane` | List the panes in the chat's workspace, and point one out: its border flashes, or its tab is marked `●`. Nothing an agent does moves your typing to another pane or tab. |
+| `list_panes`, `show_pane` | List the panes in the chat's workspace, its background tabs' too, and point one out: its border flashes, or its tab is marked `●`. A background tab's pane isn't pointed out. Nothing an agent does moves your typing to another pane or tab. |
 | `get_diagnostics` | What the language servers say is wrong in the chat's project, as the editor shows it. |
 
 The first pane an agent opens goes to its chat's right, and the next ones stack below that. An agent's tools reach only its chat's workspace.

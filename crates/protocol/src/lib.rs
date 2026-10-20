@@ -566,6 +566,33 @@ pub enum Event {
     /// closed. To every client watching the workspaces, of protocol 93 or
     /// later.
     Said(String),
+    /// The TCP ports the programs of each background tab listen on, as
+    /// the daemon found them once asked
+    /// ([`BackgroundAction::Ports`]): every background tab of the
+    /// daemon's own, those listening on none with none. Only to a client
+    /// that asked, of protocol 96 or later.
+    Listening(Vec<Listening>),
+}
+
+/// The TCP ports a background tab's programs listen on: see
+/// [`Event::Listening`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Listening {
+    /// The background tab.
+    pub tab: TabId,
+    /// Its ports, lowest first, each once.
+    pub ports: Vec<ListeningPort>,
+}
+
+/// A TCP port a program listens on: see [`Listening`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListeningPort {
+    /// The port.
+    pub port: u16,
+    /// The program, by the name its process goes by, as `ps` shows it:
+    /// `python3`, `trail`. Made safe to show: one line, of at most 15
+    /// characters.
+    pub program: String,
 }
 
 /// A message from a client to the daemon that expects an answer.

@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use clackatoo_daemon::remote::{self, Remote, RemoteError};
 use clackatoo_daemon::{Client, ClientError, DaemonConfig, RuntimeDir, launch, upgrade};
-use clackatoo_protocol::{NewTerminal, OpenFile, PaneTerminal, Size, TerminalId};
+use clackatoo_protocol::{
+    NewTerminal, OpenFile, PaneTerminal, Request, Response, Size, TerminalId,
+};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// This build's version, the commit it's from, and the day it was built:
@@ -137,6 +139,10 @@ enum Command {
     Edit(Edit),
     /// Type a command into a terminal and press Enter.
     Run(Run),
+    /// Start a command in a new background tab of a workspace, where it
+    /// keeps running out of the tab bar, and print its terminal's ID. It's
+    /// typed at a new shell's prompt, as you would type it.
+    Bg(Bg),
     /// Send text to a terminal exactly as given, without pressing Enter.
     Send(Send),
     /// Print what a terminal is showing.
@@ -323,6 +329,24 @@ struct New {
 }
 
 #[derive(Debug, Args)]
+struct Bg {
+    /// The workspace, by its name. Defaults to the one last used.
+    #[arg(long, value_name = "NAME")]
+    workspace: Option<String>,
+    /// The working directory. Defaults to the current one.
+    #[arg(long, value_name = "DIR")]
+    cwd: Option<PathBuf>,
+    /// The terminal's size in columns and rows, like 80x24.
+    #[arg(long, default_value = "80x24", value_parser = parse_size)]
+    size: Size,
+    /// The command line to type. Several arguments are joined with spaces.
+    #[arg(last = true, required = true, value_name = "COMMAND")]
+    command: Vec<String>,
+    #[command(flatten)]
+    connection: Connection,
+}
+
+#[derive(Debug, Args)]
 struct Edit {
     /// The file, or folder. A relative path is from the current directory,
     /// which is the folder shown if there's none.
@@ -414,6 +438,7 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::Daemon(args) => run_daemon(&args),
         Command::List(connection) => list(&connection),
         Command::New(new) => new_terminal(new),
+        Command::Bg(bg) => start_in_background(bg),
         Command::Edit(edit) => edit_file(edit),
         Command::Language(command) => language::run(command),
         Command::Desktop(command) => desktop::run(command),
@@ -693,6 +718,52 @@ fn new_terminal(new: New) -> anyhow::Result<()> {
     };
     let id = connect(&new.connection)?.new_terminal(request)?;
     println!("{id}");
+    Ok(())
+}
+
+fn start_in_background(bg: Bg) -> anyhow::Result<()> {
+    let cwd = match bg.cwd {
+        Some(cwd) => cwd,
+        None => std::env::current_dir().context("could not read the current directory")?,
+    };
+    let mut client = connect(&bg.connection)?;
+    if !client.daemon_has(clackatoo_protocol::wire::BACKGROUND) {
+        anyhow::bail!(
+            "the daemon is too old for background tabs: update it, and run `clackatoo upgrade`"
+        );
+    }
+    let workspaces = client.watch_workspaces()?;
+    // This daemon's own: another machine's keeps its background tabs.
+    let own = |workspace: &&clackatoo_protocol::Workspace| {
+        workspace.home.is_none() && workspace.lent.is_none()
+    };
+    let workspace = match &bg.workspace {
+        Some(name) => (workspaces.list.iter().filter(own))
+            .find(|workspace| workspace.name == *name)
+            .ok_or_else(|| anyhow::anyhow!("there's no workspace called {name:?}"))?,
+        None => (workspaces.active)
+            .and_then(|active| workspaces.get(active))
+            .filter(own)
+            .or_else(|| workspaces.list.iter().find(own))
+            .ok_or_else(|| anyhow::anyhow!("there's no workspace yet: open a window first"))?,
+    };
+    let start = clackatoo_protocol::BackgroundAction::Start {
+        workspace: workspace.id,
+        command: bg.command.join(" "),
+        cwd: Some(path_string(cwd, "--cwd")?),
+        pane: None,
+        size: bg.size,
+    };
+    let pane = match client.request(&Request::Background(start))? {
+        Response::PaneCreated(pane) => pane,
+        Response::Error(err) => anyhow::bail!("{err}"),
+        other => anyhow::bail!("the daemon answered {other:?}"),
+    };
+    let workspaces = client.watch_workspaces()?;
+    let terminal = (workspaces.find_background_pane(pane))
+        .and_then(|(_, _, pane)| pane.content.terminal())
+        .ok_or_else(|| anyhow::anyhow!("its terminal closed at once"))?;
+    println!("{terminal}");
     Ok(())
 }
 

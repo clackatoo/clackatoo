@@ -950,7 +950,8 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
 /// Samples of protocol 96: a workspace's background tabs, one running, one
 /// whose program ended by a signal, and one whose shell is idle after a
 /// command failed; and what's asked of them: a tab and a pane sent to the
-/// background, one brought back, one dismissed, and their failures seen.
+/// background, one brought back, one dismissed, their failures seen, a
+/// command started in a new one, and the ports they listen on, found.
 fn background() -> Vec<Sample> {
     use Sample::{Client, Server};
     let tab = |id, pane, terminal| Tab {
@@ -995,6 +996,34 @@ fn background() -> Vec<Sample> {
         asked(crate::BackgroundAction::Seen {
             workspace: WorkspaceId(1),
         }),
+        asked(crate::BackgroundAction::Start {
+            workspace: WorkspaceId(1),
+            command: "trail serve".into(),
+            cwd: Some("/home/jack/site".into()),
+            pane: Some(PaneId(1)),
+            size: size(),
+        }),
+        Server(ServerMessage::Response(Response::PaneCreated(PaneId(17)))),
+        asked(crate::BackgroundAction::Ports),
+        Server(ServerMessage::Event(Event::Listening(vec![
+            crate::Listening {
+                tab: TabId(8),
+                ports: vec![
+                    crate::ListeningPort {
+                        port: 8080,
+                        program: "trail".into(),
+                    },
+                    crate::ListeningPort {
+                        port: 35729,
+                        program: "trail".into(),
+                    },
+                ],
+            },
+            crate::Listening {
+                tab: TabId(14),
+                ports: Vec::new(),
+            },
+        ]))),
     ]
 }
 

@@ -36,6 +36,7 @@ mod lsp;
 mod machine;
 pub mod mcp;
 mod memory;
+mod ports;
 mod profiles;
 mod pty;
 mod quic;

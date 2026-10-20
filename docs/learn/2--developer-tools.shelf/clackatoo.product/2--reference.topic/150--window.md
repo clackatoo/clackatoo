@@ -150,15 +150,17 @@ A background tab is a tab kept running out of the tab bar, as a web server or a 
 | Ctrl+B `b` `t` | `:bg` | Sends the tab shown to the background. The workspace's only tab can go too: a shell in its folder takes its place. |
 | Ctrl+B `b` `p` | `:bgpane` | Sends the focused pane to the background, in a tab of its own. A tab's last pane takes the tab with it. |
 | Ctrl+B `b` `l` | `:Background` | Lists the background tabs. A click on the icon after the tabs does too. |
+| | `:bg CMD` | Starts `CMD` in a new background tab of the workspace shown, typed at a new shell's prompt in the focused pane's folder, as you would type it, so its shell's marks say when it runs and how it ends. Nothing is shown. [`clackatoo bg`](~clackatoo/reference/cli#bg) does the same from a shell, and an agent can too, with [`run_in_background`](~clackatoo/reference/agents#what-the-agent-can-show-you). |
 
 After the tabs, an icon says how many of the workspace's background tabs are running: `⚙ 2`. A tab counts as running while a command runs in one of its terminals, as their shells' marks say, which bash, zsh and fish 4 make when clackatoo starts them as your shell; one whose shell is at its prompt again is idle, and a terminal whose shell doesn't mark its commands counts as running while it's alive. With none running, the icon goes. A command in one that fails, or a shell in one that exits with a failure, turns the icon red with its exit status, as a failed command's mark is, `⚙ 1 ✗ 2`, until a window lists them.
 
-The list is the [finder's](#the-finder), with this workspace's background tabs first, then the other workspaces': each with its name (its program's title, else the command its shell runs or ran last, else its folder), how it's getting on (`running`, `idle`, `exited 2`, with any failure since in red), and its workspace. Beside them is the last screenful of the one picked, looked at again every two seconds while the list is open. Typing narrows them.
+The list is the [finder's](#the-finder), with this workspace's background tabs first, then the other workspaces': each with its name (its program's title, else the command its shell runs or ran last, else its folder), how it's getting on (`running`, `idle`, `exited 2`, with any failure since in red), the TCP ports its programs listen on (`· :8080`), and the workspace of one from another. Beside them is the last screenful of the one picked. Both are looked at again every two seconds while the list is open, and never while it's closed: the daemon finds the ports apart from its other work, from the sockets the processes of each terminal's shell's session hold, so a server that leaves its shell's session, as a daemon does, isn't seen. Typing narrows them.
 
 | Key, in the list | Does |
 |---|---|
 | Enter | Brings it back as a tab of its workspace, after the others, going there. A terminal of it whose shell has exited starts again as a new shell in its folder, offering `R` to put what it ran at the prompt. |
 | Ctrl+D | Dismisses it, closing its terminals. One still running asks first: a second Ctrl+D ends it. |
+| Ctrl+F | In a window on [another machine](~clackatoo/reference/remote#forwarding-ports) than the daemon, forwards the ports it listens on here, each to the same port, as `:PortForward 8080` does. |
 | Esc | Closes the list. |
 
 A background tab whose terminals have ended stays, its last screen readable, until it's dismissed or brought back: nothing vanishes by itself. Closing a workspace closes its background tabs with it. A workspace on [another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar) keeps its background tabs to itself for now: they aren't listed here, and its tabs can't be sent to the background from here.

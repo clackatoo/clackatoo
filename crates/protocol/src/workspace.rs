@@ -285,6 +285,33 @@ pub enum BackgroundAction {
         /// The workspace.
         workspace: WorkspaceId,
     },
+    /// Starts `command` in a new background tab of `workspace`: a new
+    /// shell, in `cwd`, with the command typed at its first prompt and
+    /// Enter pressed, as the user would, so its shell's marks say when it
+    /// runs and how it ends. Nothing is shown. Answered with
+    /// [`Response::PaneCreated`](crate::Response::PaneCreated): the
+    /// background tab's pane.
+    Start {
+        /// The workspace.
+        workspace: WorkspaceId,
+        /// The command line, as typed at the shell's prompt.
+        command: String,
+        /// The directory the shell starts in: `None` for the one `pane`
+        /// is in, as a new pane beside it starts in.
+        cwd: Option<String>,
+        /// The pane whose directory it starts in, with no `cwd`: `None`
+        /// for the workspace's focused pane.
+        pane: Option<PaneId>,
+        /// The terminal's size.
+        size: crate::Size,
+    },
+    /// Asks for the TCP ports each background tab's programs listen on,
+    /// which the daemon looks for apart from its other work, and sends
+    /// once found, as [`Event::Listening`](crate::Event::Listening).
+    /// Answered at once with [`Response::Done`](crate::Response::Done).
+    /// Asked again while the daemon is still looking, it sends what it
+    /// finds once.
+    Ports,
 }
 
 /// Who a workspace holding a pane lent to another daemon is lent to, and
@@ -783,6 +810,19 @@ impl Workspaces {
             workspace
                 .background_tab(id)
                 .map(|background| (workspace, background))
+        })
+    }
+
+    /// Where the background pane with `id` is: its workspace, its
+    /// background tab and itself.
+    #[must_use]
+    pub fn find_background_pane(&self, id: PaneId) -> Option<(&Workspace, &Background, Pane)> {
+        self.list.iter().find_map(|workspace| {
+            workspace.background.iter().find_map(|background| {
+                (background.tab.layout.panes().into_iter())
+                    .find(|pane| pane.id == id)
+                    .map(|pane| (workspace, background, pane))
+            })
         })
     }
 

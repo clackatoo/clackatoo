@@ -563,6 +563,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "background",
         what: "Background tabs: Ctrl+B b t keeps a tab running out of the tab bar, and Ctrl+B b l lists them",
     },
+    News {
+        id: "bgstart",
+        date: "2026-10-20",
+        lesson: "background",
+        what: ":bg CMD and clackatoo bg start a command in the background; the list says the ports each listens on",
+    },
 ];
 
 impl News {

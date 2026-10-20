@@ -25,7 +25,8 @@
 //! | Esc, Ctrl+C | Closes the finder |
 //!
 //! Listing the background tabs, Enter, Ctrl+V, Ctrl+X and Ctrl+T bring the
-//! one picked back, and Ctrl+D dismisses it (see `desk::background`).
+//! one picked back, Ctrl+D dismisses it, and Ctrl+F forwards the ports it
+//! listens on here (see `desk::background`).
 
 pub(crate) mod rank;
 pub(crate) mod view;
@@ -171,6 +172,9 @@ pub(crate) enum Outcome {
     /// The background tab picked, by what [`Opening::path`] would say, is
     /// to be dismissed.
     Dismiss(String),
+    /// The ports the background tab picked listens on, by what
+    /// [`Opening::path`] would say, are to be forwarded here.
+    Forward(String),
 }
 
 /// A preview of the file picked.
@@ -648,6 +652,10 @@ impl Finder {
             (_, Some('v' | 'x' | 't')) if background => self.open(Place::Here),
             (_, Some('d')) if background => match self.picked() {
                 Some(entry) => Outcome::Dismiss(entry.path.clone()),
+                None => Outcome::NothingPicked,
+            },
+            (_, Some('f')) if background => match self.picked() {
+                Some(entry) => Outcome::Forward(entry.path.clone()),
                 None => Outcome::NothingPicked,
             },
             (_, Some('v')) => self.open(Place::Beside(Side::Right)),

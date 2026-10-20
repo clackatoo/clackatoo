@@ -1779,3 +1779,57 @@ fn daemons_connect_to_each_other_and_keep_it_through_upgrades_and_restarts() {
     stdout(&laptop.run(&["stop"]));
     wait(laptop_daemon);
 }
+
+#[test]
+fn bg_starts_a_command_in_a_background_tab_of_the_workspace_named() {
+    use clackatoo_daemon::Client;
+    use clackatoo_protocol::{NewTerminal, PaneTerminal, Size, TerminalId};
+
+    let runtime = Runtime::new();
+    let daemon = daemon(runtime.path());
+    let mut client = Client::connect(&runtime.path().join("clackatoo/daemon.sock")).unwrap();
+    let cat = PaneTerminal::New(NewTerminal {
+        size: Size::new(80, 24).unwrap(),
+        command: Some(vec!["cat".into()]),
+        cwd: None,
+        record_to: None,
+    });
+    client.new_workspace(Some("site".into()), cat).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let started = clackatoo(
+        runtime.path(),
+        &[
+            "bg",
+            "--workspace",
+            "site",
+            "--cwd",
+            cwd,
+            "--",
+            "touch",
+            "made",
+        ],
+    );
+    assert!(started.status.success(), "{started:?}");
+    let terminal: u32 = stdout(&started).trim().parse().unwrap();
+    // Typed at its shell's prompt, in the folder given.
+    eventually("the command ran", || dir.path().join("made").exists());
+    let workspaces = client.watch_workspaces().unwrap();
+    let site = &workspaces.list[0];
+    assert_eq!(site.tabs.len(), 1, "out of the tab bar");
+    assert_eq!(site.background[0].tab.terminals(), [TerminalId(terminal)]);
+    // A workspace that isn't there says so, and starts nothing.
+    let nowhere = clackatoo(runtime.path(), &["bg", "--workspace", "nope", "--", "true"]);
+    assert!(!nowhere.status.success());
+    let said = String::from_utf8_lossy(&nowhere.stderr);
+    assert!(
+        said.contains("there's no workspace called \"nope\""),
+        "{said}"
+    );
+    assert_eq!(
+        client.watch_workspaces().unwrap().list[0].background.len(),
+        1
+    );
+    drop(runtime);
+    wait(daemon);
+}

@@ -221,9 +221,10 @@ gates! {
     /// `Connection`'s `through` and `unshared`.
     CHAIN = 95,
     /// Background tabs: tabs a workspace keeps running out of its tab
-    /// bar, `Workspace`'s `background` (`Background`, `BackgroundState`),
-    /// and what's asked of them, `Request::Background`
-    /// (`BackgroundAction`).
+    /// bar, `Workspace`'s `background` (`Background`, `BackgroundState`);
+    /// what's asked of them, `Request::Background` (`BackgroundAction`);
+    /// and the ports their programs listen on, `Event::Listening`
+    /// (`Listening`, `ListeningPort`).
     BACKGROUND = 96,
 }
 
@@ -518,6 +519,7 @@ impl Since for Event {
             Self::Connections(_) | Self::Login { .. } => FEDERATION,
             Self::Forwarded(_) => RELAY,
             Self::Said(_) => LEND,
+            Self::Listening(_) => BACKGROUND,
         }
     }
 }
@@ -924,7 +926,8 @@ impl Downgrade for ServerMessage {
     /// `BufferUpdate::Reattach`, as only another machine's buffers are
     /// attached again so, which an older peer isn't shown; and so is
     /// `Event::Said`, which is only ever about a pane lent, which an
-    /// older peer is never shown.
+    /// older peer is never shown; and `Event::Listening`, which goes only
+    /// to a client that asked for it, which an older one never does.
     /// A new answer, or a new kind of thing found, only ever answers what
     /// a newer window asked; should one reach an older peer all the same,
     /// it's told its question failed, rather than wait for ever.
@@ -972,6 +975,7 @@ impl Downgrade for ServerMessage {
                 | Event::Login { .. }
                 | Event::Forwarded(_)
                 | Event::Said(_)
+                | Event::Listening(_)
                 | Event::Buffer {
                     update:
                         BufferUpdate::Coloured { .. }
@@ -1179,7 +1183,9 @@ mod tests {
         // plain. And the connections, and ssh's questions for them, and
         // what's said of ports forwarded through them, which only a client
         // that asked for them is sent; and what the bar is told of panes
-        // lent, which an older peer is never shown.
+        // lent, which an older peer is never shown; and the ports
+        // background tabs listen on, which only a client that asked is
+        // sent.
         matches!(
             message,
             ServerMessage::Event(
@@ -1189,6 +1195,7 @@ mod tests {
                     | Event::Login { .. }
                     | Event::Forwarded(_)
                     | Event::Said(_)
+                    | Event::Listening(_)
                     | Event::Buffer {
                         update: BufferUpdate::Coloured { .. }
                             | BufferUpdate::Language { .. }

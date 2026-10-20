@@ -878,6 +878,36 @@ impl WorkspaceState {
         Ok(focused)
     }
 
+    /// Checks that `workspace` exists and can have a background tab added:
+    /// not one lent to another machine's daemon, which holds its one pane
+    /// alone.
+    pub(crate) fn check_new_background(&self, workspace: WorkspaceId) -> Result<(), Error> {
+        unlent(self.check_workspace(workspace)?)
+    }
+
+    /// Adds a background tab showing `content`, a terminal, to
+    /// `workspace`, which [`check_new_background`](Self::check_new_background)
+    /// checked, running until the server says otherwise. Returns the tab
+    /// and its pane.
+    pub(crate) fn new_background(
+        &mut self,
+        workspace: WorkspaceId,
+        content: Content,
+    ) -> (TabId, PaneId) {
+        let (tab, pane) = self.tab(content);
+        let id = tab.id;
+        for terminal in tab.terminals() {
+            self.background_terminals.insert(terminal, id);
+        }
+        self.workspace_mut(workspace).background.push(Background {
+            tab,
+            state: BackgroundState::Running,
+            failed: None,
+            name: String::new(),
+        });
+        (id, pane)
+    }
+
     /// The background tab `tab`, to change how it's getting on.
     pub(crate) fn background_mut(&mut self, tab: TabId) -> Option<&mut Background> {
         (self.workspaces.list.iter_mut())

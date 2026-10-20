@@ -1,6 +1,7 @@
 # Background tabs: the icon after the tabs, gone while none runs, counting
 # those running, red with a failure until they're listed; and the list,
-# with the screen of the one picked beside it.
+# with the screen of the one picked beside it, and the ports each listens
+# on.
 size 1280x800
 shot icon-none
 keys <C-b>c
@@ -15,8 +16,11 @@ shell sleep 1; false
 keys <C-b>bt
 sleep 2500
 shot icon-failed
+# Straight into the background, from the command line.
+keys <C-;>:bg python3 -m http.server 8090<CR>
+sleep 1500
 keys <C-b>bl
-sleep 1000
+sleep 2500
 shot list
 keys <C-n>
 sleep 1000

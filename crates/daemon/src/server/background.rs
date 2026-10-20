@@ -16,6 +16,13 @@
 //! a lookup in a map: only a change of how a tab is getting on tells the
 //! windows, never output alone.
 //!
+//! A command is started in a new background tab ([`BackgroundAction::Start`])
+//! as a new shell with the command typed at its first prompt, as the user
+//! would type it, so its shell's own marks say when it runs and how it
+//! ends. The ports background tabs' programs listen on are found on a
+//! thread of their own (see [`crate::ports`]), only when a window asks,
+//! as its list of them is open: nothing is looked for otherwise.
+//!
 //! [`Request::Background`]: clackatoo_protocol::Request::Background
 //! [`Background::state`]: clackatoo_protocol::Background::state
 //! [`Background::failed`]: clackatoo_protocol::Background::failed
@@ -24,12 +31,13 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use clackatoo_protocol::{
-    BackgroundAction, BackgroundState, Error, NewTerminal, PaneId, PaneTerminal, Response, Size,
-    Tab, TabId, TerminalId, TerminalStatus,
+    BackgroundAction, BackgroundState, Error, Event, Listening, ListeningPort, NewTerminal, PaneId,
+    PaneTerminal, Response, Size, Tab, TabId, TerminalId, TerminalStatus, WorkspaceId,
 };
 use clackatoo_term::{Progress, Terminal};
+use mio::Token;
 
-use super::Daemon;
+use super::{Daemon, Source};
 
 /// The longest name a background tab is given, in characters.
 const LONGEST_NAME: usize = 100;
@@ -45,15 +53,42 @@ pub(super) struct Backgrounds {
     /// The first of each terminal's blocks not yet looked at for a
     /// failure: one before it went to the background is never told.
     checked: HashMap<TerminalId, u32>,
+    /// What finds the ports background tabs listen on, once asked.
+    ports: Option<crate::ports::Finder>,
+    /// The clients waiting for the ports, which they're sent once found.
+    waiting: Vec<Token>,
 }
 
 impl Daemon {
     /// Answers [`Request::Background`](clackatoo_protocol::Request::Background).
     pub(super) fn serve_background(
         &mut self,
+        token: Token,
         action: &BackgroundAction,
     ) -> Result<Response, Error> {
         match *action {
+            BackgroundAction::Start {
+                workspace,
+                ref command,
+                ref cwd,
+                pane,
+                size,
+            } => {
+                let command = command.trim_end();
+                if command.trim().is_empty() || command.len() > crate::mcp::MAX_SEND {
+                    return Err(Error::Other(
+                        "a background tab's command is one line or a few, and not empty".into(),
+                    ));
+                }
+                let (pane, terminal) =
+                    self.start_background(workspace, (cwd.clone(), pane), size, command)?;
+                self.type_at_first_prompt(terminal, command.to_owned(), None, None);
+                Ok(Response::PaneCreated(pane))
+            }
+            BackgroundAction::Ports => {
+                self.find_ports(token);
+                Ok(Response::Done)
+            }
             BackgroundAction::Tab { tab } => self.send_tab_to_background(tab),
             BackgroundAction::Pane { pane } => self.send_pane_to_background(pane),
             BackgroundAction::Bring { tab } => self.bring_back(tab),
@@ -221,6 +256,117 @@ impl Daemon {
         }
         self.workspaces_changed();
         Ok(Response::Done)
+    }
+
+    /// Starts a shell in a new background tab of `workspace`, in `cwd`, or
+    /// else in the directory `beside` is in, or the workspace's focused
+    /// pane, as a new pane beside it would start, called after `command`,
+    /// which is to run in it. Returns its pane and its terminal, for the
+    /// command to be typed at its first prompt.
+    pub(super) fn start_background(
+        &mut self,
+        workspace: WorkspaceId,
+        (cwd, beside): (Option<String>, Option<PaneId>),
+        size: Size,
+        command: &str,
+    ) -> Result<(PaneId, TerminalId), Error> {
+        self.workspaces.check_new_background(workspace)?;
+        let beside = beside.or_else(|| self.workspaces.focused_pane(workspace));
+        // A pane on another machine has its own directories.
+        if beside.is_some_and(|pane| self.workspaces.borrowed().contains_key(&pane)) {
+            return Err(Error::Other(
+                "background tabs on another machine: coming soon".into(),
+            ));
+        }
+        let cwd = cwd.or_else(|| beside.and_then(|pane| self.working_directory(pane)));
+        let terminal = self.new_terminal(&NewTerminal {
+            size,
+            command: None,
+            cwd,
+            record_to: None,
+        })?;
+        let (tab, pane) = self.workspaces.new_background(workspace, terminal.into());
+        if let Some((_, background)) = self.workspaces.get().find_background(tab) {
+            let tab = background.tab.clone();
+            self.watch_in_background(&tab);
+            let state = self.background_state(&tab);
+            if let Some(background) = self.workspaces.background_mut(tab.id) {
+                background.state = state;
+                background.name = command.chars().take(LONGEST_NAME).collect();
+            }
+        }
+        self.workspaces_changed();
+        Ok((pane, terminal))
+    }
+
+    /// Looks for the ports background tabs' programs listen on, for the
+    /// client at `token`, which is sent them once they're found: started
+    /// now unless a look is under way, which it's sent instead.
+    fn find_ports(&mut self, token: Token) {
+        if !self.background.waiting.contains(&token) {
+            self.background.waiting.push(token);
+        }
+        if self.background.waiting.len() > 1 {
+            return;
+        }
+        let mut asked = Vec::new();
+        for background in (self.workspaces.get().list.iter()).flat_map(|w| &w.background) {
+            for terminal in background.tab.terminals() {
+                let Some(slot) = self.terminals.get(&terminal) else {
+                    continue;
+                };
+                if slot.terminal.status() != TerminalStatus::Running {
+                    continue;
+                }
+                // Its shell leads a session of its own.
+                if let Some(pid) = slot.terminal.info().pid {
+                    asked.push((background.tab.id.0, pid));
+                }
+            }
+        }
+        if self.background.ports.is_none() {
+            let proc = std::path::PathBuf::from("/proc");
+            self.background.ports =
+                crate::ports::Finder::start(proc, std::sync::Arc::clone(&self.waker));
+        }
+        // A thread that has gone is started again at the next ask.
+        if !(self.background.ports.as_ref()).is_some_and(|finder| finder.ask(asked)) {
+            self.background.ports = None;
+            self.background.waiting.clear();
+        }
+    }
+
+    /// Sends the ports found, if they've been, to the clients waiting for
+    /// them: every background tab, those listening on none with none.
+    pub(super) fn take_ports(&mut self) {
+        let Some(found) = (self.background.ports.as_ref()).and_then(crate::ports::Finder::take)
+        else {
+            return;
+        };
+        let mut listening: Vec<Listening> = (self.workspaces.get().list.iter())
+            .flat_map(|workspace| &workspace.background)
+            .map(|background| Listening {
+                tab: background.tab.id,
+                ports: Vec::new(),
+            })
+            .collect();
+        for (tab, ports) in found {
+            let Some(shown) = listening.iter_mut().find(|shown| shown.tab.0 == tab) else {
+                continue;
+            };
+            for (port, program) in ports {
+                if !shown.ports.iter().any(|known| known.port == port) {
+                    shown.ports.push(ListeningPort { port, program });
+                }
+            }
+            shown.ports.sort_by_key(|port| port.port);
+        }
+        let event = Event::Listening(listening);
+        for token in std::mem::take(&mut self.background.waiting) {
+            if let Some(Source::Client(_)) = self.sources.get(token.0) {
+                self.send_event(token, event.clone());
+            }
+        }
     }
 
     /// Starts looking at `tab`'s terminals' blocks for failures from
