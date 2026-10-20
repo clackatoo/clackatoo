@@ -14195,11 +14195,17 @@ fn retry_starts_an_agent_slow_to_open_a_session_again_and_asks_again() {
 fn grandchild_in(file: &Path) -> u32 {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Some(pid) = (std::fs::read_to_string(file).ok()).and_then(|pid| pid.parse().ok()) {
-            assert!(sleeping(pid), "it started sleeping");
+        // The pid is written as it forks, so it may not be `sleep` yet.
+        if let Some(pid) = (std::fs::read_to_string(file).ok()).and_then(|pid| pid.parse().ok())
+            && sleeping(pid)
+        {
             return pid;
         }
-        assert!(Instant::now() < deadline, "{} never came", file.display());
+        assert!(
+            Instant::now() < deadline,
+            "{} never came, or never started sleeping",
+            file.display()
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
