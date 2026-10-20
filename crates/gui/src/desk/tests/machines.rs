@@ -292,6 +292,7 @@ fn a_new_pane_with_no_workspace_shown_makes_one_on_the_machine_named() {
         machine: None,
         others: Vec::new(),
         passed: Vec::new(),
+        kept: Vec::new(),
     };
     let mut desk = desk(here(none));
     desk.connections_changed(to_desk(connected()));

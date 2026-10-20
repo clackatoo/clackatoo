@@ -569,6 +569,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "background",
         what: ":bg CMD and clackatoo bg start a command in the background; the list says the ports each listens on",
     },
+    News {
+        id: "keep",
+        date: "2026-10-20",
+        lesson: "background",
+        what: ":keep runs a terminal's command again after a restart, and :keep always as it ends too",
+    },
 ];
 
 impl News {

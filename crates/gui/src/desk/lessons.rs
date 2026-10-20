@@ -1247,6 +1247,22 @@ impl Facts for DeskFacts<'_> {
             .map_or(0, |workspace| workspace.background.len())
     }
 
+    fn kept_terminals(&self) -> usize {
+        let Some(workspace) =
+            (self.desk.shown).and_then(|shown| self.desk.workspaces.get(shown.workspace))
+        else {
+            return 0;
+        };
+        let background = workspace
+            .background
+            .iter()
+            .map(|background| &background.tab);
+        (workspace.tabs.iter().chain(background))
+            .flat_map(|tab| tab.layout.panes())
+            .filter(|pane| (self.desk.workspaces.kept.iter()).any(|kept| kept.pane == pane.id))
+            .count()
+    }
+
     fn last_exit(&self) -> Option<i32> {
         match self.open()?.exit {
             LastCommand::Exited(status) => Some(status),

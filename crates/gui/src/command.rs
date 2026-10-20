@@ -44,7 +44,10 @@
 //! of the tab bar, and `bgpane` the focused pane alone, in a background
 //! tab of its own; `bg CMD` starts the command in a new background tab, in
 //! the focused pane's folder; `Background` lists the background tabs, as
-//! the finder lists files.
+//! the finder lists files. `keep` marks the focused terminal to run the
+//! command its shell runs, or ran last, again by itself as the daemon
+//! starts afresh, `keep always` as it ends too, and `keep off` takes the
+//! mark away.
 //! `Board NAME` opens the board called that, made if there's none, in a
 //! tab or with a mark beside; `Board` alone, or `Boards`, picks one in
 //! the finder. `Browser` opens the focused chat's page in clackatoo's
@@ -237,6 +240,9 @@ pub(crate) enum Command {
     /// `:bg CMD`: the command started in a new background tab of the
     /// workspace shown, in the focused pane's folder.
     BackgroundStart(String),
+    /// `:keep`, `:keep always`, `:keep off`: the focused terminal kept
+    /// running so, or not.
+    Keep(clackatoo_protocol::Keeping),
 }
 
 /// What `:bg`, `:bgpane` and `:Background` do.
@@ -378,6 +384,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             return forwarding(word.ends_with('!'), argument).map(Command::PortForward);
         }
         "bg" | "bgpane" | "Background" => return background_command(word, argument),
+        "keep" => return keep_command(argument),
         _ => {}
     }
     let (place, rest) = place(word);
@@ -417,6 +424,18 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
     };
     let agent = agent_named(word, rest, argument)?;
     Ok(Command::Open { place, kind, agent })
+}
+
+/// `:keep`, with `argument` after it: how the focused terminal is kept
+/// running.
+fn keep_command(argument: Option<&str>) -> Result<Command, String> {
+    use clackatoo_protocol::Keeping;
+    Ok(Command::Keep(match argument {
+        None => Keeping::Restore,
+        Some("always") => Keeping::Always,
+        Some("off") => Keeping::Off,
+        Some(other) => return Err(format!("keep takes always or off, not {other:?}")),
+    }))
 }
 
 /// `:bg`, `:bgpane` or `:Background`, as `word` says, with `argument`
@@ -767,6 +786,7 @@ pub(crate) const NAMES: &[&str] = &[
     "bg",
     "bgpane",
     "Background",
+    "keep",
     "reload",
     "set",
     "registers",
@@ -865,6 +885,7 @@ pub(crate) fn takes(word: &str) -> Takes {
             "prev_hunk",
         ]),
         "Devices" => Takes::Words(&["allow", "deny", "revoke", "unlock"]),
+        "keep" => Takes::Words(&["always", "off"]),
         "Review" => Takes::Words(&["chat", "turn", "base"]),
         "ReviewKeep" | "ReviewReject" => Takes::Words(&["file", "turn", "all"]),
         _ => Takes::Nothing,
@@ -956,6 +977,7 @@ mod tests {
         ("bg", ""),
         ("bgpane", ""),
         ("Background", ""),
+        ("keep", ""),
         ("q", "quit"),
         ("quit", ""),
         ("w", "write"),

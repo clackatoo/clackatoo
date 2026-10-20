@@ -272,3 +272,58 @@ fn the_list_says_the_ports_each_listens_on_and_ctrl_f_forwards_them() {
         .collect();
     assert_eq!(ports, [8080, 35729]);
 }
+
+#[test]
+fn keep_marks_the_focused_terminal_and_its_tab_says_so() {
+    use clackatoo_protocol::{Keeping, Kept};
+    let mut desk = desk(with_background(
+        vec![background(5, BackgroundState::Running, None, "trail serve")],
+        Vec::new(),
+    ));
+    snapshot(&mut desk, 1);
+    normal_mode(&mut desk);
+    for (line, how) in [
+        ("keep", Keeping::Restore),
+        ("keep always", Keeping::Always),
+        ("keep off", Keeping::Off),
+    ] {
+        command(&mut desk, line);
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::Keep {
+                pane: PaneId(1),
+                how
+            }]
+        );
+    }
+    command(&mut desk, "keep forever");
+    assert!(answer_all(&mut desk).is_empty(), "nothing it takes");
+    // Marked, the tab and the background tab say so; given up, it says
+    // that too.
+    let mark = |pane, given_up| Kept {
+        pane: PaneId(pane),
+        command: "trail serve".into(),
+        always: true,
+        given_up,
+    };
+    let mut marked = with_background(
+        vec![background(5, BackgroundState::Running, None, "trail serve")],
+        Vec::new(),
+    );
+    marked.kept = vec![mark(2, false), mark(5, true)];
+    desk.workspaces_changed(marked);
+    let names: Vec<String> = desk
+        .tab_names()
+        .into_iter()
+        .map(|(_, name, _)| name)
+        .collect();
+    assert!(names[0].ends_with(" ↻"), "{names:?}");
+    command(&mut desk, "Background");
+    answer_all(&mut desk);
+    let shown = desk.finder_view((10, 60), None).unwrap();
+    assert!(
+        shown.rows[0].text.starts_with("trail serve ↻✗  running"),
+        "{:?}",
+        shown.rows[0]
+    );
+}

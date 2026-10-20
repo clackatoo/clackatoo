@@ -112,6 +112,11 @@ pub struct DaemonConfig {
     /// prompt, when the shell marks its prompts, before the agent is told
     /// the shell never became ready.
     pub prompt_wait: std::time::Duration,
+    /// How long a command kept running always waits to run again once it
+    /// ends: twice as long each time it ends again soon after it started,
+    /// up to a minute. A setting for tests: [`DEFAULT_KEEP_WAIT`] for the
+    /// rest.
+    pub keep_wait: std::time::Duration,
     /// How long an agent asked what models it has, for a chat's model
     /// menu, or for the sessions it kept, for the start page, has to say,
     /// before it's given up on and stopped, unless a chat needs it.
@@ -260,6 +265,10 @@ pub const DEFAULT_SERVER_IDLE: std::time::Duration = std::time::Duration::from_m
 /// unless told otherwise: zsh with plugins can take seconds to start.
 pub const DEFAULT_PROMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long a command kept running always waits to run again once it
+/// ends, at first (see [`DaemonConfig::keep_wait`]).
+pub const DEFAULT_KEEP_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// How long an agent asked what models it has gets to say, unless the
 /// daemon is told otherwise.
 pub const DEFAULT_PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -372,6 +381,7 @@ impl DaemonConfig {
             lsp_trace: non_empty("CLACKATOO_LSP_TRACE").map(PathBuf::from),
             server_idle: DEFAULT_SERVER_IDLE,
             prompt_wait: DEFAULT_PROMPT_WAIT,
+            keep_wait: DEFAULT_KEEP_WAIT,
             probe_wait: DEFAULT_PROBE_WAIT,
             session_wait: DEFAULT_SESSION_WAIT,
             gone_wait: DEFAULT_GONE_WAIT,

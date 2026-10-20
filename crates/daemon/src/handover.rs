@@ -61,6 +61,8 @@
 //!     machine's identity key; and the keys it knows other machines by.
 //! 25. Background tabs: the tabs each workspace keeps running out of its
 //!     tab bar, and the failure of each no window has said was seen.
+//! 26. The terminals the user marked to keep running, and the command
+//!     each keeps running.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -73,11 +75,12 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 25;
+pub(crate) const VERSION: u32 = 26;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, VERSION,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -188,6 +191,24 @@ pub(crate) struct State {
     /// The workspaces' background tabs. Since version 25; before, there
     /// were none.
     pub(crate) background: Vec<Background>,
+    /// The terminals the user marked to keep running. Since version 26;
+    /// before, none was. How running each again was going isn't handed
+    /// over: it starts again.
+    pub(crate) kept: Vec<Kept>,
+}
+
+/// A terminal the user marked to keep running (see
+/// [`clackatoo_protocol::Kept`]). Since version 26.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Kept {
+    /// Its pane, by its ID.
+    pub(crate) pane: u32,
+    /// The command it keeps running.
+    pub(crate) command: String,
+    /// It's run again as it ends, too.
+    pub(crate) always: bool,
+    /// Running it again was given up.
+    pub(crate) given_up: bool,
 }
 
 /// A tab a workspace keeps running out of its tab bar (see
@@ -888,8 +909,84 @@ impl State {
             22 => Ok(postcard::from_bytes::<v22::State>(body)?.into()),
             23 => Ok(postcard::from_bytes::<v23::State>(body)?.into()),
             24 => Ok(postcard::from_bytes::<v24::State>(body)?.into()),
+            25 => Ok(postcard::from_bytes::<v25::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
+        }
+    }
+}
+
+/// Version 25, as the builds that wrote it wrote it: no terminal was kept
+/// running.
+mod v25 {
+    use serde::Deserialize;
+
+    use super::{
+        Applied, Background, Borrower, Buffer, Chat, Connection, EditLog, Files, Known, Lender,
+        Lent, Process, Reviews, Sharing, Shell, Terminal, Workspaces,
+    };
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+        edits: EditLog,
+        applied: Vec<Applied>,
+        daemon: u64,
+        reviews: Reviews,
+        recovery_lock: Option<u32>,
+        shells: Vec<Shell>,
+        machine: Option<[u8; 16]>,
+        connections: Vec<Connection>,
+        lent: Vec<Lent>,
+        borrowers: Vec<Borrower>,
+        lenders: Vec<Lender>,
+        sharing: Vec<Sharing>,
+        key: Option<[u8; 32]>,
+        keys: Vec<Known>,
+        background: Vec<Background>,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: state.recovery_lock,
+                shells: state.shells,
+                machine: state.machine,
+                connections: state.connections,
+                lent: state.lent,
+                borrowers: state.borrowers,
+                lenders: state.lenders,
+                sharing: state.sharing,
+                key: state.key,
+                keys: state.keys,
+                background: state.background,
+                kept: Vec::new(),
+            }
         }
     }
 }
@@ -961,6 +1058,7 @@ mod v24 {
                 key: state.key,
                 keys: state.keys,
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -1031,6 +1129,7 @@ mod v23 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -1114,6 +1213,7 @@ mod v22 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -1180,6 +1280,7 @@ mod v21 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -1244,6 +1345,7 @@ mod v20 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -1304,6 +1406,7 @@ mod v19 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -1364,6 +1467,7 @@ mod v18 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -1889,6 +1993,7 @@ mod v7 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -1973,6 +2078,7 @@ mod v8 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -2027,6 +2133,7 @@ mod v9 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -2083,6 +2190,7 @@ mod v11 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -2188,6 +2296,7 @@ mod v15 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -2247,6 +2356,7 @@ mod v14 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -2304,6 +2414,7 @@ mod v13 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -2403,6 +2514,7 @@ mod v12 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -2500,6 +2612,7 @@ mod v10 {
                 key: None,
                 keys: Vec::new(),
                 background: Vec::new(),
+                kept: Vec::new(),
             }
         }
     }
@@ -2741,6 +2854,12 @@ mod tests {
                 },
                 failed: Some(137),
             }],
+            kept: vec![Kept {
+                pane: 12,
+                command: "trail serve".to_owned(),
+                always: true,
+                given_up: false,
+            }],
         }
     }
 
@@ -2941,6 +3060,20 @@ mod tests {
     }
 
     #[test]
+    fn version_26_is_read_with_the_terminals_kept_running() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v26.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        let kept = &state.kept[0];
+        assert_eq!(
+            (kept.pane, kept.command.as_str(), kept.always, kept.given_up),
+            (12, "trail serve", true, false)
+        );
+        assert_eq!(state.background[0].tab.id, 3);
+    }
+
+    #[test]
     fn version_25_is_read_with_background_tabs() {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v25.bin"))
@@ -2962,6 +3095,8 @@ mod tests {
             }
         ));
         assert_eq!(background.tab.focused, 12);
+        // No terminal was kept running.
+        assert!(state.kept.is_empty());
     }
 
     #[test]
@@ -3176,11 +3311,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v25.bin"]
+    #[ignore = "writes tests/fixtures/handover-v26.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v25.bin"
+            "/tests/fixtures/handover-v26.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();

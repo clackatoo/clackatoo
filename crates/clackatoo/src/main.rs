@@ -143,6 +143,10 @@ enum Command {
     /// keeps running out of the tab bar, and print its terminal's ID. It's
     /// typed at a new shell's prompt, as you would type it.
     Bg(Bg),
+    /// Mark a terminal to keep running the command its shell runs, or ran
+    /// last: run again by itself as the daemon starts afresh, and with
+    /// `always`, as it ends too; or with `off`, take the mark away.
+    Keep(Keep),
     /// Send text to a terminal exactly as given, without pressing Enter.
     Send(Send),
     /// Print what a terminal is showing.
@@ -347,6 +351,26 @@ struct Bg {
 }
 
 #[derive(Debug, Args)]
+struct Keep {
+    #[command(flatten)]
+    target: Target,
+    /// How it's kept running.
+    #[arg(value_enum, default_value = "restore")]
+    how: KeepHow,
+}
+
+/// How `clackatoo keep` keeps a terminal running.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum KeepHow {
+    /// Its command runs again by itself as the daemon starts afresh.
+    Restore,
+    /// That, and as its command ends, a moment later.
+    Always,
+    /// It isn't kept running.
+    Off,
+}
+
+#[derive(Debug, Args)]
 struct Edit {
     /// The file, or folder. A relative path is from the current directory,
     /// which is the folder shown if there's none.
@@ -439,6 +463,7 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::List(connection) => list(&connection),
         Command::New(new) => new_terminal(new),
         Command::Bg(bg) => start_in_background(bg),
+        Command::Keep(keep) => keep_running(&keep),
         Command::Edit(edit) => edit_file(edit),
         Command::Language(command) => language::run(command),
         Command::Desktop(command) => desktop::run(command),
@@ -764,6 +789,37 @@ fn start_in_background(bg: Bg) -> anyhow::Result<()> {
         .and_then(|(_, _, pane)| pane.content.terminal())
         .ok_or_else(|| anyhow::anyhow!("its terminal closed at once"))?;
     println!("{terminal}");
+    Ok(())
+}
+
+fn keep_running(keep: &Keep) -> anyhow::Result<()> {
+    let mut client = connect(&keep.target.connection)?;
+    if !client.daemon_has(clackatoo_protocol::wire::BACKGROUND) {
+        anyhow::bail!(
+            "the daemon is too old to keep terminals running: update it, and run `clackatoo upgrade`"
+        );
+    }
+    let terminal = clackatoo_protocol::Content::Terminal(TerminalId(keep.target.terminal));
+    let workspaces = client.watch_workspaces()?;
+    let pane = (workspaces.list.iter())
+        .filter(|workspace| workspace.home.is_none())
+        .flat_map(|workspace| {
+            let background = workspace.background.iter().map(|b| &b.tab);
+            workspace.tabs.iter().chain(background)
+        })
+        .flat_map(|tab| tab.layout.panes())
+        .find(|pane| pane.content == terminal)
+        .ok_or_else(|| anyhow::anyhow!("terminal {} is in no pane", keep.target.terminal))?;
+    let how = match keep.how {
+        KeepHow::Restore => clackatoo_protocol::Keeping::Restore,
+        KeepHow::Always => clackatoo_protocol::Keeping::Always,
+        KeepHow::Off => clackatoo_protocol::Keeping::Off,
+    };
+    match client.request(&Request::Keep { pane: pane.id, how })? {
+        Response::Text(said) => println!("{said}"),
+        Response::Error(err) => anyhow::bail!("{err}"),
+        other => anyhow::bail!("the daemon answered {other:?}"),
+    }
     Ok(())
 }
 

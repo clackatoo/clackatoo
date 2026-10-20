@@ -115,9 +115,9 @@ pub use view::{
     Links, Node, NodeId, Patch, Run, View, ViewUpdate,
 };
 pub use workspace::{
-    Axis, Background, BackgroundAction, BackgroundState, Content, Layout, Lent, MAX_NESTING,
-    OtherMachine, Pane, PaneId, PaneKind, PaneTerminal, Place, Restored, Side, Tab, TabId,
-    Workspace, WorkspaceId, Workspaces,
+    Axis, Background, BackgroundAction, BackgroundState, Content, Keeping, Kept, Layout, Lent,
+    MAX_NESTING, OtherMachine, Pane, PaneId, PaneKind, PaneTerminal, Place, Restored, Side, Tab,
+    TabId, Workspace, WorkspaceId, Workspaces,
 };
 
 /// The protocol version this crate speaks. Bump it on any change to a
@@ -1332,6 +1332,21 @@ pub enum Request {
     /// 96: a client asks [`wire::daemon_has`] with [`wire::BACKGROUND`]
     /// before sending it.
     Background(BackgroundAction),
+    /// Marks the terminal `pane` shows to keep running, as `how` says, or
+    /// takes the mark away ([`Workspaces::kept`]). Its command is the one
+    /// its shell runs, or else ran last, as its shell's integration said
+    /// with the terminal's secret, taken now and kept: refused if its
+    /// shell said none, as only a command the user ran is ever run by
+    /// itself. Only a user asks this, in a window or with the `clackatoo`
+    /// command: no agent's tool does. Answered with [`Response::Text`],
+    /// saying what it keeps running. New in protocol 96, as
+    /// [`Request::Background`].
+    Keep {
+        /// The pane, in a tab or a background tab.
+        pane: PaneId,
+        /// How it's kept.
+        how: Keeping,
+    },
 }
 
 /// How to start a terminal.

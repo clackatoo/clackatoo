@@ -379,6 +379,9 @@ mod tests {
         fn background_tabs(&self) -> usize {
             0
         }
+        fn kept_terminals(&self) -> usize {
+            0
+        }
     }
 
     #[test]

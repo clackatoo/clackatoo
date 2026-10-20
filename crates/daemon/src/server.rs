@@ -70,6 +70,7 @@ mod fits;
 mod forwards;
 mod groups;
 mod hover;
+mod keep;
 mod language;
 mod lending;
 mod links;
@@ -955,6 +956,9 @@ pub struct Daemon {
     keeping: restore::Keeping,
     /// What's kept of the terminals in background tabs.
     background: background::Backgrounds,
+    /// The terminals kept running always, and how running each again
+    /// goes.
+    keeps: keep::Keeps,
     /// Which daemon this is, kept from one run to the next.
     machine: Machine,
     /// The key that proves it, which signs the QUIC certificate.
@@ -1079,6 +1083,7 @@ impl Daemon {
             finds,
             tools: Tools::default(),
             background: background::Backgrounds::default(),
+            keeps: keep::Keeps::default(),
             explorers: Explorers::default(),
             boards,
             signs: Signs::default(),
@@ -1157,6 +1162,7 @@ impl Daemon {
             });
         daemon.workspaces.set_home(&daemon.config.home);
         daemon.workspaces.resume_background(&state.background);
+        daemon.workspaces.resume_kept(&state.kept);
         daemon.resume_machines(state);
 
         for terminal in &state.terminals {
@@ -1388,6 +1394,7 @@ impl Daemon {
                 connections,
                 lent,
                 background: self.workspaces.hand_over_background(),
+                kept: self.workspaces.hand_over_kept(),
                 borrowers,
                 lenders,
                 sharing,
@@ -1499,6 +1506,7 @@ impl Daemon {
                     .chain(self.links.due())
                     .chain(self.relay_due())
                     .chain(self.next_lent_due())
+                    .chain(self.next_restart_due())
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
@@ -1541,6 +1549,7 @@ impl Daemon {
             self.ask_again();
             self.take_found();
             self.take_ports();
+            self.restart_kept();
             self.explore();
             // After what the daemon's own threads wrote has been taken, so
             // it isn't taken for a change from outside.
@@ -1932,6 +1941,7 @@ impl Daemon {
         self.collect_damage(id);
         self.terminal_moved_on(id);
         self.background_moved_on(id);
+        self.kept_moved_on(id);
         self.note_shell(id);
     }
 
@@ -2122,10 +2132,13 @@ impl Daemon {
             for token in viewers {
                 self.send_event(token, clackatoo_protocol::Event::Exited { terminal: id });
             }
-            // A background tab's terminal stays, its screen readable, until
-            // the tab is dismissed.
+            // A terminal kept running always gets a new shell in its place,
+            // a moment later; a background tab's stays, its screen readable,
+            // until the tab is dismissed.
+            let again = self.kept_ended(id);
             self.background_ended(id);
-            if self.workspaces.get().pane_showing(id).is_some()
+            if !again
+                && self.workspaces.get().pane_showing(id).is_some()
                 && let Err(err) = self.close_terminal(id)
             {
                 log::error!("terminal {id}: closing its pane failed: {err}");
@@ -2429,6 +2442,8 @@ impl Daemon {
             }
         }
         self.workspaces.sweep_restored();
+        self.workspaces.sweep_kept();
+        self.refresh_kept();
         // A pane borrowed from another machine that has closed here is
         // closed there.
         let gone = self.workspaces.sweep_borrowed();
@@ -3010,6 +3025,7 @@ impl Daemon {
             } => self.serve_unlend(token, workspace, close_idle),
             Request::Lent => Ok(self.list_lent()),
             Request::Background(action) => self.serve_background(token, &action),
+            Request::Keep { pane, how } => self.serve_keep(pane, how),
             Request::Lend {
                 key,
                 beside,

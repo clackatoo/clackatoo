@@ -1334,6 +1334,7 @@ mod tests {
                 machine: None,
                 others: Vec::new(),
                 passed: Vec::new(),
+                kept: Vec::new(),
             },
             ..State::default()
         };

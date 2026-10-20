@@ -218,6 +218,8 @@ Each chat's agent is given tools of clackatoo's own, so it can show you things i
 
 The first pane an agent opens goes to its chat's right, and the next ones stack below that. An agent's tools reach only its chat's workspace.
 
+No tool marks a terminal to [keep running](~clackatoo/reference/window#keeping-a-terminal-running): only you do, so an agent can't arrange for anything to run by itself after a restart.
+
 Before running a command or typing into a terminal, the agent asks: Allow, Always allow, or Reject. The question shows exactly what would be typed, with keys such as Enter shown as `⏎` and nothing cut short; long text goes in the conversation, in full. Always allow lets the agent run commands in terminals it started without asking; typing into a terminal you opened always asks, and so does showing a file or folder outside the chat's project. The tools that only show or read inside the project never ask.
 
 The chat's box has a Tools setting, Ask, Allow or Off, that you can change at any time. The `agenttools` option sets it for new chats, `ask` to begin with, and `CLACKATOO_AGENT_TOOLS=off` for the daemon gives no agent any tools.

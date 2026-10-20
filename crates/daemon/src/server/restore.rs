@@ -237,6 +237,7 @@ impl Daemon {
         if only_focus_reports(bytes) {
             return;
         }
+        self.kept_typed_into(id);
         if let Some(pane) = self.workspaces.get().pane_showing(id)
             && self.workspaces.forget_ran(pane)
         {
@@ -405,6 +406,7 @@ impl Daemon {
             return Some(Pane::Terminal {
                 cwd: None,
                 ran: None,
+                keep: None,
                 elsewhere: Some(saved::Elsewhere {
                     machine: borrowed.machine.to_string(),
                     key: borrowed.key,
@@ -414,6 +416,7 @@ impl Daemon {
             });
         }
         let restored = self.workspaces.restored(id);
+        let kept = self.workspaces.kept(id);
         match content {
             Content::Terminal(terminal) => match &self.terminals.get(&terminal)?.terminal {
                 Hosted::Pty(terminal) => {
@@ -426,14 +429,22 @@ impl Daemon {
                         // runs, with the terminal's secret, never what a
                         // program printed: or for a background tab's
                         // terminal whose shell has ended, what it ran last.
-                        ran: (restored.and_then(|restored| restored.ran.clone())).or_else(|| {
-                            match terminal.status() {
-                                TerminalStatus::Running => emulator.trusted_running_command(),
-                                _ => emulator.trusted_last_command(),
-                            }
-                            .and_then(kept_command)
-                        }),
+                        // One kept running is written as offered too, for
+                        // a build from before then.
+                        ran: (kept.map(|kept| kept.command.clone()))
+                            .or_else(|| restored.and_then(|restored| restored.ran.clone()))
+                            .or_else(|| {
+                                match terminal.status() {
+                                    TerminalStatus::Running => emulator.trusted_running_command(),
+                                    _ => emulator.trusted_last_command(),
+                                }
+                                .and_then(kept_command)
+                            }),
                         elsewhere: None,
+                        keep: kept.map(|kept| saved::Keep {
+                            command: kept.command.clone(),
+                            always: kept.always,
+                        }),
                     })
                 }
                 Hosted::Chat(chat) => Some(Pane::Chat {
@@ -595,6 +606,7 @@ impl Daemon {
         self.workspaces.set_restored(restored);
         self.workspaces.refresh_background();
         self.restate_backgrounds();
+        self.keep_restored();
         self.restore_borrowers(&state.borrowers);
         self.restore_keys(&state.keys);
         self.connect_kept(state.connections.iter().map(super::links::Kept::from_saved));
@@ -800,6 +812,16 @@ impl Daemon {
                 panes.push(made.map(|made| made.id));
                 let made = made?;
                 let (ran, place) = match pane {
+                    // Kept running, it runs again, offering nothing.
+                    Pane::Terminal {
+                        keep: Some(keep), ..
+                    } => {
+                        let command = kept_command(&keep.command);
+                        if let Some(command) = command {
+                            self.keeps.restoring.push((made.id, command, keep.always));
+                        }
+                        (None, None)
+                    }
                     Pane::Terminal { ran, .. } => (ran.as_deref().and_then(kept_command), None),
                     Pane::Editor { place, .. } => (
                         None,

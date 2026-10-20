@@ -139,6 +139,18 @@ A terminal whose shell was running a command shows "was running: cargo watch" at
 
 To start once with none, run `clackatoo stop`, then [`clackatoo daemon --fresh`](~clackatoo/reference/cli#daemon).
 
+### Keeping a terminal running
+
+`:keep` marks the focused terminal to run its command again by itself as the daemon starts afresh, in its folder: the one exception to nothing running by itself, and only because you asked. Its command is the one its shell runs, or else ran last, as the shell's integration said it with its secret, taken as you mark it and kept: never what a program printed, nor whatever runs later. A shell that hasn't said, as one clackatoo didn't start as your shell, can't be marked. A terminal marked so offers nothing after a restart: it runs.
+
+| Command | Does |
+|---|---|
+| `:keep` | Runs its command again as the daemon starts afresh. |
+| `:keep always` | That, and runs it again as it ends: a second after its shell's prompt comes back after that very command, never after one you ran since, and in a new shell in its pane if the shell itself ends. Each time it ends again within ten seconds of starting it waits twice as long, up to a minute, and after five such ends in a row it gives up until you mark it again. |
+| `:keep off` | Takes the mark away. |
+
+A tab holding a terminal kept running says ` ↻` after its name, and ` ↻✗` once it has given up; so does a [background tab](#background-tabs) in the list. Only you mark a terminal, here or with [`clackatoo keep`](~clackatoo/reference/cli#keep): no [agent's tool](~clackatoo/reference/agents#what-the-agent-can-show-you) can, so nothing an agent does arranges for anything to run by itself later. The mark is kept with the workspaces, and handed over as the daemon upgrades, which keeps terminals running anyway. A terminal on another machine can't be marked from here yet.
+
 A pane closes when its program exits, as in other terminals. A tab closes with its last pane, and a workspace with its last tab, unless it has a [background tab](#background-tabs) still running, which comes back in its place. When the last workspace closes, so does the window.
 
 ### Background tabs

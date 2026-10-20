@@ -479,6 +479,17 @@ impl Terminal {
         self.block_entry(block).map(Entry::progress)
     }
 
+    /// Block `block`'s command, if clackatoo's own shell integration said
+    /// what it is, with the terminal's secret, while it's still known.
+    #[must_use]
+    pub fn trusted_command_of(&self, block: u32) -> Option<&str> {
+        let entry = self.block_entry(block)?;
+        if !entry.trusted {
+            return None;
+        }
+        entry.command.as_deref()
+    }
+
     /// The block at `line` of the document, or the one before or after it.
     /// None on the alternate screen, which has no blocks.
     #[must_use]
@@ -807,6 +818,11 @@ mod tests {
         t.advance(b"x\r\n\x1b]133;C;cmdline_url=rm%20-rf%20~\x07\x1b]133;D;0\x07");
         t.advance(PROMPT.as_bytes());
         assert_eq!(t.trusted_last_command(), Some("trail serve"));
+        // And each block says its own, if it's trusted.
+        let (latest, _) = t.latest_block().unwrap();
+        assert_eq!(t.trusted_command_of(latest - 1), None, "printed");
+        assert_eq!(t.trusted_command_of(latest - 2), Some("trail serve"));
+        assert_eq!(t.trusted_command_of(latest + 1), None);
     }
 
     #[test]

@@ -931,6 +931,7 @@ pub(super) mod tests {
             machine: None,
             machine_name: None,
             display: None,
+            keep_wait: crate::DEFAULT_KEEP_WAIT,
         };
         let mut daemon = Daemon::bind(&dir.join("daemon.sock"), config).unwrap();
         let id = TerminalId(1);

@@ -185,6 +185,7 @@ impl World {
                 speaks: None,
                 impostor: false,
             }),
+            keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
         };
         configure(&mut config);
         let socket = dir.join("clackatoo/daemon.sock");

@@ -100,6 +100,7 @@ impl TestDaemon {
             machine: None,
             machine_name: None,
             display: None,
+            keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
         };
         let mut daemon = Daemon::bind(&root.join("daemon.sock"), config).expect("bind");
         let shutdown = daemon.shutdown_handle();

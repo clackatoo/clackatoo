@@ -63,3 +63,13 @@ finder background
 ## A pane alone
 
 Ctrl+B b p sends only the focused pane to the background, in a tab of its own; a tab's last pane takes the tab with it. `:bg` and `:bgpane` do what the keys do. The workspace's only tab can go too: a shell takes its place.
+
+## Keep it running
+
+After a restart, nothing runs by itself: a terminal that was running a command offers `R` to put it at its new shell's prompt. `:keep` marks a terminal to run its command again by itself instead, the command its shell runs or ran last, as your shell said it: never what a program printed, nor what you run later. `:keep always` runs it again as it ends too, a moment later, waiting longer each time it ends soon after starting, and giving up after five such ends in a row. Its tab says ` ↻`, or ` ↻✗` once given up on; `:keep off` takes the mark away. Only you mark one, here or with `clackatoo keep`: no agent can.
+
+In the terminal beside this lesson, run `echo kept`, then in normal mode type `:keep`.
+
+```check
+kept 1
+```

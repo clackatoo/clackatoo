@@ -70,6 +70,42 @@ impl Desk {
         self.request(Request::Background(start), Asked::Command);
     }
 
+    /// Carries out `:keep`: marks the focused terminal to keep running as
+    /// `how` says, or takes the mark away.
+    pub(super) fn keep_running(&mut self, how: clackatoo_protocol::Keeping) {
+        if !self.needs_daemon(":keep", wire::BACKGROUND) {
+            return;
+        }
+        let Some(shown) = self.shown else { return };
+        self.request(
+            Request::Keep {
+                pane: shown.pane,
+                how,
+            },
+            Asked::Kept,
+        );
+    }
+
+    /// What a tab or a background tab laid out as `layout` is marked with
+    /// for a terminal of its kept running: ` ↻`, or ` ↻✗` once running it
+    /// again was given up.
+    pub(super) fn kept_mark(&self, layout: &clackatoo_protocol::Layout) -> Option<&'static str> {
+        let kept = &self.workspaces.kept;
+        if kept.is_empty() {
+            return None;
+        }
+        let marks: Vec<&clackatoo_protocol::Kept> = (layout.panes().into_iter())
+            .filter_map(|pane| kept.iter().find(|kept| kept.pane == pane.id))
+            .collect();
+        if marks.is_empty() {
+            None
+        } else if marks.iter().any(|kept| kept.given_up) {
+            Some(" ↻✗")
+        } else {
+            Some(" ↻")
+        }
+    }
+
     /// Takes in the ports background tabs listen on, as the daemon found
     /// them. Returns whether to draw again.
     pub(crate) fn listening(&mut self, listening: Vec<Listening>) -> bool {
@@ -189,10 +225,13 @@ impl Desk {
                 self.shown_name(workspace)
             };
             for background in &workspace.background {
-                let name = match background.name.trim() {
+                let mut name = match background.name.trim() {
                     "" => format!("tab {}", background.tab.id),
                     name => name.to_owned(),
                 };
+                if let Some(mark) = self.kept_mark(&background.tab.layout) {
+                    name.push_str(mark);
+                }
                 // A failure seen as the list opened still says so in it.
                 let seen = (self.background_seen.iter())
                     .find(|&&(tab, _)| tab == background.tab.id)

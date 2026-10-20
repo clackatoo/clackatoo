@@ -25,6 +25,7 @@
 //! | `saved` | The practice file has no changes that aren't written. |
 //! | `rendered` | The focused editor shows its Markdown rendered. |
 //! | `background N` | The workspace shown has N background tabs. |
+//! | `kept N` | N terminals of the workspace shown are kept running. |
 //! | `not CHECK` | CHECK doesn't hold. |
 //!
 //! Text is written in double quotes, with `\n` a line break, `\t` a tab,
@@ -59,6 +60,7 @@ pub(crate) enum Check {
     Saved,
     Rendered,
     Background(usize),
+    Kept(usize),
     Not(Box<Check>),
 }
 
@@ -159,6 +161,8 @@ pub(crate) trait Facts {
     fn rendered(&self) -> bool;
     /// How many background tabs the workspace shown has.
     fn background_tabs(&self) -> usize;
+    /// How many terminals of the workspace shown are kept running.
+    fn kept_terminals(&self) -> usize;
 }
 
 impl Check {
@@ -225,6 +229,7 @@ impl Check {
             ["saved"] => Self::Saved,
             ["rendered"] => Self::Rendered,
             ["background", count] => Self::Background(number(count)?),
+            ["kept", count] => Self::Kept(number(count)?),
             _ => return Err("that isn't a check".into()),
         })
     }
@@ -269,6 +274,7 @@ impl Check {
             Self::Saved => facts.practice_saved() == Some(true),
             Self::Rendered => facts.rendered(),
             Self::Background(count) => facts.background_tabs() == *count,
+            Self::Kept(count) => facts.kept_terminals() == *count,
             Self::Not(check) => !check.holds(facts),
         }
     }
@@ -438,6 +444,9 @@ mod tests {
         }
         fn background_tabs(&self) -> usize {
             self.background
+        }
+        fn kept_terminals(&self) -> usize {
+            0
         }
     }
 

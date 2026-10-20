@@ -224,7 +224,9 @@ gates! {
     /// bar, `Workspace`'s `background` (`Background`, `BackgroundState`);
     /// what's asked of them, `Request::Background` (`BackgroundAction`);
     /// and the ports their programs listen on, `Event::Listening`
-    /// (`Listening`, `ListeningPort`).
+    /// (`Listening`, `ListeningPort`). And terminals kept running,
+    /// `Workspaces`' `kept` (`Kept`), and marking them, `Request::Keep`
+    /// (`Keeping`).
     BACKGROUND = 96,
 }
 

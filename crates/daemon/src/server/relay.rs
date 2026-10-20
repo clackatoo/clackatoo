@@ -1135,6 +1135,11 @@ impl Daemon {
             &Request::AttachBrowser { chat, .. } => self
                 .relayed_terminal(chat)
                 .map(|(at, _)| (at, Err(self.not_yet(at, "a chat's browser")))),
+            // What another machine keeps running is its own to mark, for
+            // now (CLACKA-121).
+            &Request::Keep { pane, .. } => self
+                .relayed_pane(pane)
+                .map(|(at, _)| (at, Err(self.not_yet(at, "keeping a terminal running")))),
             // Another machine's background tabs aren't shown here: what
             // it keeps in the background is its own (CLACKA-121).
             Request::Background(action) => match *action {

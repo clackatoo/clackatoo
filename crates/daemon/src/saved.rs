@@ -240,6 +240,12 @@ pub(crate) enum Pane {
         /// new shell of its own rather than refuse the file.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         elsewhere: Option<Elsewhere>,
+        /// The command the user marked it to keep running, if they did:
+        /// run again by itself as the daemon starts afresh. It's written
+        /// as `ran` too, which a build from before then, passing this
+        /// over, offers instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keep: Option<Keep>,
     },
     /// A chat with an agent.
     Chat {
@@ -298,6 +304,16 @@ pub(crate) enum Pane {
         /// The directory whose project it's of.
         root: String,
     },
+}
+
+/// The command a terminal is kept running, as the user marked it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Keep {
+    /// The command line, as its shell's integration said it ran it.
+    pub(crate) command: String,
+    /// It's run again as it ends too, not only as the daemon starts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) always: bool,
 }
 
 /// Where an editor's cursor and view were.
@@ -580,6 +596,7 @@ mod tests {
                 cwd: Some(cwd.to_owned()),
                 ran: ran.map(str::to_owned),
                 elsewhere: None,
+                keep: None,
             })
         };
         State {
@@ -694,6 +711,25 @@ mod tests {
     }
 
     #[test]
+    fn a_command_kept_running_reads_back_and_is_left_out_when_there_is_none() {
+        let encoded = String::from_utf8(state().encode()).unwrap();
+        assert!(!encoded.contains("keep"), "{encoded}");
+        let mut state = state();
+        state.workspaces[1].tabs[0].layout = Layout::Pane(Pane::Terminal {
+            cwd: Some("/home/jack/site".into()),
+            ran: Some("trail serve".into()),
+            elsewhere: None,
+            keep: Some(Keep {
+                command: "trail serve".into(),
+                always: true,
+            }),
+        });
+        let encoded = state.encode();
+        assert!(String::from_utf8_lossy(&encoded).contains("\"always\": true"));
+        assert_eq!(State::decode(&encoded).unwrap(), state);
+    }
+
+    #[test]
     fn background_tabs_read_back_and_are_left_out_when_there_are_none() {
         let mut state = state();
         let encoded = String::from_utf8(state.encode()).unwrap();
@@ -704,6 +740,7 @@ mod tests {
                 cwd: Some("/home/jack/site".into()),
                 ran: Some("trail serve".into()),
                 elsewhere: None,
+                keep: None,
             }),
             focused: 0,
         }];
@@ -742,6 +779,7 @@ mod tests {
                 kind: "editor".into(),
                 name: Some("jack-ubuntu-laptop".into()),
             }),
+            keep: None,
         };
         kept.workspaces[0].tabs[0].layout = Layout::Pane(borrowed);
         kept.workspaces[0].lent = Some(Lent {
@@ -828,6 +866,7 @@ mod tests {
                 cwd: None,
                 ran: None,
                 elsewhere: None,
+                keep: None,
             })
         );
     }

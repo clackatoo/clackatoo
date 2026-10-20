@@ -131,6 +131,8 @@ enum Asked {
     /// The screen of a background tab's terminal, for the list's preview
     /// of the tab.
     BackgroundPreview(TabId),
+    /// `:keep`, whose answer is said in the bar.
+    Kept,
 }
 
 /// What the window attaches to again, or asks for again, when a newer
@@ -779,6 +781,10 @@ impl Desk {
                     && self.pointed().is_some_and(|pane| tab.layout.contains(pane))
                 {
                     name.push_str(" ●");
+                }
+                // A terminal kept running, as the user marked it.
+                if let Some(mark) = self.kept_mark(&tab.layout) {
+                    name.push_str(mark);
                 }
                 (tab.id, name, tab.id == shown.tab)
             })
@@ -1669,7 +1675,7 @@ impl Desk {
                 }
                 true
             }
-            Some(Asker::Window(Asked::Forwarded)) => {
+            Some(Asker::Window(Asked::Forwarded | Asked::Kept)) => {
                 match response {
                     Response::Text(said) => self.say(said),
                     Response::Error(err) => self.warn(err.to_string()),
@@ -2659,6 +2665,7 @@ impl Desk {
             Command::Review(review) => self.run_review(review),
             Command::Background(command) => self.background_command(command),
             Command::BackgroundStart(command) => self.start_in_background(command),
+            Command::Keep(how) => self.keep_running(how),
             Command::Reload
             | Command::Set(_)
             | Command::Update(_)
@@ -2844,6 +2851,7 @@ mod tests {
             machine: None,
             others: Vec::new(),
             passed: Vec::new(),
+            kept: Vec::new(),
         }
     }
 

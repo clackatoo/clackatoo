@@ -108,6 +108,47 @@ pub struct Workspaces {
         deserialize_with = "wire::since::<{ wire::CHAIN }, _, _>"
     )]
     pub passed: Vec<crate::Passed>,
+    /// The terminals the user marked to keep running, by their panes, in
+    /// tabs or background tabs: each reruns its command by itself as the
+    /// daemon starts afresh, and if it's to, as the command ends (see
+    /// [`Request::Keep`](crate::Request::Keep)). Windows mark them. Empty
+    /// from a daemon older than protocol 96.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::BACKGROUND }, _>",
+        deserialize_with = "wire::since::<{ wire::BACKGROUND }, _, _>"
+    )]
+    pub kept: Vec<Kept>,
+}
+
+/// A terminal the user marked to keep running: see [`Workspaces::kept`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Kept {
+    /// Its pane.
+    pub pane: PaneId,
+    /// The command it runs, as its shell's integration said it ran it,
+    /// with the terminal's secret, when it was marked: never what a
+    /// program printed, nor what ran later. Always one line.
+    pub command: String,
+    /// It's run again as it ends, too, not only as the daemon starts
+    /// afresh ([`Keeping::Always`]).
+    pub always: bool,
+    /// Running it again was given up, as it kept ending soon after it
+    /// started: until it's marked again.
+    pub given_up: bool,
+}
+
+/// How a terminal is kept running: see [`Request::Keep`](crate::Request::Keep).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Keeping {
+    /// It isn't: as a daemon starts afresh, its new shell offers to run
+    /// its command again, and runs nothing by itself.
+    Off,
+    /// Its command runs again by itself as the daemon starts afresh.
+    Restore,
+    /// That, and its command runs again whenever it ends, a moment later,
+    /// waiting longer each time it ends soon after it started, and giving
+    /// up after several such ends in a row.
+    Always,
 }
 
 /// A machine a daemon isn't connected to, but whose panes it shows: see

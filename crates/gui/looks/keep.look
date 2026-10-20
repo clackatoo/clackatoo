@@ -1,0 +1,24 @@
+# Terminals kept running: the mark after a tab's name, ↻, and ↻✗ once
+# running a command again was given up on; and in the list of background
+# tabs.
+size 1280x800
+shell sleep 600
+sleep 500
+keys <C-;>:keep<CR>
+sleep 800
+shot keep-badge
+# A command that ends at once, kept running always: run again after 1, 2,
+# 4, 8 and 16 seconds, then given up on.
+keys <C-b>c
+keys i
+shell true
+keys <C-;>:keep always<CR>
+sleep 34000
+shot keep-given-up
+# The kept tab in the background, and its mark in the list.
+keys <C-b>1
+keys <C-b>bt
+sleep 500
+keys <C-b>bl
+sleep 1500
+shot keep-list

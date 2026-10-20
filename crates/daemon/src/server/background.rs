@@ -193,7 +193,12 @@ impl Daemon {
             .collect();
         let focused = self.workspaces.bring_back(tab)?;
         for (pane, old) in ended {
-            self.start_again_in(pane, old);
+            // One kept running runs its command again.
+            if let Some(new) = self.start_again_in(pane, old)
+                && self.workspaces.kept(pane).is_some()
+            {
+                self.run_kept(pane, new);
+            }
         }
         for terminal in self
             .workspaces
@@ -208,10 +213,12 @@ impl Daemon {
         Ok(Response::PaneCreated(focused))
     }
 
-    /// Shows a new shell in `pane` in place of terminal `old`, whose
-    /// program has ended, in the directory it was in, offering to run
-    /// again the last command its shell said it ran; and closes `old`.
-    fn start_again_in(&mut self, pane: PaneId, old: TerminalId) {
+    /// Shows a new shell in `pane`, in a tab or a background tab, in place
+    /// of terminal `old`, whose program has ended, in the directory it was
+    /// in; and closes `old`. Unless the pane is kept running, which runs
+    /// its own command, the new shell offers to run again the last command
+    /// `old`'s shell said it ran. Returns the new shell's terminal.
+    pub(super) fn start_again_in(&mut self, pane: PaneId, old: TerminalId) -> Option<TerminalId> {
         let (cwd, ran, size) = match self.terminals.get(&old) {
             Some(slot) => {
                 let grid = slot.terminal.grid();
@@ -229,20 +236,20 @@ impl Daemon {
             cwd,
             record_to: None,
         };
-        match self.new_terminal(&request) {
-            Ok(new) => {
-                if self.workspaces.set_content(pane, new.into()).is_ok()
-                    && let Some(ran) = ran
-                {
-                    self.workspaces.offer_again(pane, ran);
-                }
+        let new = match self.new_terminal(&request) {
+            Ok(new) => self.workspaces.replace_terminal(pane, new).map(|_| new),
+            Err(err) => {
+                log::warn!("pane {pane}: a new shell couldn't be started: {err}");
+                None
             }
-            Err(err) => log::warn!("pane {pane}: a new shell couldn't be started: {err}"),
+        };
+        if let Some(ran) = ran.filter(|_| new.is_some() && self.workspaces.kept(pane).is_none()) {
+            self.workspaces.offer_again(pane, ran);
         }
-        self.workspaces.refresh_background();
         if self.terminals.contains_key(&old) && self.close_terminal(old).is_err() {
             log::warn!("terminal {old} couldn't be closed");
         }
+        new
     }
 
     /// Closes background tab `tab`, and its terminals.

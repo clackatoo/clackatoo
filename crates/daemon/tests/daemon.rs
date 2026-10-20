@@ -116,6 +116,7 @@ impl TestDaemon {
             machine: None,
             machine_name: None,
             display: None,
+            keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
         };
         change(dir.path(), &mut config);
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
@@ -16579,9 +16580,20 @@ impl TestDaemon {
     /// A daemon keeping its workspaces in `file`, whose shell is
     /// [`secret_shell`], writing the secrets it's given to `seen`.
     fn keeping_with_secret_shell(file: &Path, seen: &Path) -> Self {
+        Self::keeping_with_secret_shell_and(file, seen, |_| {})
+    }
+
+    /// As [`keeping_with_secret_shell`](Self::keeping_with_secret_shell),
+    /// with its config changed by `change`.
+    fn keeping_with_secret_shell_and(
+        file: &Path,
+        seen: &Path,
+        change: impl FnOnce(&mut DaemonConfig),
+    ) -> Self {
         let script = secret_shell(seen);
         Self::start_with_restoring(
             |dir, config| {
+                change(config);
                 let bin = dir.join("bin");
                 std::fs::create_dir(&bin).unwrap();
                 let shell = bin.join("zsh");
@@ -17815,4 +17827,245 @@ fn an_agent_starts_a_command_in_a_background_tab_asking_first_and_reads_it() {
     let workspaces = client.watch_workspaces().unwrap();
     assert_eq!(workspaces.list[0].tabs[0].layout.panes().len(), 1);
     assert_eq!(workspaces.list[0].background.len(), 1);
+}
+
+// --- Keeping terminals running (CLACKA-121) --------------------------------
+
+/// Marks pane `pane` to keep running as `how` says.
+fn keep(client: &mut Client, pane: PaneId, how: clackatoo_protocol::Keeping) -> Response {
+    client
+        .request(&Request::Keep { pane, how })
+        .expect("an answer")
+}
+
+#[test]
+fn a_terminal_kept_running_runs_its_signed_command_again_after_a_restart() {
+    use clackatoo_protocol::Keeping;
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    let dir = kept.path().join("site");
+    std::fs::create_dir(&dir).unwrap();
+    {
+        let daemon = TestDaemon::keeping_with_secret_shell(&file, &seen);
+        let mut client = daemon.client();
+        let pane = (client.new_workspace(Some("site".into()), shell_in(&dir))).unwrap();
+        let other = (client.split_pane(pane, Side::Right, shell_in(&dir))).unwrap();
+        let workspaces = client.watch_workspaces().unwrap();
+        let terminal = terminal_of(&workspaces, pane);
+        wait_for_prompt(&mut client, terminal);
+        // Nothing the shell said it ran: nothing to keep running.
+        let refused = keep(&mut client, pane, Keeping::Restore);
+        assert!(matches!(refused, Response::Error(_)), "{refused:?}");
+        client.send_input(terminal, b"sleep 60\r").unwrap();
+        wait_for_screen(&mut client, terminal, |text| text.contains("sleep 60"));
+        let kept_terminal = wait_for_answer_text(&mut client, pane, Keeping::Restore);
+        assert_eq!(
+            kept_terminal,
+            format!("pane {pane} runs `sleep 60` again as the daemon starts afresh")
+        );
+        let marked = client.watch_workspaces().unwrap().kept;
+        assert_eq!(
+            marked,
+            [clackatoo_protocol::Kept {
+                pane,
+                command: "sleep 60".into(),
+                always: false,
+                given_up: false,
+            }]
+        );
+        // What runs later is never what's kept: the mark keeps its command.
+        let beside = terminal_of(&workspaces, other);
+        wait_for_prompt(&mut client, beside);
+        wait_for_kept(&file, |kept| kept.contains("\"keep\""));
+    }
+    let daemon = TestDaemon::keeping_with_secret_shell(&file, &seen);
+    let mut client = daemon.client();
+    let workspaces = client.watch_workspaces().unwrap();
+    let panes = workspaces.list[0].tabs[0].layout.panes();
+    let (again, other) = (panes[0].id, panes[1].id);
+    // Run by itself, as the user marked it, in its new shell, offering
+    // nothing; the other offers nothing either, as it ran nothing.
+    assert!(
+        workspaces
+            .restored
+            .iter()
+            .all(|restored| restored.pane != again)
+    );
+    assert_eq!(workspaces.kept[0].pane, again);
+    assert_eq!(workspaces.kept[0].command, "sleep 60");
+    let terminal = terminal_of(&workspaces, again);
+    wait_for_screen(&mut client, terminal, |text| text.contains("$ sleep 60"));
+    let beside = terminal_of(&workspaces, other);
+    wait_for_prompt(&mut client, beside);
+    assert!(!screen_text(&client.capture(beside).unwrap()).contains("sleep"));
+    // Taken away, it's kept no more.
+    let Response::Text(said) = keep(&mut client, again, Keeping::Off) else {
+        panic!("no answer");
+    };
+    assert_eq!(said, format!("pane {again} is kept running no more"));
+    assert!(client.watch_workspaces().unwrap().kept.is_empty());
+}
+
+/// Marks `pane` to keep running as `how` says, once its shell has said
+/// what it runs, and returns what the daemon says it keeps.
+fn wait_for_answer_text(
+    client: &mut Client,
+    pane: PaneId,
+    how: clackatoo_protocol::Keeping,
+) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match keep(client, pane, how) {
+            Response::Text(said) => return said,
+            other => assert!(Instant::now() < deadline, "never kept: {other:?}"),
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_command_kept_running_always_runs_again_as_it_ends_but_not_after_the_users_own() {
+    use clackatoo_protocol::Keeping;
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    let count = kept.path().join("count");
+    let daemon = TestDaemon::keeping_with_secret_shell(&file, &seen);
+    let mut client = daemon.client();
+    let pane = (client.new_workspace(None, shell_in(kept.path()))).unwrap();
+    let terminal = terminal_of(&client.watch_workspaces().unwrap(), pane);
+    wait_for_prompt(&mut client, terminal);
+    // A command that ends at once, noting each time it runs.
+    let command = format!("echo run >> {}", count.display());
+    client
+        .send_input(terminal, format!("{command}\r").as_bytes())
+        .unwrap();
+    let runs = || {
+        std::fs::read_to_string(&count)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while runs() < 1 {
+        assert!(Instant::now() < deadline, "it never ran");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    wait_for_answer_text(&mut client, pane, Keeping::Always);
+    // Its end having been seen, it runs again a moment later, by itself.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while runs() < 2 {
+        assert!(Instant::now() < deadline, "it never ran again");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // A command of the user's own, taken over, ends without it running
+    // again after: only the command kept running counts.
+    let taken = runs();
+    client.send_input(terminal, b"true\r").unwrap();
+    std::thread::sleep(Duration::from_millis(2500));
+    // It may have run once more for its own end before the user's.
+    assert!(runs() <= taken + 1, "{} runs", runs());
+}
+
+#[test]
+fn a_command_kept_running_that_keeps_ending_quickly_is_given_up_on() {
+    use clackatoo_protocol::Keeping;
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    // Waiting 50 ms at first, rather than a second.
+    let daemon = TestDaemon::keeping_with_secret_shell_and(&file, &seen, |config| {
+        config.keep_wait = Duration::from_millis(50);
+    });
+    let mut client = daemon.client();
+    let pane = (client.new_workspace(None, shell_in(kept.path()))).unwrap();
+    let terminal = terminal_of(&client.watch_workspaces().unwrap(), pane);
+    wait_for_prompt(&mut client, terminal);
+    client.send_input(terminal, b"false\r").unwrap();
+    wait_for_answer_text(&mut client, pane, Keeping::Always);
+    // 50 + 100 + 200 + 400 + 800 ms of waiting, five quick ends, then no
+    // more.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let marked = client.watch_workspaces().unwrap().kept;
+        if marked.first().is_some_and(|kept| kept.given_up) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never given up: {marked:?}
+{}",
+            screen_text(&client.capture(terminal).unwrap())
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let screen = screen_text(&client.capture(terminal).unwrap());
+    assert!(screen.matches("$ false").count() >= 5, "{screen}");
+}
+
+#[test]
+fn no_agents_tool_marks_a_terminal_to_keep_running() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let words = last_words(&ask(
+        &mut client,
+        chat,
+        "mcp keep_running {\"pane\":1}\nmcp restart {\"pane\":1}",
+    ));
+    assert!(
+        words.contains("keep_running: refused: there's no tool"),
+        "{words}"
+    );
+    assert!(
+        words.contains("restart: refused: there's no tool"),
+        "{words}"
+    );
+    assert!(client.watch_workspaces().unwrap().kept.is_empty());
+}
+
+#[test]
+fn a_shell_kept_running_always_that_exits_comes_back_in_its_pane_running_the_command() {
+    use clackatoo_protocol::Keeping;
+    let kept = tempfile::tempdir().unwrap();
+    let (file, seen) = (kept.path().join("workspaces"), kept.path().join("seen"));
+    let count = kept.path().join("count");
+    let daemon = TestDaemon::keeping_with_secret_shell_and(&file, &seen, |config| {
+        config.keep_wait = Duration::from_millis(50);
+    });
+    let mut client = daemon.client();
+    let first = (client.new_workspace(None, shell_in(kept.path()))).unwrap();
+    let pane = (client.split_pane(first, Side::Right, shell_in(kept.path()))).unwrap();
+    let terminal = terminal_of(&client.watch_workspaces().unwrap(), pane);
+    wait_for_prompt(&mut client, terminal);
+    // It ends its shell, after a moment to be marked in.
+    let command = format!("echo run >> {}; sleep 1; exit 3", count.display());
+    client
+        .send_input(terminal, format!("{command}\r").as_bytes())
+        .unwrap();
+    wait_for_answer_text(&mut client, pane, Keeping::Always);
+    let runs = || {
+        std::fs::read_to_string(&count)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    // Its pane stays, a new shell in it running the command again.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while runs() < 2 {
+        assert!(Instant::now() < deadline, "it never ran again");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let workspaces = client.watch_workspaces().unwrap();
+    let again = terminal_of(&workspaces, pane);
+    assert_ne!(again, terminal);
+    assert_eq!(workspaces.kept[0].pane, pane);
+    // Ending soon after starting, time after time, it's given up on.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let marked = client.watch_workspaces().unwrap().kept;
+        if marked.first().is_none_or(|kept| kept.given_up) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never given up: {marked:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }

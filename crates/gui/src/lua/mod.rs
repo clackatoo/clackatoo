@@ -376,6 +376,7 @@ mod tests {
                 passed: Vec::new(),
                 machine: None,
                 others: Vec::new(),
+                kept: Vec::new(),
             },
             shown: Some(Shown {
                 workspace: WorkspaceId(1),

@@ -572,6 +572,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 machine: None,
                 others: Vec::new(),
                 passed: Vec::new(),
+                kept: Vec::new(),
             }))),
         ),
         (
@@ -944,6 +945,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
     samples.extend(mixed().into_iter().map(|sample| (MIXED, sample)));
     samples.extend(chain().into_iter().map(|sample| (CHAIN, sample)));
     samples.extend(background().into_iter().map(|sample| (BACKGROUND, sample)));
+    samples.extend(kept().into_iter().map(|sample| (BACKGROUND, sample)));
     samples
 }
 
@@ -1024,6 +1026,47 @@ fn background() -> Vec<Sample> {
                 ports: Vec::new(),
             },
         ]))),
+    ]
+}
+
+/// Samples of protocol 96 too: terminals marked to keep running, each
+/// way, and the mark taken away; what the daemon says it keeps running;
+/// and the marks, one given up on.
+fn kept() -> Vec<Sample> {
+    use Sample::{Client, Server};
+    vec![
+        Client(ClientMessage::Request(Request::Keep {
+            pane: PaneId(9),
+            how: crate::Keeping::Restore,
+        })),
+        Client(ClientMessage::Request(Request::Keep {
+            pane: PaneId(15),
+            how: crate::Keeping::Off,
+        })),
+        Client(ClientMessage::Request(Request::Keep {
+            pane: PaneId(12),
+            how: crate::Keeping::Always,
+        })),
+        Server(ServerMessage::Response(Response::Text(
+            "pane 12 runs `trail serve` again as it ends".into(),
+        ))),
+        Server(ServerMessage::Event(Event::Workspaces(Workspaces {
+            kept: vec![
+                crate::Kept {
+                    pane: PaneId(9),
+                    command: "trail serve".into(),
+                    always: false,
+                    given_up: false,
+                },
+                crate::Kept {
+                    pane: PaneId(12),
+                    command: "cargo watch -x run".into(),
+                    always: true,
+                    given_up: true,
+                },
+            ],
+            ..self::workspaces()
+        }))),
     ]
 }
 
@@ -2379,6 +2422,7 @@ fn workspaces() -> Workspaces {
         machine: None,
         others: Vec::new(),
         passed: Vec::new(),
+        kept: Vec::new(),
     }
 }
 

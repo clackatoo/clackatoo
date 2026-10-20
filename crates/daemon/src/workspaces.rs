@@ -31,8 +31,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use clackatoo_protocol::{
-    Axis, Background, BackgroundState, BoardId, BufferId, Content, Error, FilesId, Layout, Lent,
-    MAX_NESTING, MachineId, Pane, PaneId, PaneKind, Restored, ReviewId, Side, Tab, TabId,
+    Axis, Background, BackgroundState, BoardId, BufferId, Content, Error, FilesId, Kept, Layout,
+    Lent, MAX_NESTING, MachineId, Pane, PaneId, PaneKind, Restored, ReviewId, Side, Tab, TabId,
     TerminalId, Workspace, WorkspaceId, Workspaces,
 };
 
@@ -391,6 +391,7 @@ impl WorkspaceState {
                 restored: Vec::new(),
                 machine: None,
                 others: Vec::new(),
+                kept: Vec::new(),
             },
             next_workspace: handed.next_workspace,
             next_tab: handed.next_tab,
@@ -592,6 +593,105 @@ impl WorkspaceState {
             .restored
             .retain(|restored| restored.pane != pane);
         Ok(old)
+    }
+
+    /// Shows terminal `new` in `pane`, in a tab or a background tab, in
+    /// place of the terminal it showed, which it returns: as a new shell
+    /// takes the place of one that has ended. What the pane had to show
+    /// for a restart, and its mark to keep it running, stay.
+    pub(crate) fn replace_terminal(&mut self, pane: PaneId, new: TerminalId) -> Option<TerminalId> {
+        let found = (self.workspaces.list.iter_mut())
+            .flat_map(|workspace| {
+                let background = workspace.background.iter_mut().map(|b| &mut b.tab);
+                workspace.tabs.iter_mut().chain(background)
+            })
+            .find_map(|tab| pane_mut(&mut tab.layout, pane))?;
+        let Content::Terminal(old) = found.content else {
+            return None;
+        };
+        found.content = Content::Terminal(new);
+        if let Some(tab) = self.background_terminals.remove(&old) {
+            self.background_terminals.insert(new, tab);
+        }
+        Some(old)
+    }
+
+    /// Marks the terminal `pane` shows to keep running `command`, and if
+    /// `always`, as it ends too, in place of any mark it had.
+    pub(crate) fn keep(&mut self, pane: PaneId, command: String, always: bool) {
+        self.unkeep(pane);
+        self.workspaces.kept.push(Kept {
+            pane,
+            command,
+            always,
+            given_up: false,
+        });
+    }
+
+    /// Takes away `pane`'s mark to keep it running. Returns whether it had
+    /// one.
+    pub(crate) fn unkeep(&mut self, pane: PaneId) -> bool {
+        let before = self.workspaces.kept.len();
+        self.workspaces.kept.retain(|kept| kept.pane != pane);
+        self.workspaces.kept.len() != before
+    }
+
+    /// `pane`'s mark to keep it running, if it has one.
+    pub(crate) fn kept(&self, pane: PaneId) -> Option<&Kept> {
+        self.workspaces.kept.iter().find(|kept| kept.pane == pane)
+    }
+
+    /// `pane`'s mark to keep it running, to change, if it has one.
+    pub(crate) fn kept_mut(&mut self, pane: PaneId) -> Option<&mut Kept> {
+        self.workspaces
+            .kept
+            .iter_mut()
+            .find(|kept| kept.pane == pane)
+    }
+
+    /// The marks to keep terminals running, for the next build.
+    pub(crate) fn hand_over_kept(&self) -> Vec<handover::Kept> {
+        (self.workspaces.kept.iter())
+            .map(|kept| handover::Kept {
+                pane: kept.pane.0,
+                command: kept.command.clone(),
+                always: kept.always,
+                given_up: kept.given_up,
+            })
+            .collect()
+    }
+
+    /// Takes the marks to keep terminals running the last build handed
+    /// over, forgetting those of panes it doesn't have.
+    pub(crate) fn resume_kept(&mut self, handed: &[handover::Kept]) {
+        self.workspaces.kept = (handed.iter())
+            .map(|kept| Kept {
+                pane: PaneId(kept.pane),
+                command: kept.command.clone(),
+                always: kept.always,
+                given_up: kept.given_up,
+            })
+            .collect();
+        self.sweep_kept();
+    }
+
+    /// Forgets the marks of panes that have closed, or show no terminal.
+    pub(crate) fn sweep_kept(&mut self) {
+        if self.workspaces.kept.is_empty() {
+            return;
+        }
+        let terminals: Vec<PaneId> = (self.workspaces.list.iter())
+            .flat_map(|workspace| {
+                let background = workspace.background.iter().map(|b| &b.tab);
+                workspace.tabs.iter().chain(background)
+            })
+            .flat_map(|tab| tab.layout.panes())
+            .filter(|pane| matches!(pane.content, Content::Terminal(_)) && pane.home.is_none())
+            .map(|pane| pane.id)
+            .collect();
+        self.workspaces
+            .kept
+            .retain(|kept| terminals.contains(&kept.pane));
     }
 
     /// Has every pane showing buffer `old` show buffer `new`. Returns
