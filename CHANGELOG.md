@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.63 (2026-10-20)
+
+### Fixes
+
+- snap found through a link of another name, and the alias test kept from the system's zshrc (bfd6b4f)
+
 ## 2026.10.62 (2026-10-20)
 
 ### Features
