@@ -25,11 +25,13 @@ use crate::vim::{
 };
 
 /// Where a motion left the cursor on a line of history not fetched yet,
-/// and whether it goes to the line's first non-blank, as `gg` does with
-/// `startofline`, or else to the wanted column, once the line comes.
+/// with the column it wanted, and whether it goes to the line's first
+/// non-blank, as `gg` does with `startofline`, or else to the wanted
+/// column, once the line comes. The cursor, or a selection's other end
+/// begun there, moves with it then.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Unplaced {
-    at: Point,
+    cursor: Cursor,
     start_of_line: bool,
 }
 
@@ -548,32 +550,56 @@ impl Pane {
                 | Motion::ViewBottom
         );
         let fetched = Document(self).row(cursor.at.line).is_some();
-        self.unplaced = (!fetched && (vertical || to_line)).then_some(Unplaced {
-            at: cursor.at,
-            start_of_line: to_line && self.startofline,
-        });
+        // What the other end of a selection waits for is kept.
+        let anchor = self.anchor;
+        self.unplaced
+            .retain(|unplaced| Some(unplaced.cursor.at) == anchor);
+        if !fetched && (vertical || to_line) {
+            self.unplaced.push(Unplaced {
+                cursor,
+                start_of_line: to_line && self.startofline,
+            });
+        }
         self.cursor = Some(cursor);
         self.follow_cursor();
         true
     }
 
     /// Puts the cursor where it goes on its line, now the line has come,
-    /// if a motion left it there before it had.
+    /// if a motion left it there before it had, and a selection's other
+    /// end left there too. What's still to come is kept, and what neither
+    /// is at any more is forgotten.
     pub(super) fn place_unplaced(&mut self) {
-        let Some(unplaced) = self.unplaced else {
-            return;
-        };
-        let document = Document(self);
-        let Some(mut cursor) = self.cursor.filter(|cursor| cursor.at == unplaced.at) else {
-            self.unplaced = None;
-            return;
-        };
-        if document.row(unplaced.at.line).is_none() {
+        if self.unplaced.is_empty() {
             return;
         }
-        cursor.onto_line(unplaced.at.line, unplaced.start_of_line, &document);
-        self.cursor = Some(cursor);
-        self.unplaced = None;
+        let unplaced = std::mem::take(&mut self.unplaced);
+        let document = Document(self);
+        let mut placed = Vec::new();
+        let mut waiting = Vec::new();
+        for unplaced in unplaced {
+            let at = unplaced.cursor.at;
+            if document.row(at.line).is_none() {
+                waiting.push(unplaced);
+                continue;
+            }
+            let mut cursor = unplaced.cursor;
+            cursor.onto_line(at.line, unplaced.start_of_line, &document);
+            placed.push((at, cursor));
+        }
+        for (at, cursor) in placed {
+            if self.cursor.is_some_and(|here| here.at == at) {
+                self.cursor = Some(cursor);
+            }
+            if self.anchor == Some(at) {
+                self.anchor = Some(cursor.at);
+            }
+        }
+        let (cursor, anchor) = (self.cursor.map(|cursor| cursor.at), self.anchor);
+        waiting.retain(|unplaced| {
+            Some(unplaced.cursor.at) == cursor || Some(unplaced.cursor.at) == anchor
+        });
+        self.unplaced = waiting;
     }
 
     /// Moves the cursor up or down to `line`.

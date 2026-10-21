@@ -118,8 +118,9 @@ pub(crate) struct Pane {
     /// `gg`, `G`, `H`, `M` and `L` go to a line's first non-blank
     /// (`startofline`).
     startofline: bool,
-    /// Where a motion left the cursor on a line not fetched yet.
-    unplaced: Option<normal::Unplaced>,
+    /// Where motions left the cursor, or a selection's other end, on
+    /// lines not fetched yet.
+    unplaced: Vec<normal::Unplaced>,
     /// Which finished commands are marked at the end of their prompt's
     /// line, as the options say.
     blockmarks: BlockMarks,
@@ -182,7 +183,7 @@ impl Pane {
             search: None,
             case: Case::default(),
             startofline: Options::default().startofline,
-            unplaced: None,
+            unplaced: Vec::new(),
             blockmarks: Options::default().blockmarks,
             carryover: Options::default().carryover,
             found: None,
@@ -636,6 +637,7 @@ impl Pane {
             // It can have fewer lines than before.
             Some(old_end) if snapshot => {
                 self.history.clear();
+                self.unplaced.clear();
                 if follow {
                     self.scroll = (self.scroll + end).saturating_sub(old_end);
                 }
@@ -643,6 +645,7 @@ impl Pane {
             // The terminal was reset, and numbering started again.
             Some(old_end) if end < old_end => {
                 self.history.clear();
+                self.unplaced.clear();
                 self.scroll = 0;
             }
             // New lines scrolled into history.
@@ -2160,6 +2163,31 @@ mod tests {
         keys(&mut pane, "G$gg");
         serve(&mut pane, &terminal);
         assert_eq!(cursor(&pane), ("  line 1".into(), 0, 2));
+    }
+
+    #[test]
+    fn a_selection_begun_on_a_line_not_fetched_yet_moves_with_it() {
+        let terminal = terminal(&numbered_lines("  line "));
+        let ends = |pane: &Pane| (pane.anchor, pane.cursor.map(|cursor| cursor.at));
+        let at = |line, col| Some(Point { line, col });
+        // `gg` then `v` before the line comes: both ends go to its column.
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "k3lggv");
+        serve(&mut pane, &terminal);
+        assert_eq!(ends(&pane), (at(0, 3), at(0, 3)));
+        // And `j` after, onto another line not fetched: each end to its own.
+        let mut pane = self::pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "k3lggvj");
+        serve(&mut pane, &terminal);
+        assert_eq!(ends(&pane), (at(0, 3), at(1, 3)));
+        // Swapped with `o` before the line comes, the anchor still moves.
+        let mut pane = self::pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "k3lggvjo");
+        serve(&mut pane, &terminal);
+        assert_eq!(ends(&pane), (at(1, 3), at(0, 3)));
     }
 
     #[test]
