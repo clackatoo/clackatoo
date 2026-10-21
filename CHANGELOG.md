@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026.10.70 (2026-10-21)
+
+### Features
+
+- **gui:** H, M and L are motions measured against a view the lines report (CLACKA-127) (7d11831)
+- **gui:** startofline, off by default as Neovim's, decides where gg, G, H, M and L land (CLACKA-127) (3677e95)
+- **gui:** Ctrl and Shift with arrows, Home and End are Vim's keys in editors and terminals (CLACKA-127) (cec8467)
+
+### Fixes
+
+- **gui:** a line of history not fetched yet gets the cursor's column once it comes (CLACKA-127) (65de3cb)
+- **gui:** Ctrl+Left and Ctrl+Right are B and W, Ctrl+End the last character, Shift+Up and Down page only in normal mode (CLACKA-127) (4322474)
+- **gui:** : and a line number follows startofline, and what startofline covers is said exactly (CLACKA-127) (e980e44)
+- **gui:** Esc after a count or a register leaves visual mode, after anything else only forgets the keys (CLACKA-127) (24f417c)
+- **gui:** every prompt reads keys one way, Ctrl and Shift with the arrows moving by WORDs (CLACKA-127) (464f186)
+- **gui:** a selection's end on a line not fetched yet moves with it, and a reset forgets what waits (CLACKA-127) (8607dcf)
+- **gui:** Ctrl+Backspace deletes a word and Alt and a key types it, in every prompt (CLACKA-127) (fcc8f82)
+- **gui:** a dead key and Space types what compose makes, and Alt with a named key in a prompt is the key (CLACKA-127) (1f09c2b)
+- **gui:** :N keeps the wanted column, each selection end keeps its own waiting place, and Esc after an operator doesn't fail (CLACKA-127) (294edd0)
+
+### Speed
+
+- **gui:** H and L walk no more rows than the view has, whatever the count (CLACKA-127) (64d9103)
+
 ## 2026.10.69 (2026-10-21)
 
 ### Fixes
