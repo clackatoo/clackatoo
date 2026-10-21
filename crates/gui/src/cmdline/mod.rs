@@ -5,7 +5,7 @@
 //! | Key | Does |
 //! |---|---|
 //! | Left, Right, Home, End | Move the caret |
-//! | Ctrl+Left, Ctrl+Right | Move it a word |
+//! | Ctrl or Shift and Left, Right | Move it a WORD, anything between blanks |
 //! | Backspace, Delete | Delete the character before the caret, or under it |
 //! | Ctrl+U | Deletes everything before the caret |
 //! | Ctrl+W | Deletes the word before the caret |
@@ -26,10 +26,8 @@ pub(crate) mod complete;
 pub(crate) mod nearest;
 pub(crate) mod recall;
 
-use winit::keyboard::{Key, NamedKey};
-
 use crate::input::KeyPress;
-use crate::vim::Stroke;
+use crate::vim::{Stroke, strokes};
 
 /// The caret, drawn in the line's text where it is.
 pub(crate) const CARET: char = '▏';
@@ -55,7 +53,9 @@ enum Edit {
     Right,
     Home,
     End,
+    /// Ctrl or Shift and Left: back a WORD, as Vim's command line goes.
     WordLeft,
+    /// Ctrl or Shift and Right: on a WORD.
     WordRight,
     /// Ctrl+U.
     ClearBefore,
@@ -66,22 +66,6 @@ enum Edit {
 }
 
 impl Edit {
-    /// The edit a named key makes, with Ctrl held if `ctrl`.
-    fn named(key: NamedKey, ctrl: bool) -> Option<Self> {
-        Some(match key {
-            NamedKey::Backspace if ctrl => Self::DeleteWord,
-            NamedKey::Backspace => Self::Backspace,
-            NamedKey::Delete => Self::Delete,
-            NamedKey::ArrowLeft if ctrl => Self::WordLeft,
-            NamedKey::ArrowRight if ctrl => Self::WordRight,
-            NamedKey::ArrowLeft => Self::Left,
-            NamedKey::ArrowRight => Self::Right,
-            NamedKey::Home => Self::Home,
-            NamedKey::End => Self::End,
-            _ => return None,
-        })
-    }
-
     /// The edit Ctrl and `ch` make.
     fn ctrl(ch: char) -> Option<Self> {
         Some(match ch {
@@ -212,35 +196,22 @@ impl Line {
         self.caret = self.text.len();
     }
 
-    /// Takes `press`, a key typed into the window's prompt.
+    /// Takes `press`, a key typed into the window's prompt, as the keys it
+    /// makes (see [`stroke`](Self::stroke)): every prompt reads keys the
+    /// one way.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> Keyed {
-        let ctrl = press.modifiers.ctrl;
-        let edit = match press.key {
-            Key::Named(named) => Edit::named(*named, ctrl),
-            Key::Character(text) if ctrl => text.chars().next().and_then(Edit::ctrl),
-            _ => None,
-        };
-        if let Some(edit) = edit {
-            return self.edit(edit);
+        let mut keyed = Keyed::Other;
+        for stroke in strokes(press, true) {
+            keyed = match (keyed, self.stroke(stroke)) {
+                (Keyed::Emptied, _) | (_, Keyed::Emptied) => Keyed::Emptied,
+                (Keyed::Edited, _) | (_, Keyed::Edited) => Keyed::Edited,
+                _ => Keyed::Other,
+            };
         }
-        if ctrl {
-            return Keyed::Other;
-        }
-        let text = press.text.or(match press.key {
-            Key::Character(text) => Some(text.as_str()),
-            Key::Named(NamedKey::Space) => Some(" "),
-            _ => None,
-        });
-        match text.filter(|text| !text.chars().all(char::is_control)) {
-            Some(text) => {
-                self.put(text);
-                Keyed::Edited
-            }
-            None => Keyed::Other,
-        }
+        keyed
     }
 
-    /// Takes `stroke`, a key typed into an editor's prompt.
+    /// Takes `stroke`, a key typed into a prompt.
     pub(crate) fn stroke(&mut self, stroke: Stroke) -> Keyed {
         let edit = match stroke {
             Stroke::Char { ch, ctrl: true } => Edit::ctrl(ch),
@@ -290,14 +261,14 @@ impl Line {
             Edit::Right => self.caret = self.char_after(caret),
             Edit::Home => self.caret = 0,
             Edit::End => self.caret = self.text.len(),
-            Edit::WordLeft => self.caret = self.word_before(caret),
-            Edit::WordRight => self.caret = self.word_after(caret),
+            Edit::WordLeft => self.caret = self.word_before(caret, true),
+            Edit::WordRight => self.caret = self.word_after(caret, true),
             Edit::ClearBefore => {
                 self.text.replace_range(..caret, "");
                 self.caret = 0;
             }
             Edit::DeleteWord => {
-                let start = self.word_before(caret);
+                let start = self.word_before(caret, false);
                 self.text.replace_range(start..caret, "");
                 self.caret = start;
             }
@@ -334,27 +305,29 @@ impl Line {
     /// Where the word before `at` starts, past blanks before it, as Vim's
     /// Ctrl+W finds it: a run of letters, digits and `_`, or of other
     /// characters that aren't blank.
-    fn word_before(&self, at: usize) -> usize {
+    fn word_before(&self, at: usize, big: bool) -> usize {
         let mut chars = self.text[..at].char_indices().rev().peekable();
         while chars.next_if(|(_, ch)| ch.is_whitespace()).is_some() {}
         let Some(&(_, first)) = chars.peek() else {
             return 0;
         };
-        let class = class(first);
+        let class = class(first, big);
         let mut start = at;
-        while let Some((at, _)) = chars.next_if(|&(_, ch)| self::class(ch) == class) {
+        while let Some((at, _)) =
+            chars.next_if(|&(_, ch)| !ch.is_whitespace() && self::class(ch, big) == class)
+        {
             start = at;
         }
         start.min(at)
     }
 
     /// Where the next word after `at` starts, or the end.
-    fn word_after(&self, at: usize) -> usize {
+    fn word_after(&self, at: usize, big: bool) -> usize {
         let mut chars = self.text[at..].char_indices().peekable();
         if let Some(&(_, first)) = chars.peek() {
-            let class = class(first);
+            let class = class(first, big);
             while chars
-                .next_if(|&(_, ch)| !ch.is_whitespace() && self::class(ch) == class)
+                .next_if(|&(_, ch)| !ch.is_whitespace() && self::class(ch, big) == class)
                 .is_some()
             {}
         }
@@ -366,9 +339,9 @@ impl Line {
 }
 
 /// Which kind of word a character is part of: letters, digits and `_`, or
-/// anything else.
-fn class(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_'
+/// anything else; or, for a WORD (`big`), all one kind but blanks.
+fn class(ch: char, big: bool) -> bool {
+    big || ch.is_alphanumeric() || ch == '_'
 }
 
 #[cfg(test)]
@@ -478,8 +451,8 @@ mod tests {
     }
 
     #[test]
-    fn the_windows_keys_edit_too_ctrl_moving_by_words() {
-        use winit::keyboard::KeyLocation;
+    fn the_windows_keys_edit_as_strokes_do_ctrl_and_shift_moving_by_words() {
+        use winit::keyboard::{Key, KeyLocation, NamedKey};
 
         use crate::input::Modifiers;
         let press = |line: &mut Line, key: Key, ctrl: bool| {
@@ -498,6 +471,9 @@ mod tests {
                 },
             })
         };
+        let mut line = Line::new("e a.b c.d");
+        press(&mut line, Key::Named(NamedKey::ArrowLeft), true);
+        assert_eq!(line.shown(), "e a.b ▏c.d", "by WORDs");
         let mut line = Line::new("set wrap number");
         press(&mut line, Key::Named(NamedKey::ArrowLeft), true);
         assert_eq!(line.shown(), "set wrap ▏number");
@@ -513,7 +489,7 @@ mod tests {
             Keyed::Edited
         );
         assert_eq!(line.shown(), "set wrap x ▏number");
-        press(&mut line, Key::Named(NamedKey::Backspace), true);
+        press(&mut line, Key::Character("w".into()), true);
         assert_eq!(line.shown(), "set wrap ▏number");
         press(&mut line, Key::Character("u".into()), true);
         assert_eq!(line.shown(), "▏number");
