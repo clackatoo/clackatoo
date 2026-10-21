@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026.10.66 (2026-10-21)
+
+### Fixes
+
+- **gui:** H, L, Ctrl+D and their kin move a terminal's normal-mode cursor as many lines as they say (CLACKA-125) (f969be0)
+- the wheel never types into a program in normal mode, and moves its cursor on the alternate screen (CLACKA-125) (c1314a4)
+- the wheel leaves a pane without the focus in its own mode (CLACKA-125) (055b6d9)
+
 ## 2026.10.65 (2026-10-21)
 
 ### Fixes
