@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026.10.69 (2026-10-21)
+
+### Fixes
+
+- **daemon:** a shell follows the display before each command it runs, not only at its prompt (CLACKA-128) (be3b463)
+- **daemon:** bash follows the display at its prompt only, leaving users' DEBUG traps alone (CLACKA-128) (3f88392)
+
 ## 2026.10.68 (2026-10-21)
 
 ### Fixes
