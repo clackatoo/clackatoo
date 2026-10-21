@@ -342,7 +342,8 @@ impl Editor {
         shared: &Shared,
     ) -> Result<Option<Lines>, String> {
         let count = self.text(copy).lines();
-        let cursor = self.cursor.at;
+        // All of it, its wanted column too, to put back.
+        let cursor = self.cursor;
         let mut lines: Vec<u64> = Vec::new();
         let result = loop {
             *text = text.trim_start();
@@ -379,7 +380,7 @@ impl Editor {
                 });
             }
         };
-        self.cursor = Cursor::new(cursor);
+        self.cursor = cursor;
         result?;
         let Some(&last) = lines.last() else {
             return Ok(None);

@@ -1506,8 +1506,13 @@ impl Editor {
         match self.keys.read(stroke, visual, &dialect) {
             // The keys typed are drawn in the bar while they wait.
             Parsed::Incomplete => Done::REDRAW,
+            // Esc only forgets what was typed, as Vim's does, failing
+            // nothing; any other key that makes nothing fails, which stops
+            // a macro.
             Parsed::Nothing => {
-                self.fail();
+                if stroke != Stroke::Escape {
+                    self.fail();
+                }
                 Done::REDRAW
             }
             Parsed::Command(command) => self.execute(command, copy, shared, false),

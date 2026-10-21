@@ -120,7 +120,7 @@ pub(crate) struct Pane {
     startofline: bool,
     /// Where motions left the cursor, or a selection's other end, on
     /// lines not fetched yet.
-    unplaced: Vec<normal::Unplaced>,
+    unplaced: normal::Unplacements,
     /// Which finished commands are marked at the end of their prompt's
     /// line, as the options say.
     blockmarks: BlockMarks,
@@ -183,7 +183,7 @@ impl Pane {
             search: None,
             case: Case::default(),
             startofline: Options::default().startofline,
-            unplaced: Vec::new(),
+            unplaced: normal::Unplacements::default(),
             blockmarks: Options::default().blockmarks,
             carryover: Options::default().carryover,
             found: None,
@@ -637,7 +637,7 @@ impl Pane {
             // It can have fewer lines than before.
             Some(old_end) if snapshot => {
                 self.history.clear();
-                self.unplaced.clear();
+                self.forget_unplaced();
                 if follow {
                     self.scroll = (self.scroll + end).saturating_sub(old_end);
                 }
@@ -645,7 +645,7 @@ impl Pane {
             // The terminal was reset, and numbering started again.
             Some(old_end) if end < old_end => {
                 self.history.clear();
-                self.unplaced.clear();
+                self.forget_unplaced();
                 self.scroll = 0;
             }
             // New lines scrolled into history.
@@ -2188,6 +2188,25 @@ mod tests {
         keys(&mut pane, "k3lggvjo");
         serve(&mut pane, &terminal);
         assert_eq!(ends(&pane), (at(1, 3), at(0, 3)));
+        // Each end by its own rule: the anchor's column, and `H` with
+        // `startofline`, the first non-blank, on the same line.
+        let mut pane = self::pane(&terminal);
+        normal_mode(&mut pane);
+        pane.set_options(&Options {
+            startofline: true,
+            ..Options::default()
+        });
+        keys(&mut pane, "k3lkkkkvjH");
+        serve(&mut pane, &terminal);
+        assert_eq!(ends(&pane), (at(7, 3), at(7, 2)));
+        // Back and forth onto the anchor's line keeps one place for each.
+        let mut pane = self::pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "k3lggvjkjkjk");
+        assert!(pane.unplaced.cursor.is_some() && pane.unplaced.anchor.is_some());
+        serve(&mut pane, &terminal);
+        assert_eq!(ends(&pane), (at(0, 3), at(0, 3)));
+        assert!(pane.unplaced.cursor.is_none() && pane.unplaced.anchor.is_none());
     }
 
     #[test]

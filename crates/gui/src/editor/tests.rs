@@ -2991,3 +2991,14 @@ fn esc_after_keys_half_typed_only_forgets_them_but_after_a_count_or_register_lea
         assert!(!setup.editor.pending(), "{keys}");
     }
 }
+
+#[test]
+fn esc_after_an_operator_forgets_it_without_failing() {
+    let mut setup = Setup::new("one two\n");
+    setup.keys("d3<Esc>");
+    assert!(!setup.editor.failed, "as Vim's, which only clears it");
+    assert!(!setup.editor.pending());
+    assert_eq!(setup.text(), "one two\n");
+    setup.keys("dz");
+    assert!(setup.editor.failed, "another key that makes nothing fails");
+}

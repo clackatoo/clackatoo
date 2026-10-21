@@ -137,4 +137,6 @@ fn a_line_number_after_colon_keeps_the_column_unless_startofline() {
     assert_eq!(after("G4l", "5", false), (4, 3));
     assert_eq!(after("", "6", false), (5, 0));
     assert_eq!(after("", "6", true), (5, 2));
+    // The column wanted, after `$` the line's end.
+    assert_eq!(after("$", "7", false), (6, 4));
 }

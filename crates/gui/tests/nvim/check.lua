@@ -71,6 +71,7 @@ local cases = {
   { name = ':5 from the last line', lines = eight, at = { 8, 4 }, keys = ':5<CR>' },
   { name = ':6 with sol', lines = eight, at = { 1, 0 }, keys = ':6<CR>', set = 'sol' },
   { name = ':6 from line 1', lines = eight, at = { 1, 0 }, keys = ':6<CR>' },
+  { name = '$ then :7', lines = eight, at = { 1, 0 }, keys = '$:7<CR>' },
   -- Ctrl and Shift with the arrows, Home and End, as motion.txt says.
   { name = '<C-Right>', lines = dotted, at = { 1, 0 }, keys = '<C-Right>' },
   { name = '<S-Right>', lines = dotted, at = { 1, 0 }, keys = '<S-Right>' },
