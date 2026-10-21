@@ -21,7 +21,7 @@ use crate::input::KeyPress;
 use crate::motion::{Block, Cursor, Motion, Point, start_of_cell};
 use crate::vim::{
     Action, Command, Dialect, Entry, Operator, Parsed, Read, Reader, Scroll, Stroke, Target,
-    WRAPPED_TO_BOTTOM, WRAPPED_TO_TOP, strokes,
+    ViewAt, WRAPPED_TO_BOTTOM, WRAPPED_TO_TOP, strokes,
 };
 
 /// Where a motion left the cursor on a line of history not fetched yet,
@@ -66,8 +66,8 @@ pub(super) enum TerminalAction {
 /// How a terminal reads keys: every motion, as a move and as what `y`
 /// takes, with `y` its only operator and `i` its only way into insert
 /// mode, but nothing that changes text, as it has none to change, and no
-/// register, mark, `f` and its kin, `*`, `#` or `zt` and its kin yet. Esc,
-/// `gx`, `[[` and `]]` are its own.
+/// register, mark, `f` and its kin, `*` or `#` yet. Esc, `gx`, `[[` and
+/// `]]` are its own.
 pub(super) struct TerminalKeys;
 
 impl Dialect for TerminalKeys {
@@ -138,6 +138,7 @@ impl Dialect for TerminalKeys {
             | Action::Search { .. }
             | Action::SearchAgain { .. }
             | Action::Scroll(_)
+            | Action::View(_)
             | Action::Own(_) => true,
             Action::Operate(..)
             | Action::DeleteChars { .. }
@@ -151,7 +152,6 @@ impl Dialect for TerminalKeys {
             | Action::Repeat
             | Action::SearchWord { .. }
             | Action::FindAgain { .. }
-            | Action::View(_)
             | Action::SetMark(_)
             | Action::Mark { .. }
             | Action::Tilde => false,
@@ -224,6 +224,7 @@ impl Pane {
             }
             Action::SearchAgain { reverse } => self.search_again(reverse),
             Action::Scroll(scroll) => self.scroll(scroll, count),
+            Action::View(at) => self.view_at(at),
             Action::Own(TerminalAction::Escape) => {
                 if matches!(self.mode, Mode::Visual(_)) {
                     self.leave_visual();
@@ -247,7 +248,6 @@ impl Pane {
             | Action::Repeat
             | Action::SearchWord { .. }
             | Action::FindAgain { .. }
-            | Action::View(_)
             | Action::SetMark(_)
             | Action::Mark { .. }
             | Action::Tilde => {
@@ -530,6 +530,28 @@ impl Pane {
             start_of_line: true,
         });
         self.cursor = Some(cursor);
+    }
+
+    /// `zt`, `zz` and `zb`: scrolls the view to put the cursor's line at
+    /// its top, middle or bottom, as far as history goes back and no
+    /// further than the live screen, the cursor staying where it is.
+    fn view_at(&mut self, at: ViewAt) -> bool {
+        let Some(cursor) = self.cursor else {
+            return false;
+        };
+        let height = self.height().max(1);
+        let line = cursor.at.line;
+        let top = match at {
+            ViewAt::Top => line,
+            ViewAt::Middle => line.saturating_sub((height - 1) / 2),
+            ViewAt::Bottom => line.saturating_sub(height - 1),
+        };
+        let (first, _) = Document(self).bounds();
+        self.scroll = (self.history_end())
+            .saturating_sub(top.max(first))
+            .min(self.max_scroll());
+        self.fetch_history();
+        true
     }
 
     /// Ctrl+E and Ctrl+Y: moves the view `lines` up, keeping the cursor in

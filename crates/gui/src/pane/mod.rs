@@ -2298,6 +2298,31 @@ mod tests {
     }
 
     #[test]
+    fn zt_zz_and_zb_put_the_cursors_line_at_the_views_top_middle_and_bottom() {
+        let terminal = terminal(&numbered_lines("line "));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg");
+        serve(&mut pane, &terminal);
+        keys(&mut pane, "5jzt");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 6".into(), 0, 0));
+        keys(&mut pane, "zb");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 6".into(), 4, 0));
+        keys(&mut pane, "zz");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 6".into(), 2, 0));
+        // No further than the live screen, nor back past history's start.
+        keys(&mut pane, "Gzt");
+        assert_eq!(cursor(&pane).1, 4);
+        assert_eq!(pane.label(), None);
+        keys(&mut pane, "ggzb");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 1".into(), 0, 0));
+    }
+
+    #[test]
     fn h_l_and_half_pages_move_as_many_lines_as_they_say() {
         let terminal = terminal(&numbered_lines("line "));
         let mut pane = pane(&terminal);
