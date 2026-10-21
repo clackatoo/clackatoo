@@ -822,10 +822,17 @@ impl Cursor {
         } else {
             bottom_row.line
         };
+        // And the first, past one shown from partway down, as Ctrl+E can
+        // leave the view where lines wrap.
+        let highest = if top.row > 0 && top.line < bottom {
+            top.line + 1
+        } else {
+            top.line
+        };
         let from_edge = (count as u64).saturating_sub(1);
         let mut line = match motion {
-            Motion::ViewTop => top.line.saturating_add(from_edge).min(bottom),
-            Motion::ViewBottom => bottom.saturating_sub(from_edge).max(top.line),
+            Motion::ViewTop => highest.saturating_add(from_edge).min(bottom),
+            Motion::ViewBottom => bottom.saturating_sub(from_edge).max(highest),
             _ => {
                 // Half the rows shown, past the text's end not counted.
                 let half = (rows_between(top, bottom_row, lines) + 1).div_ceil(2);
@@ -859,7 +866,7 @@ impl Cursor {
                 }
             }
             if bottom != last {
-                while below(line) < view.margin && line > top.line {
+                while below(line) < view.margin && line > highest {
                     line -= 1;
                 }
             }

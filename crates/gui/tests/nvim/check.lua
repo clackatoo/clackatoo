@@ -192,6 +192,7 @@ local cases = {
   { name = '<C-d> wrapped onto a long line', lines = wrapping, at = { 13, 2 }, view = { height = 10, top = 12, columns = 20 }, keys = '<C-d>' },
   -- H, M and L with a scrolloff of half the view or more, and taken
   -- by an operator with a count past the view.
+  { name = '<C-e>H wrapped sms', lines = wrapping, at = { 14, 2 }, view = { height = 10, top = 11, columns = 20 }, keys = '<C-e>H', set = 'smoothscroll' },
   { name = 'H so=4', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = 'H', set = 'scrolloff=4' },
   { name = 'L so=4', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = 'L', set = 'scrolloff=4' },
   { name = 'H so=5', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = 'H', set = 'scrolloff=5' },

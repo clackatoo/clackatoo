@@ -248,6 +248,18 @@ fn where_lines_wrap_h_and_l_count_lines_and_scrolloff_screen_rows() {
 }
 
 #[test]
+fn h_counts_from_the_first_line_shown_whole() {
+    let text = wrapping();
+    // Ctrl+E leaves line 11's second row at the top: H goes to line 12,
+    // not back up to show line 11 whole. Neovim's, with `smoothscroll`,
+    // goes to line 11 and scrolls back.
+    let at = |keys| after(viewed(&text, 11, (14, 2), true), keys);
+    assert_eq!(at("<C-e>H"), (11, 12, 2));
+    assert_eq!(at("<C-e>2H"), (11, 13, 2));
+    assert_eq!(at("<C-e>99L"), (11, 12, 2));
+}
+
+#[test]
 fn ctrl_e_and_ctrl_y_move_the_view_keeping_the_cursor_in_it() {
     let text = sixty();
     assert_eq!(
