@@ -1130,7 +1130,10 @@ impl Editor {
 
     /// The keys `press` makes, for [`typed`](Self::typed).
     pub(crate) fn strokes(&self, press: &KeyPress<'_>) -> Vec<Stroke> {
-        strokes(press, self.mode == Mode::Insert || self.prompt.is_some())
+        if self.prompt.is_some() {
+            return vim::prompt_strokes(press);
+        }
+        strokes(press, self.mode == Mode::Insert)
     }
 
     /// Does what `stroke`, typed, does: by a macro, if `replaying`. The

@@ -150,6 +150,32 @@ pub(crate) fn strokes(press: &KeyPress<'_>, typing: bool) -> Vec<Stroke> {
     plain_strokes(press, typing)
 }
 
+/// The strokes `press` makes typed into a prompt, as [`strokes`] makes
+/// them, but for two keys more useful there: Ctrl+Backspace is Ctrl+W,
+/// deleting a word, and Alt and a key types the key's character, if it
+/// types one, so a layout that holds Alt for a character still types it.
+pub(crate) fn prompt_strokes(press: &KeyPress<'_>) -> Vec<Stroke> {
+    let modifiers = press.modifiers;
+    if modifiers.ctrl && *press.key == Key::Named(NamedKey::Backspace) {
+        return vec![Stroke::ctrl('w')];
+    }
+    if modifiers.alt && !modifiers.ctrl && !enters_normal_mode(press) {
+        let text = press.text.or(match press.key {
+            Key::Character(text) => Some(text.as_str()),
+            Key::Named(NamedKey::Space) => Some(" "),
+            _ => None,
+        });
+        let typed: Vec<Stroke> = (text.unwrap_or_default().chars())
+            .filter(|ch| !ch.is_control())
+            .map(Stroke::char)
+            .collect();
+        if !typed.is_empty() {
+            return typed;
+        }
+    }
+    strokes(press, true)
+}
+
 /// The strokes `press` makes, for a pane that doesn't read Vim's keys, in
 /// a prompt if `typing`: Ctrl and Shift with a named key are the key alone,
 /// Alt and a key is none, and Ctrl+;, Shift+Esc and Ctrl+\ are Esc.

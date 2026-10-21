@@ -8,7 +8,7 @@
 //! | Ctrl or Shift and Left, Right | Move it a WORD, anything between blanks |
 //! | Backspace, Delete | Delete the character before the caret, or under it |
 //! | Ctrl+U | Deletes everything before the caret |
-//! | Ctrl+W | Deletes the word before the caret |
+//! | Ctrl+W, Ctrl+Backspace | Deletes the word before the caret |
 //! | Ctrl+R and a register's name | Puts in what the register holds (see [`Line::wants_register`]) |
 //! | Up, Down | The lines typed before, oldest last, that start with what's typed (see [`recall`]) |
 //! | Tab, Shift+Tab | Complete the word before the caret, on the command line (see [`complete`]) |
@@ -27,7 +27,7 @@ pub(crate) mod nearest;
 pub(crate) mod recall;
 
 use crate::input::KeyPress;
-use crate::vim::{Stroke, strokes};
+use crate::vim::{Stroke, prompt_strokes};
 
 /// The caret, drawn in the line's text where it is.
 pub(crate) const CARET: char = '▏';
@@ -201,7 +201,7 @@ impl Line {
     /// one way.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> Keyed {
         let mut keyed = Keyed::Other;
-        for stroke in strokes(press, true) {
+        for stroke in prompt_strokes(press) {
             keyed = match (keyed, self.stroke(stroke)) {
                 (Keyed::Emptied, _) | (_, Keyed::Emptied) => Keyed::Emptied,
                 (Keyed::Edited, _) | (_, Keyed::Edited) => Keyed::Edited,
@@ -489,7 +489,8 @@ mod tests {
             Keyed::Edited
         );
         assert_eq!(line.shown(), "set wrap x ▏number");
-        press(&mut line, Key::Character("w".into()), true);
+        // Ctrl+Backspace deletes a word, as Ctrl+W does.
+        press(&mut line, Key::Named(NamedKey::Backspace), true);
         assert_eq!(line.shown(), "set wrap ▏number");
         press(&mut line, Key::Character("u".into()), true);
         assert_eq!(line.shown(), "▏number");
@@ -510,5 +511,28 @@ mod tests {
         let mut line = typed("set wr nu<Left><Left><Left>");
         line.replace_before(4, "wrap");
         assert_eq!(line.shown(), "set wrap▏ nu");
+    }
+
+    #[test]
+    fn alt_and_a_key_types_its_character() {
+        use winit::keyboard::{Key, KeyLocation};
+
+        use crate::input::Modifiers;
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        let mut line = Line::new("a");
+        // As a layout that holds Alt for `@` sends it.
+        let key = Key::Character("@".into());
+        let keyed = line.key(&KeyPress {
+            key: &key,
+            text: Some("@"),
+            location: KeyLocation::Standard,
+            code: None,
+            modifiers: alt,
+        });
+        assert_eq!(keyed, Keyed::Edited);
+        assert_eq!(line.shown(), "a@▏");
     }
 }

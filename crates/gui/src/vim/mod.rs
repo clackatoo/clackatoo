@@ -18,7 +18,9 @@ pub(crate) use command::{
 #[cfg(test)]
 pub(crate) use grammar::parse;
 pub(crate) use grammar::{Dialect, Keys, Parsed, Read, Reader};
-pub(crate) use stroke::{Stroke, enters_normal_mode, is_ctrl_backslash, plain_strokes, strokes};
+pub(crate) use stroke::{
+    Stroke, enters_normal_mode, is_ctrl_backslash, plain_strokes, prompt_strokes, strokes,
+};
 
 /// What a search that went past the end and round to the top says, in
 /// terminals and editors alike, as Vim does: the match may be a long way
