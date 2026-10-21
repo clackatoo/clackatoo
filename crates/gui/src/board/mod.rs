@@ -753,3 +753,25 @@ fn now() -> u64 {
             u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
         })
 }
+
+impl crate::vim::Keyed for BoardPane {
+    fn mode(&self) -> crate::vim::Mode {
+        crate::vim::Mode::Normal
+    }
+
+    fn prompting(&self) -> bool {
+        BoardPane::prompting(self)
+    }
+
+    fn pending(&self) -> bool {
+        BoardPane::pending(self)
+    }
+
+    fn counting(&self) -> Option<usize> {
+        self.count.filter(|_| self.pending.is_none())
+    }
+
+    fn forget_count(&mut self) {
+        self.count = None;
+    }
+}

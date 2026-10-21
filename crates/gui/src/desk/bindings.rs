@@ -64,6 +64,7 @@ use crate::editor::HunkAction;
 use crate::finder;
 use crate::keymap::{KeyMode, Keymap, WhichKeys, parse_keys, parse_modes};
 use crate::layout::Direction;
+use crate::vim::{Keyed, Mode};
 
 /// How many choices the palette lists at once: workspaces, or what Tab
 /// could complete a word with.
@@ -497,7 +498,7 @@ impl Desk {
         // count or not; after a count, with as many from the cursor's, as
         // Vim's `5:` starts `:.,.+4`.
         let visual = (self.focused_editor())
-            .is_some_and(|(editor, _)| matches!(editor.mode, crate::vim::Mode::Visual(_)));
+            .is_some_and(|(editor, _)| matches!(editor.mode, Mode::Visual(_)));
         let text = match (&purpose, self.bound_count.take()) {
             (Purpose::Command, Some(count)) if self.focused_editor().is_some() && !visual => {
                 match count {
@@ -511,90 +512,75 @@ impl Desk {
         self.input = Some(Input::new(purpose, text));
     }
 
+    /// The focused pane's keys, if it reads any: an editor's, a
+    /// terminal's or a chat's, an explorer's, a board's or a review's.
+    pub(super) fn focused_keyed(&self) -> Option<&dyn Keyed> {
+        if let Some((editor, _)) = self.focused_editor() {
+            return Some(editor);
+        }
+        if let Some(explorer) = self.focused_explorer() {
+            return Some(explorer);
+        }
+        if let Some(board) = self.focused_board() {
+            return Some(board);
+        }
+        if let Some(review) = self.focused_review() {
+            return Some(review);
+        }
+        let terminal = self.focused_terminal()?;
+        Some(self.panes.get(&terminal)?)
+    }
+
+    /// The same, to change.
+    fn focused_keyed_mut(&mut self) -> Option<&mut dyn Keyed> {
+        if self.focused_editor().is_some() {
+            return Some(self.focused_editor_mut()?);
+        }
+        if self.focused_explorer().is_some() {
+            return Some(self.focused_explorer_mut()?);
+        }
+        if self.focused_board().is_some() {
+            return Some(self.focused_board_mut()?);
+        }
+        if self.focused_review().is_some() {
+            return Some(self.focused_review_mut()?);
+        }
+        Some(self.focused_pane()?)
+    }
+
     /// Whether the focused pane has a command half typed, which the next
     /// key finishes.
     pub(super) fn pane_pending(&self) -> bool {
-        if let Some((editor, _)) = self.focused_editor() {
-            return editor.pending();
-        }
-        if let Some(explorer) = self.focused_explorer() {
-            return explorer.pending();
-        }
-        if let Some(board) = self.focused_board() {
-            return board.pending();
-        }
-        if let Some(review) = self.focused_review() {
-            return review.pending();
-        }
-        (self.focused_terminal())
-            .and_then(|terminal| self.panes.get(&terminal))
-            .is_some_and(crate::pane::Pane::pending)
+        self.focused_keyed().is_some_and(Keyed::pending)
     }
 
-    /// The count typed in the focused editor or terminal, if that's all
-    /// that's waiting there: the next key is looked up in the bindings, as
-    /// `5:` opens the command line.
+    /// The count typed in the focused pane, if that's all that's waiting
+    /// there: the next key is looked up in the bindings, as `5:` opens the
+    /// command line.
     pub(super) fn pane_counting(&self) -> Option<usize> {
-        if let Some((editor, _)) = self.focused_editor() {
-            return editor.counting();
-        }
-        (self.focused_terminal())
-            .and_then(|terminal| self.panes.get(&terminal))
-            .and_then(crate::pane::Pane::counting)
+        self.focused_keyed()?.counting()
     }
 
-    /// Takes a count typed in the focused editor or terminal, as one of
-    /// the bindings took the key after it, for the binding to use.
+    /// Takes a count typed in the focused pane, as one of the bindings
+    /// took the key after it, for the binding to use.
     pub(super) fn take_pane_count(&mut self) -> Option<usize> {
         let count = self.pane_counting()?;
-        if let Some(shown) = self.shown {
-            self.forget_typed_in(shown.pane);
-        }
-        if let Some(pane) = self.focused_pane() {
-            pane.forget_count();
-        }
+        self.focused_keyed_mut()?.forget_count();
         Some(count)
     }
 
     /// The mode bindings are looked up in: the focused pane's.
     pub(super) fn key_mode(&self) -> KeyMode {
-        if let Some((editor, _)) = self.focused_editor() {
-            if editor.prompting() {
-                return KeyMode::Prompt;
-            }
-            return match editor.mode {
-                crate::vim::Mode::Insert => KeyMode::Insert,
-                crate::vim::Mode::Normal => KeyMode::Normal,
-                crate::vim::Mode::Visual(_) => KeyMode::Visual,
-            };
-        }
-        if let Some(explorer) = self.focused_explorer() {
-            return if explorer.prompting() {
-                KeyMode::Prompt
-            } else {
-                KeyMode::Normal
-            };
-        }
-        if let Some(board) = self.focused_board() {
-            return if board.prompting() {
-                KeyMode::Prompt
-            } else {
-                KeyMode::Normal
-            };
-        }
-        let Some(pane) = self
-            .focused_terminal()
-            .and_then(|terminal| self.panes.get(&terminal))
-        else {
+        let Some(keyed) = self.focused_keyed() else {
             return KeyMode::Normal;
         };
-        if pane.prompting() {
+        if keyed.prompting() {
             return KeyMode::Prompt;
         }
-        match pane.mode {
-            crate::vim::Mode::Insert => KeyMode::Insert,
-            crate::vim::Mode::Normal => KeyMode::Normal,
-            crate::vim::Mode::Visual(_) => KeyMode::Visual,
+        match keyed.mode() {
+            Mode::Insert => KeyMode::Insert,
+            Mode::Normal => KeyMode::Normal,
+            Mode::Visual(_) => KeyMode::Visual,
         }
     }
 

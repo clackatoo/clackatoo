@@ -1886,3 +1886,25 @@ fn under(path: &str, root: &str) -> bool {
             .strip_prefix(root)
             .is_some_and(|rest| rest.starts_with('/'))
 }
+
+impl crate::vim::Keyed for Explorer {
+    fn mode(&self) -> crate::vim::Mode {
+        crate::vim::Mode::Normal
+    }
+
+    fn prompting(&self) -> bool {
+        Explorer::prompting(self)
+    }
+
+    fn pending(&self) -> bool {
+        Explorer::pending(self)
+    }
+
+    fn counting(&self) -> Option<usize> {
+        self.count.filter(|_| self.pending.is_none())
+    }
+
+    fn forget_count(&mut self) {
+        self.count = None;
+    }
+}

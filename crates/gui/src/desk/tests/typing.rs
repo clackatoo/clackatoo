@@ -263,6 +263,27 @@ fn a_count_alone_leaves_the_next_key_to_the_bindings() {
 }
 
 #[test]
+fn a_count_alone_in_an_explorer_leaves_the_next_key_to_the_bindings_too() {
+    let mut desk = desk(one_tab(files_pane(1, 1)));
+    answer_all(&mut desk);
+    normal_mode(&mut desk);
+    type_keys(&mut desk, "5");
+    assert_eq!(desk.pane_counting(), Some(5));
+    type_keys(&mut desk, ":");
+    assert_eq!(
+        text(&desk),
+        ":▏",
+        "the command line opens, as `5:` there did not"
+    );
+    assert_eq!(desk.pane_counting(), None, "taken by the binding");
+    // A key half typed there is the explorer's.
+    key(&mut desk, NamedKey::Escape);
+    type_keys(&mut desk, "g");
+    assert!(desk.pane_pending());
+    assert_eq!(desk.pane_counting(), None);
+}
+
+#[test]
 fn huge_counts_neither_hang_nor_overflow() {
     let mut desk = terminal_desk();
     type_keys(&mut desk, "99999999999999999999999H");

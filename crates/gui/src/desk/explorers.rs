@@ -140,6 +140,11 @@ impl Desk {
         self.explorers.panes.get(&self.shown?.pane)
     }
 
+    /// The same, to change.
+    pub(super) fn focused_explorer_mut(&mut self) -> Option<&mut Explorer> {
+        self.explorers.panes.get_mut(&self.shown?.pane)
+    }
+
     /// Makes an explorer for every pane showing one in the workspace
     /// shown, and attaches to them; forgets those of panes gone, keeping
     /// how each was shown, by its root.

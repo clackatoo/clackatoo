@@ -1299,6 +1299,28 @@ fn past_text(row: &Row) -> usize {
     (row.text_end() + 1).min(row.width())
 }
 
+impl vim::Keyed for Pane {
+    fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    fn prompting(&self) -> bool {
+        Pane::prompting(self)
+    }
+
+    fn pending(&self) -> bool {
+        Pane::pending(self)
+    }
+
+    fn counting(&self) -> Option<usize> {
+        Pane::counting(self)
+    }
+
+    fn forget_count(&mut self) {
+        Pane::forget_count(self);
+    }
+}
+
 /// History and screen as one document, for the normal-mode cursor: history
 /// lines by number, then the screen's rows numbered on from the history's
 /// end.

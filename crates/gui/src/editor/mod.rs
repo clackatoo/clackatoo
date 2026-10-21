@@ -5600,3 +5600,25 @@ fn find(text: &str, pattern: &Pattern, from: usize, backward: bool) -> Option<pa
 
 #[cfg(test)]
 mod tests;
+
+impl vim::Keyed for Editor {
+    fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    fn prompting(&self) -> bool {
+        Editor::prompting(self)
+    }
+
+    fn pending(&self) -> bool {
+        Editor::pending(self)
+    }
+
+    fn counting(&self) -> Option<usize> {
+        Editor::counting(self)
+    }
+
+    fn forget_count(&mut self) {
+        self.forget_typed();
+    }
+}

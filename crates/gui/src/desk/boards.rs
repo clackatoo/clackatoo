@@ -47,6 +47,11 @@ impl Desk {
         self.boards.panes.get(&self.shown?.pane)
     }
 
+    /// The same, to change.
+    pub(super) fn focused_board_mut(&mut self) -> Option<&mut BoardPane> {
+        self.boards.panes.get_mut(&self.shown?.pane)
+    }
+
     /// Makes a board pane for every pane showing a board in the workspace
     /// shown, and attaches to their boards; forgets those of panes gone.
     pub(super) fn attach_shown_boards(&mut self) {

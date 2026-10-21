@@ -952,3 +952,25 @@ fn expand_tabs(line: &str, tabstop: usize) -> String {
     }
     out
 }
+
+impl crate::vim::Keyed for Review {
+    fn mode(&self) -> crate::vim::Mode {
+        crate::vim::Mode::Normal
+    }
+
+    fn prompting(&self) -> bool {
+        false
+    }
+
+    fn pending(&self) -> bool {
+        Review::pending(self)
+    }
+
+    fn counting(&self) -> Option<usize> {
+        self.count.filter(|_| self.pending.is_none())
+    }
+
+    fn forget_count(&mut self) {
+        self.count = None;
+    }
+}

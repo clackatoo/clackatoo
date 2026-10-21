@@ -260,6 +260,11 @@ impl Desk {
         Some((editor, self.editors.buffers.get(&editor.buffer())?))
     }
 
+    /// The editor of the focused pane, to change, if it shows one.
+    pub(super) fn focused_editor_mut(&mut self) -> Option<&mut Editor> {
+        self.editors.panes.get_mut(&self.shown?.pane)
+    }
+
     /// Makes an editor for every pane showing a buffer in the workspace
     /// shown, and attaches to their buffers; forgets the editors of panes
     /// gone, and the buffers no editor shows.

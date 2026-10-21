@@ -28,6 +28,29 @@ pub(crate) const WRAPPED_TO_TOP: &str = "search wrapped to top";
 /// What a backward search that went round to the bottom says.
 pub(crate) const WRAPPED_TO_BOTTOM: &str = "search wrapped to bottom";
 
+/// What the desk asks of the focused pane's keys, whatever kind of pane it
+/// is, to know which mode its bindings are looked up in and whether the
+/// next key is the pane's.
+pub(crate) trait Keyed {
+    /// The mode it reads keys in: normal for a pane with no other.
+    fn mode(&self) -> Mode;
+
+    /// Whether something is typed in a prompt of its own, such as a
+    /// search, which takes every key.
+    fn prompting(&self) -> bool;
+
+    /// Whether a command is half typed, which the next key is for.
+    fn pending(&self) -> bool;
+
+    /// The count typed, if that's all that's waiting: a key the pane
+    /// doesn't take after it is the window's, as `:` is.
+    fn counting(&self) -> Option<usize>;
+
+    /// Forgets the count typed, as a binding of the window's took the key
+    /// after it.
+    fn forget_count(&mut self);
+}
+
 /// Whether keys go to the program or drive clackatoo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
