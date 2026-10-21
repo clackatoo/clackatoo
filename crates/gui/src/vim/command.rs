@@ -118,7 +118,8 @@ pub(crate) enum Scroll {
 
 /// How far the scrolling keys go, the same in every pane, as Vim's do: the
 /// half page Ctrl+D and Ctrl+U go is half the view, rounded down, until a
-/// count before one sets it, as Vim's `scroll` option keeps it.
+/// count before one sets it, as Vim's `scroll` option keeps it, to no more
+/// than the view.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Paging {
     half: Option<u64>,
@@ -134,10 +135,11 @@ impl Paging {
         match scroll {
             Scroll::Line { .. } => count.unwrap_or(1),
             Scroll::HalfPage { .. } => {
+                // A whole view at most, as Vim's.
                 if count.is_some() {
-                    self.half = count;
+                    self.half = count.map(|count| count.min(view));
                 }
-                self.half.unwrap_or(view / 2).max(1)
+                self.half.unwrap_or(view / 2).min(view).max(1)
             }
             Scroll::Page { .. } => {
                 (count.unwrap_or(1)).saturating_mul(page_rows(view, Some([Some(1); 4])))
@@ -298,6 +300,10 @@ mod tests {
         assert_eq!(paging.rows(half, None, 11), 3);
         paging.resized();
         assert_eq!(paging.rows(half, None, 11), 5);
+        // No further than the view, and kept so.
+        assert_eq!(paging.rows(half, Some(20), 11), 11);
+        assert_eq!(paging.rows(half, None, 11), 11);
+        paging.resized();
         // A page is the view less two, a count that many.
         assert_eq!(paging.rows(page, None, 10), 8);
         assert_eq!(paging.rows(page, Some(2), 10), 16);

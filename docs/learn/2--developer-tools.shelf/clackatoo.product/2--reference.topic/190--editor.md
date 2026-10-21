@@ -381,7 +381,7 @@ The marks are drawn behind the text, and the selection over it. See [the options
 | Key | Does |
 |---|---|
 | `j` `k`, `gj` `gk`, Ctrl+E Ctrl+Y | A line, or as many as a count says |
-| Ctrl+D Ctrl+U | Half a view, rounded down, or as far as a count before one set |
+| Ctrl+D Ctrl+U | Half a view, rounded down, or as far as a count before one set, a view at most |
 | Ctrl+F, Page Down, Page Up | A view, keeping two lines of the last; a count goes that many |
 | `gg` `G` | The top, the end; `10G` or `10gg`, the block holding line 10 |
 
@@ -414,7 +414,7 @@ An editor in a window of its own starts in normal mode, as in Vim. One you go to
 | `/` `?` | Searches forward or back for a pattern, written as Vim writes it (see [Substituting](#substituting)). `n` and `N` find the next and previous match, going round the file's ends. Case is ignored unless the search has a capital letter, as `ignorecase` and `smartcase` start. |
 | `gj` `gk` | The next or previous screen row, where lines wrap; a count moves that many. With `nowrap`, as `j` and `k`. |
 | `g0` `g$` | The screen row's first or last character; with `nowrap`, the first or last in view. |
-| Ctrl+D, Ctrl+U | Half the view's screen rows down or up, rounded down, the view and the cursor together. A count sets how far they go from then on, as Vim's does. |
+| Ctrl+D, Ctrl+U | Half the view's screen rows down or up, rounded down, the view and the cursor together. A count sets how far they go from then on, a whole view at most, as Vim's does. |
 | Ctrl+F, Page Down, Page Up | The view's screen rows less two down, or up with Page Up, so two lines of what was in view stay, to the start of a line; then the cursor goes to the view's top line, or its bottom line going up, `scrolloff` rows in, as Vim's does. With the text's end in view, Ctrl+F goes a whole view. If the view can't move, nothing does. A count goes that many pages. |
 | Ctrl+E Ctrl+Y | The view a screen row down or up, or as many as a count says, keeping the cursor in view, `scrolloff` rows in, as the wheel does. While a panel by the cursor is shown, they scroll it instead. |
 | `zt` `zz` `zb` | Scrolls the cursor's line to the top, middle or bottom. |

@@ -81,6 +81,11 @@ fn half_pages_move_the_view_and_the_cursor_and_a_count_sets_how_far() {
         after(viewed(&text, 21, (25, 4), false), "<C-u>"),
         (16, 20, 4)
     );
+    // No further than the view.
+    assert_eq!(
+        after(viewed(&text, 11, (15, 4), false), "20<C-d>"),
+        (21, 25, 4)
+    );
 }
 
 #[test]
