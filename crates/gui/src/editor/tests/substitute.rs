@@ -609,6 +609,25 @@ fn marks_on_lines_moved_go_with_them_and_gv_selects_them_again() {
 }
 
 #[test]
+fn lines_moved_out_past_one_end_of_the_selection_cross_its_ends_over() {
+    // Its last line up above it: it's from there to its first, the cursor
+    // at the top.
+    let mut setup = Setup::new("a\nb\nc\nd\n");
+    setup.keys("jVj<Esc>");
+    run(&mut setup, "3m0");
+    assert_eq!(setup.text(), "c\na\nb\nd\n");
+    assert_eq!((marked(&setup, '<'), marked(&setup, '>')), ((0, 0), (2, 0)));
+    assert_eq!(reselected(&mut setup), ((2, 0), (0, 0)));
+    // Its first line down below it.
+    let mut setup = Setup::new("a\nb\nc\nd\n");
+    setup.keys("jVj<Esc>");
+    run(&mut setup, "2m$");
+    assert_eq!(setup.text(), "a\nc\nd\nb\n");
+    assert_eq!((marked(&setup, '<'), marked(&setup, '>')), ((1, 0), (3, 0)));
+    assert_eq!(reselected(&mut setup), ((3, 0), (1, 0)));
+}
+
+#[test]
 fn lines_moved_to_and_from_the_ends_take_their_marks() {
     // A block from the top to the end, and back.
     let mut setup = Setup::new("a\nb\nc\nd\n");

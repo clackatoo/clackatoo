@@ -176,16 +176,17 @@ impl FilePlace {
     }
 }
 
-/// An edit, as places are moved through it, with the text it moves whole
-/// if it moves any, as `:m` moves lines: worked out once for every place.
+/// An edit, as places are moved through it, with the lines it moves whole
+/// if it moves any, as `:m` moves them: worked out once for every place.
 pub(crate) struct Passing<'a> {
     edit: &'a Edit,
     moved: Option<Moved>,
 }
 
-/// `edits`, as places are moved through them.
-pub(crate) fn passing(edits: &[impl Borrow<Edit>]) -> Vec<Passing<'_>> {
-    (edits.iter())
+/// `edits`, made in turn, which leave the text as `text`, as places are
+/// moved through them.
+pub(crate) fn passing<'a>(edits: &'a [impl Borrow<Edit>], text: &Rope) -> Vec<Passing<'a>> {
+    let mut passing: Vec<Passing<'a>> = (edits.iter())
         .map(|edit| {
             let edit = edit.borrow();
             Passing {
@@ -193,7 +194,26 @@ pub(crate) fn passing(edits: &[impl Borrow<Edit>]) -> Vec<Passing<'_>> {
                 moved: edit.moved(),
             }
         })
-        .collect()
+        .collect();
+    // Whether what one moves is whole lines is seen in the text it made,
+    // worked back to from the last's: only as far as the first that might
+    // move any, as few do.
+    let Some(first) = passing.iter().position(|edit| edit.moved.is_some()) else {
+        return passing;
+    };
+    let mut after = text.clone();
+    for index in (first..passing.len()).rev() {
+        let edit = &mut passing[index];
+        edit.moved = edit.moved.filter(|moved| moved.is_lines(&after));
+        if index > first && edit.edit.invert().apply(&mut after).is_err() {
+            // Not the text they made: none of them is taken for a move.
+            for edit in &mut passing[first..index] {
+                edit.moved = None;
+            }
+            break;
+        }
+    }
+    passing
 }
 
 /// Whether `mark` is one of a file's own: `a` to `z`, `.`, or `'`, where
@@ -286,10 +306,26 @@ impl Selected {
                 let bias = if gone { Bias::After } else { Bias::Before };
                 self.end.follow(edit, bias);
             }
+            if edit.moved.is_some() && !gone && self.start.byte >= self.end.byte {
+                // Lines moved past one end from inside it cross its ends
+                // over, which are taken in order, as Vim takes `'<` and
+                // `'>`: the cursor's end is the other.
+                let first = self.end.byte.saturating_sub(1);
+                self.end.byte = self.start.byte + 1;
+                self.start.byte = first;
+                self.last.byte = self.end.byte - 1;
+                self.shape.backward = !self.shape.backward;
+            }
             self.end.byte = self.end.byte.max(self.start.byte);
         }
         if lines && self.end.byte > self.start.byte {
             self.end.byte = self.end.byte.max(next_char(text, self.last.byte));
+        }
+        // On a character's start, as an end crossed over may not be.
+        let end = self.end.byte.min(text.len_bytes());
+        let back = text.char_to_byte(text.byte_to_char(end));
+        if back < end {
+            self.end.byte = next_char(text, back);
         }
         self.settle(text);
     }
@@ -412,7 +448,7 @@ impl Marks {
         if edits.is_empty() {
             return;
         }
-        let edits = passing(edits);
+        let edits = passing(edits, text);
         for (_, place) in self.list.iter_mut().filter(|(_, at)| at.is_in(file)) {
             place.edited(&edits, text);
         }
@@ -428,7 +464,7 @@ impl Marks {
         edits: &[impl Borrow<Edit>],
         text: &Rope,
     ) {
-        self.selections_edited(file, &passing(edits), text);
+        self.selections_edited(file, &passing(edits, text), text);
     }
 
     fn selections_edited(&mut self, file: File<'_>, edits: &[Passing<'_>], text: &Rope) {
@@ -601,5 +637,19 @@ mod tests {
         assert_eq!(place(&marks), (3, 2));
         marks.replaced(File::here("/f"), &Rope::from_str("zero\nx\n"));
         assert_eq!(place(&marks), (1, 1));
+    }
+
+    #[test]
+    fn a_blank_line_taken_out_and_put_in_elsewhere_moves_no_marks() {
+        // As a formatter might: the blank line after `a` goes after `b`.
+        let mut marks = Marks::default();
+        let text = Rope::from_str("a\n\nb\nc\n");
+        marks.set('a', FilePlace::at(File::here("/f"), &text, 2));
+        let mut edit = Edit::new();
+        edit.retain(2).delete("\n").retain(2).insert("\n").retain(2);
+        let text = Rope::from_str("a\nb\n\nc\n");
+        marks.edited(File::here("/f"), std::slice::from_ref(&edit), &text);
+        let at = marks.get('a', File::here("/f")).unwrap();
+        assert_eq!((at.line, at.col), (1, 0), "where the line was");
     }
 }

@@ -167,4 +167,4 @@ apple
 
 ## More about marks
 
-`` `. `` goes to the last change. `:marks` lists the marks the file can go to in the finder. `'<` and `'>` are the last selection's start and end. Marks move with the text as anyone edits it, an agent included, and lines `:m` moves take theirs with them, the last selection's too: so `gv` after `:'<,'>m '>+1` selects the lines where they went, and Neovim's `client.keys.map("v", "J", ":m '>+1<CR>gv=gv")` works as a binding.
+`` `. `` goes to the last change. `:marks` lists the marks the file can go to in the finder. `'<` and `'>` are the last selection's start and end. Marks move with the text as anyone edits it, an agent included, and lines `:m` moves take theirs with them, the last selection's too: so `gv` after `:'<,'>m '>+1` selects the lines where they went, and the binding `client.keys.map("v", "J", ":m '>+1<CR>gv=gv")`, the keys of a well-known Neovim mapping, moves the lines selected down a line at a time.

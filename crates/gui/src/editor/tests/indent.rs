@@ -495,6 +495,26 @@ fn reindenting_without_a_grammar_or_rules_says_so() {
 }
 
 #[test]
+fn an_indent_taken_off_one_line_and_put_on_another_moves_no_marks() {
+    // `a` loses as much indent as `c` gains, which isn't a move of the
+    // blanks from one line to the other.
+    let mut setup = Setup::new("    a\nb {\nc\n}\nz\n");
+    setup.keys("malmbggV3j=");
+    let (asked, ..) = last_indent(&setup);
+    let answer = [(0, Some(0)), (6, Some(0)), (10, Some(4)), (12, Some(0))];
+    setup.answer(asked, indents(&answer));
+    setup.follow_marks();
+    assert_eq!(setup.text(), "a\nb {\n    c\n}\nz\n");
+    let marked = |mark| {
+        let at = setup.shared.marks.get(mark, setup.copy.file()).unwrap();
+        (at.line, at.col)
+    };
+    assert_eq!([marked('a'), marked('b'), marked('<')], [(0, 0); 3]);
+    setup.keys("gvd");
+    assert_eq!(setup.text(), "z\n");
+}
+
+#[test]
 #[ignore = "a timing, for an optimised build: cargo test --profile quick -- --ignored"]
 fn reindenting_a_big_file_takes_a_frame_or_so() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/editor/mod.rs");

@@ -166,7 +166,7 @@ impl Jumps {
         if edits.is_empty() {
             return;
         }
-        let edits = crate::editor::passing(edits);
+        let edits = crate::editor::passing(edits, text);
         for place in self.places_in(file) {
             place.edited(&edits, text);
         }
