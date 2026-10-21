@@ -2687,6 +2687,10 @@ mod tests {
         keys(&mut pane, "9L");
         assert_eq!(cursor(&pane), ("line 9".into(), 0, 0), "no further than H");
         assert!(!pane.pending());
+        // An operator takes as far as history goes, as Vim's.
+        let lines: Vec<String> = (1..=9).map(|n| format!("line {n}")).collect();
+        let yank = yanked(&mut pane, &terminal, "y99L");
+        assert_eq!(yank, Some(lines.join("\n")));
     }
 
     #[test]

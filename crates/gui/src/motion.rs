@@ -880,9 +880,14 @@ impl Cursor {
             top.line
         };
         let from_edge = (count as u64).saturating_sub(1);
+        // A count past the view's other edge goes no further than it, but
+        // an operator takes as far as the text goes, as Vim's: `d99L` to
+        // its start.
         let mut line = match motion {
-            Motion::ViewTop => highest.saturating_add(from_edge).min(bottom),
-            Motion::ViewBottom => bottom.saturating_sub(from_edge).max(highest),
+            Motion::ViewTop if keep_margin => highest.saturating_add(from_edge).min(bottom),
+            Motion::ViewTop => highest.saturating_add(from_edge).min(last),
+            Motion::ViewBottom if keep_margin => bottom.saturating_sub(from_edge).max(highest),
+            Motion::ViewBottom => bottom.saturating_sub(from_edge).max(first),
             _ => {
                 // Half the rows shown, past the text's end not counted.
                 let half = (rows_between(top, bottom_row, lines) + 1).div_ceil(2);

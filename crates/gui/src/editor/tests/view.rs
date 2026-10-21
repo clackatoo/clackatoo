@@ -253,6 +253,27 @@ fn an_operator_takes_whole_lines_to_the_views_edge_scrolloff_or_not() {
 }
 
 #[test]
+fn an_operator_takes_a_count_past_the_view_as_far_as_the_text_goes() {
+    let text = sixty();
+    let lines = |range: std::ops::RangeInclusive<usize>| {
+        (text.lines().skip(range.start() - 1))
+            .take(range.count())
+            .fold(String::new(), |mut taken, line| {
+                let _ = writeln!(taken, "{line}");
+                taken
+            })
+    };
+    let mut setup = viewed(&text, 11, (15, 4), false);
+    setup.keys("d99L");
+    assert_eq!(setup.register().text, lines(1..=15));
+    assert_eq!(setup.cursor(), (0, 4));
+    let mut setup = viewed(&text, 11, (15, 4), false);
+    setup.keys("d99H");
+    assert_eq!(setup.register().text, lines(15..=60));
+    assert_eq!(setup.cursor(), (13, 4));
+}
+
+#[test]
 fn where_lines_wrap_h_and_l_count_lines_and_scrolloff_screen_rows() {
     let text = wrapping();
     let at = |keys, margin| after(with_margin(viewed(&text, 11, (14, 2), true), margin), keys);

@@ -359,7 +359,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 | `gx` | Opens the link under the cursor, as Ctrl+click does. |
 | `%` `{` `}` | The bracket that pairs with the one under the cursor; the blank line before or after the paragraph. |
 | `H` `M` `L` | The top, middle and bottom lines in view, keeping the column as `gg` does. |
-| `5k`, `3w`, `10G`, `2gg` | A count before a motion repeats it, as in Vim; before `G` or `gg`, it goes to that line, counting from the oldest line of history. `3H` and `3L` count from the view's top and bottom. |
+| `5k`, `3w`, `10G`, `2gg` | A count before a motion repeats it, as in Vim; before `G` or `gg`, it goes to that line, counting from the oldest line of history. `3H` and `3L` count from the view's top and bottom, no further than the other, but `y99L` takes to the oldest line, as Vim's does. |
 | Ctrl+D Ctrl+U | Half the view down or up, rounded down, view and cursor together. A count sets how far they go from then on, a whole view at most, as Vim's does. |
 | Ctrl+F, Page Down Page Up | The view down or up, less two lines, so two lines of what was in view stay, and the cursor to its top line, or its bottom line going up, as Vim's does. At the live screen, or history's start, nothing moves. A count goes that many pages. Ctrl+B is [the window's](#ctrl-b). |
 | Ctrl+E Ctrl+Y | The view a line down or up, or as many as a count says, with the cursor kept in it. |
