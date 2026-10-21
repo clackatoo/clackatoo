@@ -35,7 +35,7 @@ use clackatoo_text::{Bias, Edit, Rope, line_start_through};
 
 use super::keys::{Action, Command};
 use super::{BufferCopy, Done, Editor, MAX_INDENT, Marks, Shared, indent_of};
-use crate::motion::{Cursor, Motion, Point};
+use crate::motion::Cursor;
 use crate::objects::Object;
 use crate::vim::{Mode, Operator, Target};
 
@@ -338,6 +338,7 @@ impl Editor {
     /// line's first character that isn't blank. Returns whether there was
     /// anything to indent, saying why not in the bar.
     pub(super) fn reindent(&mut self, copy: &mut BufferCopy) -> bool {
+        let want = self.cursor.want();
         let mut indents = match self.answered.take() {
             Some(Answer::Indents(indents)) => indents,
             Some(Answer::Nothing) => {
@@ -390,12 +391,7 @@ impl Editor {
             self.status = Some(format!("{} lines indented", lines.len()));
         }
         self.leave_visual();
-        let text = self.text(copy);
-        self.cursor = Cursor::new(Point {
-            line: first,
-            col: 0,
-        });
-        self.cursor.apply(Motion::FirstNonBlank, &text);
+        self.after_lines(first, want, copy);
         true
     }
 }

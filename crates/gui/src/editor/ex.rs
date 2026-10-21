@@ -1227,6 +1227,7 @@ impl Editor {
             start,
             end,
             lines: Some((lines.first, lines.last)),
+            moved: None,
         };
         self.delete_span(span, copy);
         self.report_lines(lines, "fewer lines");

@@ -577,8 +577,8 @@ fn indent_operators_shift_whole_lines_by_shiftwidth() {
     );
     assert_eq!(
         setup.cursor(),
-        (0, 4),
-        "on the first line's first character"
+        (0, 3),
+        "on the first line, keeping its column, as Neovim's without startofline"
     );
     assert_eq!(setup.register().text, "kept", "the register isn't touched");
     setup.keys("u");

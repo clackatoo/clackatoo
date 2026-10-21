@@ -509,9 +509,10 @@ options! {
     /// turns over the case of the character under the cursor, and moves
     /// on past it.
     tildeop("top"): bool = false;
-    /// `gg`, `G` and Ctrl+Home, `:` and a line number in an editor, and
-    /// `H`, `M` and `L` in a terminal go to the line's first character
-    /// that isn't blank. Off, as Neovim's are, they keep the column, as
+    /// `gg`, `G` and Ctrl+Home, `H`, `M` and `L`, the paging keys, and in
+    /// an editor `:` and a line number and deleting, shifting or
+    /// indenting whole lines, go to the line's first character that isn't
+    /// blank, as Vim's do. Off, as Neovim's are, they keep the column, as
     /// `j` and `k` do.
     startofline("sol"): bool = false;
     /// `:w` formats the file first, as its language server does.

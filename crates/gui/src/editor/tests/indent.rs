@@ -411,7 +411,8 @@ fn reindenting_lines_with_a_count_a_selection_and_again() {
     assert_eq!((at, lines), (4, 2));
     setup.answer(asked, indents(&[(4, Some(4)), (6, Some(4))]));
     assert_eq!(setup.text(), "a {\n    b\n\n  c\n}\n");
-    assert_eq!(setup.cursor(), (1, 4));
+    // Keeping its column, as Neovim's does without `startofline`.
+    assert_eq!(setup.cursor(), (1, 0));
     // `.` asks again, about the lines from the cursor's.
     setup.keys("jj.");
     let (asked, at, lines) = last_indent(&setup);

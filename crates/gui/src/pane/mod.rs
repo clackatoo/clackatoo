@@ -2274,6 +2274,30 @@ mod tests {
     }
 
     #[test]
+    fn pages_land_at_the_first_non_blank_with_startofline_but_ctrl_e_doesnt() {
+        let terminal = terminal(&numbered_lines("  line "));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "k3lgg");
+        serve(&mut pane, &terminal);
+        // Without it, the column is kept.
+        press(&mut pane, Key::Character("f".into()), CTRL);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("  line 4".into(), 0, 3));
+        pane.set_options(&Options {
+            startofline: true,
+            ..Options::default()
+        });
+        press(&mut pane, Key::Character("d".into()), CTRL);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("  line 6".into(), 0, 2));
+        keys(&mut pane, "3l");
+        press(&mut pane, Key::Character("e".into()), CTRL);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("  line 7".into(), 0, 5));
+    }
+
+    #[test]
     fn h_l_and_half_pages_move_as_many_lines_as_they_say() {
         let terminal = terminal(&numbered_lines("line "));
         let mut pane = pane(&terminal);

@@ -169,7 +169,7 @@ fn an_operator_takes_whole_lines_to_the_views_edge_scrolloff_or_not() {
         "line 15\n  line 16\nline 17\n  line 18\nline 19\n  line 20\n"
     );
     assert!(setup.register().lines);
-    assert_eq!(setup.cursor().0, 14);
+    assert_eq!(setup.cursor(), (14, 4));
     let mut setup = viewed(&text, 11, (15, 4), false);
     setup.keys("yH");
     assert_eq!(
@@ -211,4 +211,19 @@ fn ctrl_e_and_ctrl_y_move_the_view_keeping_the_cursor_in_it() {
     );
     let setup = with_margin(viewed(&text, 11, (14, 4), false), 3);
     assert_eq!(after(setup, "<C-e>"), (12, 15, 4));
+}
+
+#[test]
+fn pages_land_at_the_first_non_blank_with_startofline_but_ctrl_e_doesnt() {
+    let text = sixty();
+    let sol = |top, at, keys| {
+        let mut setup = viewed(&text, top, at, false);
+        setup.set(|options| options.startofline = true);
+        after(setup, keys)
+    };
+    assert_eq!(sol(11, (15, 4), "<C-d>"), (16, 20, 2));
+    assert_eq!(sol(21, (25, 4), "<C-u>"), (16, 20, 2));
+    assert_eq!(sol(11, (15, 4), "<C-f>"), (19, 19, 0));
+    assert_eq!(sol(21, (25, 4), "<PageUp>"), (13, 22, 2));
+    assert_eq!(sol(11, (11, 4), "<C-e>"), (12, 12, 4));
 }

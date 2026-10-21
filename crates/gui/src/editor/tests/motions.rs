@@ -140,3 +140,43 @@ fn a_line_number_after_colon_keeps_the_column_unless_startofline() {
     // The column wanted, after `$` the line's end.
     assert_eq!(after("$", "7", false), (6, 4));
 }
+
+/// The text and the cursor after `keys` from where `from` puts it, with
+/// `startofline` as `sol` says.
+fn lines_after(from: &str, keys: &str, sol: bool) -> (String, (u64, usize)) {
+    let mut setup = Setup::new(EIGHT);
+    setup.set(|options| options.startofline = sol);
+    setup.keys(from);
+    setup.keys(keys);
+    (setup.text(), setup.cursor())
+}
+
+#[test]
+fn linewise_deletes_and_shifts_keep_the_column_unless_startofline() {
+    // `dd` on `three`: `  four` comes up under the cursor.
+    let gone = "one\n  two\n  four\nfive\n  six\nseven\n  eight\n";
+    assert_eq!(lines_after("3G4l", "dd", false), (gone.to_owned(), (2, 4)));
+    assert_eq!(lines_after("3G4l", "dd", true).1, (2, 2));
+    // As far as the line goes.
+    assert_eq!(lines_after("3G4l", "dj", false).1, (2, 3));
+    assert_eq!(lines_after("3G4l", "dj", true).1, (2, 0));
+    assert_eq!(lines_after("5G3l", "dk", false).1, (3, 3));
+    assert_eq!(lines_after("5G3l", "dk", true).1, (3, 2));
+    assert_eq!(lines_after("5G3l", "dG", false).1, (3, 3));
+    assert_eq!(lines_after("5G3l", "dG", true).1, (3, 2));
+    assert_eq!(lines_after("3G2l", ">>", false).1, (2, 2));
+    assert_eq!(lines_after("3G2l", ">>", true).1, (2, 4));
+    assert_eq!(lines_after("3G2l", ">j", false).1, (2, 2));
+    assert_eq!(lines_after("3G2l", ">j", true).1, (2, 4));
+    assert_eq!(lines_after("4G4l", "<<", false).1, (3, 3));
+    assert_eq!(lines_after("4G4l", "<<", true).1, (3, 0));
+}
+
+#[test]
+fn yanks_keep_the_column_whatever_startofline_says_but_gg_doesnt() {
+    assert_eq!(lines_after("3G4l", "yj", true).1, (2, 4));
+    assert_eq!(lines_after("3G4l", "yk", true).1, (1, 4));
+    assert_eq!(lines_after("3G4l", "yy", true).1, (2, 4));
+    // `gg` goes to the first non-blank itself.
+    assert_eq!(lines_after("4G3l", "ygg", true).1, (0, 0));
+}

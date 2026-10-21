@@ -508,7 +508,28 @@ impl Pane {
             Scroll::Page { down } | Scroll::Line { down } => {
                 self.scroll_view(if down { -rows } else { rows })
             }
+        };
+        // The pages, but not Ctrl+E and Ctrl+Y, as Vim's.
+        if self.startofline && !matches!(scroll, Scroll::Line { .. }) {
+            self.onto_start_of_line();
         }
+        true
+    }
+
+    /// Puts the cursor at its line's first non-blank, as `startofline`
+    /// has paging do: once the line comes, if it hasn't yet.
+    fn onto_start_of_line(&mut self) {
+        let Some(mut cursor) = self.cursor else {
+            return;
+        };
+        let document = Document(self);
+        cursor.onto_line(cursor.at.line, true, &document);
+        let fetched = document.row(cursor.at.line).is_some();
+        self.unplaced.cursor = (!fetched).then_some(Unplaced {
+            cursor,
+            start_of_line: true,
+        });
+        self.cursor = Some(cursor);
     }
 
     /// Ctrl+E and Ctrl+Y: moves the view `lines` up, keeping the cursor in

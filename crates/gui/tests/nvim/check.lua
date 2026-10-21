@@ -18,11 +18,10 @@
 -- lines to wrap at; the view's top line is printed too.
 --
 -- Gotchas (see the Acta memory `checking-vim-behaviour-headless`):
--- - `startofline` is off in Neovim, so `gg`, `G` and linewise operators
---   keep the column. clackatoo's `startofline`, off by default too, covers
---   `gg`, `G`, `:` and a line number, and a terminal's `H`, `M` and `L`;
---   its linewise operators don't follow it yet. A case can `set = 'sol'`
---   for Vim's way.
+-- - `startofline` is off in Neovim, so `gg`, `G`, the paging keys and
+--   linewise operators keep the column, as clackatoo's do with its own
+--   off, which is its default too. A case can `set = 'sol'` for Vim's
+--   way.
 -- - A motion that fails inside `normal!` silently ends that case's keys.
 -- - `.` carries over from earlier cases.
 -- - Anything that waits for input (`:s///c`) hangs the run: keep `timeout`.
@@ -140,6 +139,32 @@ local cases = {
   { name = '3<C-e>', lines = sixty, at = { 11, 4 }, view = { height = 10, top = 11 }, keys = '3<C-e>' },
   { name = '<C-y>', lines = sixty, at = { 20, 4 }, view = { height = 10, top = 11 }, keys = '<C-y>' },
   { name = '<C-e> so=3', lines = sixty, at = { 14, 4 }, view = { height = 10, top = 11 }, keys = '<C-e>', set = 'scrolloff=3' },
+  -- startofline's reach: paging, and linewise d, <<, >> and ==, but not
+  -- y, nor Ctrl+E, nor what an operator takes. Indents as clackatoo's
+  -- start: spaces, four columns.
+  { name = '<C-d> sol', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '<C-d>', set = 'sol' },
+  { name = '<C-u> sol', lines = sixty, at = { 25, 4 }, view = { height = 10, top = 21 }, keys = '<C-u>', set = 'sol' },
+  { name = '<C-f> sol', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '<C-f>', set = 'sol' },
+  { name = '<PageUp> sol', lines = sixty, at = { 25, 4 }, view = { height = 10, top = 21 }, keys = '<PageUp>', set = 'sol' },
+  { name = '<C-e> sol', lines = sixty, at = { 11, 4 }, view = { height = 10, top = 11 }, keys = '<C-e>', set = 'sol' },
+  { name = 'dd', lines = eight, at = { 3, 4 }, keys = 'dd', set = 'et sw=4 ts=4' },
+  { name = 'dd sol', lines = eight, at = { 3, 4 }, keys = 'dd', set = 'sol et sw=4 ts=4' },
+  { name = 'dj', lines = eight, at = { 3, 4 }, keys = 'dj', set = 'et sw=4 ts=4' },
+  { name = 'dj sol', lines = eight, at = { 3, 4 }, keys = 'dj', set = 'sol et sw=4 ts=4' },
+  { name = 'dk sol', lines = eight, at = { 5, 3 }, keys = 'dk', set = 'sol et sw=4 ts=4' },
+  { name = 'dk', lines = eight, at = { 5, 3 }, keys = 'dk', set = 'et sw=4 ts=4' },
+  { name = 'dG sol', lines = eight, at = { 5, 3 }, keys = 'dG', set = 'sol et sw=4 ts=4' },
+  { name = 'dG', lines = eight, at = { 5, 3 }, keys = 'dG', set = 'et sw=4 ts=4' },
+  { name = '>>', lines = eight, at = { 3, 2 }, keys = '>>', set = 'et sw=4 ts=4' },
+  { name = '>> sol', lines = eight, at = { 3, 2 }, keys = '>>', set = 'sol et sw=4 ts=4' },
+  { name = '<<', lines = eight, at = { 4, 4 }, keys = '<<', set = 'et sw=4 ts=4' },
+  { name = '<< sol', lines = eight, at = { 4, 4 }, keys = '<<', set = 'sol et sw=4 ts=4' },
+  { name = '>j', lines = eight, at = { 3, 2 }, keys = '>j', set = 'et sw=4 ts=4' },
+  { name = '>j sol', lines = eight, at = { 3, 2 }, keys = '>j', set = 'sol et sw=4 ts=4' },
+  { name = 'yj sol', lines = eight, at = { 3, 4 }, keys = 'yj', set = 'sol et sw=4 ts=4' },
+  { name = 'yk sol', lines = eight, at = { 3, 4 }, keys = 'yk', set = 'sol et sw=4 ts=4' },
+  { name = 'ygg sol', lines = eight, at = { 4, 3 }, keys = 'ygg', set = 'sol et sw=4 ts=4' },
+  { name = 'yy sol', lines = eight, at = { 3, 4 }, keys = 'yy', set = 'sol et sw=4 ts=4' },
 }
 
 -- Quiet: "3 fewer lines" would land in what's printed, as would a
