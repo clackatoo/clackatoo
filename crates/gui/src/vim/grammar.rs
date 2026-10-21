@@ -148,17 +148,14 @@ impl Keys {
 
     /// The count typed, if that's all of a command that's been typed.
     pub(crate) fn counting(&self) -> Option<usize> {
-        let mut count = None;
-        for stroke in &self.0 {
-            let Stroke::Char { ch, ctrl: false } = stroke else {
-                return None;
-            };
-            let digit = ch
-                .to_digit(10)
-                .filter(|&digit| digit > 0 || count.is_some())?;
-            count = Some(count_with(count, digit));
-        }
-        count
+        let mut reader = Reader {
+            keys: &self.0,
+            at: 0,
+            register: None,
+            tildeop: false,
+        };
+        let count = reader.count();
+        count.filter(|_| reader.at == self.0.len())
     }
 
     /// The keys typed so far, as `g` waiting for its second.

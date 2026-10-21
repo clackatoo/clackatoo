@@ -1308,7 +1308,7 @@ fn past_text(row: &Row) -> usize {
     (row.text_end() + 1).min(row.width())
 }
 
-impl vim::Keyed for Pane {
+impl vim::KeyState for Pane {
     fn mode(&self) -> Mode {
         self.mode
     }

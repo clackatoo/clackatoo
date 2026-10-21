@@ -158,8 +158,7 @@ pub(crate) struct Review {
     lit: Vec<Option<HighlightKind>>,
     cursor_cell: Option<(usize, usize)>,
     /// A count typed, and `g`, `]` or `[`, waiting for the key after.
-    count: Option<usize>,
-    pending: Option<char>,
+    typed: crate::vim::HalfTyped,
     /// What to ask the desk, oldest first.
     asks: Vec<Ask>,
     /// What the bar says until the next key.
@@ -183,8 +182,7 @@ impl Review {
             rows: Vec::new(),
             lit: Vec::new(),
             cursor_cell: None,
-            count: None,
-            pending: None,
+            typed: crate::vim::HalfTyped::default(),
             asks: Vec::new(),
             message: None,
         };
@@ -219,7 +217,7 @@ impl Review {
 
     /// Whether a key is half typed, as `g` or a count is.
     pub(crate) fn pending(&self) -> bool {
-        self.count.is_some() || self.pending.is_some()
+        self.typed.pending()
     }
 
     /// What the window's title says.
@@ -394,8 +392,8 @@ impl Review {
     /// Does what `stroke` does. Returns whether it should be drawn again.
     pub(crate) fn stroke(&mut self, stroke: Stroke) -> bool {
         self.message = None;
-        let count = self.count.take();
-        let pending = self.pending.take();
+        let count = self.typed.count.take();
+        let pending = self.typed.key.take();
         let Stroke::Char { ch, ctrl } = stroke else {
             return self.named(stroke, count);
         };
@@ -407,7 +405,7 @@ impl Review {
             (None, '0'..='9') if ch != '0' || count.is_some() => {
                 let digit = ch.to_digit(10).expect("a digit") as usize;
                 let count = count.unwrap_or(0).saturating_mul(10).saturating_add(digit);
-                self.count = Some(count.min(1_000_000));
+                self.typed.count = Some(count.min(1_000_000));
                 return false;
             }
             (Some('g'), 'g') => self.go_to(count.map_or(0, |count| count - 1)),
@@ -424,8 +422,8 @@ impl Review {
             }
             (Some(_), _) => {}
             (None, 'g' | ']' | '[') => {
-                self.count = count;
-                self.pending = Some(ch);
+                self.typed.count = count;
+                self.typed.key = Some(ch);
                 return false;
             }
             (None, 'j') => self.move_by(times, true),
@@ -953,24 +951,16 @@ fn expand_tabs(line: &str, tabstop: usize) -> String {
     out
 }
 
-impl crate::vim::Keyed for Review {
-    fn mode(&self) -> crate::vim::Mode {
-        crate::vim::Mode::Normal
+impl crate::vim::ListPane for Review {
+    fn half_typed(&self) -> &crate::vim::HalfTyped {
+        &self.typed
+    }
+
+    fn half_typed_mut(&mut self) -> &mut crate::vim::HalfTyped {
+        &mut self.typed
     }
 
     fn prompting(&self) -> bool {
         false
-    }
-
-    fn pending(&self) -> bool {
-        Review::pending(self)
-    }
-
-    fn counting(&self) -> Option<usize> {
-        self.count.filter(|_| self.pending.is_none())
-    }
-
-    fn forget_count(&mut self) {
-        self.count = None;
     }
 }

@@ -56,7 +56,7 @@
 
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{Side, WorkspaceId};
+use clackatoo_protocol::{Side, TerminalId, WorkspaceId};
 
 use super::{Desk, Input, Purpose};
 use crate::command::{Command, Kind, Place, ReviewWhich};
@@ -64,7 +64,7 @@ use crate::editor::HunkAction;
 use crate::finder;
 use crate::keymap::{KeyMode, Keymap, WhichKeys, parse_keys, parse_modes};
 use crate::layout::Direction;
-use crate::vim::{Keyed, Mode};
+use crate::vim::{KeyState, Mode};
 
 /// How many choices the palette lists at once: workspaces, or what Tab
 /// could complete a word with.
@@ -369,6 +369,16 @@ const DIRECTIONS: [(char, Direction); 4] = [
     ('l', Direction::Right),
 ];
 
+/// The kinds of pane whose keys the desk asks about (see [`KeyState`]).
+#[derive(Clone, Copy)]
+enum WithKeys {
+    Editor,
+    Explorer,
+    Board,
+    Review,
+    Terminal(TerminalId),
+}
+
 impl Desk {
     /// Whether the panes are numbered on screen: while keys wait for a
     /// pane's number, as after Ctrl+B p, or for keys that lead to one, as
@@ -512,72 +522,74 @@ impl Desk {
         self.input = Some(Input::new(purpose, text));
     }
 
+    /// Which kind of pane with keys the focused one is.
+    fn focused_with_keys(&self) -> Option<WithKeys> {
+        Some(if self.focused_editor().is_some() {
+            WithKeys::Editor
+        } else if self.focused_explorer().is_some() {
+            WithKeys::Explorer
+        } else if self.focused_board().is_some() {
+            WithKeys::Board
+        } else if self.focused_review().is_some() {
+            WithKeys::Review
+        } else {
+            WithKeys::Terminal(self.focused_terminal()?)
+        })
+    }
+
     /// The focused pane's keys, if it reads any: an editor's, a
     /// terminal's or a chat's, an explorer's, a board's or a review's.
-    pub(super) fn focused_keyed(&self) -> Option<&dyn Keyed> {
-        if let Some((editor, _)) = self.focused_editor() {
-            return Some(editor);
-        }
-        if let Some(explorer) = self.focused_explorer() {
-            return Some(explorer);
-        }
-        if let Some(board) = self.focused_board() {
-            return Some(board);
-        }
-        if let Some(review) = self.focused_review() {
-            return Some(review);
-        }
-        let terminal = self.focused_terminal()?;
-        Some(self.panes.get(&terminal)?)
+    pub(super) fn focused_key_state(&self) -> Option<&dyn KeyState> {
+        Some(match self.focused_with_keys()? {
+            WithKeys::Editor => self.focused_editor()?.0,
+            WithKeys::Explorer => self.focused_explorer()?,
+            WithKeys::Board => self.focused_board()?,
+            WithKeys::Review => self.focused_review()?,
+            WithKeys::Terminal(terminal) => self.panes.get(&terminal)?,
+        })
     }
 
     /// The same, to change.
-    fn focused_keyed_mut(&mut self) -> Option<&mut dyn Keyed> {
-        if self.focused_editor().is_some() {
-            return Some(self.focused_editor_mut()?);
-        }
-        if self.focused_explorer().is_some() {
-            return Some(self.focused_explorer_mut()?);
-        }
-        if self.focused_board().is_some() {
-            return Some(self.focused_board_mut()?);
-        }
-        if self.focused_review().is_some() {
-            return Some(self.focused_review_mut()?);
-        }
-        Some(self.focused_pane()?)
+    fn focused_key_state_mut(&mut self) -> Option<&mut dyn KeyState> {
+        Some(match self.focused_with_keys()? {
+            WithKeys::Editor => self.focused_editor_mut()?,
+            WithKeys::Explorer => self.focused_explorer_mut()?,
+            WithKeys::Board => self.focused_board_mut()?,
+            WithKeys::Review => self.focused_review_mut()?,
+            WithKeys::Terminal(terminal) => self.panes.get_mut(&terminal)?,
+        })
     }
 
     /// Whether the focused pane has a command half typed, which the next
     /// key finishes.
     pub(super) fn pane_pending(&self) -> bool {
-        self.focused_keyed().is_some_and(Keyed::pending)
+        self.focused_key_state().is_some_and(KeyState::pending)
     }
 
     /// The count typed in the focused pane, if that's all that's waiting
     /// there: the next key is looked up in the bindings, as `5:` opens the
     /// command line.
     pub(super) fn pane_counting(&self) -> Option<usize> {
-        self.focused_keyed()?.counting()
+        self.focused_key_state()?.counting()
     }
 
     /// Takes a count typed in the focused pane, as one of the bindings
     /// took the key after it, for the binding to use.
     pub(super) fn take_pane_count(&mut self) -> Option<usize> {
         let count = self.pane_counting()?;
-        self.focused_keyed_mut()?.forget_count();
+        self.focused_key_state_mut()?.forget_count();
         Some(count)
     }
 
     /// The mode bindings are looked up in: the focused pane's.
     pub(super) fn key_mode(&self) -> KeyMode {
-        let Some(keyed) = self.focused_keyed() else {
+        let Some(keys) = self.focused_key_state() else {
             return KeyMode::Normal;
         };
-        if keyed.prompting() {
+        if keys.prompting() {
             return KeyMode::Prompt;
         }
-        match keyed.mode() {
+        match keys.mode() {
             Mode::Insert => KeyMode::Insert,
             Mode::Normal => KeyMode::Normal,
             Mode::Visual(_) => KeyMode::Visual,

@@ -5621,10 +5621,7 @@ fn find(text: &str, pattern: &Pattern, from: usize, backward: bool) -> Option<pa
     before.or(last)
 }
 
-#[cfg(test)]
-mod tests;
-
-impl vim::Keyed for Editor {
+impl vim::KeyState for Editor {
     fn mode(&self) -> Mode {
         self.mode
     }
@@ -5645,3 +5642,6 @@ impl vim::Keyed for Editor {
         self.forget_typed();
     }
 }
+
+#[cfg(test)]
+mod tests;

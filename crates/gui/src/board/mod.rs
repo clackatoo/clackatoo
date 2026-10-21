@@ -89,8 +89,8 @@ pub(crate) struct BoardPane {
     /// epoch: how long ago things were, and how long claims have left,
     /// are said as of then.
     laid_at: u64,
-    count: Option<usize>,
-    pending: Option<char>,
+    /// A count typed, and `g`, waiting for the key after.
+    typed: crate::vim::HalfTyped,
     prompt: Option<Prompt>,
     cursorline: bool,
     /// What to ask the daemon, oldest first.
@@ -120,8 +120,7 @@ impl BoardPane {
             cursor_rows: 0..0,
             stale: true,
             laid_at: 0,
-            count: None,
-            pending: None,
+            typed: crate::vim::HalfTyped::default(),
             prompt: None,
             cursorline,
             outbox: Vec::new(),
@@ -154,7 +153,7 @@ impl BoardPane {
 
     /// Whether a key is half typed, as `g` or a count is.
     pub(crate) fn pending(&self) -> bool {
-        self.count.is_some() || self.pending.is_some()
+        self.typed.pending()
     }
 
     /// What the window's title says: "Board:" and the board's name, as
@@ -249,8 +248,8 @@ impl BoardPane {
             self.prompt_stroke(stroke);
             return true;
         }
-        let count = self.count.take();
-        let pending = self.pending.take();
+        let count = self.typed.count.take();
+        let pending = self.typed.key.take();
         let ch = match stroke {
             Stroke::Char { ch, ctrl: false } => ch,
             Stroke::Char { ch, ctrl: true } => {
@@ -291,14 +290,14 @@ impl BoardPane {
             (None, '0'..='9') if ch != '0' || count.is_some() => {
                 let digit = ch.to_digit(10).expect("a digit") as usize;
                 let count = count.unwrap_or(0).saturating_mul(10).saturating_add(digit);
-                self.count = Some(count.min(1_000_000));
+                self.typed.count = Some(count.min(1_000_000));
                 return false;
             }
             (Some('g'), 'g') => self.go_to(count.map_or(0, |count| count - 1)),
             (Some(_), _) => {}
             (None, 'g') => {
-                self.count = count;
-                self.pending = Some('g');
+                self.typed.count = count;
+                self.typed.key = Some('g');
                 return false;
             }
             (None, 'j') => self.move_by(count.unwrap_or(1), true),
@@ -754,24 +753,16 @@ fn now() -> u64 {
         })
 }
 
-impl crate::vim::Keyed for BoardPane {
-    fn mode(&self) -> crate::vim::Mode {
-        crate::vim::Mode::Normal
+impl crate::vim::ListPane for BoardPane {
+    fn half_typed(&self) -> &crate::vim::HalfTyped {
+        &self.typed
+    }
+
+    fn half_typed_mut(&mut self) -> &mut crate::vim::HalfTyped {
+        &mut self.typed
     }
 
     fn prompting(&self) -> bool {
         BoardPane::prompting(self)
-    }
-
-    fn pending(&self) -> bool {
-        BoardPane::pending(self)
-    }
-
-    fn counting(&self) -> Option<usize> {
-        self.count.filter(|_| self.pending.is_none())
-    }
-
-    fn forget_count(&mut self) {
-        self.count = None;
     }
 }

@@ -486,12 +486,12 @@ impl Desk {
         if self.recording().is_none() || Chord::of(press) != Some(Chord::typed('q')) {
             return false;
         }
-        let chat = (self.focused_terminal())
+        let terminal = (self.focused_terminal())
             .and_then(|terminal| self.panes.get(&terminal))
-            .is_none_or(crate::pane::Pane::is_chat);
-        let normal = !chat
-            && self.focused_keyed().is_some_and(|keyed| {
-                keyed.mode() == crate::vim::Mode::Normal && !keyed.prompting() && !keyed.pending()
+            .is_some_and(|pane| !pane.is_chat());
+        let normal = terminal
+            && self.focused_key_state().is_some_and(|keys| {
+                keys.mode() == crate::vim::Mode::Normal && !keys.prompting() && !keys.pending()
             });
         if normal {
             self.shared_mut().registers.stop_recording();

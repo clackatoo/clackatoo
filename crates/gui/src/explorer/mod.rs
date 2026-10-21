@@ -224,8 +224,7 @@ pub(crate) struct Explorer {
     /// Where each line's name starts, in cells, as of the last settle.
     name_cols: Vec<usize>,
     /// A count typed, and `g` or `z`, waiting for the key after.
-    count: Option<usize>,
-    pending: Option<char>,
+    typed: crate::vim::HalfTyped,
     prompt: Option<Prompt>,
     /// The last search, and whether it went backward.
     search: Option<(String, bool)>,
@@ -298,8 +297,7 @@ impl Explorer {
             rows: Vec::new(),
             cursor_cell: None,
             name_cols: Vec::new(),
-            count: None,
-            pending: None,
+            typed: crate::vim::HalfTyped::default(),
             prompt: None,
             search: None,
             case: Case::of(options),
@@ -457,7 +455,7 @@ impl Explorer {
     /// Whether a key is half typed, as `g` or a count is, which the next
     /// key finishes.
     pub(crate) fn pending(&self) -> bool {
-        self.count.is_some() || self.pending.is_some()
+        self.typed.pending()
     }
 
     /// Says `message` in the bar until the next key.
@@ -974,8 +972,8 @@ impl Explorer {
             self.prompt_stroke(stroke);
             return true;
         }
-        let count = self.count.take();
-        let pending = self.pending.take();
+        let count = self.typed.count.take();
+        let pending = self.typed.key.take();
         let Stroke::Char { ch, ctrl } = stroke else {
             return self.named(stroke, count);
         };
@@ -986,7 +984,7 @@ impl Explorer {
             (None, '0'..='9') if ch != '0' || count.is_some() => {
                 let digit = ch.to_digit(10).expect("a digit") as usize;
                 let count = count.unwrap_or(0).saturating_mul(10).saturating_add(digit);
-                self.count = Some(count.min(1_000_000));
+                self.typed.count = Some(count.min(1_000_000));
                 return false;
             }
             (Some('g'), 'g') => self.go_to(count.map_or(0, |count| count - 1)),
@@ -1003,8 +1001,8 @@ impl Explorer {
             (Some('g'), '?') => self.help = !self.help,
             (Some(_), _) => {}
             (None, 'g' | 'z') => {
-                self.count = count;
-                self.pending = Some(ch);
+                self.typed.count = count;
+                self.typed.key = Some(ch);
                 return false;
             }
             (None, 'j') => self.move_by(count.unwrap_or(1), true),
@@ -1887,24 +1885,16 @@ fn under(path: &str, root: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-impl crate::vim::Keyed for Explorer {
-    fn mode(&self) -> crate::vim::Mode {
-        crate::vim::Mode::Normal
+impl crate::vim::ListPane for Explorer {
+    fn half_typed(&self) -> &crate::vim::HalfTyped {
+        &self.typed
+    }
+
+    fn half_typed_mut(&mut self) -> &mut crate::vim::HalfTyped {
+        &mut self.typed
     }
 
     fn prompting(&self) -> bool {
         Explorer::prompting(self)
-    }
-
-    fn pending(&self) -> bool {
-        Explorer::pending(self)
-    }
-
-    fn counting(&self) -> Option<usize> {
-        self.count.filter(|_| self.pending.is_none())
-    }
-
-    fn forget_count(&mut self) {
-        self.count = None;
     }
 }
