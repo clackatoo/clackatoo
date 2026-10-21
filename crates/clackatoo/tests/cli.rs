@@ -1392,6 +1392,73 @@ fn shells_follow_the_display_but_never_a_variable_set_by_hand() {
     }
 }
 
+/// A shell left at a prompt drawn before the desktop logged in follows
+/// the display before the command typed there runs, not only at the
+/// prompt after it: fish and zsh in their hooks run before a command,
+/// bash from 5.3 in PS0, with `${| …; }`, which runs in the shell itself.
+/// Older bash runs PS0 in a subshell, so it follows at its next prompt.
+/// Following leaves the status, each status of a pipeline, and the last
+/// argument as the command before left them.
+#[test]
+fn shells_follow_the_display_before_the_command_they_run() {
+    const SEEN: &str = "printenv WAYLAND_DISPLAY || echo unset";
+    for (shell, zshenv) in integrated_shells() {
+        let name = shell.file_name().unwrap().to_string_lossy().into_owned();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(".zshenv"), zshenv).unwrap();
+        let mut user = UserShell::start(&shell, home.path(), &[]);
+        let file = user.runtime.path().join("clackatoo/shell/display");
+        let write = |text: &str| {
+            let partial = file.with_extension("new");
+            std::fs::write(&partial, text).unwrap();
+            std::fs::rename(&partial, &file).unwrap();
+        };
+        let said = |user: &mut UserShell, command: &str| {
+            let ran = user.run(command);
+            user.output(&ran).trim().to_owned()
+        };
+        let before_running = name != "bash" || {
+            let version = said(&mut user, "echo ${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}");
+            let version: Vec<u32> = version.split(' ').map(|n| n.parse().unwrap()).collect();
+            version >= vec![5, 3]
+        };
+        assert_eq!(said(&mut user, SEEN), "unset", "{name}");
+
+        // The desktop logs in while the shell sits at its prompt.
+        write("#systemd\nWAYLAND_DISPLAY=wayland-0\nXDG_SESSION_TYPE=wayland\n");
+        let first = if before_running { "wayland-0" } else { "unset" };
+        assert_eq!(said(&mut user, SEEN), first, "{name}");
+        assert_eq!(said(&mut user, SEEN), "wayland-0", "{name}");
+
+        // And logs out, while the shell sits after a pipeline that
+        // failed, which still says so.
+        user.run("false | sh -c 'exit 3'");
+        write("#none\nXDG_SESSION_TYPE=tty\n");
+        let status = said(
+            &mut user,
+            match name.as_str() {
+                "fish" => "echo $status $pipestatus; printenv WAYLAND_DISPLAY || echo unset",
+                "zsh" => "echo $? $pipestatus; printenv WAYLAND_DISPLAY || echo unset",
+                _ => "echo $? ${PIPESTATUS[*]}; printenv WAYLAND_DISPLAY || echo unset",
+            },
+        );
+        let first = if before_running { "unset" } else { "wayland-0" };
+        assert_eq!(status, format!("3 1 3\n{first}"), "{name}");
+
+        // fish has no last argument.
+        if name != "fish" {
+            user.run(": last");
+            write("#systemd\nWAYLAND_DISPLAY=wayland-1\nXDG_SESSION_TYPE=wayland\n");
+            let last = said(&mut user, "echo $_; printenv WAYLAND_DISPLAY || echo unset");
+            let first = if before_running { "wayland-1" } else { "unset" };
+            assert_eq!(last, format!("last\n{first}"), "{name}");
+        }
+        let text = user.text();
+        assert!(!text.contains("unbound"), "{name}: {text}");
+        assert!(!text.contains("bad substitution"), "{name}: {text}");
+    }
+}
+
 /// `display` says what the daemon follows, from the file it writes for
 /// its shells, and fails while no daemon is running, or it follows
 /// nothing, whatever a file another left behind says.

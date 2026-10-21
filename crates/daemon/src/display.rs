@@ -61,9 +61,10 @@
 //! given the values as they are when it starts ([`Env::apply`]). A program
 //! that's already running keeps the environment it started with, as on any
 //! Unix. The shells of terminals already open follow at their next
-//! prompt, through their integration, from a small file the daemon writes
-//! beside the integration's scripts ([`DisplayConfig::file`]), changing
-//! only variables the user hasn't set in that shell themselves.
+//! prompt, and before the next command they run (bash from 5.3), through
+//! their integration, from a small file the daemon writes beside the
+//! integration's scripts ([`DisplayConfig::file`]), changing only
+//! variables the user hasn't set in that shell themselves.
 
 use std::collections::HashMap;
 use std::ffi::OsString;

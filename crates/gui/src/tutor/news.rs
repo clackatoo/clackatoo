@@ -605,6 +605,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "A count before gg, or before G after an operator, goes to that line: 5gg, d3G and y2gg take the lines they say",
     },
+    News {
+        id: "displaycmd",
+        date: "2026-10-21",
+        lesson: "remote",
+        what: "A shell picks up the display you log in to before the next command it runs, not only at its next prompt",
+    },
 ];
 
 impl News {

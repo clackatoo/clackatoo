@@ -52,12 +52,14 @@ end
 # The display the desktop's login gives the programs clackatoo starts,
 # which the daemon writes to a small file whenever it changes: where it
 # came from on a `#` line, then `NAME=VALUE` a line each, a name above
-# that isn't there being unset. It's read before each prompt, by `read`
-# alone, and only once it has changed are the variables set or erased,
-# as text, never run. A variable is changed only while it's as fish
-# started with it, or as this last made it: one you've set yourself is
-# yours, and stays.
-function __clackatoo_display --on-event fish_prompt
+# that isn't there being unset. It's read before each prompt, and
+# before each command runs, as a prompt drawn before you logged in can
+# wait hours for its command (fish 3 has fish_preexec too). It's read by
+# `read` alone, and only once it has changed are the variables set or
+# erased, as text, never run. A variable is changed only while it's as
+# fish started with it, or as this last made it: one you've set yourself
+# is yours, and stays.
+function __clackatoo_display --on-event fish_prompt --on-event fish_preexec
     test -f $__clackatoo_display_file; or return
     read -lz text <$__clackatoo_display_file
     if test -z "$text"; or test "$text" = "$__clackatoo_display_text"
