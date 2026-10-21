@@ -142,8 +142,6 @@ impl<O> Command<O> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action<O> {
     Move(Motion),
-    /// `G` or `gg` with a count: to that line.
-    GoToLine,
     Operate(Operator, Target),
     /// `x`, or `X` if `before`.
     DeleteChars {

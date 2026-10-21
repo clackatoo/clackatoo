@@ -2086,6 +2086,19 @@ mod tests {
     }
 
     #[test]
+    fn gg_and_g_go_to_the_first_non_blank() {
+        let terminal = terminal("  one\r\nb\r\nc\r\nd\r\n  five");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg");
+        assert_eq!(cursor(&pane), ("  one".into(), 0, 2));
+        keys(&mut pane, "0G");
+        assert_eq!(cursor(&pane), ("  five".into(), 4, 2));
+        keys(&mut pane, "01G");
+        assert_eq!(cursor(&pane), ("  one".into(), 0, 2));
+    }
+
+    #[test]
     fn h_l_and_half_pages_move_as_many_lines_as_they_say() {
         let terminal = terminal(&numbered_lines("line "));
         let mut pane = pane(&terminal);

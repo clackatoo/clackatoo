@@ -16,10 +16,8 @@
 --
 -- Gotchas (see the Acta memory `checking-vim-behaviour-headless`):
 -- - `startofline` is off in Neovim, so `gg`, `G` and linewise operators
---   keep the column. clackatoo goes to the first non-blank only for `gg`
---   and `G` with a count: without one they go to column 0, and a linewise
---   yank keeps the column. 1d makes gg/G go to the first non-blank with
---   or without a count, as Vim's default startofline.
+--   keep the column; clackatoo's `gg` and `G` go to the first non-blank,
+--   with a count or without, as Vim's default `startofline` does.
 -- - A motion that fails inside `normal!` silently ends that case's keys.
 -- - `.` carries over from earlier cases.
 -- - Anything that waits for input (`:s///c`) hangs the run: keep `timeout`.

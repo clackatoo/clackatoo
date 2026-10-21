@@ -1530,16 +1530,10 @@ impl Editor {
             Action::Move(motion) => {
                 let motion = self.remember_find(motion);
                 let motion = self.by_rows(motion);
-                self.cursor = self.moved(copy, motion, times);
+                self.cursor = self.moved(copy, motion, command.count);
                 if self.cursor.at == from && can_fail(motion) {
                     self.fail();
                 }
-            }
-            Action::GoToLine => {
-                let text = self.text(copy);
-                let line = (times as u64).saturating_sub(1).min(text.last_line());
-                self.cursor = Cursor::new(Point { line, col: 0 });
-                self.cursor.apply(Motion::FirstNonBlank, &text);
             }
             Action::Operate(..)
             | Action::DeleteChars { .. }
@@ -1727,7 +1721,7 @@ impl Editor {
                 forward: forward != reverse,
                 till,
             };
-            self.cursor = self.moved(copy, motion, times);
+            self.cursor = self.moved(copy, motion, Some(times));
         }
         if self.cursor.at == from {
             self.fail();
@@ -1811,8 +1805,9 @@ impl Editor {
         }
     }
 
-    /// The cursor moved by `motion`, `times` times.
-    fn moved(&self, copy: &BufferCopy, motion: Motion, times: usize) -> Cursor {
+    /// The cursor moved by `motion`, as `count` says (see [`Cursor::go`]).
+    fn moved(&self, copy: &BufferCopy, motion: Motion, count: Option<usize>) -> Cursor {
+        let times = count.unwrap_or(1);
         let text = self.text(copy);
         let mut cursor = self.cursor;
         match motion {
@@ -1874,22 +1869,9 @@ impl Editor {
                     cursor = Cursor::new(Point { line, col });
                 }
             }
-            _ => cursor.repeat(motion, times, &text),
+            _ => cursor.go(motion, count, &text),
         }
         cursor
-    }
-
-    /// The cursor moved by `motion` as `count` says: `G` and `gg` with a
-    /// count go to that line, and other motions go `count` times.
-    fn moved_counted(&self, copy: &BufferCopy, motion: Motion, count: Option<usize>) -> Cursor {
-        match (motion, count) {
-            (Motion::First | Motion::Last, Some(number)) => {
-                let mut cursor = self.cursor;
-                cursor.go_to_line_number(number, &self.text(copy));
-                cursor
-            }
-            _ => self.moved(copy, motion, count.unwrap_or(1)),
-        }
     }
 
     // --- Operators ----------------------------------------------------------
@@ -2259,7 +2241,7 @@ impl Editor {
                     cursor.repeat(end, times - usize::from(at_end), &text);
                     return Some(chars(at, cursor.at));
                 }
-                let moved = self.moved_counted(copy, motion, count);
+                let moved = self.moved(copy, motion, count);
                 // `dj` on the last line has no line to take with it.
                 if matches!(motion, Motion::Up(_) | Motion::Down(_)) && moved.at.line == at.line {
                     return None;

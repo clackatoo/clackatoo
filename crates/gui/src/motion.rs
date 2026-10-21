@@ -1,9 +1,10 @@
-//! Moving the normal-mode cursor through a terminal's history and screen.
+//! What Vim's motions do, for every pane with a cursor: where each goes
+//! over [`Lines`], and what an operator takes with it.
 //!
-//! The cursor moves over the whole document: history lines, numbered as
-//! they scrolled off, then the screen's rows numbered on from there. A
-//! line keeps its number as output scrolls it into history, so a cursor on
-//! a line stays on it. Motions follow Vim's.
+//! A pane gives its text as `Lines`: a terminal's history then screen, as
+//! one document whose lines keep their numbers as output scrolls them into
+//! history, or an editor's file, laid out as it's drawn. What keys make a
+//! motion is [`crate::vim`]'s.
 
 use std::ops::Deref;
 use std::rc::Rc;
@@ -573,17 +574,10 @@ impl Cursor {
                     self.want = col;
                 }
             }
-            Motion::First => {
-                self.at = Point {
-                    line: first,
-                    col: 0,
-                };
-                self.want = 0;
-            }
-            Motion::Last => {
-                self.at = Point { line: last, col: 0 };
-                self.want = 0;
-            }
+            // At the line's first character that isn't blank, as Vim's
+            // `startofline` puts it.
+            Motion::First => self.go_to_line_number(1, lines),
+            Motion::Last => *self = Self::at_first_non_blank(last, lines),
             Motion::WordStart => self.word_start(lines, Class::of),
             Motion::WordBack => self.word_back(lines, Class::of),
             Motion::WordEnd => self.word_end(lines, Class::of),
@@ -625,10 +619,20 @@ impl Cursor {
         }
     }
 
+    /// Moves by `motion` as a command with `count` typed before it does:
+    /// `G` and `gg` with a count go to that line (see
+    /// [`go_to_line_number`](Self::go_to_line_number)), and any other motion
+    /// goes `count` times (see [`repeat`](Self::repeat)).
+    pub(crate) fn go(&mut self, motion: Motion, count: Option<usize>, lines: &impl Lines) {
+        match (motion, count) {
+            (Motion::First | Motion::Last, Some(number)) => self.go_to_line_number(number, lines),
+            (motion, count) => self.repeat(motion, count.unwrap_or(1), lines),
+        }
+    }
+
     /// Moves by `motion` `times` times, as a count before it asks (`5k`,
     /// `3w`, `2}`): up and down by `times` times its lines, or rows, at
-    /// once, and anything else again and again. `G` and `gg` with a count
-    /// go to a line instead (see [`go_to_line_number`](Self::go_to_line_number)).
+    /// once, and anything else again and again.
     pub(crate) fn repeat(&mut self, motion: Motion, times: usize, lines: &impl Lines) {
         let n = times as u64;
         match motion {
@@ -656,11 +660,14 @@ impl Cursor {
     pub(crate) fn go_to_line_number(&mut self, number: usize, lines: &impl Lines) {
         let (first, last) = lines.bounds();
         let line = first.saturating_add((number as u64).saturating_sub(1));
-        *self = Self::new(Point {
-            line: line.min(last),
-            col: 0,
-        });
-        self.apply(Motion::FirstNonBlank, lines);
+        *self = Self::at_first_non_blank(line.min(last), lines);
+    }
+
+    /// A cursor at line `line`'s first character that isn't blank.
+    fn at_first_non_blank(line: u64, lines: &impl Lines) -> Self {
+        let mut cursor = Self::new(Point { line, col: 0 });
+        cursor.apply(Motion::FirstNonBlank, lines);
+        cursor
     }
 
     /// Moves to screen row `to`, as `gj` and `gk` do: as far from its left

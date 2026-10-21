@@ -245,7 +245,7 @@ impl Reader<'_> {
             return self.after_g(first, visual, dialect);
         }
         if let Some(motion) = self.motion(stroke) {
-            return self.made(first, motion.map(|motion| go(first, motion)));
+            return self.made(first, motion.map(Action::Move));
         }
         let action = match stroke {
             Stroke::Char {
@@ -326,8 +326,7 @@ impl Reader<'_> {
         if next.plain() == Some('v') {
             return self.made(first, Read::Yes(Action::Reselect));
         }
-        let motion = after_g_motion(next);
-        self.made(first, motion.map(|motion| go(first, motion)))
+        self.made(first, after_g_motion(next).map(Action::Move))
     }
 
     /// The action of the plain key `ch`, which may read keys after it, or
@@ -576,15 +575,6 @@ fn after_g_motion(stroke: Stroke) -> Read<Motion> {
     }
 }
 
-/// The action of moving by `motion`, with `count` typed: `G` and `gg`
-/// with a count go to that line.
-fn go<O>(count: Option<usize>, motion: Motion) -> Action<O> {
-    match motion {
-        Motion::First | Motion::Last if count.is_some() => Action::GoToLine,
-        motion => Action::Move(motion),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use clackatoo_protocol::Construct;
@@ -642,8 +632,8 @@ mod tests {
         );
         assert_eq!(read("1"), Parsed::Incomplete);
         assert_eq!(read("0"), command(None, Action::Move(Motion::LineStart)));
-        assert_eq!(read("10G"), command(Some(10), Action::GoToLine));
-        assert_eq!(read("10gg"), command(Some(10), Action::GoToLine));
+        assert_eq!(read("10G"), command(Some(10), Action::Move(Motion::Last)));
+        assert_eq!(read("10gg"), command(Some(10), Action::Move(Motion::First)));
         // A count too big is kept to the most there is.
         let most = Some(crate::motion::MOST_COUNT);
         assert_eq!(

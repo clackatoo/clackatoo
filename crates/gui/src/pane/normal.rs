@@ -487,13 +487,13 @@ impl Pane {
     }
 
     /// Moves the normal-mode cursor by `motion`, as `count` says (see
-    /// [`counted`]), and the view to keep it in sight. Returns whether
+    /// [`Cursor::go`]), and the view to keep it in sight. Returns whether
     /// there's a cursor to move.
     pub(super) fn move_cursor(&mut self, motion: Motion, count: Option<usize>) -> bool {
         let Some(mut cursor) = self.cursor.take() else {
             return false;
         };
-        counted(&mut cursor, motion, count, &Document(self));
+        cursor.go(motion, count, &Document(self));
         self.cursor = Some(cursor);
         self.follow_cursor();
         true
@@ -573,22 +573,8 @@ impl Pane {
     }
 }
 
-/// Moves `cursor` by `motion` in `lines`, as `count` says: `G` and `gg`
-/// go to line `count`, and other motions go `count` times.
-pub(super) fn counted(
-    cursor: &mut Cursor,
-    motion: Motion,
-    count: Option<usize>,
-    lines: &impl crate::motion::Lines,
-) {
-    match (motion, count) {
-        (Motion::First | Motion::Last, Some(number)) => cursor.go_to_line_number(number, lines),
-        (motion, count) => cursor.repeat(motion, count.unwrap_or(1), lines),
-    }
-}
-
 /// The motion a key makes, of those that take one key; a count before it
-/// repeats it (see [`counted`]).
+/// repeats it (see [`Cursor::go`]).
 fn motion(key: &Key, character: Option<char>) -> Option<Motion> {
     Some(match (key, character) {
         (Key::Named(NamedKey::ArrowLeft), _) | (_, Some('h')) => Motion::Left,

@@ -10,7 +10,6 @@
 
 use clackatoo_protocol::{Block, Request, Which};
 
-use super::normal::counted;
 use super::{Copy, Document, Mode, Pane, Pending, Selection};
 use crate::motion::{Cursor, Motion, Point, Reach, before};
 use crate::objects::Object;
@@ -28,7 +27,7 @@ pub(super) enum BlockUse {
 
 impl Pane {
     /// `y` and `motion`: copies what the motion moves over, as `count`
-    /// says it moves (see [`counted`]). The cursor moves to the start of
+    /// says it moves (see [`Cursor::go`]). The cursor moves to the start of
     /// it, as it does when the motion goes back.
     pub(super) fn yank_motion(&mut self, motion: Motion, count: Option<usize>) -> bool {
         let Some(cursor) = self.cursor else {
@@ -36,7 +35,7 @@ impl Pane {
         };
         let document = Document(self);
         let mut moved = cursor;
-        counted(&mut moved, motion, count, &document);
+        moved.go(motion, count, &document);
         let (start, end) = if moved.at < cursor.at {
             (moved.at, cursor.at)
         } else {

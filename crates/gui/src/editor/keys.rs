@@ -198,7 +198,6 @@ impl Action {
         matches!(
             self,
             Self::Move(Motion::First | Motion::Last | Motion::Match | Motion::Paragraph { .. })
-                | Self::GoToLine
                 | Self::SearchAgain { .. }
                 | Self::SearchWord { .. }
                 | Self::Own(

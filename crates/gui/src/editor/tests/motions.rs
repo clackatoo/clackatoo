@@ -5,9 +5,9 @@
 //! and as an operator's target (`d3G`, `d3gg`, `y2gg`), from above or
 //! below it, multiplied by a count before the operator (`2d3gg` is line
 //! 6), and the last line for a count past it (`99G`, `d99G`). Where
-//! clackatoo differs on purpose: a counted `gg` or `G` goes to the line's
-//! first non-blank, as Vim does with `startofline`, where Neovim keeps the
-//! column.
+//! clackatoo differs on purpose: `gg` and `G`, with a count or without, go
+//! to the line's first non-blank, as Vim does with `startofline`, where
+//! Neovim keeps the column.
 
 use super::Setup;
 
@@ -109,4 +109,13 @@ fn a_counted_gg_in_visual_mode_selects_to_that_line() {
     assert_eq!(text, "one\n  six\nseven\n  eight\n");
     assert_eq!(held, "  two\nthree\n  four\nfive\n");
     assert_eq!(cursor.0, 1);
+}
+
+#[test]
+fn gg_and_g_without_a_count_go_to_the_first_non_blank_too() {
+    let mut setup = Setup::new("  one\nx\n  last\n");
+    setup.keys("G");
+    assert_eq!(setup.cursor(), (2, 2));
+    setup.keys("0gg");
+    assert_eq!(setup.cursor(), (0, 2));
 }
