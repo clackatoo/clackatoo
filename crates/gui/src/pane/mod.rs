@@ -2270,7 +2270,7 @@ mod tests {
         assert_eq!(cursor(&pane), ("line 4".into(), 0, 0));
         press(&mut pane, Key::Named(NamedKey::ArrowUp), shift);
         serve(&mut pane, &terminal);
-        assert_eq!(cursor(&pane), ("line 4".into(), 3, 0));
+        assert_eq!(cursor(&pane), ("line 5".into(), 4, 0));
     }
 
     #[test]
@@ -2295,6 +2295,13 @@ mod tests {
         press(&mut pane, Key::Character("e".into()), CTRL);
         serve(&mut pane, &terminal);
         assert_eq!(cursor(&pane), ("  line 7".into(), 0, 5));
+        // A page that can't move the view, at the live screen, leaves the
+        // cursor where it was.
+        named(&mut pane, NamedKey::PageDown);
+        assert_eq!(cursor(&pane), ("  line 9".into(), 0, 2));
+        keys(&mut pane, "3l");
+        named(&mut pane, NamedKey::PageDown);
+        assert_eq!(cursor(&pane), ("  line 9".into(), 0, 5));
     }
 
     #[test]
@@ -2618,9 +2625,10 @@ mod tests {
         let terminal = terminal(&numbered_lines("line "));
         let mut pane = pane(&terminal);
         normal_mode(&mut pane);
-        keys(&mut pane, "gg");
+        keys(&mut pane, "gg4j");
         serve(&mut pane, &terminal);
-        // The view's height less two, the cursor kept in view, as Vim's.
+        // The view's height less two, the cursor to its top line, as Vim's,
+        // though line 5 is still in view.
         press(&mut pane, Key::Character("f".into()), CTRL);
         serve(&mut pane, &terminal);
         assert_eq!(cursor(&pane), ("line 4".into(), 0, 0));
@@ -2628,21 +2636,25 @@ mod tests {
         press(&mut pane, Key::Character("d".into()), CTRL);
         serve(&mut pane, &terminal);
         assert_eq!(cursor(&pane), ("line 6".into(), 0, 0));
-        // The view stops at the live screen, and the cursor stays in it.
+        // The view stops at the live screen, the cursor at its top.
         named(&mut pane, NamedKey::PageDown);
         serve(&mut pane, &terminal);
         assert_eq!(cursor(&pane), ("line 9".into(), 0, 0));
         assert_eq!(pane.label(), None);
+        // Up, the cursor to the view's bottom line.
         named(&mut pane, NamedKey::PageUp);
         serve(&mut pane, &terminal);
-        assert_eq!(cursor(&pane), ("line 9".into(), 3, 0));
+        assert_eq!(cursor(&pane), ("line 10".into(), 4, 0));
         assert_eq!(pane.label().as_deref(), Some("↑3"));
+        named(&mut pane, NamedKey::PageUp);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 7".into(), 4, 0));
         // A count before Ctrl+D sets how far it goes from then on.
         keys(&mut pane, "1");
         press(&mut pane, Key::Character("d".into()), CTRL);
-        assert_eq!(cursor(&pane), ("line 10".into(), 3, 0));
+        assert_eq!(cursor(&pane), ("line 8".into(), 4, 0));
         press(&mut pane, Key::Character("d".into()), CTRL);
-        assert_eq!(cursor(&pane), ("line 11".into(), 3, 0));
+        assert_eq!(cursor(&pane), ("line 9".into(), 4, 0));
     }
 
     #[test]

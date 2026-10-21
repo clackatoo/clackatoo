@@ -639,7 +639,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "onepage",
         date: "2026-10-21",
         lesson: "basics",
-        what: "Ctrl+F keeps two lines and the cursor in view in every pane, and a count before Ctrl+D sets how far it goes",
+        what: "Ctrl+F keeps two lines and puts the cursor at the top in every pane, and a count before Ctrl+D sets how far",
     },
     News {
         id: "linescolumn",

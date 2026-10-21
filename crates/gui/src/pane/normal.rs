@@ -496,21 +496,24 @@ impl Pane {
         true
     }
 
-    /// Ctrl+D, Ctrl+U, Ctrl+F and their kin, with `count` typed: the half
-    /// pages move the view and the cursor together, and the pages and
-    /// Ctrl+E and Ctrl+Y the view, keeping the cursor in it, as Vim's do
-    /// (see [`crate::vim::Paging`]).
+    /// Ctrl+D, Ctrl+U, Ctrl+F and their kin, with `count` typed, as Vim's
+    /// do (see [`crate::vim::Paging`]): the half pages move the view and
+    /// the cursor together, the pages the view and the cursor to its top
+    /// or bottom line, and Ctrl+E and Ctrl+Y the view, keeping the cursor
+    /// in it.
     fn scroll(&mut self, scroll: Scroll, count: Option<usize>) -> bool {
         let rows = self.paging.rows(scroll, count, self.height().max(1));
         let rows = i64::try_from(rows).unwrap_or(i64::MAX);
+        let (top, at) = (self.scroll, self.cursor.map(|cursor| cursor.at));
         match scroll {
             Scroll::HalfPage { down } => self.page(if down { rows } else { -rows }),
-            Scroll::Page { down } | Scroll::Line { down } => {
-                self.scroll_view(if down { -rows } else { rows })
-            }
+            Scroll::Page { down } => self.whole_page(if down { rows } else { -rows }),
+            Scroll::Line { down } => return self.scroll_view(if down { -rows } else { rows }),
         };
-        // The pages, but not Ctrl+E and Ctrl+Y, as Vim's.
-        if self.startofline && !matches!(scroll, Scroll::Line { .. }) {
+        // The pages, but not Ctrl+E and Ctrl+Y, as Vim's; and not when
+        // neither the view nor the cursor could move.
+        let moved = self.scroll != top || self.cursor.map(|cursor| cursor.at) != at;
+        if self.startofline && moved {
             self.onto_start_of_line();
         }
         true
@@ -679,6 +682,23 @@ impl Pane {
             self.move_cursor(Motion::Down(line - from), None);
         }
         true
+    }
+
+    /// Ctrl+F, Page Down and Page Up: scrolls the view `lines` down, or up
+    /// if negative, and once it's moved, puts the cursor on its top line
+    /// going down, or its bottom line going up, as Vim's do. If the view
+    /// can't move, at the live screen or history's start, nothing does.
+    fn whole_page(&mut self, lines: i64) -> bool {
+        if !self.scroll_by(-lines) {
+            return true;
+        }
+        let top = self.view_top();
+        let line = if lines > 0 {
+            top
+        } else {
+            top + self.height().saturating_sub(1)
+        };
+        self.move_to_line(line)
     }
 
     /// Ctrl+D and Ctrl+U: moves the view and the cursor `lines` down (or

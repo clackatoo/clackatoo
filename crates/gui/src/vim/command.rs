@@ -111,8 +111,8 @@ pub(crate) enum Scroll {
     Line { down: bool },
     /// Ctrl+D and Ctrl+U: the view and the cursor half the view.
     HalfPage { down: bool },
-    /// Ctrl+F and Page Down, Page Up: the view most of it, keeping the
-    /// cursor in it.
+    /// Ctrl+F and Page Down, Page Up: the view most of it, and the cursor
+    /// to its top line, or its bottom line going up.
     Page { down: bool },
 }
 
@@ -127,8 +127,8 @@ pub(crate) struct Paging {
 impl Paging {
     /// How many screen rows `scroll`, with `count` typed, goes in a view
     /// `view` rows tall: a line a time for Ctrl+E and Ctrl+Y, the half page
-    /// for Ctrl+D and Ctrl+U, and the view less two, keeping two rows of
-    /// what was in view, a page a time for Ctrl+F, Page Down and Page Up.
+    /// for Ctrl+D and Ctrl+U, and a page a time for Ctrl+F, Page Down and
+    /// Page Up, of lines a row each (see [`page_rows`]).
     pub(crate) fn rows(&mut self, scroll: Scroll, count: Option<usize>, view: u64) -> u64 {
         let count = count.map(|count| count as u64);
         match scroll {
@@ -140,7 +140,7 @@ impl Paging {
                 self.half.unwrap_or(view / 2).max(1)
             }
             Scroll::Page { .. } => {
-                (count.unwrap_or(1)).saturating_mul(view.saturating_sub(2).max(1))
+                (count.unwrap_or(1)).saturating_mul(page_rows(view, Some([Some(1); 4])))
             }
         }
     }
@@ -149,6 +149,37 @@ impl Paging {
     /// Vim's `scroll` is set afresh then.
     pub(crate) fn resized(&mut self) {
         self.half = None;
+    }
+}
+
+/// How many screen rows a page goes in a view `view` rows tall, as Vim's
+/// do: the view less two, keeping two lines of what was in view, or less
+/// one, keeping one, or the whole view, keeping none, as those lines fit.
+/// `across` has how many rows each of four lines takes, from the view's
+/// edge the page goes past: the first line beyond it, then the three
+/// inside it, nearest first, `None` for one the text doesn't have. No
+/// `across` at all, as when there's nothing beyond the edge, goes the
+/// whole view.
+pub(crate) fn page_rows(view: u64, across: Option<[Option<u64>; 4]>) -> u64 {
+    let whole = view.max(1);
+    let Some([beyond, first, second, third]) = across else {
+        return whole;
+    };
+    // The rows kept, with the line beyond's, fit in all but two.
+    let room = view.saturating_sub(2);
+    let fits = |rows: u64| rows <= room;
+    let beyond = beyond.unwrap_or(u64::MAX);
+    let Some((first, second)) = first.zip(second) else {
+        return whole;
+    };
+    if !fits(beyond) || !fits(first + beyond) || !fits(second + first) {
+        return whole;
+    }
+    match third {
+        Some(third) if fits(third + second + first) && fits(second + first + beyond) => {
+            whole.saturating_sub(2).max(1)
+        }
+        _ => whole.saturating_sub(1).max(1),
     }
 }
 
@@ -274,5 +305,25 @@ mod tests {
         // Never nothing, however small the view.
         assert_eq!(paging.rows(half, None, 1), 1);
         assert_eq!(paging.rows(page, None, 1), 1);
+    }
+
+    #[test]
+    fn a_page_keeps_as_many_lines_in_view_as_fit_as_vims_does() {
+        let lines = |rows| Some([Some(rows); 4]);
+        assert_eq!(page_rows(10, lines(1)), 8);
+        // Lines of two rows still fit twice in eight.
+        assert_eq!(page_rows(10, lines(2)), 8);
+        // Three of three don't: one is kept.
+        assert_eq!(page_rows(10, lines(3)), 9);
+        // A line beyond the edge too long to keep any.
+        let long = Some([Some(9), Some(1), Some(1), Some(1)]);
+        assert_eq!(page_rows(10, long), 10);
+        // Small views: four rows keep one line, three none.
+        assert_eq!(page_rows(4, lines(1)), 3);
+        assert_eq!(page_rows(3, lines(1)), 3);
+        // Nothing beyond the edge, or too little text inside it.
+        assert_eq!(page_rows(10, None), 10);
+        assert_eq!(page_rows(10, Some([Some(1), Some(1), None, None])), 10);
+        assert_eq!(page_rows(10, Some([Some(1), Some(1), Some(1), None])), 9);
     }
 }

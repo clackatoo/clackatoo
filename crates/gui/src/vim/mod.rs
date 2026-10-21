@@ -14,6 +14,7 @@ mod stroke;
 
 pub(crate) use command::{
     Action, Command, Entry, Operator, Paging, Recase, Scroll, Target, ViewAt, is_register,
+    page_rows,
 };
 #[cfg(test)]
 pub(crate) use grammar::parse;

@@ -361,7 +361,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 | `H` `M` `L` | The top, middle and bottom lines in view, keeping the column as `gg` does. |
 | `5k`, `3w`, `10G`, `2gg` | A count before a motion repeats it, as in Vim; before `G` or `gg`, it goes to that line, counting from the oldest line of history. `3H` and `3L` count from the view's top and bottom. |
 | Ctrl+D Ctrl+U | Half the view down or up, rounded down, view and cursor together. A count sets how far they go from then on, as Vim's does. |
-| Ctrl+F, Page Down Page Up | The view down or up, less two lines, so two lines of what was in view stay; the cursor stays in view. A count goes that many pages. Ctrl+B is [the window's](#ctrl-b). |
+| Ctrl+F, Page Down Page Up | The view down or up, less two lines, so two lines of what was in view stay, and the cursor to its top line, or its bottom line going up, as Vim's does. At the live screen, or history's start, nothing moves. A count goes that many pages. Ctrl+B is [the window's](#ctrl-b). |
 | Ctrl+E Ctrl+Y | The view a line down or up, or as many as a count says, with the cursor kept in it. |
 | `zt` `zz` `zb` | The view scrolled to put the cursor's line at its top, middle or bottom, as far as history goes and no further than the live screen. |
 

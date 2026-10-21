@@ -84,7 +84,7 @@ fn half_pages_move_the_view_and_the_cursor_and_a_count_sets_how_far() {
 }
 
 #[test]
-fn pages_move_the_view_less_two_rows_keeping_the_cursor_in_it() {
+fn pages_move_the_view_less_two_rows_and_the_cursor_to_its_top_or_bottom() {
     let text = sixty();
     assert_eq!(
         after(viewed(&text, 11, (15, 4), false), "<C-f>"),
@@ -105,6 +105,38 @@ fn pages_move_the_view_less_two_rows_keeping_the_cursor_in_it() {
 }
 
 #[test]
+fn a_page_puts_the_cursor_at_the_views_top_or_bottom_line_wherever_it_was() {
+    let text = sixty();
+    let at = |top, cursor, keys| after(viewed(&text, top, (cursor, 4), false), keys);
+    // Still in view after the page, but it goes to the top all the same.
+    assert_eq!(at(11, 20, "<C-f>"), (19, 19, 4));
+    // Or the bottom.
+    assert_eq!(at(21, 21, "<PageUp>"), (13, 22, 4));
+    assert_eq!(at(31, 35, "2<PageUp>"), (15, 24, 4));
+    // Short of a page from the text's start.
+    assert_eq!(at(4, 8, "<PageUp>"), (1, 10, 4));
+    // The text's end in view: a whole view, to its last line.
+    assert_eq!(at(51, 55, "<C-f>"), (60, 60, 4));
+    let short = viewed("a\nb\nc\n", 1, (1, 0), false);
+    assert_eq!(after(short, "<C-f>"), (3, 3, 0));
+    // With `scrolloff`, that many rows in.
+    let margin = with_margin(viewed(&text, 45, (50, 4), false), 3);
+    assert_eq!(after(margin, "<C-f>"), (53, 56, 4));
+}
+
+#[test]
+fn a_page_that_cant_move_the_view_leaves_the_cursor_be_startofline_or_not() {
+    let text = sixty();
+    assert_eq!(
+        after(viewed(&text, 1, (5, 4), false), "<PageUp>"),
+        (1, 5, 4)
+    );
+    let mut setup = viewed(&text, 1, (6, 4), false);
+    setup.set(|options| options.startofline = true);
+    assert_eq!(after(setup, "<PageUp>"), (1, 6, 4));
+}
+
+#[test]
 fn where_lines_wrap_paging_goes_by_screen_rows() {
     let text = wrapping();
     // Five rows down: the cursor from line 14 onto line 17's second row.
@@ -115,6 +147,27 @@ fn where_lines_wrap_paging_goes_by_screen_rows() {
     assert_eq!(
         after(viewed(&text, 11, (14, 2), true), "<C-f>"),
         (16, 16, 2)
+    );
+}
+
+#[test]
+fn where_lines_wrap_a_page_goes_to_a_lines_start() {
+    let text = wrapping();
+    // Eight rows from line 12 end on line 17's second: back to its first.
+    // Neovim puts the cursor at line 17's end, having passed it there;
+    // clackatoo keeps the column it wanted.
+    assert_eq!(
+        after(viewed(&text, 12, (13, 2), true), "<C-f>"),
+        (17, 17, 2)
+    );
+    // Up from line 21, eight rows end on line 15's second: on to 16.
+    assert_eq!(
+        after(viewed(&text, 21, (24, 2), true), "<PageUp>"),
+        (16, 22, 2)
+    );
+    assert_eq!(
+        after(viewed(&text, 30, (30, 2), true), "<PageUp>"),
+        (25, 30, 2)
     );
 }
 

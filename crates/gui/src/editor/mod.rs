@@ -3968,23 +3968,28 @@ impl Editor {
         });
     }
 
-    /// Ctrl+D, Ctrl+U, Ctrl+F and their kin, with `count` typed: the half
-    /// pages move the view and the cursor together, and the pages, Ctrl+E
-    /// and Ctrl+Y the view, keeping the cursor in it, as Vim's do (see
-    /// [`Paging`]). Ctrl+E and Ctrl+Y go by screen rows, as the wheel does,
-    /// where Vim's go by lines; a panel by the cursor takes them first (see
+    /// Ctrl+D, Ctrl+U, Ctrl+F and their kin, with `count` typed, as Vim's
+    /// do (see [`Paging`]): the half pages move the view and the cursor
+    /// together, the pages the view and the cursor to its top or bottom
+    /// line, and Ctrl+E and Ctrl+Y the view, keeping the cursor in it.
+    /// Ctrl+E and Ctrl+Y go by screen rows, as the wheel does, where Vim's
+    /// go by lines; a panel by the cursor takes them first (see
     /// [`panel_stroke`](Self::panel_stroke)).
     fn scroll(&mut self, scroll: Scroll, count: Option<usize>, copy: &BufferCopy) {
         let rows = self.paging.rows(scroll, count, self.height.max(1) as u64);
         let rows = i64::try_from(rows).unwrap_or(i64::MAX);
+        let (top, at) = (self.top, self.cursor.at);
         match scroll {
             Scroll::HalfPage { down } => self.page(down, rows, copy),
-            Scroll::Page { down } | Scroll::Line { down } => {
+            Scroll::Page { down } => self.whole_page(down, count.unwrap_or(1), copy),
+            Scroll::Line { down } => {
                 self.wheel(if down { -rows } else { rows }, copy);
+                return;
             }
         }
-        // The pages, but not Ctrl+E and Ctrl+Y, as Vim's.
-        if self.startofline && !matches!(scroll, Scroll::Line { .. }) {
+        // The pages, but not Ctrl+E and Ctrl+Y, as Vim's; and not when
+        // neither the view nor the cursor could move.
+        if self.startofline && (self.top != top || self.cursor.at != at) {
             let line = self.cursor.at.line;
             self.after_lines(line, self.cursor.want(), copy);
         }
@@ -4021,6 +4026,88 @@ impl Editor {
         wrap::onto_row(&mut self.cursor, &text, up);
         self.top = Top::of(top, &text);
         self.cursor_into_view(&text);
+    }
+
+    /// Ctrl+F, Page Down and Page Up: `count` pages down, or up unless
+    /// `down` (see [`vim::page_rows`]), to a line's start, as Vim's go.
+    /// Once the view's moved, the cursor goes to the first line it shows
+    /// whole going down, or the last going up, `scrolloff` rows in and in
+    /// the column it wanted; if it can't, nothing moves.
+    fn whole_page(&mut self, down: bool, count: usize, copy: &BufferCopy) {
+        let text = self.text(copy);
+        self.clamp_top(&text);
+        let height = self.height.max(1) as u64;
+        let last = text.last_line();
+        let top = self.top.row(&text);
+        let across = self.page_across(down, top, &text);
+        let rows = vim::page_rows(height, across).saturating_mul(count as u64);
+        let to = if down {
+            rows_down(top, rows, last, &text).min(self.lowest_top(&text))
+        } else {
+            rows_up(top, rows, 0, &text)
+        };
+        // Partway down a line, back to its start if that's a line on, as
+        // Vim's, or else on to the next line's: a line back going up.
+        let to = match to.row {
+            0 => to,
+            _ if down && to.line == top.line && to.line < last => RowAt {
+                line: to.line + 1,
+                row: 0,
+            },
+            _ if !down && top.line - to.line > 1 => RowAt {
+                line: to.line + 1,
+                row: 0,
+            },
+            _ => RowAt {
+                line: to.line,
+                row: 0,
+            },
+        };
+        if to == top {
+            return;
+        }
+        let line = if down {
+            to.line
+        } else {
+            let bottom = rows_down(to, height - 1, last, &text);
+            let cut = bottom.row + 1 < text.screen_rows(bottom.line).len();
+            if cut && bottom.line > to.line {
+                bottom.line - 1
+            } else {
+                bottom.line
+            }
+        };
+        self.top = Top::of(to, &text);
+        let want = self.cursor.want();
+        self.cursor = Cursor::wanting(Point { line, col: 0 }, want);
+        self.cursor_into_view(&text);
+        let line = self.cursor.at.line;
+        drop(text);
+        self.after_lines(line, want, copy);
+    }
+
+    /// How many rows each of the four lines across the view's edge that a
+    /// page `down`, or up, goes past takes, from the view's top `top`, for
+    /// [`vim::page_rows`]: none when there's nothing past it.
+    fn page_across(&self, down: bool, top: RowAt, text: &Text<'_>) -> Option<[Option<u64>; 4]> {
+        let last = text.last_line();
+        let rows = |line: Option<u64>| {
+            let line = line.filter(|&line| line <= last)?;
+            Some(text.screen_rows(line).len() as u64)
+        };
+        if down {
+            let bottom = rows_down(top, self.height.max(1) as u64 - 1, last, text);
+            let whole = bottom.row + 1 == text.screen_rows(bottom.line).len();
+            if whole && bottom.line == last {
+                return None;
+            }
+            let beyond = bottom.line + u64::from(whole);
+            Some([0, 1, 2, 3].map(|back| rows(beyond.checked_sub(back))))
+        } else if top.line == 0 {
+            None
+        } else {
+            Some([0, 1, 2, 3].map(|on| rows(Some(top.line - 1 + on))))
+        }
     }
 
     /// `zt`, `zz` and `zb`: the cursor's line at the view's top, middle or
