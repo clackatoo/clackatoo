@@ -629,6 +629,24 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: ":set startofline puts gg, G, H, M and L at the first non-blank, as Vim does; off, they keep the column",
     },
+    News {
+        id: "editorview",
+        date: "2026-10-21",
+        lesson: "wrap",
+        what: "The editor takes H, M and L, with operators too, and Ctrl+E and Ctrl+Y; a terminal takes zt, zz and zb",
+    },
+    News {
+        id: "onepage",
+        date: "2026-10-21",
+        lesson: "basics",
+        what: "Ctrl+F keeps two lines and the cursor in view in every pane, and a count before Ctrl+D sets how far it goes",
+    },
+    News {
+        id: "linescolumn",
+        date: "2026-10-21",
+        lesson: "basics",
+        what: "dd, >> and << keep the column, as Neovim's; :set startofline puts them and Ctrl+D/U/F at the first non-blank",
+    },
 ];
 
 impl News {

@@ -42,4 +42,4 @@ option wrap
 
 Three options shape it, all on to begin with but the last: `linebreak` breaks between words, after a blank or a character such as `-` or `,`; `breakindent` starts the rows a line goes on over as far in as the line is indented; and `showbreak` is drawn at the start of each, such as `:set sbr=↪\ ` for an arrow and a space.
 
-`g0` and `g$` go to the screen row's first and last character, and Ctrl+D and Ctrl+U move by half a page of screen rows. A click beside a row goes to that row's start.
+`g0` and `g$` go to the screen row's first and last character, and Ctrl+D and Ctrl+U move by half a page of screen rows, Ctrl+E and Ctrl+Y the view by a row. `H`, `M` and `L` go to the first line in view, the middle and the last shown whole, keeping `scrolloff` rows from the edges. A click beside a row goes to that row's start.
