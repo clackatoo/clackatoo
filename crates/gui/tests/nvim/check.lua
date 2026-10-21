@@ -211,6 +211,8 @@ local cases = {
   { name = '30zz', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '30zz' },
   { name = '40zb', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '40zb' },
   { name = 'zz', lines = sixty, at = { 20, 4 }, view = { height = 10, top = 11 }, keys = 'zz' },
+  { name = 'zz wrapped', lines = wrapping, at = { 21, 2 }, view = { height = 10, top = 11, columns = 20 }, keys = 'zz' },
+  { name = 'zz wrapped, the second row', lines = wrapping, at = { 21, 25 }, view = { height = 10, top = 11, columns = 20 }, keys = 'zz' },
   { name = 'zz in nine rows', lines = sixty, at = { 20, 4 }, view = { height = 9, top = 11 }, keys = 'zz' },
   { name = '5zt from the top', lines = sixty, at = { 1, 4 }, view = { height = 10, top = 1 }, keys = '5zt' },
 }

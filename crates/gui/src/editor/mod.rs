@@ -4195,9 +4195,21 @@ impl Editor {
                 row: 0,
             },
             ViewAt::Top => cursor,
-            // Above the middle in a view an even number of rows tall,
-            // as Vim's.
-            ViewAt::Middle => rows_up(cursor, ((height - 1) / 2) as u64, 0, &text),
+            // The cursor's whole line in the middle, as Vim's, a row above
+            // it where the rows left are odd; or, if it's too long, the
+            // cursor's row.
+            ViewAt::Middle => {
+                let rows = text.screen_rows(cursor.line).len();
+                if rows < height {
+                    let start = RowAt {
+                        line: cursor.line,
+                        row: 0,
+                    };
+                    rows_up(start, ((height - rows) / 2) as u64, 0, &text)
+                } else {
+                    rows_up(cursor, ((height - 1) / 2) as u64, 0, &text)
+                }
+            }
             ViewAt::Bottom => {
                 let last = last_row(&text, cursor.line);
                 let bottom = if last.row - cursor.row < height {

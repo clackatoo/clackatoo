@@ -368,6 +368,13 @@ fn zt_zz_and_zb_with_a_count_put_that_line_there_and_the_cursor_on_it() {
     // The middle of ten rows is the fifth, as Vim's.
     assert_eq!(at("30zz"), (26, 30, 4));
     assert_eq!(after(viewed(&text, 11, (20, 4), false), "zz"), (16, 20, 4));
+    // Where lines wrap, the cursor's whole line in the middle, whichever
+    // of its rows it's on.
+    let text = wrapping();
+    for col in [2, 25] {
+        let setup = viewed(&text, 11, (21, col), true);
+        assert_eq!(after(setup, "zz"), (18, 21, col), "byte {col}");
+    }
     // In its column, whatever startofline says.
     let mut setup = viewed(&text, 11, (15, 4), false);
     setup.set(|options| options.startofline = true);
