@@ -224,7 +224,7 @@ impl Pane {
             }
             Action::SearchAgain { reverse } => self.search_again(reverse),
             Action::Scroll(scroll) => self.scroll(scroll, count),
-            Action::View(at) => self.view_at(at),
+            Action::View(at) => self.view_at(at, count),
             Action::Own(TerminalAction::Escape) => {
                 if matches!(self.mode, Mode::Visual(_)) {
                     self.leave_visual();
@@ -543,8 +543,14 @@ impl Pane {
 
     /// `zt`, `zz` and `zb`: scrolls the view to put the cursor's line at
     /// its top, middle or bottom, as far as history goes back and no
-    /// further than the live screen, the cursor staying where it is.
-    fn view_at(&mut self, at: ViewAt) -> bool {
+    /// further than the live screen, the cursor staying where it is; with
+    /// a count, line `count` from history's oldest, as `G` counts, the
+    /// cursor going there in its column, as Vim's.
+    fn view_at(&mut self, at: ViewAt, count: Option<usize>) -> bool {
+        if let Some(count) = count {
+            let (first, last) = Document(self).bounds();
+            self.move_to_line(first.saturating_add(count as u64 - 1).min(last));
+        }
         let Some(cursor) = self.cursor else {
             return false;
         };

@@ -2331,6 +2331,16 @@ mod tests {
         keys(&mut pane, "ggzb");
         serve(&mut pane, &terminal);
         assert_eq!(cursor(&pane), ("line 1".into(), 0, 0));
+        // A count puts that line there, the cursor on it in its column.
+        keys(&mut pane, "2l3zt");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 3".into(), 0, 2));
+        keys(&mut pane, "10zb");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 10".into(), 4, 2));
+        keys(&mut pane, "7zz");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 7".into(), 2, 2));
     }
 
     #[test]
