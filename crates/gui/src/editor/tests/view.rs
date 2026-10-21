@@ -1,8 +1,12 @@
 //! The keys that go by the view: paging (Ctrl+D, Ctrl+U, Ctrl+F, Page Down
-//! and Page Up), Ctrl+E and Ctrl+Y, and `H`, `M` and `L`, each case checked
-//! against Neovim 0.11 headless (`crates/gui/tests/nvim/check.lua`), in a
-//! view of ten rows. Where clackatoo differs on purpose: Ctrl+E and Ctrl+Y
-//! go by screen rows where lines wrap, as the wheel does, not by lines.
+//! and Page Up), Ctrl+E and Ctrl+Y, `H`, `M` and `L`, and `zt`, `zz` and
+//! `zb`, each case checked against Neovim 0.11 headless
+//! (`crates/gui/tests/nvim/check.lua`), in a view of ten rows. Where
+//! clackatoo differs on purpose: Ctrl+E and Ctrl+Y go by screen rows where
+//! lines wrap, as the wheel does, not by lines, so `H` counts from the
+//! first line shown whole after one leaves a line partly shown; and a page
+//! that stops partway down a wrapped line keeps the column wanted, where
+//! Neovim's leaves the cursor at that line's end.
 
 use std::fmt::Write;
 
