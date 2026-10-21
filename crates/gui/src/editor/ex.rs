@@ -213,14 +213,17 @@ impl Editor {
         let mut rest = line.trim_start_matches([' ', ':']);
         let lines = self.range(&mut rest, copy, shared)?;
         rest = rest.trim_start();
-        // A range alone goes to its last line, as `:12`, `:+3` and `:$` do.
+        // A range alone goes to its last line, as `:12`, `:+3` and `:$` do,
+        // keeping the column as `G` does, or with `startofline` to its
+        // first non-blank.
         if rest.is_empty()
             && let Some(lines) = lines
         {
-            self.cursor = Cursor::new(Point {
-                line: lines.last,
-                col: 0,
-            });
+            let text = self.text(copy);
+            let mut cursor = self.cursor;
+            cursor.onto_line(lines.last, self.startofline, &text);
+            drop(text);
+            self.cursor = cursor;
             return Ok(());
         }
         let (name, bang, after) = command_name(rest)?;

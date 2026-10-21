@@ -118,3 +118,20 @@ fn gg_and_g_keep_the_column_unless_startofline() {
     assert_eq!(sol("2l", "6G"), (5, 2));
     assert_eq!(sol("2l", "G"), (7, 2));
 }
+
+#[test]
+fn a_line_number_after_colon_keeps_the_column_unless_startofline() {
+    let after = |from: &str, line: &str, startofline: bool| {
+        let mut setup = Setup::new(EIGHT);
+        setup.set(|options| options.startofline = startofline);
+        setup.keys(from);
+        let done = setup
+            .editor
+            .ex(line, &mut setup.copy, &mut setup.shared, false);
+        assert!(done.is_ok(), "{line}");
+        setup.cursor()
+    };
+    assert_eq!(after("G4l", "5", false), (4, 3));
+    assert_eq!(after("", "6", false), (5, 0));
+    assert_eq!(after("", "6", true), (5, 2));
+}

@@ -17,8 +17,10 @@
 --
 -- Gotchas (see the Acta memory `checking-vim-behaviour-headless`):
 -- - `startofline` is off in Neovim, so `gg`, `G` and linewise operators
---   keep the column, as clackatoo's do with its `startofline` off, which
---   is its default too. A case can `set = 'sol'` for Vim's way.
+--   keep the column. clackatoo's `startofline`, off by default too, covers
+--   `gg`, `G`, `:` and a line number, and a terminal's `H`, `M` and `L`;
+--   its linewise operators don't follow it yet. A case can `set = 'sol'`
+--   for Vim's way.
 -- - A motion that fails inside `normal!` silently ends that case's keys.
 -- - `.` carries over from earlier cases.
 -- - Anything that waits for input (`:s///c`) hangs the run: keep `timeout`.
