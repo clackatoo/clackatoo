@@ -639,13 +639,19 @@ pub(crate) const NEWS: &[News] = &[
         id: "onepage",
         date: "2026-10-21",
         lesson: "basics",
-        what: "Ctrl+F keeps two lines and puts the cursor at the top in every pane, and a count before Ctrl+D sets how far",
+        what: "In editors and terminals Ctrl+F keeps two lines and puts the cursor at the top; a count sets Ctrl+D's reach",
     },
     News {
         id: "linescolumn",
         date: "2026-10-21",
         lesson: "basics",
         what: "dd, >> and << keep the column, as Neovim's; :set startofline puts them and Ctrl+D/U/F at the first non-blank",
+    },
+    News {
+        id: "ztcount",
+        date: "2026-10-22",
+        lesson: "basics",
+        what: "A count before zt, zz or zb puts that line at the top, middle or bottom, the cursor on it, as in Vim",
     },
 ];
 
