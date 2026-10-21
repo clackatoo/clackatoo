@@ -464,6 +464,9 @@ pub(crate) enum Motion {
     RowStart,
     /// `g$`: the screen row's last character.
     RowEnd,
+    /// Ctrl+End: the last line's last character, or with a count, that
+    /// line's.
+    TextEnd,
     /// `H`: the view's top line, or with a count, so many from the top.
     ViewTop,
     /// `M`: the middle of the lines in view.
@@ -519,9 +522,12 @@ impl Motion {
                     Reach::Exclusive
                 }
             }
-            Self::LineEnd | Self::WordEnd | Self::BigWordEnd | Self::Match | Self::RowEnd => {
-                Reach::Inclusive
-            }
+            Self::LineEnd
+            | Self::WordEnd
+            | Self::BigWordEnd
+            | Self::Match
+            | Self::RowEnd
+            | Self::TextEnd => Reach::Inclusive,
             Self::Up(_)
             | Self::Down(_)
             | Self::First
@@ -656,10 +662,21 @@ impl Cursor {
                 self.at.col = on_row(lines, at.line, &rows, index, col);
                 self.want = self.at.col;
             }
+            Motion::TextEnd => self.onto_line_end(last, lines),
             Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom => {
                 self.go_in_view(motion, 1, lines);
             }
         }
+    }
+
+    /// Moves to line `line`'s last character, keeping to lines' ends
+    /// moving up and down, as `$` does.
+    fn onto_line_end(&mut self, line: u64, lines: &impl Lines) {
+        self.at = Point {
+            line,
+            col: lines.last_cell(line),
+        };
+        self.want = usize::MAX;
     }
 
     /// Moves by `motion` as a command with `count` typed before it does:
@@ -683,6 +700,10 @@ impl Cursor {
                 self.onto_line(line.min(last), start_of_line, lines);
             }
             (Motion::First, None) => self.onto_line(first, start_of_line, lines),
+            (Motion::TextEnd, Some(number)) => {
+                let line = first.saturating_add((number as u64).saturating_sub(1));
+                self.onto_line_end(line.min(last), lines);
+            }
             (Motion::Last, None) => self.onto_line(last, start_of_line, lines),
             (Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom, count) => {
                 self.go_in_view(motion, count.unwrap_or(1), lines);

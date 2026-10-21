@@ -531,7 +531,11 @@ impl Pane {
         // it comes.
         let vertical = matches!(
             motion,
-            Motion::Up(_) | Motion::Down(_) | Motion::RowUp(_) | Motion::RowDown(_)
+            Motion::Up(_)
+                | Motion::Down(_)
+                | Motion::RowUp(_)
+                | Motion::RowDown(_)
+                | Motion::TextEnd
         );
         let to_line = matches!(
             motion,

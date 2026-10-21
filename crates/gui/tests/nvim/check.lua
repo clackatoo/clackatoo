@@ -29,6 +29,9 @@ local eight = {
   'one', '  two', 'three', '  four', 'five', '  six', 'seven', '  eight',
 }
 
+-- Words and WORDs apart, indented.
+local dotted = { 'a.b c.d e.f', '  x.y z', '  last.one end' }
+
 local cases = {
   -- CLACKA-127: a count before `gg`, or `G` as an operator's target, is a
   -- line number.
@@ -63,9 +66,29 @@ local cases = {
   { name = '6G with sol', lines = eight, at = { 1, 2 }, keys = '6G', set = 'sol' },
   { name = 'H with sol', lines = eight, at = { 5, 3 }, keys = 'H', set = 'sol' },
   { name = 'L with sol', lines = eight, at = { 1, 2 }, keys = 'L', set = 'sol' },
+  { name = ':5 from the last line', lines = eight, at = { 8, 4 }, keys = ':5<CR>' },
+  { name = ':6 with sol', lines = eight, at = { 1, 0 }, keys = ':6<CR>', set = 'sol' },
+  { name = ':6 from line 1', lines = eight, at = { 1, 0 }, keys = ':6<CR>' },
+  -- Ctrl and Shift with the arrows, Home and End, as motion.txt says.
+  { name = '<C-Right>', lines = dotted, at = { 1, 0 }, keys = '<C-Right>' },
+  { name = '<S-Right>', lines = dotted, at = { 1, 0 }, keys = '<S-Right>' },
+  { name = '<C-Left>', lines = dotted, at = { 1, 10 }, keys = '<C-Left>' },
+  { name = '<S-Left>', lines = dotted, at = { 1, 10 }, keys = '<S-Left>' },
+  { name = 'd<C-End> from line 2', lines = dotted, at = { 2, 3 }, keys = 'd<C-End>' },
+  { name = '<C-End>', lines = dotted, at = { 1, 0 }, keys = '<C-End>' },
+  { name = '<C-Home>', lines = dotted, at = { 3, 5 }, keys = '<C-Home>' },
+  { name = 'insert <C-Left>', lines = dotted, at = { 1, 10 }, keys = 'a<C-Left>X<Esc>' },
+  { name = 'insert <S-Left>', lines = dotted, at = { 1, 10 }, keys = 'a<S-Left>X<Esc>' },
+  -- Esc after keys half typed in visual mode.
+  { name = 'v alone', lines = dotted, at = { 1, 0 }, keys = 'vl' },
+  { name = 'vg<Esc>', lines = dotted, at = { 1, 0 }, keys = 'vlg<Esc>' },
+  { name = 'vi<Esc>', lines = dotted, at = { 1, 0 }, keys = 'vli<Esc>' },
+  { name = 'v3<Esc>', lines = dotted, at = { 1, 0 }, keys = 'vl3<Esc>' },
+  { name = 'v"a<Esc>', lines = dotted, at = { 1, 0 }, keys = 'vl"a<Esc>' },
 }
 
--- Quiet: "3 fewer lines" would land in what's printed.
+-- Quiet: "3 fewer lines" would land in what's printed, as would a
+-- line number typed after `:`, which `silent` keeps out.
 vim.o.report = 9999
 
 local out = {}
@@ -84,7 +107,7 @@ for _, case in ipairs(cases) do
   vim.api.nvim_buf_set_lines(0, 0, -1, false, case.lines)
   vim.api.nvim_win_set_cursor(0, case.at)
   local keys = vim.api.nvim_replace_termcodes(case.keys, true, false, true)
-  local ok, why = pcall(vim.cmd, 'normal! ' .. keys)
+  local ok, why = pcall(vim.cmd, 'silent normal! ' .. keys)
   local cursor = vim.api.nvim_win_get_cursor(0)
   say(('== %s%s'):format(case.name, ok and '' or ('  (failed: ' .. tostring(why) .. ')')))
   say(('   cursor %d,%d  mode %s'):format(cursor[1], cursor[2], vim.fn.mode()))

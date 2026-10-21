@@ -1460,6 +1460,9 @@ fn gra_asks_for_code_actions_at_the_cursor_and_picks_one_from_a_menu() {
     assert!(action_menu(&mut setup).is_none());
     setup.keys("gra");
     setup.answer(setup.queries[7].0, Answer::CodeActions(actions.clone()));
+    // Shift+Down and Shift+Up move through it, as Down and Up do.
+    setup.keys("<S-Down><S-Up>");
+    assert!(action_menu(&mut setup).is_some());
     setup.keys("l");
     assert!(action_menu(&mut setup).is_none());
     assert_eq!(setup.cursor(), (1, 1));
@@ -2937,23 +2940,40 @@ fn a_command_half_typed_shows_first_in_the_bar() {
 }
 
 #[test]
-fn ctrl_and_shift_with_arrows_home_and_end_are_vims_keys() {
-    let mut setup = Setup::new("one two three\nfour\n");
-    setup.keys("$<C-Left>");
-    assert_eq!(setup.cursor(), (0, 8), "as b");
-    setup.keys("<S-Left>");
-    assert_eq!(setup.cursor(), (0, 4));
-    setup.keys("<C-Right>");
-    assert_eq!(setup.cursor(), (0, 8), "as w");
-    setup.keys("<S-Right>");
-    assert_eq!(setup.cursor(), (1, 0));
-    setup.keys("<C-Home>");
-    assert_eq!(setup.cursor().0, 0, "as gg");
-    setup.keys("<C-End>");
-    assert_eq!(setup.cursor().0, 1, "as G");
-    // In insert mode, a word back or on, and the text's ends.
-    setup.keys("ggA<C-Left>X<C-Home>Y<C-End>Z<Esc>");
-    assert_eq!(setup.text(), "Yone two Xthree\nfourZ\n");
+fn ctrl_and_shift_with_left_and_right_are_words_and_words_of_anything_but_blanks() {
+    // Checked against Neovim 0.11 headless (`tests/nvim/check.lua`).
+    let dotted = "a.b c.d e.f\n  x.y z\n  last.one end\n";
+    let after = |keys: &str| {
+        let mut setup = Setup::new(dotted);
+        setup.keys(keys);
+        (setup.text(), setup.cursor())
+    };
+    assert_eq!(after("$<C-Left>").1, (0, 8), "as B");
+    assert_eq!(after("$<S-Left>").1, (0, 9), "as b");
+    assert_eq!(after("<C-Right>").1, (0, 4), "as W");
+    assert_eq!(after("<S-Right>").1, (0, 1), "as w");
+    // Ctrl+End: the last line's last character, taken by an operator.
+    assert_eq!(after("<C-End>").1, (2, 13));
+    assert_eq!(
+        after("j3ld<C-End>"),
+        ("a.b c.d e.f\n  x\n".to_owned(), (1, 2))
+    );
+    // Ctrl+Home: as gg, keeping the column.
+    assert_eq!(after("G5l<C-Home>").1, (0, 5));
+    // In insert mode, a word back or on either way, the text's ends, and
+    // Shift+Up and Shift+Down as Up and Down.
+    assert_eq!(
+        after("A<C-Left>X<Esc>").0,
+        "a.b c.d e.Xf\n  x.y z\n  last.one end\n"
+    );
+    assert_eq!(
+        after("A<S-Left>X<Esc>").0,
+        "a.b c.d e.Xf\n  x.y z\n  last.one end\n"
+    );
+    assert_eq!(
+        after("i<C-End>Z<C-Home>Y<S-Down>X<Esc>").0,
+        "Ya.b c.d e.f\n X x.y z\n  last.one endZ\n"
+    );
 }
 
 #[test]

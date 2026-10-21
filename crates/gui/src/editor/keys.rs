@@ -212,8 +212,13 @@ impl Action {
     pub(crate) fn jumps(self) -> bool {
         matches!(
             self,
-            Self::Move(Motion::First | Motion::Last | Motion::Match | Motion::Paragraph { .. })
-                | Self::SearchAgain { .. }
+            Self::Move(
+                Motion::First
+                    | Motion::Last
+                    | Motion::TextEnd
+                    | Motion::Match
+                    | Motion::Paragraph { .. }
+            ) | Self::SearchAgain { .. }
                 | Self::SearchWord { .. }
                 | Self::Own(
                     EditorAction::Diagnostic { .. }

@@ -202,8 +202,8 @@ impl Rendered {
         Some(match stroke {
             Stroke::Down => lines,
             Stroke::Up => -lines,
-            Stroke::PageDown => page,
-            Stroke::PageUp => -page,
+            Stroke::PageDown | Stroke::ShiftDown => page,
+            Stroke::PageUp | Stroke::ShiftUp => -page,
             Stroke::Char { ch, ctrl } => match (ch, ctrl) {
                 ('j', false) | ('e', true) => lines,
                 ('k', false) | ('y', true) => -lines,

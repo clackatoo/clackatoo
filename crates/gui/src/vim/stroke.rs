@@ -30,14 +30,22 @@ pub(crate) enum Stroke {
     End,
     PageUp,
     PageDown,
-    /// Ctrl+Left or Shift+Left: a word back, as Vim's `<C-Left>`.
-    WordBack,
-    /// Ctrl+Right or Shift+Right: a word on.
-    WordForward,
-    /// Ctrl+Home: the text's first line.
-    TextStart,
-    /// Ctrl+End: its last.
-    TextEnd,
+    /// Shift+Left: `b` in normal mode, as Vim's `<S-Left>`.
+    ShiftLeft,
+    /// Shift+Right: `w`.
+    ShiftRight,
+    /// Ctrl+Left: `B`, as Vim's `<C-Left>`.
+    CtrlLeft,
+    /// Ctrl+Right: `W`.
+    CtrlRight,
+    /// Ctrl+Home: `gg`.
+    CtrlHome,
+    /// Ctrl+End: the last line's last character.
+    CtrlEnd,
+    /// Shift+Up, in normal mode: Page Up, as Vim's `<S-Up>`.
+    ShiftUp,
+    /// Shift+Down, in normal mode: Page Down.
+    ShiftDown,
 }
 
 impl Stroke {
@@ -86,6 +94,7 @@ impl Stroke {
     pub(crate) fn chord(self) -> Chord {
         let named = |named| Chord::with(Base::Named(named), false, false, false);
         let ctrl = |named| Chord::with(Base::Named(named), true, false, false);
+        let shift = |named| Chord::with(Base::Named(named), false, false, true);
         match self {
             Self::Char { ch, ctrl } => Chord::with(Base::Char(ch), ctrl, false, false),
             Self::Escape => named(Named::Escape),
@@ -102,28 +111,36 @@ impl Stroke {
             Self::End => named(Named::End),
             Self::PageUp => named(Named::PageUp),
             Self::PageDown => named(Named::PageDown),
-            Self::WordBack => ctrl(Named::Left),
-            Self::WordForward => ctrl(Named::Right),
-            Self::TextStart => ctrl(Named::Home),
-            Self::TextEnd => ctrl(Named::End),
+            Self::ShiftLeft => shift(Named::Left),
+            Self::ShiftRight => shift(Named::Right),
+            Self::CtrlLeft => ctrl(Named::Left),
+            Self::CtrlRight => ctrl(Named::Right),
+            Self::CtrlHome => ctrl(Named::Home),
+            Self::CtrlEnd => ctrl(Named::End),
+            Self::ShiftUp => shift(Named::Up),
+            Self::ShiftDown => shift(Named::Down),
         }
     }
 }
 
 /// The strokes `press` makes, for a pane that reads Vim's keys, in insert
-/// mode or a prompt if `typing`: Ctrl or Shift with an arrow, Home or End
-/// as Vim reads them, Ctrl+Left as `b` and Shift+Up as Page Up, and
+/// mode or a prompt if `typing`: Ctrl or Shift with Left or Right, and
+/// Ctrl with Home or End, as strokes of their own, which each mode reads as
+/// Vim's does; Shift with Up or Down too, but only in normal mode; and
 /// otherwise as [`plain_strokes`] makes them.
 pub(crate) fn strokes(press: &KeyPress<'_>, typing: bool) -> Vec<Stroke> {
     let modifiers = press.modifiers;
-    if (modifiers.ctrl || modifiers.shift) && !modifiers.alt {
+    let (ctrl, shift) = (modifiers.ctrl, modifiers.shift);
+    if (ctrl || shift) && !modifiers.alt {
         let vim = match press.key {
-            Key::Named(NamedKey::ArrowLeft) => Some(Stroke::WordBack),
-            Key::Named(NamedKey::ArrowRight) => Some(Stroke::WordForward),
-            Key::Named(NamedKey::ArrowUp) if modifiers.shift => Some(Stroke::PageUp),
-            Key::Named(NamedKey::ArrowDown) if modifiers.shift => Some(Stroke::PageDown),
-            Key::Named(NamedKey::Home) if modifiers.ctrl => Some(Stroke::TextStart),
-            Key::Named(NamedKey::End) if modifiers.ctrl => Some(Stroke::TextEnd),
+            Key::Named(NamedKey::ArrowLeft) if ctrl => Some(Stroke::CtrlLeft),
+            Key::Named(NamedKey::ArrowRight) if ctrl => Some(Stroke::CtrlRight),
+            Key::Named(NamedKey::ArrowLeft) => Some(Stroke::ShiftLeft),
+            Key::Named(NamedKey::ArrowRight) => Some(Stroke::ShiftRight),
+            Key::Named(NamedKey::ArrowUp) if shift && !typing => Some(Stroke::ShiftUp),
+            Key::Named(NamedKey::ArrowDown) if shift && !typing => Some(Stroke::ShiftDown),
+            Key::Named(NamedKey::Home) if ctrl => Some(Stroke::CtrlHome),
+            Key::Named(NamedKey::End) if ctrl => Some(Stroke::CtrlEnd),
             _ => None,
         };
         if let Some(stroke) = vim {

@@ -2161,41 +2161,63 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_and_shift_with_arrows_home_and_end_are_vims_keys() {
-        let terminal = terminal(&numbered_lines("a b "));
+    fn ctrl_and_shift_with_left_and_right_are_words_and_words_of_anything_but_blanks() {
+        let terminal = terminal("a.b c.d\r\n  x.y z\r\n  l.o end");
         let mut pane = pane(&terminal);
         normal_mode(&mut pane);
         let shift = Modifiers {
             shift: true,
             ..Modifiers::default()
         };
-        keys(&mut pane, "k$");
-        press(&mut pane, Key::Named(NamedKey::ArrowLeft), CTRL);
-        assert_eq!(cursor(&pane), ("a b 12".into(), 3, 4), "as b");
-        press(&mut pane, Key::Named(NamedKey::ArrowLeft), shift);
-        assert_eq!(cursor(&pane).2, 2);
-        press(&mut pane, Key::Named(NamedKey::ArrowRight), CTRL);
-        assert_eq!(cursor(&pane).2, 4, "as w");
-        press(&mut pane, Key::Named(NamedKey::ArrowRight), shift);
-        assert_eq!(cursor(&pane), (String::new(), 4, 0));
-        press(&mut pane, Key::Named(NamedKey::Home), CTRL);
-        serve(&mut pane, &terminal);
-        assert_eq!(cursor(&pane), ("a b 1".into(), 0, 0), "as gg");
-        // Shift+Down and Shift+Up page, as Page Down and Page Up do.
-        press(&mut pane, Key::Named(NamedKey::ArrowDown), shift);
-        serve(&mut pane, &terminal);
-        assert_eq!(cursor(&pane), ("a b 6".into(), 0, 0));
-        press(&mut pane, Key::Named(NamedKey::ArrowUp), shift);
-        serve(&mut pane, &terminal);
-        assert_eq!(cursor(&pane), ("a b 1".into(), 0, 0));
+        let named = |pane: &mut Pane, key, modifiers| {
+            press(pane, Key::Named(key), modifiers);
+            cursor(pane).2
+        };
+        keys(&mut pane, "gg$");
+        assert_eq!(named(&mut pane, NamedKey::ArrowLeft, CTRL), 4, "as B");
+        keys(&mut pane, "$");
+        assert_eq!(named(&mut pane, NamedKey::ArrowLeft, shift), 5, "as b");
+        keys(&mut pane, "0");
+        assert_eq!(named(&mut pane, NamedKey::ArrowRight, CTRL), 4, "as W");
+        keys(&mut pane, "0");
+        assert_eq!(named(&mut pane, NamedKey::ArrowRight, shift), 1, "as w");
+        // Ctrl+End to a line's last character, Ctrl+Home as gg.
+        keys(&mut pane, "3");
         press(&mut pane, Key::Named(NamedKey::End), CTRL);
-        assert_eq!(cursor(&pane), (String::new(), 4, 0), "as G");
+        assert_eq!(cursor(&pane), ("  l.o end".into(), 2, 8));
+        press(&mut pane, Key::Named(NamedKey::Home), CTRL);
+        assert_eq!(cursor(&pane), ("a.b c.d".into(), 0, 6), "keeping to ends");
+        press(&mut pane, Key::Named(NamedKey::End), CTRL);
+        assert_eq!(cursor(&pane), (String::new(), 4, 0), "the last line");
         // In insert mode they're the program's.
         keys(&mut pane, "i");
         sent(&mut pane);
         press(&mut pane, Key::Named(NamedKey::ArrowLeft), CTRL);
-        assert_eq!(sent(&mut pane), [b"\x1b[1;5D".to_vec()]);
+        press(&mut pane, Key::Named(NamedKey::ArrowUp), shift);
+        assert_eq!(
+            sent(&mut pane),
+            [b"\x1b[1;5D".to_vec(), b"\x1b[1;2A".to_vec()]
+        );
         assert_eq!(pane.mode, Mode::Insert);
+    }
+
+    #[test]
+    fn shift_up_and_shift_down_page_in_normal_mode() {
+        let terminal = terminal(&numbered_lines("line "));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        keys(&mut pane, "gg");
+        serve(&mut pane, &terminal);
+        press(&mut pane, Key::Named(NamedKey::ArrowDown), shift);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 6".into(), 0, 0));
+        press(&mut pane, Key::Named(NamedKey::ArrowUp), shift);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 1".into(), 0, 0));
     }
 
     #[test]

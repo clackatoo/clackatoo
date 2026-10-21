@@ -350,7 +350,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 | Keys | Move |
 |---|---|
 | `h` `j` `k` `l`, arrows | Left, down, up, right. Moving up and down returns to the column you started from after passing shorter lines. |
-| Ctrl or Shift and Left, Right | As `b` and `w`, as in Vim. Ctrl+Home and Ctrl+End are `gg` and `G`, and Shift+Up and Shift+Down page up and down. In insert mode they go to the program. |
+| Shift+Left Shift+Right, Ctrl+Left Ctrl+Right | As `b` and `w`, and `B` and `W`, as in Vim. Ctrl+Home is `gg`, Ctrl+End goes to the last line's last character, and Shift+Up and Shift+Down page up and down. In insert mode they all go to the program. |
 | `w` `b` `e` | To the next word's start, this or the previous word's start, this or the next word's end. Words are runs of letters, digits and `_`, or runs of other characters; both cross line ends. |
 | `W` `B` `E` | The same, for anything between blanks. |
 | `0` `^` `$`, Home End | The line's first column, its first character that isn't blank, its last character. |

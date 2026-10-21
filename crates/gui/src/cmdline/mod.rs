@@ -252,10 +252,10 @@ impl Line {
             Stroke::Delete => Some(Edit::Delete),
             Stroke::Left => Some(Edit::Left),
             Stroke::Right => Some(Edit::Right),
-            Stroke::Home | Stroke::TextStart => Some(Edit::Home),
-            Stroke::End | Stroke::TextEnd => Some(Edit::End),
-            Stroke::WordBack => Some(Edit::WordLeft),
-            Stroke::WordForward => Some(Edit::WordRight),
+            Stroke::Home | Stroke::CtrlHome => Some(Edit::Home),
+            Stroke::End | Stroke::CtrlEnd => Some(Edit::End),
+            Stroke::CtrlLeft | Stroke::ShiftLeft => Some(Edit::WordLeft),
+            Stroke::CtrlRight | Stroke::ShiftRight => Some(Edit::WordRight),
             _ => None,
         };
         edit.map_or(Keyed::Other, |edit| self.edit(edit))

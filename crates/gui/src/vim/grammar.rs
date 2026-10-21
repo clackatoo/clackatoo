@@ -272,8 +272,9 @@ impl Reader<'_> {
                 ch: 'f',
                 ctrl: true,
             }
-            | Stroke::PageDown => Action::Scroll(Scroll::Page { down: true }),
-            Stroke::PageUp => Action::Scroll(Scroll::Page { down: false }),
+            | Stroke::PageDown
+            | Stroke::ShiftDown => Action::Scroll(Scroll::Page { down: true }),
+            Stroke::PageUp | Stroke::ShiftUp => Action::Scroll(Scroll::Page { down: false }),
             Stroke::Char {
                 ch: 'r',
                 ctrl: true,
@@ -486,10 +487,12 @@ impl Reader<'_> {
             Stroke::Down | Stroke::Enter => Motion::Down(1),
             Stroke::Home => Motion::LineStart,
             Stroke::End => Motion::LineEnd,
-            Stroke::WordBack => Motion::WordBack,
-            Stroke::WordForward => Motion::WordStart,
-            Stroke::TextStart => Motion::First,
-            Stroke::TextEnd => Motion::Last,
+            Stroke::ShiftLeft => Motion::WordBack,
+            Stroke::ShiftRight => Motion::WordStart,
+            Stroke::CtrlLeft => Motion::BigWordBack,
+            Stroke::CtrlRight => Motion::BigWordStart,
+            Stroke::CtrlHome => Motion::First,
+            Stroke::CtrlEnd => Motion::TextEnd,
             Stroke::Char { ch, ctrl: false } => match ch {
                 'h' => Motion::Left,
                 'l' | ' ' => Motion::Right,
@@ -765,6 +768,14 @@ mod tests {
         assert_eq!(
             parse(&[Stroke::ctrl('y')], false, &Plain { tildeop: false }),
             command(None, Action::Scroll(Scroll::Line { down: false }))
+        );
+        assert_eq!(
+            parse(&[Stroke::ShiftDown], false, &Plain { tildeop: false }),
+            command(None, Action::Scroll(Scroll::Page { down: true }))
+        );
+        assert_eq!(
+            parse(&[Stroke::CtrlEnd], false, &Plain { tildeop: false }),
+            command(None, Action::Move(Motion::TextEnd))
         );
         assert_eq!(read("Q"), Parsed::Nothing);
     }

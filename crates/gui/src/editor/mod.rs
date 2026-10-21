@@ -1377,6 +1377,7 @@ impl Editor {
                 ctrl: true,
             }
             | Stroke::Down
+            | Stroke::ShiftDown
             | Stroke::Tab => MenuStroke::Down,
             Stroke::Char {
                 ch: 'k',
@@ -1386,7 +1387,8 @@ impl Editor {
                 ch: 'p',
                 ctrl: true,
             }
-            | Stroke::Up => MenuStroke::Up,
+            | Stroke::Up
+            | Stroke::ShiftUp => MenuStroke::Up,
             Stroke::Enter => MenuStroke::Pick,
             Stroke::Char {
                 ch: digit @ '1'..='9',
@@ -2761,36 +2763,50 @@ impl Editor {
             | Stroke::End
             | Stroke::PageUp
             | Stroke::PageDown
-            | Stroke::WordBack
-            | Stroke::WordForward
-            | Stroke::TextStart
-            | Stroke::TextEnd => {
-                self.moved_while_inserting(copy);
-                let text = self.text(copy);
-                let line = self.cursor.at.line;
-                let cells = text.laid(line).map_or(0, |laid| laid.cells());
-                match stroke {
-                    Stroke::End => self.cursor = Cursor::new(Point { line, col: cells }),
-                    // As Vim's: a word back or on, the text's first
-                    // character, or past its last.
-                    Stroke::WordBack => self.cursor.apply(Motion::WordBack, &text),
-                    Stroke::WordForward => self.cursor.apply(Motion::WordStart, &text),
-                    Stroke::TextStart => self.cursor = Cursor::new(Point { line: 0, col: 0 }),
-                    Stroke::TextEnd => {
-                        let line = text.last_line();
-                        let cells = text.laid(line).map_or(0, |laid| laid.cells());
-                        self.cursor = Cursor::new(Point { line, col: cells });
-                    }
-                    Stroke::Right => {
-                        let after = next_char(&text, at).min(text.line_end(line));
-                        self.cursor = Cursor::new(text.point_of(after));
-                    }
-                    Stroke::Left => self.cursor.apply(Motion::Left, &text),
-                    Stroke::Home => self.cursor.apply(Motion::LineStart, &text),
-                    Stroke::Up | Stroke::PageUp => self.cursor.apply(Motion::Up(1), &text),
-                    _ => self.cursor.apply(Motion::Down(1), &text),
-                }
+            | Stroke::ShiftLeft
+            | Stroke::ShiftRight
+            | Stroke::CtrlLeft
+            | Stroke::CtrlRight
+            | Stroke::CtrlHome
+            | Stroke::CtrlEnd
+            | Stroke::ShiftUp
+            | Stroke::ShiftDown => self.move_inserting(stroke, at, copy),
+        }
+    }
+
+    /// An arrow, Home, End or Page Up or Down, in insert mode, from byte
+    /// `at`: moves the cursor, ending the run typed.
+    fn move_inserting(&mut self, stroke: Stroke, at: usize, copy: &mut BufferCopy) {
+        self.moved_while_inserting(copy);
+        let text = self.text(copy);
+        let line = self.cursor.at.line;
+        let cells = text.laid(line).map_or(0, |laid| laid.cells());
+        match stroke {
+            Stroke::End => self.cursor = Cursor::new(Point { line, col: cells }),
+            // As Vim's: a word back or on, with Ctrl or Shift, the
+            // text's first character, or past its last.
+            Stroke::ShiftLeft | Stroke::CtrlLeft => {
+                self.cursor.apply(Motion::WordBack, &text);
             }
+            Stroke::ShiftRight | Stroke::CtrlRight => {
+                self.cursor.apply(Motion::WordStart, &text);
+            }
+            Stroke::CtrlHome => self.cursor = Cursor::new(Point { line: 0, col: 0 }),
+            Stroke::CtrlEnd => {
+                let line = text.last_line();
+                let cells = text.laid(line).map_or(0, |laid| laid.cells());
+                self.cursor = Cursor::new(Point { line, col: cells });
+            }
+            Stroke::Right => {
+                let after = next_char(&text, at).min(text.line_end(line));
+                self.cursor = Cursor::new(text.point_of(after));
+            }
+            Stroke::Left => self.cursor.apply(Motion::Left, &text),
+            Stroke::Home => self.cursor.apply(Motion::LineStart, &text),
+            Stroke::Up | Stroke::PageUp | Stroke::ShiftUp => {
+                self.cursor.apply(Motion::Up(1), &text);
+            }
+            _ => self.cursor.apply(Motion::Down(1), &text),
         }
     }
 
@@ -3032,10 +3048,14 @@ impl Editor {
                 | Stroke::End
                 | Stroke::PageUp
                 | Stroke::PageDown
-                | Stroke::WordBack
-                | Stroke::WordForward
-                | Stroke::TextStart
-                | Stroke::TextEnd
+                | Stroke::ShiftLeft
+                | Stroke::ShiftRight
+                | Stroke::CtrlLeft
+                | Stroke::CtrlRight
+                | Stroke::CtrlHome
+                | Stroke::CtrlEnd
+                | Stroke::ShiftUp
+                | Stroke::ShiftDown
         );
         if moved {
             self.close_completion();
@@ -5403,6 +5423,7 @@ fn can_fail(motion: Motion) -> bool {
             | Motion::FirstNonBlank
             | Motion::First
             | Motion::Last
+            | Motion::TextEnd
             | Motion::RowStart
             | Motion::RowEnd
     )
