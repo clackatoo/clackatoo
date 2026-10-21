@@ -6,8 +6,8 @@
 //! Each workspace's name and tabs, in order, and which tab was shown; each
 //! tab's name, its splits with their shares, and its focused pane; and for
 //! each pane what's needed to make it again: a terminal's directory, and
-//! the command its shell was running, if one was; an editor's file, and
-//! where its cursor and view were; an explorer's or a folder's root; a
+//! the command its shell was running, if one was; an editor's file, the
+//! directory it was opened from, and where its cursor and view were; an explorer's or a folder's root; a
 //! board; a review; and a chat's agent and session, which the agent kept.
 //! Beside the workspaces, the daemon's connections to the daemons on other
 //! machines: each one's host, and the command that runs clackatoo there.

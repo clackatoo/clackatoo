@@ -939,7 +939,8 @@ impl Daemon {
             } => {
                 // Its changes not saved came back as a buffer of their own,
                 // with no file yet, or with its file as it was, opened from
-                // the directory its recovery file kept.
+                // the directory its recovery file kept, or a file's own
+                // directory if it came back with no name.
                 let recovered = (recovery.as_deref())
                     .and_then(|key| self.recovered_from(key))
                     .filter(|buffer| self.buffers.contains_key(buffer));
@@ -955,7 +956,7 @@ impl Daemon {
                 // from before then kept it, from its file's own directory:
                 // never the home directory. A stat, as opening a file is.
                 let dir = (dir.as_deref())
-                    .filter(|dir| Path::new(dir).is_dir())
+                    .filter(|dir| Path::new(dir).is_absolute() && Path::new(dir).is_dir())
                     .or_else(|| Path::new(path).parent()?.to_str());
                 let file = OpenFile {
                     path: path.clone(),
