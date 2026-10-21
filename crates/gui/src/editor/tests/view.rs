@@ -107,6 +107,30 @@ fn half_pages_show_nothing_past_the_texts_end_but_the_cursor_goes_on() {
 }
 
 #[test]
+fn at_the_texts_end_a_view_partway_down_a_line_stays_there() {
+    // A long last line: `G$` leaves the view's top on line 55's second row.
+    let text = format!("{}61{}\n", wrapping(), "x".repeat(28));
+    let mut setup = viewed(&text, 1, (1, 0), true);
+    setup.keys("G$");
+    let top = setup.editor.top;
+    assert_ne!(top.cell, 0, "partway down a line");
+    setup.keys("<C-d>");
+    assert_eq!(setup.editor.top, top, "Ctrl+D has nothing more to show");
+    // Ctrl+F as far as it goes, line 61 at the top, then no further.
+    setup.keys("<C-f>");
+    let top = setup.editor.top;
+    setup.keys("<C-f>");
+    assert_eq!(setup.editor.top, top, "nor Ctrl+F");
+    // Nor back to the line's start from its second row, where Ctrl+E
+    // leaves it.
+    setup.keys("<C-e>");
+    let top = setup.editor.top;
+    assert_ne!(top.cell, 0, "partway down a line");
+    setup.keys("<C-f>");
+    assert_eq!(setup.editor.top, top, "Ctrl+F from partway");
+}
+
+#[test]
 fn where_lines_wrap_half_pages_go_to_a_lines_start() {
     let text = wrapping();
     // Five rows down from line 12 end on line 15's second: back to its

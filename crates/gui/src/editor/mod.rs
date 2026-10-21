@@ -4049,7 +4049,13 @@ impl Editor {
         } else {
             rows_up(top, rows, 0, &text)
         };
-        let (to, cursor_rows) = Self::to_line_start(top, to, rows, &text);
+        // A view that can't move stays where it is, partway down a line or
+        // not, the cursor going on all the same.
+        let (to, cursor_rows) = if to == top {
+            (top, rows)
+        } else {
+            Self::to_line_start(top, to, rows, &text)
+        };
         let motion = if down {
             Motion::RowDown(cursor_rows)
         } else {
@@ -4061,12 +4067,12 @@ impl Editor {
         self.cursor_into_view(&text);
     }
 
-    /// Where a view scrolled from row `top` to row `to` goes to start a
-    /// line, as Vim's half pages do, and how many rows the cursor goes, of
-    /// `rows`, to stay with it: partway down a line, the view goes back to
-    /// its start if that's a line on going down, or two or more back going
-    /// up, or else on to the next line's start going down, or its own
-    /// going up.
+    /// Where a view scrolled from row `top` to another, `to`, goes to start
+    /// a line, as Vim's pages and half pages do, and how many rows the
+    /// cursor goes, of `rows`, to stay with it: partway down a line, the
+    /// view goes back to its start if that's a line on going down, or on to
+    /// the next line's start if it's two or more back going up; or else on
+    /// to the next line's start going down, or its own going up.
     fn to_line_start(top: RowAt, to: RowAt, rows: u64, text: &Text<'_>) -> (RowAt, u64) {
         if to.row == 0 {
             return (to, rows);
@@ -4112,23 +4118,11 @@ impl Editor {
         } else {
             rows_up(top, rows, 0, &text)
         };
-        // Partway down a line, back to its start if that's a line on, as
-        // Vim's, or else on to the next line's: a line back going up.
-        let to = match to.row {
-            0 => to,
-            _ if down && to.line == top.line && to.line < last => RowAt {
-                line: to.line + 1,
-                row: 0,
-            },
-            _ if !down && top.line - to.line > 1 => RowAt {
-                line: to.line + 1,
-                row: 0,
-            },
-            _ => RowAt {
-                line: to.line,
-                row: 0,
-            },
-        };
+        if to == top {
+            return;
+        }
+        let (to, _) = Self::to_line_start(top, to, rows, &text);
+        // Back where it was, partway down the text's last line.
         if to == top {
             return;
         }
