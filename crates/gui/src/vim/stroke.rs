@@ -172,6 +172,17 @@ pub(crate) fn prompt_strokes(press: &KeyPress<'_>) -> Vec<Stroke> {
         if !typed.is_empty() {
             return typed;
         }
+        // Alt and a named key, as Left or Backspace, is the key alone.
+        if let Key::Named(_) = press.key {
+            let without_alt = KeyPress {
+                modifiers: crate::input::Modifiers {
+                    alt: false,
+                    ..modifiers
+                },
+                ..*press
+            };
+            return strokes(&without_alt, true);
+        }
     }
     strokes(press, true)
 }
@@ -186,6 +197,26 @@ pub(crate) fn plain_strokes(press: &KeyPress<'_>, typing: bool) -> Vec<Stroke> {
     let modifiers = press.modifiers;
     if modifiers.alt {
         return Vec::new();
+    }
+    // Typed, what a key types after dead keys and compose comes first: `'`
+    // then Space types `'`, and a key the layout can't name types its text.
+    let typed = |text: Option<&str>| -> Vec<Stroke> {
+        (text.unwrap_or_default().chars())
+            .filter(|ch| !ch.is_control())
+            .map(Stroke::char)
+            .collect()
+    };
+    if typing
+        && !modifiers.ctrl
+        && matches!(
+            press.key,
+            Key::Named(NamedKey::Space) | Key::Unidentified(_)
+        )
+    {
+        let text = typed(press.text);
+        if !text.is_empty() {
+            return text;
+        }
     }
     let named = match press.key {
         Key::Named(NamedKey::Escape) => Some(Stroke::Escape),
@@ -264,5 +295,60 @@ mod tests {
         let written = crate::keymap::write_macro(&chords);
         assert_eq!(written, "i<lt> <CR><C-w><C-Space><Left><Esc>");
         assert_eq!(Stroke::read(&written), strokes);
+    }
+
+    /// A press of `key`, typing `text`, with `modifiers`.
+    fn pressed(key: &Key, text: Option<&str>, modifiers: crate::input::Modifiers) -> Vec<Stroke> {
+        let press = KeyPress {
+            key,
+            text,
+            location: winit::keyboard::KeyLocation::Standard,
+            code: None,
+            modifiers,
+        };
+        strokes(&press, true)
+    }
+
+    #[test]
+    fn what_a_dead_key_and_space_type_is_typed() {
+        use winit::keyboard::NativeKey;
+        let plain = crate::input::Modifiers::default();
+        let space = Key::Named(NamedKey::Space);
+        // `'` then Space, with compose, is Space typing `'`.
+        assert_eq!(pressed(&space, Some("'"), plain), [Stroke::char('\'')]);
+        assert_eq!(pressed(&space, Some(" "), plain), [Stroke::char(' ')]);
+        // In normal mode, Space is Space.
+        let press = KeyPress {
+            key: &space,
+            text: Some("'"),
+            location: winit::keyboard::KeyLocation::Standard,
+            code: None,
+            modifiers: plain,
+        };
+        assert_eq!(strokes(&press, false), [Stroke::char(' ')]);
+        // A key the layout doesn't name types its text.
+        let unnamed = Key::Unidentified(NativeKey::Unidentified);
+        assert_eq!(pressed(&unnamed, Some("é"), plain), [Stroke::char('é')]);
+    }
+
+    #[test]
+    fn alt_and_a_named_key_in_a_prompt_is_the_key() {
+        let alt = crate::input::Modifiers {
+            alt: true,
+            ..crate::input::Modifiers::default()
+        };
+        let key = |named| {
+            let key = Key::Named(named);
+            prompt_strokes(&KeyPress {
+                key: &key,
+                text: None,
+                location: winit::keyboard::KeyLocation::Standard,
+                code: None,
+                modifiers: alt,
+            })
+        };
+        assert_eq!(key(NamedKey::ArrowLeft), [Stroke::Left]);
+        assert_eq!(key(NamedKey::Backspace), [Stroke::Backspace]);
+        assert_eq!(key(NamedKey::End), [Stroke::End]);
     }
 }
