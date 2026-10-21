@@ -61,6 +61,7 @@ pub(crate) trait Dialect {
         _backward: bool,
         _stroke: Stroke,
         _keys: &mut Reader<'_>,
+        _visual: bool,
     ) -> Option<Read<Self::Own>> {
         None
     }
@@ -165,6 +166,12 @@ impl Keys {
         &self.0
     }
 
+    /// The keys typed so far, as the bar shows them while a command is half
+    /// typed, as Vim's `showcmd` does: `y3`, `"a`, `^W`.
+    pub(crate) fn shown(&self) -> Option<String> {
+        (!self.0.is_empty()).then(|| self.0.iter().map(|stroke| stroke.shown()).collect())
+    }
+
     /// Keeps `stroke` as typed, unread: for a view that reads its keys its
     /// own way, as the editor's rendered Markdown does.
     pub(crate) fn push(&mut self, stroke: Stroke) {
@@ -200,7 +207,7 @@ impl Reader<'_> {
     }
 
     /// The next key, not read yet.
-    pub(crate) fn peek(&self) -> Option<Stroke> {
+    fn peek(&self) -> Option<Stroke> {
         self.keys.get(self.at).copied()
     }
 
@@ -256,6 +263,14 @@ impl Reader<'_> {
                 ch: 'u',
                 ctrl: true,
             } => Action::Scroll(Scroll::HalfPage { down: false }),
+            Stroke::Char {
+                ch: 'e',
+                ctrl: true,
+            } => Action::Scroll(Scroll::Line { down: true }),
+            Stroke::Char {
+                ch: 'y',
+                ctrl: true,
+            } => Action::Scroll(Scroll::Line { down: false }),
             Stroke::Char {
                 ch: 'f',
                 ctrl: true,
@@ -427,7 +442,7 @@ impl Reader<'_> {
                 let Some(next) = self.next() else {
                     return Parsed::Incomplete;
                 };
-                return match dialect.after_bracket(ch == '[', next, self) {
+                return match dialect.after_bracket(ch == '[', next, self, visual) {
                     Some(own) => self.made(first, own.map(Action::Own)),
                     None => Parsed::Nothing,
                 };
@@ -742,6 +757,10 @@ mod tests {
             parse(&[Stroke::PageUp], false, &Plain { tildeop: false }),
             command(None, Action::Scroll(Scroll::Page { down: false }))
         );
+        assert_eq!(
+            parse(&[Stroke::ctrl('e')], false, &Plain { tildeop: false }),
+            command(None, Action::Scroll(Scroll::Line { down: true }))
+        );
         assert_eq!(read("Q"), Parsed::Nothing);
     }
 
@@ -932,6 +951,7 @@ mod tests {
             backward: bool,
             stroke: Stroke,
             _keys: &mut Reader<'_>,
+            _visual: bool,
         ) -> Option<Read<char>> {
             let again = if backward { '[' } else { ']' };
             (stroke.plain()? == again).then_some(Read::Yes(again))
@@ -985,8 +1005,15 @@ mod tests {
             keys.so_far(),
             [Stroke::char('2'), Stroke::char('0'), Stroke::char('d')]
         );
+        assert_eq!(keys.shown().as_deref(), Some("20d"));
         assert!(matches!(read(&mut keys, 'j'), Parsed::Command(_)));
         assert!(!keys.pending());
+        assert_eq!(keys.shown(), None);
+        let ctrl_w = keys.read(Stroke::ctrl('w'), false, &plain);
+        assert_eq!(ctrl_w, Parsed::Nothing);
+        keys.read(Stroke::char('"'), false, &plain);
+        assert_eq!(keys.shown().as_deref(), Some("\""));
+        keys.clear();
         read(&mut keys, 'd');
         assert_eq!(read(&mut keys, 'z'), Parsed::Nothing);
         assert!(!keys.pending());

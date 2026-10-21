@@ -13,13 +13,20 @@ mod grammar;
 mod stroke;
 
 pub(crate) use command::{
-    Action, Command, Entry, Operator, Recase, Scroll, Target, ViewAt, WRAPPED_TO_BOTTOM,
-    WRAPPED_TO_TOP, is_register,
+    Action, Command, Entry, Operator, Recase, Scroll, Target, ViewAt, is_register,
 };
 #[cfg(test)]
 pub(crate) use grammar::parse;
 pub(crate) use grammar::{Dialect, Keys, Parsed, Read, Reader};
 pub(crate) use stroke::{Stroke, enters_normal_mode, is_ctrl_backslash, strokes};
+
+/// What a search that went past the end and round to the top says, in
+/// terminals and editors alike, as Vim does: the match may be a long way
+/// back.
+pub(crate) const WRAPPED_TO_TOP: &str = "search wrapped to top";
+
+/// What a backward search that went round to the bottom says.
+pub(crate) const WRAPPED_TO_BOTTOM: &str = "search wrapped to bottom";
 
 /// Whether keys go to the program or drive clackatoo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

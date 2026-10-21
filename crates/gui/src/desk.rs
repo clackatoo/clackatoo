@@ -8083,6 +8083,15 @@ mod tests {
         normal_mode(&mut desk);
         type_keys(&mut desk, " pf");
         assert!(finds(&mut desk).is_empty(), "unbound");
+        // The keys went to the terminal, where `f` waits for the character
+        // to find, as Vim's does; Esc forgets it.
+        assert!(desk.pane_pending());
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
         type_keys(&mut desk, " ff");
         let asked = finds(&mut desk);
         assert_eq!(search_in(&asked).1, Search::Files);

@@ -29,7 +29,7 @@ use crate::motion::{Block, Cursor, Lines, Motion, Point, RowAt, View};
 use crate::options::{BlockMarks, Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 use crate::screen::Screen;
-use crate::vim::{Mode, Selection, enters_normal_mode, is_ctrl_backslash};
+use crate::vim::{self, Mode, Selection, enters_normal_mode, is_ctrl_backslash};
 
 mod links;
 mod marks;
@@ -40,25 +40,6 @@ mod predict;
 
 pub(crate) use mouse::{Copy, PaneMouse};
 use predict::Predictor;
-
-/// The first key of a two-key command.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Prefix {
-    /// `g`, and `gg` jumps to the top.
-    G,
-    /// `y`, waiting for a motion or an object, `times` times if a count
-    /// came before it; `yy` copies the line.
-    Y { times: Option<usize> },
-    /// `yg`, and `ygg` copies up to the first line, or line `times`.
-    YG { times: Option<usize> },
-    /// `i` or `a`, after `y` or in visual mode: an object comes next.
-    Object { inner: bool },
-    /// `[` or `]`, and the same again jumps to the block before or after.
-    Bracket { forward: bool },
-    /// Ctrl+\ left insert mode, and pressing it again sends it to the
-    /// program.
-    CtrlBackslash,
-}
 
 /// Text just copied, highlighted until `until`.
 #[derive(Clone, Copy, Debug)]
@@ -155,11 +136,11 @@ pub(crate) struct Pane {
     pending: VecDeque<Pending>,
     /// A view update was applied but not yet drawn and acknowledged.
     unacknowledged: bool,
-    /// The first key of a two-key command, waiting for the second.
-    prefix: Option<Prefix>,
-    /// A count typed in normal or visual mode, waiting for the command it
-    /// repeats: `5` of `5k`, or of `3yy`, or `y3w`.
-    count: Option<usize>,
+    /// The keys of a command being typed in normal or visual mode.
+    keys: vim::Keys,
+    /// Ctrl+\ just left insert mode, and pressing it again sends it to
+    /// the program. Any other key forgets it.
+    after_ctrl_backslash: bool,
     /// Drawn for history lines still on their way.
     blank: Row,
     /// Where the mouse is over the pane, for the link under it.
@@ -205,8 +186,8 @@ impl Pane {
             flash: None,
             pending: VecDeque::new(),
             unacknowledged: false,
-            prefix: None,
-            count: None,
+            keys: vim::Keys::default(),
+            after_ctrl_backslash: false,
             blank: RowBuilder::new(0).finish(false),
             hovered: None,
             opening: None,
@@ -476,10 +457,7 @@ impl Pane {
     /// Ctrl+\ waiting to be pressed again isn't: any other key does what
     /// it would.
     pub(crate) fn pending(&self) -> bool {
-        self.prefix
-            .is_some_and(|prefix| prefix != Prefix::CtrlBackslash)
-            || self.count.is_some()
-            || self.chat.as_ref().is_some_and(|chat| chat.pending())
+        self.keys.pending() || self.chat.as_ref().is_some_and(|chat| chat.pending())
     }
 
     /// The count typed, if that's all that's waiting: a key the pane
@@ -489,13 +467,13 @@ impl Pane {
         if let Some(chat) = &self.chat {
             return chat.pending().then_some(1);
         }
-        self.count.filter(|_| self.prefix.is_none())
+        self.keys.counting()
     }
 
     /// Forgets a count typed, or a chat's two-key command half typed, as a
     /// binding of the window's took the key after it.
     pub(crate) fn forget_count(&mut self) {
-        self.count = None;
+        self.keys.clear();
         if let Some(chat) = &mut self.chat {
             chat.forget_prefix();
         }
@@ -577,8 +555,8 @@ impl Pane {
             chat.leave();
         }
         self.leave_visual();
-        self.prefix = None;
-        self.count = None;
+        self.keys.clear();
+        self.after_ctrl_backslash = false;
         self.prompt = None;
     }
 
@@ -743,13 +721,15 @@ impl Pane {
         let modifiers = press.modifiers;
         let ctrl_backslash = is_ctrl_backslash(press);
         let to_normal = enters_normal_mode(press);
-        let prefix = self.prefix.take();
+        let after_ctrl_backslash = std::mem::take(&mut self.after_ctrl_backslash);
         // Text selected with the mouse is copied by Ctrl+Shift+C, or `y` in
-        // normal mode, and any other key forgets it.
+        // normal mode with nothing typed, and any other key forgets it.
         let ctrl_shift_c =
             modifiers.ctrl && matches!(press.key, Key::Character(text) if text == "C");
         let y = self.mode == Mode::Normal
             && !modifiers.ctrl
+            && !modifiers.alt
+            && !self.keys.pending()
             && matches!(press.key, Key::Character(text) if text == "y");
         if (ctrl_shift_c || y) && self.copy_mouse_selection(Copy::Clipboard) {
             self.mouse_selection = None;
@@ -762,7 +742,7 @@ impl Pane {
         let redraw = match self.mode {
             Mode::Insert if to_normal => {
                 self.enter_normal();
-                self.prefix = ctrl_backslash.then_some(Prefix::CtrlBackslash);
+                self.after_ctrl_backslash = ctrl_backslash;
                 true
             }
             // Typing returns to the live screen, where the typing shows, and
@@ -770,7 +750,7 @@ impl Pane {
             Mode::Insert => self
                 .type_key(press)
                 .is_some_and(|guessed| std::mem::replace(&mut self.scroll, 0) > 0 || guessed),
-            _ if ctrl_backslash && prefix == Some(Prefix::CtrlBackslash) => {
+            _ if ctrl_backslash && after_ctrl_backslash => {
                 self.send_keyed(vec![0x1c]);
                 self.insert()
             }
@@ -780,10 +760,10 @@ impl Pane {
                 self.leave_visual();
                 self.mode = Mode::Normal;
                 self.prompt = None;
-                self.count = None;
+                self.keys.clear();
                 true
             }
-            _ => self.normal_key(press, prefix),
+            _ => self.normal_key(press),
         };
         redraw || forgot_selection
     }
@@ -1062,11 +1042,11 @@ impl Pane {
                 None => up,
             });
         }
-        // A count waiting for its command shows first, as Vim's `showcmd`.
-        if let Some(count) = self.count {
+        // A command half typed shows first, as Vim's `showcmd` shows it.
+        if let Some(keys) = self.keys.shown() {
             label = Some(match label {
-                Some(label) => format!("{count}  {label}"),
-                None => count.to_string(),
+                Some(label) => format!("{keys}  {label}"),
+                None => keys,
             });
         }
         label
@@ -1112,7 +1092,7 @@ impl Pane {
         self.mode = Mode::Insert;
         self.cursor = None;
         self.prompt = None;
-        self.count = None;
+        self.keys.clear();
         self.status = None;
         self.scroll = 0;
         true
@@ -2496,39 +2476,149 @@ mod tests {
     }
 
     #[test]
-    fn keys_a_terminal_doesnt_take_are_nothing_and_the_next_starts_afresh() {
+    fn commands_a_terminal_doesnt_take_are_nothing_and_spend_their_keys() {
         let terminal = terminal("one two six\r\nfour five");
         let mut pane = pane(&terminal);
         normal_mode(&mut pane);
         keys(&mut pane, "gg");
-        // An operator but `y`, a register and `z` wait for nothing: the
-        // next key moves as it would alone.
-        for keys_ in ["dw", "\"aw", "zw"] {
+        // An operator but `y`, a register, `z` and `f` wait for the rest of
+        // their command, which isn't a terminal's: all its keys are spent.
+        for keys_ in ["dw", "\"aw", "zw", "fw"] {
             keys(&mut pane, "0");
             keys(&mut pane, &keys_[..keys_.len() - 1]);
-            assert!(!pane.pending(), "{keys_}");
+            assert!(pane.pending(), "{keys_}");
             keys(&mut pane, "w");
-            assert_eq!(cursor(&pane), ("one two six".into(), 0, 4), "{keys_}");
+            assert!(!pane.pending(), "{keys_}");
+            assert_eq!(cursor(&pane), ("one two six".into(), 0, 0), "{keys_}");
         }
         // Entering insert mode but by `i` does nothing.
+        keys(&mut pane, "w");
         for key in ["a", "A", "o"] {
             keys(&mut pane, key);
             assert_eq!(pane.mode, Mode::Normal, "{key}");
             assert_eq!(cursor(&pane), ("one two six".into(), 0, 4), "{key}");
         }
+        // Nor does `r` and a character in visual mode.
+        keys(&mut pane, "vrw");
+        assert_eq!(pane.mode, Mode::Visual(Selection::Characters));
+        assert_eq!(cursor(&pane), ("one two six".into(), 0, 4));
         assert!(sent(&mut pane).is_empty());
         assert_eq!(pane.take_yanked(), None);
     }
 
     #[test]
-    fn today_f_is_nothing_so_fw_moves_by_w() {
+    fn a_half_typed_command_shows_in_the_bar_and_takes_the_next_key() {
+        let terminal = terminal("one two\r\nthree");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let bar = |keys_: &str| {
+            let mut pane = self::pane(&terminal);
+            normal_mode(&mut pane);
+            keys(&mut pane, keys_);
+            pane.label()
+        };
+        assert_eq!(bar("3").as_deref(), Some("3"));
+        assert_eq!(bar("y3").as_deref(), Some("y3"));
+        assert_eq!(bar("2y").as_deref(), Some("2y"));
+        assert_eq!(bar("\"a").as_deref(), Some("\"a"));
+        // `d` isn't a terminal's, but waits for its motion like any
+        // operator, so the bar says why `:` does nothing after it.
+        keys(&mut pane, "d");
+        assert!(pane.pending());
+        assert_eq!(pane.label().as_deref(), Some("d"));
+        keys(&mut pane, ":");
+        assert!(!pane.pending() && !pane.prompting());
+        assert_eq!(pane.label(), None);
+    }
+
+    #[test]
+    fn y_takes_every_motion_space_backspace_and_enter_too() {
+        let terminal = terminal(&numbered_lines("line "));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg");
+        serve(&mut pane, &terminal);
+        let mut yank = |keys: &str| yanked(&mut pane, &terminal, keys);
+        assert_eq!(yank("y ").as_deref(), Some("l"), "as yl");
+        assert_eq!(yank("lly").as_deref(), None);
+        let backspace = Key::Named(NamedKey::Backspace);
+        press(&mut pane, backspace, Modifiers::default());
+        serve(&mut pane, &terminal);
+        assert_eq!(
+            pane.take_yanked().map(|(text, _)| text).as_deref(),
+            Some("i"),
+            "as yh"
+        );
+        keys(&mut pane, "y");
+        named(&mut pane, NamedKey::Enter);
+        serve(&mut pane, &terminal);
+        assert_eq!(
+            pane.take_yanked().map(|(text, _)| text).as_deref(),
+            Some("line 1\nline 2"),
+            "as yj"
+        );
+        // The view's lines, the ends of words of anything but blanks, and
+        // the first non-blank.
+        let mut yank = |keys: &str| yanked(&mut pane, &terminal, keys);
+        assert_eq!(yank("ggyH").as_deref(), Some("line 1"));
+        assert_eq!(yank("ggyE").as_deref(), Some("line"));
+        assert_eq!(yank("ggyW").as_deref(), Some("line "));
+        assert_eq!(yank("gg$y^").as_deref(), Some("line "));
+    }
+
+    #[test]
+    fn the_motions_a_terminal_takes_now() {
+        let terminal = terminal("  a.b c-d\r\nx");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg$^");
+        assert_eq!(cursor(&pane).2, 2);
+        keys(&mut pane, "W");
+        assert_eq!(cursor(&pane).2, 6);
+        keys(&mut pane, "B");
+        assert_eq!(cursor(&pane).2, 2);
+        keys(&mut pane, "E");
+        assert_eq!(cursor(&pane).2, 4);
+    }
+
+    #[test]
+    fn g_and_a_key_it_doesnt_take_and_alt_and_a_letter_are_nothing() {
         let terminal = terminal("one two six\r\nfour five");
         let mut pane = pane(&terminal);
         normal_mode(&mut pane);
-        keys(&mut pane, "gg0f");
+        keys(&mut pane, "gg0");
+        // `gw` was `w`, `gy` began a copy, and `gi` typed.
+        for keys_ in ["gw", "gy", "gi"] {
+            keys(&mut pane, keys_);
+            assert!(!pane.pending(), "{keys_}");
+            assert_eq!(pane.mode, Mode::Normal, "{keys_}");
+            assert_eq!(cursor(&pane), ("one two six".into(), 0, 0), "{keys_}");
+        }
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        press(&mut pane, Key::Character("w".into()), alt);
+        press(&mut pane, Key::Character("i".into()), alt);
+        assert_eq!(pane.mode, Mode::Normal);
+        assert_eq!(cursor(&pane), ("one two six".into(), 0, 0));
+        assert!(sent(&mut pane).is_empty());
+    }
+
+    #[test]
+    fn esc_after_a_count_leaves_visual_mode_and_ctrl_c_after_y_reaches_the_program() {
+        let terminal = terminal("one two\r\nthree");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "v3");
+        named(&mut pane, NamedKey::Escape);
+        assert_eq!(pane.mode, Mode::Normal);
         assert!(!pane.pending());
-        keys(&mut pane, "w");
-        assert_eq!(cursor(&pane), ("one two six".into(), 0, 4));
+        // Ctrl+C reaches the program whatever's half typed, and forgets it.
+        keys(&mut pane, "y");
+        press(&mut pane, Key::Character("c".into()), CTRL);
+        assert_eq!(sent(&mut pane), [vec![0x03]]);
+        assert!(!pane.pending());
     }
 
     #[test]
@@ -2919,6 +3009,34 @@ mod mouse_tests {
             highlights
                 .iter()
                 .all(|highlight| highlight.kind == HighlightKind::Copied)
+        );
+    }
+
+    #[test]
+    fn y_copies_the_mouses_selection_only_with_nothing_typed() {
+        let terminal = terminal("hello world\r\nsecond");
+        let mut pane = pane(&terminal);
+        pane.enter_normal_mode();
+        let select = |pane: &mut Pane| {
+            mouse(pane, MouseAction::Press(LEFT), [0, 6], 1);
+            mouse(pane, MouseAction::Motion(Some(LEFT)), [1, 2], 1);
+            mouse(pane, MouseAction::Release(LEFT), [1, 2], 1);
+            copied(pane, &terminal);
+        };
+        select(&mut pane);
+        key(&mut pane, "y");
+        assert_eq!(
+            copied(&mut pane, &terminal),
+            Some(("world\nsec".to_owned(), Copy::Clipboard))
+        );
+        // After `y`, the next `y` is `yy`, which copies the cursor's line,
+        // where the drag began.
+        key(&mut pane, "y");
+        select(&mut pane);
+        key(&mut pane, "y");
+        assert_eq!(
+            copied(&mut pane, &terminal),
+            Some(("hello world".to_owned(), Copy::Clipboard))
         );
     }
 

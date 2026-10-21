@@ -51,12 +51,25 @@ impl Stroke {
     /// The keys `text` writes down, for tests, as `@` types a register
     /// holding it (see [`crate::keymap::read_macro`]): a character for
     /// itself, and a key that types none by its name in angle brackets,
-    /// `<Esc>`, `<CR>` or `<C-r>`, with `<lt>` for `<`.
+    /// `<Esc>`, `<CR>` or `<C-r>`, with `<lt>` for `<`. A `<` that starts
+    /// no key's name is itself, and line breaks and the other control
+    /// characters are the keys that type them.
     #[cfg(test)]
     pub(crate) fn read(text: &str) -> Vec<Self> {
         (crate::keymap::read_macro(text).into_iter())
             .flat_map(|chord| strokes(&chord.kept().press(), false))
             .collect()
+    }
+
+    /// The stroke as the bar shows it in a command half typed, as Vim's
+    /// `showcmd` does: a character as itself, Ctrl and one as `^W`, and
+    /// another key by its name, as `<Tab>`.
+    pub(crate) fn shown(self) -> String {
+        match self {
+            Self::Char { ch, ctrl: false } => ch.to_string(),
+            Self::Char { ch, ctrl: true } => format!("^{}", ch.to_ascii_uppercase()),
+            stroke => stroke.chord().to_string(),
+        }
     }
 
     /// The key that types the stroke, as a macro records it: for what a

@@ -138,6 +138,7 @@ impl Dialect for EditorKeys {
         backward: bool,
         stroke: Stroke,
         _keys: &mut Reader<'_>,
+        _visual: bool,
     ) -> Option<Read<EditorAction>> {
         Some(Read::Yes(match stroke.plain()? {
             'd' => EditorAction::Diagnostic { backward },
@@ -154,11 +155,13 @@ impl Dialect for EditorKeys {
         }))
     }
 
-    /// All but `H`, `M` and `L`, which aren't the editor's yet.
+    /// All but `H`, `M` and `L`, and Ctrl+E and Ctrl+Y, which aren't the
+    /// editor's yet: Ctrl+E and Ctrl+Y scroll a panel by the cursor,
+    /// before the grammar (see `Editor::panel_stroke`).
     fn takes(&self, command: &Command) -> bool {
         let (Action::Move(motion) | Action::Operate(_, Target::Motion(motion))) = command.action
         else {
-            return true;
+            return !matches!(command.action, Action::Scroll(vim::Scroll::Line { .. }));
         };
         !matches!(
             motion,
@@ -271,15 +274,20 @@ mod tests {
             vim::parse(&visual, true, &EditorKeys { tildeop: false }),
             own(None, EditorAction::FormatSelection)
         );
-        // None of them is what an operator acts on.
+        // None of them is what an operator acts on, so `dgr` is nothing at
+        // once, as in Neovim, where `gr` and the keys after it are normal
+        // mode's alone.
         assert_eq!(read("dgd"), Parsed::Nothing);
+        assert_eq!(read("dgr"), Parsed::Nothing);
     }
 
     #[test]
-    fn h_m_and_l_arent_the_editors_yet() {
+    fn h_m_l_ctrl_e_and_ctrl_y_arent_the_editors_yet() {
         assert_eq!(read("H"), Parsed::Nothing);
         assert_eq!(read("3L"), Parsed::Nothing);
         assert_eq!(read("dM"), Parsed::Nothing);
+        let ctrl_e = vim::parse(&[Stroke::ctrl('e')], false, &EditorKeys { tildeop: false });
+        assert_eq!(ctrl_e, Parsed::Nothing);
     }
 
     #[test]

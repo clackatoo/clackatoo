@@ -1069,9 +1069,9 @@ impl Editor {
             Some(position) => format!("{}{modified}  rendered  {position}", copy.name()),
             None => format!("{}{modified}  {}:{}", copy.name(), at.line + 1, at.col + 1),
         };
-        // A count waiting for its command shows first, as Vim's `showcmd`.
-        if let Some(count) = self.counting() {
-            label = format!("{count}  {label}");
+        // A command half typed shows first, as Vim's `showcmd` shows it.
+        if let Some(keys) = self.keys.shown() {
+            label = format!("{keys}  {label}");
         }
         match self.diagnostic_here(copy).filter(|_| !self.rendered()) {
             Some(diagnostic) => format!("{label}  {}", diagnostic.described()),
@@ -1496,12 +1496,11 @@ impl Editor {
             tildeop: self.tildeop,
         };
         match self.keys.read(stroke, visual, &dialect) {
-            // A count is drawn in the bar while it waits.
-            Parsed::Incomplete if self.counting().is_some() => Done::REDRAW,
-            Parsed::Incomplete => Done::default(),
+            // The keys typed are drawn in the bar while they wait.
+            Parsed::Incomplete => Done::REDRAW,
             Parsed::Nothing => {
                 self.fail();
-                Done::default()
+                Done::REDRAW
             }
             Parsed::Command(command) => self.execute(command, copy, shared, false),
         }
@@ -1566,6 +1565,10 @@ impl Editor {
             Action::Scroll(Scroll::Page { down }) => {
                 let rows = self.height.saturating_sub(2);
                 self.page(if down { 1 } else { -1 }, rows, copy);
+            }
+            // Not the editor's yet (see `EditorKeys::takes`).
+            Action::Scroll(Scroll::Line { .. }) => {
+                debug_assert!(false, "an editor doesn't take {command:?}");
             }
             Action::View(at) => self.view_at(at, copy),
             Action::Reselect => self.reselect(copy, &mut shared.marks),

@@ -1,8 +1,10 @@
 //! Normal and visual mode: clackatoo's own cursor, selection, copying and
 //! search.
 //!
-//! The cursor moves with Vim's motions over the whole document, history
-//! then screen, and the view follows it. `v` and `V` select from where the
+//! Keys are read by the grammar every pane reads them with (see
+//! [`crate::vim`]), as [`TerminalKeys`] says a terminal reads them. The
+//! cursor moves with Vim's motions over the whole document, history then
+//! screen, and the view follows it. `v` and `V` select from where the
 //! cursor was to where it goes, by character or by line, and `y` copies;
 //! `y` also takes a motion or a text object (see [`super::operator`]).
 //! `/` and `?` search forward and back, and `n` and `N` search again. The
@@ -13,12 +15,14 @@ use clackatoo_protocol::{Match, Position, Request};
 use clackatoo_term::{MOST_LINES, MOST_TEXT};
 use winit::keyboard::{Key, NamedKey};
 
-use super::{Copy, Document, Lines, Mode, Pane, Pending, Prefix, Selection};
+use super::{Copy, Document, Lines, Mode, Pane, Pending, Selection};
 use crate::cmdline::{Keyed, Line};
 use crate::input::KeyPress;
-use crate::motion::{Block, Cursor, Motion, Point, count_with, multiplied, start_of_cell};
-use crate::objects::Object;
-use crate::vim::{WRAPPED_TO_BOTTOM, WRAPPED_TO_TOP};
+use crate::motion::{Block, Cursor, Motion, Point, start_of_cell};
+use crate::vim::{
+    Action, Command, Dialect, Entry, Operator, Parsed, Read, Reader, Scroll, Stroke, Target,
+    WRAPPED_TO_BOTTOM, WRAPPED_TO_TOP, strokes,
+};
 
 /// A search being typed.
 #[derive(Debug)]
@@ -27,200 +31,228 @@ pub(super) struct Prompt {
     pub(super) backward: bool,
 }
 
+/// A command of a terminal's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TerminalAction {
+    /// Esc, with nothing typed before it but a count: leaves visual mode,
+    /// or else forgets the match found.
+    Escape,
+    /// `gx`: opens the link under the cursor, as in Vim.
+    OpenLink,
+    /// `]]`, or `[[` if not `forward`: to the start of the shell's block
+    /// after the cursor's line, or before it.
+    Block { forward: bool },
+}
+
+/// How a terminal reads keys: every motion, as a move and as what `y`
+/// takes, with `y` its only operator and `i` its only way into insert
+/// mode, but nothing that changes text, as it has none to change, and no
+/// register, mark, `f` and its kin, `*`, `#` or `zt` and its kin yet. Esc,
+/// `gx`, `[[` and `]]` are its own.
+pub(super) struct TerminalKeys;
+
+impl Dialect for TerminalKeys {
+    type Own = TerminalAction;
+
+    fn own(
+        &self,
+        stroke: Stroke,
+        _keys: &mut Reader<'_>,
+        _visual: bool,
+    ) -> Option<Read<Self::Own>> {
+        match stroke {
+            Stroke::Escape => Some(Read::Yes(TerminalAction::Escape)),
+            // An editor moves with them; a terminal is typed into with
+            // them, in insert mode.
+            Stroke::Enter
+            | Stroke::Backspace
+            | Stroke::Char {
+                ch: ' ',
+                ctrl: false,
+            } => Some(Read::No),
+            _ => None,
+        }
+    }
+
+    fn after_g(
+        &self,
+        stroke: Stroke,
+        _keys: &mut Reader<'_>,
+        _visual: bool,
+    ) -> Option<Read<Self::Own>> {
+        (stroke.plain()? == 'x').then_some(Read::Yes(TerminalAction::OpenLink))
+    }
+
+    fn after_bracket(
+        &self,
+        backward: bool,
+        stroke: Stroke,
+        _keys: &mut Reader<'_>,
+        _visual: bool,
+    ) -> Option<Read<Self::Own>> {
+        let again = if backward { '[' } else { ']' };
+        (stroke.plain()? == again)
+            .then_some(Read::Yes(TerminalAction::Block { forward: !backward }))
+    }
+
+    fn takes(&self, command: &Command<Self::Own>) -> bool {
+        if command.register.is_some() {
+            return false;
+        }
+        match command.action {
+            Action::Move(motion) | Action::Operate(Operator::Yank, Target::Motion(motion)) => {
+                !matches!(motion, Motion::Find { .. })
+            }
+            Action::Insert(entry) => entry == Entry::Before,
+            Action::Operate(
+                Operator::Yank,
+                Target::Lines | Target::Object { .. } | Target::Selection,
+            )
+            | Action::Visual { .. }
+            | Action::BlockVisual
+            | Action::Reselect
+            | Action::OtherEnd
+            | Action::OtherCorner
+            | Action::Select { .. }
+            | Action::Search { .. }
+            | Action::SearchAgain { .. }
+            | Action::Scroll(_)
+            | Action::Own(_) => true,
+            Action::Operate(..)
+            | Action::DeleteChars { .. }
+            | Action::DeleteToEnd { .. }
+            | Action::Substitute
+            | Action::Put { .. }
+            | Action::Join
+            | Action::Replace(_)
+            | Action::Undo
+            | Action::Redo
+            | Action::Repeat
+            | Action::SearchWord { .. }
+            | Action::FindAgain { .. }
+            | Action::View(_)
+            | Action::SetMark(_)
+            | Action::Mark { .. }
+            | Action::Tilde => false,
+        }
+    }
+}
+
 impl Pane {
-    pub(super) fn normal_key(&mut self, press: &KeyPress<'_>, prefix: Option<Prefix>) -> bool {
+    /// A key pressed in normal or visual mode.
+    pub(super) fn normal_key(&mut self, press: &KeyPress<'_>) -> bool {
         if self.prompt.is_some() {
             return self.prompt_key(press);
         }
         self.status = None;
+        // Ctrl+C always reaches the program, and Ctrl+Shift+C copies what's
+        // selected, as in other terminals, whatever's half typed.
         let character = match press.key {
             Key::Character(text) => text.chars().next(),
             _ => None,
         };
-        // A count, before a command or after `y`, and just after Ctrl+\
-        // left insert mode too. A 0 that doesn't follow a digit is a
-        // motion, as in Vim.
-        let counts = matches!(
-            prefix,
-            None | Some(Prefix::Y { .. } | Prefix::CtrlBackslash)
-        );
-        if counts
-            && !press.modifiers.ctrl
-            && let Some(digit) = character.and_then(|ch| ch.to_digit(10))
-            && (digit != 0 || self.count.is_some())
-        {
-            self.count = Some(count_with(self.count, digit));
-            // `y` still waits for its motion.
-            self.prefix = prefix.filter(|prefix| matches!(prefix, Prefix::Y { .. }));
-            // Drawn again, for the bar to show the count.
-            return true;
+        if press.modifiers.ctrl && matches!(character, Some('c' | 'C')) {
+            self.keys.clear();
+            if character == Some('C') {
+                return self.yank_selection();
+            }
+            self.send_keyed(vec![0x03]);
+            return false;
         }
-        let count = self.count.take();
-        let redraw = self.command_key(press, character, prefix, count);
-        // `3g` keeps its count for `3gg`; `3y` keeps it in its prefix.
-        if self.prefix == Some(Prefix::G) {
-            self.count = count;
+        let mut redraw = false;
+        for stroke in strokes(press, false) {
+            let visual = matches!(self.mode, Mode::Visual(_));
+            redraw |= match self.keys.read(stroke, visual, &TerminalKeys) {
+                // The keys typed are drawn in the bar while they wait, and
+                // gone from it once they make nothing.
+                Parsed::Incomplete | Parsed::Nothing => true,
+                Parsed::Command(command) => self.execute(command),
+            };
         }
         redraw
     }
 
-    /// The key `press`, which types `character` if any, after `prefix`,
-    /// in normal or visual mode, with `count` typed before it.
-    fn command_key(
-        &mut self,
-        press: &KeyPress<'_>,
-        character: Option<char>,
-        prefix: Option<Prefix>,
-        count: Option<usize>,
-    ) -> bool {
-        let after_g = prefix == Some(Prefix::G);
+    /// Does `command`, which [`TerminalKeys`] took.
+    fn execute(&mut self, command: Command<TerminalAction>) -> bool {
+        let count = command.count;
         let height = self.height();
         let half = i64::try_from((height / 2).max(1)).unwrap_or(1);
         let page = i64::try_from(height.max(1)).unwrap_or(1);
-        let ctrl = press.modifiers.ctrl;
-        if !ctrl && let Some(redraw) = self.second_key(press, character, prefix, count) {
-            return redraw;
-        }
-        let visual = matches!(self.mode, Mode::Visual(_));
-        let motion = match (press.key, character) {
-            // Ctrl+Shift+C copies, as in other terminals.
-            (_, Some('C')) if ctrl => return self.yank_selection(),
-            // Ctrl+C always reaches the program.
-            (_, Some('c')) if ctrl => {
-                self.send_keyed(vec![0x03]);
-                return false;
+        let down = |down: bool, lines: i64| if down { lines } else { -lines };
+        match command.action {
+            Action::Move(motion) => self.move_cursor(motion, count),
+            Action::Operate(Operator::Yank, Target::Motion(motion)) => {
+                self.yank_motion(motion, count)
             }
-            // Ctrl+V selects a block of columns, as in Vim. Ctrl+Shift+V
-            // pastes, and never comes here.
-            (_, Some('v')) if ctrl => return self.toggle_visual(Selection::Block),
-            (Key::Named(NamedKey::Escape), _) => {
-                if visual {
+            Action::Operate(Operator::Yank, Target::Lines) => self.yank_lines(command.times()),
+            Action::Operate(Operator::Yank, Target::Selection) => self.yank_selection(),
+            // Copied after `y`, selected in visual mode.
+            Action::Operate(Operator::Yank, Target::Object { object, inner })
+            | Action::Select { object, inner } => self.use_object(object, inner),
+            Action::Insert(Entry::Before) => self.insert(),
+            Action::Visual { lines: false } => self.toggle_visual(Selection::Characters),
+            Action::Visual { lines: true } => self.toggle_visual(Selection::Lines),
+            Action::BlockVisual => self.toggle_visual(Selection::Block),
+            Action::Reselect => self.reselect(),
+            Action::OtherCorner if self.mode == Mode::Visual(Selection::Block) => {
+                self.other_corner()
+            }
+            Action::OtherEnd | Action::OtherCorner => self.other_end(),
+            Action::Search { backward } => {
+                self.prompt = Some(Prompt {
+                    line: Line::default(),
+                    backward,
+                });
+                true
+            }
+            Action::SearchAgain { reverse } => self.search_again(reverse),
+            // Half and whole pages move the view and the cursor together.
+            Action::Scroll(Scroll::HalfPage { down: is_down }) => self.page(down(is_down, half)),
+            Action::Scroll(Scroll::Page { down: is_down }) => self.page(down(is_down, page)),
+            // A line of view, keeping the cursor in it.
+            Action::Scroll(Scroll::Line { down: is_down }) => self.scroll_view(down(!is_down, 1)),
+            Action::Own(TerminalAction::Escape) => {
+                if matches!(self.mode, Mode::Visual(_)) {
                     self.leave_visual();
                 } else {
                     self.found = None;
                 }
-                return true;
+                true
             }
-            // Half and whole pages move the view and the cursor together.
-            (_, Some('d')) if ctrl => return self.page(half),
-            (_, Some('u')) if ctrl => return self.page(-half),
-            (_, Some('f')) if ctrl => return self.page(page),
-            // Ctrl+B is the window's (see `desk::prefix`): Page Up pages up.
-            (Key::Named(NamedKey::PageDown), _) => return self.page(page),
-            (Key::Named(NamedKey::PageUp), _) => return self.page(-page),
-            // A line of view, keeping the cursor in it.
-            (_, Some('e')) if ctrl => return self.scroll_view(-1),
-            (_, Some('y')) if ctrl => return self.scroll_view(1),
-            (_, _) if ctrl => return false,
-            // `gx` opens the link under the cursor, as in Vim.
-            (_, Some('x')) if after_g => return self.open_link_at_cursor(),
-            (_, Some(key @ ('i' | 'a'))) if visual => {
-                self.prefix = Some(Prefix::Object { inner: key == 'i' });
-                return false;
-            }
-            (_, Some('i')) => return self.insert(),
-            (_, Some('v')) if after_g => return self.reselect(),
-            (_, Some('v')) => return self.toggle_visual(Selection::Characters),
-            (_, Some('V')) => return self.toggle_visual(Selection::Lines),
-            (_, Some('O')) if self.mode == Mode::Visual(Selection::Block) => {
-                return self.other_corner();
-            }
-            (_, Some('o' | 'O')) if visual => {
-                if let (Some(anchor), Some(cursor)) = (self.anchor, self.cursor) {
-                    self.anchor = Some(cursor.at);
-                    self.cursor = Some(Cursor::new(anchor));
-                    self.follow_cursor();
-                }
-                return true;
-            }
-            (_, Some('y')) if visual => return self.yank_selection(),
-            (_, Some('y')) => {
-                self.prefix = Some(Prefix::Y { times: count });
-                return false;
-            }
-            (_, Some('Y')) => return self.yank_lines(count.unwrap_or(1)),
-            (_, Some(slash @ ('/' | '?'))) => {
-                self.prompt = Some(Prompt {
-                    line: Line::default(),
-                    backward: slash == '?',
-                });
-                return true;
-            }
-            (_, Some('n')) => return self.search_again(false),
-            (_, Some('N')) => return self.search_again(true),
-            (_, Some(bracket @ ('[' | ']'))) => {
-                self.prefix = Some(Prefix::Bracket {
-                    forward: bracket == ']',
-                });
-                return false;
-            }
-            (_, Some('g')) if after_g => Motion::First,
-            (_, Some('g')) => {
-                self.prefix = Some(Prefix::G);
-                return false;
-            }
-            // The top, middle and bottom of the view, or with a count, so
-            // many lines from its top or bottom.
-            (_, Some('H')) => Motion::ViewTop,
-            (_, Some('M')) => Motion::ViewMiddle,
-            (_, Some('L')) => Motion::ViewBottom,
-            _ => match motion(press.key, character) {
-                Some(motion) => motion,
-                None => return false,
-            },
-        };
-        self.move_cursor(motion, count)
-    }
-
-    /// The second key of `y`, `i`, `[` and their kin, after `prefix`, with
-    /// `count` typed after it: none if there's no such prefix. A key they
-    /// don't take cancels them.
-    fn second_key(
-        &mut self,
-        press: &KeyPress<'_>,
-        character: Option<char>,
-        prefix: Option<Prefix>,
-        count: Option<usize>,
-    ) -> Option<bool> {
-        Some(match prefix? {
-            Prefix::Y { times } => self.after_y(press, character, false, multiplied(times, count)),
-            Prefix::YG { times } => self.after_y(press, character, true, times),
-            Prefix::Object { inner } => character
-                .and_then(Object::of_key)
-                .is_some_and(|object| self.use_object(object, inner)),
-            Prefix::Bracket { forward } => {
-                let again = if forward { ']' } else { '[' };
-                character == Some(again) && self.jump_to_block(forward)
-            }
-            Prefix::G | Prefix::CtrlBackslash => return None,
-        })
-    }
-
-    /// The key after `y`, or after `yg` if `after_yg`, with `count` typed
-    /// before it or after `y`.
-    fn after_y(
-        &mut self,
-        press: &KeyPress<'_>,
-        character: Option<char>,
-        after_yg: bool,
-        count: Option<usize>,
-    ) -> bool {
-        match character {
-            Some('g') if after_yg => self.yank_motion(Motion::First, count),
-            _ if after_yg => false,
-            Some('y') => self.yank_lines(count.unwrap_or(1)),
-            Some('g') => {
-                self.prefix = Some(Prefix::YG { times: count });
+            Action::Own(TerminalAction::OpenLink) => self.open_link_at_cursor(),
+            Action::Own(TerminalAction::Block { forward }) => self.jump_to_block(forward),
+            Action::Operate(..)
+            | Action::Insert(_)
+            | Action::DeleteChars { .. }
+            | Action::DeleteToEnd { .. }
+            | Action::Substitute
+            | Action::Put { .. }
+            | Action::Join
+            | Action::Replace(_)
+            | Action::Undo
+            | Action::Redo
+            | Action::Repeat
+            | Action::SearchWord { .. }
+            | Action::FindAgain { .. }
+            | Action::View(_)
+            | Action::SetMark(_)
+            | Action::Mark { .. }
+            | Action::Tilde => {
+                debug_assert!(false, "a terminal doesn't take {command:?}");
                 false
-            }
-            Some(key @ ('i' | 'a')) => {
-                self.prefix = Some(Prefix::Object { inner: key == 'i' });
-                false
-            }
-            _ => {
-                (motion(press.key, character)).is_some_and(|motion| self.yank_motion(motion, count))
             }
         }
+    }
+
+    /// `o` and `O` in visual mode: the cursor goes to the other end of the
+    /// selection, and the selection's start to where the cursor was.
+    fn other_end(&mut self) -> bool {
+        if let (Some(anchor), Some(cursor)) = (self.anchor, self.cursor) {
+            self.anchor = Some(cursor.at);
+            self.cursor = Some(Cursor::new(anchor));
+            self.follow_cursor();
+        }
+        true
     }
 
     /// Takes in what the daemon answered a copy or a search with.
@@ -563,27 +595,6 @@ impl Pane {
             self.move_to_line(line);
         }
     }
-}
-
-/// The motion a key makes, of those that take one key; a count before it
-/// repeats it (see [`Cursor::go`]).
-fn motion(key: &Key, character: Option<char>) -> Option<Motion> {
-    Some(match (key, character) {
-        (Key::Named(NamedKey::ArrowLeft), _) | (_, Some('h')) => Motion::Left,
-        (Key::Named(NamedKey::ArrowRight), _) | (_, Some('l')) => Motion::Right,
-        (Key::Named(NamedKey::ArrowDown), _) | (_, Some('j')) => Motion::Down(1),
-        (Key::Named(NamedKey::ArrowUp), _) | (_, Some('k')) => Motion::Up(1),
-        (Key::Named(NamedKey::Home), _) | (_, Some('0')) => Motion::LineStart,
-        (Key::Named(NamedKey::End), _) | (_, Some('$')) => Motion::LineEnd,
-        (_, Some('w')) => Motion::WordStart,
-        (_, Some('b')) => Motion::WordBack,
-        (_, Some('e')) => Motion::WordEnd,
-        (_, Some('G')) => Motion::Last,
-        (_, Some('%')) => Motion::Match,
-        (_, Some('}')) => Motion::Paragraph { forward: true },
-        (_, Some('{')) => Motion::Paragraph { forward: false },
-        _ => return None,
-    })
 }
 
 pub(super) fn position(point: Point) -> Position {

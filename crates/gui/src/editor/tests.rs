@@ -2920,3 +2920,18 @@ fn hidden_starts_are_never_drawn_nor_gone_to_and_changing_a_line_keeps_them() {
     setup.keys("i<BS><Esc>");
     assert_eq!(setup.text(), format!("{two}{one}gamma\n"));
 }
+
+#[test]
+fn a_command_half_typed_shows_first_in_the_bar() {
+    let mut setup = Setup::new("one\ntwo\n");
+    let label = |setup: &Setup| setup.editor.label(&setup.copy);
+    let after = label(&setup);
+    setup.keys("2d");
+    assert_eq!(label(&setup), format!("2d  {after}"));
+    setup.keys("<Esc>\"a");
+    assert_eq!(label(&setup), format!("\"a  {after}"));
+    setup.keys("y");
+    assert_eq!(label(&setup), format!("\"ay  {after}"));
+    setup.keys("y");
+    assert_eq!(label(&setup), after);
+}

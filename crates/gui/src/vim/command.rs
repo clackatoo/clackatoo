@@ -7,14 +7,6 @@
 use crate::motion::Motion;
 use crate::objects::Object;
 
-/// What a search that went past the end and round to the top says, in
-/// terminals and editors alike, as Vim does: the match may be a long way
-/// back.
-pub(crate) const WRAPPED_TO_TOP: &str = "search wrapped to top";
-
-/// What a backward search that went round to the bottom says.
-pub(crate) const WRAPPED_TO_BOTTOM: &str = "search wrapped to bottom";
-
 /// Whether `ch` names a register, after `"`: `a` to `z`, or `A` to `Z` to
 /// add to them, `0` to `9`, `"` for the unnamed, `-` for small deletes,
 /// `_` for none, and `+` and `*` for the clipboard and the primary
@@ -112,12 +104,14 @@ pub(crate) enum ViewAt {
     Bottom,
 }
 
-/// How far a scroll goes, down if `down`, the cursor going with the view.
+/// How far a scroll goes, down if `down`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Scroll {
-    /// Ctrl+D and Ctrl+U: half the view.
+    /// Ctrl+E and Ctrl+Y: the view a line, keeping the cursor in it.
+    Line { down: bool },
+    /// Ctrl+D and Ctrl+U: the view and the cursor half the view.
     HalfPage { down: bool },
-    /// Ctrl+F and Page Down, Page Up: most of it.
+    /// Ctrl+F and Page Down, Page Up: the view and the cursor most of it.
     Page { down: bool },
 }
 
