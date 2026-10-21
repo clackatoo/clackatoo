@@ -587,6 +587,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "In normal mode the wheel never types into a program: over a full-screen one, it moves the cursor",
     },
+    News {
+        id: "pagemoves",
+        date: "2026-10-21",
+        lesson: "basics",
+        what: "H, L, Ctrl+D/U/F and Page Up/Down in a terminal's normal mode go as far as they say again, not a line",
+    },
 ];
 
 impl News {

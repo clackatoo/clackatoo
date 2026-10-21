@@ -320,7 +320,7 @@ Text can be typed through an input method, as Chinese, Japanese and Korean are, 
 
 ## Scrolling
 
-The mouse wheel scrolls history in either mode, in the pane under the pointer. On the alternate screen, which full-screen programs use and which has no history, the wheel sends arrow keys instead in insert mode, so less, Vim and htop scroll themselves. In normal mode it moves normal mode's cursor up and down there, and never reaches the program, even in a pane the focus left in insert mode. A program that takes [the mouse](#the-mouse) gets the wheel itself, in insert mode.
+The mouse wheel scrolls history in either mode, in the pane under the pointer. On the alternate screen, which full-screen programs use and which has no history, the wheel sends arrow keys instead in insert mode, so less, Vim and htop scroll themselves. In normal mode it moves normal mode's cursor up and down there, and never reaches the program. The wheel follows the mode of the pane under the pointer, and the focused pane's is the window's. A program that takes [the mouse](#the-mouse) gets the wheel itself, in insert mode.
 
 While the view is scrolled up, a pill at the pane's bottom right says how far, and how to get back: `↓ 42 lines · G to return` in normal mode, `type to return` in insert mode, where typing goes back to the live screen. A pane without the focus says only how far. In a pane too small for the pill, the bottom bar's note says it instead, as `↑42`. New output doesn't move what you're reading.
 

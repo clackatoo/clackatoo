@@ -2108,16 +2108,9 @@ impl Desk {
         else {
             return false;
         };
-        // A pane the focus left in insert mode keeps it until the focus
-        // comes back; while the window is in normal mode, the wheel over
-        // it mustn't reach its program either.
-        let normal = self.mode() == WindowMode::Normal;
-        self.panes.get_mut(&terminal).is_some_and(|pane| {
-            if normal && !pane.is_chat() {
-                pane.enter_normal_mode();
-            }
-            pane.wheel(lines, (cell, pixel), modifiers)
-        })
+        self.panes
+            .get_mut(&terminal)
+            .is_some_and(|pane| pane.wheel(lines, (cell, pixel), modifiers))
     }
 
     // --- The mouse --------------------------------------------------------

@@ -88,25 +88,29 @@ fn a_click_on_another_pane_arrives_in_the_windows_mode() {
 }
 
 #[test]
-fn the_wheel_over_a_pane_left_in_insert_mode_reaches_no_program_in_normal_mode() {
+fn the_wheel_leaves_a_pane_without_the_focus_in_its_own_mode() {
     let mut desk = desk(two_side_by_side());
-    // Pane 1's program is on the alternate screen, where insert mode's
-    // wheel is arrow keys.
+    // Pane 1 has history to scroll back through.
     let mut screen = Terminal::new(Size::new(40, 24).unwrap(), &Config::default());
-    screen.advance(b"\x1b[?1049h");
+    for line in 1..=40 {
+        screen.advance(format!("line {line}\r\n").as_bytes());
+    }
     desk.view_changed(TerminalId(1), &ViewUpdate::Snapshot(View::capture(&screen)));
     snapshot(&mut desk, 2);
     let in_one = [100.0, 100.0];
     let in_two = [500.0, 100.0];
-    desk.wheel(in_one, 1, Modifiers::default());
-    assert_eq!(typed_into(&answer_all(&mut desk)), [TerminalId(1)]);
-    // Left in insert mode, and the window put in normal mode elsewhere.
+    // Pane 1 is left in insert mode, and the window put in normal mode
+    // elsewhere; the wheel scrolls pane 1 back as it is.
     click(&mut desk, in_two, Modifiers::default());
     normal_mode(&mut desk);
-    answer_all(&mut desk);
-    desk.wheel(in_one, 1, Modifiers::default());
-    assert_eq!(typed_into(&answer_all(&mut desk)), []);
-    assert_eq!(mode(&desk, 1), Mode::Normal);
+    desk.wheel(in_one, 5, Modifiers::default());
+    assert_eq!(mode(&desk, 1), Mode::Insert);
+    // Back to it in insert mode, the view it was scrolled to stays.
+    key(&mut desk, "i");
+    click(&mut desk, in_one, Modifiers::default());
+    assert_eq!(shown_pane(&desk), PaneId(1));
+    let pill = desk.pane(TerminalId(1)).and_then(|pane| pane.pill(false));
+    assert_eq!(pill.as_deref(), Some("↓ 5 lines"));
 }
 
 #[test]
