@@ -155,7 +155,8 @@ impl Jumps {
     /// Moves the places in `file` through `edits`, made to it in turn,
     /// which leave its text as `text`. Text put in where a place
     /// is goes before it, so a line opened above a place's line takes the
-    /// place down with its line.
+    /// place down with its line, and one on lines `:m` moves goes with
+    /// them.
     pub(super) fn edited(
         &mut self,
         file: File<'_>,
@@ -165,8 +166,9 @@ impl Jumps {
         if edits.is_empty() {
             return;
         }
+        let edits = crate::editor::passing(edits);
         for place in self.places_in(file) {
-            place.edited(edits, text);
+            place.edited(&edits, text);
         }
     }
 
@@ -379,6 +381,16 @@ mod tests {
         let text = Rope::from_str("zero\none\ntwo\nthree\n");
         jumps.edited(File::here("/f"), std::slice::from_ref(&edit), &text);
         jumps.edited(File::here("/other"), std::slice::from_ref(&edit), &text);
+        assert_eq!(place(&jumps), (3, 2));
+        // Moved to the top, as `:m0` moves its line, it goes with it.
+        let mut moved = Edit::new();
+        moved.insert("three\n").retain(13).delete("three\n");
+        let text = Rope::from_str("three\nzero\none\ntwo\n");
+        jumps.edited(File::here("/f"), std::slice::from_ref(&moved), &text);
+        assert_eq!(place(&jumps), (0, 2));
+        // And back, as undoing it moves it.
+        let text = Rope::from_str("zero\none\ntwo\nthree\n");
+        jumps.edited(File::here("/f"), &[moved.invert()], &text);
         assert_eq!(place(&jumps), (3, 2));
         // Shorter text: as far as it goes, at its last line's end.
         jumps.replaced(File::here("/f"), &Rope::from_str("zero\nx\n"));

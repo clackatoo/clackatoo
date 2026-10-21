@@ -88,7 +88,7 @@ pub(crate) use hints::HINTS_WAIT;
 use kept::Kept;
 pub(crate) use keys::Stroke;
 use keys::{Action, Command, Entry, Operator, Parsed, Target, ViewAt};
-pub(crate) use marks::{File, FilePlace, Marks};
+pub(crate) use marks::{File, FilePlace, Marks, passing};
 #[cfg(test)]
 pub(crate) use panel::Line as PanelLine;
 pub(crate) use panel::{BESIDE_GAP, Beside, PanelView};

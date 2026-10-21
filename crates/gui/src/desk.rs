@@ -9785,6 +9785,123 @@ mod tests {
         assert_eq!(cursor_line(&desk), 1);
     }
 
+    /// Presses `letter` with Shift held, as a capital is typed: the
+    /// config's bindings to capitals see Shift.
+    fn press_shifted(desk: &mut Desk, letter: &str) {
+        let shift = Modifiers {
+            shift: true,
+            ctrl: false,
+            alt: false,
+        };
+        press(desk, Key::Character(letter.into()), None, shift);
+    }
+
+    /// Makes buffer 7's edits with `daemons`, and answers its questions
+    /// how lines are indented as a grammar of braces would, a step in for
+    /// each brace still open before a line and one out for a line that
+    /// closes one, until nothing's left.
+    fn serve_indenting(desk: &mut Desk, daemons: &mut Daemons) {
+        use clackatoo_protocol::{Answer, BufferUpdate, LineIndent, Query};
+        loop {
+            let (_, sent) = serve(desk, daemons);
+            let asked: Vec<(u64, usize, usize)> = (sent.into_iter())
+                .filter_map(|message| match message {
+                    ClientMessage::Query {
+                        id,
+                        at,
+                        query: Query::Indent { end, .. },
+                        ..
+                    } => Some((id, at, end)),
+                    _ => None,
+                })
+                .collect();
+            if asked.is_empty() {
+                return;
+            }
+            for (id, first, last) in asked {
+                let text = daemon_text(daemons, 7);
+                let (mut indents, mut open, mut start) = (Vec::new(), 0u32, 0);
+                for line in text.split_inclusive('\n') {
+                    let closes = line.trim_start().starts_with('}');
+                    if (first..=last).contains(&start) {
+                        let width = open.saturating_sub(u32::from(closes)) * 4;
+                        indents.push(LineIndent {
+                            line: start,
+                            width: Some(width),
+                        });
+                    }
+                    let count = |brace| u32::try_from(line.matches(brace).count()).unwrap();
+                    open = (open + count('{')).saturating_sub(count('}'));
+                    start += line.len();
+                }
+                let answer = BufferUpdate::Answer {
+                    id,
+                    version: daemons[&BufferId(7)].version(),
+                    answer: Answer::Indents(indents),
+                };
+                assert!(desk.buffer_changed(BufferId(7), answer), "answered");
+            }
+        }
+    }
+
+    /// The lines of the focused editor's last selection, and whether it's
+    /// still being made, a selection of lines.
+    fn selected_lines(desk: &Desk) -> ((u64, u64), bool) {
+        let (editor, copy) = desk.focused_editor().expect("an editor");
+        let marks = &desk.shared().marks;
+        let line = |mark| marks.get(mark, copy.file()).expect("a selection").line;
+        let selecting = editor.mode == Mode::Visual(Selection::Lines);
+        ((line('<'), line('>')), selecting)
+    }
+
+    #[test]
+    fn a_binding_moves_the_lines_selected_down_and_up_with_m_and_gv_again_and_again() {
+        let config = r#"
+            client.keys.map("v", "J", ":m '>+1<CR>gv=gv", { desc = "Move selection down 1" })
+            client.keys.map("v", "K", ":m '<-2<CR>gv=gv", { desc = "Move selection up 1" })
+        "#;
+        let text = "a\nb\nc\nd\ne\n";
+        let mut desk = editing("/t.txt", text);
+        let mut daemons = daemon_of_7(text);
+        desk.lua_from(config);
+        answer_all(&mut desk);
+        press_shifted(&mut desk, "V");
+        type_keys(&mut desk, "j");
+        let mut press = |desk: &mut Desk, key| {
+            press_shifted(desk, key);
+            serve_indenting(desk, &mut daemons);
+            (editor_text(desk), selected_lines(desk))
+        };
+        let lines = |text: &str, first, last| (text.to_owned(), ((first, last), true));
+        assert_eq!(press(&mut desk, "J"), lines("c\na\nb\nd\ne\n", 1, 2));
+        assert_eq!(press(&mut desk, "J"), lines("c\nd\na\nb\ne\n", 2, 3));
+        assert_eq!(press(&mut desk, "K"), lines("c\na\nb\nd\ne\n", 1, 2));
+        // In Rust, where the grammar indents them where they go.
+        let text = "fn a() {\n    one();\n    two();\n}\nfn b() {}\n";
+        let mut desk = editing("/p/a.rs", text);
+        let mut daemons = daemon_of_7(text);
+        desk.lua_from(config);
+        answer_all(&mut desk);
+        type_keys(&mut desk, "j");
+        press_shifted(&mut desk, "V");
+        type_keys(&mut desk, "j");
+        let mut press = |desk: &mut Desk, key| {
+            press_shifted(desk, key);
+            serve_indenting(desk, &mut daemons);
+            (editor_text(desk), selected_lines(desk))
+        };
+        let out = "fn a() {\n}\none();\ntwo();\nfn b() {}\n";
+        assert_eq!(press(&mut desk, "J"), lines(out, 2, 3));
+        let bottom = "fn a() {\n}\nfn b() {}\none();\ntwo();\n";
+        assert_eq!(press(&mut desk, "J"), lines(bottom, 3, 4));
+        assert_eq!(press(&mut desk, "J"), lines(bottom, 3, 4), "no further");
+        assert_eq!(press(&mut desk, "K"), lines(out, 2, 3));
+        assert_eq!(press(&mut desk, "K"), lines(text, 1, 2));
+        let top = "one();\ntwo();\nfn a() {\n}\nfn b() {}\n";
+        assert_eq!(press(&mut desk, "K"), lines(top, 0, 1));
+        assert_eq!(press(&mut desk, "J"), lines(text, 1, 2));
+    }
+
     #[test]
     fn a_macro_waiting_stops_if_the_focus_moves_but_goes_where_it_asks() {
         let mut desk = desk(one_tab(side_by_side(vec![file_pane(1, 7), pane(2)])));

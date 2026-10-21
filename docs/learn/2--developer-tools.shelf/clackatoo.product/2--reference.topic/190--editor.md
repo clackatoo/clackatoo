@@ -226,7 +226,7 @@ A key that fails stops the macro, as in Vim: a motion that can't move, a search 
 
 ## Marks
 
-`m` and a letter marks the cursor's place: `a` to `z` for each file on its own, `A` to `Z` anywhere. `` `a `` goes to it, and `'a` to its line; both are jumps, and an operator takes them: `d'a` deletes the lines from here to the mark's. A mark in another file opens it in place, as `:e` does. `` `. `` goes to your last change. Marks move with the text, whoever edits it; once no pane shows a file, its marks keep their lines. `:marks` lists them in the finder. `'<` and `'>` are the last selection's start and end.
+`m` and a letter marks the cursor's place: `a` to `z` for each file on its own, `A` to `Z` anywhere. `` `a `` goes to it, and `'a` to its line; both are jumps, and an operator takes them: `d'a` deletes the lines from here to the mark's. A mark in another file opens it in place, as `:e` does. `` `. `` goes to your last change. Marks move with the text, whoever edits it, and lines `:m` moves take theirs with them; once no pane shows a file, its marks keep their lines. `:marks` lists them in the finder. `'<` and `'>` are the last selection's start and end, which `gv` selects again. They follow lines `:m` moves too, so Neovim's binding `client.keys.map("v", "J", ":m '>+1<CR>gv=gv")` moves the lines selected down a line at a time, and keeps them selected.
 
 ## Substituting
 
@@ -263,7 +263,7 @@ Each `:s` is one undo step, however many lines it changes. While you type it, wh
 |---|---|
 | `:g/pattern/command` | Does the command on each line that matches: `:g/TODO/d`, `:g/x/normal Atext`, `:g/x/s//y/`, `:g/^/m0` turns the file upside down. `:v` and `:g!` on each line that doesn't. All of it is one undo step. Marks move as lines are deleted. |
 | `:d` `:y` | Deletes or copies the lines, into a register if one's named: `:2,5d a`. |
-| `:m 0` `:t $` `:co .` | Moves or copies the lines after the line given; 0 is the top. |
+| `:m 0` `:t $` `:co .` | Moves or copies the lines after the line given; 0 is the top. Lines moved take their marks, and the last selection, with them, and so does undoing it. |
 | `:normal keys` | Types the keys on each line of the range, as in normal mode, then Esc. |
 
 ## Git signs
@@ -508,6 +508,6 @@ A drag from insert mode selects in visual mode for a while, as Neovim's "(insert
 - Options for one pane only: `:set` sets them for every pane.
 - `$` and `l` stop at a line's last character that isn't blank, as on a terminal's screen, so blanks at a line's end can be reached only with `A` and `D`.
 - `clackatoo edit` opens the tab, but the window doesn't switch to it.
-- `\1` inside a pattern, `\@` lookaround, `\&` and `\%V`; `\zs` and `\ze` inside a group; `:g` inside `:g`, or `:s` with `c` under `:g`; `:m` leaves marks on the moved lines where the lines were. Macros don't record pastes. A mark on deleted text stays where the text was, rather than going.
+- `\1` inside a pattern, `\@` lookaround, `\&` and `\%V`; `\zs` and `\ze` inside a group; `:g` inside `:g`, or `:s` with `c` under `:g`; `:m` under `:g` leaves marks on the moved lines where the lines were. There are no `'[` and `']` marks. Macros don't record pastes. A mark on deleted text stays where the text was, rather than going.
 - Sideways scrolling while dragging with `nowrap`. In visual mode, `D`, `X`, `C`, `S`, `R` and `Y` don't act on whole lines as Vim's do, `X`, `Y`, `R` and `S` don't act on a block as Vim's do, and `.` doesn't make `gq` again.
 - A change typed just as the connection to the daemon drops can be lost.

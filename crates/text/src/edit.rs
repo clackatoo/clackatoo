@@ -287,6 +287,50 @@ impl Edit {
         Some((self.map(start, Bias::After), self.map(end, Bias::Before)))
     }
 
+    /// The text it moves, if all it does is take text away at one place
+    /// and put the same back at another, as `:m` moves lines: so places in
+    /// it can go with it, where [`map`](Self::map) would leave them where
+    /// it was. Lines moved to or from the end of a text with no line
+    /// break after it take the break from the line before them, or give
+    /// theirs to it, which isn't moved.
+    #[must_use]
+    pub fn moved(&self) -> Option<Moved> {
+        let mut changes = self.changes();
+        let (first, second) = (changes.next()?, changes.next()?);
+        if changes.next().is_some() {
+            return None;
+        }
+        let ((taken_at, taken), (put_at, put)) = match (first, second) {
+            ((taken_at, taken, ""), (put_at, "", put))
+            | ((put_at, "", put), (taken_at, taken, "")) => ((taken_at, taken), (put_at, put)),
+            _ => return None,
+        };
+        // How far into what's taken, and into what's put, the lines moved
+        // start: past a break that isn't theirs.
+        let (taken_skip, put_skip) = if taken == put {
+            (0, 0)
+        } else if (taken.strip_prefix('\n'))
+            .is_some_and(|lines| put.strip_suffix('\n') == Some(lines))
+        {
+            // Up from the end: the break taken is the line before's,
+            // which their last line's own becomes.
+            (1, 0)
+        } else if (taken.strip_suffix('\n'))
+            .is_some_and(|lines| put.strip_prefix('\n') == Some(lines))
+        {
+            // Down to the end: the last line's break goes before them, and
+            // what was after their own last is the text's end.
+            (0, 1)
+        } else {
+            return None;
+        };
+        Some(Moved {
+            from: taken_at + taken_skip,
+            to: self.map(put_at, Bias::Before) + put_skip,
+            len: taken.len() - taken_skip,
+        })
+    }
+
     /// Each change it makes, as where it is in the text before the edit,
     /// the text taken away there and the text put in its place.
     pub fn changes(&self) -> impl Iterator<Item = (usize, &str, &str)> {
@@ -560,6 +604,29 @@ impl<'a> Iterator for Changes<'a> {
     }
 }
 
+/// Text an edit moves whole from one place to another, as
+/// [`Edit::moved`] finds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Moved {
+    /// Where it starts in the text before the edit...
+    pub from: usize,
+    /// ...where it starts in the text after it...
+    pub to: usize,
+    /// ...and how many bytes of it there were before.
+    pub len: usize,
+}
+
+impl Moved {
+    /// Where `place`, a byte offset into the text before the edit, goes
+    /// if it's in the text moved: as far into it as it was.
+    #[must_use]
+    pub fn place(&self, place: usize) -> Option<usize> {
+        (place.checked_sub(self.from))
+            .filter(|&offset| offset < self.len)
+            .map(|offset| self.to + offset)
+    }
+}
+
 /// Places moved through an edit one after another, in order, as
 /// [`Edit::untouched`] makes it.
 #[derive(Debug)]
@@ -727,6 +794,52 @@ mod tests {
         let edit = Edit::replace(5, 1, "", "xy");
         assert_eq!(edit.map_keeping(1, Bias::After), 3);
         assert_eq!(edit.map_keeping(1, Bias::Before), 1);
+    }
+
+    #[test]
+    fn text_taken_away_and_put_back_elsewhere_is_moved_and_places_in_it_go_with_it() {
+        // `a\nb\n` down below `c\n`, and back up.
+        let mut down = Edit::new();
+        down.delete("a\nb\n").retain(2).insert("a\nb\n").retain(2);
+        assert_eq!(down.apply_to("a\nb\nc\nd\n").unwrap(), "c\na\nb\nd\n");
+        let moved = down.moved().unwrap();
+        assert_eq!(
+            moved,
+            Moved {
+                from: 0,
+                to: 2,
+                len: 4
+            }
+        );
+        assert_eq!(moved.place(2), Some(4));
+        assert_eq!(moved.place(4), None, "c's line isn't moved");
+        let up = down.invert().moved().unwrap();
+        assert_eq!((up.from, up.to, up.len), (2, 0, 4));
+        // To the end of a text with no break after it, the break goes
+        // before them, and back up, it stays with the line before.
+        let mut down = Edit::new();
+        down.delete("a\n").retain(1).insert("\na");
+        assert_eq!(down.apply_to("a\nb").unwrap(), "b\na");
+        let moved = down.moved().unwrap();
+        assert_eq!((moved.from, moved.to, moved.len), (0, 2, 2));
+        assert_eq!(moved.place(1), Some(3), "a's break is the text's end");
+        let up = down.invert().moved().unwrap();
+        assert_eq!((up.from, up.to, up.len), (2, 0, 1));
+        assert_eq!(up.place(1), None, "b's break is b's");
+        // Anything else isn't a move.
+        assert_eq!(Edit::replace(4, 1, "b", "").moved(), None);
+        assert_eq!(Edit::replace(4, 1, "", "x\n").moved(), None);
+        let mut other = Edit::new();
+        other.delete("a\n").retain(2).insert("x\n");
+        assert_eq!(other.moved(), None);
+        let mut three = Edit::new();
+        three
+            .delete("a\n")
+            .retain(1)
+            .insert("a\n")
+            .retain(1)
+            .insert("z");
+        assert_eq!(three.moved(), None);
     }
 
     #[test]

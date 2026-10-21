@@ -542,6 +542,136 @@ fn lines_are_deleted_yanked_moved_and_copied() {
     assert_eq!(setup.text(), "2\n3\n4\n5\n");
 }
 
+/// Where `mark` is, as its line and column.
+fn marked(setup: &Setup, mark: char) -> (u64, usize) {
+    let at = (setup.shared.marks.get(mark, setup.copy.file()))
+        .unwrap_or_else(|| panic!("mark {mark} isn't set"));
+    (at.line, at.col)
+}
+
+/// What `gv` selects, as the lines and columns of its anchor and cursor.
+fn reselected(setup: &mut Setup) -> ((u64, usize), (u64, usize)) {
+    setup.keys("gv");
+    let anchor = setup.editor.anchor.expect("a selection");
+    let selected = ((anchor.line, anchor.col), setup.cursor());
+    setup.keys("<Esc>");
+    selected
+}
+
+#[test]
+fn marks_on_lines_moved_go_with_them_and_gv_selects_them_again() {
+    // `a` on the block, `c` on the line it jumps, `d` past them both.
+    let mut setup = Setup::new("a\nb1\nc\nd\ne\n");
+    setup.keys("jlmajmcjmdggVj<Esc>");
+    run(&mut setup, "'<,'>m '>+1");
+    assert_eq!(setup.text(), "c\na\nb1\nd\ne\n");
+    assert_eq!(marked(&setup, 'a'), (2, 1));
+    assert_eq!(marked(&setup, 'c'), (0, 0), "up by as many as were moved");
+    assert_eq!(marked(&setup, 'd'), (3, 0));
+    assert_eq!((marked(&setup, '<'), marked(&setup, '>')), ((1, 0), (2, 0)));
+    assert_eq!(reselected(&mut setup), ((1, 0), (2, 0)));
+    // Again, and so on down.
+    run(&mut setup, "'<,'>m '>+1");
+    assert_eq!(setup.text(), "c\nd\na\nb1\ne\n");
+    assert_eq!(marked(&setup, 'a'), (3, 1));
+    assert_eq!(marked(&setup, 'd'), (1, 0));
+    assert_eq!(reselected(&mut setup), ((2, 0), (3, 0)));
+    // And up.
+    run(&mut setup, "'<,'>m '<-2");
+    assert_eq!(setup.text(), "c\na\nb1\nd\ne\n");
+    assert_eq!(marked(&setup, 'a'), (2, 1));
+    assert_eq!(marked(&setup, 'd'), (3, 0));
+    assert_eq!(reselected(&mut setup), ((1, 0), (2, 0)));
+    // Undone, the move back carries them back.
+    setup.keys("u");
+    assert_eq!(setup.text(), "c\nd\na\nb1\ne\n");
+    assert_eq!(marked(&setup, 'a'), (3, 1));
+    assert_eq!(marked(&setup, 'd'), (1, 0));
+    assert_eq!(reselected(&mut setup), ((2, 0), (3, 0)));
+    // Ending on an empty line, whose line break is all that's selected of
+    // it.
+    let mut setup = Setup::new("a\n\nc\nd\n");
+    setup.keys("Vj<Esc>");
+    run(&mut setup, "'<,'>m '>+1");
+    assert_eq!(setup.text(), "c\na\n\nd\n");
+    assert_eq!(reselected(&mut setup), ((1, 0), (2, 0)));
+    run(&mut setup, "'<,'>m '<-2");
+    assert_eq!(setup.text(), "a\n\nc\nd\n");
+    assert_eq!(reselected(&mut setup), ((0, 0), (1, 0)));
+    // In its own mode, the cursor at the end it was.
+    let mut setup = Setup::new("a\nbcd\nefg\nh\n");
+    setup.keys("jjlvkh<Esc>");
+    run(&mut setup, "'<,'>m0");
+    assert_eq!(setup.text(), "bcd\nefg\na\nh\n");
+    assert_eq!(reselected(&mut setup), ((1, 1), (0, 0)));
+    setup.keys("gvd");
+    assert_eq!(setup.text(), "g\na\nh\n");
+}
+
+#[test]
+fn lines_moved_to_and_from_the_ends_take_their_marks() {
+    // A block from the top to the end, and back.
+    let mut setup = Setup::new("a\nb\nc\nd\n");
+    setup.keys("majmbjmcVj<Esc>");
+    run(&mut setup, "'<,'>m0");
+    assert_eq!(setup.text(), "c\nd\na\nb\n");
+    let marks = [
+        marked(&setup, 'a'),
+        marked(&setup, 'b'),
+        marked(&setup, 'c'),
+    ];
+    assert_eq!(marks, [(2, 0), (3, 0), (0, 0)]);
+    assert_eq!(reselected(&mut setup), ((0, 0), (1, 0)));
+    run(&mut setup, "'<,'>m$");
+    assert_eq!(setup.text(), "a\nb\nc\nd\n");
+    let marks = [
+        marked(&setup, 'a'),
+        marked(&setup, 'b'),
+        marked(&setup, 'c'),
+    ];
+    assert_eq!(marks, [(0, 0), (1, 0), (2, 0)]);
+    assert_eq!(reselected(&mut setup), ((2, 0), (3, 0)));
+    // With no line break after the last line, the break stays at the
+    // end, and the marks with their lines.
+    let mut setup = Setup::new("a\nbc\nde");
+    setup.keys("majlmbjmd");
+    run(&mut setup, "1m$");
+    assert_eq!(setup.text(), "bc\nde\na");
+    let marks = [
+        marked(&setup, 'a'),
+        marked(&setup, 'b'),
+        marked(&setup, 'd'),
+    ];
+    assert_eq!(marks, [(2, 0), (0, 1), (1, 1)]);
+    setup.keys("GVk<Esc>");
+    run(&mut setup, "'<,'>m0");
+    assert_eq!(setup.text(), "de\na\nbc");
+    let marks = [
+        marked(&setup, 'a'),
+        marked(&setup, 'b'),
+        marked(&setup, 'd'),
+    ];
+    assert_eq!(marks, [(1, 0), (2, 1), (0, 1)]);
+    assert_eq!(reselected(&mut setup), ((1, 0), (0, 0)));
+    setup.keys("u");
+    assert_eq!(setup.text(), "bc\nde\na");
+    let marks = [
+        marked(&setup, 'a'),
+        marked(&setup, 'b'),
+        marked(&setup, 'd'),
+    ];
+    assert_eq!(marks, [(2, 0), (0, 1), (1, 1)]);
+    // `:t` copies, and the marks stay on the lines copied.
+    let mut setup = Setup::new("a\nb\n");
+    setup.keys("majmb");
+    run(&mut setup, "1,2t0");
+    assert_eq!(setup.text(), "a\nb\na\nb\n");
+    assert_eq!((marked(&setup, 'a'), marked(&setup, 'b')), ((2, 0), (3, 0)));
+    run(&mut setup, "3,4t$");
+    assert_eq!(setup.text(), "a\nb\na\nb\na\nb\n");
+    assert_eq!((marked(&setup, 'a'), marked(&setup, 'b')), ((2, 0), (3, 0)));
+}
+
 #[test]
 fn case_changes_go_through_the_operators() {
     let changed = |text: &str, keys: &str| {

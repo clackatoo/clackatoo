@@ -12,8 +12,10 @@
 //!
 //! A mark moves with the text, as the jump list's places do (see
 //! [`FilePlace`]): edits made above it, by anyone, take it down with them,
-//! and one on a character put back in other words, as when its case is
-//! changed, stays on it. Marks are the window's own, kept until it closes.
+//! one on a character put back in other words, as when its case is
+//! changed, stays on it, and one on lines `:m` moves goes with them, as
+//! the last selection does, so `gv` selects the lines moved. Marks are the
+//! window's own, kept until it closes.
 //!
 //! A file is its path on the machine it's on: the daemon's own, or another
 //! machine whose workspaces `:connect` brought in, where the same path may
@@ -22,7 +24,7 @@
 use std::borrow::Borrow;
 
 use clackatoo_protocol::MachineId;
-use clackatoo_text::{Bias, Edit, Rope};
+use clackatoo_text::{Bias, Edit, Moved, Rope};
 
 use crate::pane::Selection;
 
@@ -127,10 +129,11 @@ impl FilePlace {
     /// Moves it through `edits`, made to its file in turn, which leave its
     /// text as `text`. Text put in where it is goes before it, so a line
     /// opened above its line takes it down with its line; on a character
-    /// replaced, it stays on what's put in its place.
-    pub(crate) fn edited(&mut self, edits: &[impl Borrow<Edit>], text: &Rope) {
+    /// replaced, it stays on what's put in its place; and in text moved,
+    /// it goes with it.
+    pub(crate) fn edited(&mut self, edits: &[Passing<'_>], text: &Rope) {
         for edit in edits {
-            self.follow(edit.borrow(), Bias::After);
+            self.follow(edit, Bias::After);
         }
         self.find_line(text);
     }
@@ -138,8 +141,10 @@ impl FilePlace {
     /// Moves its byte through `edit`, text put in where it is going after
     /// it if `bias` is [`Bias::Before`]. Its line and column are left for
     /// [`find_line`](Self::find_line).
-    fn follow(&mut self, edit: &Edit, bias: Bias) {
-        self.byte = edit.map_keeping(self.byte, bias);
+    fn follow(&mut self, edit: &Passing<'_>, bias: Bias) {
+        self.byte = (edit.moved)
+            .and_then(|moved| moved.place(self.byte))
+            .unwrap_or_else(|| edit.edit.map_keeping(self.byte, bias));
     }
 
     /// Works out the line and column from the byte.
@@ -169,6 +174,26 @@ impl FilePlace {
         self.byte = text.char_to_byte(text.byte_to_char(byte));
         self.find_line(text);
     }
+}
+
+/// An edit, as places are moved through it, with the text it moves whole
+/// if it moves any, as `:m` moves lines: worked out once for every place.
+pub(crate) struct Passing<'a> {
+    edit: &'a Edit,
+    moved: Option<Moved>,
+}
+
+/// `edits`, as places are moved through them.
+pub(crate) fn passing(edits: &[impl Borrow<Edit>]) -> Vec<Passing<'_>> {
+    (edits.iter())
+        .map(|edit| {
+            let edit = edit.borrow();
+            Passing {
+                edit,
+                moved: edit.moved(),
+            }
+        })
+        .collect()
 }
 
 /// Whether `mark` is one of a file's own: `a` to `z`, `.`, or `'`, where
@@ -231,15 +256,40 @@ impl Selected {
     /// Moves it through `edits`, made to its file in turn, which leave its
     /// text as `text`. Text put in where it starts is in it, and where it
     /// ends isn't, as Vim's columns would have it; but once all of it has
-    /// been deleted, text put back there is, as an undo puts it back.
-    fn edited(&mut self, edits: &[impl Borrow<Edit>], text: &Rope) {
+    /// been deleted, text put back there is, as an undo puts it back. In
+    /// text moved, its end goes with its last character, or once all of
+    /// it's been deleted, with its start.
+    ///
+    /// A selection of lines keeps the line its last character was on,
+    /// though that's deleted, as `=` takes away the indent the cursor was
+    /// in: the lines are what's selected.
+    fn edited(&mut self, edits: &[Passing<'_>], text: &Rope) {
+        let lines = self.shape.kind == Selection::Lines;
         for edit in edits {
-            let edit = edit.borrow();
             let gone = self.start.byte == self.end.byte;
+            let moved_end = edit.moved.and_then(|moved| {
+                if gone {
+                    moved.place(self.start.byte)
+                } else {
+                    moved.place(self.end.byte - 1).map(|last| last + 1)
+                }
+            });
             self.start.follow(edit, Bias::Before);
-            let bias = if gone { Bias::After } else { Bias::Before };
-            self.end.follow(edit, bias);
+            if lines && gone {
+                self.last.byte = self.start.byte;
+            } else if lines {
+                self.last.follow(edit, Bias::After);
+            }
+            if let Some(end) = moved_end {
+                self.end.byte = end;
+            } else {
+                let bias = if gone { Bias::After } else { Bias::Before };
+                self.end.follow(edit, bias);
+            }
             self.end.byte = self.end.byte.max(self.start.byte);
+        }
+        if lines && self.end.byte > self.start.byte {
+            self.end.byte = self.end.byte.max(next_char(text, self.last.byte));
         }
         self.settle(text);
     }
@@ -362,10 +412,11 @@ impl Marks {
         if edits.is_empty() {
             return;
         }
+        let edits = passing(edits);
         for (_, place) in self.list.iter_mut().filter(|(_, at)| at.is_in(file)) {
-            place.edited(edits, text);
+            place.edited(&edits, text);
         }
-        self.edited_selections(file, edits, text);
+        self.selections_edited(file, &edits, text);
     }
 
     /// Moves the selections kept for `file` through `edits`,
@@ -377,6 +428,10 @@ impl Marks {
         edits: &[impl Borrow<Edit>],
         text: &Rope,
     ) {
+        self.selections_edited(file, &passing(edits), text);
+    }
+
+    fn selections_edited(&mut self, file: File<'_>, edits: &[Passing<'_>], text: &Rope) {
         for kept in self
             .selections
             .iter_mut()

@@ -575,6 +575,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "background",
         what: ":keep runs a terminal's command again after a restart, and :keep always as it ends too",
     },
+    News {
+        id: "movemarks",
+        date: "2026-10-21",
+        lesson: "registers",
+        what: "Marks go with lines :m moves, so a binding of :m '>+1<CR>gv=gv moves the selection",
+    },
 ];
 
 impl News {

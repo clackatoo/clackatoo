@@ -409,6 +409,19 @@ fn dot_neither_selects_nor_marks() {
 }
 
 #[test]
+fn a_selection_of_lines_keeps_its_last_line_when_the_indent_its_end_was_in_goes() {
+    let mut setup = Setup::new("    a\n    b\nc\n");
+    setup.keys("Vj<Esc><lt><lt>");
+    assert_eq!(setup.text(), "    a\nb\nc\n");
+    setup.keys("gvd");
+    assert_eq!(setup.text(), "c\n");
+    // Its lines all deleted and put back, it's all of them again.
+    let mut setup = Setup::new("    a\n    b\nc\n");
+    setup.keys("Vjdugvd");
+    assert_eq!(setup.text(), "c\n");
+}
+
+#[test]
 fn a_files_editors_share_its_last_selection_and_each_file_keeps_its_own() {
     let mut setup = Setup::new(GRID);
     let mut other = Editor::new(BufferId(1), &setup.options);
