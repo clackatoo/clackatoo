@@ -1485,9 +1485,7 @@ impl Editor {
             return Done::REDRAW;
         }
         if stroke == Stroke::Escape && !self.keys.pending() {
-            self.mode = Mode::Normal;
-            self.anchor = None;
-            self.found = None;
+            self.escape();
             return Done::REDRAW;
         }
         // `q` stops a macro being recorded, whatever comes after.
@@ -1633,7 +1631,16 @@ impl Editor {
                 }
             },
             EditorAction::RepeatSubstitute { all } => self.repeat_substitute(all, copy, shared),
+            EditorAction::Escape => self.escape(),
         }
+    }
+
+    /// Esc in normal or visual mode, with nothing typed before it but a
+    /// count or a register: leaves visual mode, and forgets the match.
+    fn escape(&mut self) {
+        self.mode = Mode::Normal;
+        self.anchor = None;
+        self.found = None;
     }
 
     /// Notes `command` as the change being made, for `.`, if it's one: in

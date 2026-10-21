@@ -366,7 +366,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 
 Moving past the top of the view scrolls into history. In normal mode the view holds still while output arrives, so the cursor stays on its text. On the alternate screen the cursor moves over the screen only.
 
-The keys are read as an editor reads them, so a command half typed, as `y3` or `"a`, shows at the start of the bar until it's done, as Vim's `showcmd` shows it. A command a terminal doesn't take, as `dw`, `x`, `"ayy` or `fx`, does nothing, all its keys spent, as in a file Vim won't change: so after `d`, the next key is the command's too, `:` included. Esc after keys half typed only forgets them, as in Vim: `vg` and Esc is still in visual mode, and a second Esc leaves it.
+The keys are read as an editor reads them, so a command half typed, as `y3` or `"a`, shows at the start of the bar until it's done, as Vim's `showcmd` shows it. A command a terminal doesn't take, as `dw`, `x`, `"ayy` or `fx`, does nothing, all its keys spent, as in a file Vim won't change: so after `d`, the next key is the command's too, `:` included. Esc after keys half typed only forgets them, as in Vim: `vg` or `vi` and Esc is still in visual mode, and a second Esc leaves it. Esc after only a count or a register, as `v3` or `v"a`, does what Esc alone does, and leaves visual mode.
 
 ### Selecting and copying
 

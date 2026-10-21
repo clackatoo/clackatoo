@@ -2977,11 +2977,17 @@ fn ctrl_and_shift_with_left_and_right_are_words_and_words_of_anything_but_blanks
 }
 
 #[test]
-fn esc_after_keys_half_typed_only_forgets_them() {
-    let mut setup = Setup::new("one two\n");
-    setup.keys("vg<Esc>");
-    assert!(matches!(setup.editor.mode, Mode::Visual(_)));
-    assert!(!setup.editor.pending());
-    setup.keys("<Esc>");
-    assert_eq!(setup.editor.mode, Mode::Normal);
+fn esc_after_keys_half_typed_only_forgets_them_but_after_a_count_or_register_leaves() {
+    // As Neovim's, checked with `tests/nvim/check.lua`.
+    for (keys, visual) in [("vg", true), ("vi", true), ("v3", false), ("v\"a", false)] {
+        let mut setup = Setup::new("one two\n");
+        setup.keys(keys);
+        setup.keys("<Esc>");
+        assert_eq!(
+            matches!(setup.editor.mode, Mode::Visual(_)),
+            visual,
+            "{keys}"
+        );
+        assert!(!setup.editor.pending(), "{keys}");
+    }
 }

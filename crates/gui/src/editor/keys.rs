@@ -57,6 +57,9 @@ pub(crate) enum EditorAction {
     /// `&`: the last `:s` again on the cursor's line, without its flags;
     /// or `g&`, on every line, with them, and the last search's pattern.
     RepeatSubstitute { all: bool },
+    /// Esc after a count or a register: what Esc alone does, as Vim's
+    /// does, the count and register forgotten.
+    Escape,
 }
 
 /// How an editor reads keys: every command, and its own; `~` is an
@@ -79,6 +82,7 @@ impl Dialect for EditorKeys {
         _visual: bool,
     ) -> Option<Read<EditorAction>> {
         Some(match stroke {
+            Stroke::Escape => Read::Yes(EditorAction::Escape),
             // Ctrl+W `d`, or Ctrl+W Ctrl+D, as Neovim's.
             Stroke::Char {
                 ch: 'w',

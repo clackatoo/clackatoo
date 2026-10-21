@@ -105,7 +105,9 @@ impl Dialect for TerminalKeys {
     }
 
     fn takes(&self, command: &Command<Self::Own>) -> bool {
-        if command.register.is_some() {
+        // A register is for nothing a terminal takes, but Esc after one
+        // still does what Esc does, as in Vim.
+        if command.register.is_some() && command.action != Action::Own(TerminalAction::Escape) {
             return false;
         }
         match command.action {

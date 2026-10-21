@@ -2738,16 +2738,17 @@ mod tests {
     }
 
     #[test]
-    fn esc_after_keys_half_typed_only_forgets_them() {
+    fn esc_after_keys_half_typed_only_forgets_them_but_after_a_count_or_register_leaves() {
+        // As Neovim's, checked with check.lua.
         let terminal = terminal("one two\r\nthree");
-        let mut pane = pane(&terminal);
-        normal_mode(&mut pane);
-        keys(&mut pane, "vg");
-        named(&mut pane, NamedKey::Escape);
-        assert_eq!(pane.mode, Mode::Visual(Selection::Characters));
-        assert!(!pane.pending());
-        named(&mut pane, NamedKey::Escape);
-        assert_eq!(pane.mode, Mode::Normal);
+        for (keys_, visual) in [("vg", true), ("vi", true), ("v3", false), ("v\"a", false)] {
+            let mut pane = pane(&terminal);
+            normal_mode(&mut pane);
+            keys(&mut pane, keys_);
+            named(&mut pane, NamedKey::Escape);
+            assert_eq!(matches!(pane.mode, Mode::Visual(_)), visual, "{keys_}");
+            assert!(!pane.pending(), "{keys_}");
+        }
     }
 
     #[test]
