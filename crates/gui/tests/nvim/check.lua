@@ -165,6 +165,50 @@ local cases = {
   { name = 'yk sol', lines = eight, at = { 3, 4 }, keys = 'yk', set = 'sol et sw=4 ts=4' },
   { name = 'ygg sol', lines = eight, at = { 4, 3 }, keys = 'ygg', set = 'sol et sw=4 ts=4' },
   { name = 'yy sol', lines = eight, at = { 3, 4 }, keys = 'yy', set = 'sol et sw=4 ts=4' },
+  -- Stage 2's review: pages put the cursor at the new view's top or
+  -- bottom whenever the view moved, and leave it where it was if it
+  -- couldn't.
+  { name = '<C-f> from low in view', lines = sixty, at = { 20, 4 }, view = { height = 10, top = 11 }, keys = '<C-f>' },
+  { name = '<PageUp> from the top line', lines = sixty, at = { 21, 4 }, view = { height = 10, top = 21 }, keys = '<PageUp>' },
+  { name = '<PageUp> near the top', lines = sixty, at = { 8, 4 }, view = { height = 10, top = 4 }, keys = '<PageUp>' },
+  { name = '<PageUp> at the top', lines = sixty, at = { 5, 4 }, view = { height = 10, top = 1 }, keys = '<PageUp>' },
+  { name = '<PageUp> at the top sol', lines = sixty, at = { 6, 4 }, view = { height = 10, top = 1 }, keys = '<PageUp>', set = 'sol' },
+  { name = '2<PageUp>', lines = sixty, at = { 35, 4 }, view = { height = 10, top = 31 }, keys = '2<PageUp>' },
+  { name = '<C-f> with the end in view', lines = sixty, at = { 55, 4 }, view = { height = 10, top = 51 }, keys = '<C-f>' },
+  { name = '<C-f> so=3 near the end', lines = sixty, at = { 50, 4 }, view = { height = 10, top = 45 }, keys = '<C-f>', set = 'scrolloff=3' },
+  { name = '<C-f> short', lines = { 'a', 'b', 'c' }, at = { 1, 0 }, view = { height = 10, top = 1 }, keys = '<C-f>' },
+  { name = '<PageUp> wrapped', lines = wrapping, at = { 24, 2 }, view = { height = 10, top = 21, columns = 20 }, keys = '<PageUp>' },
+  { name = '<C-f> wrapped onto a long line', lines = wrapping, at = { 13, 2 }, view = { height = 10, top = 12, columns = 20 }, keys = '<C-f>' },
+  { name = '<C-b> wrapped from the top line', lines = wrapping, at = { 30, 2 }, view = { height = 10, top = 30, columns = 20 }, keys = '<C-b>' },
+  { name = '3zt sol', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '3zt', set = 'sol' },
+  -- Half pages don't scroll past the text's end, and go as far as the
+  -- view at most.
+  { name = '<C-d> near the end', lines = sixty, at = { 50, 4 }, view = { height = 10, top = 48 }, keys = '<C-d>' },
+  { name = '<C-d> with the end in view', lines = sixty, at = { 55, 4 }, view = { height = 10, top = 51 }, keys = '<C-d>' },
+  { name = '<C-d> short', lines = { 'a', 'b', 'c' }, at = { 1, 0 }, view = { height = 10, top = 1 }, keys = '<C-d>' },
+  { name = '<C-u> near the top', lines = sixty, at = { 8, 4 }, view = { height = 10, top = 3 }, keys = '<C-u>' },
+  { name = '20<C-d>', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '20<C-d>' },
+  { name = '<C-u> wrapped', lines = wrapping, at = { 24, 2 }, view = { height = 10, top = 21, columns = 20 }, keys = '<C-u>' },
+  { name = '<C-d> wrapped onto a long line', lines = wrapping, at = { 13, 2 }, view = { height = 10, top = 12, columns = 20 }, keys = '<C-d>' },
+  -- H, M and L with a scrolloff of half the view or more, and taken
+  -- by an operator with a count past the view.
+  { name = 'H so=4', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = 'H', set = 'scrolloff=4' },
+  { name = 'L so=4', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = 'L', set = 'scrolloff=4' },
+  { name = 'H so=5', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = 'H', set = 'scrolloff=5' },
+  { name = 'L so=5', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = 'L', set = 'scrolloff=5' },
+  { name = 'L so=10', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = 'L', set = 'scrolloff=10' },
+  { name = '99L', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '99L' },
+  { name = 'd99L', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = 'd99L' },
+  { name = 'd99H', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = 'd99H' },
+  -- `:d` goes to the first non-blank whatever startofline says.
+  { name = ':3d', lines = eight, at = { 1, 0 }, keys = ':3d<CR>' },
+  { name = ':d', lines = eight, at = { 4, 4 }, keys = ':d<CR>' },
+  -- y'a leaves the cursor at the mark's line's first non-blank.
+  { name = "y'a", lines = eight, at = { 2, 4 }, keys = "ma3jy'a" },
+  -- zt, zz and zb with a count: that line at the top, middle or bottom.
+  { name = '5zt', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '5zt' },
+  { name = '30zz', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '30zz' },
+  { name = '40zb', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '40zb' },
 }
 
 -- Quiet: "3 fewer lines" would land in what's printed, as would a
