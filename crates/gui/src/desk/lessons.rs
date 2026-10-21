@@ -33,11 +33,11 @@ use crate::editor::{BufferCopy, Lit, Prose, Stretch};
 use crate::finder::{self, Finder, LocalItem};
 use crate::input::{KeptPress, KeyPress};
 use crate::keymap::KeyMode;
-use crate::pane::{Mode, Selection};
 use crate::render::HighlightKind;
 use crate::tutor::check::{self, Facts, Focus, Kind};
 use crate::tutor::news::NEWS;
 use crate::tutor::{self, Io, Lesson, Rendered, Setup, Start, State};
+use crate::vim::{Mode, Selection};
 
 /// How long a step's heading is lit as it ticks off.
 const TICK: Duration = Duration::from_millis(900);

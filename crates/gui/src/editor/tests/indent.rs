@@ -6,7 +6,7 @@ use std::time::Duration;
 use clackatoo_protocol::{Answer, Construct, LineIndent, Piece, Query};
 
 use super::{Mode, Setup};
-use crate::pane::Selection;
+use crate::vim::Selection;
 
 /// The last question how lines should be indented: its number, the byte
 /// it asks about, and how many lines, as the text is now.

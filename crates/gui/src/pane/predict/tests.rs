@@ -14,8 +14,9 @@ use winit::keyboard::{Key, KeyLocation, NamedKey};
 use super::{Guess, Input, PredictEcho, Predictor, Tally};
 use crate::input::{KeyPress, Modifiers};
 use crate::options::Options;
-use crate::pane::{Mode, Pane};
+use crate::pane::Pane;
 use crate::screen::Screen;
+use crate::vim::Mode;
 
 /// A prompt, marked as a shell with shell integration marks it.
 const PROMPT: &str = "\x1b]133;A\x07$ ";

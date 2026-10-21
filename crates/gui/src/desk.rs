@@ -32,7 +32,8 @@ use crate::keymap::{Chord, Pressed};
 use crate::layout::{Area, Direction, Divider, Placement};
 use crate::options::Options;
 use crate::other::{OtherPane, Why};
-use crate::pane::{self, Copy, Mode, Pane, PaneMouse, Selection};
+use crate::pane::{Copy, Pane, PaneMouse};
+use crate::vim::{self, Mode, Selection};
 use bindings::Binding;
 pub(crate) use updating::UpdateAsked;
 
@@ -1879,7 +1880,7 @@ impl Desk {
         };
         // Esc pressed cancels it; one a macro or binding types waits its
         // turn.
-        let escape = *press.key == Key::Named(NamedKey::Escape) || pane::enters_normal_mode(press);
+        let escape = *press.key == Key::Named(NamedKey::Escape) || vim::enters_normal_mode(press);
         let cancel = escape && !typing && !self.key_from_frame();
         if let Some(redraw) = self.hold_while_waiting(cancel, held) {
             return redraw;
@@ -1894,7 +1895,7 @@ impl Desk {
             self.disarm_focused_chat();
             // Ctrl+; and its kin close the command line, and go on to the
             // pane, which stays in normal mode.
-            if !pane::enters_normal_mode(press) {
+            if !vim::enters_normal_mode(press) {
                 self.input_key(press);
                 return true;
             }
@@ -1902,7 +1903,7 @@ impl Desk {
         } else if self.finding() {
             // And so the finder.
             self.disarm_focused_chat();
-            if !pane::enters_normal_mode(press) {
+            if !vim::enters_normal_mode(press) {
                 self.finder_key(press);
                 return true;
             }
@@ -1982,7 +1983,7 @@ impl Desk {
                 Pressed::Unbound => {}
             }
         }
-        if pane::enters_normal_mode(press) {
+        if vim::enters_normal_mode(press) {
             self.normal_mode_asked();
         }
         let had_message = self.message.take().is_some() || asked;

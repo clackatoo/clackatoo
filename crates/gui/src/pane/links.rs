@@ -339,8 +339,9 @@ mod tests {
     use super::*;
     use crate::input::KeyPress;
     use crate::motion::Cursor;
-    use crate::pane::{Mode, PaneMouse};
+    use crate::pane::PaneMouse;
     use crate::render::HighlightKind;
+    use crate::vim::Mode;
 
     const CTRL: Modifiers = Modifiers {
         shift: false,

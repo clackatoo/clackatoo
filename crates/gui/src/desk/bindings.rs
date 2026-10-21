@@ -497,7 +497,7 @@ impl Desk {
         // count or not; after a count, with as many from the cursor's, as
         // Vim's `5:` starts `:.,.+4`.
         let visual = (self.focused_editor())
-            .is_some_and(|(editor, _)| matches!(editor.mode, crate::pane::Mode::Visual(_)));
+            .is_some_and(|(editor, _)| matches!(editor.mode, crate::vim::Mode::Visual(_)));
         let text = match (&purpose, self.bound_count.take()) {
             (Purpose::Command, Some(count)) if self.focused_editor().is_some() && !visual => {
                 match count {
@@ -563,9 +563,9 @@ impl Desk {
                 return KeyMode::Prompt;
             }
             return match editor.mode {
-                crate::pane::Mode::Insert => KeyMode::Insert,
-                crate::pane::Mode::Normal => KeyMode::Normal,
-                crate::pane::Mode::Visual(_) => KeyMode::Visual,
+                crate::vim::Mode::Insert => KeyMode::Insert,
+                crate::vim::Mode::Normal => KeyMode::Normal,
+                crate::vim::Mode::Visual(_) => KeyMode::Visual,
             };
         }
         if let Some(explorer) = self.focused_explorer() {
@@ -592,9 +592,9 @@ impl Desk {
             return KeyMode::Prompt;
         }
         match pane.mode {
-            crate::pane::Mode::Insert => KeyMode::Insert,
-            crate::pane::Mode::Normal => KeyMode::Normal,
-            crate::pane::Mode::Visual(_) => KeyMode::Visual,
+            crate::vim::Mode::Insert => KeyMode::Insert,
+            crate::vim::Mode::Normal => KeyMode::Normal,
+            crate::vim::Mode::Visual(_) => KeyMode::Visual,
         }
     }
 

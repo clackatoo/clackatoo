@@ -177,7 +177,7 @@ impl Desk {
             return false;
         };
         let mut redraw = false;
-        for stroke in crate::editor::strokes(press, false) {
+        for stroke in crate::vim::strokes(press, false) {
             redraw |= browser.stroke(stroke);
         }
         for ask in browser.take_asks() {

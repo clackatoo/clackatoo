@@ -5,9 +5,10 @@
 use clackatoo_protocol::{BufferId, BufferUpdate};
 
 use super::Setup;
-use crate::editor::{Editor, Mode};
+use crate::editor::Editor;
 use crate::fonts::Fonts;
 use crate::options::{MarkdownView, Options};
+use crate::vim::Mode;
 
 /// A pane 800 by 480 pixels, as the tests draw it in.
 const SIZE: [f32; 2] = [800.0, 480.0];

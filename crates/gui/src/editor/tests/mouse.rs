@@ -9,7 +9,7 @@ use clackatoo_protocol::Size;
 
 use super::{Mode, Setup};
 use crate::motion::Point;
-use crate::pane::Selection;
+use crate::vim::Selection;
 
 /// The four cells of line numbers left of the text, in a [`Setup`].
 const GUTTER: i64 = 4;

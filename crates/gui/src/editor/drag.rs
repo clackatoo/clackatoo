@@ -42,7 +42,7 @@ use super::text::Text;
 use super::{Asking, BufferCopy, Editor, Mode, on_character, wrap};
 use crate::motion::{Cursor, Point, last_row, rows_down, rows_up};
 use crate::objects::Object;
-use crate::pane::Selection;
+use crate::vim::Selection;
 
 /// How long a frame is: the view never scrolls by itself more often.
 const FRAME: Duration = Duration::from_millis(16);

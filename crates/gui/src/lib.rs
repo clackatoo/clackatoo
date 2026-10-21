@@ -55,6 +55,7 @@ mod session;
 mod start;
 mod tutor;
 mod updates;
+mod vim;
 
 #[cfg(test)]
 mod tests;

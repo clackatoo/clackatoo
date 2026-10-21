@@ -155,7 +155,7 @@ impl Desk {
             return false;
         };
         let mut redraw = false;
-        for stroke in crate::editor::strokes(press, false) {
+        for stroke in crate::vim::strokes(press, false) {
             redraw |= review.stroke(stroke);
         }
         let asks = review.take_asks();
@@ -419,10 +419,10 @@ impl Desk {
     pub(super) fn comment_here(&mut self) {
         if self.focused_review().is_some() {
             if let Some(pane) = self.shown.map(|shown| shown.pane) {
-                let press = crate::editor::Stroke::char('g');
+                let press = crate::vim::Stroke::char('g');
                 if let Some(review) = self.reviews.panes.get_mut(&pane) {
                     review.stroke(press);
-                    review.stroke(crate::editor::Stroke::char('c'));
+                    review.stroke(crate::vim::Stroke::char('c'));
                     for ask in review.take_asks() {
                         self.review_asked(pane, ask);
                     }

@@ -33,7 +33,7 @@ use clackatoo_term::{Row, RowBuilder};
 use super::listing::{self, Folder, Original, Problem, Step};
 use super::{Ask, Explorer, FENCED, Opening, join, parent_of, under};
 use crate::colors;
-use crate::editor::Stroke;
+use crate::vim::Stroke;
 
 /// Folders' listings being edited as text, by the explorer's pane.
 #[derive(Debug)]

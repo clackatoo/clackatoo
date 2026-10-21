@@ -35,7 +35,8 @@ use super::card::Card;
 use super::paint::{AGENTS, FOLD, How, ITEMS, PROMPT, Picked, Position, TextKey, control};
 use super::{ChatView, Input};
 use crate::input::KeyPress;
-use crate::pane::{Copy, Selection};
+use crate::pane::Copy;
+use crate::vim::Selection;
 
 /// The first key of a two-key command, waiting for the second.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -971,7 +972,8 @@ mod tests {
     use crate::chat::ChatView;
     use crate::chat::fixtures::{fonts, paint, read, read_named, talk};
     use crate::chat::paint::{FOLD, ITEMS, PROMPT, TextKey};
-    use crate::pane::{Copy, Selection};
+    use crate::pane::Copy;
+    use crate::vim::Selection;
 
     fn reading(node: clackatoo_protocol::ChatNode) -> (ChatView, crate::fonts::Fonts) {
         let mut fonts = fonts();

@@ -47,11 +47,12 @@ use clackatoo_protocol::{
 
 use super::jumps::FolderPlace;
 use super::{Asked, Desk};
-use crate::editor::{BufferCopy, Editor, Stroke};
+use crate::editor::{BufferCopy, Editor};
 use crate::explorer::{Ask, Explorer, Opening, Planned, View, listing};
 use crate::input::KeyPress;
 use crate::layout::Placement;
-use crate::pane::Mode;
+use crate::vim::Mode;
+use crate::vim::Stroke;
 
 /// How many panes focused are remembered, the latest first, to know where
 /// a file picked in an explorer opens.
@@ -383,7 +384,7 @@ impl Desk {
             return false;
         };
         let mut redraw = false;
-        for stroke in crate::editor::strokes(press, explorer.prompting()) {
+        for stroke in crate::vim::strokes(press, explorer.prompting()) {
             redraw |= explorer.stroke(stroke);
         }
         let asks = explorer.take_asks();
@@ -802,7 +803,7 @@ impl Desk {
         if !normal {
             return false;
         }
-        let strokes = crate::editor::strokes(press, false);
+        let strokes = crate::vim::strokes(press, false);
         let char = |ch| [Stroke::Char { ch, ctrl: false }];
         if self.is_explorer(pane) && after_g && strokes == char('.') {
             self.with_editor(pane, |editor, _| editor.forget_typed());

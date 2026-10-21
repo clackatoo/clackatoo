@@ -19,7 +19,7 @@ use clackatoo_protocol::{
     ChatAction, ClientMessage, CursorShape, Match, Request, Response, Size, TerminalId, ViewUpdate,
 };
 use clackatoo_term::{Row, RowBuilder, Underline};
-use winit::keyboard::{Key, KeyCode, NamedKey};
+use winit::keyboard::{Key, NamedKey};
 
 use crate::chat::{ChatView, TextPaint};
 use crate::fonts::Fonts;
@@ -29,6 +29,7 @@ use crate::motion::{Block, Cursor, Lines, Motion, Point};
 use crate::options::{BlockMarks, Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 use crate::screen::Screen;
+use crate::vim::{Mode, Selection, enters_normal_mode, is_ctrl_backslash};
 
 mod links;
 mod marks;
@@ -39,15 +40,6 @@ mod predict;
 
 pub(crate) use mouse::{Copy, PaneMouse};
 use predict::Predictor;
-
-/// Whether keys go to the program or drive clackatoo.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Mode {
-    Insert,
-    Normal,
-    /// Selecting, from where `v` or `V` was pressed to the cursor.
-    Visual(Selection),
-}
 
 /// The first key of a two-key command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,18 +71,6 @@ struct Flash {
     end: Point,
     kind: Selection,
     until: Instant,
-}
-
-/// What a visual selection covers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Selection {
-    /// Characters from one end to the other.
-    Characters,
-    /// Whole lines.
-    Lines,
-    /// A block of columns, from one corner to the other, as Ctrl+V selects
-    /// (see [`crate::motion::Block`]).
-    Block,
 }
 
 /// The fewest rows a pane shows the pill saying it's scrolled back in:
@@ -1351,24 +1331,6 @@ fn past_text(row: &Row) -> usize {
     (row.text_end() + 1).min(row.width())
 }
 
-/// Whether `press` is Ctrl+\\.
-fn is_ctrl_backslash(press: &KeyPress<'_>) -> bool {
-    press.modifiers.ctrl
-        && !press.modifiers.alt
-        && matches!(press.key, Key::Character(text) if text == "\\")
-}
-
-/// Whether `press` is one of the keys that switch to normal mode from
-/// anywhere: Ctrl+;, Shift+Esc or Ctrl+\\.
-pub(crate) fn enters_normal_mode(press: &KeyPress<'_>) -> bool {
-    let modifiers = press.modifiers;
-    let shift_escape = modifiers.shift && *press.key == Key::Named(NamedKey::Escape);
-    // By its place on the keyboard, so it's the same keys on layouts
-    // where `;` takes Shift.
-    let ctrl_semicolon = modifiers.ctrl && !modifiers.alt && press.code == Some(KeyCode::Semicolon);
-    shift_escape || ctrl_semicolon || is_ctrl_backslash(press)
-}
-
 /// History and screen as one document, for the normal-mode cursor: history
 /// lines by number, then the screen's rows numbered on from the history's
 /// end.
@@ -1422,7 +1384,7 @@ impl<'d> Lines for Document<'d> {
 mod tests {
     use clackatoo_protocol::{HistoryLine, HistoryLines, Line, LinkTarget, View};
     use clackatoo_term::{Config, Terminal};
-    use winit::keyboard::KeyLocation;
+    use winit::keyboard::{KeyCode, KeyLocation};
 
     use super::*;
     use crate::input::Modifiers;

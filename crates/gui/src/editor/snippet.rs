@@ -29,7 +29,7 @@ use super::complete::{Completion, Splice, splice};
 use super::text::Text;
 use super::{BufferCopy, Done, Editor, Stroke, Typed, indent_of, word_at};
 use crate::motion::{Cursor, Motion};
-use crate::pane::Mode;
+use crate::vim::Mode;
 
 /// A place to type, in the text.
 #[derive(Clone, Debug)]

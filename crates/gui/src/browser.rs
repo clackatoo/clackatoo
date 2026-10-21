@@ -21,8 +21,8 @@ use zune_core::options::DecoderOptions;
 use zune_jpeg::JpegDecoder;
 
 use crate::colors;
-use crate::editor::Stroke;
 use crate::render::Image;
+use crate::vim::Stroke;
 
 /// How many lines the pane's words take, above the picture.
 pub(crate) const STATUS_ROWS: u16 = 2;

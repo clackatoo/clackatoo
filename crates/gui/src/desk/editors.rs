@@ -24,12 +24,13 @@ use clackatoo_text::Edit;
 use super::jumps::{FilePlace, Jump, Jumps};
 use super::{Asked, Desk, Purpose};
 use crate::command::Place;
-use crate::editor::{BufferCopy, Done, Editor, GiveUp, Heard, HunkAction, Marks, Shared, Stroke};
+use crate::editor::{BufferCopy, Done, Editor, GiveUp, Heard, HunkAction, Marks, Shared};
 use crate::explorer::Explorer;
 use crate::finder::Finder;
 use crate::input::{KeptPress, KeyPress};
 use crate::options::{Clipboard, Options};
 use crate::pane::Copy;
+use crate::vim::Stroke;
 
 /// The editors, by the pane each is, and the buffers they show.
 #[derive(Debug, Default)]

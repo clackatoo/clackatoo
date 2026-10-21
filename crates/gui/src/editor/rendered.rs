@@ -36,7 +36,6 @@ use clackatoo_protocol::{Code, Span};
 use clackatoo_text::Rope;
 use parley::LayoutContext;
 
-use super::keys::Stroke;
 use super::{BufferCopy, Done, Editor, Shared};
 use crate::fonts::Fonts;
 use crate::markdown::colours::Colours;
@@ -45,7 +44,8 @@ use crate::markdown::layout::{
 };
 use crate::markdown::tables::Cells;
 use crate::markdown::{self, BlockKind};
-use crate::pane::Mode;
+use crate::vim::Mode;
+use crate::vim::Stroke;
 
 /// The widest the column of text gets, in ems: as a chat's, about as wide
 /// as a printed page's lines, and wide enough for 80 columns of code.

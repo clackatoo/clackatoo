@@ -29,7 +29,7 @@ use super::substitute::{self, Bytes, Flags, Replacement};
 use super::{BufferCopy, Done, Editor, Prompt, Register, Searched, Shared, Text, Wrote, keys};
 use crate::keymap::read_macro;
 use crate::motion::{Cursor, Motion, Point};
-use crate::pane::Mode;
+use crate::vim::Mode;
 
 /// The deepest macros typed by `:normal` type each other, as Vim's
 /// `maxmapdepth`.
@@ -900,8 +900,8 @@ impl Editor {
     /// A key typed while `:s///c` asks about a match: `y` replaces it, `l`
     /// replaces it and stops, `n` leaves it, `a` replaces it and all the
     /// rest, `q` and Esc stop, and Ctrl+E and Ctrl+Y scroll.
-    pub(super) fn confirm_stroke(&mut self, stroke: keys::Stroke, copy: &mut BufferCopy) {
-        use keys::Stroke;
+    pub(super) fn confirm_stroke(&mut self, stroke: crate::vim::Stroke, copy: &mut BufferCopy) {
+        use crate::vim::Stroke;
         match stroke {
             Stroke::Char {
                 ch: 'y',
@@ -1137,7 +1137,7 @@ impl Editor {
         shared: &mut Shared,
     ) -> Result<(), String> {
         if self.mode != Mode::Normal {
-            self.stroke(keys::Stroke::Escape, copy, shared);
+            self.stroke(crate::vim::Stroke::Escape, copy, shared);
         }
         let mut pending: Vec<std::vec::IntoIter<crate::keymap::Chord>> =
             vec![read_macro(keys).into_iter()];
@@ -1182,7 +1182,7 @@ impl Editor {
         }
         self.typed.clear();
         if self.mode != Mode::Normal {
-            self.stroke(keys::Stroke::Escape, copy, shared);
+            self.stroke(crate::vim::Stroke::Escape, copy, shared);
         }
         Ok(())
     }

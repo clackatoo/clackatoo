@@ -37,7 +37,7 @@ use super::keys::{Action, Command, Operator, Target};
 use super::{BufferCopy, Done, Editor, MAX_INDENT, Marks, Shared, indent_of};
 use crate::motion::{Cursor, Motion, Point};
 use crate::objects::Object;
-use crate::pane::Mode;
+use crate::vim::Mode;
 
 /// The most new lines kept waiting for their indent to be put right: an
 /// answer that never comes, as one lost with a connection, isn't waited

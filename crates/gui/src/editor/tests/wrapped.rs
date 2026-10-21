@@ -633,7 +633,7 @@ fn what_is_laid_out_follows_edits_undos_and_redos_as_laid_out_afresh() {
             let fresh = Laid::new(text.line_text(at), setup.editor.indent.tabstop);
             laid.assert_as(&fresh, &format!("after {keys}, line {at}"));
             if let Some(wrapping) = wrapping
-                && setup.editor.mode != crate::pane::Mode::Insert
+                && setup.editor.mode != crate::vim::Mode::Insert
             {
                 assert_eq!(
                     *text.screen_rows(at),

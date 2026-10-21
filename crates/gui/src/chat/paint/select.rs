@@ -26,8 +26,8 @@ use crate::chat::card::Card;
 use crate::chat::markdown::{self, BlockKind};
 use crate::chat::{Brush, ChatView, Hit, Tone};
 use crate::fonts::Fonts;
-use crate::pane::Selection;
 use crate::render::{Fill, Ink, Paint};
+use crate::vim::Selection;
 
 /// One block of the conversation's text: a block of a message, the line
 /// a turn's work folds under, or a line of a card.

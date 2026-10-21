@@ -24,8 +24,8 @@ use winit::keyboard::{Key, NamedKey};
 
 use super::Desk;
 use crate::input::KeyPress;
-use crate::pane::Mode;
 use crate::render::mono_width;
+use crate::vim::Mode;
 
 /// What the offer says after the command, in full, and in a pane too
 /// narrow for that.

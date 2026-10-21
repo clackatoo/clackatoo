@@ -71,7 +71,6 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::{Answer, BufferId, Edit, FileLocation, Query, Size, Trigger};
 use clackatoo_term::{Row, RowBuilder, Style};
 use clackatoo_text::{Bias, Diagnostic, Hunk};
-use winit::keyboard::{Key, NamedKey};
 
 use actions::{ActionMenu, MenuKey, MenuStroke};
 pub use bench::EditorBench;
@@ -86,7 +85,6 @@ pub(crate) use ex::is_editor_command;
 #[cfg(test)]
 pub(crate) use hints::HINTS_WAIT;
 use kept::Kept;
-pub(crate) use keys::Stroke;
 use keys::{Action, Command, Entry, Operator, Parsed, Target, ViewAt};
 pub(crate) use marks::{File, FilePlace, Marks, passing};
 #[cfg(test)]
@@ -116,8 +114,9 @@ use crate::motion::{
 };
 use crate::objects::Object;
 use crate::options::{Case, CompleteAccept, Options};
-use crate::pane::{Mode, Selection, corners, enters_normal_mode};
+use crate::pane::corners;
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
+use crate::vim::{Mode, Selection, Stroke, strokes};
 
 /// How long text copied stays highlighted, as in a terminal's normal mode.
 const FLASH: Duration = Duration::from_millis(150);
@@ -5376,53 +5375,6 @@ fn after_line(builder: &mut RowBuilder, end: usize, width: usize, said: &[(&str,
             builder.push(text, style, true);
         }
     }
-}
-
-pub(crate) fn strokes(press: &KeyPress<'_>, typing: bool) -> Vec<Stroke> {
-    if enters_normal_mode(press) {
-        return vec![Stroke::Escape];
-    }
-    let modifiers = press.modifiers;
-    if modifiers.alt {
-        return Vec::new();
-    }
-    let named = match press.key {
-        Key::Named(NamedKey::Escape) => Some(Stroke::Escape),
-        Key::Named(NamedKey::Enter) => Some(Stroke::Enter),
-        Key::Named(NamedKey::Tab) if modifiers.shift => Some(Stroke::BackTab),
-        Key::Named(NamedKey::Tab) => Some(Stroke::Tab),
-        Key::Named(NamedKey::Backspace) => Some(Stroke::Backspace),
-        Key::Named(NamedKey::Delete) => Some(Stroke::Delete),
-        Key::Named(NamedKey::ArrowLeft) => Some(Stroke::Left),
-        Key::Named(NamedKey::ArrowRight) => Some(Stroke::Right),
-        Key::Named(NamedKey::ArrowUp) => Some(Stroke::Up),
-        Key::Named(NamedKey::ArrowDown) => Some(Stroke::Down),
-        Key::Named(NamedKey::Home) => Some(Stroke::Home),
-        Key::Named(NamedKey::End) => Some(Stroke::End),
-        Key::Named(NamedKey::PageUp) => Some(Stroke::PageUp),
-        Key::Named(NamedKey::PageDown) => Some(Stroke::PageDown),
-        Key::Named(NamedKey::Space) if !modifiers.ctrl => Some(Stroke::char(' ')),
-        Key::Named(NamedKey::Space) => Some(Stroke::ctrl(' ')),
-        _ => None,
-    };
-    if let Some(named) = named {
-        return vec![named];
-    }
-    let Key::Character(key) = press.key else {
-        return Vec::new();
-    };
-    if modifiers.ctrl {
-        return key.chars().next().map(Stroke::ctrl).into_iter().collect();
-    }
-    let text = if typing {
-        press.text.unwrap_or(key)
-    } else {
-        key
-    };
-    text.chars()
-        .filter(|ch| !ch.is_control())
-        .map(Stroke::char)
-        .collect()
 }
 
 /// `at`, put on a character of `text`, as the cursor is in normal and

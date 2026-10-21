@@ -51,7 +51,7 @@ use super::registers::Register;
 use super::text::Text;
 use super::{BufferCopy, Editor, Mode, next_char, on_character};
 use crate::motion::{Cursor, Motion, Point};
-use crate::pane::Selection;
+use crate::vim::Selection;
 
 /// What the bar says when a change would join a listing's lines.
 pub(super) const JOINS_ENTRIES: &str = "a listing's lines can't be joined: act on whole lines";

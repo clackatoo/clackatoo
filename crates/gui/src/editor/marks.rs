@@ -26,7 +26,7 @@ use std::borrow::Borrow;
 use clackatoo_protocol::MachineId;
 use clackatoo_text::{Bias, Edit, Moved, Rope};
 
-use crate::pane::Selection;
+use crate::vim::Selection;
 
 /// A file, as places are kept in it: its path, on the machine it's on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -41,7 +41,7 @@ use super::text::{Laid, Text, tab_end};
 use super::visual::Extent;
 use super::{BufferCopy, Editor, FLASH, Mode, on_character};
 use crate::motion::{Block, Cursor, Point};
-use crate::pane::Selection;
+use crate::vim::Selection;
 
 /// What the bar says when a block would go past a listing's end.
 pub(super) const PAST_LISTING: &str =

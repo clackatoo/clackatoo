@@ -6,7 +6,7 @@
 use clackatoo_protocol::{BufferId, Size};
 
 use super::{BufferCopy, Editor, Mode, Setup};
-use crate::pane::Selection;
+use crate::vim::Selection;
 
 /// Six lines of eight characters, each different.
 const GRID: &str = "abcdefgh\nijklmnop\nqrstuvwx\nyz012345\n6789ABCD\nEFGHIJKL\n";

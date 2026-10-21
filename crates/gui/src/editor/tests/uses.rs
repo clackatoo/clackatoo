@@ -243,7 +243,7 @@ fn gq_on_a_selection_is_formatted_as_its_language_server_does() {
     // From the first line's start to the last one's end, for the desk to
     // ask, leaving visual mode, the cursor at its start.
     assert_eq!(setup.editor.take_format_asked(), Some((4, 15)));
-    assert_eq!(setup.editor.mode, crate::pane::Mode::Normal);
+    assert_eq!(setup.editor.mode, crate::vim::Mode::Normal);
     assert_eq!(setup.cursor(), (1, 0));
     // A selection of characters, exactly.
     setup.keys("lvl");

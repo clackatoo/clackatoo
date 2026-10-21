@@ -28,8 +28,8 @@ pub(crate) mod recall;
 
 use winit::keyboard::{Key, NamedKey};
 
-use crate::editor::Stroke;
 use crate::input::KeyPress;
+use crate::vim::Stroke;
 
 /// The caret, drawn in the line's text where it is.
 pub(crate) const CARET: char = '▏';

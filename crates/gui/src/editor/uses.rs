@@ -19,8 +19,8 @@ use clackatoo_protocol::{Answer, Query, Use, UseKind};
 
 use super::{BufferCopy, Editor, word_at};
 use crate::motion::Point;
-use crate::pane::Mode;
 use crate::render::{Highlight, HighlightKind};
+use crate::vim::Mode;
 
 /// How long the cursor rests on a name before its uses are asked for: as
 /// long as a glance, so moving through the text asks nothing.

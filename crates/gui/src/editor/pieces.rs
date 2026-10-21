@@ -29,7 +29,7 @@ use super::keys::{Action, Target};
 use super::{BufferCopy, Change, Command, Done, Editor, Marks, Shared, Stroke};
 use crate::motion::Cursor;
 use crate::objects::Object;
-use crate::pane::{Mode, Selection};
+use crate::vim::{Mode, Selection};
 
 /// How long a command waits for its answer before it's given up on.
 pub(crate) const PATIENCE: Duration = Duration::from_secs(1);

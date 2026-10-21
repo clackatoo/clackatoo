@@ -4,8 +4,8 @@
 //! clackatoo differs on purpose, which says why.
 
 use super::{Mode, Register, Setup, Wrote};
-use crate::pane::Selection;
 use crate::render::HighlightKind;
+use crate::vim::Selection;
 
 const SIX: &str = "abcdef\nabcdef\nabcdef\n";
 const FOUR: &str = "abcdef\nabcdef\nabcdef\nabcdef\n";

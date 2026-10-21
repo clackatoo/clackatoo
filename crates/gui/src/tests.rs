@@ -1207,7 +1207,8 @@ fn a_chat_pane_sends_what_is_typed_and_esc_leaves_insert_mode() {
     use winit::keyboard::{Key, KeyLocation, NamedKey};
 
     use crate::input::{KeyPress, Modifiers};
-    use crate::pane::{Mode, Pane};
+    use crate::pane::Pane;
+    use crate::vim::Mode;
 
     let press = |pane: &mut Pane, key: Key, text: Option<&str>| {
         pane.key(&KeyPress {
@@ -2189,8 +2190,8 @@ fn grep_finder_view(layout: &crate::finder::view::Layout) -> crate::finder::view
 fn renders_an_explorer_pane() {
     use clackatoo_protocol::{Entry, EntryKind, FilesId, FilesUpdate, GitMark};
 
-    use crate::editor::Stroke;
     use crate::explorer::Explorer;
+    use crate::vim::Stroke;
 
     let Some(gpu) = gpu() else {
         eprintln!("no GPU available; skipping");

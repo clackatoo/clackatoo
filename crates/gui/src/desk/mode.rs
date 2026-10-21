@@ -51,7 +51,7 @@ use winit::keyboard::{Key, NamedKey};
 use super::editors::Held;
 use super::{Asked, Desk, Purpose};
 use crate::editor::PATIENCE;
-use crate::pane::Mode;
+use crate::vim::Mode;
 
 /// How soon after a key typed in this window reached a terminal its
 /// program ending is taken for the user's doing, as `exit` is.

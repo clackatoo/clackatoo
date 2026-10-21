@@ -46,9 +46,10 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::PaneId;
 
 use super::{Asked, Asker, Desk};
-use crate::editor::{BufferCopy, Stroke};
+use crate::editor::BufferCopy;
 use crate::input::{KeptPress, KeyPress};
 use crate::keymap::{Base, Chord, Named};
+use crate::vim::Stroke;
 
 /// The most keys macros type before they're stopped: one that types
 /// itself again, and never fails, would go on for ever. Fewer in tests,
@@ -489,7 +490,7 @@ impl Desk {
             .and_then(|terminal| self.panes.get(&terminal))
             .is_some_and(|pane| {
                 !pane.is_chat()
-                    && pane.mode == crate::pane::Mode::Normal
+                    && pane.mode == crate::vim::Mode::Normal
                     && !pane.prompting()
                     && !pane.pending()
             });

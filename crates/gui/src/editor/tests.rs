@@ -13,8 +13,8 @@ use super::copy::tests::Daemon;
 use super::{BufferCopy, Editor, HunkAction, Mode, Register, Shared, Stroke, Wrote};
 use crate::motion::{Cursor, Point};
 use crate::options::{CompleteAccept, Options};
-use crate::pane::Selection;
 use crate::render::{HighlightKind, Ink};
+use crate::vim::Selection;
 
 mod block;
 mod hints;

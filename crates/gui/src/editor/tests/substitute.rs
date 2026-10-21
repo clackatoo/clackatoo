@@ -100,7 +100,7 @@ fn a_selection_gives_its_lines_to_the_command_line() {
         .editor
         .command_line(&setup.copy, &mut setup.shared.marks);
     assert_eq!(start, "'<,'>");
-    assert!(!matches!(setup.editor.mode, crate::pane::Mode::Visual(_)));
+    assert!(!matches!(setup.editor.mode, crate::vim::Mode::Visual(_)));
     run(&mut setup, "'<,'>s/a/b/");
     assert_eq!(setup.text(), "a\nb\nb\na\n");
     assert_eq!(setup.cursor(), (2, 0));

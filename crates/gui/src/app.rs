@@ -41,7 +41,7 @@ use crate::ime::{InputMethod, Preedit};
 use crate::input;
 use crate::launch::LaunchToken;
 use crate::layout::{Placement, Tile};
-use crate::pane::{Copy, Mode};
+use crate::pane::Copy;
 use crate::render::{
     self, CursorStyle, Fill, Highlight, PADDING, Paint, Picture, PlacedImage, Renderer, Scene,
     SceneCursor,
@@ -49,6 +49,7 @@ use crate::render::{
 use crate::screen::Screen;
 use crate::session::{Location, Session, SessionEvent};
 use crate::updates;
+use crate::vim::Mode;
 
 pub mod look;
 

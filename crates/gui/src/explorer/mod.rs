@@ -59,10 +59,11 @@ use clackatoo_protocol::{
 use clackatoo_term::{Row, RowBuilder};
 
 use crate::colors;
-use crate::editor::{Matching, Pattern, Stroke};
+use crate::editor::{Matching, Pattern};
 use crate::motion::Words;
 use crate::options::{Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
+use crate::vim::Stroke;
 
 mod editing;
 pub(crate) mod listing;

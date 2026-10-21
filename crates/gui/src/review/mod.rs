@@ -40,9 +40,9 @@ use clackatoo_protocol::{
 use clackatoo_term::{Row, RowBuilder};
 
 use crate::colors;
-use crate::editor::Stroke;
 use crate::options::Options;
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
+use crate::vim::Stroke;
 
 #[cfg(test)]
 mod tests;
