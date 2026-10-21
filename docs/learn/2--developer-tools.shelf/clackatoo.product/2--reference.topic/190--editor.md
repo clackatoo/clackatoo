@@ -381,8 +381,8 @@ The marks are drawn behind the text, and the selection over it. See [the options
 | Key | Does |
 |---|---|
 | `j` `k`, `gj` `gk`, Ctrl+E Ctrl+Y | A line, or as many as a count says |
-| Ctrl+D Ctrl+U | Half a view |
-| Ctrl+F Ctrl+B | A view, keeping two lines of the last |
+| Ctrl+D Ctrl+U | Half a view, rounded down, or as far as a count before one set |
+| Ctrl+F, Page Down, Page Up | A view, keeping two lines of the last; a count goes that many |
 | `gg` `G` | The top, the end; `10G` or `10gg`, the block holding line 10 |
 
 The wheel scrolls it too. Any other key is the text's: the text comes back where the view was, and the key does there what it does, so `i` types at the start of the top block, and `/` searches the text. `:w`, `:q` and the rest of the command line are the same either way.
@@ -413,8 +413,8 @@ An editor in a window of its own starts in normal mode, as in Vim. One you go to
 | `/` `?` | Searches forward or back for a pattern, written as Vim writes it (see [Substituting](#substituting)). `n` and `N` find the next and previous match, going round the file's ends. Case is ignored unless the search has a capital letter, as `ignorecase` and `smartcase` start. |
 | `gj` `gk` | The next or previous screen row, where lines wrap; a count moves that many. With `nowrap`, as `j` and `k`. |
 | `g0` `g$` | The screen row's first or last character; with `nowrap`, the first or last in view. |
-| Ctrl+D, Ctrl+U | Half a page of screen rows down or up. |
-| Ctrl+F, Page Down, Page Up | A page of screen rows down, or up with Page Up. |
+| Ctrl+D, Ctrl+U | Half the view's screen rows down or up, rounded down, the view and the cursor together. A count sets how far they go from then on, as Vim's does. |
+| Ctrl+F, Page Down, Page Up | The view's screen rows less two down, or up with Page Up, keeping the cursor in view, `scrolloff` rows in. A count goes that many pages. |
 | `zt` `zz` `zb` | Scrolls the cursor's line to the top, middle or bottom. |
 | `]d` `[d` | The next mistake a [language server](#language-servers) found, or the one before, going round the file's ends. A count goes that many. |
 | `gd` `gD` `gy` `gri` | Where what's under the cursor is defined, declared, where its type is defined, or what implements it, as the [language server](#language-servers) says, as Neovim's keys go. A place in another file opens there in place of this one, as `:e` does. Several places open [the finder](~clackatoo/reference/window#the-finder) on them, each with its line. |

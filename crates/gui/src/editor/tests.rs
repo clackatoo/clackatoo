@@ -26,6 +26,7 @@ mod rendered;
 mod snippets;
 mod substitute;
 mod uses;
+mod view;
 mod visual;
 mod words;
 mod wrapped;

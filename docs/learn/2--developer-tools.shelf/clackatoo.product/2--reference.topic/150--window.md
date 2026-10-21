@@ -360,8 +360,8 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 | `%` `{` `}` | The bracket that pairs with the one under the cursor; the blank line before or after the paragraph. |
 | `H` `M` `L` | The top, middle and bottom lines in view, keeping the column as `gg` does. |
 | `5k`, `3w`, `10G`, `2gg` | A count before a motion repeats it, as in Vim; before `G` or `gg`, it goes to that line, counting from the oldest line of history. `3H` and `3L` count from the view's top and bottom. |
-| Ctrl+D Ctrl+U | Half a screen down or up, view and cursor together. |
-| Ctrl+F, Page Down Page Up | A screen down or up. Ctrl+B is [the window's](#ctrl-b). |
+| Ctrl+D Ctrl+U | Half the view down or up, rounded down, view and cursor together. A count sets how far they go from then on, as Vim's does. |
+| Ctrl+F, Page Down Page Up | The view down or up, less two lines, so two lines of what was in view stay; the cursor stays in view. A count goes that many pages. Ctrl+B is [the window's](#ctrl-b). |
 | Ctrl+E Ctrl+Y | The view a line down or up, with the cursor kept in it. |
 
 Moving past the top of the view scrolls into history. In normal mode the view holds still while output arrives, so the cursor stays on its text. On the alternate screen the cursor moves over the screen only.

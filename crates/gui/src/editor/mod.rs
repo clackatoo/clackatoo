@@ -116,7 +116,7 @@ use crate::options::{Case, CompleteAccept, Options};
 use crate::pane::corners;
 use crate::render::{CursorStyle, FLASH, Highlight, HighlightKind, SceneCursor};
 use crate::vim::{
-    self, Entry, Mode, Operator, Recase, Scroll, Selection, Stroke, Target, ViewAt, strokes,
+    self, Entry, Mode, Operator, Paging, Recase, Scroll, Selection, Stroke, Target, ViewAt, strokes,
 };
 
 /// The fewest cells left for the text beside the line numbers. A narrower
@@ -595,6 +595,8 @@ pub(crate) struct Editor {
     inccommand: bool,
     /// `~` is an operator, taking a motion (`tildeop`).
     tildeop: bool,
+    /// How far Ctrl+D and its kin go.
+    paging: Paging,
     /// `gg`, `G` and their kin go to a line's first non-blank
     /// (`startofline`).
     startofline: bool,
@@ -799,6 +801,7 @@ impl Editor {
             preview: None,
             inccommand: options.inccommand == crate::options::InCommand::NoSplit,
             tildeop: options.tildeop,
+            paging: Paging::default(),
             startofline: options.startofline,
             compiled: std::cell::RefCell::new(None),
             whole: std::cell::RefCell::new(None),
@@ -903,6 +906,9 @@ impl Editor {
     pub(crate) fn resize(&mut self, size: Size) {
         let (height, width) = (usize::from(size.rows()), usize::from(size.cols()));
         self.resized |= (height, width) != (self.height, self.width);
+        if height != self.height {
+            self.paging.resized();
+        }
         self.height = height;
         self.width = width;
         if self.width < self.gutter + LEAST_TEXT {
@@ -1592,12 +1598,8 @@ impl Editor {
             Action::SearchWord { backward } => self.search_word(backward, copy, shared),
             Action::Tilde => self.tilde(times, copy),
             Action::FindAgain { reverse } => self.find_again(reverse, times, copy),
-            Action::Scroll(Scroll::HalfPage { down }) => {
-                self.page(if down { 1 } else { -1 }, self.height / 2, copy);
-            }
-            Action::Scroll(Scroll::Page { down }) => {
-                let rows = self.height.saturating_sub(2);
-                self.page(if down { 1 } else { -1 }, rows, copy);
+            Action::Scroll(scroll @ (Scroll::HalfPage { .. } | Scroll::Page { .. })) => {
+                self.scroll(scroll, command.count, copy);
             }
             // Not the editor's yet (see `EditorKeys::takes`).
             Action::Scroll(Scroll::Line { .. }) => {
@@ -3944,14 +3946,28 @@ impl Editor {
         });
     }
 
-    /// Ctrl+D and the like: `rows` screen rows down, or up if `direction`
-    /// is negative, moving the view and the cursor together.
-    fn page(&mut self, direction: i64, rows: usize, copy: &BufferCopy) {
-        let rows = rows.max(1) as u64;
+    /// Ctrl+D, Ctrl+U, Ctrl+F and their kin, with `count` typed: the half
+    /// pages move the view and the cursor together, and the pages the view,
+    /// keeping the cursor in it, as Vim's do (see [`Paging`]).
+    fn scroll(&mut self, scroll: Scroll, count: Option<usize>, copy: &BufferCopy) {
+        let rows = self.paging.rows(scroll, count, self.height.max(1) as u64);
+        let rows = i64::try_from(rows).unwrap_or(i64::MAX);
+        match scroll {
+            Scroll::HalfPage { down } => self.page(down, rows, copy),
+            Scroll::Page { down } | Scroll::Line { down } => {
+                self.wheel(if down { -rows } else { rows }, copy);
+            }
+        }
+    }
+
+    /// Ctrl+D and Ctrl+U: `rows` screen rows down, or up unless `down`,
+    /// moving the view and the cursor together.
+    fn page(&mut self, down: bool, rows: i64, copy: &BufferCopy) {
+        let rows = rows.unsigned_abs().max(1);
         let text = self.text(copy);
         self.clamp_top(&text);
         let top = self.top.row(&text);
-        let up = direction < 0;
+        let up = !down;
         let top = if up {
             self.cursor.apply(Motion::RowUp(rows), &text);
             rows_up(top, rows, 0, &text)

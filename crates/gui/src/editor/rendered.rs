@@ -74,6 +74,8 @@ pub(crate) struct Rendered {
     /// left was, from the pane's top left, and what of it was drawn, its
     /// left, top, width and height, as a table's cells are cut off at the
     /// column's edge, for clicks.
+    /// How far its scrolling keys go.
+    paging: vim::Paging,
     shown: Vec<(usize, [f32; 2], [f32; 4])>,
     /// How many blocks it last laid out afresh, rather than kept.
     #[cfg(test)]
@@ -126,6 +128,7 @@ impl Rendered {
             view_height: 600.0,
             margin: 0.0,
             most: f32::INFINITY,
+            paging: vim::Paging::default(),
             shown: Vec::new(),
             #[cfg(test)]
             fresh: 0,
@@ -190,31 +193,40 @@ impl Rendered {
     }
 
     /// How many lines `stroke` scrolls the view down, or up if fewer than
-    /// none, a line `count` times for those that go by lines, if it's one
-    /// of the keys that scroll.
-    fn lines_for(&self, stroke: Stroke, count: Option<usize>) -> Option<f32> {
-        #[allow(clippy::cast_precision_loss, reason = "counts of lines")]
-        let lines = count.unwrap_or(1) as f32;
-        let view = (self.view_height / self.line_height).floor().max(1.0);
-        let half = (view / 2.0).ceil();
-        // As Vim's, keeping two lines of what was in view.
-        let page = (view - 2.0).max(1.0);
-        Some(match stroke {
-            Stroke::Down => lines,
-            Stroke::Up => -lines,
-            Stroke::PageDown | Stroke::ShiftDown => page,
-            Stroke::PageUp | Stroke::ShiftUp => -page,
-            Stroke::Char { ch, ctrl } => match (ch, ctrl) {
-                ('j', false) | ('e', true) => lines,
-                ('k', false) | ('y', true) => -lines,
-                ('d', true) => half,
-                ('u', true) => -half,
-                ('f', true) => page,
-                ('b', true) => -page,
-                _ => return None,
-            },
-            _ => return None,
-        })
+    /// none, with `count` typed, if it's one of the keys that scroll: `j`
+    /// and `k` a line a time, and the scrolling keys as far as they go in
+    /// any pane (see [`vim::Paging`]).
+    fn lines_for(&mut self, stroke: Stroke, count: Option<usize>) -> Option<f32> {
+        let plain = |ch| Stroke::Char { ch, ctrl: false };
+        let ctrl = |ch| Stroke::Char { ch, ctrl: true };
+        let keys = [
+            (Stroke::Down, vim::Scroll::Line { down: true }),
+            (plain('j'), vim::Scroll::Line { down: true }),
+            (ctrl('e'), vim::Scroll::Line { down: true }),
+            (Stroke::Up, vim::Scroll::Line { down: false }),
+            (plain('k'), vim::Scroll::Line { down: false }),
+            (ctrl('y'), vim::Scroll::Line { down: false }),
+            (ctrl('d'), vim::Scroll::HalfPage { down: true }),
+            (ctrl('u'), vim::Scroll::HalfPage { down: false }),
+            (ctrl('f'), vim::Scroll::Page { down: true }),
+            (Stroke::PageDown, vim::Scroll::Page { down: true }),
+            (Stroke::ShiftDown, vim::Scroll::Page { down: true }),
+            (Stroke::PageUp, vim::Scroll::Page { down: false }),
+            (Stroke::ShiftUp, vim::Scroll::Page { down: false }),
+        ];
+        let &(_, scroll) = keys.iter().find(|(key, _)| *key == stroke)?;
+        let (vim::Scroll::Line { down }
+        | vim::Scroll::HalfPage { down }
+        | vim::Scroll::Page { down }) = scroll;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "rows in view"
+        )]
+        let view = (self.view_height / self.line_height).floor().max(1.0) as u64;
+        #[allow(clippy::cast_precision_loss, reason = "rows in view")]
+        let rows = self.paging.rows(scroll, count, view) as f32;
+        Some(if down { rows } else { -rows })
     }
 
     /// Scrolls the view by `rows` lines of text, up if more than none, as

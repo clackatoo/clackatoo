@@ -118,6 +118,8 @@ pub(crate) struct Pane {
     /// `gg`, `G`, `H`, `M` and `L` go to a line's first non-blank
     /// (`startofline`).
     startofline: bool,
+    /// How far Ctrl+D and its kin go.
+    paging: vim::Paging,
     /// Where motions left the cursor, or a selection's other end, on
     /// lines not fetched yet.
     unplaced: normal::Unplacements,
@@ -183,6 +185,7 @@ impl Pane {
             search: None,
             case: Case::default(),
             startofline: Options::default().startofline,
+            paging: vim::Paging::default(),
             unplaced: normal::Unplacements::default(),
             blockmarks: Options::default().blockmarks,
             carryover: Options::default().carryover,
@@ -589,6 +592,7 @@ impl Pane {
             return;
         }
         self.requested_size = Some(size);
+        self.paging.resized();
         self.request(
             Request::Resize {
                 terminal: self.terminal,
@@ -2263,10 +2267,10 @@ mod tests {
         serve(&mut pane, &terminal);
         press(&mut pane, Key::Named(NamedKey::ArrowDown), shift);
         serve(&mut pane, &terminal);
-        assert_eq!(cursor(&pane), ("line 6".into(), 0, 0));
+        assert_eq!(cursor(&pane), ("line 4".into(), 0, 0));
         press(&mut pane, Key::Named(NamedKey::ArrowUp), shift);
         serve(&mut pane, &terminal);
-        assert_eq!(cursor(&pane), ("line 1".into(), 0, 0));
+        assert_eq!(cursor(&pane), ("line 4".into(), 3, 0));
     }
 
     #[test]
@@ -2567,23 +2571,29 @@ mod tests {
         normal_mode(&mut pane);
         keys(&mut pane, "gg");
         serve(&mut pane, &terminal);
-        // The view's whole height of five lines.
+        // The view's height less two, the cursor kept in view, as Vim's.
         press(&mut pane, Key::Character("f".into()), CTRL);
         serve(&mut pane, &terminal);
-        assert_eq!(cursor(&pane), ("line 6".into(), 0, 0));
-        // Half of it, two lines.
+        assert_eq!(cursor(&pane), ("line 4".into(), 0, 0));
+        // Half of five, rounded down: the view and the cursor two lines.
         press(&mut pane, Key::Character("d".into()), CTRL);
         serve(&mut pane, &terminal);
-        assert_eq!(cursor(&pane), ("line 8".into(), 0, 0));
-        // The view stops at the live screen; the cursor goes on.
+        assert_eq!(cursor(&pane), ("line 6".into(), 0, 0));
+        // The view stops at the live screen, and the cursor stays in it.
         named(&mut pane, NamedKey::PageDown);
         serve(&mut pane, &terminal);
-        assert_eq!(cursor(&pane), (String::new(), 4, 0));
+        assert_eq!(cursor(&pane), ("line 9".into(), 0, 0));
         assert_eq!(pane.label(), None);
         named(&mut pane, NamedKey::PageUp);
         serve(&mut pane, &terminal);
-        assert_eq!(cursor(&pane), ("line 8".into(), 4, 0));
-        assert_eq!(pane.label().as_deref(), Some("↑5"));
+        assert_eq!(cursor(&pane), ("line 9".into(), 3, 0));
+        assert_eq!(pane.label().as_deref(), Some("↑3"));
+        // A count before Ctrl+D sets how far it goes from then on.
+        keys(&mut pane, "1");
+        press(&mut pane, Key::Character("d".into()), CTRL);
+        assert_eq!(cursor(&pane), ("line 10".into(), 3, 0));
+        press(&mut pane, Key::Character("d".into()), CTRL);
+        assert_eq!(cursor(&pane), ("line 11".into(), 3, 0));
     }
 
     #[test]

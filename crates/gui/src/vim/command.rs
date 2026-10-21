@@ -111,8 +111,45 @@ pub(crate) enum Scroll {
     Line { down: bool },
     /// Ctrl+D and Ctrl+U: the view and the cursor half the view.
     HalfPage { down: bool },
-    /// Ctrl+F and Page Down, Page Up: the view and the cursor most of it.
+    /// Ctrl+F and Page Down, Page Up: the view most of it, keeping the
+    /// cursor in it.
     Page { down: bool },
+}
+
+/// How far the scrolling keys go, the same in every pane, as Vim's do: the
+/// half page Ctrl+D and Ctrl+U go is half the view, rounded down, until a
+/// count before one sets it, as Vim's `scroll` option keeps it.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Paging {
+    half: Option<u64>,
+}
+
+impl Paging {
+    /// How many screen rows `scroll`, with `count` typed, goes in a view
+    /// `view` rows tall: a line a time for Ctrl+E and Ctrl+Y, the half page
+    /// for Ctrl+D and Ctrl+U, and the view less two, keeping two rows of
+    /// what was in view, a page a time for Ctrl+F, Page Down and Page Up.
+    pub(crate) fn rows(&mut self, scroll: Scroll, count: Option<usize>, view: u64) -> u64 {
+        let count = count.map(|count| count as u64);
+        match scroll {
+            Scroll::Line { .. } => count.unwrap_or(1),
+            Scroll::HalfPage { .. } => {
+                if count.is_some() {
+                    self.half = count;
+                }
+                self.half.unwrap_or(view / 2).max(1)
+            }
+            Scroll::Page { .. } => {
+                (count.unwrap_or(1)).saturating_mul(view.saturating_sub(2).max(1))
+            }
+        }
+    }
+
+    /// Forgets the half page a count set, as the view's size changed, as
+    /// Vim's `scroll` is set afresh then.
+    pub(crate) fn resized(&mut self) {
+        self.half = None;
+    }
 }
 
 /// A command, how many times to do it, and the register it takes text
@@ -212,4 +249,30 @@ pub(crate) enum Action<O> {
     Tilde,
     /// A command of the pane's own.
     Own(O),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paging_goes_as_far_in_every_pane_as_vims_does() {
+        let mut paging = Paging::default();
+        let half = Scroll::HalfPage { down: true };
+        let page = Scroll::Page { down: false };
+        // Half of eleven rows, rounded down, as Vim's `scroll` starts.
+        assert_eq!(paging.rows(half, None, 11), 5);
+        // A count sets it, until the view's size changes.
+        assert_eq!(paging.rows(half, Some(3), 11), 3);
+        assert_eq!(paging.rows(half, None, 11), 3);
+        paging.resized();
+        assert_eq!(paging.rows(half, None, 11), 5);
+        // A page is the view less two, a count that many.
+        assert_eq!(paging.rows(page, None, 10), 8);
+        assert_eq!(paging.rows(page, Some(2), 10), 16);
+        assert_eq!(paging.rows(Scroll::Line { down: true }, Some(4), 10), 4);
+        // Never nothing, however small the view.
+        assert_eq!(paging.rows(half, None, 1), 1);
+        assert_eq!(paging.rows(page, None, 1), 1);
+    }
 }

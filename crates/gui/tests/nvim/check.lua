@@ -13,7 +13,9 @@
 -- Add a case to `cases` below: `lines`, the cursor `at` as {line, byte}
 -- (1-based line, 0-based byte), `keys` in Vim's notation (`<Esc>`,
 -- `<CR>`, `<C-v>`), and `set`, options to `:set` for it alone, if any
--- (`'sol'`).
+-- (`'sol'`). For keys that depend on the view (`H`, Ctrl+D), `view` sets
+-- the window's `height` in rows, its `top` line, and its `columns` for
+-- lines to wrap at; the view's top line is printed too.
 --
 -- Gotchas (see the Acta memory `checking-vim-behaviour-headless`):
 -- - `startofline` is off in Neovim, so `gg`, `G` and linewise operators
@@ -33,6 +35,18 @@ local eight = {
 
 -- Words and WORDs apart, indented.
 local dotted = { 'a.b c.d e.f', '  x.y z', '  last.one end' }
+
+-- Sixty lines, every other one indented.
+local sixty = {}
+for n = 1, 60 do
+  sixty[n] = (n % 2 == 0 and '  ' or '') .. 'line ' .. n
+end
+
+-- Sixty lines, the odd ones long enough to wrap over two rows of 20.
+local wrapping = {}
+for n = 1, 60 do
+  wrapping[n] = n % 2 == 1 and (('%02d'):format(n) .. string.rep('x', 28)) or ('line ' .. n)
+end
 
 local cases = {
   -- CLACKA-127: a count before `gg`, or `G` as an operator's target, is a
@@ -88,6 +102,16 @@ local cases = {
   { name = 'vi<Esc>', lines = dotted, at = { 1, 0 }, keys = 'vli<Esc>' },
   { name = 'v3<Esc>', lines = dotted, at = { 1, 0 }, keys = 'vl3<Esc>' },
   { name = 'v"a<Esc>', lines = dotted, at = { 1, 0 }, keys = 'vl"a<Esc>' },
+  -- Paging, in a view of ten rows from line 11, or 21.
+  { name = '<C-d>', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '<C-d>' },
+  { name = '3<C-d> then <C-d>', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '3<C-d><C-d>' },
+  { name = '<C-u>', lines = sixty, at = { 25, 4 }, view = { height = 10, top = 21 }, keys = '<C-u>' },
+  { name = '<C-f>', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '<C-f>' },
+  { name = '<C-f> so=3', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '<C-f>', set = 'scrolloff=3' },
+  { name = '2<C-f>', lines = sixty, at = { 15, 4 }, view = { height = 10, top = 11 }, keys = '2<C-f>' },
+  { name = '<C-b>', lines = sixty, at = { 25, 4 }, view = { height = 10, top = 21 }, keys = '<C-b>' },
+  { name = '<C-d> wrapped', lines = wrapping, at = { 14, 2 }, view = { height = 10, top = 11, columns = 20 }, keys = '<C-d>' },
+  { name = '<C-f> wrapped', lines = wrapping, at = { 14, 2 }, view = { height = 10, top = 11, columns = 20 }, keys = '<C-f>' },
 }
 
 -- Quiet: "3 fewer lines" would land in what's printed, as would a
@@ -101,19 +125,32 @@ end
 
 for _, case in ipairs(cases) do
   vim.cmd('enew!')
-  vim.cmd('set nostartofline')
+  vim.cmd('set nostartofline scrolloff=0')
+  vim.wo.scroll = 0
+  vim.o.columns = (case.view and case.view.columns) or 80
   if case.set then
     vim.cmd('set ' .. case.set)
   end
   vim.bo.buftype = 'nofile'
   vim.fn.setreg('"', '')
   vim.api.nvim_buf_set_lines(0, 0, -1, false, case.lines)
-  vim.api.nvim_win_set_cursor(0, case.at)
+  if case.view then
+    vim.api.nvim_win_set_height(0, case.view.height)
+    vim.fn.winrestview({
+      topline = case.view.top,
+      lnum = case.at[1],
+      col = case.at[2],
+      curswant = case.at[2],
+    })
+  else
+    vim.api.nvim_win_set_cursor(0, case.at)
+  end
   local keys = vim.api.nvim_replace_termcodes(case.keys, true, false, true)
   local ok, why = pcall(vim.cmd, 'silent normal! ' .. keys)
   local cursor = vim.api.nvim_win_get_cursor(0)
   say(('== %s%s'):format(case.name, ok and '' or ('  (failed: ' .. tostring(why) .. ')')))
-  say(('   cursor %d,%d  mode %s'):format(cursor[1], cursor[2], vim.fn.mode()))
+  say(('   cursor %d,%d  mode %s  top %d'):format(
+    cursor[1], cursor[2], vim.fn.mode(), vim.fn.winsaveview().topline))
   say('   lines  ' .. vim.inspect(vim.api.nvim_buf_get_lines(0, 0, -1, false)))
   say(('   reg    %s %s'):format(vim.fn.getregtype('"'), vim.inspect(vim.fn.getreg('"'))))
 end

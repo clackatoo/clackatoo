@@ -196,10 +196,6 @@ impl Pane {
     /// Does `command`, which [`TerminalKeys`] took.
     fn execute(&mut self, command: Command<TerminalAction>) -> bool {
         let count = command.count;
-        let height = self.height();
-        let half = i64::try_from((height / 2).max(1)).unwrap_or(1);
-        let page = i64::try_from(height.max(1)).unwrap_or(1);
-        let down = |down: bool, lines: i64| if down { lines } else { -lines };
         match command.action {
             Action::Move(motion) => self.move_cursor(motion, count),
             Action::Operate(Operator::Yank, Target::Motion(motion)) => {
@@ -227,11 +223,7 @@ impl Pane {
                 true
             }
             Action::SearchAgain { reverse } => self.search_again(reverse),
-            // Half and whole pages move the view and the cursor together.
-            Action::Scroll(Scroll::HalfPage { down: is_down }) => self.page(down(is_down, half)),
-            Action::Scroll(Scroll::Page { down: is_down }) => self.page(down(is_down, page)),
-            // A line of view, keeping the cursor in it.
-            Action::Scroll(Scroll::Line { down: is_down }) => self.scroll_view(down(!is_down, 1)),
+            Action::Scroll(scroll) => self.scroll(scroll, count),
             Action::Own(TerminalAction::Escape) => {
                 if matches!(self.mode, Mode::Visual(_)) {
                     self.leave_visual();
@@ -504,6 +496,21 @@ impl Pane {
         true
     }
 
+    /// Ctrl+D, Ctrl+U, Ctrl+F and their kin, with `count` typed: the half
+    /// pages move the view and the cursor together, and the pages and
+    /// Ctrl+E and Ctrl+Y the view, keeping the cursor in it, as Vim's do
+    /// (see [`crate::vim::Paging`]).
+    fn scroll(&mut self, scroll: Scroll, count: Option<usize>) -> bool {
+        let rows = self.paging.rows(scroll, count, self.height().max(1));
+        let rows = i64::try_from(rows).unwrap_or(i64::MAX);
+        match scroll {
+            Scroll::HalfPage { down } => self.page(if down { rows } else { -rows }),
+            Scroll::Page { down } | Scroll::Line { down } => {
+                self.scroll_view(if down { -rows } else { rows })
+            }
+        }
+    }
+
     /// Ctrl+E and Ctrl+Y: moves the view `lines` up, keeping the cursor in
     /// it.
     fn scroll_view(&mut self, lines: i64) -> bool {
@@ -625,8 +632,8 @@ impl Pane {
         true
     }
 
-    /// Ctrl+D, Ctrl+U and their kin: moves the view and the cursor `lines`
-    /// down (or up, if negative).
+    /// Ctrl+D and Ctrl+U: moves the view and the cursor `lines` down (or
+    /// up, if negative).
     fn page(&mut self, lines: i64) -> bool {
         self.scroll_by(-lines);
         let motion = if lines > 0 {

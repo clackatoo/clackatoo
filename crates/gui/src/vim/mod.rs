@@ -13,7 +13,7 @@ mod grammar;
 mod stroke;
 
 pub(crate) use command::{
-    Action, Command, Entry, Operator, Recase, Scroll, Target, ViewAt, is_register,
+    Action, Command, Entry, Operator, Paging, Recase, Scroll, Target, ViewAt, is_register,
 };
 #[cfg(test)]
 pub(crate) use grammar::parse;
