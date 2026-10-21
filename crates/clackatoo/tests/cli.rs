@@ -1394,9 +1394,9 @@ fn shells_follow_the_display_but_never_a_variable_set_by_hand() {
 
 /// A shell left at a prompt drawn before the desktop logged in follows
 /// the display before the command typed there runs, not only at the
-/// prompt after it: fish and zsh in their hooks run before a command,
-/// bash from 5.3 in PS0, with `${| …; }`, which runs in the shell itself.
-/// Older bash runs PS0 in a subshell, so it follows at its next prompt.
+/// prompt after it: fish and zsh, in their hooks run before a command.
+/// bash follows at its next prompt only, as anything it could run before
+/// a command either runs in a subshell or sets off the user's DEBUG trap.
 /// Following leaves the status, each status of a pipeline, and the last
 /// argument as the command before left them.
 #[test]
@@ -1417,11 +1417,7 @@ fn shells_follow_the_display_before_the_command_they_run() {
             let ran = user.run(command);
             user.output(&ran).trim().to_owned()
         };
-        let before_running = name != "bash" || {
-            let version = said(&mut user, "echo ${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}");
-            let version: Vec<u32> = version.split(' ').map(|n| n.parse().unwrap()).collect();
-            version >= vec![5, 3]
-        };
+        let before_running = name != "bash";
         assert_eq!(said(&mut user, SEEN), "unset", "{name}");
 
         // The desktop logs in while the shell sits at its prompt.

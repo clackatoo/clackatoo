@@ -134,7 +134,7 @@ Through a jump host (`ProxyJump`), ssh reached the other machine at an address o
 
 ## The other machine's desktop
 
-A daemon `--remote` starts on your desktop starts before you've logged in to the desktop itself, over ssh, with no `WAYLAND_DISPLAY` of its own. Programs it starts still open their windows on the desktop once you log in there: the daemon follows the display your desktop tells systemd as you log in, and gives it to the terminals, agents and language servers it starts from then on, and shells already open take it before the next command they run. Once you log out and the desktop's socket has gone, what starts no longer gets its display. `ssh desk clackatoo display` says what programs on desk get now. See [the desktop's display](~clackatoo/reference/terminal-emulation#the-display).
+A daemon `--remote` starts on your desktop starts before you've logged in to the desktop itself, over ssh, with no `WAYLAND_DISPLAY` of its own. Programs it starts still open their windows on the desktop once you log in there: the daemon follows the display your desktop tells systemd as you log in, and gives it to the terminals, agents and language servers it starts from then on, and shells already open take it before the next command they run (bash at its next prompt). Once you log out and the desktop's socket has gone, what starts no longer gets its display. `ssh desk clackatoo display` says what programs on desk get now. See [the desktop's display](~clackatoo/reference/terminal-emulation#the-display).
 
 ## Options
 

@@ -52,9 +52,9 @@ __clackatoo_precmd() {
 # which the daemon writes to a small file whenever it changes: where it
 # came from on a `#` line, then `NAME=VALUE` a line each, a name in
 # __clackatoo_display_names (set by .zshenv) that isn't there being
-# unset. It's read at each prompt, and before each command runs (the
-# first of the hooks then), as a prompt drawn before you logged in can
-# wait hours for its command. It's read with `$(<FILE)`, which zsh reads
+# unset. It's read at each prompt, and before each command runs, ahead
+# of the other hooks in preexec_functions, as a prompt drawn before you
+# logged in can wait hours for its command. It's read with `$(<FILE)`, which zsh reads
 # itself, starting nothing, and in one go, where `read` reads a byte at a
 # time; only once it has changed are the variables set or unset, as
 # text, never run. A variable is changed only while it's as this shell

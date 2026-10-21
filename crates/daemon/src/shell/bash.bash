@@ -52,13 +52,19 @@ if [[ $- == *i* && -z ${__clackatoo_integrated-} ]]; then
     # The display the desktop's login gives the programs clackatoo starts,
     # which the daemon writes to a small file whenever it changes: where it
     # came from on a `#` line, then `NAME=VALUE` a line each, a name above
-    # that isn't there being unset. It's read at each prompt, and from
-    # bash 5.3 before each command runs too (see PS0 below), as a prompt
-    # drawn before you logged in can wait hours for its command. It's read
-    # by `read` alone, and only once it has changed are the variables set
-    # or unset, as text, never run. A variable is changed only while it's
-    # as this shell started with it, or as this last made it: one you've
-    # set yourself is yours, and stays.
+    # that isn't there being unset. It's read at each prompt, by `read`
+    # alone, and only once it has changed are the variables set or unset,
+    # as text, never run. A variable is changed only while it's as this
+    # shell started with it, or as this last made it: one you've set
+    # yourself is yours, and stays.
+    #
+    # Only at the prompt, where fish and zsh also follow it just before a
+    # command runs: PS0's `$(…)` runs in a subshell, which can't set the
+    # shell's variables. bash 5.3's `${| …; }` in PS0 would set off the
+    # user's DEBUG trap on our call first, which breaks bash-preexec's
+    # hooks and its `extdebug` veto (the veto would skip our call, and the
+    # command would still run); a DEBUG trap of our own would have to
+    # share theirs.
     __clackatoo_display() {
         builtin local text= name kept want
         { IFS= builtin read -r -d '' text <"$__clackatoo_display_file" || builtin :; } 2>/dev/null
@@ -138,26 +144,9 @@ if [[ $- == *i* && -z ${__clackatoo_integrated-} ]]; then
         # On lines of their own, which survive a trailing `;`.
         PROMPT_COMMAND=__clackatoo_precmd$'\n'${PROMPT_COMMAND:+$PROMPT_COMMAND$'\n'}__clackatoo_prompt
     fi
-    # PS0 is shown after a command is read, before it runs (bash 4.4 and
-    # later), with what's in `$(…)` and `${| …; }` run, unless
-    # `shopt -u promptvars` stops that.
-    #
-    # The display is followed there, before the command runs. PS0's
-    # `$(…)` runs in a subshell, which can't set the shell's variables,
-    # but bash 5.3's `${| …; }` runs in the shell itself, leaving `$?`,
-    # PIPESTATUS, `$_` and REPLY as they were, and capturing nothing, so
-    # it costs no file. A DEBUG trap sees it, as it sees the prompt
-    # commands, so one that acts on the first command after a prompt, as
-    # bash-preexec's does, acts a moment earlier, before the C mark, on
-    # the same line from the history. Older bash follows the display at
-    # its next prompt only:
-    # a DEBUG trap of our own would fight the user's and run before
-    # every simple command.
-    if (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 3) )) &&
-        shopt -q promptvars; then
-        PS0=$PS0'${| __clackatoo_display; }'
-    fi
-    # Then the C mark, whose command and secret need `$(…)`.
+    # Shown after a command is read, before it runs (bash 4.4 and later).
+    # The command and secret need PS0's `$(…)` expanded, which
+    # `shopt -u promptvars` stops.
     if [[ -n ${__clackatoo_secret-} ]] && shopt -q promptvars; then
         PS0=$PS0'$(__clackatoo_command)'
     else

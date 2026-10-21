@@ -609,7 +609,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "displaycmd",
         date: "2026-10-21",
         lesson: "remote",
-        what: "A shell picks up the display you log in to before the next command it runs, not only at its next prompt",
+        what: "fish and zsh pick up the display you log in to before the next command, not only at the next prompt",
     },
 ];
 
