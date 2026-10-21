@@ -2381,6 +2381,289 @@ mod tests {
         assert_eq!(yanked(&mut pane, &terminal, "[[").as_deref(), None);
         assert_eq!(pane.label().as_deref(), Some("no block here"));
     }
+
+    // Normal mode's keys as they are before they move onto the grammar the
+    // editor reads (CLACKA-127), so the move changes none of them.
+
+    const CTRL: Modifiers = Modifiers {
+        ctrl: true,
+        shift: false,
+        alt: false,
+    };
+
+    /// What `pane` sent the program.
+    fn sent(pane: &mut Pane) -> Vec<Vec<u8>> {
+        (pane.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Request(Request::SendInput { bytes, .. }) => Some(bytes),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ctrl_e_and_ctrl_y_move_the_view_a_line_and_keep_the_cursor_in_it() {
+        let terminal = terminal(&numbered_lines("line "));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg");
+        serve(&mut pane, &terminal);
+        // Down a line, taking the cursor off the top with it.
+        press(&mut pane, Key::Character("e".into()), CTRL);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 2".into(), 0, 0));
+        // Up a line, the cursor staying on its line.
+        press(&mut pane, Key::Character("y".into()), CTRL);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 2".into(), 1, 0));
+        // Up from the live screen, the cursor kept to the bottom row.
+        keys(&mut pane, "G");
+        press(&mut pane, Key::Character("y".into()), CTRL);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 12".into(), 4, 0));
+        assert_eq!(pane.label().as_deref(), Some("↑1"));
+    }
+
+    #[test]
+    fn ctrl_f_ctrl_d_and_the_page_keys_move_the_view_and_the_cursor() {
+        let terminal = terminal(&numbered_lines("line "));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg");
+        serve(&mut pane, &terminal);
+        // The view's whole height of five lines.
+        press(&mut pane, Key::Character("f".into()), CTRL);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 6".into(), 0, 0));
+        // Half of it, two lines.
+        press(&mut pane, Key::Character("d".into()), CTRL);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 8".into(), 0, 0));
+        // The view stops at the live screen; the cursor goes on.
+        named(&mut pane, NamedKey::PageDown);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), (String::new(), 4, 0));
+        assert_eq!(pane.label(), None);
+        named(&mut pane, NamedKey::PageUp);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 8".into(), 4, 0));
+        assert_eq!(pane.label().as_deref(), Some("↑5"));
+    }
+
+    #[test]
+    fn m_and_counted_h_and_l_go_to_lines_of_the_view() {
+        let terminal = terminal(&numbered_lines("line "));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        // The view is `line 9` to the empty line after `line 12`.
+        keys(&mut pane, "M");
+        assert_eq!(cursor(&pane), ("line 11".into(), 2, 0));
+        keys(&mut pane, "3H");
+        assert_eq!(cursor(&pane), ("line 11".into(), 2, 0));
+        keys(&mut pane, "2H");
+        assert_eq!(cursor(&pane), ("line 10".into(), 1, 0));
+        keys(&mut pane, "9H");
+        assert_eq!(cursor(&pane), (String::new(), 4, 0), "no further than L");
+        keys(&mut pane, "3L");
+        assert_eq!(cursor(&pane), ("line 11".into(), 2, 0));
+        keys(&mut pane, "2L");
+        assert_eq!(cursor(&pane), ("line 12".into(), 3, 0));
+        keys(&mut pane, "9L");
+        assert_eq!(cursor(&pane), ("line 9".into(), 0, 0), "no further than H");
+        assert!(!pane.pending());
+    }
+
+    #[test]
+    fn y_takes_gg_with_a_count_as_a_line_and_multiplies_it() {
+        let terminal = terminal(&numbered_lines("line "));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let mut yank = |keys: &str| yanked(&mut pane, &terminal, keys);
+        assert_eq!(yank("3Gygg").as_deref(), Some("line 1\nline 2\nline 3"));
+        assert_eq!(yank("4Gy2gg").as_deref(), Some("line 2\nline 3\nline 4"));
+        assert_eq!(yank("ggy2gg").as_deref(), Some("line 1\nline 2"));
+        assert_eq!(
+            yank("gg2y3gg").as_deref(),
+            Some("line 1\nline 2\nline 3\nline 4\nline 5\nline 6")
+        );
+        // `yg` and a key that isn't `g` copies nothing, and spends the key.
+        assert_eq!(yank("gg0ygw"), None);
+        assert_eq!(cursor(&pane), ("line 1".into(), 0, 0));
+        assert!(!pane.pending());
+    }
+
+    #[test]
+    fn o_and_capital_o_in_visual_mode_go_to_the_other_end() {
+        let terminal = terminal("hello world\r\nsecond");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let ends = |pane: &Pane| (pane.anchor, pane.cursor.map(|cursor| cursor.at));
+        let at = |line, col| Some(Point { line, col });
+        keys(&mut pane, "k0vjl");
+        assert_eq!(ends(&pane), (at(0, 0), at(1, 1)));
+        let selected = pane.selection();
+        keys(&mut pane, "o");
+        assert_eq!(ends(&pane), (at(1, 1), at(0, 0)));
+        assert_eq!(pane.selection(), selected, "the same text");
+        keys(&mut pane, "O");
+        assert_eq!(ends(&pane), (at(0, 0), at(1, 1)));
+        // By lines too.
+        named(&mut pane, NamedKey::Escape);
+        keys(&mut pane, "Vk");
+        assert_eq!(ends(&pane), (at(1, 1), at(0, 1)));
+        keys(&mut pane, "O");
+        assert_eq!(ends(&pane), (at(0, 1), at(1, 1)));
+        keys(&mut pane, "o");
+        assert_eq!(ends(&pane), (at(1, 1), at(0, 1)));
+        assert_eq!(pane.mode, Mode::Visual(Selection::Lines));
+    }
+
+    #[test]
+    fn keys_a_terminal_doesnt_take_are_nothing_and_the_next_starts_afresh() {
+        let terminal = terminal("one two six\r\nfour five");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg");
+        // An operator but `y`, a register and `z` wait for nothing: the
+        // next key moves as it would alone.
+        for keys_ in ["dw", "\"aw", "zw"] {
+            keys(&mut pane, "0");
+            keys(&mut pane, &keys_[..keys_.len() - 1]);
+            assert!(!pane.pending(), "{keys_}");
+            keys(&mut pane, "w");
+            assert_eq!(cursor(&pane), ("one two six".into(), 0, 4), "{keys_}");
+        }
+        // Entering insert mode but by `i` does nothing.
+        for key in ["a", "A", "o"] {
+            keys(&mut pane, key);
+            assert_eq!(pane.mode, Mode::Normal, "{key}");
+            assert_eq!(cursor(&pane), ("one two six".into(), 0, 4), "{key}");
+        }
+        assert!(sent(&mut pane).is_empty());
+        assert_eq!(pane.take_yanked(), None);
+    }
+
+    #[test]
+    fn today_f_is_nothing_so_fw_moves_by_w() {
+        let terminal = terminal("one two six\r\nfour five");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg0f");
+        assert!(!pane.pending());
+        keys(&mut pane, "w");
+        assert_eq!(cursor(&pane), ("one two six".into(), 0, 4));
+    }
+
+    #[test]
+    fn a_bracket_or_y_and_a_key_they_dont_take_spend_both() {
+        let terminal = terminal("one two six\r\nfour five");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg0[w");
+        assert_eq!(cursor(&pane), ("one two six".into(), 0, 0), "not by `w`");
+        assert!(!pane.pending());
+        assert_eq!(yanked(&mut pane, &terminal, "yx"), None);
+        assert!(!pane.pending());
+        // The next key starts afresh: it moves, and copies nothing.
+        assert_eq!(yanked(&mut pane, &terminal, "w"), None);
+        assert_eq!(cursor(&pane), ("one two six".into(), 0, 4));
+    }
+
+    #[test]
+    fn g_and_j_k_0_or_dollar_move_as_the_key_alone() {
+        let terminal = terminal("one two\r\nthree\r\nfour\r\nfive\r\nsix");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg0gj");
+        assert_eq!(cursor(&pane), ("three".into(), 1, 0));
+        keys(&mut pane, "gk");
+        assert_eq!(cursor(&pane), ("one two".into(), 0, 0));
+        keys(&mut pane, "g$");
+        assert_eq!(cursor(&pane), ("one two".into(), 0, 6));
+        keys(&mut pane, "g0");
+        assert_eq!(cursor(&pane), ("one two".into(), 0, 0));
+        keys(&mut pane, "3gj");
+        assert_eq!(cursor(&pane), ("five".into(), 3, 0));
+        assert!(!pane.pending());
+    }
+
+    #[test]
+    fn esc_forgets_the_match_in_normal_mode_and_leaves_visual_mode() {
+        let terminal = terminal("cat dog\r\nbird cat\r\nfish");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let lit = |pane: &Pane, kind| {
+            (pane.highlights(5).iter())
+                .filter(|highlight| highlight.kind == kind)
+                .count()
+        };
+        keys(&mut pane, "gg/cat");
+        named(&mut pane, NamedKey::Enter);
+        serve(&mut pane, &terminal);
+        assert_eq!(lit(&pane, HighlightKind::Match), 1);
+        let at = cursor(&pane);
+        named(&mut pane, NamedKey::Escape);
+        assert_eq!(lit(&pane, HighlightKind::Match), 0);
+        assert_eq!(cursor(&pane), at);
+        keys(&mut pane, "vl");
+        assert_eq!(lit(&pane, HighlightKind::Selection), 1);
+        named(&mut pane, NamedKey::Escape);
+        assert_eq!(pane.mode, Mode::Normal);
+        assert_eq!(lit(&pane, HighlightKind::Selection), 0);
+    }
+
+    #[test]
+    fn ctrl_shift_c_copies_a_visual_selection() {
+        let terminal = terminal("hello world\r\nsecond");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "k0ve");
+        let ctrl_shift = Modifiers {
+            shift: true,
+            ..CTRL
+        };
+        press(&mut pane, Key::Character("C".into()), ctrl_shift);
+        serve(&mut pane, &terminal);
+        assert_eq!(
+            pane.take_yanked().map(|(text, _)| text).as_deref(),
+            Some("hello")
+        );
+        assert_eq!(pane.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn a_half_typed_command_is_pending_and_a_count_alone_is_counting() {
+        let terminal = terminal("one two\r\nthree");
+        let after = |keys_: &str| {
+            let mut pane = pane(&terminal);
+            normal_mode(&mut pane);
+            keys(&mut pane, keys_);
+            (pane.pending(), pane.counting())
+        };
+        assert_eq!(after(""), (false, None));
+        assert_eq!(after("3"), (true, Some(3)));
+        assert_eq!(after("y"), (true, None));
+        assert_eq!(after("y3"), (true, None));
+        assert_eq!(after("g"), (true, None));
+        assert_eq!(after("3g"), (true, None));
+        assert_eq!(after("["), (true, None));
+        assert_eq!(after("vi"), (true, None));
+    }
+
+    #[test]
+    fn enter_space_and_backspace_do_nothing() {
+        let terminal = terminal("one two\r\nthree");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg0l");
+        for key in [NamedKey::Enter, NamedKey::Space, NamedKey::Backspace] {
+            named(&mut pane, key);
+            assert_eq!(cursor(&pane), ("one two".into(), 0, 1), "{key:?}");
+            assert!(!pane.pending(), "{key:?}");
+            assert_eq!(pane.mode, Mode::Normal, "{key:?}");
+        }
+        assert!(sent(&mut pane).is_empty());
+    }
 }
 
 #[cfg(test)]
