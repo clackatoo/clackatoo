@@ -118,6 +118,8 @@ pub(crate) struct Pane {
     /// `gg`, `G`, `H`, `M` and `L` go to a line's first non-blank
     /// (`startofline`).
     startofline: bool,
+    /// Where a motion left the cursor on a line not fetched yet.
+    unplaced: Option<normal::Unplaced>,
     /// Which finished commands are marked at the end of their prompt's
     /// line, as the options say.
     blockmarks: BlockMarks,
@@ -180,6 +182,7 @@ impl Pane {
             search: None,
             case: Case::default(),
             startofline: Options::default().startofline,
+            unplaced: None,
             blockmarks: Options::default().blockmarks,
             carryover: Options::default().carryover,
             found: None,
@@ -684,6 +687,7 @@ impl Pane {
                     }
                 }
                 self.scroll = self.scroll.min(self.max_scroll());
+                self.place_unplaced();
                 self.fetch_history();
                 true
             }
@@ -2135,6 +2139,25 @@ mod tests {
             assert_eq!(cursor(&pane).0, line, "{keys_}");
             assert_eq!(cursor(&pane).2, col, "{keys_}");
         }
+    }
+
+    #[test]
+    fn a_line_of_history_not_fetched_yet_gets_its_column_once_it_comes() {
+        let terminal = terminal(&numbered_lines("  line "));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        // The wanted column, as on any line.
+        keys(&mut pane, "k3lgg");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("  line 1".into(), 0, 3));
+        // Or with `startofline`, its first non-blank.
+        pane.set_options(&Options {
+            startofline: true,
+            ..Options::default()
+        });
+        keys(&mut pane, "G$gg");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("  line 1".into(), 0, 2));
     }
 
     #[test]

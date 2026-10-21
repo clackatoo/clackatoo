@@ -24,6 +24,15 @@ use crate::vim::{
     WRAPPED_TO_BOTTOM, WRAPPED_TO_TOP, strokes,
 };
 
+/// Where a motion left the cursor on a line of history not fetched yet,
+/// and whether it goes to the line's first non-blank, as `gg` does with
+/// `startofline`, or else to the wanted column, once the line comes.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Unplaced {
+    at: Point,
+    start_of_line: bool,
+}
+
 /// A search being typed.
 #[derive(Debug)]
 pub(super) struct Prompt {
@@ -518,9 +527,47 @@ impl Pane {
             return false;
         };
         cursor.go(motion, count, &Document(self), self.startofline);
+        // On a line of history not fetched yet, its column is found once
+        // it comes.
+        let vertical = matches!(
+            motion,
+            Motion::Up(_) | Motion::Down(_) | Motion::RowUp(_) | Motion::RowDown(_)
+        );
+        let to_line = matches!(
+            motion,
+            Motion::First
+                | Motion::Last
+                | Motion::ViewTop
+                | Motion::ViewMiddle
+                | Motion::ViewBottom
+        );
+        let fetched = Document(self).row(cursor.at.line).is_some();
+        self.unplaced = (!fetched && (vertical || to_line)).then_some(Unplaced {
+            at: cursor.at,
+            start_of_line: to_line && self.startofline,
+        });
         self.cursor = Some(cursor);
         self.follow_cursor();
         true
+    }
+
+    /// Puts the cursor where it goes on its line, now the line has come,
+    /// if a motion left it there before it had.
+    pub(super) fn place_unplaced(&mut self) {
+        let Some(unplaced) = self.unplaced else {
+            return;
+        };
+        let document = Document(self);
+        let Some(mut cursor) = self.cursor.filter(|cursor| cursor.at == unplaced.at) else {
+            self.unplaced = None;
+            return;
+        };
+        if document.row(unplaced.at.line).is_none() {
+            return;
+        }
+        cursor.onto_line(unplaced.at.line, unplaced.start_of_line, &document);
+        self.cursor = Some(cursor);
+        self.unplaced = None;
     }
 
     /// Moves the cursor up or down to `line`.
