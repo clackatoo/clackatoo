@@ -198,4 +198,6 @@ fn yanks_keep_the_column_whatever_startofline_says_but_gg_doesnt() {
     assert_eq!(lines_after("3G4l", "yy", true).1, (2, 4));
     // `gg` goes to the first non-blank itself.
     assert_eq!(lines_after("4G3l", "ygg", true).1, (0, 0));
+    // As does `'a`, back to the mark's line, startofline or not.
+    assert_eq!(lines_after("2G4l", "ma3jy'a", false).1, (1, 2));
 }

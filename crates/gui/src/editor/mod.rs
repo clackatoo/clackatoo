@@ -2065,11 +2065,18 @@ impl Editor {
         if exact {
             return exclusive(&text, start, end, false);
         }
+        // `'a` goes to the mark's line's first non-blank, as `y'a` leaves
+        // the cursor if that's back.
+        let mut moved = Cursor::new(Point {
+            line: to.line,
+            col: 0,
+        });
+        moved.apply(Motion::FirstNonBlank, &text);
         Some(Span {
             start: text.line_start(start.line),
             end: text.line_start(end.line + 1),
             lines: Some((start.line, end.line)),
-            moved: None,
+            moved: Some(moved),
         })
     }
 
