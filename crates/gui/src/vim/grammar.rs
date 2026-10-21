@@ -761,6 +761,10 @@ mod tests {
             parse(&[Stroke::ctrl('e')], false, &Plain { tildeop: false }),
             command(None, Action::Scroll(Scroll::Line { down: true }))
         );
+        assert_eq!(
+            parse(&[Stroke::ctrl('y')], false, &Plain { tildeop: false }),
+            command(None, Action::Scroll(Scroll::Line { down: false }))
+        );
         assert_eq!(read("Q"), Parsed::Nothing);
     }
 

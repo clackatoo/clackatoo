@@ -1289,6 +1289,9 @@ pub(crate) mod tests {
         assert_eq!(went(&margin, Motion::ViewTop, None), at(6, 3));
         assert_eq!(went(&margin, Motion::ViewTop, Some(3)), at(7, 3));
         assert_eq!(went(&margin, Motion::ViewBottom, None), at(8, 3));
+        // A count no further than the margin from the other edge.
+        assert_eq!(went(&margin, Motion::ViewTop, Some(9)), at(8, 3));
+        assert_eq!(went(&margin, Motion::ViewBottom, Some(9)), at(6, 3));
         let start = viewed(0, 1);
         assert_eq!(went(&start, Motion::ViewTop, None), at(0, 3));
         assert_eq!(went(&start, Motion::ViewBottom, None), at(3, 3));
