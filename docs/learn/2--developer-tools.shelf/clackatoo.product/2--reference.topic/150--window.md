@@ -189,7 +189,7 @@ In normal mode, `:` opens a command line, in the palette in the middle of the wi
 
 While it's open, the bottom bar keeps the mode and the tabs, and the focused pane's cursor is drawn hollow, since what you type goes to the line. The same holds for a search, a new name, the finder and the machine picker. Tab completes the word before the caret: a command's name, a kind of pane after a split's mark (`:|Te`), an option after `:set`, with `no` or `inv` before a switch and `name=` before a choice's values, a file or folder after `:e`, `:w`, `:Editor` and `:Explore` (spaces in names are written `\ `), a workspace after `:ws`, a machine after a kind of pane's `@` and after `:ws new@`, a lesson after `:Tutor`, and the words `:Gitsigns`, `:Devices` and `:Review` take. One choice goes in at once. With more, they're listed under the line, and Tab and Shift+Tab, or Down and Up, go through them, and past either end back to what you typed. Files complete only while the daemon is on this machine, and a slow folder says `listing…` while it's read.
 
-Up and Down go back through the commands you've typed, in this window and others, keeping to those that start with what's typed. They're kept in `clackatoo/history` under `$XDG_STATE_HOME`, the last 100, readable only by you; a line you start with a space isn't kept, nor is a device's pairing code, and a line of either kind is left out when the file is read, if an older build kept it. Left, Right, Home and End move the caret, and Ctrl+Left and Ctrl+Right move it a word. Ctrl+U deletes everything before the caret, and Ctrl+W the word before it. Ctrl+R and a register's name puts in what the register holds: Ctrl+R Ctrl+W the word under an editor's cursor, Ctrl+R `:` the last command, and Ctrl+R `/` the last search. A count before `:` in an editor starts the line with that many lines, `5:` giving `:.,.+4`. From a selection it's `'<,'>`, count or not.
+Up and Down go back through the commands you've typed, in this window and others, keeping to those that start with what's typed. They're kept in `clackatoo/history` under `$XDG_STATE_HOME`, the last 100, readable only by you; a line you start with a space isn't kept, nor is a device's pairing code, and a line of either kind is left out when the file is read, if an older build kept it. Left, Right, Home and End move the caret, and Ctrl+Left and Ctrl+Right move it a word. Ctrl+U deletes everything before the caret, and Ctrl+W the word before it. Ctrl+R and a register's name puts in what the register holds: Ctrl+R Ctrl+W the word under an editor's cursor, Ctrl+R `:` the last command, and Ctrl+R `/` the last search. A count before `:` in an editor starts the line with that many lines, `5:` giving `:.,.+4`; in any other pane, `5:` opens the command line as `:` does. From a selection it's `'<,'>`, count or not.
 
 | Command | Does |
 |---|---|
@@ -351,17 +351,21 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 |---|---|
 | `h` `j` `k` `l`, arrows | Left, down, up, right. Moving up and down returns to the column you started from after passing shorter lines. |
 | `w` `b` `e` | To the next word's start, this or the previous word's start, this or the next word's end. Words are runs of letters, digits and `_`, or runs of other characters; both cross line ends. |
-| `0` `$`, Home End | The line's first column, its last character. |
-| `gg` `G` | The oldest line of history, the screen's last line, or with a count, that line. |
+| `W` `B` `E` | The same, for anything between blanks. |
+| `0` `^` `$`, Home End | The line's first column, its first character that isn't blank, its last character. |
+| `gj` `gk` `g0` `g$` | As `j`, `k`, `0` and `$`: a terminal's lines don't wrap. |
+| `gg` `G` | The oldest line of history, the screen's last line, or with a count, that line: at its first character that isn't blank, as in Vim. |
 | `gx` | Opens the link under the cursor, as Ctrl+click does. |
 | `%` `{` `}` | The bracket that pairs with the one under the cursor; the blank line before or after the paragraph. |
 | `H` `M` `L` | The top, middle and bottom lines in view. |
-| `5k`, `3w`, `10G`, `2gg` | A count before a motion repeats it, as in Vim; before `G` or `gg`, it goes to that line, counting from the oldest line of history. `3H` and `3L` count from the view's top and bottom. A count waiting shows in the bar. |
+| `5k`, `3w`, `10G`, `2gg` | A count before a motion repeats it, as in Vim; before `G` or `gg`, it goes to that line, counting from the oldest line of history. `3H` and `3L` count from the view's top and bottom. |
 | Ctrl+D Ctrl+U | Half a screen down or up, view and cursor together. |
 | Ctrl+F, Page Down Page Up | A screen down or up. Ctrl+B is [the window's](#ctrl-b). |
 | Ctrl+E Ctrl+Y | The view a line down or up, with the cursor kept in it. |
 
 Moving past the top of the view scrolls into history. In normal mode the view holds still while output arrives, so the cursor stays on its text. On the alternate screen the cursor moves over the screen only.
+
+The keys are read as an editor reads them, so a command half typed, as `y3` or `"a`, shows at the start of the bar until it's done, as Vim's `showcmd` shows it. A command a terminal doesn't take, as `dw`, `x`, `"ayy` or `fx`, does nothing, all its keys spent, as in a file Vim won't change: so after `d`, the next key is the command's too, `:` included.
 
 ### Selecting and copying
 
@@ -373,7 +377,7 @@ Moving past the top of the view scrolls into history. In normal mode the view ho
 | `o` | Moves the other end of the selection. |
 | `y`, Ctrl+Shift+C | Copies the selection to the clipboard, and returns to normal mode. |
 | `yy`, `Y` | Copies the cursor's line, or with a count, as many lines from it: `3yy`. `y2w` and `2yj` take counts too. |
-| `y` and a motion | Copies what the motion moves over: `yw` to the next word, `y$` to the line's end, `yj` this line and the next, `ygg` up to the top. |
+| `y` and a motion | Copies what the motion moves over: `yw` to the next word, `y$` to the line's end, `yj` this line and the next, `ygg` up to the top, `yH` up to the view's top. |
 | `y` and a [text object](#text-objects) | Copies the object around the cursor: `yiw` the word, `yi"` what's in the quotes, `yib` a command's output. |
 | Esc | Drops the selection. |
 

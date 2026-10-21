@@ -611,6 +611,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "fish and zsh pick up the display you log in to before the next command, not only at the next prompt",
     },
+    News {
+        id: "onegrammar",
+        date: "2026-10-21",
+        lesson: "basics",
+        what: "Terminals take W B E ^ and yH, gg and G go to the first non-blank, and the bar shows a command half typed",
+    },
 ];
 
 impl News {

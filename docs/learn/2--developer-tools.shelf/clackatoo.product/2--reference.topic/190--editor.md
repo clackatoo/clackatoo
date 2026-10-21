@@ -393,7 +393,7 @@ The [option](~clackatoo/reference/config#options) `markdownview` says how a Mark
 
 ## Keys
 
-An editor in a window of its own starts in normal mode, as in Vim. One you go to takes [the window's mode](~clackatoo/reference/window#modes): in insert mode it types at its cursor once its text has come, holding what you type until then. A file opened from the explorer or a review opens in normal mode. The bottom bar shows the mode, the file's name, and the cursor's line and column.
+An editor in a window of its own starts in normal mode, as in Vim. One you go to takes [the window's mode](~clackatoo/reference/window#modes): in insert mode it types at its cursor once its text has come, holding what you type until then. A file opened from the explorer or a review opens in normal mode. The bottom bar shows the mode, the file's name, and the cursor's line and column, and before them a command half typed, as `2d` or `"a`, as Vim's `showcmd` shows it.
 
 ### Moving
 
@@ -403,7 +403,7 @@ An editor in a window of its own starts in normal mode, as in Vim. One you go to
 | `w` `b` `e` | The start of the next word, the start of this one or the one before, the end of this one or the next. |
 | `W` `B` `E` | The same, for anything between blanks. |
 | `0` `^` `$` | The line's start, its first character that isn't blank, its last character. |
-| `gg` `G` | The first line, the last. With a count, that line: `12G` and `12gg` are line 12. A count works the same after an operator, so `d3G` deletes from the cursor's line to line 3, and `y2gg` copies from line 2 to the cursor's. |
+| `gg` `G` | The first line, the last, at its first character that isn't blank, as in Vim. With a count, that line: `12G` and `12gg` are line 12. A count works the same after an operator, so `d3G` deletes from the cursor's line to line 3, and `y2gg` copies from line 2 to the cursor's. |
 | `]f` `[f` | The start of the next function, or the one before, as the grammar finds them. A count goes that many. `]C` and `[C` go to classes, structs, impls, traits, enums and interfaces. |
 | `%` | The bracket that pairs with the one under the cursor, or with the next on its line: `()`, `[]` or `{}`, across lines. |
 | `{` `}` | The empty line before the paragraph, or after it; or the file's first line, or the end of its last. With an operator, from a line's start, they take whole lines, so `d}` deletes the paragraph. |
