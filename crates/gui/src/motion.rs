@@ -614,10 +614,10 @@ impl Cursor {
                     self.want = col;
                 }
             }
-            // At the line's first character that isn't blank, as Vim's
-            // `startofline` puts it.
-            Motion::First => self.go_to_line_number(1, lines),
-            Motion::Last => *self = Self::at_first_non_blank(last, lines),
+            // Keeping the column, as Neovim does: `go` puts them at the
+            // first non-blank, with `startofline`.
+            Motion::First => self.go_to_line(first, lines),
+            Motion::Last => self.go_to_line(last, lines),
             Motion::WordStart => self.word_start(lines, Class::of),
             Motion::WordBack => self.word_back(lines, Class::of),
             Motion::WordEnd => self.word_end(lines, Class::of),
@@ -663,17 +663,44 @@ impl Cursor {
     }
 
     /// Moves by `motion` as a command with `count` typed before it does:
-    /// `G` and `gg` with a count go to that line (see
-    /// [`go_to_line_number`](Self::go_to_line_number)), `H` and `L` so many
-    /// lines from the view's top or bottom, and any other motion goes
-    /// `count` times (see [`repeat`](Self::repeat)).
-    pub(crate) fn go(&mut self, motion: Motion, count: Option<usize>, lines: &impl Lines) {
+    /// `G` and `gg` with a count go to that line, `H` and `L` so many lines
+    /// from the view's top or bottom, and any other motion goes `count`
+    /// times (see [`repeat`](Self::repeat)). `gg`, `G`, `H`, `M` and `L`
+    /// land at the line's first character that isn't blank if
+    /// `start_of_line`, as Vim's `startofline` puts them, or else aim for
+    /// the wanted column.
+    pub(crate) fn go(
+        &mut self,
+        motion: Motion,
+        count: Option<usize>,
+        lines: &impl Lines,
+        start_of_line: bool,
+    ) {
+        let (first, last) = lines.bounds();
         match (motion, count) {
-            (Motion::First | Motion::Last, Some(number)) => self.go_to_line_number(number, lines),
+            (Motion::First | Motion::Last, Some(number)) => {
+                let line = first.saturating_add((number as u64).saturating_sub(1));
+                self.onto_line(line.min(last), start_of_line, lines);
+            }
+            (Motion::First, None) => self.onto_line(first, start_of_line, lines),
+            (Motion::Last, None) => self.onto_line(last, start_of_line, lines),
             (Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom, count) => {
                 self.go_in_view(motion, count.unwrap_or(1), lines);
+                if start_of_line {
+                    *self = Self::at_first_non_blank(self.at.line, lines);
+                }
             }
             (motion, count) => self.repeat(motion, count.unwrap_or(1), lines),
+        }
+    }
+
+    /// Moves to line `line`: to its first character that isn't blank if
+    /// `start_of_line`, or else aiming for the wanted column.
+    pub(crate) fn onto_line(&mut self, line: u64, start_of_line: bool, lines: &impl Lines) {
+        if start_of_line {
+            *self = Self::at_first_non_blank(line, lines);
+        } else {
+            self.go_to_line(line, lines);
         }
     }
 
@@ -736,15 +763,6 @@ impl Cursor {
                 }
             }
         }
-    }
-
-    /// Moves to line `number`, counting the first of `lines` as 1, or to
-    /// the last if there aren't so many, at its first character that isn't
-    /// blank: `10G` and `10gg`, as Vim's.
-    pub(crate) fn go_to_line_number(&mut self, number: usize, lines: &impl Lines) {
-        let (first, last) = lines.bounds();
-        let line = first.saturating_add((number as u64).saturating_sub(1));
-        *self = Self::at_first_non_blank(line.min(last), lines);
     }
 
     /// A cursor at line `line`'s first character that isn't blank.
@@ -1272,7 +1290,7 @@ pub(crate) mod tests {
         };
         let went = |lines: &Viewed, motion, count| {
             let mut cursor = Cursor::new(at(12, 3));
-            cursor.go(motion, count, lines);
+            cursor.go(motion, count, lines, false);
             cursor.at
         };
         // Lines 5 to 9 in view.
@@ -1304,8 +1322,23 @@ pub(crate) mod tests {
         // Without a view, nowhere.
         let text = Text::new(&lines);
         let mut cursor = Cursor::new(at(12, 3));
-        cursor.go(Motion::ViewTop, None, &text);
+        cursor.go(Motion::ViewTop, None, &text, false);
         assert_eq!(cursor.at, at(12, 3));
+        // With `startofline`, at the line's first non-blank.
+        let indented = Viewed(
+            Text::new(&["a", "  b", "c"]),
+            View {
+                top: RowAt { line: 0, row: 0 },
+                rows: 3,
+                margin: 0,
+            },
+        );
+        let mut cursor = Cursor::new(at(0, 0));
+        cursor.go(Motion::ViewMiddle, None, &indented, true);
+        assert_eq!(cursor.at, at(1, 2));
+        cursor.go(Motion::First, None, &indented, false);
+        cursor.go(Motion::Last, Some(2), &indented, false);
+        assert_eq!(cursor.at, at(1, 2), "the wanted column");
     }
 
     /// Where `motions` take a cursor starting at `start`.
@@ -1380,9 +1413,9 @@ pub(crate) mod tests {
         let forward = Motion::Paragraph { forward: true };
         assert_eq!(repeated(forward, 2, at(0, 0)), at(4, 0));
         let mut cursor = Cursor::new(at(0, 4));
-        cursor.go_to_line_number(3, &text);
+        cursor.go(Motion::Last, Some(3), &text, true);
         assert_eq!(cursor.at, at(2, 2), "at its first character");
-        cursor.go_to_line_number(99, &text);
+        cursor.go(Motion::First, Some(99), &text, true);
         assert_eq!(cursor.at, at(5, 0), "or the last line");
     }
 
@@ -1393,7 +1426,7 @@ pub(crate) mod tests {
         // Quick, as it stops once it goes nowhere.
         cursor.repeat(Motion::WordStart, usize::MAX, &text);
         assert_eq!(cursor.at.line, 1);
-        cursor.go_to_line_number(usize::MAX, &text);
+        cursor.go(Motion::Last, Some(usize::MAX), &text, true);
         assert_eq!(cursor.at, at(1, 0));
         let mut count = None;
         for _ in 0..30 {
@@ -1488,9 +1521,10 @@ pub(crate) mod tests {
     fn missing_lines_count_as_blank() {
         let text = Text::new(&["one", "two"]);
         let mut cursor = Cursor::new(at(1, 2));
+        // Keeping the column.
         cursor.apply(Motion::First, &text);
-        assert_eq!(cursor.at, at(0, 0));
+        assert_eq!(cursor.at, at(0, 2));
         cursor.apply(Motion::Last, &text);
-        assert_eq!(cursor.at, at(1, 0));
+        assert_eq!(cursor.at, at(1, 2));
     }
 }

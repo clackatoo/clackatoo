@@ -115,6 +115,9 @@ pub(crate) struct Pane {
     search: Option<(String, bool)>,
     /// How searches treat case, as the options say.
     case: Case,
+    /// `gg`, `G`, `H`, `M` and `L` go to a line's first non-blank
+    /// (`startofline`).
+    startofline: bool,
     /// Which finished commands are marked at the end of their prompt's
     /// line, as the options say.
     blockmarks: BlockMarks,
@@ -176,6 +179,7 @@ impl Pane {
             prompt: None,
             search: None,
             case: Case::default(),
+            startofline: Options::default().startofline,
             blockmarks: Options::default().blockmarks,
             carryover: Options::default().carryover,
             found: None,
@@ -201,6 +205,7 @@ impl Pane {
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.case = Case::of(options);
+        self.startofline = options.startofline;
         self.blockmarks = options.blockmarks;
         self.carryover = options.carryover;
         self.predictor.set_choice(options.predictecho);
@@ -1835,7 +1840,7 @@ mod tests {
         let terminal = terminal("hello\r\n\r\n日本\r\nend");
         let mut pane = pane(&terminal);
         normal_mode(&mut pane);
-        keys(&mut pane, "ggllv3j0l");
+        keys(&mut pane, "gg0llv3j0l");
         let cols = |pane: &Pane| {
             (pane.highlights(5).iter())
                 .map(|highlight| (highlight.line, highlight.cols.clone()))
@@ -2100,16 +2105,36 @@ mod tests {
     }
 
     #[test]
-    fn gg_and_g_go_to_the_first_non_blank() {
+    fn gg_g_h_and_l_keep_the_column_unless_startofline() {
         let terminal = terminal("  one\r\nb\r\nc\r\nd\r\n  five");
         let mut pane = pane(&terminal);
         normal_mode(&mut pane);
+        // From past `  five`'s end, as near as `  one` goes.
         keys(&mut pane, "gg");
-        assert_eq!(cursor(&pane), ("  one".into(), 0, 2));
-        keys(&mut pane, "0G");
-        assert_eq!(cursor(&pane), ("  five".into(), 4, 2));
-        keys(&mut pane, "01G");
-        assert_eq!(cursor(&pane), ("  one".into(), 0, 2));
+        assert_eq!(cursor(&pane), ("  one".into(), 0, 4));
+        keys(&mut pane, "lG");
+        assert_eq!(cursor(&pane), ("  five".into(), 4, 4));
+        keys(&mut pane, "1G");
+        assert_eq!(cursor(&pane), ("  one".into(), 0, 4));
+        keys(&mut pane, "hL");
+        assert_eq!(cursor(&pane), ("  five".into(), 4, 3));
+        // As Vim's do with it, to the first non-blank.
+        pane.set_options(&Options {
+            startofline: true,
+            ..Options::default()
+        });
+        for (keys_, line) in [
+            ("gg", "  one"),
+            ("G", "  five"),
+            ("H", "  one"),
+            ("3G", "c"),
+        ] {
+            keys(&mut pane, "$");
+            keys(&mut pane, keys_);
+            let col = if line == "c" { 0 } else { 2 };
+            assert_eq!(cursor(&pane).0, line, "{keys_}");
+            assert_eq!(cursor(&pane).2, col, "{keys_}");
+        }
     }
 
     #[test]
@@ -2170,7 +2195,7 @@ mod tests {
         normal_mode(&mut pane);
         let mut yank = |keys: &str| yanked(&mut pane, &terminal, keys);
         assert_eq!(
-            yank("gg3yy").as_deref(),
+            yank("gg03yy").as_deref(),
             Some("one two six\nfour five\nseven")
         );
         assert_eq!(yank("2Y").as_deref(), Some("one two six\nfour five"));
@@ -2583,8 +2608,8 @@ mod tests {
         // the first non-blank.
         let mut yank = |keys: &str| yanked(&mut pane, &terminal, keys);
         assert_eq!(yank("ggyH").as_deref(), Some("line 1"));
-        assert_eq!(yank("ggyE").as_deref(), Some("line"));
-        assert_eq!(yank("ggyW").as_deref(), Some("line "));
+        assert_eq!(yank("gg0yE").as_deref(), Some("line"));
+        assert_eq!(yank("gg0yW").as_deref(), Some("line "));
         assert_eq!(yank("gg$y^").as_deref(), Some("line "));
     }
 

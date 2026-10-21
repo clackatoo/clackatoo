@@ -131,7 +131,7 @@ fn j_and_k_move_by_line_and_gj_and_gk_by_row() {
     assert_eq!(setup.cursor(), (0, 5));
     setup.keys("2j");
     assert_eq!(setup.cursor(), (2, 5));
-    setup.keys("gg3gj");
+    setup.keys("gg03gj");
     assert_eq!(setup.cursor(), (1, 0));
 
     // $ and 0 are the line's; g$ and g0 the row's.
@@ -148,7 +148,7 @@ fn j_and_k_move_by_line_and_gj_and_gk_by_row() {
     assert_eq!(setup.cursor(), (0, 71));
     // With an operator, it's not by lines: dgj deletes up to the cursor
     // a row down.
-    setup.keys("ggdgj");
+    setup.keys("gg0dgj");
     assert_eq!(setup.text().lines().next().unwrap().len(), 80 - 36);
 }
 

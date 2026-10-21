@@ -517,7 +517,7 @@ impl Pane {
         let Some(mut cursor) = self.cursor.take() else {
             return false;
         };
-        cursor.go(motion, count, &Document(self));
+        cursor.go(motion, count, &Document(self), self.startofline);
         self.cursor = Some(cursor);
         self.follow_cursor();
         true

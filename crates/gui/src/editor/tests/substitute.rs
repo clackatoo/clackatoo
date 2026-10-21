@@ -562,7 +562,7 @@ fn reselected(setup: &mut Setup) -> ((u64, usize), (u64, usize)) {
 fn marks_on_lines_moved_go_with_them_and_gv_selects_them_again() {
     // `a` on the block, `c` on the line it jumps, `d` past them both.
     let mut setup = Setup::new("a\nb1\nc\nd\ne\n");
-    setup.keys("jlmajmcjmdggVj<Esc>");
+    setup.keys("jlmajmcjmdgg0Vj<Esc>");
     run(&mut setup, "'<,'>m '>+1");
     assert_eq!(setup.text(), "c\na\nb1\nd\ne\n");
     assert_eq!(marked(&setup, 'a'), (2, 1));

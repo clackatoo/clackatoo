@@ -1633,7 +1633,7 @@ fn motions_that_go_nowhere_take_nothing_and_the_last_paragraph_goes_to_the_end()
     // `d}` takes it all.
     setup.keys("}");
     assert_eq!(setup.cursor(), (1, 4));
-    setup.keys("ggd}");
+    setup.keys("gg0d}");
     assert_eq!(setup.text(), "\n");
     // A line of blanks isn't empty: the paragraph goes on past it.
     let mut blanks = Setup::new("a\n  \nb\n\nc\n");

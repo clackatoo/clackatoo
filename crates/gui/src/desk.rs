@@ -6625,13 +6625,14 @@ mod tests {
             answers: None,
         };
         desk.buffer_changed(BufferId(7), update);
-        assert_eq!(note(&desk), "t.txt  11:1");
+        // `G` kept the column `l` went to.
+        assert_eq!(note(&desk), "t.txt  11:2");
         // ...and so does this window, after going to the top.
         type_text(&mut desk, "ggOtop");
         escape(&mut desk);
         assert_eq!(note(&desk), "t.txt  1:3");
         ctrl(&mut desk, "o");
-        assert_eq!(note(&desk), "t.txt  12:1", "where gg left");
+        assert_eq!(note(&desk), "t.txt  12:2", "where gg left");
         ctrl(&mut desk, "o");
         assert_eq!(note(&desk), "t.txt  7:2", "where G left");
         // The start of the file, where both lines went in, went down with
@@ -8857,12 +8858,13 @@ mod tests {
     #[test]
     fn quote_quote_goes_back_and_forth_from_the_last_jump() {
         let mut desk = editing("/t.txt", "one two\nthree\nfour\nfive five\n");
+        // `G` keeps the column, as Neovim's does.
         type_text(&mut desk, "wG");
-        assert_eq!(note(&desk), "t.txt  4:1");
+        assert_eq!(note(&desk), "t.txt  4:5");
         type_text(&mut desk, "``");
         assert_eq!(note(&desk), "t.txt  1:5");
         type_text(&mut desk, "``");
-        assert_eq!(note(&desk), "t.txt  4:1");
+        assert_eq!(note(&desk), "t.txt  4:5");
         type_text(&mut desk, "w''");
         assert_eq!(note(&desk), "t.txt  1:1", "to the line's start");
         // Ctrl+O knows of the jumps `''` made.

@@ -575,6 +575,9 @@ pub(crate) struct Editor {
     inccommand: bool,
     /// `~` is an operator, taking a motion (`tildeop`).
     tildeop: bool,
+    /// `gg`, `G` and their kin go to a line's first non-blank
+    /// (`startofline`).
+    startofline: bool,
     /// The pattern compiled last, kept to compile it once (see
     /// [`ex`]'s `pattern`).
     compiled: std::cell::RefCell<Option<Compiled>>,
@@ -776,6 +779,7 @@ impl Editor {
             preview: None,
             inccommand: options.inccommand == crate::options::InCommand::NoSplit,
             tildeop: options.tildeop,
+            startofline: options.startofline,
             compiled: std::cell::RefCell::new(None),
             whole: std::cell::RefCell::new(None),
             macro_asked: None,
@@ -909,6 +913,7 @@ impl Editor {
         };
         self.inccommand = options.inccommand == crate::options::InCommand::NoSplit;
         self.tildeop = options.tildeop;
+        self.startofline = options.startofline;
         self.highlight_uses = options.highlightuses;
         if !self.highlight_uses {
             self.forget_uses();
@@ -1872,7 +1877,7 @@ impl Editor {
                     cursor = Cursor::new(Point { line, col });
                 }
             }
-            _ => cursor.go(motion, count, &text),
+            _ => cursor.go(motion, count, &text, self.startofline),
         }
         cursor
     }

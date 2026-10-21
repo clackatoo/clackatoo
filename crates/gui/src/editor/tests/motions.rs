@@ -4,10 +4,9 @@
 //! A count before `gg` or `G` is a line number, as a move (`5gg`, `3G`)
 //! and as an operator's target (`d3G`, `d3gg`, `y2gg`), from above or
 //! below it, multiplied by a count before the operator (`2d3gg` is line
-//! 6), and the last line for a count past it (`99G`, `d99G`). Where
-//! clackatoo differs on purpose: `gg` and `G`, with a count or without, go
-//! to the line's first non-blank, as Vim does with `startofline`, where
-//! Neovim keeps the column.
+//! 6), and the last line for a count past it (`99G`, `d99G`). `gg` and
+//! `G`, with a count or without, keep the column, as Neovim's do, or with
+//! `startofline` go to the line's first non-blank, as Vim's do.
 
 use super::Setup;
 
@@ -26,22 +25,13 @@ fn after(from: &str, keys: &str) -> (String, (u64, usize), String, bool) {
 
 #[test]
 fn a_count_before_gg_or_g_goes_to_that_line() {
-    let mut setup = Setup::new(EIGHT);
-    setup.keys("G");
-    setup.keys("5gg");
-    assert_eq!(setup.cursor(), (4, 0), "from below");
-    setup.keys("gg");
-    setup.keys("3G");
-    assert_eq!(setup.cursor(), (2, 0), "from above");
-    setup.keys("G1G");
-    assert_eq!(setup.cursor(), (0, 0));
-    setup.keys("6gg");
-    assert_eq!(setup.cursor(), (5, 2), "to its first non-blank");
+    // From the last line's fifth column, as near it as each line goes.
+    assert_eq!(after("G4l", "5gg").1, (4, 3), "from below");
+    assert_eq!(after("2l", "3G").1, (2, 2), "from above");
+    assert_eq!(after("G4l", "1G").1, (0, 2));
     // A count past the end is the last line.
-    setup.keys("gg99G");
-    assert_eq!(setup.cursor(), (7, 2));
-    setup.keys("gg99gg");
-    assert_eq!(setup.cursor(), (7, 2));
+    assert_eq!(after("", "99G").1, (7, 0));
+    assert_eq!(after("", "99gg").1, (7, 0));
 }
 
 #[test]
@@ -112,10 +102,19 @@ fn a_counted_gg_in_visual_mode_selects_to_that_line() {
 }
 
 #[test]
-fn gg_and_g_without_a_count_go_to_the_first_non_blank_too() {
-    let mut setup = Setup::new("  one\nx\n  last\n");
-    setup.keys("G");
-    assert_eq!(setup.cursor(), (2, 2));
-    setup.keys("0gg");
-    assert_eq!(setup.cursor(), (0, 2));
+fn gg_and_g_keep_the_column_unless_startofline() {
+    // And the column wanted stays, for `j` after.
+    assert_eq!(after("G4l", "ggj").1, (1, 4));
+    assert_eq!(after("2l", "G").1, (7, 2));
+    // With `startofline`, at the first non-blank.
+    let sol = |from: &str, keys: &str| {
+        let mut setup = Setup::new(EIGHT);
+        setup.set(|options| options.startofline = true);
+        setup.keys(from);
+        setup.keys(keys);
+        setup.cursor()
+    };
+    assert_eq!(sol("G4l", "gg"), (0, 0));
+    assert_eq!(sol("2l", "6G"), (5, 2));
+    assert_eq!(sol("2l", "G"), (7, 2));
 }

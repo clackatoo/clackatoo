@@ -35,7 +35,7 @@ impl Pane {
         };
         let document = Document(self);
         let mut moved = cursor;
-        moved.go(motion, count, &document);
+        moved.go(motion, count, &document, self.startofline);
         let (start, end) = if moved.at < cursor.at {
             (moved.at, cursor.at)
         } else {

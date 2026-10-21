@@ -615,7 +615,13 @@ pub(crate) const NEWS: &[News] = &[
         id: "onegrammar",
         date: "2026-10-21",
         lesson: "basics",
-        what: "Terminals take W B E ^ and yH, gg and G go to the first non-blank, and the bar shows a command half typed",
+        what: "Terminals take W B E ^ and yH, and the bar shows a command half typed, as Vim's showcmd",
+    },
+    News {
+        id: "startofline",
+        date: "2026-10-21",
+        lesson: "basics",
+        what: ":set startofline puts gg, G, H, M and L at the first non-blank, as Vim does; off, they keep the column",
     },
 ];
 

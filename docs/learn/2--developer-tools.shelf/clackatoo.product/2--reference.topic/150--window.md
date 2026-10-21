@@ -354,10 +354,10 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 | `W` `B` `E` | The same, for anything between blanks. |
 | `0` `^` `$`, Home End | The line's first column, its first character that isn't blank, its last character. |
 | `gj` `gk` `g0` `g$` | As `j`, `k`, `0` and `$`: a terminal's lines don't wrap. |
-| `gg` `G` | The oldest line of history, the screen's last line, or with a count, that line: at its first character that isn't blank, as in Vim. |
+| `gg` `G` | The oldest line of history, the screen's last line, or with a count, that line, keeping the column, as Neovim's do; at its first character that isn't blank with the [option](~clackatoo/reference/config#options) `startofline`, as Vim's do. |
 | `gx` | Opens the link under the cursor, as Ctrl+click does. |
 | `%` `{` `}` | The bracket that pairs with the one under the cursor; the blank line before or after the paragraph. |
-| `H` `M` `L` | The top, middle and bottom lines in view. |
+| `H` `M` `L` | The top, middle and bottom lines in view, keeping the column as `gg` does. |
 | `5k`, `3w`, `10G`, `2gg` | A count before a motion repeats it, as in Vim; before `G` or `gg`, it goes to that line, counting from the oldest line of history. `3H` and `3L` count from the view's top and bottom. |
 | Ctrl+D Ctrl+U | Half a screen down or up, view and cursor together. |
 | Ctrl+F, Page Down Page Up | A screen down or up. Ctrl+B is [the window's](#ctrl-b). |

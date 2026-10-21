@@ -11,13 +11,14 @@
 -- purpose.
 --
 -- Add a case to `cases` below: `lines`, the cursor `at` as {line, byte}
--- (1-based line, 0-based byte), and `keys` in Vim's notation (`<Esc>`,
--- `<CR>`, `<C-v>`).
+-- (1-based line, 0-based byte), `keys` in Vim's notation (`<Esc>`,
+-- `<CR>`, `<C-v>`), and `set`, options to `:set` for it alone, if any
+-- (`'sol'`).
 --
 -- Gotchas (see the Acta memory `checking-vim-behaviour-headless`):
 -- - `startofline` is off in Neovim, so `gg`, `G` and linewise operators
---   keep the column; clackatoo's `gg` and `G` go to the first non-blank,
---   with a count or without, as Vim's default `startofline` does.
+--   keep the column, as clackatoo's do with its `startofline` off, which
+--   is its default too. A case can `set = 'sol'` for Vim's way.
 -- - A motion that fails inside `normal!` silently ends that case's keys.
 -- - `.` carries over from earlier cases.
 -- - Anything that waits for input (`:s///c`) hangs the run: keep `timeout`.
@@ -51,6 +52,17 @@ local cases = {
   { name = 'y3G from line 6', lines = eight, at = { 6, 2 }, keys = 'y3G' },
   { name = 'ygg from line 4', lines = eight, at = { 4, 2 }, keys = 'ygg' },
   { name = 'V2ggd from line 5', lines = eight, at = { 5, 0 }, keys = 'V2ggd' },
+  -- `startofline`: off, as Neovim's is, `gg`, `G`, `H`, `M` and `L` keep
+  -- the column; on, as Vim's is, they go to the first non-blank.
+  { name = 'gg then j from the last line', lines = eight, at = { 8, 4 }, keys = 'ggj' },
+  { name = 'G from line 1', lines = eight, at = { 1, 2 }, keys = 'G' },
+  { name = 'H from line 5', lines = eight, at = { 5, 3 }, keys = 'H' },
+  { name = 'L from line 1', lines = eight, at = { 1, 2 }, keys = 'L' },
+  { name = 'M from line 1', lines = eight, at = { 1, 2 }, keys = 'M' },
+  { name = 'gg with sol', lines = eight, at = { 8, 4 }, keys = 'gg', set = 'sol' },
+  { name = '6G with sol', lines = eight, at = { 1, 2 }, keys = '6G', set = 'sol' },
+  { name = 'H with sol', lines = eight, at = { 5, 3 }, keys = 'H', set = 'sol' },
+  { name = 'L with sol', lines = eight, at = { 1, 2 }, keys = 'L', set = 'sol' },
 }
 
 -- Quiet: "3 fewer lines" would land in what's printed.
@@ -63,6 +75,10 @@ end
 
 for _, case in ipairs(cases) do
   vim.cmd('enew!')
+  vim.cmd('set nostartofline')
+  if case.set then
+    vim.cmd('set ' .. case.set)
+  end
   vim.bo.buftype = 'nofile'
   vim.fn.setreg('"', '')
   vim.api.nvim_buf_set_lines(0, 0, -1, false, case.lines)
