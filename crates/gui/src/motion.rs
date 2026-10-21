@@ -626,16 +626,16 @@ impl Cursor {
     }
 
     /// Moves by `motion` `times` times, as a count before it asks (`5k`,
-    /// `3w`, `2}`): up and down that many lines, or rows, at once, and
-    /// anything else again and again. `G` and `gg` with a count go to a
-    /// line instead (see [`go_to_line_number`](Self::go_to_line_number)).
+    /// `3w`, `2}`): up and down by `times` times its lines, or rows, at
+    /// once, and anything else again and again. `G` and `gg` with a count
+    /// go to a line instead (see [`go_to_line_number`](Self::go_to_line_number)).
     pub(crate) fn repeat(&mut self, motion: Motion, times: usize, lines: &impl Lines) {
         let n = times as u64;
         match motion {
-            Motion::Up(_) => self.apply(Motion::Up(n), lines),
-            Motion::Down(_) => self.apply(Motion::Down(n), lines),
-            Motion::RowUp(_) => self.apply(Motion::RowUp(n), lines),
-            Motion::RowDown(_) => self.apply(Motion::RowDown(n), lines),
+            Motion::Up(by) => self.apply(Motion::Up(by.saturating_mul(n)), lines),
+            Motion::Down(by) => self.apply(Motion::Down(by.saturating_mul(n)), lines),
+            Motion::RowUp(by) => self.apply(Motion::RowUp(by.saturating_mul(n)), lines),
+            Motion::RowDown(by) => self.apply(Motion::RowDown(by.saturating_mul(n)), lines),
             // Until it goes nowhere, so a count bigger than the text is
             // quick.
             _ => {
@@ -1210,6 +1210,11 @@ pub(crate) mod tests {
         };
         assert_eq!(repeated(Motion::Down(1), 3, at(0, 0)), at(3, 0));
         assert_eq!(repeated(Motion::Up(1), 9, at(3, 0)), at(0, 0));
+        assert_eq!(
+            repeated(Motion::Down(2), 2, at(0, 0)),
+            at(4, 0),
+            "lines at a time"
+        );
         assert_eq!(repeated(Motion::WordStart, 2, at(2, 2)), at(5, 0));
         let forward = Motion::Paragraph { forward: true };
         assert_eq!(repeated(forward, 2, at(0, 0)), at(4, 0));

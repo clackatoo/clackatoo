@@ -2124,6 +2124,25 @@ mod tests {
     }
 
     #[test]
+    fn h_l_and_half_pages_move_as_many_lines_as_they_say() {
+        let terminal = terminal(&numbered_lines("line "));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "H");
+        assert_eq!(cursor(&pane), ("line 9".into(), 0, 0));
+        keys(&mut pane, "L");
+        assert_eq!(cursor(&pane).1, 4);
+        // Half of five lines is two, for the view and the cursor alike.
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        press(&mut pane, Key::Character("u".into()), ctrl);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 11".into(), 4, 0));
+    }
+
+    #[test]
     fn a_count_just_after_ctrl_backslash_counts_and_forgets_it() {
         let terminal = terminal("one\r\ntwo\r\nthree\r\nfour");
         let mut pane = pane(&terminal);
