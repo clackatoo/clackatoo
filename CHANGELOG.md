@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.68 (2026-10-21)
+
+### Fixes
+
+- **gui:** a count before gg, or G as an operator's target, goes to that line (CLACKA-127) (96244b5)
+
 ## 2026.10.67 (2026-10-21)
 
 ### Fixes
