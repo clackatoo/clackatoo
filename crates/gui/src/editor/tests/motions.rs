@@ -115,8 +115,11 @@ fn gg_and_g_keep_the_column_unless_startofline() {
         setup.cursor()
     };
     assert_eq!(sol("G4l", "gg"), (0, 0));
-    assert_eq!(sol("2l", "6G"), (5, 2));
-    assert_eq!(sol("2l", "G"), (7, 2));
+    // From column 0, which keeping it would keep to.
+    assert_eq!(sol("", "6G"), (5, 2));
+    assert_eq!(sol("", "G"), (7, 2));
+    assert_eq!(sol("", "6gg"), (5, 2));
+    assert_eq!(after("", "6G").1, (5, 0), "and without it");
 }
 
 #[test]

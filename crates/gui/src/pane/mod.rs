@@ -2127,17 +2127,19 @@ mod tests {
             startofline: true,
             ..Options::default()
         });
+        // From each line's end, which keeping the column would keep to.
         for (keys_, line) in [
             ("gg", "  one"),
             ("G", "  five"),
             ("H", "  one"),
-            ("3G", "c"),
+            ("L", "  five"),
+            ("1G", "  one"),
+            ("5G", "  five"),
         ] {
             keys(&mut pane, "$");
             keys(&mut pane, keys_);
-            let col = if line == "c" { 0 } else { 2 };
             assert_eq!(cursor(&pane).0, line, "{keys_}");
-            assert_eq!(cursor(&pane).2, col, "{keys_}");
+            assert_eq!(cursor(&pane).2, 2, "{keys_}");
         }
     }
 
