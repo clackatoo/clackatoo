@@ -1685,7 +1685,8 @@ impl Editor {
         let registers = (&mut shared.registers, name);
         match command.action {
             Action::Operate(operator, target) => {
-                if !self.operate(operator, target, times, copy, &shared.marks, registers) {
+                let count = command.count;
+                if !self.operate(operator, target, count, copy, &shared.marks, registers) {
                     self.fail();
                 }
             }
@@ -1878,6 +1879,19 @@ impl Editor {
         cursor
     }
 
+    /// The cursor moved by `motion` as `count` says: `G` and `gg` with a
+    /// count go to that line, and other motions go `count` times.
+    fn moved_counted(&self, copy: &BufferCopy, motion: Motion, count: Option<usize>) -> Cursor {
+        match (motion, count) {
+            (Motion::First | Motion::Last, Some(number)) => {
+                let mut cursor = self.cursor;
+                cursor.go_to_line_number(number, &self.text(copy));
+                cursor
+            }
+            _ => self.moved(copy, motion, count.unwrap_or(1)),
+        }
+    }
+
     // --- Operators ----------------------------------------------------------
 
     /// Makes `operator` act on `target`, keeping the text in `registers`
@@ -1888,7 +1902,7 @@ impl Editor {
         &mut self,
         operator: Operator,
         target: Target,
-        times: usize,
+        count: Option<usize>,
         copy: &mut BufferCopy,
         marks: &Marks,
         (registers, name): (&mut Registers, Option<char>),
@@ -1900,12 +1914,12 @@ impl Editor {
         if target == Target::Selection
             && let Some(block) = self.selected_block(copy)
         {
-            self.operate_block(operator, block, times, copy, (registers, name));
+            self.operate_block(operator, block, count.unwrap_or(1), copy, (registers, name));
             return true;
         }
         let span = match target {
             Target::Mark { mark, exact } => self.mark_span(mark, exact, copy, marks),
-            _ => self.span(operator, target, times, copy),
+            _ => self.span(operator, target, count, copy),
         };
         let Some(span) = span else {
             return false;
@@ -1949,7 +1963,7 @@ impl Editor {
             }
             // A count is how many lines, or for a selection, how many steps.
             let steps = if target == Target::Selection {
-                times
+                count.unwrap_or(1)
             } else {
                 1
             };
@@ -2153,14 +2167,15 @@ impl Editor {
         self.enter_insert(1);
     }
 
-    /// What `operator` acting on `target` acts on.
+    /// What `operator` acting on `target`, with `count` typed, acts on.
     fn span(
         &mut self,
         operator: Operator,
         target: Target,
-        times: usize,
+        count: Option<usize>,
         copy: &BufferCopy,
     ) -> Option<Span> {
+        let times = count.unwrap_or(1);
         let text = self.text(copy);
         let at = self.cursor.at;
         let lines = |first: u64, last: u64| Span {
@@ -2244,7 +2259,7 @@ impl Editor {
                     cursor.repeat(end, times - usize::from(at_end), &text);
                     return Some(chars(at, cursor.at));
                 }
-                let moved = self.moved(copy, motion, times);
+                let moved = self.moved_counted(copy, motion, count);
                 // `dj` on the last line has no line to take with it.
                 if matches!(motion, Motion::Up(_) | Motion::Down(_)) && moved.at.line == at.line {
                     return None;
@@ -2431,7 +2446,7 @@ impl Editor {
             self.put_over_block(before, times, block, &register, copy, registers);
             return;
         }
-        let Some(span) = self.span(Operator::Delete, Target::Selection, 1, copy) else {
+        let Some(span) = self.span(Operator::Delete, Target::Selection, None, copy) else {
             return;
         };
         if span.lines.is_none() && self.takes_hidden((span.start, span.end), copy) {

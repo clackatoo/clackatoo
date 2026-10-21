@@ -599,6 +599,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "shell",
         what: "After a restart an editor keeps the directory its file was opened from, so a tab or split from it starts there",
     },
+    News {
+        id: "countedgg",
+        date: "2026-10-21",
+        lesson: "basics",
+        what: "A count before gg, or before G after an operator, goes to that line: 5gg, d3G and y2gg take the lines they say",
+    },
 ];
 
 impl News {

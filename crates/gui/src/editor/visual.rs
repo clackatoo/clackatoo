@@ -292,7 +292,7 @@ impl Editor {
         if let Some(block) = self.selected_block(copy) {
             return self.replace_block(ch, block, copy);
         }
-        let Some(span) = self.span(Operator::Delete, Target::Selection, 1, copy) else {
+        let Some(span) = self.span(Operator::Delete, Target::Selection, None, copy) else {
             return;
         };
         let text = self.text(copy);

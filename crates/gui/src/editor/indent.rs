@@ -306,7 +306,7 @@ impl Editor {
         }
         let span = match target {
             Target::Mark { mark, exact } => self.mark_span(mark, exact, copy, marks),
-            _ => self.span(Operator::Reindent, target, command.times(), copy),
+            _ => self.span(Operator::Reindent, target, command.count, copy),
         };
         // Nothing to indent: it fails without asking again.
         let Some(span) = span else {

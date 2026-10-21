@@ -249,7 +249,7 @@ impl Command {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     Move(Motion),
-    /// `G` with a count: to that line.
+    /// `G` or `gg` with a count: to that line.
     GoToLine,
     Operate(Operator, Target),
     /// `x`, or `X` if `before`.
@@ -505,7 +505,8 @@ pub(crate) fn parse_with(keys: &[Stroke], visual: bool, tildeop: bool) -> Parsed
         return match motion {
             Read::More => Parsed::Incomplete,
             Read::No => Parsed::Nothing,
-            Read::Yes(Action::Move(Motion::Last)) if first.is_some() => {
+            // `G` and `gg` with a count go to that line.
+            Read::Yes(Action::Move(Motion::First | Motion::Last)) if first.is_some() => {
                 command(first, Action::GoToLine)
             }
             Read::Yes(action) => command(first, action),
@@ -938,6 +939,7 @@ mod tests {
         assert_eq!(read("1"), Parsed::Incomplete);
         assert_eq!(read("0"), command(None, Action::Move(Motion::LineStart)));
         assert_eq!(read("10G"), command(Some(10), Action::GoToLine));
+        assert_eq!(read("10gg"), command(Some(10), Action::GoToLine));
         // A count too big is kept to the most there is.
         let most = Some(crate::motion::MOST_COUNT);
         assert_eq!(
