@@ -593,6 +593,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "H, L, Ctrl+D/U/F and Page Up/Down in a terminal's normal mode go as far as they say again, not a line",
     },
+    News {
+        id: "editordir",
+        date: "2026-10-21",
+        lesson: "shell",
+        what: "After a restart an editor keeps the directory its file was opened from, so a tab or split from it starts there",
+    },
 ];
 
 impl News {

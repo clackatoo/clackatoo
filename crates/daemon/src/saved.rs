@@ -285,6 +285,11 @@ pub(crate) enum Pane {
         /// one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recovery: Option<String>,
+        /// The directory its file was opened from, which paths opened
+        /// beside it, and new terminals beside it, are from. One kept by a
+        /// build from before then is its file's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dir: Option<String>,
         /// Where its cursor and view were, as a window last said.
         #[serde(default)]
         place: Option<Place>,
@@ -619,6 +624,7 @@ mod tests {
                                             Layout::Pane(Pane::Editor {
                                                 path: "/src/clackatoo/README.md".into(),
                                                 recovery: None,
+                                                dir: None,
                                                 place: Some(Place {
                                                     line: 12,
                                                     column: 4,
@@ -745,6 +751,22 @@ mod tests {
             focused: 0,
         }];
         assert_eq!(State::decode(&state.encode()).unwrap(), state);
+    }
+
+    #[test]
+    fn an_editor_s_directory_reads_back_and_is_left_out_when_there_is_none() {
+        let encoded = String::from_utf8(state().encode()).unwrap();
+        assert!(!encoded.contains("\"dir\""), "{encoded}");
+        let mut state = state();
+        state.workspaces[1].tabs[0].layout = Layout::Pane(Pane::Editor {
+            path: "/src/clackatoo/crates/gui/src/main.rs".into(),
+            recovery: None,
+            dir: Some("/src/clackatoo".into()),
+            place: None,
+        });
+        let encoded = state.encode();
+        assert!(String::from_utf8_lossy(&encoded).contains("\"dir\": \"/src/clackatoo\""));
+        assert_eq!(State::decode(&encoded).unwrap(), state);
     }
 
     /// Written by the first build that wrote version 1. It must always be

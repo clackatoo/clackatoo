@@ -479,6 +479,7 @@ impl Daemon {
                 Some(Pane::Editor {
                     path,
                     recovery,
+                    dir: slot.buffer.dir().to_str().map(str::to_owned),
                     place: (self.keeping.places.get(&id).map(|&(_, place)| place))
                         .or_else(|| restored.and_then(|restored| restored.place))
                         .map(|place| saved::Place {
@@ -930,9 +931,15 @@ impl Daemon {
                 };
                 self.pane_content(PaneTerminal::New(terminal), None)
             }
-            Pane::Editor { path, recovery, .. } => {
+            Pane::Editor {
+                path,
+                recovery,
+                dir,
+                ..
+            } => {
                 // Its changes not saved came back as a buffer of their own,
-                // with no file yet, or with its file as it was.
+                // with no file yet, or with its file as it was, opened from
+                // the directory its recovery file kept.
                 let recovered = (recovery.as_deref())
                     .and_then(|key| self.recovered_from(key))
                     .filter(|buffer| self.buffers.contains_key(buffer));
@@ -944,9 +951,15 @@ impl Daemon {
                     log::info!("{path} isn't there: its editor isn't made again");
                     return None;
                 }
+                // Opened from where it was, or, if that's gone or a build
+                // from before then kept it, from its file's own directory:
+                // never the home directory. A stat, as opening a file is.
+                let dir = (dir.as_deref())
+                    .filter(|dir| Path::new(dir).is_dir())
+                    .or_else(|| Path::new(path).parent()?.to_str());
                 let file = OpenFile {
                     path: path.clone(),
-                    cwd: None,
+                    cwd: dir.map(str::to_owned),
                 };
                 self.pane_content(PaneTerminal::File(file), None)
             }

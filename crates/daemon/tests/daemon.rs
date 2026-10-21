@@ -16526,6 +16526,99 @@ fn a_terminal_whose_folder_has_gone_comes_back_at_home_and_a_file_gone_is_left_o
     );
 }
 
+/// A shell where the pane it's made beside works, as `Ctrl+B c` makes.
+fn shell_beside() -> PaneTerminal {
+    PaneTerminal::New(NewTerminal {
+        size: Size::new(60, 10).unwrap(),
+        command: None,
+        cwd: None,
+        record_to: None,
+    })
+}
+
+/// Waits until a shell made beside `pane`, by `split`, says it's in
+/// `dir`.
+fn wait_for_pwd_beside(client: &mut Client, pane: PaneId, dir: &Path) {
+    let shell = client
+        .split_pane(pane, Side::Below, shell_beside())
+        .unwrap();
+    let workspaces =
+        wait_for_workspaces(client, |workspaces| workspaces.find_pane(shell).is_some());
+    wait_for_pwd(client, terminal_of(&workspaces, shell), dir);
+}
+
+#[test]
+fn an_editor_brought_back_after_a_restart_keeps_the_directory_its_file_was_opened_from() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    // Neither its file's own directory nor the home directory.
+    let project = kept.path().join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+    {
+        let daemon = TestDaemon::keeping(&file);
+        let mut client = daemon.client();
+        client
+            .new_workspace(Some("work".into()), open_file(&project, "src/main.rs"))
+            .unwrap();
+        wait_for_kept(&file, |kept| kept.contains("\"dir\""));
+    }
+    let daemon = TestDaemon::keeping(&file);
+    let mut client = daemon.client();
+    let workspaces = client.watch_workspaces().unwrap();
+    let work = &workspaces.list[0];
+    assert!(matches!(
+        work.tabs[0].layout.panes()[0].content,
+        Content::Buffer(_)
+    ));
+    // A new tab from the editor starts where its file was opened from.
+    let shell = client.new_tab(work.id, shell_beside()).unwrap();
+    let workspaces = wait_for_workspaces(&mut client, |workspaces| {
+        workspaces.find_pane(shell).is_some()
+    });
+    wait_for_pwd(&mut client, terminal_of(&workspaces, shell), &project);
+}
+
+#[test]
+fn an_editor_kept_with_no_directory_or_one_gone_comes_back_in_its_file_s_own() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let (older, moved) = (kept.path().join("older"), kept.path().join("moved"));
+    std::fs::create_dir_all(&older).unwrap();
+    std::fs::create_dir_all(&moved).unwrap();
+    std::fs::write(older.join("notes.txt"), "one\n").unwrap();
+    std::fs::write(moved.join("todo.txt"), "two\n").unwrap();
+    // One kept by a build from before editors kept their directory, and
+    // one whose directory has gone since.
+    let json = serde_json::json!({
+        "clackatoo_workspaces": 1,
+        "workspaces": [{
+            "name": "w",
+            "tabs": [{"layout": {"split": {
+                "left_to_right": true,
+                "parts": [
+                    {"pane": {"editor": {"path": older.join("notes.txt")}}},
+                    {"pane": {"editor": {
+                        "path": moved.join("todo.txt"),
+                        "dir": kept.path().join("gone"),
+                    }}},
+                ],
+                "shares": [1, 1],
+            }}}],
+        }],
+    });
+    std::fs::write(&file, json.to_string()).unwrap();
+    let daemon = TestDaemon::keeping(&file);
+    let mut client = daemon.client();
+    let workspaces = client.watch_workspaces().unwrap();
+    let panes: Vec<PaneId> = (workspaces.list[0].tabs[0].layout.panes().iter())
+        .map(|pane| pane.id)
+        .collect();
+    assert_eq!(panes.len(), 2, "{workspaces:#?}");
+    wait_for_pwd_beside(&mut client, panes[0], &older);
+    wait_for_pwd_beside(&mut client, panes[1], &moved);
+}
+
 #[test]
 fn workspaces_that_cant_be_read_are_set_aside_and_the_daemon_starts_with_none() {
     let kept = tempfile::tempdir().unwrap();
@@ -17191,6 +17284,64 @@ fn an_editor_of_changes_not_saved_comes_back_showing_them() {
             (a, "one\ntwo\n".to_owned(), true),
         ]
     );
+}
+
+#[test]
+fn an_editor_of_changes_not_saved_comes_back_in_the_directory_it_was_opened_from() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().canonicalize().unwrap();
+    let recovery = root.join("recovery");
+    let file = root.join("workspaces");
+    // Neither the file's own directory nor the daemon's home.
+    let project = root.join("project");
+    std::fs::create_dir_all(project.join("sub")).unwrap();
+    std::fs::write(project.join("sub/a.txt"), "one\n").unwrap();
+    let start = || {
+        let (recovery, file) = (recovery.clone(), file.clone());
+        TestDaemon::start_with_restoring(
+            move |_, config| {
+                let mut kept = RecoveryConfig::in_dir(recovery);
+                kept.after = Duration::from_millis(50);
+                config.recovery = Some(kept);
+                config.workspaces = Some(file);
+            },
+            true,
+        )
+    };
+    {
+        let daemon = start();
+        let mut client = daemon.client();
+        client.watch_workspaces().unwrap();
+        // A buffer with no file yet, and a file, each with changes.
+        let pane = client.new_workspace(None, blank(&project)).unwrap();
+        let b = buffer_in(&mut client, pane);
+        attach_buffer(&mut client, b);
+        send_change(&mut client, b, 1, insert(0, 0, "draft\n", 0));
+        let other =
+            (client.split_pane(pane, Side::Right, open_file(&project, "sub/a.txt"))).unwrap();
+        let a = buffer_in(&mut client, other);
+        attach_buffer(&mut client, a);
+        send_change(&mut client, a, 1, insert(4, 4, "two\n", 0));
+        wait_for_recovery_files(&recovery, |files| files.len() == 2);
+        wait_for_kept(&file, |kept| kept.matches("\"recovery\"").count() == 2);
+    }
+    let lock = std::fs::File::open(recovery.join(".lock")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
+        assert!(Instant::now() < deadline, "the lock is still held");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(lock);
+    let daemon = start();
+    let mut client = daemon.client();
+    let workspaces = client.watch_workspaces().unwrap();
+    let panes: Vec<PaneId> = (workspaces.list[0].tabs[0].layout.panes().iter())
+        .map(|pane| pane.id)
+        .collect();
+    assert_eq!(panes.len(), 2, "{workspaces:#?}");
+    for pane in panes {
+        wait_for_pwd_beside(&mut client, pane, &project);
+    }
 }
 
 #[test]
