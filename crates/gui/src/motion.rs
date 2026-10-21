@@ -732,7 +732,8 @@ impl Cursor {
         };
         let highest = rows_down(top, top_margin, last, lines);
         let lowest = rows_up(bottom, bottom_margin, first, lines).max(highest);
-        let from_edge = (count as u64).saturating_sub(1);
+        // No further than the view, so a huge count walks no more rows.
+        let from_edge = (count as u64).saturating_sub(1).min(view.rows);
         let to = match motion {
             Motion::ViewTop => rows_down(top, from_edge, last, lines).clamp(highest, lowest),
             Motion::ViewBottom => rows_up(bottom, from_edge, first, lines).clamp(highest, lowest),
@@ -1310,6 +1311,7 @@ pub(crate) mod tests {
         // A count no further than the margin from the other edge.
         assert_eq!(went(&margin, Motion::ViewTop, Some(9)), at(8, 3));
         assert_eq!(went(&margin, Motion::ViewBottom, Some(9)), at(6, 3));
+        assert_eq!(went(&plain, Motion::ViewBottom, Some(usize::MAX)), at(5, 3));
         let start = viewed(0, 1);
         assert_eq!(went(&start, Motion::ViewTop, None), at(0, 3));
         assert_eq!(went(&start, Motion::ViewBottom, None), at(3, 3));
