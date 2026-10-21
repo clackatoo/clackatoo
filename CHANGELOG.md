@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026.10.67 (2026-10-21)
+
+### Fixes
+
+- **daemon:** an editor brought back keeps the directory its file was opened from (CLACKA-126) (b24a7c5)
+- **daemon:** a relative kept directory falls back to the file's own, and the docs say so (CLACKA-126) (c140bec)
+
 ## 2026.10.66 (2026-10-21)
 
 ### Fixes
