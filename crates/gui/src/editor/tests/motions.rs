@@ -173,6 +173,25 @@ fn linewise_deletes_and_shifts_keep_the_column_unless_startofline() {
 }
 
 #[test]
+fn colon_d_goes_to_the_first_non_blank_whatever_startofline_says() {
+    let after = |from: &str, line: &str, startofline: bool| {
+        let mut setup = Setup::new(EIGHT);
+        setup.set(|options| options.startofline = startofline);
+        setup.keys(from);
+        let done = setup
+            .editor
+            .ex(line, &mut setup.copy, &mut setup.shared, false);
+        assert!(done.is_ok(), "{line}");
+        setup.cursor()
+    };
+    for sol in [false, true] {
+        // `  four` comes up to line 3, `five` to line 4.
+        assert_eq!(after("", "3d", sol), (2, 2), "sol {sol}");
+        assert_eq!(after("4G4l", "d", sol), (3, 0), "sol {sol}");
+    }
+}
+
+#[test]
 fn yanks_keep_the_column_whatever_startofline_says_but_gg_doesnt() {
     assert_eq!(lines_after("3G4l", "yj", true).1, (2, 4));
     assert_eq!(lines_after("3G4l", "yk", true).1, (1, 4));
