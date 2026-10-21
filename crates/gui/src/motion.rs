@@ -539,6 +539,41 @@ impl Motion {
     }
 }
 
+/// What an operator takes with a motion: from `start` to `end`, in order,
+/// as `reach` says, and the cursor where the motion went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Taken {
+    pub(crate) start: Point,
+    pub(crate) end: Point,
+    pub(crate) reach: Reach,
+    pub(crate) moved: Cursor,
+}
+
+impl Taken {
+    /// What `motion` takes from `from` to `moved`, where it went, in
+    /// `lines`: none if it went nowhere it could (see
+    /// [`Motion::reach_from`]).
+    pub(crate) fn between(
+        motion: Motion,
+        from: Point,
+        moved: Cursor,
+        lines: &impl Lines,
+    ) -> Option<Self> {
+        let reach = motion.reach_from(from, moved.at, lines)?;
+        let (start, end) = if moved.at < from {
+            (moved.at, from)
+        } else {
+            (from, moved.at)
+        };
+        Some(Self {
+            start,
+            end,
+            reach,
+            moved,
+        })
+    }
+}
+
 /// The normal-mode cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Cursor {
@@ -713,6 +748,20 @@ impl Cursor {
             }
             (motion, count) => self.repeat(motion, count.unwrap_or(1), lines),
         }
+    }
+
+    /// What an operator takes with `motion`, `count` typed, from here:
+    /// as far as [`go`](Self::go) moves (see [`Taken`]).
+    pub(crate) fn taken(
+        &self,
+        motion: Motion,
+        count: Option<usize>,
+        lines: &impl Lines,
+        start_of_line: bool,
+    ) -> Option<Taken> {
+        let mut moved = *self;
+        moved.go(motion, count, lines, start_of_line);
+        Taken::between(motion, self.at, moved, lines)
     }
 
     /// Moves to line `line`: to its first character that isn't blank if

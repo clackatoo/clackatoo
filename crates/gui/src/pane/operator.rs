@@ -11,7 +11,7 @@
 use clackatoo_protocol::{Block, Request, Which};
 
 use super::{Copy, Document, Mode, Pane, Pending, Selection};
-use crate::motion::{Cursor, Motion, Point, Reach, before};
+use crate::motion::{Cursor, Motion, Point, Reach, Taken, before};
 use crate::objects::Object;
 
 /// What a block asked of the daemon is for.
@@ -34,14 +34,13 @@ impl Pane {
             return false;
         };
         let document = Document(self);
-        let mut moved = cursor;
-        moved.go(motion, count, &document, self.startofline);
-        let (start, end) = if moved.at < cursor.at {
-            (moved.at, cursor.at)
-        } else {
-            (cursor.at, moved.at)
-        };
-        let Some(reach) = motion.reach_from(cursor.at, moved.at, &document) else {
+        let Some(Taken {
+            start,
+            end,
+            reach,
+            moved,
+        }) = cursor.taken(motion, count, &document, self.startofline)
+        else {
             return false;
         };
         let copied = match reach {

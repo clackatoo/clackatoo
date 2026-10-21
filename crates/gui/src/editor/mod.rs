@@ -108,8 +108,8 @@ use crate::colors;
 use crate::input::KeyPress;
 use crate::keymap::Chord;
 use crate::motion::{
-    Block, Class, Cursor, Lines, Motion, Point, Reach, RowAt, Words, before, class_at, last_row,
-    row_at, rows_down, rows_up,
+    Block, Class, Cursor, Lines, Motion, Point, Reach, RowAt, Taken, Words, before, class_at,
+    last_row, row_at, rows_down, rows_up,
 };
 use crate::objects::Object;
 use crate::options::{Case, CompleteAccept, Options};
@@ -185,6 +185,26 @@ struct Span {
     end: usize,
     /// Whole lines, `first` to `last`.
     lines: Option<(u64, u64)>,
+}
+
+impl Span {
+    /// Lines `first` to `last` of `text`, whole.
+    fn lines(text: &Text<'_>, first: u64, last: u64) -> Self {
+        Self {
+            start: text.line_start(first),
+            end: text.line_start(last + 1),
+            lines: Some((first, last)),
+        }
+    }
+
+    /// The characters of `text` from `start` to `last`, both in it.
+    fn chars(text: &Text<'_>, start: Point, last: Point) -> Self {
+        Self {
+            start: text.byte_at(start),
+            end: text.char_end(last),
+            lines: None,
+        }
+    }
 }
 
 /// A change being made, for `.` to make again: the command, what was
@@ -2185,16 +2205,8 @@ impl Editor {
         let times = count.unwrap_or(1);
         let text = self.text(copy);
         let at = self.cursor.at;
-        let lines = |first: u64, last: u64| Span {
-            start: text.line_start(first),
-            end: text.line_start(last + 1),
-            lines: Some((first, last)),
-        };
-        let chars = |start: Point, last: Point| Span {
-            start: text.byte_at(start),
-            end: text.char_end(last),
-            lines: None,
-        };
+        let lines = |first: u64, last: u64| Span::lines(&text, first, last);
+        let chars = |start: Point, last: Point| Span::chars(&text, start, last);
         match target {
             Target::Lines => {
                 let last = (at.line + times as u64 - 1).min(text.last_line());
@@ -2236,63 +2248,71 @@ impl Editor {
                 };
                 Some(chars(start, last))
             }
-            Target::Motion(motion) => {
-                let motion = self.remember_find(motion);
-                let motion = self.by_rows(motion);
-                // `cw` changes to the end of the word, not the next.
-                let word = matches!(motion, Motion::WordStart | Motion::BigWordStart);
-                let big = motion == Motion::BigWordStart;
-                let row = text.row(at.line);
-                let class = |col| {
-                    let class = class_at(row.as_deref(), col, text.words());
-                    if big && class == Class::Punctuation {
-                        Class::Word
-                    } else {
-                        class
-                    }
-                };
-                if operator == Operator::Change && word && class(at.col) != Class::Blank {
-                    let end = if big {
-                        Motion::BigWordEnd
-                    } else {
-                        Motion::WordEnd
-                    };
-                    // On a word's last character, `e` would go on to the
-                    // next word's end: that character is the word.
-                    let mut next = self.cursor;
-                    next.apply(Motion::Right, &text);
-                    let at_end = next.at == at || class(next.at.col) != class(at.col);
-                    let mut cursor = self.cursor;
-                    cursor.repeat(end, times - usize::from(at_end), &text);
-                    return Some(chars(at, cursor.at));
-                }
-                let moved = self.moved(copy, motion, count);
-                // `dj` on the last line has no line to take with it.
-                if matches!(motion, Motion::Up(_) | Motion::Down(_)) && moved.at.line == at.line {
-                    return None;
-                }
-                let (start, end) = if moved.at < at {
-                    (moved.at, at)
-                } else {
-                    (at, moved.at)
-                };
-                match self.reach(motion, at, moved.at, &text)? {
-                    Reach::Lines => Some(lines(start.line, end.line)),
-                    Reach::Inclusive => Some(chars(start, end)),
-                    Reach::Exclusive => exclusive(&text, start, end, word),
-                }
-            }
+            Target::Motion(motion) => self.motion_span(operator, motion, count, copy),
         }
     }
 
-    /// What an operator takes with `motion` from `from` to `to`, as
-    /// [`Motion::reach_from`] says, but after `$`, `gj` and `gk` take the
-    /// character they go to, as in Vim.
-    fn reach(&self, motion: Motion, from: Point, to: Point, text: &Text<'_>) -> Option<Reach> {
+    /// What `operator` acting on `motion`, with `count` typed, acts on.
+    fn motion_span(
+        &mut self,
+        operator: Operator,
+        motion: Motion,
+        count: Option<usize>,
+        copy: &BufferCopy,
+    ) -> Option<Span> {
+        let times = count.unwrap_or(1);
+        let text = self.text(copy);
+        let at = self.cursor.at;
+        let lines = |first: u64, last: u64| Span::lines(&text, first, last);
+        let chars = |start: Point, last: Point| Span::chars(&text, start, last);
+        let motion = self.remember_find(motion);
+        let motion = self.by_rows(motion);
+        // `cw` changes to the end of the word, not the next.
+        let word = matches!(motion, Motion::WordStart | Motion::BigWordStart);
+        let big = motion == Motion::BigWordStart;
+        let row = text.row(at.line);
+        let class = |col| {
+            let class = class_at(row.as_deref(), col, text.words());
+            if big && class == Class::Punctuation {
+                Class::Word
+            } else {
+                class
+            }
+        };
+        if operator == Operator::Change && word && class(at.col) != Class::Blank {
+            let end = if big {
+                Motion::BigWordEnd
+            } else {
+                Motion::WordEnd
+            };
+            // On a word's last character, `e` would go on to the
+            // next word's end: that character is the word.
+            let mut next = self.cursor;
+            next.apply(Motion::Right, &text);
+            let at_end = next.at == at || class(next.at.col) != class(at.col);
+            let mut cursor = self.cursor;
+            cursor.repeat(end, times - usize::from(at_end), &text);
+            return Some(chars(at, cursor.at));
+        }
+        let moved = self.moved(copy, motion, count);
+        // `dj` on the last line has no line to take with it.
+        if matches!(motion, Motion::Up(_) | Motion::Down(_)) && moved.at.line == at.line {
+            return None;
+        }
+        let Taken {
+            start, end, reach, ..
+        } = Taken::between(motion, at, moved, &text)?;
+        // After `$`, `gj` and `gk` take the character they go to,
+        // as in Vim.
         let rows = matches!(motion, Motion::RowUp(_) | Motion::RowDown(_));
-        match motion.reach_from(from, to, text)? {
-            Reach::Exclusive if rows && self.cursor.want() == usize::MAX => Some(Reach::Inclusive),
-            reach => Some(reach),
+        let reach = match reach {
+            Reach::Exclusive if rows && self.cursor.want() == usize::MAX => Reach::Inclusive,
+            reach => reach,
+        };
+        match reach {
+            Reach::Lines => Some(lines(start.line, end.line)),
+            Reach::Inclusive => Some(chars(start, end)),
+            Reach::Exclusive => exclusive(&text, start, end, word),
         }
     }
 
