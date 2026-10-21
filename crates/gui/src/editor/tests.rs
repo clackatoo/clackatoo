@@ -2955,3 +2955,13 @@ fn ctrl_and_shift_with_arrows_home_and_end_are_vims_keys() {
     setup.keys("ggA<C-Left>X<C-Home>Y<C-End>Z<Esc>");
     assert_eq!(setup.text(), "Yone two Xthree\nfourZ\n");
 }
+
+#[test]
+fn esc_after_keys_half_typed_only_forgets_them() {
+    let mut setup = Setup::new("one two\n");
+    setup.keys("vg<Esc>");
+    assert!(matches!(setup.editor.mode, Mode::Visual(_)));
+    assert!(!setup.editor.pending());
+    setup.keys("<Esc>");
+    assert_eq!(setup.editor.mode, Mode::Normal);
+}

@@ -615,7 +615,13 @@ pub(crate) const NEWS: &[News] = &[
         id: "onegrammar",
         date: "2026-10-21",
         lesson: "basics",
-        what: "Terminals take W B E ^ and yH, and the bar shows a command half typed, as Vim's showcmd",
+        what: "A command a terminal doesn't take spends its keys: dw and fw no longer move by w. The bar shows y3 as typed",
+    },
+    News {
+        id: "termmotions",
+        date: "2026-10-21",
+        lesson: "basics",
+        what: "A terminal's normal mode takes every motion: W, B, E and ^ move, and y takes H, M and L, as yH",
     },
     News {
         id: "startofline",

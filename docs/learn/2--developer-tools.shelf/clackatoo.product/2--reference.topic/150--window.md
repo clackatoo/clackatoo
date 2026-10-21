@@ -335,7 +335,7 @@ Clicking a pane focuses it. What else the mouse does depends on the program in t
 - A triple click selects whole lines.
 - With Alt held, or Ctrl and Alt, dragging selects a block of columns. Over a program that takes the mouse, add Shift.
 
-Letting go copies the selection to the primary selection, and a middle click pastes it, as elsewhere on Linux. Ctrl+Shift+C, or `y` in normal mode, copies it to the clipboard. The selection stays highlighted until the next key or click. In normal mode, a click also moves the cursor there.
+Letting go copies the selection to the primary selection, and a middle click pastes it, as elsewhere on Linux. Ctrl+Shift+C, or `y` in normal mode with nothing typed before it, copies it to the clipboard. The selection stays highlighted until the next key or click. In normal mode, a click also moves the cursor there.
 
 **Programs that take the mouse.** Programs such as Neovim, htop and less can ask for clicks, drags and the wheel, and get them while their pane is in insert mode on the live screen. The pointer is then an arrow rather than a text cursor. Hold Shift to select text anyway. A drag stays with the pane it started in, even when the pointer leaves it.
 
@@ -366,7 +366,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 
 Moving past the top of the view scrolls into history. In normal mode the view holds still while output arrives, so the cursor stays on its text. On the alternate screen the cursor moves over the screen only.
 
-The keys are read as an editor reads them, so a command half typed, as `y3` or `"a`, shows at the start of the bar until it's done, as Vim's `showcmd` shows it. A command a terminal doesn't take, as `dw`, `x`, `"ayy` or `fx`, does nothing, all its keys spent, as in a file Vim won't change: so after `d`, the next key is the command's too, `:` included.
+The keys are read as an editor reads them, so a command half typed, as `y3` or `"a`, shows at the start of the bar until it's done, as Vim's `showcmd` shows it. A command a terminal doesn't take, as `dw`, `x`, `"ayy` or `fx`, does nothing, all its keys spent, as in a file Vim won't change: so after `d`, the next key is the command's too, `:` included. Esc after keys half typed only forgets them, as in Vim: `vg` and Esc is still in visual mode, and a second Esc leaves it.
 
 ### Selecting and copying
 

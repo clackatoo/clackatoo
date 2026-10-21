@@ -2714,6 +2714,19 @@ mod tests {
     }
 
     #[test]
+    fn esc_after_keys_half_typed_only_forgets_them() {
+        let terminal = terminal("one two\r\nthree");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "vg");
+        named(&mut pane, NamedKey::Escape);
+        assert_eq!(pane.mode, Mode::Visual(Selection::Characters));
+        assert!(!pane.pending());
+        named(&mut pane, NamedKey::Escape);
+        assert_eq!(pane.mode, Mode::Normal);
+    }
+
+    #[test]
     fn esc_after_a_count_leaves_visual_mode_and_ctrl_c_after_y_reaches_the_program() {
         let terminal = terminal("one two\r\nthree");
         let mut pane = pane(&terminal);
