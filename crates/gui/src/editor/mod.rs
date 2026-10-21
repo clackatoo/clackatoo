@@ -1605,7 +1605,12 @@ impl Editor {
             Action::Tilde => self.tilde(times, copy),
             Action::FindAgain { reverse } => self.find_again(reverse, times, copy),
             Action::Scroll(scroll) => self.scroll(scroll, command.count, copy),
-            Action::View(at) => self.view_at(at, copy),
+            Action::View(at) => {
+                if let Some(count) = command.count {
+                    self.onto_counted_line(count, copy);
+                }
+                self.view_at(at, copy);
+            }
             Action::Reselect => self.reselect(copy, &mut shared.marks),
             Action::OtherEnd => self.other_end(),
             Action::OtherCorner => self.other_corner(copy),
@@ -4169,6 +4174,18 @@ impl Editor {
         } else {
             Some([0, 1, 2, 3].map(|on| rows(Some(top.line - 1 + on))))
         }
+    }
+
+    /// Puts the cursor on line `count`, counting from 1, as far as the text
+    /// goes, in the column it wanted, as `5zt` does whatever `startofline`
+    /// says, as Vim's.
+    fn onto_counted_line(&mut self, count: usize, copy: &BufferCopy) {
+        let text = self.text(copy);
+        let line = (count as u64).saturating_sub(1).min(text.last_line());
+        let mut cursor = Cursor::wanting(Point { line, col: 0 }, self.cursor.want());
+        cursor.onto_line(line, false, &text);
+        drop(text);
+        self.cursor = cursor;
     }
 
     /// `zt`, `zz` and `zb`: the cursor's line at the view's top, middle or

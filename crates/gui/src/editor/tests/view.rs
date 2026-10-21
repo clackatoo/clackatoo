@@ -332,6 +332,18 @@ fn h_counts_from_the_first_line_shown_whole() {
 }
 
 #[test]
+fn zt_zz_and_zb_with_a_count_put_that_line_there_and_the_cursor_on_it() {
+    let text = sixty();
+    let at = |keys| after(viewed(&text, 11, (15, 4), false), keys);
+    assert_eq!(at("5zt"), (5, 5, 4));
+    assert_eq!(at("40zb"), (31, 40, 4));
+    // In its column, whatever startofline says.
+    let mut setup = viewed(&text, 11, (15, 4), false);
+    setup.set(|options| options.startofline = true);
+    assert_eq!(after(setup, "3zt"), (3, 3, 4));
+}
+
+#[test]
 fn ctrl_e_and_ctrl_y_move_the_view_keeping_the_cursor_in_it() {
     let text = sixty();
     assert_eq!(
