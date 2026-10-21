@@ -416,6 +416,7 @@ An editor in a window of its own starts in normal mode, as in Vim. One you go to
 | `g0` `g$` | The screen row's first or last character; with `nowrap`, the first or last in view. |
 | Ctrl+D, Ctrl+U | Half the view's screen rows down or up, rounded down, the view and the cursor together. A count sets how far they go from then on, as Vim's does. |
 | Ctrl+F, Page Down, Page Up | The view's screen rows less two down, or up with Page Up, keeping the cursor in view, `scrolloff` rows in. A count goes that many pages. |
+| Ctrl+E Ctrl+Y | The view a screen row down or up, or as many as a count says, keeping the cursor in view, `scrolloff` rows in, as the wheel does. While a panel by the cursor is shown, they scroll it instead. |
 | `zt` `zz` `zb` | Scrolls the cursor's line to the top, middle or bottom. |
 | `]d` `[d` | The next mistake a [language server](#language-servers) found, or the one before, going round the file's ends. A count goes that many. |
 | `gd` `gD` `gy` `gri` | Where what's under the cursor is defined, declared, where its type is defined, or what implements it, as the [language server](#language-servers) says, as Neovim's keys go. A place in another file opens there in place of this one, as `:e` does. Several places open [the finder](~clackatoo/reference/window#the-finder) on them, each with its line. |

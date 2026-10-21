@@ -1599,13 +1599,7 @@ impl Editor {
             Action::SearchWord { backward } => self.search_word(backward, copy, shared),
             Action::Tilde => self.tilde(times, copy),
             Action::FindAgain { reverse } => self.find_again(reverse, times, copy),
-            Action::Scroll(scroll @ (Scroll::HalfPage { .. } | Scroll::Page { .. })) => {
-                self.scroll(scroll, command.count, copy);
-            }
-            // Not the editor's yet (see `EditorKeys::takes`).
-            Action::Scroll(Scroll::Line { .. }) => {
-                debug_assert!(false, "an editor doesn't take {command:?}");
-            }
+            Action::Scroll(scroll) => self.scroll(scroll, command.count, copy),
             Action::View(at) => self.view_at(at, copy),
             Action::Reselect => self.reselect(copy, &mut shared.marks),
             Action::OtherEnd => self.other_end(),
@@ -3967,8 +3961,11 @@ impl Editor {
     }
 
     /// Ctrl+D, Ctrl+U, Ctrl+F and their kin, with `count` typed: the half
-    /// pages move the view and the cursor together, and the pages the view,
-    /// keeping the cursor in it, as Vim's do (see [`Paging`]).
+    /// pages move the view and the cursor together, and the pages, Ctrl+E
+    /// and Ctrl+Y the view, keeping the cursor in it, as Vim's do (see
+    /// [`Paging`]). Ctrl+E and Ctrl+Y go by screen rows, as the wheel does,
+    /// where Vim's go by lines; a panel by the cursor takes them first (see
+    /// [`panel_stroke`](Self::panel_stroke)).
     fn scroll(&mut self, scroll: Scroll, count: Option<usize>, copy: &BufferCopy) {
         let rows = self.paging.rows(scroll, count, self.height.max(1) as u64);
         let rows = i64::try_from(rows).unwrap_or(i64::MAX);

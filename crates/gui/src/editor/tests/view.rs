@@ -1,6 +1,8 @@
-//! The keys that go by the view: paging (Ctrl+D, Ctrl+U, Ctrl+F, Ctrl+B,
-//! Page Down and Page Up), each case checked against Neovim 0.11 headless
-//! (`crates/gui/tests/nvim/check.lua`), in a view of ten rows.
+//! The keys that go by the view: paging (Ctrl+D, Ctrl+U, Ctrl+F, Page Down
+//! and Page Up), Ctrl+E and Ctrl+Y, and `H`, `M` and `L`, each case checked
+//! against Neovim 0.11 headless (`crates/gui/tests/nvim/check.lua`), in a
+//! view of ten rows. Where clackatoo differs on purpose: Ctrl+E and Ctrl+Y
+//! go by screen rows where lines wrap, as the wheel does, not by lines.
 
 use std::fmt::Write;
 
@@ -190,4 +192,23 @@ fn where_lines_wrap_h_and_l_count_lines_and_scrolloff_screen_rows() {
     assert_eq!(at("3L", 0), (11, 14, 2));
     assert_eq!(at("H", 2), (11, 12, 2));
     assert_eq!(at("L", 2), (11, 14, 2));
+}
+
+#[test]
+fn ctrl_e_and_ctrl_y_move_the_view_keeping_the_cursor_in_it() {
+    let text = sixty();
+    assert_eq!(
+        after(viewed(&text, 11, (11, 4), false), "<C-e>"),
+        (12, 12, 4)
+    );
+    assert_eq!(
+        after(viewed(&text, 11, (11, 4), false), "3<C-e>"),
+        (14, 14, 4)
+    );
+    assert_eq!(
+        after(viewed(&text, 11, (20, 4), false), "<C-y>"),
+        (10, 19, 4)
+    );
+    let setup = with_margin(viewed(&text, 11, (14, 4), false), 3);
+    assert_eq!(after(setup, "<C-e>"), (12, 15, 4));
 }

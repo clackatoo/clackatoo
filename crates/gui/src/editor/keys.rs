@@ -158,13 +158,6 @@ impl Dialect for EditorKeys {
             _ => return None,
         }))
     }
-
-    /// All but Ctrl+E and Ctrl+Y, which aren't the editor's yet: they
-    /// scroll a panel by the cursor, before the grammar (see
-    /// `Editor::panel_stroke`).
-    fn takes(&self, command: &Command) -> bool {
-        !matches!(command.action, Action::Scroll(vim::Scroll::Line { .. }))
-    }
 }
 
 impl Action {
@@ -287,9 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_e_and_ctrl_y_arent_the_editors_yet_but_h_m_and_l_are_jumps() {
-        let ctrl_e = vim::parse(&[Stroke::ctrl('e')], false, &EditorKeys { tildeop: false });
-        assert_eq!(ctrl_e, Parsed::Nothing);
+    fn h_m_and_l_are_jumps() {
         assert_eq!(
             read("3L"),
             command(Some(3), Action::Move(Motion::ViewBottom))

@@ -135,6 +135,11 @@ local cases = {
   { name = '3L wrapped', lines = wrapping, at = { 14, 2 }, view = { height = 10, top = 11, columns = 20 }, keys = '3L' },
   { name = 'H so=2 wrapped', lines = wrapping, at = { 14, 2 }, view = { height = 10, top = 11, columns = 20 }, keys = 'H', set = 'scrolloff=2' },
   { name = 'L so=2 wrapped', lines = wrapping, at = { 14, 2 }, view = { height = 10, top = 11, columns = 20 }, keys = 'L', set = 'scrolloff=2' },
+  -- Ctrl+E and Ctrl+Y: the view a line, the cursor kept in it.
+  { name = '<C-e>', lines = sixty, at = { 11, 4 }, view = { height = 10, top = 11 }, keys = '<C-e>' },
+  { name = '3<C-e>', lines = sixty, at = { 11, 4 }, view = { height = 10, top = 11 }, keys = '3<C-e>' },
+  { name = '<C-y>', lines = sixty, at = { 20, 4 }, view = { height = 10, top = 11 }, keys = '<C-y>' },
+  { name = '<C-e> so=3', lines = sixty, at = { 14, 4 }, view = { height = 10, top = 11 }, keys = '<C-e>', set = 'scrolloff=3' },
 }
 
 -- Quiet: "3 fewer lines" would land in what's printed, as would a
