@@ -348,7 +348,7 @@ pub(crate) fn rows_down(from: RowAt, mut n: u64, end: u64, lines: &impl Lines) -
 }
 
 /// How many screen rows `to` is below `from`, in `lines`.
-fn rows_between(from: RowAt, to: RowAt, lines: &impl Lines) -> u64 {
+pub(crate) fn rows_between(from: RowAt, to: RowAt, lines: &impl Lines) -> u64 {
     if to.line == from.line {
         return to.row.saturating_sub(from.row) as u64;
     }

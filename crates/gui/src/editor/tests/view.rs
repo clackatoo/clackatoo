@@ -89,6 +89,37 @@ fn half_pages_move_the_view_and_the_cursor_and_a_count_sets_how_far() {
 }
 
 #[test]
+fn half_pages_show_nothing_past_the_texts_end_but_the_cursor_goes_on() {
+    let text = sixty();
+    let at = |top, cursor, keys| after(viewed(&text, top, (cursor, 4), false), keys);
+    // Three rows to line 60 at the bottom; the cursor five.
+    assert_eq!(at(48, 50, "<C-d>"), (51, 55, 4));
+    // None at all.
+    assert_eq!(at(51, 55, "<C-d>"), (51, 60, 4));
+    let short = viewed("a\nb\nc\n", 1, (1, 0), false);
+    assert_eq!(after(short, "<C-d>"), (1, 3, 0));
+    // Up, as far as the text's start, and the cursor on.
+    assert_eq!(at(3, 8, "<C-u>"), (1, 3, 4));
+}
+
+#[test]
+fn where_lines_wrap_half_pages_go_to_a_lines_start() {
+    let text = wrapping();
+    // Five rows down from line 12 end on line 15's second: back to its
+    // first, the cursor four rows.
+    assert_eq!(
+        after(viewed(&text, 12, (13, 2), true), "<C-d>"),
+        (15, 15, 22)
+    );
+    // Five up from line 21 end on line 17's second, four lines back: on
+    // to line 18, the cursor four rows.
+    assert_eq!(
+        after(viewed(&text, 21, (24, 2), true), "<C-u>"),
+        (18, 21, 22)
+    );
+}
+
+#[test]
 fn pages_move_the_view_less_two_rows_and_the_cursor_to_its_top_or_bottom() {
     let text = sixty();
     assert_eq!(

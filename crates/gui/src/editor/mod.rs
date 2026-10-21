@@ -109,7 +109,7 @@ use crate::input::KeyPress;
 use crate::keymap::Chord;
 use crate::motion::{
     Block, Class, Cursor, Lines, Motion, Point, Reach, RowAt, Taken, Words, before, class_at,
-    last_row, row_at, rows_down, rows_up,
+    last_row, row_at, rows_between, rows_down, rows_up,
 };
 use crate::objects::Object;
 use crate::options::{Case, CompleteAccept, Options};
@@ -4012,23 +4012,74 @@ impl Editor {
     }
 
     /// Ctrl+D and Ctrl+U: `rows` screen rows down, or up unless `down`,
-    /// moving the view and the cursor together.
+    /// moving the view and the cursor together, as Vim's do. The view goes
+    /// no further down than shows the text's last line at its bottom, and
+    /// to a line's start (see [`to_line_start`](Self::to_line_start)); the
+    /// cursor goes as far as the view would have, less or more as that
+    /// takes.
     fn page(&mut self, down: bool, rows: i64, copy: &BufferCopy) {
         let rows = rows.unsigned_abs().max(1);
         let text = self.text(copy);
         self.clamp_top(&text);
+        let height = self.height.max(1) as u64;
+        let last = text.last_line();
         let top = self.top.row(&text);
-        let up = !down;
-        let top = if up {
-            self.cursor.apply(Motion::RowUp(rows), &text);
-            rows_up(top, rows, 0, &text)
+        let to = if down {
+            // Short of the end, rows from the top to there, if fewer than
+            // the view and the half page.
+            let reach = rows_down(top, height - 1 + rows, last, &text);
+            let view_rows = if reach == last_row(&text, last) {
+                (rows_between(top, reach, &text) + 1).saturating_sub(height)
+            } else {
+                rows
+            };
+            rows_down(top, view_rows.min(rows), last, &text)
         } else {
-            self.cursor.apply(Motion::RowDown(rows), &text);
-            rows_down(top, rows, text.last_line(), &text).min(self.lowest_top(&text))
+            rows_up(top, rows, 0, &text)
         };
-        wrap::onto_row(&mut self.cursor, &text, up);
-        self.top = Top::of(top, &text);
+        let (to, cursor_rows) = Self::to_line_start(top, to, rows, &text);
+        let motion = if down {
+            Motion::RowDown(cursor_rows)
+        } else {
+            Motion::RowUp(cursor_rows)
+        };
+        self.cursor.apply(motion, &text);
+        wrap::onto_row(&mut self.cursor, &text, !down);
+        self.top = Top::of(to, &text);
         self.cursor_into_view(&text);
+    }
+
+    /// Where a view scrolled from row `top` to row `to` goes to start a
+    /// line, as Vim's half pages do, and how many rows the cursor goes, of
+    /// `rows`, to stay with it: partway down a line, the view goes back to
+    /// its start if that's a line on going down, or two or more back going
+    /// up, or else on to the next line's start going down, or its own
+    /// going up.
+    fn to_line_start(top: RowAt, to: RowAt, rows: u64, text: &Text<'_>) -> (RowAt, u64) {
+        if to.row == 0 {
+            return (to, rows);
+        }
+        let start = RowAt {
+            line: to.line,
+            row: 0,
+        };
+        let next = RowAt {
+            line: to.line + 1,
+            row: 0,
+        };
+        let rest = (text.screen_rows(to.line).len() - to.row) as u64;
+        let partway = to.row as u64;
+        if to > top {
+            if to.line > top.line || to.line >= text.last_line() {
+                (start, rows.saturating_sub(partway))
+            } else {
+                (next, rows + rest)
+            }
+        } else if top.line - to.line > 1 {
+            (next, rows.saturating_sub(rest))
+        } else {
+            (start, rows + partway)
+        }
     }
 
     /// Ctrl+F, Page Down and Page Up: `count` pages down, or up unless

@@ -178,17 +178,20 @@ fn scrolloff_and_paging_count_screen_rows() {
     setup.keys("<C-d>");
     assert_eq!(top(&setup), RowAt { line: 3, row: 0 });
     assert_eq!(setup.cursor(), (4, 72), "five rows down");
+    // Ctrl+U: five rows up would start the view on line 1's second row,
+    // so it starts at line 2, as Vim's does, and the cursor goes three.
     setup.keys("<C-u>");
-    assert_eq!(top(&setup), RowAt { line: 1, row: 1 });
+    assert_eq!(top(&setup), RowAt { line: 2, row: 0 });
+    assert_eq!(setup.cursor(), (3, 72), "three rows up");
     // zt, zz and zb put the cursor's line's rows at the top, middle and
     // bottom, scrolloff allowing.
+    setup.keys("0zb");
+    assert_eq!(top(&setup), RowAt { line: 1, row: 1 });
     setup.keys("zt");
     assert_eq!(top(&setup), RowAt { line: 1, row: 2 });
-    setup.keys("zb");
-    assert_eq!(top(&setup), RowAt { line: 1, row: 1 });
     // The wheel scrolls by rows.
     setup.editor.wheel(-2, &setup.copy);
-    assert_eq!(top(&setup), RowAt { line: 2, row: 0 });
+    assert_eq!(top(&setup), RowAt { line: 2, row: 1 });
     // As far down as it goes, the last line's last row shows at the
     // bottom, scrolloff rows below the top.
     setup.keys("G");
