@@ -2078,9 +2078,10 @@ impl Editor {
     /// edit. Each indent is written afresh, with tabs or spaces as the line
     /// has them. Empty lines stay empty.
     ///
-    /// The cursor goes to the first line's first character that isn't
-    /// blank; a selection stays, on the same characters, so `>` can be
-    /// pressed again.
+    /// The cursor goes to the first line, in the column it wanted, or with
+    /// `startofline` to its first character that isn't blank, as Neovim's
+    /// and Vim's do; a selection stays, on the same characters, so `>` can
+    /// be pressed again.
     fn shift(&mut self, span: Span, steps: usize, out: bool, copy: &mut BufferCopy) {
         let want = self.cursor.want();
         let text = self.text(copy);
@@ -2132,8 +2133,10 @@ impl Editor {
         }
     }
 
-    /// Highlights `span`, just copied, and moves the cursor to its start
-    /// if that's before it.
+    /// Highlights `span`, just copied, and moves the cursor back to where
+    /// the motion went if that's before it, as Vim's: `yk` and `ygg` to
+    /// their line in the column, or where the motion put it (`span.moved`,
+    /// as `gg` with `startofline`), `yb` to the span's start.
     fn yanked(&mut self, span: Span, copy: &BufferCopy) {
         let text = self.text(copy);
         let (start, last, kind) = match span.lines {

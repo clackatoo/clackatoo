@@ -70,12 +70,12 @@ pub(crate) struct Rendered {
     view_height: f32,
     margin: f32,
     most: f32,
+    /// How far its scrolling keys go.
+    paging: vim::Paging,
     /// The blocks with links drawn last, each with where its text's top
     /// left was, from the pane's top left, and what of it was drawn, its
     /// left, top, width and height, as a table's cells are cut off at the
     /// column's edge, for clicks.
-    /// How far its scrolling keys go.
-    paging: vim::Paging,
     shown: Vec<(usize, [f32; 2], [f32; 4])>,
     /// How many blocks it last laid out afresh, rather than kept.
     #[cfg(test)]

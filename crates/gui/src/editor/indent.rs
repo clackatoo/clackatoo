@@ -335,8 +335,9 @@ impl Editor {
     /// `=`: indents each line the answer it waited for is about as it
     /// says, as one edit. A blank line is left empty, and one the rules
     /// say to keep as it is keeps its indent. The cursor goes to the first
-    /// line's first character that isn't blank. Returns whether there was
-    /// anything to indent, saying why not in the bar.
+    /// line, in the column it wanted, or with `startofline` to its first
+    /// character that isn't blank. Returns whether there was anything to
+    /// indent, saying why not in the bar.
     pub(super) fn reindent(&mut self, copy: &mut BufferCopy) -> bool {
         let want = self.cursor.want();
         let mut indents = match self.answered.take() {

@@ -195,9 +195,10 @@ impl Action {
     }
 
     /// Whether it's a jump, which the jump list records, as Vim's are:
-    /// `gg`, `G`, `n` and `N`, `]d` and `[d`, `]c` and `[c`, `]f` and the
-    /// like, and going to a mark. A search typed after `/` is too, once
-    /// Enter finds it, as is going where a language server says, once it
+    /// `gg`, `G` and Ctrl+End, `H`, `M` and `L`, `%`, `{` and `}`, `n` and
+    /// `N`, `*` and `#`, `]d` and `[d`, `]c` and `[c`, `]f` and the like,
+    /// and going to a mark. A search typed after `/` is too, once Enter
+    /// finds it, as is going where a language server says, once it
     /// answers.
     pub(crate) fn jumps(self) -> bool {
         matches!(
