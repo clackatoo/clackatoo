@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026.10.65 (2026-10-21)
+
+### Fixes
+
+- **editor:** :move carries marks with the lines it moves, so gv reselects a moved block (CLACKA-124) (31ce7a0)
+- **editor:** only whole lines with text in them are taken for a move, and a move across a selection's end crosses it over (CLACKA-124) (de2bb03)
+
 ## 2026.10.64 (2026-10-20)
 
 ### Features
