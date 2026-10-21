@@ -755,16 +755,16 @@ impl Cursor {
         keep_margin: bool,
     ) {
         let (first, last) = lines.bounds();
+        // Line `number`, counting the first as 1, or the last if there
+        // aren't so many.
+        let numbered =
+            |number: usize| (first.saturating_add((number as u64).saturating_sub(1))).min(last);
         match (motion, count) {
             (Motion::First | Motion::Last, Some(number)) => {
-                let line = first.saturating_add((number as u64).saturating_sub(1));
-                self.onto_line(line.min(last), start_of_line, lines);
+                self.onto_line(numbered(number), start_of_line, lines);
             }
             (Motion::First, None) => self.onto_line(first, start_of_line, lines),
-            (Motion::TextEnd, Some(number)) => {
-                let line = first.saturating_add((number as u64).saturating_sub(1));
-                self.onto_line_end(line.min(last), lines);
-            }
+            (Motion::TextEnd, Some(number)) => self.onto_line_end(numbered(number), lines),
             (Motion::Last, None) => self.onto_line(last, start_of_line, lines),
             (Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom, count) => {
                 self.go_in_view(motion, count.unwrap_or(1), lines, keep_margin);
