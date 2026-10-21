@@ -377,6 +377,28 @@ fn a_count_or_g_typed_in_the_view_is_the_editors_and_goes_as_any_does() {
 }
 
 #[test]
+fn a_new_size_forgets_how_far_a_count_set_ctrl_d_to_go() {
+    let mut fonts = crate::chat::fixtures::fonts();
+    let mut setup = markdown(&document(60));
+    toggle(&mut setup);
+    paint(&mut setup, &mut fonts);
+    let scrolled = |setup: &Setup| setup.editor.rendered.as_ref().unwrap().scrolled();
+    setup.keys("1<C-d>");
+    let line = scrolled(&setup);
+    assert!(line > 0.0);
+    setup.keys("<C-d>");
+    assert!(
+        (scrolled(&setup) - 2.0 * line).abs() < 0.5,
+        "the count kept"
+    );
+    // Taller, half the view again.
+    let taller = [SIZE[0], SIZE[1] + 10.0 * line];
+    (setup.editor).paint_rendered(&mut fonts, [0.0; 2], taller, &setup.copy);
+    setup.keys("<C-d>");
+    assert!(scrolled(&setup) > 4.0 * line, "{}", scrolled(&setup));
+}
+
+#[test]
 fn gj_and_gk_scroll_as_j_and_k_do() {
     let mut fonts = crate::chat::fixtures::fonts();
     let mut setup = markdown(&document(60));

@@ -591,8 +591,12 @@ impl Pane {
         if self.requested_size == Some(size) && current == Some(size) {
             return;
         }
+        // Only a new height forgets the half page a count set, as Vim's
+        // `scroll` is set afresh when the window's height changes.
+        if self.requested_size.or(current).map(Size::rows) != Some(size.rows()) {
+            self.paging.resized();
+        }
         self.requested_size = Some(size);
-        self.paging.resized();
         self.request(
             Request::Resize {
                 terminal: self.terminal,
@@ -2655,6 +2659,11 @@ mod tests {
         assert_eq!(cursor(&pane), ("line 8".into(), 4, 0));
         press(&mut pane, Key::Character("d".into()), CTRL);
         assert_eq!(cursor(&pane), ("line 9".into(), 4, 0));
+        // A new width keeps it; only a new height forgets it.
+        let size = pane.screen.as_ref().unwrap().size;
+        pane.resize(Size::new(size.cols() + 10, size.rows()).unwrap());
+        press(&mut pane, Key::Character("d".into()), CTRL);
+        assert_eq!(cursor(&pane).0, "line 10");
     }
 
     #[test]

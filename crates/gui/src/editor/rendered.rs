@@ -218,15 +218,26 @@ impl Rendered {
         let (vim::Scroll::Line { down }
         | vim::Scroll::HalfPage { down }
         | vim::Scroll::Page { down }) = scroll;
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "rows in view"
-        )]
-        let view = (self.view_height / self.line_height).floor().max(1.0) as u64;
+        let view = self.view_rows();
         #[allow(clippy::cast_precision_loss, reason = "rows in view")]
         let rows = self.paging.rows(scroll, count, view) as f32;
         Some(if down { rows } else { -rows })
+    }
+
+    /// How many lines of its text the view shows, as drawn last.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "rows in view"
+    )]
+    fn view_rows(&self) -> u64 {
+        (self.view_height / self.line_height).floor().max(1.0) as u64
+    }
+
+    /// How far down the page the view is, in pixels.
+    #[cfg(test)]
+    pub(super) fn scrolled(&self) -> f32 {
+        self.scroll
     }
 
     /// Scrolls the view by `rows` lines of text, up if more than none, as
@@ -366,8 +377,14 @@ impl Rendered {
     ) -> TextPaint {
         let em = text_size(fonts);
         let m = Measures::of(em);
+        let rows = self.view_rows();
         self.line_height = (em * LINE).round();
         self.view_height = size[1];
+        // A new size, or text size, forgets the half page a count set, as
+        // Vim's `scroll` is set afresh when the window's height changes.
+        if self.view_rows() != rows {
+            self.paging.resized();
+        }
         self.margin = m.em(1.5);
         let column = (size[0] - 2.0 * m.em(2.0)).clamp(m.em(8.0), m.em(COLUMN));
         let left = ((size[0] - column) / 2.0).max(0.0).round();
