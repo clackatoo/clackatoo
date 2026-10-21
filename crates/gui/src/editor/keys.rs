@@ -159,18 +159,11 @@ impl Dialect for EditorKeys {
         }))
     }
 
-    /// All but `H`, `M` and `L`, and Ctrl+E and Ctrl+Y, which aren't the
-    /// editor's yet: Ctrl+E and Ctrl+Y scroll a panel by the cursor,
-    /// before the grammar (see `Editor::panel_stroke`).
+    /// All but Ctrl+E and Ctrl+Y, which aren't the editor's yet: they
+    /// scroll a panel by the cursor, before the grammar (see
+    /// `Editor::panel_stroke`).
     fn takes(&self, command: &Command) -> bool {
-        let (Action::Move(motion) | Action::Operate(_, Target::Motion(motion))) = command.action
-        else {
-            return !matches!(command.action, Action::Scroll(vim::Scroll::Line { .. }));
-        };
-        !matches!(
-            motion,
-            Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom
-        )
+        !matches!(command.action, Action::Scroll(vim::Scroll::Line { .. }))
     }
 }
 
@@ -220,6 +213,9 @@ impl Action {
                 Motion::First
                     | Motion::Last
                     | Motion::TextEnd
+                    | Motion::ViewTop
+                    | Motion::ViewMiddle
+                    | Motion::ViewBottom
                     | Motion::Match
                     | Motion::Paragraph { .. }
             ) | Self::SearchAgain { .. }
@@ -291,12 +287,14 @@ mod tests {
     }
 
     #[test]
-    fn h_m_l_ctrl_e_and_ctrl_y_arent_the_editors_yet() {
-        assert_eq!(read("H"), Parsed::Nothing);
-        assert_eq!(read("3L"), Parsed::Nothing);
-        assert_eq!(read("dM"), Parsed::Nothing);
+    fn ctrl_e_and_ctrl_y_arent_the_editors_yet_but_h_m_and_l_are_jumps() {
         let ctrl_e = vim::parse(&[Stroke::ctrl('e')], false, &EditorKeys { tildeop: false });
         assert_eq!(ctrl_e, Parsed::Nothing);
+        assert_eq!(
+            read("3L"),
+            command(Some(3), Action::Move(Motion::ViewBottom))
+        );
+        assert!(Action::Move(Motion::ViewMiddle).jumps());
     }
 
     #[test]

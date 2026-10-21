@@ -1000,6 +1000,7 @@ impl Editor {
             .for_lesson(self.styling.prose.clone())
             .wrapping(self.wrapping.at(self.text_width().max(1)), typing)
             .keeping(&self.kept, self.buffer, copy.revision(), copy.line_log())
+            .viewing(self.top, self.height.max(1) as u64, self.margin())
     }
 
     /// Hides as much of the start of each line as `hide` says: the cursor
@@ -1854,6 +1855,24 @@ impl Editor {
 
     /// The cursor moved by `motion`, as `count` says (see [`Cursor::go`]).
     fn moved(&self, copy: &BufferCopy, motion: Motion, count: Option<usize>) -> Cursor {
+        self.moving(copy, motion, count, false)
+    }
+
+    /// Where `motion` goes, as `count` says, when an operator takes it
+    /// (see [`Cursor::go_to_take`]).
+    fn taken_to(&self, copy: &BufferCopy, motion: Motion, count: Option<usize>) -> Cursor {
+        self.moving(copy, motion, count, true)
+    }
+
+    /// [`moved`](Self::moved), or [`taken_to`](Self::taken_to) if
+    /// `taking`.
+    fn moving(
+        &self,
+        copy: &BufferCopy,
+        motion: Motion,
+        count: Option<usize>,
+        taking: bool,
+    ) -> Cursor {
         let times = count.unwrap_or(1);
         let text = self.text(copy);
         let mut cursor = self.cursor;
@@ -1916,6 +1935,7 @@ impl Editor {
                     cursor = Cursor::new(Point { line, col });
                 }
             }
+            _ if taking => cursor.go_to_take(motion, count, &text, self.startofline),
             _ => cursor.go(motion, count, &text, self.startofline),
         }
         cursor
@@ -2296,7 +2316,7 @@ impl Editor {
             cursor.repeat(end, times - usize::from(at_end), &text);
             return Some(chars(at, cursor.at));
         }
-        let moved = self.moved(copy, motion, count);
+        let moved = self.taken_to(copy, motion, count);
         // `dj` on the last line has no line to take with it.
         if matches!(motion, Motion::Up(_) | Motion::Down(_)) && moved.at.line == at.line {
             return None;
@@ -5477,6 +5497,9 @@ fn can_fail(motion: Motion) -> bool {
             | Motion::TextEnd
             | Motion::RowStart
             | Motion::RowEnd
+            | Motion::ViewTop
+            | Motion::ViewMiddle
+            | Motion::ViewBottom
     )
 }
 

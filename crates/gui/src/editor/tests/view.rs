@@ -115,3 +115,79 @@ fn where_lines_wrap_paging_goes_by_screen_rows() {
         (16, 16, 2)
     );
 }
+
+/// `viewed`, with `scrolloff` at `margin`.
+fn with_margin(mut setup: Setup, margin: u32) -> Setup {
+    setup.set(|options| options.scrolloff = margin);
+    setup
+}
+
+#[test]
+fn h_m_and_l_go_to_lines_of_the_view_by_count() {
+    let text = sixty();
+    let at = |keys| after(viewed(&text, 11, (15, 4), false), keys);
+    assert_eq!(at("H"), (11, 11, 4));
+    assert_eq!(at("3H"), (11, 13, 4));
+    assert_eq!(at("M"), (11, 15, 4));
+    assert_eq!(at("L"), (11, 20, 4));
+    assert_eq!(at("3L"), (11, 18, 4));
+    // The middle of what's shown, where the text ends in view.
+    let short = viewed("a\nb\nc\nd\n", 1, (1, 0), false);
+    assert_eq!(after(short, "M"), (1, 2, 0));
+}
+
+#[test]
+fn h_and_l_keep_scrolloff_rows_from_the_views_edges_but_not_at_the_texts_start() {
+    let text = sixty();
+    let at = |keys| after(with_margin(viewed(&text, 11, (15, 4), false), 3), keys);
+    assert_eq!(at("H"), (11, 14, 4));
+    assert_eq!(at("2H"), (11, 14, 4));
+    assert_eq!(at("5H"), (11, 15, 4));
+    assert_eq!(at("L"), (11, 17, 4));
+    assert_eq!(at("99H"), (11, 17, 4));
+    let top = with_margin(viewed(&text, 1, (5, 4), false), 3);
+    assert_eq!(after(top, "H"), (1, 1, 4));
+}
+
+#[test]
+fn h_m_and_l_keep_the_column_unless_startofline() {
+    let text = sixty();
+    let mut setup = viewed(&text, 12, (15, 4), false);
+    setup.set(|options| options.startofline = true);
+    assert_eq!(after(setup, "H"), (12, 12, 2));
+}
+
+#[test]
+fn an_operator_takes_whole_lines_to_the_views_edge_scrolloff_or_not() {
+    let text = sixty();
+    let mut setup = with_margin(viewed(&text, 11, (15, 4), false), 3);
+    setup.keys("dL");
+    assert_eq!(
+        setup.register().text,
+        "line 15\n  line 16\nline 17\n  line 18\nline 19\n  line 20\n"
+    );
+    assert!(setup.register().lines);
+    assert_eq!(setup.cursor().0, 14);
+    let mut setup = viewed(&text, 11, (15, 4), false);
+    setup.keys("yH");
+    assert_eq!(
+        setup.register().text,
+        "line 11\n  line 12\nline 13\n  line 14\nline 15\n"
+    );
+    assert_eq!(setup.cursor(), (10, 4));
+}
+
+#[test]
+fn where_lines_wrap_h_and_l_count_lines_and_scrolloff_screen_rows() {
+    let text = wrapping();
+    let at = |keys, margin| after(with_margin(viewed(&text, 11, (14, 2), true), margin), keys);
+    assert_eq!(at("H", 0), (11, 11, 2));
+    assert_eq!(at("M", 0), (11, 13, 2));
+    // Line 17 goes on past the view's bottom: line 16 is the last shown
+    // whole.
+    assert_eq!(at("L", 0), (11, 16, 2));
+    assert_eq!(at("3H", 0), (11, 13, 2));
+    assert_eq!(at("3L", 0), (11, 14, 2));
+    assert_eq!(at("H", 2), (11, 12, 2));
+    assert_eq!(at("L", 2), (11, 14, 2));
+}

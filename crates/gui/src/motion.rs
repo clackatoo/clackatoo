@@ -167,7 +167,8 @@ pub(crate) trait Lines {
 
 /// The part of the lines in view, for `H`, `M` and `L`: from screen row
 /// `top`, `rows` tall, keeping `margin` rows from its edges as `scrolloff`
-/// does, short of the text's ends.
+/// does, short of the text's ends. A line going on past its bottom isn't
+/// shown whole, so `L` goes to the one before.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct View {
     pub(crate) top: RowAt,
@@ -699,7 +700,7 @@ impl Cursor {
             }
             Motion::TextEnd => self.onto_line_end(last, lines),
             Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom => {
-                self.go_in_view(motion, 1, lines);
+                self.go_in_view(motion, 1, lines, true);
             }
         }
     }
@@ -728,6 +729,31 @@ impl Cursor {
         lines: &impl Lines,
         start_of_line: bool,
     ) {
+        self.going(motion, count, lines, start_of_line, true);
+    }
+
+    /// Where `motion` goes, `count` typed, when an operator takes it: as
+    /// [`go`](Self::go) goes, but `H` and `L` to the view's edges, as
+    /// Vim's do, `scrolloff` or not.
+    pub(crate) fn go_to_take(
+        &mut self,
+        motion: Motion,
+        count: Option<usize>,
+        lines: &impl Lines,
+        start_of_line: bool,
+    ) {
+        self.going(motion, count, lines, start_of_line, false);
+    }
+
+    /// [`go`](Self::go), keeping the view's margin if `keep_margin`.
+    fn going(
+        &mut self,
+        motion: Motion,
+        count: Option<usize>,
+        lines: &impl Lines,
+        start_of_line: bool,
+        keep_margin: bool,
+    ) {
         let (first, last) = lines.bounds();
         match (motion, count) {
             (Motion::First | Motion::Last, Some(number)) => {
@@ -741,7 +767,7 @@ impl Cursor {
             }
             (Motion::Last, None) => self.onto_line(last, start_of_line, lines),
             (Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom, count) => {
-                self.go_in_view(motion, count.unwrap_or(1), lines);
+                self.go_in_view(motion, count.unwrap_or(1), lines, keep_margin);
                 if start_of_line {
                     *self = Self::at_first_non_blank(self.at.line, lines);
                 }
@@ -760,7 +786,7 @@ impl Cursor {
         start_of_line: bool,
     ) -> Option<Taken> {
         let mut moved = *self;
-        moved.go(motion, count, lines, start_of_line);
+        moved.go_to_take(motion, count, lines, start_of_line);
         Taken::between(motion, self.at, moved, lines)
     }
 
@@ -774,42 +800,71 @@ impl Cursor {
         }
     }
 
-    /// Moves to the screen row of the view that `motion`, `H`, `M` or `L`,
-    /// goes to: `count` rows from its top or bottom, counting from 1, or
-    /// the middle of the rows in view, keeping the view's margin from its
-    /// edges unless it's at the text's start or end, and aiming for the
-    /// wanted column. Nothing without a view.
-    fn go_in_view(&mut self, motion: Motion, count: usize, lines: &impl Lines) {
+    /// Moves to the line of the view that `motion`, `H`, `M` or `L`, goes
+    /// to, as Vim's do: `count` lines from the first line in view or the
+    /// last shown whole, counting from 1, or the line half the rows shown
+    /// reach; aiming for the wanted column. Moving, as opposed to being
+    /// taken by an operator (`keep_margin`), it keeps the view's margin of
+    /// screen rows from the view's edges, as Vim's `scrolloff` does,
+    /// unless the view is at the text's start or end. Nothing without a
+    /// view.
+    fn go_in_view(&mut self, motion: Motion, count: usize, lines: &impl Lines, keep_margin: bool) {
         let Some(view) = lines.view() else {
             return;
         };
         let (first, last) = lines.bounds();
         let top = view.top;
-        let bottom = rows_down(top, view.rows.saturating_sub(1), last, lines);
-        let top_margin = if top
-            == (RowAt {
-                line: first,
-                row: 0,
-            }) {
-            0
+        let bottom_row = rows_down(top, view.rows.saturating_sub(1), last, lines);
+        // The last line shown whole: one going on past the view isn't.
+        let cut = bottom_row.row + 1 < lines.screen_rows(bottom_row.line).len();
+        let bottom = if cut && bottom_row.line > top.line {
+            bottom_row.line - 1
         } else {
-            view.margin
+            bottom_row.line
         };
-        let bottom_margin = if bottom == last_row(lines, last) {
-            0
-        } else {
-            view.margin
+        let from_edge = (count as u64).saturating_sub(1);
+        let mut line = match motion {
+            Motion::ViewTop => top.line.saturating_add(from_edge).min(bottom),
+            Motion::ViewBottom => bottom.saturating_sub(from_edge).max(top.line),
+            _ => {
+                // Half the rows shown, past the text's end not counted.
+                let half = (rows_between(top, bottom_row, lines) + 1).div_ceil(2);
+                let mut used = 0;
+                let mut line = top.line;
+                loop {
+                    let rows = lines.screen_rows(line).len() as u64;
+                    used += if line == top.line {
+                        rows - top.row as u64
+                    } else {
+                        rows
+                    };
+                    if used >= half || line >= bottom_row.line {
+                        break line;
+                    }
+                    line += 1;
+                }
+            }
         };
-        let highest = rows_down(top, top_margin, last, lines);
-        let lowest = rows_up(bottom, bottom_margin, first, lines).max(highest);
-        // No further than the view, so a huge count walks no more rows.
-        let from_edge = (count as u64).saturating_sub(1).min(view.rows);
-        let to = match motion {
-            Motion::ViewTop => rows_down(top, from_edge, last, lines).clamp(highest, lowest),
-            Motion::ViewBottom => rows_up(bottom, from_edge, first, lines).clamp(highest, lowest),
-            _ => rows_down(top, rows_between(top, bottom, lines) / 2, last, lines),
-        };
-        self.go_to_row(to, lines);
+        if keep_margin {
+            let above = |line| rows_between(top, RowAt { line, row: 0 }, lines);
+            let below = |line| rows_between(last_row(lines, line), last_row(lines, bottom), lines);
+            if top
+                != (RowAt {
+                    line: first,
+                    row: 0,
+                })
+            {
+                while above(line) < view.margin && line < bottom {
+                    line += 1;
+                }
+            }
+            if bottom != last {
+                while below(line) < view.margin && line > top.line {
+                    line -= 1;
+                }
+            }
+        }
+        self.go_to_line(line, lines);
     }
 
     /// Moves by `motion` `times` times, as a count before it asks (`5k`,

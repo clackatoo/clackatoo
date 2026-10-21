@@ -28,9 +28,9 @@ use clackatoo_text::{Diagnostic, Rope, Span};
 use super::Prose;
 use super::hints::{Hint, Hints};
 use super::kept::{Kept, LineLog};
-use super::wrap::{Placed, Wrap};
+use super::wrap::{Placed, Top, Wrap};
 use crate::colors;
-use crate::motion::{Cells, Lines, Point, ScreenRow, Spot, Words};
+use crate::motion::{Cells, Lines, Point, ScreenRow, Spot, View, Words};
 
 /// The column after a tab that starts at column `col`, with tabs stopping
 /// at multiples of `tabstop`.
@@ -794,6 +794,10 @@ pub(crate) struct Text<'a> {
     /// it wraps as prose.
     prose: Option<Rc<Prose>>,
     kept: Kept,
+    /// The view's top, how many rows it shows, and the rows kept from its
+    /// edges, for `H`, `M` and `L`: its top is only found on a row when
+    /// they ask.
+    viewing: Option<(Top, u64, u64)>,
 }
 
 impl<'a> Text<'a> {
@@ -809,6 +813,16 @@ impl<'a> Text<'a> {
             hints: None,
             prose: None,
             kept: Kept::default(),
+            viewing: None,
+        }
+    }
+
+    /// The text in a view from `top`, `rows` tall, keeping `margin` rows
+    /// from its edges, as `H`, `M` and `L` go by.
+    pub(crate) fn viewing(self, top: Top, rows: u64, margin: u64) -> Self {
+        Self {
+            viewing: Some((top, rows, margin)),
+            ..self
         }
     }
 
@@ -1120,6 +1134,15 @@ impl Lines for Text<'_> {
 
     fn words(&self) -> Words {
         self.words
+    }
+
+    fn view(&self) -> Option<View> {
+        let (top, rows, margin) = self.viewing?;
+        Some(View {
+            top: top.row(self),
+            rows,
+            margin,
+        })
     }
 }
 

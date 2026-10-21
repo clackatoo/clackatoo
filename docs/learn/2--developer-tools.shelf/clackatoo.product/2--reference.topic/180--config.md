@@ -158,7 +158,7 @@ Several can go after one `:set`, such as `:set nu rnu`. Each option has a short 
 | `autoread` | `ar` | A file changed on disk by something other than an agent is read again if it has no changes not written, as an edit `u` undoes. Off, or with changes, the bottom bar says so. | on |
 | `inccommand` | `icm` | Shows what `:s` would do while it's typed: `nosplit`, in place, or `none`. | `nosplit` |
 | `tildeop` | `top` | `~` takes a motion, as `g~` does. | off |
-| `startofline` | `sol` | `gg`, `G` and Ctrl+Home, `:` and a line number in an editor, and `H`, `M` and `L` in a terminal go to the line's first character that isn't blank. Off, as Neovim's are, they keep the column, as `j` and `k` do. Other keys Vim's `startofline` covers don't follow it yet. | off |
+| `startofline` | `sol` | `gg`, `G` and Ctrl+Home, `H`, `M` and `L`, and `:` and a line number in an editor go to the line's first character that isn't blank. Off, as Neovim's are, they keep the column, as `j` and `k` do. Other keys Vim's `startofline` covers don't follow it yet. | off |
 | `ignorecase` | `ic` | Searches ignore case, in editors and in a terminal's normal mode. An editor ignores the case of plain English letters only, for now: `é` doesn't match `É`. | on |
 | `smartcase` | `scs` | With `ignorecase`, a search with a capital letter in it matches case. Does nothing without `ignorecase`, as in Vim. | on |
 | `clipboard` | `cb` | Which of the desktop's an editor's unnamed register goes along with: the clipboard (`unnamedplus`), the primary selection (`unnamed`), or neither (`none`), keeping it the window's own but for `"+` and `"*`. | `unnamedplus` |
