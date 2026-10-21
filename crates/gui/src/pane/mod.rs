@@ -25,7 +25,7 @@ use crate::chat::{ChatView, TextPaint};
 use crate::fonts::Fonts;
 use crate::history::History;
 use crate::input::{self, KeyPress};
-use crate::motion::{Block, Cursor, Lines, Motion, Point};
+use crate::motion::{Block, Cursor, Lines, Motion, Point, RowAt, View};
 use crate::options::{BlockMarks, Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 use crate::screen::Screen;
@@ -1348,6 +1348,18 @@ impl<'d> Lines for Document<'d> {
 
     fn row(&self, line: u64) -> Option<&'d Row> {
         self.line(line)
+    }
+
+    /// The rows the pane shows: no `scrolloff` in a terminal.
+    fn view(&self) -> Option<View> {
+        Some(View {
+            top: RowAt {
+                line: self.0.view_top(),
+                row: 0,
+            },
+            rows: self.0.height(),
+            margin: 0,
+        })
     }
 
     fn bounds(&self) -> (u64, u64) {

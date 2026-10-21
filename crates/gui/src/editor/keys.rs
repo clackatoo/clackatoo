@@ -153,6 +153,18 @@ impl Dialect for EditorKeys {
             _ => return None,
         }))
     }
+
+    /// All but `H`, `M` and `L`, which aren't the editor's yet.
+    fn takes(&self, command: &Command) -> bool {
+        let (Action::Move(motion) | Action::Operate(_, Target::Motion(motion))) = command.action
+        else {
+            return true;
+        };
+        !matches!(
+            motion,
+            Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom
+        )
+    }
 }
 
 impl Action {
@@ -261,6 +273,13 @@ mod tests {
         );
         // None of them is what an operator acts on.
         assert_eq!(read("dgd"), Parsed::Nothing);
+    }
+
+    #[test]
+    fn h_m_and_l_arent_the_editors_yet() {
+        assert_eq!(read("H"), Parsed::Nothing);
+        assert_eq!(read("3L"), Parsed::Nothing);
+        assert_eq!(read("dM"), Parsed::Nothing);
     }
 
     #[test]

@@ -158,6 +158,21 @@ pub(crate) trait Lines {
     fn words(&self) -> Words {
         Words::NONE
     }
+
+    /// The part of them in view, for `H`, `M` and `L`, if they know.
+    fn view(&self) -> Option<View> {
+        None
+    }
+}
+
+/// The part of the lines in view, for `H`, `M` and `L`: from screen row
+/// `top`, `rows` tall, keeping `margin` rows from its edges as `scrolloff`
+/// does, short of the text's ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct View {
+    pub(crate) top: RowAt,
+    pub(crate) rows: u64,
+    pub(crate) margin: u64,
 }
 
 /// The characters words are made of besides letters, digits and `_`, as a
@@ -279,6 +294,18 @@ pub(crate) fn rows_down(from: RowAt, mut n: u64, end: u64, lines: &impl Lines) -
             row: 0,
         };
     }
+}
+
+/// How many screen rows `to` is below `from`, in `lines`.
+fn rows_between(from: RowAt, to: RowAt, lines: &impl Lines) -> u64 {
+    if to.line == from.line {
+        return to.row.saturating_sub(from.row) as u64;
+    }
+    let rest_of_first = lines.screen_rows(from.line).len() - from.row;
+    let between: usize = (from.line + 1..to.line)
+        .map(|line| lines.screen_rows(line).len())
+        .sum();
+    (rest_of_first + between + to.row) as u64
 }
 
 /// The screen row `n` rows up from `from`, or line `first`'s first if
@@ -437,6 +464,13 @@ pub(crate) enum Motion {
     RowStart,
     /// `g$`: the screen row's last character.
     RowEnd,
+    /// `H`: the view's top line, or with a count, so many from the top.
+    ViewTop,
+    /// `M`: the middle of the lines in view.
+    ViewMiddle,
+    /// `L`: the view's bottom line, or with a count, so many from the
+    /// bottom.
+    ViewBottom,
 }
 
 /// What an operator such as `y` takes when given a motion, as in Vim.
@@ -488,7 +522,13 @@ impl Motion {
             Self::LineEnd | Self::WordEnd | Self::BigWordEnd | Self::Match | Self::RowEnd => {
                 Reach::Inclusive
             }
-            Self::Up(_) | Self::Down(_) | Self::First | Self::Last => Reach::Lines,
+            Self::Up(_)
+            | Self::Down(_)
+            | Self::First
+            | Self::Last
+            | Self::ViewTop
+            | Self::ViewMiddle
+            | Self::ViewBottom => Reach::Lines,
         }
     }
 }
@@ -616,18 +656,62 @@ impl Cursor {
                 self.at.col = on_row(lines, at.line, &rows, index, col);
                 self.want = self.at.col;
             }
+            Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom => {
+                self.go_in_view(motion, 1, lines);
+            }
         }
     }
 
     /// Moves by `motion` as a command with `count` typed before it does:
     /// `G` and `gg` with a count go to that line (see
-    /// [`go_to_line_number`](Self::go_to_line_number)), and any other motion
-    /// goes `count` times (see [`repeat`](Self::repeat)).
+    /// [`go_to_line_number`](Self::go_to_line_number)), `H` and `L` so many
+    /// lines from the view's top or bottom, and any other motion goes
+    /// `count` times (see [`repeat`](Self::repeat)).
     pub(crate) fn go(&mut self, motion: Motion, count: Option<usize>, lines: &impl Lines) {
         match (motion, count) {
             (Motion::First | Motion::Last, Some(number)) => self.go_to_line_number(number, lines),
+            (Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom, count) => {
+                self.go_in_view(motion, count.unwrap_or(1), lines);
+            }
             (motion, count) => self.repeat(motion, count.unwrap_or(1), lines),
         }
+    }
+
+    /// Moves to the screen row of the view that `motion`, `H`, `M` or `L`,
+    /// goes to: `count` rows from its top or bottom, counting from 1, or
+    /// the middle of the rows in view, keeping the view's margin from its
+    /// edges unless it's at the text's start or end, and aiming for the
+    /// wanted column. Nothing without a view.
+    fn go_in_view(&mut self, motion: Motion, count: usize, lines: &impl Lines) {
+        let Some(view) = lines.view() else {
+            return;
+        };
+        let (first, last) = lines.bounds();
+        let top = view.top;
+        let bottom = rows_down(top, view.rows.saturating_sub(1), last, lines);
+        let top_margin = if top
+            == (RowAt {
+                line: first,
+                row: 0,
+            }) {
+            0
+        } else {
+            view.margin
+        };
+        let bottom_margin = if bottom == last_row(lines, last) {
+            0
+        } else {
+            view.margin
+        };
+        let highest = rows_down(top, top_margin, last, lines);
+        let lowest = rows_up(bottom, bottom_margin, first, lines).max(highest);
+        let from_edge = (count as u64).saturating_sub(1);
+        let to = match motion {
+            Motion::ViewTop => rows_down(top, from_edge, last, lines).clamp(highest, lowest),
+            Motion::ViewBottom => rows_up(bottom, from_edge, first, lines).clamp(highest, lowest),
+            _ => rows_down(top, rows_between(top, bottom, lines) / 2, last, lines),
+        };
+        self.go_to_row(to, lines);
     }
 
     /// Moves by `motion` `times` times, as a count before it asks (`5k`,
@@ -1152,6 +1236,73 @@ pub(crate) mod tests {
 
     pub(crate) fn at(line: u64, col: usize) -> Point {
         Point { line, col }
+    }
+
+    /// `text`, with `view` of it shown.
+    struct Viewed(Text, View);
+
+    impl Lines for Viewed {
+        type Line = Row;
+        type Row<'a> = &'a Row;
+
+        fn row(&self, line: u64) -> Option<&Row> {
+            self.0.row(line)
+        }
+
+        fn bounds(&self) -> (u64, u64) {
+            self.0.bounds()
+        }
+
+        fn view(&self) -> Option<View> {
+            Some(self.1)
+        }
+    }
+
+    #[test]
+    fn h_m_and_l_go_to_lines_of_the_view_keeping_its_margin() {
+        let lines: Vec<String> = (0..20).map(|n| format!("line {n}")).collect();
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let viewed = |top, margin| {
+            let view = View {
+                top: RowAt { line: top, row: 0 },
+                rows: 5,
+                margin,
+            };
+            Viewed(Text::new(&lines), view)
+        };
+        let went = |lines: &Viewed, motion, count| {
+            let mut cursor = Cursor::new(at(12, 3));
+            cursor.go(motion, count, lines);
+            cursor.at
+        };
+        // Lines 5 to 9 in view.
+        let plain = viewed(5, 0);
+        assert_eq!(went(&plain, Motion::ViewTop, None), at(5, 3));
+        assert_eq!(went(&plain, Motion::ViewTop, Some(2)), at(6, 3));
+        assert_eq!(went(&plain, Motion::ViewTop, Some(9)), at(9, 3));
+        assert_eq!(went(&plain, Motion::ViewMiddle, None), at(7, 3));
+        assert_eq!(went(&plain, Motion::ViewBottom, None), at(9, 3));
+        assert_eq!(went(&plain, Motion::ViewBottom, Some(3)), at(7, 3));
+        assert_eq!(went(&plain, Motion::ViewBottom, Some(9)), at(5, 3));
+        // A margin of a line, but not at the text's start.
+        let margin = viewed(5, 1);
+        assert_eq!(went(&margin, Motion::ViewTop, None), at(6, 3));
+        assert_eq!(went(&margin, Motion::ViewTop, Some(3)), at(7, 3));
+        assert_eq!(went(&margin, Motion::ViewBottom, None), at(8, 3));
+        let start = viewed(0, 1);
+        assert_eq!(went(&start, Motion::ViewTop, None), at(0, 3));
+        assert_eq!(went(&start, Motion::ViewBottom, None), at(3, 3));
+        // The text ending in view: the middle of what's shown.
+        let end = viewed(17, 0);
+        assert_eq!(went(&end, Motion::ViewBottom, None), at(19, 3));
+        assert_eq!(went(&end, Motion::ViewMiddle, None), at(18, 3));
+        // Taken by an operator, whole lines.
+        assert_eq!(Motion::ViewTop.reach(), Reach::Lines);
+        // Without a view, nowhere.
+        let text = Text::new(&lines);
+        let mut cursor = Cursor::new(at(12, 3));
+        cursor.go(Motion::ViewTop, None, &text);
+        assert_eq!(cursor.at, at(12, 3));
     }
 
     /// Where `motions` take a cursor starting at `start`.

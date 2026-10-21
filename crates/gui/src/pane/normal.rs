@@ -161,17 +161,9 @@ impl Pane {
             }
             // The top, middle and bottom of the view, or with a count, so
             // many lines from its top or bottom.
-            (_, Some(view @ ('H' | 'M' | 'L'))) => {
-                let top = self.view_top();
-                let bottom = top + height.saturating_sub(1);
-                let lines = count.map_or(0, |count| count.saturating_sub(1) as u64);
-                let line = match view {
-                    'H' => top.saturating_add(lines).min(bottom),
-                    'M' => top + height.saturating_sub(1) / 2,
-                    _ => bottom.saturating_sub(lines).max(top),
-                };
-                return self.move_to_line(line);
-            }
+            (_, Some('H')) => Motion::ViewTop,
+            (_, Some('M')) => Motion::ViewMiddle,
+            (_, Some('L')) => Motion::ViewBottom,
             _ => match motion(press.key, character) {
                 Some(motion) => motion,
                 None => return false,
