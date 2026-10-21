@@ -522,14 +522,20 @@ impl Pane {
         let Some(mut cursor) = self.cursor else {
             return;
         };
-        let document = Document(self);
-        cursor.onto_line(cursor.at.line, true, &document);
-        let fetched = document.row(cursor.at.line).is_some();
+        cursor.onto_line(cursor.at.line, true, &Document(self));
+        self.note_unplaced(cursor, true);
+        self.cursor = Some(cursor);
+    }
+
+    /// Notes where the cursor is, `cursor`, if its line hasn't come yet,
+    /// to put it where it goes on the line, at its first non-blank if
+    /// `start_of_line`, once it has; or forgets what was noted.
+    fn note_unplaced(&mut self, cursor: Cursor, start_of_line: bool) {
+        let fetched = Document(self).row(cursor.at.line).is_some();
         self.unplaced.cursor = (!fetched).then_some(Unplaced {
             cursor,
-            start_of_line: true,
+            start_of_line,
         });
-        self.cursor = Some(cursor);
     }
 
     /// `zt`, `zz` and `zb`: scrolls the view to put the cursor's line at
@@ -611,11 +617,11 @@ impl Pane {
                 | Motion::ViewMiddle
                 | Motion::ViewBottom
         );
-        let fetched = Document(self).row(cursor.at.line).is_some();
-        self.unplaced.cursor = (!fetched && (vertical || to_line)).then_some(Unplaced {
-            cursor,
-            start_of_line: to_line && self.startofline,
-        });
+        if vertical || to_line {
+            self.note_unplaced(cursor, to_line && self.startofline);
+        } else {
+            self.unplaced.cursor = None;
+        }
         self.cursor = Some(cursor);
         self.follow_cursor();
         true
