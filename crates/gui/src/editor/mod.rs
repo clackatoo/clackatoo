@@ -4201,7 +4201,9 @@ impl Editor {
                 row: 0,
             },
             ViewAt::Top => cursor,
-            ViewAt::Middle => rows_up(cursor, (height / 2) as u64, 0, &text),
+            // Above the middle in a view an even number of rows tall,
+            // as Vim's.
+            ViewAt::Middle => rows_up(cursor, ((height - 1) / 2) as u64, 0, &text),
             ViewAt::Bottom => {
                 let last = last_row(&text, cursor.line);
                 let bottom = if last.row - cursor.row < height {

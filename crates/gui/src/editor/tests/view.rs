@@ -337,6 +337,9 @@ fn zt_zz_and_zb_with_a_count_put_that_line_there_and_the_cursor_on_it() {
     let at = |keys| after(viewed(&text, 11, (15, 4), false), keys);
     assert_eq!(at("5zt"), (5, 5, 4));
     assert_eq!(at("40zb"), (31, 40, 4));
+    // The middle of ten rows is the fifth, as Vim's.
+    assert_eq!(at("30zz"), (26, 30, 4));
+    assert_eq!(after(viewed(&text, 11, (20, 4), false), "zz"), (16, 20, 4));
     // In its column, whatever startofline says.
     let mut setup = viewed(&text, 11, (15, 4), false);
     setup.set(|options| options.startofline = true);
