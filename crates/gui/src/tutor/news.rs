@@ -581,6 +581,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "registers",
         what: "Marks go with lines :m moves, so a binding of :m '>+1<CR>gv=gv moves the selection",
     },
+    News {
+        id: "wheelcursor",
+        date: "2026-10-21",
+        lesson: "basics",
+        what: "In normal mode the wheel never types into a program: over a full-screen one, it moves the cursor",
+    },
 ];
 
 impl News {

@@ -88,6 +88,28 @@ fn a_click_on_another_pane_arrives_in_the_windows_mode() {
 }
 
 #[test]
+fn the_wheel_over_a_pane_left_in_insert_mode_reaches_no_program_in_normal_mode() {
+    let mut desk = desk(two_side_by_side());
+    // Pane 1's program is on the alternate screen, where insert mode's
+    // wheel is arrow keys.
+    let mut screen = Terminal::new(Size::new(40, 24).unwrap(), &Config::default());
+    screen.advance(b"\x1b[?1049h");
+    desk.view_changed(TerminalId(1), &ViewUpdate::Snapshot(View::capture(&screen)));
+    snapshot(&mut desk, 2);
+    let in_one = [100.0, 100.0];
+    let in_two = [500.0, 100.0];
+    desk.wheel(in_one, 1, Modifiers::default());
+    assert_eq!(typed_into(&answer_all(&mut desk)), [TerminalId(1)]);
+    // Left in insert mode, and the window put in normal mode elsewhere.
+    click(&mut desk, in_two, Modifiers::default());
+    normal_mode(&mut desk);
+    answer_all(&mut desk);
+    desk.wheel(in_one, 1, Modifiers::default());
+    assert_eq!(typed_into(&answer_all(&mut desk)), []);
+    assert_eq!(mode(&desk, 1), Mode::Normal);
+}
+
+#[test]
 fn switching_tabs_and_workspaces_arrives_in_the_windows_mode() {
     let mut desk = desk(workspaces(vec![
         workspace(1, "a", vec![tab(1, pane(1)), tab(2, pane(2))]),

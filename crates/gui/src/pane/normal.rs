@@ -491,7 +491,7 @@ impl Pane {
     /// Moves the normal-mode cursor by `motion`, as `count` says (see
     /// [`counted`]), and the view to keep it in sight. Returns whether
     /// there's a cursor to move.
-    fn move_cursor(&mut self, motion: Motion, count: Option<usize>) -> bool {
+    pub(super) fn move_cursor(&mut self, motion: Motion, count: Option<usize>) -> bool {
         let Some(mut cursor) = self.cursor.take() else {
             return false;
         };

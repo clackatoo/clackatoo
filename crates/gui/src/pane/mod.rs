@@ -25,7 +25,7 @@ use crate::chat::{ChatView, TextPaint};
 use crate::fonts::Fonts;
 use crate::history::History;
 use crate::input::{self, KeyPress};
-use crate::motion::{Block, Cursor, Lines, Point};
+use crate::motion::{Block, Cursor, Lines, Motion, Point};
 use crate::options::{BlockMarks, Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 use crate::screen::Screen;
@@ -840,9 +840,11 @@ impl Pane {
     /// from the pane's top left. A program that asked for mouse reports
     /// gets the wheel instead (see [`mouse`](self::mouse)). On the
     /// alternate screen, which has no history, other programs get arrow
-    /// keys, as other terminals send them. In a chat, with Shift over a
-    /// table too wide for it, the table scrolls sideways. Returns whether
-    /// the pane must be redrawn.
+    /// keys in insert mode, as other terminals send them; in normal mode,
+    /// which keeps input from the program, normal mode's cursor moves
+    /// instead, as `k` and `j` move it. In a chat, with Shift over a table
+    /// too wide for it, the table scrolls sideways. Returns whether the
+    /// pane must be redrawn.
     pub(crate) fn wheel(
         &mut self,
         lines: i64,
@@ -884,6 +886,14 @@ impl Pane {
             return false;
         };
         if screen.state.alternate {
+            if self.mode != Mode::Insert {
+                let motion = if lines > 0 {
+                    Motion::Up(lines.unsigned_abs())
+                } else {
+                    Motion::Down(lines.unsigned_abs())
+                };
+                return self.move_cursor(motion, None);
+            }
             let key = Key::Named(if lines > 0 {
                 NamedKey::ArrowUp
             } else {
@@ -2507,6 +2517,83 @@ mod mouse_tests {
         };
         mouse_with(&mut pane, MouseAction::Press(LEFT), [0, 0], 1, shift);
         assert_eq!(input(&mut pane), "");
+    }
+
+    /// Presses `text`'s key, with no modifiers.
+    fn key(pane: &mut Pane, text: &str) {
+        let key = Key::Character(text.into());
+        pane.key(&KeyPress {
+            key: &key,
+            text: Some(text),
+            location: winit::keyboard::KeyLocation::Standard,
+            code: None,
+            modifiers: Modifiers::default(),
+        });
+    }
+
+    fn wheel(pane: &mut Pane, lines: i64) -> bool {
+        pane.wheel(lines, ([0, 0], [0.0; 2]), Modifiers::default())
+    }
+
+    #[test]
+    fn on_the_alternate_screen_the_wheel_sends_arrows_only_in_insert_mode() {
+        let terminal = terminal("\x1b[?1049hone\r\ntwo\r\nthree\r\nfour\r\nfive");
+        let mut pane = pane(&terminal);
+        wheel(&mut pane, 2);
+        assert_eq!(input(&mut pane), "\x1b[A\x1b[A");
+        wheel(&mut pane, -1);
+        assert_eq!(input(&mut pane), "\x1b[B");
+
+        // Normal mode keeps the wheel from the program, and moves its
+        // cursor instead, within the screen, which has no history.
+        pane.enter_normal_mode();
+        let end = pane.history_end();
+        let line = |pane: &Pane| pane.cursor.expect("a cursor").at.line - end;
+        assert_eq!(line(&pane), 4);
+        assert!(wheel(&mut pane, 2));
+        assert_eq!(line(&pane), 2);
+        wheel(&mut pane, 10);
+        assert_eq!(line(&pane), 0, "no further than the top");
+        wheel(&mut pane, -3);
+        assert_eq!(line(&pane), 3);
+        wheel(&mut pane, -10);
+        assert_eq!(line(&pane), 4, "no further than the bottom");
+        assert_eq!(pane.scroll, 0);
+        assert_eq!(input(&mut pane), "");
+
+        // In visual mode too, and the selection grows as the cursor goes.
+        key(&mut pane, "V");
+        wheel(&mut pane, 2);
+        let selected: Vec<usize> = (pane.highlights(5).into_iter())
+            .filter(|highlight| highlight.kind == HighlightKind::Selection)
+            .map(|highlight| highlight.line)
+            .collect();
+        assert_eq!(selected, [2, 3, 4]);
+        assert_eq!(input(&mut pane), "");
+    }
+
+    #[test]
+    fn a_program_that_asks_gets_no_wheel_in_normal_mode() {
+        let terminal = terminal("\x1b[?1049h\x1b[?1002h\x1b[?1006hone\r\ntwo\r\nthree");
+        let mut pane = pane(&terminal);
+        pane.enter_normal_mode();
+        wheel(&mut pane, 2);
+        assert_eq!(input(&mut pane), "");
+        // The cursor moved from the third line to the first.
+        assert_eq!(pane.cursor.expect("a cursor").at.line, pane.history_end());
+    }
+
+    #[test]
+    fn on_the_main_screen_the_wheel_scrolls_history_in_normal_mode_too() {
+        let output: String = (1..=12).map(|n| n.to_string() + "\r\n").collect();
+        let mut pane = pane(&terminal(&output));
+        pane.enter_normal_mode();
+        assert!(wheel(&mut pane, 2));
+        assert_eq!(pane.scroll, 2);
+        assert_eq!(input(&mut pane), "");
+        // The cursor stays in view, on its bottom line.
+        let bottom = pane.history_end() - 2 + 4;
+        assert_eq!(pane.cursor.expect("a cursor").at.line, bottom);
     }
 
     #[test]
