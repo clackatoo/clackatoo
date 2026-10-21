@@ -210,6 +210,21 @@ fn h_and_l_keep_scrolloff_rows_from_the_views_edges_but_not_at_the_texts_start()
 }
 
 #[test]
+fn with_scrolloff_past_half_the_view_h_m_and_l_meet_where_vims_do() {
+    let text = sixty();
+    let at = |keys, margin| after(with_margin(viewed(&text, 11, (15, 4), false), margin), keys);
+    // Four rows from each edge of ten leave lines 15 and 16.
+    assert_eq!(at("H", 4), (11, 15, 4));
+    assert_eq!(at("L", 4), (11, 16, 4));
+    // Five meet at line 15, taking from the bottom first.
+    for margin in [5, 10] {
+        assert_eq!(at("H", margin), (11, 15, 4), "so={margin}");
+        assert_eq!(at("M", margin), (11, 15, 4), "so={margin}");
+        assert_eq!(at("L", margin), (11, 15, 4), "so={margin}");
+    }
+}
+
+#[test]
 fn h_m_and_l_keep_the_column_unless_startofline() {
     let text = sixty();
     let mut setup = viewed(&text, 12, (15, 4), false);

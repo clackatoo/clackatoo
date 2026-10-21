@@ -6,6 +6,7 @@
 //! history, or an editor's file, laid out as it's drawn. What keys make a
 //! motion is [`crate::vim`]'s.
 
+use std::cmp::Ordering;
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -166,9 +167,9 @@ pub(crate) trait Lines {
 }
 
 /// The part of the lines in view, for `H`, `M` and `L`: from screen row
-/// `top`, `rows` tall, keeping `margin` rows from its edges as `scrolloff`
-/// does, short of the text's ends. A line going on past its bottom isn't
-/// shown whole, so `L` goes to the one before.
+/// `top`, `rows` tall, keeping `margin` rows, `scrolloff`, from its edges
+/// as far as they fit, short of the text's ends. A line going on past its
+/// bottom isn't shown whole, so `L` goes to the one before.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct View {
     pub(crate) top: RowAt,
@@ -246,6 +247,55 @@ impl ScreenRow {
 pub(crate) struct RowAt {
     pub(crate) line: u64,
     pub(crate) row: usize,
+}
+
+/// Where `line`, gone to by `H`, `M` or `L` in `view`, whose last line
+/// shown whole is `bottom`, goes to keep `view.margin` rows from the
+/// view's edges, as Vim's `scrolloff` does: lines are taken from the
+/// bottom and the top in turn, the bottom first, until there are as many
+/// rows as it wants beyond each, or they meet, and `line` is kept between.
+/// None are wanted at the text's start, or at its end, as `ends` says
+/// each shows, and then no more than half the view at the other.
+fn within_margin(
+    line: u64,
+    view: &View,
+    bottom: u64,
+    ends: (bool, bool),
+    lines: &impl Lines,
+) -> u64 {
+    let top = view.top;
+    let (mut above_wanted, mut below_wanted) = (view.margin, view.margin);
+    if ends.0 {
+        above_wanted = 0;
+        below_wanted = below_wanted.min(view.rows / 2);
+    }
+    if ends.1 {
+        below_wanted = 0;
+        above_wanted = above_wanted.min(view.rows.saturating_sub(1) / 2);
+    }
+    let shown = |line: u64| {
+        let rows = lines.screen_rows(line).len() as u64;
+        if line == top.line {
+            rows - top.row as u64
+        } else {
+            rows
+        }
+    };
+    let (mut high, mut low, mut above, mut below) = (top.line, bottom, 0, 0);
+    while (above < above_wanted || below < below_wanted) && high < low {
+        if below < below_wanted && (below <= above || above >= above_wanted) {
+            below += shown(low);
+            low -= 1;
+        } else {
+            above += shown(high);
+            high += 1;
+        }
+    }
+    match high.cmp(&low) {
+        Ordering::Less => line.clamp(high, low),
+        Ordering::Equal => high,
+        Ordering::Greater => low,
+    }
 }
 
 /// Which of `rows` cell `col` of their line is on.
@@ -853,23 +903,13 @@ impl Cursor {
             }
         };
         if keep_margin {
-            let above = |line| rows_between(top, RowAt { line, row: 0 }, lines);
-            let below = |line| rows_between(last_row(lines, line), last_row(lines, bottom), lines);
-            if top
-                != (RowAt {
+            let at_start = top
+                == (RowAt {
                     line: first,
                     row: 0,
-                })
-            {
-                while above(line) < view.margin && line < bottom {
-                    line += 1;
-                }
-            }
-            if bottom != last {
-                while below(line) < view.margin && line > highest {
-                    line -= 1;
-                }
-            }
+                });
+            let ends = (at_start, bottom == last);
+            line = within_margin(line, &view, bottom, ends, lines).max(highest);
         }
         self.go_to_line(line, lines);
     }

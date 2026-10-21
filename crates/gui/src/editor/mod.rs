@@ -1005,7 +1005,7 @@ impl Editor {
             .for_lesson(self.styling.prose.clone())
             .wrapping(self.wrapping.at(self.text_width().max(1)), typing)
             .keeping(&self.kept, self.buffer, copy.revision(), copy.line_log())
-            .viewing(self.top, self.height.max(1) as u64, self.margin())
+            .viewing(self.top, self.height.max(1) as u64, self.scrolloff as u64)
     }
 
     /// Hides as much of the start of each line as `hide` says: the cursor

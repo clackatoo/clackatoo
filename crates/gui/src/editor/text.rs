@@ -817,8 +817,9 @@ impl<'a> Text<'a> {
         }
     }
 
-    /// The text in a view from `top`, `rows` tall, keeping `margin` rows
-    /// from its edges, as `H`, `M` and `L` go by.
+    /// The text in a view from `top`, `rows` tall, keeping `margin` rows,
+    /// `scrolloff`, from its edges as far as they fit, as `H`, `M` and `L`
+    /// go by.
     pub(crate) fn viewing(self, top: Top, rows: u64, margin: u64) -> Self {
         Self {
             viewing: Some((top, rows, margin)),
