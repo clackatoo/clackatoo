@@ -30,6 +30,14 @@ pub(crate) enum Stroke {
     End,
     PageUp,
     PageDown,
+    /// Ctrl+Left or Shift+Left: a word back, as Vim's `<C-Left>`.
+    WordBack,
+    /// Ctrl+Right or Shift+Right: a word on.
+    WordForward,
+    /// Ctrl+Home: the text's first line.
+    TextStart,
+    /// Ctrl+End: its last.
+    TextEnd,
 }
 
 impl Stroke {
@@ -77,6 +85,7 @@ impl Stroke {
     /// took it.
     pub(crate) fn chord(self) -> Chord {
         let named = |named| Chord::with(Base::Named(named), false, false, false);
+        let ctrl = |named| Chord::with(Base::Named(named), true, false, false);
         match self {
             Self::Char { ch, ctrl } => Chord::with(Base::Char(ch), ctrl, false, false),
             Self::Escape => named(Named::Escape),
@@ -93,11 +102,41 @@ impl Stroke {
             Self::End => named(Named::End),
             Self::PageUp => named(Named::PageUp),
             Self::PageDown => named(Named::PageDown),
+            Self::WordBack => ctrl(Named::Left),
+            Self::WordForward => ctrl(Named::Right),
+            Self::TextStart => ctrl(Named::Home),
+            Self::TextEnd => ctrl(Named::End),
         }
     }
 }
 
+/// The strokes `press` makes, for a pane that reads Vim's keys, in insert
+/// mode or a prompt if `typing`: Ctrl or Shift with an arrow, Home or End
+/// as Vim reads them, Ctrl+Left as `b` and Shift+Up as Page Up, and
+/// otherwise as [`plain_strokes`] makes them.
 pub(crate) fn strokes(press: &KeyPress<'_>, typing: bool) -> Vec<Stroke> {
+    let modifiers = press.modifiers;
+    if (modifiers.ctrl || modifiers.shift) && !modifiers.alt {
+        let vim = match press.key {
+            Key::Named(NamedKey::ArrowLeft) => Some(Stroke::WordBack),
+            Key::Named(NamedKey::ArrowRight) => Some(Stroke::WordForward),
+            Key::Named(NamedKey::ArrowUp) if modifiers.shift => Some(Stroke::PageUp),
+            Key::Named(NamedKey::ArrowDown) if modifiers.shift => Some(Stroke::PageDown),
+            Key::Named(NamedKey::Home) if modifiers.ctrl => Some(Stroke::TextStart),
+            Key::Named(NamedKey::End) if modifiers.ctrl => Some(Stroke::TextEnd),
+            _ => None,
+        };
+        if let Some(stroke) = vim {
+            return vec![stroke];
+        }
+    }
+    plain_strokes(press, typing)
+}
+
+/// The strokes `press` makes, for a pane that doesn't read Vim's keys, in
+/// a prompt if `typing`: Ctrl and Shift with a named key are the key alone,
+/// Alt and a key is none, and Ctrl+;, Shift+Esc and Ctrl+\ are Esc.
+pub(crate) fn plain_strokes(press: &KeyPress<'_>, typing: bool) -> Vec<Stroke> {
     if enters_normal_mode(press) {
         return vec![Stroke::Escape];
     }

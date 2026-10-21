@@ -2760,13 +2760,27 @@ impl Editor {
             | Stroke::Home
             | Stroke::End
             | Stroke::PageUp
-            | Stroke::PageDown => {
+            | Stroke::PageDown
+            | Stroke::WordBack
+            | Stroke::WordForward
+            | Stroke::TextStart
+            | Stroke::TextEnd => {
                 self.moved_while_inserting(copy);
                 let text = self.text(copy);
                 let line = self.cursor.at.line;
                 let cells = text.laid(line).map_or(0, |laid| laid.cells());
                 match stroke {
                     Stroke::End => self.cursor = Cursor::new(Point { line, col: cells }),
+                    // As Vim's: a word back or on, the text's first
+                    // character, or past its last.
+                    Stroke::WordBack => self.cursor.apply(Motion::WordBack, &text),
+                    Stroke::WordForward => self.cursor.apply(Motion::WordStart, &text),
+                    Stroke::TextStart => self.cursor = Cursor::new(Point { line: 0, col: 0 }),
+                    Stroke::TextEnd => {
+                        let line = text.last_line();
+                        let cells = text.laid(line).map_or(0, |laid| laid.cells());
+                        self.cursor = Cursor::new(Point { line, col: cells });
+                    }
                     Stroke::Right => {
                         let after = next_char(&text, at).min(text.line_end(line));
                         self.cursor = Cursor::new(text.point_of(after));
@@ -3018,6 +3032,10 @@ impl Editor {
                 | Stroke::End
                 | Stroke::PageUp
                 | Stroke::PageDown
+                | Stroke::WordBack
+                | Stroke::WordForward
+                | Stroke::TextStart
+                | Stroke::TextEnd
         );
         if moved {
             self.close_completion();

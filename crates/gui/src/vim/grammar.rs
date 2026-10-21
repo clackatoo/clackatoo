@@ -489,6 +489,10 @@ impl Reader<'_> {
             Stroke::Down | Stroke::Enter => Motion::Down(1),
             Stroke::Home => Motion::LineStart,
             Stroke::End => Motion::LineEnd,
+            Stroke::WordBack => Motion::WordBack,
+            Stroke::WordForward => Motion::WordStart,
+            Stroke::TextStart => Motion::First,
+            Stroke::TextEnd => Motion::Last,
             Stroke::Char { ch, ctrl: false } => match ch {
                 'h' => Motion::Left,
                 'l' | ' ' => Motion::Right,

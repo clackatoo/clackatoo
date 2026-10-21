@@ -2935,3 +2935,23 @@ fn a_command_half_typed_shows_first_in_the_bar() {
     setup.keys("y");
     assert_eq!(label(&setup), after);
 }
+
+#[test]
+fn ctrl_and_shift_with_arrows_home_and_end_are_vims_keys() {
+    let mut setup = Setup::new("one two three\nfour\n");
+    setup.keys("$<C-Left>");
+    assert_eq!(setup.cursor(), (0, 8), "as b");
+    setup.keys("<S-Left>");
+    assert_eq!(setup.cursor(), (0, 4));
+    setup.keys("<C-Right>");
+    assert_eq!(setup.cursor(), (0, 8), "as w");
+    setup.keys("<S-Right>");
+    assert_eq!(setup.cursor(), (1, 0));
+    setup.keys("<C-Home>");
+    assert_eq!(setup.cursor().0, 0, "as gg");
+    setup.keys("<C-End>");
+    assert_eq!(setup.cursor().0, 1, "as G");
+    // In insert mode, a word back or on, and the text's ends.
+    setup.keys("ggA<C-Left>X<C-Home>Y<C-End>Z<Esc>");
+    assert_eq!(setup.text(), "Yone two Xthree\nfourZ\n");
+}

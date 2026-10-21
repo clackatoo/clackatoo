@@ -2161,6 +2161,44 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_and_shift_with_arrows_home_and_end_are_vims_keys() {
+        let terminal = terminal(&numbered_lines("a b "));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        keys(&mut pane, "k$");
+        press(&mut pane, Key::Named(NamedKey::ArrowLeft), CTRL);
+        assert_eq!(cursor(&pane), ("a b 12".into(), 3, 4), "as b");
+        press(&mut pane, Key::Named(NamedKey::ArrowLeft), shift);
+        assert_eq!(cursor(&pane).2, 2);
+        press(&mut pane, Key::Named(NamedKey::ArrowRight), CTRL);
+        assert_eq!(cursor(&pane).2, 4, "as w");
+        press(&mut pane, Key::Named(NamedKey::ArrowRight), shift);
+        assert_eq!(cursor(&pane), (String::new(), 4, 0));
+        press(&mut pane, Key::Named(NamedKey::Home), CTRL);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("a b 1".into(), 0, 0), "as gg");
+        // Shift+Down and Shift+Up page, as Page Down and Page Up do.
+        press(&mut pane, Key::Named(NamedKey::ArrowDown), shift);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("a b 6".into(), 0, 0));
+        press(&mut pane, Key::Named(NamedKey::ArrowUp), shift);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("a b 1".into(), 0, 0));
+        press(&mut pane, Key::Named(NamedKey::End), CTRL);
+        assert_eq!(cursor(&pane), (String::new(), 4, 0), "as G");
+        // In insert mode they're the program's.
+        keys(&mut pane, "i");
+        sent(&mut pane);
+        press(&mut pane, Key::Named(NamedKey::ArrowLeft), CTRL);
+        assert_eq!(sent(&mut pane), [b"\x1b[1;5D".to_vec()]);
+        assert_eq!(pane.mode, Mode::Insert);
+    }
+
+    #[test]
     fn h_l_and_half_pages_move_as_many_lines_as_they_say() {
         let terminal = terminal(&numbered_lines("line "));
         let mut pane = pane(&terminal);

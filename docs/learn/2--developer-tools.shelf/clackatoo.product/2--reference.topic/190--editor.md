@@ -400,6 +400,7 @@ An editor in a window of its own starts in normal mode, as in Vim. One you go to
 | Keys | Moves to |
 |---|---|
 | `h` `j` `k` `l`, the arrows | The next character or line. A count moves that many. |
+| Ctrl or Shift and Left, Right | As `b` and `w`, as in Vim, in insert mode too. Ctrl+Home and Ctrl+End are `gg` and `G`, or in insert mode the text's start and end, and Shift+Up and Shift+Down are Page Up and Page Down. |
 | `w` `b` `e` | The start of the next word, the start of this one or the one before, the end of this one or the next. |
 | `W` `B` `E` | The same, for anything between blanks. |
 | `0` `^` `$` | The line's start, its first character that isn't blank, its last character. |
