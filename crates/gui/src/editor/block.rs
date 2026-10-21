@@ -35,13 +35,13 @@
 use clackatoo_protocol::Edit;
 use clackatoo_text::Bias;
 
-use super::keys::Operator;
 use super::registers::{Register, Registers, Wrote};
 use super::text::{Laid, Text, tab_end};
 use super::visual::Extent;
-use super::{BufferCopy, Editor, FLASH, Mode, on_character};
+use super::{BufferCopy, Editor, Mode, on_character};
 use crate::motion::{Block, Cursor, Point};
-use crate::vim::Selection;
+use crate::render::FLASH;
+use crate::vim::{Operator, Selection};
 
 /// What the bar says when a block would go past a listing's end.
 pub(super) const PAST_LISTING: &str =

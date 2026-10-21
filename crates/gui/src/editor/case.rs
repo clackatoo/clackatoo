@@ -8,18 +8,7 @@
 //! for Greek with a subscript iota, which goes to its one-character
 //! capital, as Vim's does.
 
-/// A change of case.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Recase {
-    /// `gu`: to small letters.
-    Lower,
-    /// `gU`: to capitals.
-    Upper,
-    /// `g~` and `~`: small letters to capitals, and capitals to small.
-    Toggle,
-    /// `g?`: each ASCII letter thirteen on, round the alphabet.
-    Rot13,
-}
+use crate::vim::Recase;
 
 impl Recase {
     /// `ch`, with its case changed.

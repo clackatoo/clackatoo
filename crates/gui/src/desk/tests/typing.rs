@@ -383,7 +383,7 @@ fn searches_go_back_through_those_typed_in_terminals_and_editors() {
     key(&mut editor, NamedKey::Enter);
     // From the top, backward, it went round to the bottom, and says so
     // until the next key.
-    assert_eq!(editor_label(&editor), crate::pane::WRAPPED_TO_BOTTOM);
+    assert_eq!(editor_label(&editor), crate::vim::WRAPPED_TO_BOTTOM);
     type_keys(&mut editor, "l");
     assert!(editor_label(&editor).ends_with("1:6"), "found");
 }

@@ -25,11 +25,11 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::{Answer, Construct, Edit, Piece, Query};
 use clackatoo_text::Bias;
 
-use super::keys::{Action, Target};
+use super::keys::{Action, EditorAction};
 use super::{BufferCopy, Change, Command, Done, Editor, Marks, Shared, Stroke};
 use crate::motion::Cursor;
 use crate::objects::Object;
-use crate::vim::{Mode, Selection};
+use crate::vim::{Mode, Selection, Target};
 
 /// How long a command waits for its answer before it's given up on.
 pub(crate) const PATIENCE: Duration = Duration::from_secs(1);
@@ -91,10 +91,10 @@ fn grammar_question(command: Command) -> Option<Query> {
             object: Object::Code(construct),
             ..
         } => Some(Query::Pieces(construct)),
-        Action::Piece {
+        Action::Own(EditorAction::Piece {
             construct,
             backward,
-        } => Some(Query::Starts {
+        }) => Some(Query::Starts {
             construct,
             backward,
             count: u32::try_from(command.times()).unwrap_or(u32::MAX),

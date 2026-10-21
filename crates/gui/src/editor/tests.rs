@@ -379,7 +379,7 @@ fn a_search_that_goes_round_an_end_says_so() {
     assert_eq!(setup.cursor(), (0, 2));
     assert_eq!(
         setup.editor.status.as_deref(),
-        Some(crate::pane::WRAPPED_TO_TOP)
+        Some(crate::vim::WRAPPED_TO_TOP)
     );
     setup.keys("n");
     assert_eq!(setup.editor.status, None, "it says it once");
@@ -389,14 +389,14 @@ fn a_search_that_goes_round_an_end_says_so() {
     assert_eq!(setup.cursor(), (1, 2));
     assert_eq!(
         setup.editor.status.as_deref(),
-        Some(crate::pane::WRAPPED_TO_BOTTOM)
+        Some(crate::vim::WRAPPED_TO_BOTTOM)
     );
     // The only match, from on it, goes all the way round to itself.
     let mut setup = Setup::new("one\nx\n");
     setup.keys("/one<CR>");
     assert_eq!(
         setup.editor.status.as_deref(),
-        Some(crate::pane::WRAPPED_TO_TOP)
+        Some(crate::vim::WRAPPED_TO_TOP)
     );
 }
 

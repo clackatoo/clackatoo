@@ -33,11 +33,11 @@
 use clackatoo_protocol::{Answer, LineIndent, Query};
 use clackatoo_text::{Bias, Edit, Rope, line_start_through};
 
-use super::keys::{Action, Command, Operator, Target};
+use super::keys::{Action, Command};
 use super::{BufferCopy, Done, Editor, MAX_INDENT, Marks, Shared, indent_of};
 use crate::motion::{Cursor, Motion, Point};
 use crate::objects::Object;
-use crate::vim::Mode;
+use crate::vim::{Mode, Operator, Target};
 
 /// The most new lines kept waiting for their indent to be put right: an
 /// answer that never comes, as one lost with a connection, isn't waited

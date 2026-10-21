@@ -74,7 +74,6 @@ use clackatoo_text::{Bias, Diagnostic, Hunk};
 
 use actions::{ActionMenu, MenuKey, MenuStroke};
 pub use bench::EditorBench;
-use case::Recase;
 pub use complete::Ranking;
 use complete::{Completion, Resolved};
 /// The daemon's side of a buffer, for the desk's tests.
@@ -85,7 +84,7 @@ pub(crate) use ex::is_editor_command;
 #[cfg(test)]
 pub(crate) use hints::HINTS_WAIT;
 use kept::Kept;
-use keys::{Action, Command, Entry, Operator, Parsed, Target, ViewAt};
+use keys::{Action, Command, EditorAction, EditorKeys, Parsed};
 pub(crate) use marks::{File, FilePlace, Marks, passing};
 #[cfg(test)]
 pub(crate) use panel::Line as PanelLine;
@@ -115,11 +114,10 @@ use crate::motion::{
 use crate::objects::Object;
 use crate::options::{Case, CompleteAccept, Options};
 use crate::pane::corners;
-use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
-use crate::vim::{Mode, Selection, Stroke, strokes};
-
-/// How long text copied stays highlighted, as in a terminal's normal mode.
-const FLASH: Duration = Duration::from_millis(150);
+use crate::render::{CursorStyle, FLASH, Highlight, HighlightKind, SceneCursor};
+use crate::vim::{
+    self, Entry, Mode, Operator, Recase, Scroll, Selection, Stroke, Target, ViewAt, strokes,
+};
 
 /// The fewest cells left for the text beside the line numbers. A narrower
 /// pane shows no numbers.
@@ -467,7 +465,7 @@ pub(crate) struct Editor {
     /// Where the cursor was drawn, in cells of the pane, as laid out last.
     cursor_cell: Option<(usize, usize)>,
     /// The keys of a command being typed in normal or visual mode.
-    typed: Vec<Stroke>,
+    keys: vim::Keys,
     /// Whether the next edit starts an undo step: it's the first of a
     /// command, or of a go of insert mode.
     new_step: bool,
@@ -734,7 +732,7 @@ impl Editor {
             shown: Vec::new(),
             placed: Vec::new(),
             cursor_cell: None,
-            typed: Vec::new(),
+            keys: vim::Keys::default(),
             new_step: true,
             word_run: 0,
             changing: None,
@@ -864,28 +862,18 @@ impl Editor {
     /// Whether a command is half typed, such as `d` waiting for its
     /// motion, which the next key is for.
     pub(crate) fn pending(&self) -> bool {
-        !self.typed.is_empty()
+        self.keys.pending()
     }
 
     /// The count typed, if that's all of a command that's been typed: a
     /// key the editor doesn't take after it is the window's, as `:`.
     pub(crate) fn counting(&self) -> Option<usize> {
-        let mut count = None;
-        for stroke in &self.typed {
-            let Stroke::Char { ch, ctrl: false } = stroke else {
-                return None;
-            };
-            let digit = ch
-                .to_digit(10)
-                .filter(|&digit| digit > 0 || count.is_some())?;
-            count = Some(crate::motion::count_with(count, digit));
-        }
-        count
+        self.keys.counting()
     }
 
     /// The keys of the command half typed, as `g` waiting for its second.
     pub(crate) fn typed_so_far(&self) -> &[Stroke] {
-        &self.typed
+        self.keys.so_far()
     }
 
     pub(crate) fn resize(&mut self, size: Size) {
@@ -1017,7 +1005,7 @@ impl Editor {
             return;
         }
         self.leave_visual();
-        self.typed.clear();
+        self.keys.clear();
         self.prompt = None;
         self.new_step = true;
         self.enter_insert(1);
@@ -1035,7 +1023,7 @@ impl Editor {
         self.leave_visual();
         self.insert_after = false;
         self.drag = None;
-        self.typed.clear();
+        self.keys.clear();
         self.prompt = None;
         self.actions = None;
         self.close_completion();
@@ -1208,7 +1196,7 @@ impl Editor {
     /// Forgets the keys of a command half typed, as when the macro typing
     /// them is stopped.
     pub(crate) fn forget_typed(&mut self) {
-        self.typed.clear();
+        self.keys.clear();
     }
 
     /// Whether the editor waits for the language server or the daemon to
@@ -1302,7 +1290,7 @@ impl Editor {
         // A macro types past menus, which it can't know will be there.
         if self.actions.is_some()
             && !self.replaying
-            && self.typed.is_empty()
+            && !self.keys.pending()
             && self.prompt.is_none()
             && self.mode == Mode::Normal
             && let Some(done) = self.actions_stroke(stroke, copy)
@@ -1311,7 +1299,7 @@ impl Editor {
             return done;
         }
         if self.panel.is_some()
-            && self.typed.is_empty()
+            && !self.keys.pending()
             && self.prompt.is_none()
             && let Some(done) = self.panel_stroke(stroke)
         {
@@ -1489,7 +1477,7 @@ impl Editor {
             self.insert_stroke(stroke, copy);
             return Done::REDRAW;
         }
-        if stroke == Stroke::Escape && self.typed.is_empty() {
+        if stroke == Stroke::Escape && !self.keys.pending() {
             self.mode = Mode::Normal;
             self.anchor = None;
             self.found = None;
@@ -1497,27 +1485,25 @@ impl Editor {
         }
         // `q` stops a macro being recorded, whatever comes after.
         if stroke == Stroke::char('q')
-            && self.typed.is_empty()
+            && !self.keys.pending()
             && shared.registers.recording().is_some()
         {
             shared.registers.stop_recording();
             return Done::REDRAW;
         }
-        self.typed.push(stroke);
         let visual = matches!(self.mode, Mode::Visual(_));
-        match keys::parse_with(&self.typed, visual, self.tildeop) {
+        let dialect = EditorKeys {
+            tildeop: self.tildeop,
+        };
+        match self.keys.read(stroke, visual, &dialect) {
             // A count is drawn in the bar while it waits.
             Parsed::Incomplete if self.counting().is_some() => Done::REDRAW,
             Parsed::Incomplete => Done::default(),
             Parsed::Nothing => {
-                self.typed.clear();
                 self.fail();
                 Done::default()
             }
-            Parsed::Command(command) => {
-                self.typed.clear();
-                self.execute(command, copy, shared, false)
-            }
+            Parsed::Command(command) => self.execute(command, copy, shared, false),
         }
     }
 
@@ -1579,41 +1565,22 @@ impl Editor {
             Action::SearchAgain { reverse } => self.search_again(reverse, copy, shared),
             Action::SearchWord { backward } => self.search_word(backward, copy, shared),
             Action::Tilde => self.tilde(times, copy),
-            Action::RepeatSubstitute { all } => self.repeat_substitute(all, copy, shared),
             Action::FindAgain { reverse } => self.find_again(reverse, times, copy),
-            Action::HalfPage(direction) => self.page(i64::from(direction), self.height / 2, copy),
-            Action::Page(direction) => {
-                self.page(i64::from(direction), self.height.saturating_sub(2), copy);
+            Action::Scroll(Scroll::HalfPage { down }) => {
+                self.page(if down { 1 } else { -1 }, self.height / 2, copy);
+            }
+            Action::Scroll(Scroll::Page { down }) => {
+                let rows = self.height.saturating_sub(2);
+                self.page(if down { 1 } else { -1 }, rows, copy);
             }
             Action::View(at) => self.view_at(at, copy),
-            Action::Diagnostic { backward } => self.next_diagnostic(backward, times, copy),
-            Action::Hunk { backward } => self.next_hunk(backward, times, copy),
-            Action::Ask(_)
-            | Action::Hover
-            | Action::ShowDiagnostics
-            | Action::Rename
-            | Action::CodeActions
-            | Action::FormatSelection => {
-                self.language_server(command.action, copy);
-            }
             Action::Reselect => self.reselect(copy, &mut shared.marks),
             Action::OtherEnd => self.other_end(),
             Action::OtherCorner => self.other_corner(copy),
-            Action::Piece {
-                construct,
-                backward,
-            } => self.go_to_piece(construct, backward, copy),
             Action::Select { object, inner } => self.select(object, inner, times, copy),
-            Action::Record(name) => shared.registers.record(name),
-            Action::Replay(name) => match shared.registers.macro_keys(name) {
-                Ok(keys) => self.macro_asked = Some((keys, times)),
-                Err(why) => {
-                    self.status = Some(why);
-                    self.fail();
-                }
-            },
             Action::SetMark(mark) => self.set_mark(mark, copy, &mut shared.marks),
             Action::Mark { mark, exact } => self.go_to_mark(mark, exact, copy, &shared.marks),
+            Action::Own(own) => self.own(own, times, copy, shared),
         }
         if command.action.jumps() && self.cursor.at != from {
             self.left_from(from, copy);
@@ -1629,6 +1596,40 @@ impl Editor {
             self.normal_cursor(copy);
         }
         done
+    }
+
+    /// Does `action`, a command of the editor's own, `times` over where
+    /// that means something.
+    fn own(
+        &mut self,
+        action: EditorAction,
+        times: usize,
+        copy: &mut BufferCopy,
+        shared: &mut Shared,
+    ) {
+        match action {
+            EditorAction::Diagnostic { backward } => self.next_diagnostic(backward, times, copy),
+            EditorAction::Hunk { backward } => self.next_hunk(backward, times, copy),
+            EditorAction::Piece {
+                construct,
+                backward,
+            } => self.go_to_piece(construct, backward, copy),
+            EditorAction::Ask(query) => self.ask(query, copy),
+            EditorAction::Hover => self.hover(copy),
+            EditorAction::ShowDiagnostics => self.show_diagnostics(copy),
+            EditorAction::Rename => self.rename_here(copy),
+            EditorAction::CodeActions => self.ask_actions(copy),
+            EditorAction::FormatSelection => self.format_selection(copy),
+            EditorAction::Record(name) => shared.registers.record(name),
+            EditorAction::Replay(name) => match shared.registers.macro_keys(name) {
+                Ok(keys) => self.macro_asked = Some((keys, times)),
+                Err(why) => {
+                    self.status = Some(why);
+                    self.fail();
+                }
+            },
+            EditorAction::RepeatSubstitute { all } => self.repeat_substitute(all, copy, shared),
+        }
     }
 
     /// Notes `command` as the change being made, for `.`, if it's one: in
@@ -3488,20 +3489,6 @@ impl Editor {
         Done::REDRAW
     }
 
-    /// What `action` asks of the language server, or shows of what it
-    /// said.
-    fn language_server(&mut self, action: Action, copy: &mut BufferCopy) {
-        match action {
-            Action::Ask(query) => self.ask(query, copy),
-            Action::Hover => self.hover(copy),
-            Action::ShowDiagnostics => self.show_diagnostics(copy),
-            Action::Rename => self.rename_here(copy),
-            Action::CodeActions => self.ask_actions(copy),
-            Action::FormatSelection => self.format_selection(copy),
-            _ => {}
-        }
-    }
-
     /// `gq` in visual mode: what's selected is for the desk to have its
     /// language server format, leaving visual mode, the cursor at its
     /// start, as Vim's `gq` leaves it. Whole lines are formatted to the
@@ -3679,9 +3666,9 @@ impl Editor {
             self.cursor = Cursor::new(text.point_of(found.start));
             // A match back where it started went all the way round.
             if !backward && found.start <= from {
-                self.status = Some(crate::pane::WRAPPED_TO_TOP.into());
+                self.status = Some(vim::WRAPPED_TO_TOP.into());
             } else if backward && found.start >= from {
-                self.status = Some(crate::pane::WRAPPED_TO_BOTTOM.into());
+                self.status = Some(vim::WRAPPED_TO_BOTTOM.into());
             }
         } else {
             self.found = None;

@@ -299,6 +299,10 @@ pub(crate) struct Highlight {
     pub(crate) kind: HighlightKind,
 }
 
+/// How long text just copied stays highlighted, so you see what went, in
+/// terminals and editors alike: as long as Neovim's highlight on yank.
+pub(crate) const FLASH: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// Why text is highlighted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HighlightKind {
@@ -306,7 +310,7 @@ pub(crate) enum HighlightKind {
     Selection,
     /// A search found it.
     Match,
-    /// It was just copied.
+    /// It was just copied, for [`FLASH`].
     Copied,
     /// It's the cursor's line (`cursorline`).
     CursorLine,

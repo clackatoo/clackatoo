@@ -45,13 +45,12 @@ use std::rc::Rc;
 
 use clackatoo_protocol::Edit;
 
-use super::keys::{Operator, Target};
 use super::marks::{Marks, Selected, Shape};
 use super::registers::Register;
 use super::text::Text;
 use super::{BufferCopy, Editor, Mode, next_char, on_character};
 use crate::motion::{Cursor, Motion, Point};
-use crate::vim::Selection;
+use crate::vim::{Operator, Selection, Target};
 
 /// What the bar says when a change would join a listing's lines.
 pub(super) const JOINS_ENTRIES: &str = "a listing's lines can't be joined: act on whole lines";

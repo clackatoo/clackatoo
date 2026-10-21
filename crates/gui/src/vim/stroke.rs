@@ -6,7 +6,7 @@ use winit::keyboard::{Key, KeyCode, NamedKey};
 use crate::input::KeyPress;
 use crate::keymap::{Base, Chord, Named};
 
-/// One key, as an editor reads it.
+/// One key, as the grammar reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stroke {
     /// A character, typed with Ctrl if `ctrl`.
@@ -48,68 +48,15 @@ impl Stroke {
         }
     }
 
-    /// The keys `text` writes down, for tests: a character for itself,
-    /// and a key that types none by its name in angle brackets, `<Esc>`,
-    /// `<CR>` or `<C-r>`, with `<lt>` for `<`. A `<` that starts no name
-    /// is itself. Line breaks are Enter, and the other control characters
-    /// the keys that type them.
+    /// The keys `text` writes down, for tests, as `@` types a register
+    /// holding it (see [`crate::keymap::read_macro`]): a character for
+    /// itself, and a key that types none by its name in angle brackets,
+    /// `<Esc>`, `<CR>` or `<C-r>`, with `<lt>` for `<`.
     #[cfg(test)]
     pub(crate) fn read(text: &str) -> Vec<Self> {
-        let mut strokes = Vec::with_capacity(text.len());
-        let mut rest = text;
-        while let Some(ch) = rest.chars().next() {
-            if ch == '<'
-                && let Some(end) = rest[1..].find('>').map(|end| end + 1)
-                && let Some(stroke) = Self::named(&rest[1..end])
-            {
-                strokes.push(stroke);
-                rest = &rest[end + 1..];
-                continue;
-            }
-            strokes.push(match ch {
-                '\n' | '\r' => Self::Enter,
-                '\t' => Self::Tab,
-                '\u{1b}' => Self::Escape,
-                '\u{8}' | '\u{7f}' => Self::Backspace,
-                // Ctrl+A to Ctrl+Z.
-                '\u{1}'..='\u{1a}' => Self::ctrl(char::from(ch as u8 + b'a' - 1)),
-                _ => Self::char(ch),
-            });
-            rest = &rest[ch.len_utf8()..];
-        }
-        strokes
-    }
-
-    /// The key called `name`, between angle brackets, if it's one.
-    #[cfg(test)]
-    fn named(name: &str) -> Option<Self> {
-        Some(match name {
-            "Esc" => Self::Escape,
-            "CR" => Self::Enter,
-            "Tab" => Self::Tab,
-            "S-Tab" => Self::BackTab,
-            "BS" => Self::Backspace,
-            "Del" => Self::Delete,
-            "Left" => Self::Left,
-            "Right" => Self::Right,
-            "Up" => Self::Up,
-            "Down" => Self::Down,
-            "Home" => Self::Home,
-            "End" => Self::End,
-            "PageUp" => Self::PageUp,
-            "PageDown" => Self::PageDown,
-            "lt" => Self::char('<'),
-            "Space" => Self::char(' '),
-            "C-Space" => Self::ctrl(' '),
-            _ => {
-                let mut key = name.strip_prefix("C-")?.chars();
-                let ch = key.next()?;
-                if key.next().is_some() {
-                    return None;
-                }
-                Self::ctrl(ch)
-            }
-        })
+        (crate::keymap::read_macro(text).into_iter())
+            .flat_map(|chord| strokes(&chord.kept().press(), false))
+            .collect()
     }
 
     /// The key that types the stroke, as a macro records it: for what a

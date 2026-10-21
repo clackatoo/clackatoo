@@ -309,7 +309,7 @@ impl Pane {
                 start,
                 end,
                 kind,
-                until: std::time::Instant::now() + super::FLASH,
+                until: std::time::Instant::now() + crate::render::FLASH,
             });
         }
         let (from, to_place) = (super::normal::position(start), super::normal::position(end));

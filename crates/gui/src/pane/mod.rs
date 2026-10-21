@@ -13,7 +13,7 @@
 
 use std::collections::VecDeque;
 use std::ops::Range;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use clackatoo_protocol::{
     ChatAction, ClientMessage, CursorShape, Match, Request, Response, Size, TerminalId, ViewUpdate,
@@ -60,10 +60,6 @@ enum Prefix {
     CtrlBackslash,
 }
 
-/// How long text copied to the clipboard stays highlighted, so you see what
-/// went: as long as Neovim's highlight on yank.
-const FLASH: Duration = Duration::from_millis(150);
-
 /// Text just copied, highlighted until `until`.
 #[derive(Clone, Copy, Debug)]
 struct Flash {
@@ -76,14 +72,6 @@ struct Flash {
 /// The fewest rows a pane shows the pill saying it's scrolled back in:
 /// fewer, and it would cover too much of what's being read.
 const PILL_ROWS: u16 = 4;
-
-/// What a search that went past the end and round to the top says, in
-/// terminals and editors alike, as Vim does: the match may be a long way
-/// back.
-pub(crate) const WRAPPED_TO_TOP: &str = "search wrapped to top";
-
-/// What a backward search that went round to the bottom says.
-pub(crate) const WRAPPED_TO_BOTTOM: &str = "search wrapped to bottom";
 
 /// A request sent to the daemon and not yet answered. Answers arrive in
 /// the order requests were sent.
@@ -1388,6 +1376,8 @@ mod tests {
 
     use super::*;
     use crate::input::Modifiers;
+    use crate::render::FLASH;
+    use crate::vim::{WRAPPED_TO_BOTTOM, WRAPPED_TO_TOP};
 
     /// A 12 × 5 terminal after `output`.
     fn terminal(output: &str) -> Terminal {

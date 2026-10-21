@@ -13,14 +13,12 @@ use clackatoo_protocol::{Match, Position, Request};
 use clackatoo_term::{MOST_LINES, MOST_TEXT};
 use winit::keyboard::{Key, NamedKey};
 
-use super::{
-    Copy, Document, Lines, Mode, Pane, Pending, Prefix, Selection, WRAPPED_TO_BOTTOM,
-    WRAPPED_TO_TOP,
-};
+use super::{Copy, Document, Lines, Mode, Pane, Pending, Prefix, Selection};
 use crate::cmdline::{Keyed, Line};
 use crate::input::KeyPress;
 use crate::motion::{Block, Cursor, Motion, Point, count_with, multiplied, start_of_cell};
 use crate::objects::Object;
+use crate::vim::{WRAPPED_TO_BOTTOM, WRAPPED_TO_TOP};
 
 /// A search being typed.
 #[derive(Debug)]

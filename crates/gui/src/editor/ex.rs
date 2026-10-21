@@ -22,14 +22,14 @@
 
 use clackatoo_text::Edit;
 
-use super::case::Recase;
 use super::marked::Marked;
 use super::pattern::{Found, Locations, Matching, Pattern, TOO_COMPLEX};
 use super::substitute::{self, Bytes, Flags, Replacement};
-use super::{BufferCopy, Done, Editor, Prompt, Register, Searched, Shared, Text, Wrote, keys};
+use super::{BufferCopy, Done, Editor, Prompt, Register, Searched, Shared, Text, Wrote};
 use crate::keymap::read_macro;
 use crate::motion::{Cursor, Motion, Point};
 use crate::vim::Mode;
+use crate::vim::Recase;
 
 /// The deepest macros typed by `:normal` type each other, as Vim's
 /// `maxmapdepth`.
@@ -572,7 +572,7 @@ impl Editor {
         let mut text = text.trim();
         let mut register = None;
         if let Some(ch) = text.chars().next().filter(|ch| !ch.is_ascii_digit()) {
-            if !keys::is_register(ch) {
+            if !crate::vim::is_register(ch) {
                 return Err(format!("{ch} isn't a register"));
             }
             register = Some(ch);
@@ -1180,7 +1180,7 @@ impl Editor {
         if matches!(self.prompt, Some(Prompt::Search { .. })) {
             self.prompt = None;
         }
-        self.typed.clear();
+        self.keys.clear();
         if self.mode != Mode::Normal {
             self.stroke(crate::vim::Stroke::Escape, copy, shared);
         }

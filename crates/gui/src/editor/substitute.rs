@@ -14,8 +14,8 @@
 
 use clackatoo_text::Edit;
 
-use super::case::Recase;
 use super::pattern::{Found, Locations, Pattern};
+use crate::vim::Recase;
 
 /// What `:s` is typed with after its name: `/pattern/replacement/flags`
 /// and a count, any of it left out.

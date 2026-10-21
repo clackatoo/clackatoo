@@ -45,7 +45,7 @@ use crate::markdown::layout::{
 use crate::markdown::tables::Cells;
 use crate::markdown::{self, BlockKind};
 use crate::vim::Mode;
-use crate::vim::Stroke;
+use crate::vim::{self, Stroke};
 
 /// The widest the column of text gets, in ems: as a chat's, about as wide
 /// as a printed page's lines, and wide enough for 80 columns of code.
@@ -142,10 +142,10 @@ impl Rendered {
     /// that's `text`, after `typed`, the keys of a command typed before it:
     /// a count, or `g`. The editor keeps them, as it keeps its own, so its
     /// bar shows them, and leaving the pane forgets them.
-    pub(super) fn key(&mut self, stroke: Stroke, typed: &mut Vec<Stroke>, text: &Rope) -> Keyed {
+    pub(super) fn key(&mut self, stroke: Stroke, typed: &mut vim::Keys, text: &Rope) -> Keyed {
         let g = Stroke::char('g');
-        let after_g = typed.last() == Some(&g);
-        let count: Option<usize> = (typed.iter())
+        let after_g = typed.so_far().last() == Some(&g);
+        let count: Option<usize> = (typed.so_far().iter())
             .filter_map(|&typed| digit(typed))
             .collect::<String>()
             .parse()
@@ -156,7 +156,7 @@ impl Rendered {
             typed.push(stroke);
             return Keyed::Took;
         }
-        let before = std::mem::take(typed);
+        let before = typed.take();
         // `gj` and `gk` go by screen rows, which here are lines, as `j`
         // and `k` do: a config may map `j` to `gj`.
         let rows = after_g
@@ -656,7 +656,7 @@ impl Editor {
         let rendered = self.rendered.as_mut()?;
         // What the bar said goes, as with any key.
         self.status = None;
-        match rendered.key(stroke, &mut self.typed, copy.text()) {
+        match rendered.key(stroke, &mut self.keys, copy.text()) {
             Keyed::Took => Some(Done::REDRAW),
             Keyed::Text(before) => {
                 self.show_text_to_edit(copy);
@@ -707,7 +707,7 @@ impl Editor {
         // Nothing half typed, which showing it rendered would throw away,
         // leaving the rest of its keys to edit the text: else it stays as
         // its text.
-        let idle = self.mode == Mode::Normal && self.typed.is_empty() && self.prompt.is_none();
+        let idle = self.mode == Mode::Normal && !self.keys.pending() && self.prompt.is_none();
         if self.renders(copy) && idle {
             self.show_rendered(copy);
         }
