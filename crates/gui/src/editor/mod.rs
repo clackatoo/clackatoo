@@ -1609,9 +1609,15 @@ impl Editor {
             return Done::REDRAW;
         }
         if stroke == Stroke::Escape && !self.keys.pending() {
+            let visual = matches!(self.mode, Mode::Visual(_));
             self.escape();
             // Back onto a character from just past a line's end.
             self.normal_cursor(copy);
+            // Out of visual mode, aiming for where the cursor is, as Vim's
+            // `nv_esc()`.
+            if visual {
+                self.cursor = Cursor::new(self.cursor.at);
+            }
             return Done::REDRAW;
         }
         // `q` stops a macro being recorded, whatever comes after.

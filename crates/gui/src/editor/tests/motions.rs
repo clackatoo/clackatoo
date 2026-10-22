@@ -865,3 +865,15 @@ fn c_over_nothing_types_there_as_vims_does() {
         ("\"\"\n".into(), (1, 1))
     );
 }
+
+#[test]
+fn esc_out_of_visual_mode_aims_for_where_the_cursor_is() {
+    assert_eq!(in_cells("abc\nde\nfgh\n", (2, 1), "v$<Esc>j").1, (3, 1));
+    assert_eq!(
+        in_cells("abcdef\nde\nfghijk\n", (1, 4), "jv<Esc>j").1,
+        (3, 1)
+    );
+    // On a tab, the column it sat in in visual mode, as Neovim's.
+    assert_eq!(in_cells("\tfoo\nabcdefgh\n", (1, 4), "vh<Esc>j").1, (2, 0));
+    assert_eq!(in_cells("\tfoo\nabcdefgh\n", (1, 0), "v<Esc>j").1, (2, 3));
+}
