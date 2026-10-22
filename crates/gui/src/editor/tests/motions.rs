@@ -895,6 +895,12 @@ fn j_joins_with_a_space_where_vims_do_join_puts_one() {
     assert_eq!(in_cells("\n  cd\n", (1, 0), "J").0, "cd\n");
     // After an empty line joined on, one again.
     assert_eq!(in_cells("ab\t\n\ncd\n", (1, 0), "3J").0, "ab\t cd\n");
+    // A count on the last line joins it alone: the cursor to its start.
+    assert_eq!(
+        in_cells("ab\ncd  ef\n", (2, 4), "3J"),
+        ("ab\ncd  ef\n".into(), (2, 0))
+    );
+    assert_eq!(in_cells("ab\ncd  ef\n", (2, 4), "J").1, (2, 4));
 }
 
 #[test]

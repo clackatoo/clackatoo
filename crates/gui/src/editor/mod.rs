@@ -2830,6 +2830,13 @@ impl Editor {
     fn join(&mut self, times: usize, copy: &mut BufferCopy) {
         let line = self.cursor.at.line;
         let text = self.text(copy);
+        // A count past the last line joins as many as there are, as Vim's
+        // `nv_join()` cuts it: on the last line, just it, which Vim's
+        // `do_join()` leaves with the cursor at its start.
+        if times > 1 && line >= text.last_line() {
+            self.cursor = Cursor::new(Point { line, col: 0 });
+            return;
+        }
         let joined = (line + 1)..=line.saturating_add(times as u64).min(text.last_line());
         let kept = |line| self.keep.is_some_and(|keep| keep(&text.line_text(line)));
         let hidden = (self.hide.is_some()
