@@ -484,6 +484,10 @@ pub(crate) struct Editor {
     /// Whether the next edit starts an undo step: it's the first of a
     /// command, or of a go of insert mode.
     new_step: bool,
+    /// Where the cursor was before a command that changed nothing but
+    /// would have made an undo step in Vim, as `3J` on the last line does:
+    /// `u` next takes the cursor back there, as undoing that step does.
+    step_unchanged: Option<Cursor>,
     /// How many of a word's characters have been typed in a row in insert
     /// mode, just before the cursor: so only a word typed there, such as
     /// `else`, has its line's indent worked out again, not one that was
@@ -756,6 +760,7 @@ impl Editor {
             cursor_cell: None,
             keys: vim::Keys::default(),
             new_step: true,
+            step_unchanged: None,
             word_run: 0,
             changing: None,
             last_change: None,
@@ -1639,7 +1644,13 @@ impl Editor {
             // No more steps than Vim's `undolevels` keeps, so a huge
             // count doesn't queue millions.
             Action::Undo | Action::Redo => {
-                for _ in 0..times.min(MOST_UNDOS) {
+                let mut times = times.min(MOST_UNDOS);
+                let unchanged = self.step_unchanged.take();
+                if let Some(cursor) = unchanged.filter(|_| command.action == Action::Undo) {
+                    self.cursor = cursor;
+                    times -= 1;
+                }
+                for _ in 0..times {
                     copy.reverse(command.action == Action::Undo);
                 }
             }
@@ -2831,11 +2842,19 @@ impl Editor {
         let line = self.cursor.at.line;
         let text = self.text(copy);
         // A count past the last line joins as many as there are, as Vim's
-        // `nv_join()` cuts it: on the last line, just it, which Vim's
-        // `do_join()` leaves with the cursor at its start.
-        if times > 1 && line >= text.last_line() {
-            self.cursor = Cursor::new(Point { line, col: 0 });
-            return;
+        // `nv_join()` cuts it, and `.` joins as many again: on the last
+        // line, just it, which Vim's `do_join()` leaves with the cursor at
+        // its start, an undo step all the same.
+        let there = text.last_line().saturating_sub(line);
+        if times > 1 && times as u64 > there {
+            if let Some(change) = &mut self.changing {
+                change.command.count = usize::try_from(there + 1).ok();
+            }
+            if there == 0 {
+                self.step_unchanged = Some(self.cursor);
+                self.cursor = Cursor::new(Point { line, col: 0 });
+                return;
+            }
         }
         let joined = (line + 1)..=line.saturating_add(times as u64).min(text.last_line());
         let kept = |line| self.keep.is_some_and(|keep| keep(&text.line_text(line)));
@@ -3275,6 +3294,7 @@ impl Editor {
         };
         copy.edit(edit, step);
         self.new_step = false;
+        self.step_unchanged = None;
     }
 
     /// Moves the word being completed, the places its items are at, and

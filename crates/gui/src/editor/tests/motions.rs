@@ -900,6 +900,10 @@ fn j_joins_with_a_space_where_vims_do_join_puts_one() {
         in_cells("ab\ncd  ef\n", (2, 4), "3J"),
         ("ab\ncd  ef\n".into(), (2, 0))
     );
+    // Which is an undo step, though nothing changed, and a count cut
+    // short is the count `.` joins again, as Vim's `prep_redo()` has it.
+    assert_eq!(in_cells("ab \n", (1, 1), "4Ju").1, (1, 1));
+    assert_eq!(in_cells(".\n中\n", (1, 0), "4J.").1, (1, 1));
     assert_eq!(in_cells("ab\ncd  ef\n", (2, 4), "J").1, (2, 4));
 }
 
