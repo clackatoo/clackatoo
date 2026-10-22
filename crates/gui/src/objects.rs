@@ -103,7 +103,7 @@ impl Object {
             Self::Quote(quote) => quoted(lines.row(at.line).as_deref(), at, quote, inner)
                 .map(chars)
                 .ok_or(None),
-            Self::Bracket { open, close } => bracketed(lines, at, open, close, inner)
+            Self::Bracket { open, close } => bracketed(lines, at, (open, close), inner, count)
                 .map(chars)
                 .ok_or(None),
             Self::Paragraph => {
@@ -191,9 +191,16 @@ impl Object {
                 .map_err(|failed| Some(chars(failed)));
         }
         if self != Self::Paragraph {
-            let found = self
-                .find(lines, selected.cursor, inner, count)
-                .map_err(|_| None)?;
+            // As Vim's: brackets are looked for from the selection's start,
+            // and a quoted string can't be over lines.
+            let from = match self {
+                Self::Bracket { .. } => selected.anchor.min(selected.cursor),
+                Self::Quote(_) if selected.anchor.line != selected.cursor.line => {
+                    return Err(None);
+                }
+                _ => selected.cursor,
+            };
+            let found = self.find(lines, from, inner, count).map_err(|_| None)?;
             return Ok(Selected {
                 anchor: found.start,
                 cursor: found.last,
@@ -395,38 +402,56 @@ fn quoted(row: Option<&impl Cells>, at: Point, quote: char, inner: bool) -> Opti
     }
 }
 
-/// `i(` and `a(`, and the like: the brackets around the cursor, or that it
-/// is on.
+/// `i(` and `a(`, and the like, as Vim's `current_block()` finds them:
+/// the brackets around the cursor, or that it's on, or `count` levels out;
+/// or if there are none around it, as Neovim's, the next after it, and
+/// with a count, the next after that, in it.
 fn bracketed(
     lines: &impl Lines,
     at: Point,
-    open: char,
-    close: char,
+    (open, close): (char, char),
     inner: bool,
+    count: usize,
 ) -> Option<(Point, Point)> {
     let ch = |point: Point| {
         let row = lines.row(point.line)?;
         row.cell(point.col).map(|spot| spot.ch)
     };
-    // The opening bracket: the cursor's, or the first unmatched one before
-    // it.
-    let mut walk = Walk::new(lines, at);
-    if ch(at) != Some(open) {
+    // The first opening bracket back from `from`, or on if `forward`, that
+    // isn't matched by a closing one between.
+    let unmatched = |from: Point, forward: bool| {
+        let mut walk = Walk::new(lines, from);
         let mut depth = 0usize;
-        for steps in 0.. {
-            if steps == BRACKET_SEARCH || !walk.back() {
+        for _ in 0..BRACKET_SEARCH {
+            if !(if forward { walk.forward() } else { walk.back() }) {
                 return None;
             }
             match ch(walk.at()) {
                 Some(c) if c == close => depth += 1,
                 Some(c) if c == open => match depth.checked_sub(1) {
                     Some(fewer) => depth = fewer,
-                    None => break,
+                    None => return Some(walk.at()),
                 },
                 _ => {}
             }
         }
+        None
+    };
+    // From just after an opening bracket the cursor's on, so it's the
+    // first, as Vim's.
+    let from = if ch(at) == Some(open) {
+        let mut walk = Walk::new(lines, at);
+        walk.forward();
+        walk.at()
+    } else {
+        at
+    };
+    let forward = unmatched(from, false).is_none();
+    let mut start = from;
+    for _ in 0..count.max(1) {
+        start = unmatched(start, forward)?;
     }
+    let mut walk = Walk::new(lines, start);
     let start = walk.at();
     // Its partner.
     let mut depth = 0usize;
@@ -540,7 +565,28 @@ mod tests {
         // Over lines, without the break after `(` or the indent before `)`.
         assert_eq!(found(&text, at(2, 2), "i("), Some((at(2, 0), at(2, 3))));
         assert_eq!(found(&text, at(2, 2), "a("), Some((at(1, 1), at(3, 0))));
-        assert_eq!(found(&text, at(0, 0), "i("), None);
+        // With none around it, the next, as Neovim's.
+        assert_eq!(found(&text, at(0, 0), "i("), Some((at(0, 2), at(0, 10))));
         assert_eq!(found(&Text::new(&["()"]), at(0, 0), "i("), None);
+    }
+
+    #[test]
+    fn a_count_of_brackets_goes_out_or_on_into_the_next() {
+        let counted = |text: &[&str], from, count| {
+            let found = Object::of_key('(')
+                .unwrap()
+                .find(&Text::new(text), from, true, count);
+            found.ok().map(|found| (found.start, found.last))
+        };
+        // Out a level, as Vim's.
+        let text = ["f(a, (b), c)"];
+        assert_eq!(counted(&text, at(0, 6), 2), Some((at(0, 2), at(0, 10))));
+        assert_eq!(counted(&text, at(0, 6), 3), None);
+        // With none around the cursor, on into the next, as Neovim's.
+        assert_eq!(
+            counted(&["x ((y)) z"], at(0, 0), 2),
+            Some((at(0, 4), at(0, 4)))
+        );
+        assert_eq!(counted(&["x ((y)) z"], at(0, 0), 3), None);
     }
 }

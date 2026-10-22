@@ -179,3 +179,24 @@ fn words_keep_a_block_and_end_lines_selected() {
     assert_eq!(mode("<C-v>aw"), Mode::Visual(Selection::Block));
     assert_eq!(mode("Vaw"), Mode::Visual(Selection::Characters));
 }
+
+#[test]
+fn brackets_as_vims_current_block_finds_them() {
+    let taken = |text, at, keys| after(text, at, keys).2;
+    // None around the cursor: the next, as Neovim's.
+    assert_eq!(taken("a\t(b)\tc\n", (1, 0), "ya("), "(b)");
+    // A count goes out, or with none around, on into the next.
+    assert_eq!(taken("f(a, (b), c)\n", (1, 6), "y2i("), "a, (b), c");
+    assert_eq!(taken("x ((y)) z\n", (1, 0), "y2i("), "y");
+    // Selected, from the selection's start.
+    assert_eq!(taken("a\t(b)\tc\n", (1, 0), "vlla(y"), "(b)");
+    // A quoted string isn't over lines: the selection stays.
+    let mut setup = Setup::new("a \"b\"\nc\n");
+    setup.keys("vji\"");
+    assert_eq!(setup.cursor(), (1, 0));
+    assert_eq!(
+        setup.editor.anchor,
+        Some(crate::motion::Point { line: 0, col: 0 })
+    );
+    assert!(setup.editor.take_failed());
+}
