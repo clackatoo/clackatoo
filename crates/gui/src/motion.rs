@@ -249,6 +249,49 @@ pub(crate) struct RowAt {
     pub(crate) row: usize,
 }
 
+impl View {
+    /// The view's bottom row, or the text's last if that's sooner.
+    pub(crate) fn bottom_row(&self, lines: &impl Lines) -> RowAt {
+        let (_, last) = lines.bounds();
+        rows_down(self.top, self.rows.saturating_sub(1), last, lines)
+    }
+
+    /// The first and last lines shown whole: one going on past the view's
+    /// bottom isn't, nor one shown from partway down, as Ctrl+E can leave
+    /// it where lines wrap, unless it's the only one.
+    pub(crate) fn whole_lines(&self, lines: &impl Lines) -> (u64, u64) {
+        let top = self.top;
+        let bottom_row = self.bottom_row(lines);
+        let cut = bottom_row.row + 1 < lines.screen_rows(bottom_row.line).len();
+        let bottom = if cut && bottom_row.line > top.line {
+            bottom_row.line - 1
+        } else {
+            bottom_row.line
+        };
+        let highest = if top.row > 0 && top.line < bottom {
+            top.line + 1
+        } else {
+            top.line
+        };
+        (highest, bottom)
+    }
+
+    /// Where the cursor on line `line` goes to be in the view `margin` rows
+    /// from its edges, as far as they fit, as Vim's `cursor_correct()`
+    /// puts it after `H`, `M`, `L` and the pages (see [`within_margin`]).
+    pub(crate) fn correct(&self, line: u64, lines: &impl Lines) -> u64 {
+        let (first, last) = lines.bounds();
+        let (highest, bottom) = self.whole_lines(lines);
+        let at_start = self.top
+            == (RowAt {
+                line: first,
+                row: 0,
+            });
+        let at_end = bottom == last;
+        within_margin(line, self, bottom, (at_start, at_end), lines).max(highest)
+    }
+}
+
 /// Where `line`, gone to by `H`, `M` or `L` in `view`, whose last line
 /// shown whole is `bottom`, goes to keep `view.margin` rows from the
 /// view's edges, as Vim's `scrolloff` does: lines are taken from the
@@ -864,21 +907,8 @@ impl Cursor {
         };
         let (first, last) = lines.bounds();
         let top = view.top;
-        let bottom_row = rows_down(top, view.rows.saturating_sub(1), last, lines);
-        // The last line shown whole: one going on past the view isn't.
-        let cut = bottom_row.row + 1 < lines.screen_rows(bottom_row.line).len();
-        let bottom = if cut && bottom_row.line > top.line {
-            bottom_row.line - 1
-        } else {
-            bottom_row.line
-        };
-        // And the first, past one shown from partway down, as Ctrl+E can
-        // leave the view where lines wrap.
-        let highest = if top.row > 0 && top.line < bottom {
-            top.line + 1
-        } else {
-            top.line
-        };
+        let bottom_row = view.bottom_row(lines);
+        let (highest, bottom) = view.whole_lines(lines);
         let from_edge = (count as u64).saturating_sub(1);
         // A count past the view's other edge goes no further than it, but
         // an operator takes as far as the text goes, as Vim's: `d99L` to
@@ -908,13 +938,7 @@ impl Cursor {
             }
         };
         if keep_margin {
-            let at_start = top
-                == (RowAt {
-                    line: first,
-                    row: 0,
-                });
-            let ends = (at_start, bottom == last);
-            line = within_margin(line, &view, bottom, ends, lines).max(highest);
+            line = view.correct(line, lines);
         }
         self.go_to_line(line, lines);
     }
