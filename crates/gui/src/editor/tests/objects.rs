@@ -295,3 +295,15 @@ fn brackets_and_quotes_selected_grow_as_vims_do() {
     // Between two strings, from the quote before, as Vim's.
     assert_eq!(taken("a \"b c\" d \"e\"\n", (1, 8), "yi\""), " d ");
 }
+
+#[test]
+fn brackets_with_nothing_inside_fail_to_be_selected() {
+    // As Vim's current_block in visual mode: nothing in `{` / `}`, nor
+    // in the next pair after the cursor.
+    for (text, keys) in [("{\n}\n", "jVi{"), ("\t(p q)\t\n\"q\" r\n{\n}\n", "lvi{")] {
+        let mut setup = Setup::new(text);
+        setup.keys(keys);
+        assert!(setup.editor.take_failed(), "{keys}");
+        assert_eq!(setup.editor.anchor, Some(setup.editor.cursor.at), "{keys}");
+    }
+}

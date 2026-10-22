@@ -481,6 +481,23 @@ fn unmatched(
     None
 }
 
+/// The character before the one at `at`, as Vim's `decl()` steps: from a
+/// line's start, the line before's last.
+fn char_before(lines: &impl Lines, at: Point) -> Point {
+    if at.col > 0 {
+        let row = lines.row(at.line);
+        let col = previous_cell(row.as_deref(), at.col).unwrap_or(0);
+        return Point { col, ..at };
+    }
+    match at.line.checked_sub(1) {
+        Some(line) if line >= lines.bounds().0 => Point {
+            line,
+            col: lines.last_cell(line),
+        },
+        _ => at,
+    }
+}
+
 /// The closing bracket that pairs with the opening one at `start`.
 fn partner(lines: &impl Lines, start: Point, (open, close): (char, char)) -> Option<Point> {
     let mut walk = Walk::new(lines, start);
@@ -549,22 +566,23 @@ fn bracket_selected(
             break (start, end, true);
         }
         let (first, last, inclusive) = inside(lines, start, end)?;
+        // Nothing inside, as Vim's fails in visual mode.
+        if first == end {
+            return None;
+        }
         // Its last character, before the line `)` starts.
         let last_char = if inclusive {
             last
         } else {
-            let mut walk = Walk::new(lines, last);
-            walk.back();
-            walk.at()
+            char_before(lines, last)
         };
         let grows = first < low || high < last_char;
-        if single || grows || first == last_char {
+        if grows || first == last_char {
             break (first, last, inclusive);
         }
-        // No more than is selected: the brackets out from these.
-        let mut walk = Walk::new(lines, low);
-        walk.back();
-        start = unmatched(lines, walk.at(), pair, false)?;
+        // No more than is selected: the brackets out from these, from
+        // before the selection's start.
+        start = unmatched(lines, char_before(lines, low), pair, false)?;
         end = partner(lines, start, pair)?;
     };
     let (start, last, inclusive) = found;
