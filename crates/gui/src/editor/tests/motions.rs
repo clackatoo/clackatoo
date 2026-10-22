@@ -666,3 +666,14 @@ fn i_on_a_line_of_blanks_types_after_them_and_selected_at_the_start() {
         " y abc\nde\n"
     );
 }
+
+#[test]
+fn dl_short_of_its_count_at_a_lines_end_takes_the_last_character() {
+    assert_eq!(in_cells("x\n", (1, 0), "dl").0, "\n");
+    assert_eq!(in_cells("foo\n", (1, 0), "d4l").0, "\n");
+    assert_eq!(in_cells("foo\n", (1, 0), "d2l").0, "o\n");
+    assert_eq!(in_cells("x\n", (1, 0), "clZ<Esc>").0, "Z\n");
+    assert_eq!(kept("a\t\n", (1, 0), "y5l").1, "a\t");
+    // An empty line has none.
+    assert_eq!(in_cells("\nx\n", (1, 0), "dl").0, "\nx\n");
+}

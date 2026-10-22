@@ -2476,6 +2476,17 @@ mod tests {
     }
 
     #[test]
+    fn yl_short_of_its_count_at_a_lines_end_takes_the_last_character() {
+        let terminal = terminal("one two six\r\nfour five");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let mut yank = |keys: &str| yanked(&mut pane, &terminal, keys);
+        assert_eq!(yank("gg$yl").as_deref(), Some("x"));
+        assert_eq!(yank("gg$hy5l").as_deref(), Some("ix"));
+        assert_eq!(yank("gg0y2l").as_deref(), Some("on"));
+    }
+
+    #[test]
     fn yw_stops_at_the_end_of_its_last_words_line() {
         let terminal = terminal("one\r\n  two three");
         let mut pane = pane(&terminal);

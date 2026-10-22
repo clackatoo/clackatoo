@@ -642,6 +642,11 @@ impl Motion {
             {
                 None
             }
+            // `dl` short of its count, at the line's last character, takes
+            // that too, as Vim's.
+            Self::Right if !lines.empty(to.line) && steps(from, to, lines) < count.unwrap_or(1) => {
+                Some(Reach::Inclusive)
+            }
             // `+` on the last line has no line to take.
             Self::NextLine | Self::PreviousLine if from.line == to.line => None,
             // `}` with no empty line after takes the last line's end.
@@ -1550,6 +1555,18 @@ pub(crate) fn line_end(line: u64, lines: &impl Lines) -> usize {
     }
     let last = lines.last_cell(line);
     lines.row(line).map_or(last, |row| row.extent(last).1) + 1
+}
+
+/// How many characters on from `from` `to` is, on its line.
+fn steps(from: Point, to: Point, lines: &impl Lines) -> usize {
+    let row = lines.row(from.line);
+    let mut col = from.col;
+    let mut steps = 0;
+    while col < to.col {
+        col = next_cell(row.as_deref(), col).unwrap_or(to.col);
+        steps += 1;
+    }
+    steps
 }
 
 /// The step Space takes from `at` for an operator: on along the line, to
