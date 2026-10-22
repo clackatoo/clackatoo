@@ -1531,7 +1531,7 @@ impl<'a, L: Lines> Walk<'a, L> {
 /// The column just after line `line`'s last character, or 0 if the line
 /// is empty. Space and Backspace stop there when an operator takes them,
 /// so the line break counts as a character.
-fn line_end(line: u64, lines: &impl Lines) -> usize {
+pub(crate) fn line_end(line: u64, lines: &impl Lines) -> usize {
     if lines.empty(line) {
         return 0;
     }

@@ -1,8 +1,10 @@
 //! Text objects: the pieces of text `i` and `a` pick out after `y`, or in
 //! visual mode, as in Vim. `iw` is the word under the cursor and `aw` the
-//! word with the blanks after it; `i"` is what's between the quotes around
-//! the cursor and `a"` the quotes too; `i(` is what's between the
-//! parentheses around it, across lines, and `a(` the parentheses too.
+//! word with the blanks after it, a count that many, as Vim's
+//! `current_word()` takes them (see [`words`]); `i"` is what's between
+//! the quotes around the cursor and `a"` the quotes too; `i(` is what's
+//! between the parentheses around it, across lines, and `a(` the
+//! parentheses too.
 //!
 //! In Vim `b` is another name for `(`. Here it is the shell's block, the
 //! more useful thing in a terminal: `ib` is a command's output, `ab` its
@@ -20,9 +22,13 @@
 
 use clackatoo_text::Construct;
 
+use crate::vim::Selection;
+
 use crate::motion::{
     Cells, Class, Lines, Point, Walk, Words, class_at, next_cell, previous_cell, text_end,
 };
+
+mod words;
 
 /// How far a bracket object looks for each of its brackets, in cells.
 const BRACKET_SEARCH: usize = 100_000;
@@ -71,15 +77,17 @@ impl Object {
 
     /// Where the object around `at` starts and ends, both included: just
     /// its insides if `inner`, and `count` of them where that's a thing (a
-    /// paragraph). None if there's no such object there, or it's empty.
-    /// Blocks and pieces of code aren't found here (see the module docs).
+    /// paragraph, words). An error if there's no such object there, or
+    /// it's empty, with where Vim's leaves the cursor if it moves it
+    /// failing, as counting words past the text's end does. Blocks and
+    /// pieces of code aren't found here (see the module docs).
     pub(crate) fn find(
         self,
         lines: &impl Lines,
         at: Point,
         inner: bool,
         count: usize,
-    ) -> Option<Found> {
+    ) -> Result<Found, Option<Point>> {
         let chars = |(start, last)| Found {
             start,
             last,
@@ -87,17 +95,20 @@ impl Object {
         };
         match self {
             Self::Word | Self::BigWord => {
-                let row = lines.row(at.line);
                 let big = self == Self::BigWord;
-                Some(chars(word(row.as_deref(), at, inner, big, lines.words())))
+                let found = words::current(lines, at, None, (inner, big), count)
+                    .map_err(|failed| Some(failed.end))?;
+                taken_words(lines, found).ok_or(None)
             }
-            Self::Quote(quote) => {
-                quoted(lines.row(at.line).as_deref(), at, quote, inner).map(chars)
-            }
-            Self::Bracket { open, close } => bracketed(lines, at, open, close, inner).map(chars),
+            Self::Quote(quote) => quoted(lines.row(at.line).as_deref(), at, quote, inner)
+                .map(chars)
+                .ok_or(None),
+            Self::Bracket { open, close } => bracketed(lines, at, open, close, inner)
+                .map(chars)
+                .ok_or(None),
             Self::Paragraph => {
-                let (first, last) = paragraph(lines, at.line, inner, count.max(1))?;
-                Some(Found {
+                let (first, last) = paragraph(lines, at.line, inner, count.max(1)).ok_or(None)?;
+                Ok(Found {
                     start: Point {
                         line: first,
                         col: 0,
@@ -106,7 +117,7 @@ impl Object {
                     lines: true,
                 })
             }
-            Self::Block | Self::Code(_) => None,
+            Self::Block | Self::Code(_) => Err(None),
         }
     }
 }
@@ -137,21 +148,53 @@ pub(crate) struct Selected {
 }
 
 impl Object {
+    /// The kind of selection selecting it in visual mode leaves, from
+    /// `kind`: whole lines if `lines`, as a paragraph is, or characters,
+    /// but a block stays one for words and quoted strings, as Vim's do; and
+    /// failing, as it was.
+    pub(crate) fn selection(self, kind: Selection, lines: bool, failed: bool) -> Selection {
+        let keeps_block = matches!(self, Self::Word | Self::BigWord | Self::Quote(_));
+        if failed || (kind == Selection::Block && keeps_block) {
+            kind
+        } else if lines {
+            Selection::Lines
+        } else {
+            Selection::Characters
+        }
+    }
+
     /// What's selected once `count` of the object are, in visual mode, from
     /// `selected`: the object around the cursor, or for a paragraph, as
     /// Vim's `current_par()` goes, the selection taken on by `count`
-    /// paragraphs if it's more than a line, by lines or not. None if
-    /// there's no such object there.
+    /// paragraphs if it's more than a line, by lines or not; for words, as
+    /// Vim's `current_word()` goes, the same. An error if there's no such
+    /// object there, with what's selected if Vim's leaves it changed
+    /// failing, as counting words past the text's end does.
     pub(crate) fn select(
         self,
         lines: &impl Lines,
         selected: Selected,
         inner: bool,
         count: usize,
-    ) -> Option<Selected> {
+    ) -> Result<Selected, Option<Selected>> {
+        if let Self::Word | Self::BigWord = self {
+            let big = self == Self::BigWord;
+            let anchor = Some(selected.anchor);
+            // By characters, from lines too, as Vim's.
+            let chars = |found: words::Worded| Selected {
+                anchor: found.start,
+                cursor: found.end,
+                lines: false,
+            };
+            return words::current(lines, selected.cursor, anchor, (inner, big), count)
+                .map(chars)
+                .map_err(|failed| Some(chars(failed)));
+        }
         if self != Self::Paragraph {
-            let found = self.find(lines, selected.cursor, inner, count)?;
-            return Some(Selected {
+            let found = self
+                .find(lines, selected.cursor, inner, count)
+                .map_err(|_| None)?;
+            return Ok(Selected {
                 anchor: found.start,
                 cursor: found.last,
                 lines: found.lines,
@@ -159,7 +202,7 @@ impl Object {
         }
         let line = selected.cursor.line;
         if selected.anchor.line == line {
-            let (start, end) = paragraph(lines, line, inner, count.max(1))?;
+            let (start, end) = paragraph(lines, line, inner, count.max(1)).ok_or(None)?;
             // By lines already, on a line that starts one: on to the next.
             if !(selected.lines && start == line) {
                 let at = |line| Point { line, col: 0 };
@@ -169,7 +212,7 @@ impl Object {
                 } else {
                     at(start)
                 };
-                return Some(Selected {
+                return Ok(Selected {
                     anchor,
                     cursor: at(end),
                     lines: true,
@@ -177,7 +220,7 @@ impl Object {
             }
         }
         let line = more_paragraphs(lines, selected, inner, count.max(1));
-        Some(Selected {
+        Ok(Selected {
             cursor: Point { line, col: 0 },
             ..selected
         })
@@ -272,45 +315,41 @@ fn paragraph(lines: &impl Lines, line: u64, inner: bool, count: usize) -> Option
     Some((start.cast_unsigned(), end.cast_unsigned()))
 }
 
-/// `iw` and `aw`, with `words` part of words; or if `big`, `iW` and
-/// `aW`, lumping punctuation in with letters.
-fn word(
-    row: Option<&impl Cells>,
-    at: Point,
-    inner: bool,
-    big: bool,
-    words: Words,
-) -> (Point, Point) {
-    let class = |col| match class_at(row, col, words) {
-        Class::Punctuation if big => Class::Word,
-        class => class,
-    };
-    let end = text_end(row).max(at.col + 1);
-    let run = |col: usize| {
-        let wanted = class(col);
-        let mut start = col;
-        while let Some(previous) = previous_cell(row, start).filter(|&p| class(p) == wanted) {
-            start = previous;
-        }
-        let mut last = col;
-        while let Some(next) = next_cell(row, last).filter(|&n| n < end && class(n) == wanted) {
-            last = next;
-        }
-        (start, last)
-    };
-    let (mut start, mut last) = run(at.col);
-    if !inner {
-        if class(at.col) == Class::Blank {
-            // The blanks, and the word after them.
-            if let Some(next) = next_cell(row, last).filter(|&n| n < end) {
-                last = run(next).1;
-            }
-        } else {
-            (start, last) = with_blanks(row, start, last, end);
-        }
+/// What an operator takes of the words `found`, as Vim's: to a line's
+/// start, not in it, it ends at the end of the line before, or takes whole
+/// lines from the first's indent. None if that's nothing.
+fn taken_words(lines: &impl Lines, found: words::Worded) -> Option<Found> {
+    let words::Worded {
+        start,
+        end,
+        inclusive,
+    } = found;
+    if inclusive || end.col > 0 {
+        return Some(Found {
+            start,
+            last: end,
+            lines: false,
+        });
     }
-    let point = |col| Point { line: at.line, col };
-    (point(start), point(last))
+    if end.line <= start.line {
+        return None;
+    }
+    let line = end.line - 1;
+    let row = lines.row(start.line);
+    let indent = row.as_deref().map_or(0, |row| {
+        (row.on_from(0))
+            .find(|(_, spot)| !spot.blank())
+            .map_or(usize::MAX, |(col, _)| col)
+    });
+    let last = Point {
+        line,
+        col: lines.last_cell(line),
+    };
+    Some(Found {
+        start,
+        last,
+        lines: start.col <= indent,
+    })
 }
 
 /// `start` to `last`, with the blanks after it, or if there are none, the
@@ -456,7 +495,7 @@ mod tests {
         let mut keys = keys.chars();
         let inner = keys.next() == Some('i');
         let object = Object::of_key(keys.next().unwrap()).unwrap();
-        let found = object.find(text, from, inner, 1)?;
+        let found = object.find(text, from, inner, 1).ok()?;
         assert!(!found.lines);
         Some((found.start, found.last))
     }

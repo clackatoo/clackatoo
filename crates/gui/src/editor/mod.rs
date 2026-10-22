@@ -1787,15 +1787,20 @@ impl Editor {
             cursor: self.cursor.at,
             lines: self.mode == Mode::Visual(Selection::Lines),
         };
-        if let Some(selected) = object.select(&text, selected, inner, times) {
-            let kind = if selected.lines {
-                Selection::Lines
-            } else {
-                Selection::Characters
-            };
+        // Failing, Vim's leaves what it took on of a count.
+        let (selected, failed) = match object.select(&text, selected, inner, times) {
+            Ok(selected) => (Some(selected), false),
+            Err(selected) => (selected, true),
+        };
+        drop(text);
+        if let (Some(selected), Mode::Visual(kind)) = (selected, self.mode) {
+            let kind = object.selection(kind, selected.lines, failed);
             self.mode = Mode::Visual(kind);
             self.anchor = Some(selected.anchor);
             self.cursor = Cursor::new(selected.cursor);
+        }
+        if failed {
+            self.fail();
         }
     }
 
@@ -2385,12 +2390,22 @@ impl Editor {
                 })
             }
             Target::Object { object, inner } => {
-                let Some(found) = object.find(&text, at, inner, times) else {
-                    self.status = Some(match object {
-                        Object::Block => "a file has no shell blocks".into(),
-                        _ => "nothing there".into(),
-                    });
-                    return None;
+                let found = match object.find(&text, at, inner, times) {
+                    Ok(found) => found,
+                    // Where Vim's leaves the cursor, failing a count of
+                    // words past the text's end.
+                    Err(Some(moved)) => {
+                        drop(text);
+                        self.cursor = Cursor::new(moved);
+                        return None;
+                    }
+                    Err(None) => {
+                        self.status = Some(match object {
+                            Object::Block => "a file has no shell blocks".into(),
+                            _ => "nothing there".into(),
+                        });
+                        return None;
+                    }
                 };
                 if !found.lines {
                     return Some(chars(found.start, found.last));

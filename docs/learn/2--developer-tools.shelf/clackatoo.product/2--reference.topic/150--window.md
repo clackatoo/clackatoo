@@ -397,7 +397,7 @@ After `y`, or in visual mode, `i` or `a` and one more key pick out a piece of te
 
 | Keys | Picks out |
 |---|---|
-| `iw` `aw` | A word, and with `a` the blanks after it (or before it, at the end of a line). |
+| `iw` `aw` | A word, and with `a` the blanks after it (or before it, at the end of a line). A count takes that many, over lines too, a run of blanks counting as one with `iw`; in visual mode, with more than a character selected, it takes on another, as Vim's. |
 | `iW` `aW` | The same, for anything between blanks. |
 | `i"` `a"`, `i'` `a'`, `` i` `` `` a` `` | What's between the quotes around the cursor, or the next pair on its line; with `a`, the quotes too. |
 | `i(` `a(`, `i[` `a[`, `i{` `a{`, `i<` `a<` | What's between the brackets around the cursor, across lines; with `a`, the brackets too. The closing bracket works as well. |

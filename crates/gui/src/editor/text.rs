@@ -1566,8 +1566,8 @@ mod tests {
                     for inner in [true, false] {
                         let ends =
                             |found: Option<Found>| found.map(|found| (found.start, found.last));
-                        let found = ends(object.find(&short, from, inner, 1));
-                        let far = ends(object.find(&long, along(from), inner, 1));
+                        let found = ends(object.find(&short, from, inner, 1).ok());
+                        let far = ends(object.find(&long, along(from), inner, 1).ok());
                         if far.is_none_or(|(start, _)| start.line > 0 || start.col >= shift) {
                             let found = found.map(|(start, last)| (along(start), along(last)));
                             assert_eq!(found, far, "{context}: {object:?}, {inner}");

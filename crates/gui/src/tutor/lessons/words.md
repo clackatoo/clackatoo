@@ -47,6 +47,21 @@ has "  margin-top: 4px;"
 
 A language pack you write says what else its words are made of in its `language.toml`, as Vim's `iskeyword` does: `word = "-"`, or for Lisp, `word = "-?!*"`.
 
+## More words at once with a count
+
+A count takes that many words: `d2aw` deletes two and the blanks after them, over a line's end too. In visual mode, `aw` again takes on the next word, so `vawaw` selects two, as `v2aw` does, and `iw` counts a run of blanks as a word.
+
+```setup
+cursor 2
+```
+
+On `margin-top` in `.card`, type `vawaw` and then `d`: the name goes, with the `: ` after it.
+
+```check
+not has "margin-top: 4px"
+has "  4px;"
+```
+
 ## Lines' first characters with + and -
 
 `+` or Enter goes to the next line's first character that isn't blank, and `-` to the line before's; `_` to this line's, or with a count, that many lines down. `g_` goes to the line's last character that isn't blank, `|` to the column a count says, and `ge` back to the end of the word before. Space and Backspace go on over a line's end, as `l` and `h` don't.

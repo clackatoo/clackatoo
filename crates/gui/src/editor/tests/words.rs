@@ -51,6 +51,11 @@ fn words_have_what_the_language_puts_in_them() {
     assert_eq!(setup.text(), "a {: 0; }\n");
     setup.keys("u04lcwpadding<Esc>");
     assert_eq!(setup.text(), "a { padding: 0; }\n");
+    // `aw` again in visual mode takes on the next, as the words lesson
+    // has it.
+    let mut lesson = with_words(".card {\n  margin-top: 4px;\n", "-");
+    lesson.keys("j^vawawd");
+    assert_eq!(lesson.text(), ".card {\n  4px;\n");
     // A fresh snapshot is read as plain text, until the daemon says again.
     let snapshot = setup.daemon.snapshot();
     setup.copy.update(snapshot);

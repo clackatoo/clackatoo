@@ -2579,6 +2579,16 @@ mod tests {
         assert_eq!(pane.mode, Mode::Normal);
     }
 
+    #[test]
+    fn words_selected_take_on_more_and_a_count_goes_over_lines() {
+        let terminal = terminal("one two six\r\nfour five");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let mut yank = |keys: &str| yanked(&mut pane, &terminal, keys);
+        assert_eq!(yank("gg0vawawy").as_deref(), Some("one two "));
+        assert_eq!(yank("gg0wwy2aw").as_deref(), Some("six\nfour "));
+    }
+
     /// The highlights on text just copied, as lines and columns.
     fn flashed(pane: &Pane) -> Vec<(usize, Range<usize>)> {
         pane.highlights(5)

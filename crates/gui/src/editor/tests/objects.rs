@@ -144,3 +144,38 @@ fn vip_moves_the_selections_other_end_only_to_another_line() {
     assert_eq!(anchor("2lvip"), Some((0, 2)));
     assert_eq!(anchor("j2lvip"), Some((0, 0)));
 }
+
+#[test]
+fn words_as_vims_current_word_takes_them() {
+    let taken = |text, at, keys| after(text, at, keys).2;
+    // Blanks at a line's end, tabs too.
+    assert_eq!(taken("end\t\n", (1, 0), "yaw"), "end\t");
+    // A count goes on over lines.
+    assert_eq!(taken("ab cd\nef gh\n", (1, 3), "y2aw"), "cd\nef ");
+    assert_eq!(taken("ab cd\nef gh\n", (1, 3), "y3aw"), " cd\nef gh");
+    assert_eq!(taken("one two three four\n", (1, 0), "v2awy"), "one two ");
+    // In visual mode, more than a character selected takes on another,
+    // away from the other end, from just past a line's end too.
+    assert_eq!(taken("one two three four\n", (1, 0), "vawawy"), "one two ");
+    assert_eq!(taken("one two three four\n", (1, 0), "viwiwy"), "one ");
+    assert_eq!(taken("one two three four\n", (1, 8), "vhawy"), " two t");
+    assert_eq!(taken("abc def\nxy\n", (1, 0), "v$awy"), "abc def\nxy");
+    assert_eq!(taken("abc def\nxy\n", (1, 0), "v$iwy"), "abc def\nxy");
+    // Past the text's end, it fails, leaving the cursor, or the selection,
+    // where it got to.
+    let (text, cursor, ..) = after("one two three\n", (1, 0), "d5aw");
+    assert_eq!((text.as_str(), cursor), ("one two three\n", (1, 12)));
+    assert_eq!(after("one two three\n", (1, 4), "v5aw").1, (1, 13));
+}
+
+#[test]
+fn words_keep_a_block_and_end_lines_selected() {
+    let mode = |keys: &str| {
+        let mut setup = Setup::new("xy\nxy\n.a.a.a.\n");
+        setup.keys("j");
+        setup.keys(keys);
+        setup.editor.mode
+    };
+    assert_eq!(mode("<C-v>aw"), Mode::Visual(Selection::Block));
+    assert_eq!(mode("Vaw"), Mode::Visual(Selection::Characters));
+}

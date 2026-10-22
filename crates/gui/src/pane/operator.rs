@@ -83,19 +83,26 @@ impl Pane {
                 cursor: cursor.at,
                 lines: self.mode == Mode::Visual(Selection::Lines),
             };
-            let Some(selected) = object.select(&Document(self), selected, inner, count) else {
-                return false;
+            // Failing, Vim's leaves what it took on of a count.
+            let (selected, failed) = match object.select(&Document(self), selected, inner, count) {
+                Ok(selected) => (Some(selected), false),
+                Err(selected) => (selected, true),
             };
-            let kind = if selected.lines {
-                Selection::Lines
-            } else {
-                Selection::Characters
-            };
-            self.select(selected.anchor, selected.cursor, kind);
-            return true;
+            if let (Some(selected), Mode::Visual(kind)) = (selected, self.mode) {
+                let kind = object.selection(kind, selected.lines, failed);
+                self.select(selected.anchor, selected.cursor, kind);
+            }
+            return !failed;
         }
-        let Some(found) = object.find(&Document(self), cursor.at, inner, count) else {
-            return false;
+        let found = match object.find(&Document(self), cursor.at, inner, count) {
+            Ok(found) => found,
+            Err(moved) => {
+                if let Some(at) = moved {
+                    self.cursor = Some(Cursor::new(at));
+                    self.follow_cursor();
+                }
+                return false;
+            }
         };
         let kind = if found.lines {
             Selection::Lines

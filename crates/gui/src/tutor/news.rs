@@ -672,6 +672,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "New motions in editors and terminals: + - _ g_ | ge gE, and in editors Enter, Space and Backspace as Vim's",
     },
     News {
+        id: "wordcounts",
+        date: "2026-10-22",
+        lesson: "words",
+        what: "Counts for aw and iw, over lines, and aw again in visual mode takes on the next word, as Vim's",
+    },
+    News {
         id: "remoterestore",
         date: "2026-10-23",
         lesson: "shell",
