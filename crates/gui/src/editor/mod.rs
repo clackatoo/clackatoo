@@ -2063,7 +2063,10 @@ impl Editor {
     /// couldn't move, the object isn't there, or the mark isn't set.
     ///
     /// Once it has, the cursor aims for where it's left, as Vim's
-    /// `do_pending()` sets `w_set_curswant` for every operator.
+    /// `do_pending()` sets `w_set_curswant` for every operator; and so it
+    /// does after an object or a mark that isn't there, as Vim's
+    /// `nv_object()` and `nv_cursormark()` set it found or not, where a
+    /// motion that fails leaves the aim as it was.
     fn operate(
         &mut self,
         operator: Operator,
@@ -2074,7 +2077,7 @@ impl Editor {
         registers: (&mut Registers, Option<char>),
     ) -> bool {
         let acted = self.operate_on(operator, target, count, copy, marks, registers);
-        if acted {
+        if acted || matches!(target, Target::Object { .. } | Target::Mark { .. }) {
             self.cursor = Cursor::new(self.cursor.at);
         }
         acted

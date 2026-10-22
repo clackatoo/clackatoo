@@ -1086,3 +1086,14 @@ fn a_count_searches_that_many_matches_on() {
     assert_eq!(in_cells(text, (1, 0), "*3N").1, (1, 4));
     assert_eq!(in_cells(text, (1, 10), "2#").1, (1, 2));
 }
+
+#[test]
+fn an_object_or_a_mark_that_isnt_there_still_leaves_the_aim_where_the_cursor_is() {
+    // As Vim's `nv_object()` and `nv_cursormark()`; a motion that fails
+    // keeps it.
+    let text = "abcdefghijkl\n\tx\ty\nabcdefghijkl\n";
+    for keys in ["jdi(j", "jyi(j", "jd`zj", "jgUi\"j", "j>i(j"] {
+        assert_eq!(in_cells(text, (1, 5), keys).1, (3, 7), "{keys}");
+    }
+    assert_eq!(in_cells(text, (1, 5), "jdfqj").1, (3, 5));
+}
