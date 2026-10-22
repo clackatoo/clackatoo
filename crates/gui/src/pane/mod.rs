@@ -2803,6 +2803,38 @@ mod tests {
     }
 
     #[test]
+    fn plus_minus_underscore_g_underscore_bar_and_ge_move_as_the_editors_do() {
+        // As check.lua's `spaced`, narrower, checked against Neovim.
+        let terminal = terminal("  one tw.th\r\nfour  five\r\n\r\n  six sev\r\neight");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let at = |pane: &mut Pane, keys_: &str| {
+            keys(pane, keys_);
+            serve(pane, &terminal);
+            let (text, _, col) = cursor(pane);
+            (text, col)
+        };
+        let line = |text: &str, col| (text.to_owned(), col);
+        assert_eq!(at(&mut pane, "gg5l+"), line("four  five", 0));
+        assert_eq!(at(&mut pane, "2+"), line("  six sev", 2));
+        assert_eq!(at(&mut pane, "3l-"), line("", 0));
+        assert_eq!(at(&mut pane, "2-"), line("  one tw.th", 2));
+        assert_eq!(at(&mut pane, "6l_"), line("  one tw.th", 2));
+        assert_eq!(at(&mut pane, "4_"), line("  six sev", 2));
+        assert_eq!(at(&mut pane, "0g_"), line("  six sev", 8));
+        assert_eq!(at(&mut pane, "gg$5|"), line("  one tw.th", 4));
+        assert_eq!(at(&mut pane, "30|"), line("  one tw.th", 10));
+        assert_eq!(at(&mut pane, "0wwge"), line("  one tw.th", 4));
+        assert_eq!(at(&mut pane, "j0ge"), line("  one tw.th", 10));
+        assert_eq!(at(&mut pane, "$gE"), line("  one tw.th", 4));
+        // `y` takes them as `d` would: lines, or both ends of `ge`.
+        let mut yank = |keys_: &str| yanked(&mut pane, &terminal, keys_);
+        assert_eq!(yank("gg05ly+").as_deref(), Some("  one tw.th\nfour  five"));
+        assert_eq!(yank("gg06lyge").as_deref(), Some("e t"));
+        assert_eq!(yank("gg010ly5|").as_deref(), Some("e tw.t"));
+    }
+
+    #[test]
     fn commands_a_terminal_doesnt_take_are_nothing_and_spend_their_keys() {
         let terminal = terminal("one two six\r\nfour five");
         let mut pane = pane(&terminal);

@@ -223,3 +223,165 @@ fn a_count_finds_that_many_and_semicolon_after_t_goes_on() {
     assert_eq!(at("$T.;").1, 6);
     assert_eq!(at("$2T.").1, 6);
 }
+
+/// Indents, blanks after, an empty line and punctuation, as check.lua's
+/// `spaced`.
+const SPACED: &str = "  one two.three\nfour  five\n\n  six seven  \neight\n";
+
+/// The text, the cursor, with lines counted from 1 as check.lua counts
+/// them, and what `p` puts, after `keys` from line `line` and byte `col`
+/// of `SPACED`.
+fn spaced(line: u64, col: usize, keys: &str) -> (String, (u64, usize), String) {
+    let mut setup = Setup::new(SPACED);
+    setup.keys(&format!("{line}G0"));
+    for _ in 0..col {
+        setup.keys("l");
+    }
+    setup.keys(keys);
+    let (at_line, at_col) = setup.cursor();
+    (setup.text(), (at_line + 1, at_col), setup.register().text)
+}
+
+/// Just the cursor of [`spaced`].
+fn cursor_after(line: u64, col: usize, keys: &str) -> (u64, usize) {
+    spaced(line, col, keys).1
+}
+
+#[test]
+fn plus_enter_minus_and_underscore_go_to_lines_first_non_blanks() {
+    assert_eq!(cursor_after(1, 5, "+"), (2, 0));
+    assert_eq!(cursor_after(1, 5, "<CR>"), (2, 0));
+    assert_eq!(cursor_after(1, 5, "3+"), (4, 2));
+    assert_eq!(cursor_after(1, 5, "9+"), (5, 0));
+    assert_eq!(cursor_after(5, 2, "+"), (5, 2), "no line after");
+    assert_eq!(cursor_after(2, 3, "-"), (1, 2));
+    assert_eq!(cursor_after(5, 3, "3-"), (2, 0));
+    assert_eq!(cursor_after(1, 8, "_"), (1, 2));
+    assert_eq!(cursor_after(2, 8, "3_"), (4, 2));
+    assert_eq!(cursor_after(2, 8, "9_"), (5, 0));
+}
+
+#[test]
+fn plus_minus_and_underscore_take_whole_lines() {
+    let lines = "  one two.three\nfour  five\n";
+    let rest = "\n  six seven  \neight\n";
+    assert_eq!(spaced(1, 5, "d+"), (rest.into(), (1, 0), lines.into()));
+    assert_eq!(spaced(2, 3, "y-").2, lines);
+    assert_eq!(spaced(1, 8, "d2_"), (rest.into(), (1, 0), lines.into()));
+    // A count past the last line takes nothing.
+    assert_eq!(spaced(5, 2, "d2_"), (SPACED.into(), (5, 2), String::new()));
+}
+
+#[test]
+fn g_underscore_goes_to_the_last_non_blank() {
+    assert_eq!(cursor_after(4, 0, "g_"), (4, 10));
+    assert_eq!(cursor_after(3, 0, "2g_"), (4, 10));
+    assert_eq!(cursor_after(3, 0, "g_"), (3, 0));
+    let (text, at, taken) = spaced(4, 2, "dg_");
+    assert_eq!(
+        (text.lines().nth(3), at, taken.as_str()),
+        (Some("    "), (4, 2), "six seven")
+    );
+}
+
+#[test]
+fn bar_goes_to_the_column_a_count_says_and_wants_it() {
+    assert_eq!(cursor_after(1, 12, "5|"), (1, 4));
+    assert_eq!(cursor_after(1, 2, "30|"), (1, 14));
+    assert_eq!(cursor_after(1, 12, "|"), (1, 0));
+    assert_eq!(cursor_after(1, 2, "30|j"), (2, 9));
+    let (text, at, taken) = spaced(1, 12, "d5|");
+    assert_eq!(
+        (text.lines().next(), at, taken.as_str()),
+        (Some("  onree"), (1, 4), "e two.th")
+    );
+}
+
+#[test]
+fn ge_goes_back_to_the_end_of_the_word_before() {
+    assert_eq!(cursor_after(1, 6, "ge"), (1, 4));
+    assert_eq!(cursor_after(1, 8, "ge"), (1, 4));
+    assert_eq!(cursor_after(2, 1, "ge"), (1, 14), "over a line's end");
+    assert_eq!(
+        cursor_after(4, 3, "ge"),
+        (3, 0),
+        "stopping at an empty line"
+    );
+    assert_eq!(cursor_after(3, 0, "ge"), (2, 9));
+    assert_eq!(cursor_after(2, 6, "3ge"), (1, 9));
+    assert_eq!(cursor_after(1, 14, "gE"), (1, 4));
+    assert_eq!(cursor_after(1, 0, "ge"), (1, 0));
+    assert_eq!(cursor_after(1, 3, "ge"), (1, 0));
+    // Taking both ends.
+    let (text, at, taken) = spaced(1, 6, "dge");
+    assert_eq!(
+        (text.lines().next(), at, taken.as_str()),
+        (Some("  onwo.three"), (1, 4), "e t")
+    );
+    let (text, at, taken) = spaced(2, 6, "dgE");
+    assert_eq!(
+        (text.lines().nth(1), at, taken.as_str()),
+        (Some("fouive"), (2, 3), "r  f")
+    );
+}
+
+#[test]
+fn space_and_backspace_go_on_over_line_ends() {
+    assert_eq!(cursor_after(1, 13, "3<Space>"), (2, 1));
+    assert_eq!(cursor_after(2, 9, "2<Space>"), (4, 0), "over an empty line");
+    assert_eq!(cursor_after(5, 4, "<Space>"), (5, 4), "none after the last");
+    assert_eq!(cursor_after(2, 0, "<BS>"), (1, 14));
+    assert_eq!(cursor_after(4, 0, "<BS>"), (3, 0));
+    assert_eq!(cursor_after(2, 1, "3<BS>"), (1, 13));
+}
+
+#[test]
+fn space_takes_a_lines_end_as_a_character_and_d_backspace_the_line_break() {
+    let line = |n: usize, (text, at, taken): (String, (u64, usize), String)| {
+        (text.lines().nth(n).map(str::to_owned), at, taken)
+    };
+    let fiv = Some("four  fiv".to_owned());
+    // On a line's last character, Space takes it, and a count past the
+    // line's end ends there, as Vim's does, until it's past the next.
+    assert_eq!(
+        line(1, spaced(2, 9, "d<Space>")),
+        (fiv.clone(), (2, 8), "e".into())
+    );
+    assert_eq!(
+        line(1, spaced(2, 9, "d2<Space>")),
+        (fiv.clone(), (2, 8), "e".into())
+    );
+    assert_eq!(
+        line(1, spaced(2, 9, "d3<Space>")),
+        (fiv, (2, 8), "e\n".into())
+    );
+    let joined = Some("four  fiv six seven  ".to_owned());
+    assert_eq!(
+        line(1, spaced(2, 9, "d4<Space>")),
+        (joined, (2, 9), "e\n\n ".into())
+    );
+    assert_eq!(
+        line(4, spaced(5, 2, "d9<Space>")),
+        (Some("ei".into()), (5, 1), "ght".into())
+    );
+    // Back from a line's start, `d` takes the line break; `y` the
+    // character before it.
+    let joined_one = Some("  one two.threefour  five".to_owned());
+    assert_eq!(
+        line(0, spaced(2, 0, "d<BS>")),
+        (joined_one, (1, 15), "\n".into())
+    );
+    let joined_two = Some("  one two.threfour  five".to_owned());
+    assert_eq!(
+        line(0, spaced(2, 0, "d2<BS>")),
+        (joined_two, (1, 14), "e\n".into())
+    );
+    let joined_three = Some("  one two.threour  five".to_owned());
+    assert_eq!(
+        line(0, spaced(2, 1, "d3<BS>")),
+        (joined_three, (1, 14), "e\nf".into())
+    );
+    assert_eq!(spaced(2, 1, "y3<BS>").1, (1, 13));
+    assert_eq!(spaced(2, 1, "y3<BS>").2, "ee\nf");
+    assert_eq!(spaced(2, 0, "y<BS>").2, "e");
+}

@@ -660,6 +660,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "A terminal takes f, t, F and T, with ; and , to find again, and y with them, as yt) copies up to a )",
     },
     News {
+        id: "linemotions",
+        date: "2026-10-22",
+        lesson: "basics",
+        what: "New motions in editors and terminals: + - _ g_ | ge gE, and in editors Enter, Space and Backspace as Vim's",
+    },
+    News {
         id: "remoterestore",
         date: "2026-10-23",
         lesson: "shell",

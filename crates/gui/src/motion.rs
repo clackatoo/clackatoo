@@ -571,6 +571,28 @@ pub(crate) enum Motion {
     /// `L`: the view's bottom line, or with a count, so many from the
     /// bottom.
     ViewBottom,
+    /// `+` and Enter: the next line's first character that isn't blank.
+    NextLine,
+    /// `-`: the previous line's first character that isn't blank.
+    PreviousLine,
+    /// `_`: this line's first character that isn't blank, or with a
+    /// count, that many lines less one down.
+    LineFirstNonBlank,
+    /// `g_`: this line's last character that isn't blank, or with a
+    /// count, that many lines less one down.
+    LastNonBlank,
+    /// `|`: the column a count says, counting from 1, or the first.
+    Column,
+    /// `ge`: the end of the word before, back over line ends.
+    WordEndBack,
+    /// `gE`: the end of the run of anything but blanks before.
+    BigWordEndBack,
+    /// Space: right, and on from a line's last character to the next
+    /// line's start, as Vim's does with `whichwrap` having `s`.
+    RightOver,
+    /// Backspace: left, and back from a line's start to the end of the
+    /// line before, as Vim's does with `whichwrap` having `b`.
+    LeftOver,
 }
 
 /// What an operator such as `y` takes when given a motion, as in Vim.
@@ -590,7 +612,18 @@ impl Motion {
     /// which takes nothing.
     pub(crate) fn reach_from(self, from: Point, to: Point, lines: &impl Lines) -> Option<Reach> {
         match self {
-            Self::Match | Self::Find { .. } if from == to => None,
+            Self::Match
+            | Self::Find { .. }
+            | Self::WordEndBack
+            | Self::BigWordEndBack
+            | Self::RightOver
+            | Self::LeftOver
+                if from == to =>
+            {
+                None
+            }
+            // `+` on the last line has no line to take.
+            Self::NextLine | Self::PreviousLine if from.line == to.line => None,
             // `}` with no empty line after takes the last line's end.
             Self::Paragraph { forward: true } if !lines.empty(to.line) => Some(Reach::Inclusive),
             _ => Some(self.reach()),
@@ -611,7 +644,10 @@ impl Motion {
             // As in Vim, moving by rows isn't by lines.
             | Self::RowUp(_)
             | Self::RowDown(_)
-            | Self::RowStart => Reach::Exclusive,
+            | Self::RowStart
+            | Self::Column
+            | Self::RightOver
+            | Self::LeftOver => Reach::Exclusive,
             Self::Find { forward, .. } => {
                 if forward {
                     Reach::Inclusive
@@ -624,14 +660,20 @@ impl Motion {
             | Self::BigWordEnd
             | Self::Match
             | Self::RowEnd
-            | Self::TextEnd => Reach::Inclusive,
+            | Self::TextEnd
+            | Self::LastNonBlank
+            | Self::WordEndBack
+            | Self::BigWordEndBack => Reach::Inclusive,
             Self::Up(_)
             | Self::Down(_)
             | Self::First
             | Self::Last
             | Self::ViewTop
             | Self::ViewMiddle
-            | Self::ViewBottom => Reach::Lines,
+            | Self::ViewBottom
+            | Self::NextLine
+            | Self::PreviousLine
+            | Self::LineFirstNonBlank => Reach::Lines,
         }
     }
 }
@@ -662,6 +704,7 @@ impl Taken {
         } else {
             (from, moved.at)
         };
+
         Some(Self {
             start,
             end,
@@ -746,6 +789,15 @@ impl Cursor {
                 self.want = self.at.col;
             }
             Motion::Find { .. } => self.find(motion, 1, lines),
+            Motion::NextLine
+            | Motion::PreviousLine
+            | Motion::LineFirstNonBlank
+            | Motion::LastNonBlank
+            | Motion::Column
+            | Motion::RightOver
+            | Motion::LeftOver => self.apply_over_lines(motion, lines),
+            Motion::WordEndBack => self.word_end_back(lines, Class::of),
+            Motion::BigWordEndBack => self.word_end_back(lines, Class::big),
             // Keeping the column, as Neovim does: `go` puts them at the
             // first non-blank, with `startofline`.
             Motion::First => self.go_to_line(first, lines),
@@ -862,6 +914,40 @@ impl Cursor {
                     *self = Self::at_first_non_blank(self.at.line, lines);
                 }
             }
+            // A count less one lines down, as Vim's: none from the last
+            // line.
+            (Motion::LineFirstNonBlank | Motion::LastNonBlank, Some(count))
+                if count > 1 && self.at.line >= last => {}
+            (Motion::LineFirstNonBlank | Motion::LastNonBlank, count) => {
+                let down = (count.unwrap_or(1) as u64).saturating_sub(1);
+                let line = self.at.line.saturating_add(down).min(last);
+                if motion == Motion::LineFirstNonBlank {
+                    *self = Self::at_first_non_blank(line, lines);
+                } else {
+                    let row = lines.row(line);
+                    let end = text_end(row.as_deref());
+                    let col = start_of_cell(row.as_deref(), end.saturating_sub(1));
+                    self.settle(Point { line, col });
+                }
+            }
+            (Motion::Column, count) => {
+                let col = count.unwrap_or(1).saturating_sub(1);
+                let row = lines.row(self.at.line);
+                self.at.col = start_of_cell(row.as_deref(), col.min(lines.last_cell(self.at.line)));
+                self.want = col;
+            }
+            // Taken by an operator, Space stops at a line's end, past its
+            // last character, before going on, as Vim's counts the line
+            // break as one.
+            (Motion::RightOver, count) if !keep_margin => {
+                for _ in 0..count.unwrap_or(1) {
+                    match over_on(self.at, lines) {
+                        Some(at) => self.settle(at),
+                        None => break,
+                    }
+                }
+            }
+
             (motion, count) => self.repeat(motion, count.unwrap_or(1), lines),
         }
     }
@@ -877,6 +963,11 @@ impl Cursor {
     ) -> Option<Taken> {
         let mut moved = *self;
         moved.go_to_take(motion, count, lines, start_of_line);
+        // `y2_` on the last line has no line to take with it.
+        let down = matches!(motion, Motion::LineFirstNonBlank | Motion::LastNonBlank);
+        if down && count.is_some_and(|count| count > 1) && moved.at.line == self.at.line {
+            return None;
+        }
         Taken::between(motion, self.at, moved, lines)
     }
 
@@ -1088,6 +1179,72 @@ impl Cursor {
         self.settle(walk.at);
     }
 
+    /// [`apply`](Self::apply) for the motions that go to other lines'
+    /// starts, ends and first non-blanks: `+`, `-`, `_`, `g_`, `|`,
+    /// Space and Backspace.
+    fn apply_over_lines(&mut self, motion: Motion, lines: &impl Lines) {
+        let (first, last) = lines.bounds();
+        let at = self.at;
+        match motion {
+            Motion::NextLine if at.line < last => {
+                *self = Self::at_first_non_blank(at.line + 1, lines);
+            }
+            Motion::PreviousLine if at.line > first => {
+                *self = Self::at_first_non_blank(at.line - 1, lines);
+            }
+            Motion::LineFirstNonBlank | Motion::LastNonBlank | Motion::Column => {
+                self.going(motion, None, lines, false, true);
+            }
+            Motion::RightOver => {
+                self.apply(Motion::Right, lines);
+                if self.at == at && at.line < last {
+                    self.settle(Point {
+                        line: at.line + 1,
+                        col: 0,
+                    });
+                }
+            }
+            Motion::LeftOver => {
+                self.apply(Motion::Left, lines);
+                if self.at == at && at.line > first {
+                    let line = at.line - 1;
+                    self.settle(Point {
+                        line,
+                        col: lines.last_cell(line),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `ge`, or `gE` as `kind` sees classes: back to before the start of
+    /// the word the cursor's on, then on back over blanks and line ends to
+    /// the end of the word before, stopping at an empty line, as Vim's.
+    fn word_end_back(&mut self, lines: &impl Lines, kind: fn(Class) -> Class) {
+        let mut walk = Walk::new(lines, self.at).seeing(kind);
+        let class = walk.class();
+        if !walk.back() {
+            return;
+        }
+        if class != Class::Blank {
+            while walk.class() == class {
+                if !walk.back() {
+                    return self.settle(walk.at);
+                }
+            }
+        }
+        while walk.class() == Class::Blank {
+            if walk.at.col == 0 && lines.empty(walk.at.line) {
+                break;
+            }
+            if !walk.back() {
+                break;
+            }
+        }
+        self.settle(walk.at);
+    }
+
     /// Lands on `at`, pulled back from a line's end onto its last
     /// character.
     fn settle(&mut self, at: Point) {
@@ -1233,6 +1390,61 @@ impl<'a, L: Lines> Walk<'a, L> {
         }
         None
     }
+}
+
+/// Where a line's end is, as Space and Backspace stop at taken by an
+/// operator: just past its last character, or its start if it's empty.
+fn line_end(line: u64, lines: &impl Lines) -> usize {
+    if lines.empty(line) {
+        0
+    } else {
+        lines.last_cell(line) + 1
+    }
+}
+
+/// The step Space takes from `at` for an operator: on along the line, to
+/// its end past its last character, then to the next line's start.
+fn over_on(at: Point, lines: &impl Lines) -> Option<Point> {
+    let end = line_end(at.line, lines);
+    if at.col < end {
+        let row = lines.row(at.line);
+        let col = next_cell(row.as_deref(), at.col).map_or(end, |col| col.min(end));
+        return Some(Point { col, ..at });
+    }
+    (at.line < lines.bounds().1).then_some(Point {
+        line: at.line + 1,
+        col: 0,
+    })
+}
+
+/// What `d` or `c` takes with Backspace typed `times` from `at`: from
+/// where it goes to the character before `at`, inclusive, a line's end,
+/// past its last character, counting as one, so back from a line's start
+/// it takes the line break, as Vim's does. `None` if it can't go back.
+pub(crate) fn deleted_back(at: Point, times: usize, lines: &impl Lines) -> Option<(Point, Point)> {
+    let last = over_back(at, lines)?;
+    let mut start = last;
+    for _ in 1..times {
+        match over_back(start, lines) {
+            Some(back) => start = back,
+            None => break,
+        }
+    }
+    Some((start, last))
+}
+
+/// The step Backspace takes from `at` for `d`: back along the line, then
+/// to the end of the line before, past its last character.
+fn over_back(at: Point, lines: &impl Lines) -> Option<Point> {
+    if at.col > 0 {
+        let row = lines.row(at.line);
+        let col = previous_cell(row.as_deref(), at.col.min(line_end(at.line, lines))).unwrap_or(0);
+        return Some(Point { col, ..at });
+    }
+    (at.line > lines.bounds().0).then(|| Point {
+        line: at.line - 1,
+        col: line_end(at.line - 1, lines),
+    })
 }
 
 /// The brackets `%` pairs, opening first.

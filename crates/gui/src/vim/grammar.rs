@@ -481,10 +481,12 @@ impl Reader<'_> {
     /// The motion `stroke` starts, if it starts one.
     fn motion(&mut self, stroke: Stroke) -> Option<Read<Motion>> {
         let motion = match stroke {
-            Stroke::Left | Stroke::Backspace => Motion::Left,
+            Stroke::Left => Motion::Left,
+            Stroke::Backspace => Motion::LeftOver,
             Stroke::Right => Motion::Right,
             Stroke::Up => Motion::Up(1),
-            Stroke::Down | Stroke::Enter => Motion::Down(1),
+            Stroke::Down => Motion::Down(1),
+            Stroke::Enter => Motion::NextLine,
             Stroke::Home => Motion::LineStart,
             Stroke::End => Motion::LineEnd,
             Stroke::ShiftLeft => Motion::WordBack,
@@ -495,7 +497,12 @@ impl Reader<'_> {
             Stroke::CtrlEnd => Motion::TextEnd,
             Stroke::Char { ch, ctrl: false } => match ch {
                 'h' => Motion::Left,
-                'l' | ' ' => Motion::Right,
+                'l' => Motion::Right,
+                ' ' => Motion::RightOver,
+                '+' => Motion::NextLine,
+                '-' => Motion::PreviousLine,
+                '_' => Motion::LineFirstNonBlank,
+                '|' => Motion::Column,
                 'k' => Motion::Up(1),
                 'j' => Motion::Down(1),
                 '0' => Motion::LineStart,
@@ -585,8 +592,8 @@ impl Reader<'_> {
     }
 }
 
-/// The motion `g` and `stroke` make: `gg`, and `gj`, `gk`, `g0` and `g$`
-/// by screen rows, where lines wrap.
+/// The motion `g` and `stroke` make: `gg`, `gj`, `gk`, `g0` and `g$` by
+/// screen rows, where lines wrap, `g_`, and `ge` and `gE`.
 fn after_g_motion(stroke: Stroke) -> Read<Motion> {
     match stroke.plain() {
         Some('g') => Read::Yes(Motion::First),
@@ -594,6 +601,9 @@ fn after_g_motion(stroke: Stroke) -> Read<Motion> {
         Some('k') => Read::Yes(Motion::RowUp(1)),
         Some('0') => Read::Yes(Motion::RowStart),
         Some('$') => Read::Yes(Motion::RowEnd),
+        Some('_') => Read::Yes(Motion::LastNonBlank),
+        Some('e') => Read::Yes(Motion::WordEndBack),
+        Some('E') => Read::Yes(Motion::BigWordEndBack),
         _ => Read::No,
     }
 }

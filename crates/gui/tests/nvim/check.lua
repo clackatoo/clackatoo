@@ -66,6 +66,10 @@ for n = 1, 30 do
   long[n] = n % 5 == 0 and ('  line ' .. n) or (('%02d'):format(n) .. string.rep('y', 68))
 end
 
+-- Indents, blanks after, an empty line and punctuation, for `+`, `-`,
+-- `_`, `g_`, `|`, `ge` and Space and Backspace.
+local spaced = { '  one two.three', 'four  five', '', '  six seven  ', 'eight' }
+
 local cases = {
   -- CLACKA-127: a count before `gg`, or `G` as an operator's target, is a
   -- line number.
@@ -262,6 +266,57 @@ local cases = {
   { name = 't.2;', lines = { 'ab.cd.ef.gh' }, at = { 1, 0 }, keys = 't.2;' },
   { name = '2T.', lines = { 'ab.cd.ef.gh' }, at = { 1, 10 }, keys = '2T.' },
   { name = 'T.;', lines = { 'ab.cd.ef.gh' }, at = { 1, 10 }, keys = 'T.;' },
+  -- Stage 3's motions, written once for every pane.
+  { name = '+', lines = spaced, at = { 1, 5 }, keys = '+' },
+  { name = '<CR>', lines = spaced, at = { 1, 5 }, keys = '<CR>' },
+  { name = '3+', lines = spaced, at = { 1, 5 }, keys = '3+' },
+  { name = '9+', lines = spaced, at = { 1, 5 }, keys = '9+' },
+  { name = '+ on the last line', lines = spaced, at = { 5, 2 }, keys = '+' },
+  { name = '-', lines = spaced, at = { 2, 3 }, keys = '-' },
+  { name = '3-', lines = spaced, at = { 5, 3 }, keys = '3-' },
+  { name = 'd+', lines = spaced, at = { 1, 5 }, keys = 'd+' },
+  { name = 'y-', lines = spaced, at = { 2, 3 }, keys = 'y-' },
+  { name = '_', lines = spaced, at = { 1, 8 }, keys = '_' },
+  { name = '3_', lines = spaced, at = { 2, 8 }, keys = '3_' },
+  { name = '9_', lines = spaced, at = { 2, 8 }, keys = '9_' },
+  { name = 'd2_', lines = spaced, at = { 1, 8 }, keys = 'd2_' },
+  { name = 'd2_ on the last line', lines = spaced, at = { 5, 2 }, keys = 'd2_' },
+  { name = 'g_', lines = spaced, at = { 4, 0 }, keys = 'g_' },
+  { name = '2g_', lines = spaced, at = { 3, 0 }, keys = '2g_' },
+  { name = 'dg_', lines = spaced, at = { 4, 2 }, keys = 'dg_' },
+  { name = 'g_ empty', lines = spaced, at = { 3, 0 }, keys = 'g_' },
+  { name = '5|', lines = spaced, at = { 1, 12 }, keys = '5|' },
+  { name = '30|', lines = spaced, at = { 1, 2 }, keys = '30|' },
+  { name = '|', lines = spaced, at = { 1, 12 }, keys = '|' },
+  { name = '30|j', lines = spaced, at = { 1, 2 }, keys = '30|j' },
+  { name = 'd5|', lines = spaced, at = { 1, 12 }, keys = 'd5|' },
+  { name = 'ge', lines = spaced, at = { 1, 6 }, keys = 'ge' },
+  { name = 'ge from within', lines = spaced, at = { 1, 8 }, keys = 'ge' },
+  { name = 'ge over a line', lines = spaced, at = { 2, 1 }, keys = 'ge' },
+  { name = 'ge to an empty line', lines = spaced, at = { 4, 3 }, keys = 'ge' },
+  { name = 'ge from an empty line', lines = spaced, at = { 3, 0 }, keys = 'ge' },
+  { name = '3ge', lines = spaced, at = { 2, 6 }, keys = '3ge' },
+  { name = 'gE', lines = spaced, at = { 1, 14 }, keys = 'gE' },
+  { name = 'ge at the start', lines = spaced, at = { 1, 0 }, keys = 'ge' },
+  { name = 'ge at the first word', lines = spaced, at = { 1, 3 }, keys = 'ge' },
+  { name = 'dge', lines = spaced, at = { 1, 6 }, keys = 'dge' },
+  { name = 'dgE', lines = spaced, at = { 2, 6 }, keys = 'dgE' },
+  { name = '3<Space>', lines = spaced, at = { 1, 13 }, keys = '3<Space><Esc>' },
+  { name = '<Space> at the end', lines = spaced, at = { 2, 9 }, keys = '<Space><Esc>' },
+  { name = '<Space> to an empty line', lines = spaced, at = { 2, 9 }, keys = '2<Space><Esc>' },
+  { name = 'd<Space> at the end', lines = spaced, at = { 2, 9 }, keys = 'd<Space><Esc>' },
+  { name = 'd2<Space> at the end', lines = spaced, at = { 2, 9 }, keys = 'd2<Space><Esc>' },
+  { name = 'd3<Space> at the end', lines = spaced, at = { 2, 9 }, keys = 'd3<Space><Esc>' },
+  { name = 'd4<Space> at the end', lines = spaced, at = { 2, 9 }, keys = 'd4<Space><Esc>' },
+  { name = 'd9<Space> on the last line', lines = spaced, at = { 5, 2 }, keys = 'd9<Space><Esc>' },
+  { name = '<BS> at the start', lines = spaced, at = { 2, 0 }, keys = '<BS>' },
+  { name = '<BS> to an empty line', lines = spaced, at = { 4, 0 }, keys = '<BS>' },
+  { name = '3<BS>', lines = spaced, at = { 2, 1 }, keys = '3<BS>' },
+  { name = 'd<BS> at the start', lines = spaced, at = { 2, 0 }, keys = 'd<BS>' },
+  { name = 'd2<BS> at the start', lines = spaced, at = { 2, 0 }, keys = 'd2<BS>' },
+  { name = 'd3<BS>', lines = spaced, at = { 2, 1 }, keys = 'd3<BS>' },
+  { name = 'y3<BS>', lines = spaced, at = { 2, 1 }, keys = 'y3<BS>' },
+  { name = 'y<BS> at the start', lines = spaced, at = { 2, 0 }, keys = 'y<BS>' },
   { name = 'M with a line cut off', lines = long, at = { 3, 4 }, view = { height = 10, top = 2, columns = 20 }, keys = 'M' },
   { name = 'M so=5 at the end', lines = sixty, at = { 56, 4 }, view = { height = 10, top = 51 }, keys = 'M', set = 'scrolloff=5' },
 }

@@ -400,10 +400,16 @@ An editor in a window of its own starts in normal mode, as in Vim. One you go to
 | Keys | Moves to |
 |---|---|
 | `h` `j` `k` `l`, the arrows | The next character or line. A count moves that many. |
+| Space, Backspace | The next character or the one before, as `l` and `h`, but on over a line's end to the next line's start, or back to the line before's last character, as Vim's do. With an operator, a line's end counts as a character, so `d` and Space on a line's last character deletes it, and `d` and Backspace at a line's start joins it to the line before. |
+| `+` Enter, `-` | The next line's first character that isn't blank, or the line before's. A count goes that many lines. With an operator, they take whole lines. |
+| `_` | This line's first character that isn't blank, or with a count, that many lines down less one, taking whole lines: `d2_` is `2dd`. |
 | Shift+Left Shift+Right, Ctrl+Left Ctrl+Right | As `b` and `w`, and `B` and `W`, as in Vim; in insert mode, either moves a word back or on. Ctrl+Home is `gg` and Ctrl+End goes to the last line's last character, or in insert mode the text's start and end. Shift+Up and Shift+Down page up and down in normal mode, and are Up and Down in insert mode and in menus. |
 | `w` `b` `e` | The start of the next word, the start of this one or the one before, the end of this one or the next. |
+| `ge` `gE` | The end of the word before, or of the run of anything but blanks before, back over line ends, stopping at an empty line. With an operator, they take the character under the cursor too. |
 | `W` `B` `E` | The same, for anything between blanks. |
 | `0` `^` `$` | The line's start, its first character that isn't blank, its last character. |
+| `g_` | The line's last character that isn't blank, or with a count, that many lines down less one. |
+| `\|` | The column a count says, counting from 1, or the line's last character if it's shorter, wanting that column on as `j` and `k` go. |
 | `gg` `G` | The first line, the last, keeping the column, as Neovim's do, or at its first character that isn't blank with the [option](~clackatoo/reference/config#options) `startofline`, as `:` and a line number do. With a count, that line: `12G` and `12gg` are line 12. A count works the same after an operator, so `d3G` deletes from the cursor's line to line 3, and `y2gg` copies from line 2 to the cursor's. |
 | `]f` `[f` | The start of the next function, or the one before, as the grammar finds them. A count goes that many. `]C` and `[C` go to classes, structs, impls, traits, enums and interfaces. |
 | `H` `M` `L` | `H` and `L` the view's first and last lines shown whole, `M` the line half its rows reach; `3H` and `3L` count that many lines from the top or bottom. They keep `scrolloff` screen rows from the view's edges, unless it's at the file's start or end, but an operator takes to the edges: `dL`, `yH`, and with a count past the view's other edge as far as the text goes, as Vim's does: `d99L` to the text's start. They keep the column as `gg` does. |

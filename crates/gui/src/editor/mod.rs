@@ -109,7 +109,7 @@ use crate::input::KeyPress;
 use crate::keymap::Chord;
 use crate::motion::{
     Block, Class, Cursor, Lines, Motion, Point, Reach, RowAt, Taken, View, Words, before, class_at,
-    last_row, row_at, rows_between, rows_down, rows_up,
+    deleted_back, last_row, row_at, rows_between, rows_down, rows_up,
 };
 use crate::objects::Object;
 use crate::options::{Case, CompleteAccept, Options};
@@ -2323,9 +2323,26 @@ impl Editor {
             cursor.repeat(end, times - usize::from(at_end), &text);
             return Some(chars(at, cursor.at));
         }
+        // Back over a line's start, `d` and `c` take the line break.
+        if matches!(operator, Operator::Delete | Operator::Change) && motion == Motion::LeftOver {
+            let (start, last) = deleted_back(at, times, &text)?;
+            // A line's end past its last character is its line break.
+            let end = if text.byte_at(last) >= text.line_end(last.line) {
+                text.line_start(last.line + 1)
+            } else {
+                text.char_end(last)
+            };
+            return Some(Span {
+                start: text.byte_at(start),
+                end,
+                lines: None,
+                moved: Some(Cursor::new(start)),
+            });
+        }
         let moved = self.taken_to(copy, motion, count);
-        // `dj` on the last line has no line to take with it.
-        if matches!(motion, Motion::Up(_) | Motion::Down(_)) && moved.at.line == at.line {
+        // `dj` on the last line has no line to take with it, nor `d2_`.
+        let down = matches!(motion, Motion::LineFirstNonBlank | Motion::LastNonBlank) && times > 1;
+        if (matches!(motion, Motion::Up(_) | Motion::Down(_)) || down) && moved.at.line == at.line {
             return None;
         }
         let Taken {
@@ -5715,6 +5732,9 @@ fn can_fail(motion: Motion) -> bool {
             | Motion::ViewTop
             | Motion::ViewMiddle
             | Motion::ViewBottom
+            | Motion::LineFirstNonBlank
+            | Motion::LastNonBlank
+            | Motion::Column
     )
 }
 
