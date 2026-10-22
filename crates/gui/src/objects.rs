@@ -163,8 +163,14 @@ impl Object {
             // By lines already, on a line that starts one: on to the next.
             if !(selected.lines && start == line) {
                 let at = |line| Point { line, col: 0 };
+                // The anchor moves only to another line, as Vim's.
+                let anchor = if selected.anchor.line == start {
+                    selected.anchor
+                } else {
+                    at(start)
+                };
                 return Some(Selected {
-                    anchor: at(start),
+                    anchor,
                     cursor: at(end),
                     lines: true,
                 });

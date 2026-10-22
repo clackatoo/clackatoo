@@ -133,3 +133,14 @@ fn ip_and_ap_take_a_selection_on_by_paragraphs() {
     setup.keys("vjip");
     assert_eq!(setup.editor.mode, Mode::Visual(Selection::Characters));
 }
+
+#[test]
+fn vip_moves_the_selections_other_end_only_to_another_line() {
+    let anchor = |keys: &str| {
+        let mut setup = Setup::new(PARA);
+        setup.keys(keys);
+        setup.editor.anchor.map(|at| (at.line, at.col))
+    };
+    assert_eq!(anchor("2lvip"), Some((0, 2)));
+    assert_eq!(anchor("j2lvip"), Some((0, 0)));
+}
