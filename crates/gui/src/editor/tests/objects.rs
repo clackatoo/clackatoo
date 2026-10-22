@@ -241,3 +241,15 @@ fn an_object_that_fails_aims_for_where_the_cursor_is() {
     setup.keys("4jVka(d");
     assert_eq!(setup.cursor(), (3, 0));
 }
+
+#[test]
+fn more_paragraphs_than_there_are_fail_as_far_as_they_go() {
+    let mut setup = Setup::new("a\n\nb\n\nc\n");
+    setup.keys("Vj5ap");
+    assert_eq!(setup.cursor(), (4, 0));
+    assert_eq!(setup.editor.mode, Mode::Visual(Selection::Lines));
+    // Which stops a macro, as Vim's.
+    assert!(setup.editor.take_failed());
+    setup.keys("<Esc>ggVjap");
+    assert!(!setup.editor.take_failed());
+}

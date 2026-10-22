@@ -226,19 +226,31 @@ impl Object {
                 });
             }
         }
-        let line = more_paragraphs(lines, selected, inner, count.max(1));
-        Ok(Selected {
+        // Failing at the text's end, as far as it got, as Vim's.
+        let (line, failed) = more_paragraphs(lines, selected, inner, count.max(1));
+        let selected = Selected {
             cursor: Point { line, col: 0 },
             ..selected
-        })
+        };
+        if failed {
+            Err(Some(selected))
+        } else {
+            Ok(selected)
+        }
     }
 }
 
 /// Where the cursor of `selected`, more than a line, goes for `count`
 /// more paragraphs: on away from the anchor, over a paragraph and, unless
 /// `inner`, the blank lines after it, as Vim's `current_par()` extends a
-/// selection, stopping at the text's end.
-fn more_paragraphs(lines: &impl Lines, selected: Selected, inner: bool, count: usize) -> u64 {
+/// selection, stopping at the text's end, and saying if it got there
+/// with paragraphs still to go, where Vim's fails.
+fn more_paragraphs(
+    lines: &impl Lines,
+    selected: Selected,
+    inner: bool,
+    count: usize,
+) -> (u64, bool) {
     let (first, last) = lines.bounds();
     let back = selected.cursor.line < selected.anchor.line;
     let end = if back { first } else { last };
@@ -246,7 +258,7 @@ fn more_paragraphs(lines: &impl Lines, selected: Selected, inner: bool, count: u
     let mut at = selected.cursor.line;
     for _ in 0..count {
         if at == end {
-            break;
+            return (at, true);
         }
         let mut was_white = None;
         for _ in 0..2 {
@@ -265,7 +277,7 @@ fn more_paragraphs(lines: &impl Lines, selected: Selected, inner: bool, count: u
             was_white = Some(white);
         }
     }
-    at
+    (at, false)
 }
 
 /// `ip` and `ap`, `count` of them, around line `line`, as Vim's
