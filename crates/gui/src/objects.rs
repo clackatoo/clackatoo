@@ -30,6 +30,8 @@ mod found;
 mod quotes;
 mod words;
 
+use words::{Pos, Step};
+
 pub(crate) use found::Found;
 pub(crate) use words::back_fails;
 
@@ -354,11 +356,11 @@ fn bracketed(
     count: usize,
 ) -> Option<(Point, Point, bool)> {
     let (start, end) = brackets(lines, at, pair, count, true)?;
-    if inner {
+    Some(if inner {
         inside(lines, start, end)
     } else {
-        Some((start, end, true))
-    }
+        (start, end, true)
+    })
 }
 
 /// The character in cell `at` of `lines`.
@@ -443,6 +445,13 @@ fn brackets(
     count: usize,
     on_open: bool,
 ) -> Option<(Point, Point)> {
+    // In a line's indent, `{` looks from past it, as Vim's.
+    let mut at = at;
+    if on_open && pair.0 == '{' {
+        let mut pos = Pos::new(lines, at);
+        while in_indent(lines, pos.at) && pos.inc() == Step::Along {}
+        at = pos.at;
+    }
     let from = if on_open && char_at(lines, at) == Some(pair.0) {
         let mut walk = Walk::new(lines, at);
         walk.forward();
@@ -478,7 +487,7 @@ fn bracket_selected(
         if !inner {
             break (start, end, true);
         }
-        let (first, last, inclusive) = inside(lines, start, end)?;
+        let (first, last, inclusive) = inside(lines, start, end);
         // Nothing inside, as Vim's fails in visual mode.
         if first == end {
             return None;
@@ -507,44 +516,47 @@ fn bracket_selected(
     })
 }
 
-/// What's strictly between the brackets at `open` and `close`, leaving
-/// out the line break after an opening bracket that ends its line, and the
-/// indent before a closing one that starts its line. None if empty.
-fn inside(lines: &impl Lines, open: Point, close: Point) -> Option<(Point, Point, bool)> {
-    let mut walk = Walk::new(lines, open);
-    walk.forward();
-    let mut first = walk.at();
-    if first.line < close.line && first.col >= text_end(lines.row(first.line).as_deref()) {
-        first = Point {
-            line: first.line + 1,
-            col: 0,
-        };
+/// What's between the brackets at `open` and `close`, as Vim's
+/// `current_block()` leaves it without them: from the character after
+/// `open`, or the next line's start if `open` ends its line, to the one
+/// before `close`, back over the indent before it and any lines of blanks
+/// before that (Vim's `inindent()`). Back over any of those, it ends at the
+/// next line's start after it, exclusive, Vim's `sol`, which an operator
+/// takes up to as an exclusive motion: whole lines from the start's
+/// indent. With nothing between, it's empty, at the start.
+fn inside(lines: &impl Lines, open: Point, close: Point) -> (Point, Point, bool) {
+    let mut start = Pos::new(lines, open);
+    start.incl();
+    let start = start.at;
+    let mut end = Pos::new(lines, close);
+    let mut sol = close.col == 0;
+    end.decl();
+    while in_indent(lines, end.at) {
+        sol = true;
+        if end.decl() != Step::Along {
+            break;
+        }
     }
-    let row = lines.row(close.line);
-    let indented = row.as_deref().is_none_or(|row| {
-        (row.on_from(0))
-            .take_while(|&(col, _)| col < close.col)
-            .all(|(_, spot)| spot.blank())
-    });
-    // Up to the line the closing bracket starts, not in it, as Vim's
-    // `current_block()` with `sol`: to an operator, the lines between
-    // whole from their indent.
-    if indented && close.line > first.line {
-        let last = Point {
-            line: close.line,
-            col: 0,
-        };
-        return (first < last).then_some((first, last, false));
+    if sol {
+        end.incl();
+        (start, end.at, false)
+    } else if start <= end.at {
+        (start, end.at, true)
+    } else {
+        (start, start, false)
     }
-    // Nothing between: an empty region at the closing bracket, as Vim's
-    // `ci(` types there.
-    if first == close {
-        return Some((first, first, false));
-    }
-    let mut walk = Walk::new(lines, close);
-    walk.back();
-    let last = walk.at();
-    (first <= last).then_some((first, last, true))
+}
+
+/// Vim's `inindent(1)`: whether the character at `at` is blank, and all
+/// before it on its line.
+fn in_indent(lines: &impl Lines, at: Point) -> bool {
+    let row = lines.row(at.line);
+    at.col < line_end(at.line, lines)
+        && row.as_deref().is_some_and(|row| {
+            (row.on_from(0))
+                .take_while(|&(col, _)| col <= at.col)
+                .all(|(_, spot)| spot.blank())
+        })
 }
 
 #[cfg(test)]

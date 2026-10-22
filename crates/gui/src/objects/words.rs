@@ -13,7 +13,7 @@ use crate::motion::{Class, Lines, Point, Words, class_at, line_end, next_cell, p
 
 /// What a step of a [`Pos`] did, as Vim's `inc` and `dec` return.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Step {
+pub(super) enum Step {
     /// Onto another character of the line.
     Along,
     /// Forward, onto the line's end, just past its last character.
@@ -32,12 +32,24 @@ impl Step {
     }
 }
 
-/// A position as Vim's word functions move one.
-struct Pos<'a, L> {
+/// A position as Vim's word functions move one, and its block objects.
+pub(super) struct Pos<'a, L> {
     lines: &'a L,
-    at: Point,
+    pub(super) at: Point,
     big: bool,
     words: Words,
+}
+
+impl<'a, L: Lines> Pos<'a, L> {
+    /// At `at` of `lines`, to step a character at a time.
+    pub(super) fn new(lines: &'a L, at: Point) -> Self {
+        Self {
+            lines,
+            at,
+            big: false,
+            words: Words::NONE,
+        }
+    }
 }
 
 impl<L: Lines> Pos<'_, L> {
@@ -65,7 +77,7 @@ impl<L: Lines> Pos<'_, L> {
     }
 
     /// Vim's `inc`.
-    fn inc(&mut self) -> Step {
+    pub(super) fn inc(&mut self) -> Step {
         let end = self.end(self.at.line);
         if self.at.col < end {
             let row = self.lines.row(self.at.line);
@@ -84,7 +96,7 @@ impl<L: Lines> Pos<'_, L> {
     }
 
     /// Vim's `dec`.
-    fn dec(&mut self) -> Step {
+    pub(super) fn dec(&mut self) -> Step {
         if self.at.col > 0 {
             let row = self.lines.row(self.at.line);
             let col = self.at.col.min(self.end(self.at.line));
@@ -103,7 +115,7 @@ impl<L: Lines> Pos<'_, L> {
     }
 
     /// Vim's `incl`: forward, over a line's end.
-    fn incl(&mut self) -> Step {
+    pub(super) fn incl(&mut self) -> Step {
         match self.inc() {
             Step::End => self.inc(),
             step => step,
@@ -111,7 +123,7 @@ impl<L: Lines> Pos<'_, L> {
     }
 
     /// Vim's `decl`: back, over a line's end.
-    fn decl(&mut self) -> Step {
+    pub(super) fn decl(&mut self) -> Step {
         match self.dec() {
             Step::Line if self.at.col > 0 => self.dec(),
             step => step,

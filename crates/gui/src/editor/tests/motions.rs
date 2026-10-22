@@ -982,3 +982,19 @@ fn up_and_down_in_insert_mode_go_just_past_a_short_lines_end() {
         "abcd\naQb\n"
     );
 }
+
+#[test]
+fn inside_brackets_is_what_vims_current_block_leaves() {
+    // Only the indent before `}`: nothing, as `{` ends its line.
+    assert_eq!(in_cells("  {\n  }\n", (1, 2), "di{").0, "  {\n  }\n");
+    // Back over lines of blanks before an indented `)`, which stay.
+    assert_eq!(in_cells("(\na\n  \n)\n", (2, 0), "di(").0, "(\n  \n)\n");
+    assert_eq!(in_cells("(a\n  \n)\n", (1, 1), "di(").0, "(\n  \n)\n");
+    // Blanks after `(` are inside it.
+    assert_eq!(in_cells("(  \na\n)\n", (2, 0), "di(").0, "(\n)\n");
+    // In a line's indent, `{` looks from past it: the block it starts.
+    assert_eq!(
+        in_cells("{\n  a\n  {\n  b\n  }\n}\n", (3, 0), "di{"),
+        ("{\n  a\n  {\n  }\n}\n".into(), (4, 2))
+    );
+}
