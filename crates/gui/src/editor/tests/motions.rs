@@ -926,3 +926,14 @@ fn a_word_on_an_empty_last_line_reaches_back_over_the_line_break() {
     assert_eq!(kept("ab  \n\n", (2, 0), "yiw").1, " \n");
     assert_eq!(kept("ab\n\n\n", (3, 0), "yiw").1, "\n");
 }
+
+#[test]
+fn an_operator_leaves_the_cursor_aiming_where_it_left_it() {
+    // On a tab, which the cursor sits at the end of: `j` goes on from
+    // there, as Vim's `do_pending()` sets `curswant` after every operator.
+    let text = "abcdefghijkl\n\tx\ty\nabcdefghijkl\n";
+    for keys in ["jyyj", "j>>j", "jylj", "jy$j"] {
+        assert_eq!(in_cells(text, (1, 5), keys).1, (3, 7), "{keys}");
+    }
+    assert_eq!(in_cells("\t\n\nab  \n", (1, 0), "Voxj").1, (2, 0));
+}

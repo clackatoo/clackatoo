@@ -2063,7 +2063,27 @@ impl Editor {
     /// under `name`, as [`Registers::wrote`] keeps it, unless it indents.
     /// Returns whether there was anything to act on: not if the motion
     /// couldn't move, the object isn't there, or the mark isn't set.
+    ///
+    /// Once it has, the cursor aims for where it's left, as Vim's
+    /// `do_pending()` sets `w_set_curswant` for every operator.
     fn operate(
+        &mut self,
+        operator: Operator,
+        target: Target,
+        count: Option<usize>,
+        copy: &mut BufferCopy,
+        marks: &Marks,
+        registers: (&mut Registers, Option<char>),
+    ) -> bool {
+        let acted = self.operate_on(operator, target, count, copy, marks, registers);
+        if acted {
+            self.cursor = Cursor::new(self.cursor.at);
+        }
+        acted
+    }
+
+    /// [`operate`](Self::operate), but for where the cursor aims after.
+    fn operate_on(
         &mut self,
         operator: Operator,
         target: Target,
