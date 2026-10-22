@@ -2143,33 +2143,7 @@ impl Editor {
             return true;
         }
         if let Operator::Recase(recase) = operator {
-            let (start, end) = recased(&self.text(copy), span);
-            self.recase(start, end, recase, copy);
-            // To the start of what it took, as Vim's: by lines, the
-            // cursor or where the motion went, whichever's first, which
-            // keeps the cursor's column going on down (`gU50%`, `3gUU`).
-            let text = self.text(copy);
-            let went = match (target, span.lines, self.anchor) {
-                // Where `gUU` goes, the last line's first non-blank, as
-                // Vim's `nv_lineop()` puts it.
-                (Target::Lines, Some((_, last)), _) => {
-                    Some(Cursor::at_first_non_blank(last, &text))
-                }
-                // A selection by lines starts at the other end's line's
-                // start.
-                (Target::Selection, _, Some(anchor)) => Some(Cursor::new(Point {
-                    line: anchor.line,
-                    col: 0,
-                })),
-                _ => span.moved,
-            };
-            self.cursor = match (span.lines, went) {
-                (Some(_), Some(went)) if went.at < self.cursor.at => went,
-                (Some(_), _) => self.cursor,
-                (None, _) => Cursor::new(text.point_of(span.start())),
-            };
-            drop(text);
-            self.leave_visual();
+            self.recase_span(recase, target, span, copy);
             return true;
         }
         if let Operator::Indent | Operator::Dedent = operator {
@@ -2227,6 +2201,41 @@ impl Editor {
             Operator::Indent | Operator::Dedent | Operator::Recase(_) | Operator::Reindent => {}
         }
         true
+    }
+
+    /// `gU`, `gu`, `g~` or `g?`, as `recase` says, on `span`, which `target`
+    /// took.
+    fn recase_span(&mut self, recase: Recase, target: Target, span: Span, copy: &mut BufferCopy) {
+        let (start, end) = recased(&self.text(copy), span);
+        self.recase(start, end, recase, copy);
+        // To the start of what it took, as Vim's: by lines, the
+        // cursor or where the motion went, whichever's first, which
+        // keeps the cursor's column going on down (`gU50%`, `3gUU`).
+        let text = self.text(copy);
+        let went = match (target, span.lines, self.anchor) {
+            // Where `gUU` goes, the last line's first non-blank, as
+            // Vim's `nv_lineop()` puts it.
+            (Target::Lines, Some((_, last)), _) => Some(Cursor::at_first_non_blank(last, &text)),
+            // A selection by lines starts at the other end's line's
+            // start.
+            (Target::Selection, _, Some(anchor)) => Some(Cursor::new(Point {
+                line: anchor.line,
+                col: 0,
+            })),
+            _ => span.moved,
+        };
+        self.cursor = match (span.lines, went) {
+            // An object's start, as Vim's `do_pending()` puts the
+            // cursor at the start of the text acted on.
+            _ if matches!(target, Target::Object { .. }) => {
+                Cursor::new(text.point_of(span.start()))
+            }
+            (Some(_), Some(went)) if went.at < self.cursor.at => went,
+            (Some(_), _) => self.cursor,
+            (None, _) => Cursor::new(text.point_of(span.start())),
+        };
+        drop(text);
+        self.leave_visual();
     }
 
     /// `operator` on an empty region, `span`, as Vim's without `E` in

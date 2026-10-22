@@ -1106,3 +1106,12 @@ fn an_object_or_a_mark_that_isnt_there_still_leaves_the_aim_where_the_cursor_is(
     }
     assert_eq!(in_cells(text, (1, 5), "jdfqj").1, (3, 5));
 }
+
+#[test]
+fn recasing_an_object_puts_the_cursor_at_its_start() {
+    assert_eq!(in_cells("x{\n\n}abc\n", (1, 0), "gUi{").1, (2, 0));
+    assert_eq!(
+        in_cells("x{\nab\n}abc\n", (1, 0), "gUi{"),
+        ("x{\nAB\n}abc\n".into(), (2, 0))
+    );
+}
