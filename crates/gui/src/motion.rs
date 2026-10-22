@@ -14,6 +14,8 @@ use clackatoo_term::{Cell, Row};
 
 mod classes;
 
+pub(crate) use classes::word_classes;
+
 /// A position in the document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Point {
@@ -212,6 +214,7 @@ impl Words {
     }
 
     /// Whether there are none.
+    #[cfg(test)]
     pub(crate) fn is_none(self) -> bool {
         self.0 == 0
     }
@@ -1814,16 +1817,24 @@ pub(crate) fn class_at(row: Option<&impl Cells>, col: usize, words: Words) -> Cl
     if spot.blank() {
         return Class::Blank;
     }
-    // ASCII as Vim's `iskeyword` has it, with what the language adds.
-    if spot.ch.is_ascii() {
-        return if words.is_word(spot.ch) {
+    class_of(spot.ch, words)
+}
+
+/// The class of `ch`, with `words` part of words: ASCII as Vim's
+/// `iskeyword` has it, with what the language adds; past it, as Vim's
+/// classes have it (see [`classes`]).
+pub(crate) fn class_of(ch: char, words: Words) -> Class {
+    if ch == ' ' || ch == '\t' {
+        return Class::Blank;
+    }
+    if ch.is_ascii() {
+        return if words.is_word(ch) {
             Class::Word
         } else {
             Class::Punctuation
         };
     }
-    // Past it, as Vim's classes have it.
-    match classes::of(spot.ch) {
+    match classes::of(ch) {
         0 => Class::Blank,
         1 => Class::Punctuation,
         2 => Class::Word,

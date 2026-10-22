@@ -111,7 +111,8 @@ use crate::input::KeyPress;
 use crate::keymap::Chord;
 use crate::motion::{
     Block, Class, Cursor, Exclusive, Lines, Motion, Point, Reach, RowAt, Taken, View, Words,
-    class_at, deleted_back, last_row, over_back, row_at, rows_between, rows_down, rows_up,
+    class_at, class_of, deleted_back, last_row, over_back, row_at, rows_between, rows_down,
+    rows_up,
 };
 use crate::objects::{Object, Selected};
 use crate::options::{Case, CompleteAccept, Options};
@@ -4076,7 +4077,7 @@ impl Editor {
         let next = (text.slice(here, line_end).char_indices())
             .find(|&(_, ch)| words.is_word(ch))
             .map(|(at, _)| here + at);
-        next.map(|at| word_at(text, at))
+        next.map(|at| ident_at(text, at))
     }
 
     /// The word under the cursor, or the next on its line, as Ctrl+R
@@ -6209,6 +6210,30 @@ fn word_at(text: &Text<'_>, at: usize) -> (usize, usize) {
     }
     if start == end {
         return (at, at);
+    }
+    (rope.char_to_byte(start), rope.char_to_byte(end))
+}
+
+/// Where the word at byte `at` of `text` starts and ends, as Vim's `*`
+/// finds it: as [`word_at`], but only characters of the class of the one
+/// at `at`, as Vim sorts them, so a run of CJK ideographs is one apart
+/// from the letters beside it.
+fn ident_at(text: &Text<'_>, at: usize) -> (usize, usize) {
+    let rope = text.rope();
+    let words = text.words();
+    let char_at = rope.byte_to_char(at.min(rope.len_bytes()));
+    if char_at >= rope.len_chars() || !words.is_word(rope.char(char_at)) {
+        return (at, at);
+    }
+    let class = class_of(rope.char(char_at), words);
+    let of_it = |ch| words.is_word(ch) && class_of(ch, words) == class;
+    let mut start = char_at;
+    while start > 0 && of_it(rope.char(start - 1)) {
+        start -= 1;
+    }
+    let mut end = char_at;
+    while end < rope.len_chars() && of_it(rope.char(end)) {
+        end += 1;
     }
     (rope.char_to_byte(start), rope.char_to_byte(end))
 }

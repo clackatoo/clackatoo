@@ -254,7 +254,7 @@ const CLASSES: &[(u32, u32, u32)] = &[
     (0x2f800, 0x2fa1f, 19968),
 ];
 
-/// Vim's class of `ch`, from `0x100` on: 0 blank, 1 punctuation, 2 a
+/// Vim's class of `ch`, from `0x80` on: 0 blank, 1 punctuation, 2 a
 /// word's, or another, a script's own.
 pub(crate) fn of(ch: char) -> u32 {
     let cp = u32::from(ch);
@@ -270,4 +270,43 @@ pub(crate) fn of(ch: char) -> u32 {
         Ok(index) => CLASSES[index].2,
         Err(_) => 2,
     }
+}
+
+/// The characters from `0x80` on that are in words, as Vim's
+/// `vim_iswordc()` takes them, by class: first those of class 2, then
+/// each script's own, each as ranges of first and last code points, in
+/// order, without the surrogates, which aren't characters.
+pub(crate) fn word_classes() -> Vec<Vec<(u32, u32)>> {
+    let mut words = Vec::new();
+    let mut push = |first: u32, last: u32| {
+        // Around the surrogates.
+        if first < 0xd800 {
+            words.push((first, last.min(0xd7ff)));
+        }
+        if last > 0xdfff {
+            words.push((first.max(0xe000), last));
+        }
+    };
+    let mut from = 0x80;
+    for &(first, last, _) in CLASSES {
+        if first > from {
+            push(from, first - 1);
+        }
+        from = last + 1;
+    }
+    push(from, 0x10_ffff);
+    let mut classes = vec![words];
+    let mut scripts: Vec<u32> = (CLASSES.iter())
+        .map(|&(_, _, class)| class)
+        .filter(|&class| class >= 3)
+        .collect();
+    scripts.sort_unstable();
+    scripts.dedup();
+    for script in scripts {
+        let ranges = (CLASSES.iter())
+            .filter(|&&(_, _, class)| class == script)
+            .map(|&(first, last, _)| (first, last));
+        classes.push(ranges.collect());
+    }
+    classes
 }

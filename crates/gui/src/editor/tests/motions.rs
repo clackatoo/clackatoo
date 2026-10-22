@@ -1066,3 +1066,13 @@ fn gv_selects_where_vims_marks_say_after_joins_deletes_and_undos() {
     // Lines put in above take it down, whether put or opened.
     assert_eq!(gv("abcdef\ngh\nij\n", (2, 0), "vl<Esc>jddkpgv"), (3, 1));
 }
+
+#[test]
+fn star_takes_words_as_vims_classes_sort_them() {
+    // `ª` is punctuation, so `aªb` is three words apart.
+    assert_eq!(in_cells("aªb\nxx aªb\n", (1, 0), "*").1, (2, 3));
+    // A run of CJK ideographs is a word apart from letters, and an emoji
+    // is a word.
+    assert_eq!(in_cells("中文x 中文\n", (1, 0), "*").1, (1, 6));
+    assert_eq!(in_cells("x 😀 x 😀\n", (1, 2), "*").1, (1, 7));
+}

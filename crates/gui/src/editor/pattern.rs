@@ -13,21 +13,26 @@
 //! `\c` and `\C`. What the engine can't do is refused, with why: `\1` in
 //! a pattern, `\@` lookaround, `\&` and `\%V`.
 //!
-//! The engine's own word boundaries know only letters, digits and `_`. In
-//! a language whose words have more in them (see [`Words`]), such as CSS's
-//! `-`, `\k` takes those characters too, as `iskeyword` does in Vim; and a
-//! pattern with `\<` or `\>` is matched by fancy-regex instead, which can
-//! look behind and ahead: `\<` is a place with no word's character before
-//! it and one after, and `\>` the other way round. fancy-regex backtracks,
-//! so it gives up past [`MOST_BACKTRACKS`] steps of one search, rather
-//! than hang, and the pattern says so ([`gave_up`](Pattern::gave_up)).
-//! Every other pattern, in every buffer, is the regex crate's alone.
+//! Words are as Vim's: `\k` is letters, digits and `_`, with what the
+//! language adds to them (see [`Words`]), such as CSS's `-`, as
+//! `iskeyword` does, and past ASCII, the characters Vim's classes put in
+//! words (see [`crate::motion::word_classes`]): not `ª` or `²`, but CJK
+//! ideographs and emoji. The engine's own word boundaries know none of
+//! that, so a pattern with `\<` or `\>` is matched by fancy-regex
+//! instead, which can look behind and ahead: `\<` is a place where a
+//! word's character follows one of another class or none, as Vim's
+//! regex engine finds it, and `\>` the other way round. fancy-regex
+//! backtracks, so it gives up past [`MOST_BACKTRACKS`] steps of one
+//! search, rather than hang, and the pattern says so
+//! ([`gave_up`](Pattern::gave_up)). Every other pattern is the regex
+//! crate's alone.
 //!
 //! A line break in the text is `\n`, as in Vim, so `^` and `$` are each
 //! line's start and end, `.` doesn't take a line break, and nor does a
 //! class such as `[^a]` or `\S`.
 
 use std::cell::Cell;
+use std::fmt::Write as _;
 
 use regex::{CaptureLocations, Regex, RegexBuilder};
 
@@ -82,8 +87,8 @@ pub(crate) struct Pattern {
 enum Engine {
     /// The regex crate, for every pattern but those below.
     Plain(Regex),
-    /// fancy-regex, for a pattern with `\<` or `\>` where words have more
-    /// in them than the regex crate's word boundaries know; with the
+    /// fancy-regex, for a pattern with `\<` or `\>`, whose words the
+    /// regex crate's word boundaries don't know; with the
     /// regex crate's for the same pattern without them, which matches
     /// wherever it does and more, so a search starts no sooner than where
     /// that finds a match, and none is made where it finds none.
@@ -660,18 +665,10 @@ impl Reader<'_> {
                 self.at_start = true;
                 self.no_repeat = true;
             }
-            '<' | '>' if !self.words.is_none() => {
+            '<' | '>' => {
                 // See the module's docs.
                 self.out.push_str(&edge(self.words, ch == '<'));
                 self.looks = true;
-                self.no_repeat = true;
-            }
-            '<' => {
-                self.out.push_str(r"\b{start}");
-                self.no_repeat = true;
-            }
-            '>' => {
-                self.out.push_str(r"\b{end}");
                 self.no_repeat = true;
             }
             '%' => self.percent()?,
@@ -748,7 +745,7 @@ impl Reader<'_> {
     /// `\K`, which take what words have in them besides letters, digits
     /// and `_`.
     fn class_atom(&self, ch: char, breaks: bool) -> Option<String> {
-        if !matches!(ch, 'k' | 'K') || self.words.is_none() {
+        if !matches!(ch, 'k' | 'K') {
             return class_atom(ch, breaks);
         }
         let mut inside = keyword_inside(self.words);
@@ -1028,23 +1025,60 @@ fn numbered(base: char, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) ->
 
 /// The inside of a class of the characters of words: `\w`, and `words`.
 fn keyword_inside(words: Words) -> String {
-    let mut inside = String::from(r"\w");
-    for word in words.chars() {
-        push_class_char(&mut inside, word);
+    let mut inside = String::new();
+    for class in &word_classes_inside(words) {
+        inside.push_str(class);
     }
     inside
 }
 
-/// `\<`, if `start`, or else `\>`, as fancy-regex looks for them with
-/// `words` part of words: no word's character before and one after, or
-/// the other way round.
+/// The insides of the classes of characters words are made of, as Vim
+/// sorts them (see [`crate::motion::word_classes`]): letters, digits, `_`
+/// and `words`, with the others of class 2, then each script's own.
+fn word_classes_inside(words: Words) -> Vec<String> {
+    let classes = crate::motion::word_classes();
+    (classes.iter().enumerate())
+        .map(|(index, ranges)| {
+            let mut inside = String::new();
+            if index == 0 {
+                inside.push_str("0-9A-Za-z_");
+                for word in words.chars() {
+                    push_class_char(&mut inside, word);
+                }
+            }
+            for (first, last) in ranges {
+                let _ = write!(inside, r"\x{{{first:x}}}-\x{{{last:x}}}");
+            }
+            inside
+        })
+        .collect()
+}
+
+/// `\<`, if `start`, or else `\>`, as fancy-regex looks for them, as Vim's
+/// regex engine finds them: where a word's character follows one of
+/// another class, or none, or the other way round; the classes as
+/// [`word_classes_inside`] has them, so `中` and `x` are words apart. The
+/// character it's at, or after, is looked at first, and the scripts' own
+/// classes only if it's in one of them, as few are, so most places are
+/// ruled in or out in a step or two.
 fn edge(words: Words, start: bool) -> String {
-    let word = format!("[{}]", keyword_inside(words));
-    if start {
-        format!("(?<!{word})(?={word})")
+    let classes = word_classes_inside(words);
+    let one = |inside: &str| {
+        let class = format!("[{inside}]");
+        if start {
+            format!("(?={class})(?<!{class})")
+        } else {
+            format!("(?<={class})(?!{class})")
+        }
+    };
+    let scripts: String = classes[1..].concat();
+    let each: Vec<String> = classes[1..].iter().map(|inside| one(inside)).collect();
+    let at_script = if start {
+        format!("(?=[{scripts}])")
     } else {
-        format!("(?<={word})(?!{word})")
-    }
+        format!("(?<=[{scripts}])")
+    };
+    format!("(?:{}|{at_script}(?:{}))", one(&classes[0]), each.join("|"))
 }
 
 /// Adds `ch` to a class being written, escaped as the engine needs.
@@ -1344,9 +1378,14 @@ mod tests {
             matches_in("\\<margin\\>\\|\\<margin-top\\>", "margin-top", words),
             ["margin-top"]
         );
-        // In plain text, the engine's own edges.
+        // In plain text, as Vim's: letters and digits, past ASCII as its
+        // classes sort them, so `ª` and `²` are punctuation and a word of
+        // CJK ideographs or of emoji is a word apart from letters.
         assert_eq!(matches("\\<a\\>", "a-b"), ["a"]);
-        assert_eq!(regex("\\<a\\>"), "\\b{start}a\\b{end}");
+        assert_eq!(matches("\\<a\\>", "ªa ²a éa"), ["a", "a"]);
+        assert_eq!(matches("\\<b", "aªb a\u{a0}b é b"), ["b", "b", "b"]);
+        assert_eq!(matches("\\<\\k\\+\\>", "x中y 😀z"), ["x中y", "😀z"]);
+        assert_eq!(matches("\\<中\\>\\|\\<z", "x中y 😀z"), ["中", "z"]);
     }
 
     #[test]
