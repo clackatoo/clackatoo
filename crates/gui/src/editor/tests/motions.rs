@@ -988,6 +988,12 @@ fn up_and_down_in_insert_mode_go_just_past_a_short_lines_end() {
         in_cells("abcd\nab\n", (1, 1), "i<Down>Q<Esc>").0,
         "abcd\naQb\n"
     );
+    // Right at a line's end goes nowhere, and keeps the column aimed for.
+    let text = "\n  \nabcd\n";
+    assert_eq!(
+        in_cells(text, (3, 2), "$a<Left><Up><Right><Down>Z<Esc>").0,
+        "\n  \nabcZd\n"
+    );
 }
 
 #[test]

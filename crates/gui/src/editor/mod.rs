@@ -3158,9 +3158,13 @@ impl Editor {
                 let cells = text.laid(line).map_or(0, |laid| laid.cells());
                 self.cursor = Cursor::new(Point { line, col: cells });
             }
+            // At the line's end, nowhere, aiming as it did, as Vim's
+            // `ins_right()` fails.
             Stroke::Right => {
                 let after = next_char(&text, at).min(text.line_end(line));
-                self.cursor = Cursor::new(text.point_of(after));
+                if after > at {
+                    self.cursor = Cursor::new(text.point_of(after));
+                }
             }
             Stroke::Left => self.cursor.apply(Motion::Left, &text),
             Stroke::Home => self.cursor.apply(Motion::LineStart, &text),
