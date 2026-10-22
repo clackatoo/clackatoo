@@ -3994,6 +3994,9 @@ impl Editor {
 
     /// `n`, or `N` if `reverse`: the next match of the last search.
     fn search_again(&mut self, reverse: bool, copy: &BufferCopy, shared: &Shared) {
+        // Aiming for where the cursor is, found or not, as Vim's
+        // `normal_search()` sets `curswant` before it searches.
+        self.cursor = Cursor::new(self.cursor.at);
         let Some(Searched {
             pattern,
             backward,

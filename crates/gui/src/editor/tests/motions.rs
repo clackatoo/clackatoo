@@ -937,3 +937,13 @@ fn an_operator_leaves_the_cursor_aiming_where_it_left_it() {
     }
     assert_eq!(in_cells("\t\n\nab  \n", (1, 0), "Voxj").1, (2, 0));
 }
+
+#[test]
+fn a_search_found_or_not_aims_for_where_the_cursor_is() {
+    // On a tab: `k` goes on from its end, as Vim's `normal_search()` sets
+    // `curswant` before searching, with no pattern yet or none found.
+    let text = "abcdefghijkl\nx\t\nabcdefghijkl\n";
+    for keys in ["jnk", "jNk", "j/zzz<CR>k"] {
+        assert_eq!(in_cells(text, (1, 2), keys).1, (1, 3), "{keys}");
+    }
+}
