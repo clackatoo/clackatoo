@@ -40,8 +40,11 @@ enum Place {
     Wanted,
     /// The first non-blank, as `gg` goes to with `startofline`.
     FirstNonBlank,
-    /// This column, as far as the line goes, as `5zt` keeps.
+    /// This column, as far as the line goes, as `5zt` keeps and `|` goes
+    /// to.
     Column(usize),
+    /// The last non-blank, as `g_` goes to.
+    LastNonBlank,
 }
 
 /// What waits for its line: the cursor's place, and a selection's other
@@ -650,31 +653,36 @@ impl Pane {
         cursor.go(motion, count, &Document(self), self.startofline);
         // On a line of history not fetched yet, its column is found once
         // it comes.
-        let vertical = matches!(
-            motion,
-            Motion::Up(_)
-                | Motion::Down(_)
-                | Motion::RowUp(_)
-                | Motion::RowDown(_)
-                | Motion::TextEnd
-        );
-        let to_line = matches!(
-            motion,
+        let goes = match motion {
             Motion::First
-                | Motion::Last
-                | Motion::ViewTop
-                | Motion::ViewMiddle
-                | Motion::ViewBottom
-        );
-        if vertical || to_line {
-            let goes = if to_line && self.startofline {
-                Place::FirstNonBlank
-            } else {
-                Place::Wanted
-            };
-            self.note_unplaced(cursor, goes);
-        } else {
-            self.unplaced.cursor = None;
+            | Motion::Last
+            | Motion::ViewTop
+            | Motion::ViewMiddle
+            | Motion::ViewBottom
+                if self.startofline =>
+            {
+                Some(Place::FirstNonBlank)
+            }
+            Motion::Up(_)
+            | Motion::Down(_)
+            | Motion::RowUp(_)
+            | Motion::RowDown(_)
+            | Motion::TextEnd
+            | Motion::First
+            | Motion::Last
+            | Motion::ViewTop
+            | Motion::ViewMiddle
+            | Motion::ViewBottom => Some(Place::Wanted),
+            Motion::NextLine | Motion::PreviousLine | Motion::LineFirstNonBlank => {
+                Some(Place::FirstNonBlank)
+            }
+            Motion::LastNonBlank => Some(Place::LastNonBlank),
+            Motion::Column => Some(Place::Column(cursor.want())),
+            _ => None,
+        };
+        match goes {
+            Some(goes) => self.note_unplaced(cursor, goes),
+            None => self.unplaced.cursor = None,
         }
         self.cursor = Some(cursor);
         self.follow_cursor();
@@ -717,6 +725,7 @@ impl Pane {
                 let col = col.min(document.last_cell(line));
                 cursor.at.col = start_of_cell(document.row(line), col);
             }
+            Place::LastNonBlank => cursor.go(Motion::LastNonBlank, None, &document, false),
             goes => cursor.onto_line(line, goes == Place::FirstNonBlank, &document),
         }
         Some(cursor)

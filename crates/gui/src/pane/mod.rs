@@ -2355,6 +2355,25 @@ mod tests {
     }
 
     #[test]
+    fn lines_first_and_last_non_blanks_and_columns_wait_for_their_lines() {
+        let terminal = terminal(&numbered_lines("  line "));
+        let at = |keys_: &str| {
+            let mut pane = pane(&terminal);
+            normal_mode(&mut pane);
+            // None of history has come when the keys are read.
+            keys(&mut pane, keys_);
+            serve(&mut pane, &terminal);
+            let (text, _, col) = cursor(&pane);
+            (text, col)
+        };
+        assert_eq!(at("gg+"), ("  line 2".into(), 2));
+        assert_eq!(at("gg2_"), ("  line 2".into(), 2));
+        assert_eq!(at("gg2g_"), ("  line 2".into(), 7));
+        assert_eq!(at("gg5|"), ("  line 1".into(), 4));
+        assert_eq!(at("gg3+-"), ("  line 3".into(), 2));
+    }
+
+    #[test]
     fn zt_with_a_count_keeps_off_a_wide_characters_right_half() {
         let terminal = terminal("a中文b\r\nxyzw");
         let mut pane = pane(&terminal);
