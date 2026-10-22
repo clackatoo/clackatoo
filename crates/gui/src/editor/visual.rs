@@ -46,7 +46,7 @@ use std::rc::Rc;
 
 use clackatoo_protocol::Edit;
 
-use super::marks::{Marks, Selected, Shape};
+use super::marks::{Column, Marks, Selected, Shape};
 use super::registers::Register;
 use super::text::Text;
 use super::{BufferCopy, Editor, Mode, next_char, on_character};
@@ -107,7 +107,6 @@ impl Editor {
             kind,
             backward: at < anchor,
             to_end: self.cursor.want() == usize::MAX,
-            cols: (first.col, last.col),
         };
         Some((bytes, shape))
     }
@@ -150,19 +149,22 @@ impl Editor {
         let text = self.text(copy);
         let len = text.rope().len_bytes();
         let shape = selected.shape;
-        // Just past a line's end, as Vim's selection can be, if it was in
-        // that column or one further on, as Vim's keeps it.
-        let point = |byte: usize, col: usize| {
+        // Just past a line's end, as Vim's selection can be, if its column
+        // as Vim keeps it is there or further on.
+        let point = |byte: usize, col: Column| {
             let at = text.point_of(byte.min(len));
-            let cells = text.line_cells(at.line);
-            if cells > 0 && at.col >= cells && col >= at.col {
-                at
+            if col.past_end(text.rope()) {
+                Point {
+                    line: at.line,
+                    col: text.line_cells(at.line),
+                }
             } else {
                 on_character(at, &text)
             }
         };
         let (start, last) = selected.ends();
-        let (first, last) = (point(start, shape.cols.0), point(last, shape.cols.1));
+        let [first_col, last_col] = selected.columns();
+        let (first, last) = (point(start, first_col), point(last, last_col));
         let (anchor, head) = if shape.backward {
             (last, first)
         } else {

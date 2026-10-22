@@ -665,6 +665,15 @@ fn past_a_lines_end_in_every_kind_of_selection_and_back_to_it() {
     // as Vim's keeps the column.
     assert_eq!(cursor("abc\n", "lvldgv"), (0, 1));
     assert_eq!(cursor("ab\ncd\n", "lvjdgv"), (0, 1));
+    // A line joined on takes its ends' columns with its text, as Vim's
+    // `do_join()` does: one past its end stays past the end.
+    assert_eq!(cursor("abc\nde\n", "llvjJgv"), (0, 6));
+    assert_eq!(cursor("ab\ncd\n\n", "lvjjJgv"), (0, 5));
+    assert_eq!(cursor("abcdef\nxy\n", "4l<C-v>jJgv"), (0, 9));
+    assert_eq!(cursor("abcdef\nxy\n", "4lvjdgv"), (0, 4));
+    // On its line deleted, the column is kept, past the end of the line
+    // after.
+    assert_eq!(cursor("abcdef\ngh\n", "llvl<Esc>ggddgv"), (0, 2));
     assert_eq!(copied("abc\nxy\n", "v$<Esc>gvy"), "abc\n");
     assert_eq!(copied("abc\nxy\n", "v$ggy"), "abc\n");
     assert_eq!(copied("xy\nabc\n", "jv$ggy"), "\na");

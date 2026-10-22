@@ -231,11 +231,98 @@ pub(crate) struct Shape {
     pub(crate) backward: bool,
     /// The cursor kept to line ends, as after `$`.
     pub(crate) to_end: bool,
-    /// The columns its first and last ends were in, which Vim's keeps as
-    /// they were: an end an edit leaves at a line's end, short of the
-    /// column it was in, goes just past it, as Vim's goes to the line's
-    /// end there, but not one that was before it.
-    pub(crate) cols: (usize, usize),
+}
+
+/// One end of a selection as Vim keeps it, for `gv`: its line, and its
+/// column in bytes, which edits within the line leave as it is and a line
+/// joined onto the one before moves with its text, as Vim's
+/// `mark_col_adjust()` does: so it may be past the line's end, as Vim's
+/// may, which `gv` takes as just past it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Column {
+    /// The byte its line starts at, in the window's copy of the text.
+    start: usize,
+    /// Its line, from 0.
+    line: u64,
+    /// Bytes from the line's start.
+    col: usize,
+}
+
+impl Column {
+    /// The end at `byte` of `text`.
+    fn at(text: &Rope, byte: usize) -> Self {
+        let byte = byte.min(text.len_bytes());
+        let line = text.byte_to_line(byte);
+        let start = text.line_to_byte(line);
+        Self {
+            start,
+            line: line as u64,
+            col: byte - start,
+        }
+    }
+
+    /// Whether it's at or past the end of its line of `text`, as Vim's
+    /// `gv` puts the cursor just past it.
+    pub(crate) fn past_end(&self, text: &Rope) -> bool {
+        let Ok(line) = usize::try_from(self.line) else {
+            return true;
+        };
+        if line >= text.len_lines() {
+            return true;
+        }
+        let row = text.line(line);
+        let len = row.len_bytes() - usize::from(row.bytes().last() == Some(b'\n'));
+        self.col >= len
+    }
+
+    /// Moves it through `edit`, which leaves the text as `after`. A change
+    /// that takes away the line break before its line joins the line onto
+    /// the one it's taken to, and the column goes with the line's text, as
+    /// Vim's `do_join()` takes it, less the indent `J` takes away (Vim's
+    /// `spaces_removed`); otherwise its line goes where its start does: in
+    /// lines `:m` moves, with them, and down with lines put in above it.
+    fn edited(&mut self, edit: &Passing<'_>, after: &Rope) {
+        let start = self.start;
+        let moved = edit.moved.and_then(|moved| moved.place(start));
+        let joined = (start > 0 && moved.is_none())
+            .then(|| {
+                (edit.edit.changes()).find(|&(at, removed, put)| {
+                    // Lines put back as many as were taken, as recasing
+                    // them does, aren't joined.
+                    let breaks = |text: &str| text.bytes().filter(|&byte| byte == b'\n').count();
+                    at < start && at + removed.len() >= start && breaks(removed) > breaks(put)
+                })
+            })
+            .flatten();
+        let (byte, kept) = if let Some(moved) = moved {
+            (moved, None)
+        } else if let Some((at, removed, put)) = joined {
+            // `J`'s: the line break and the indent after it, nothing else.
+            let indent = (removed.strip_prefix('\n'))
+                .filter(|rest| rest.bytes().all(|byte| byte == b' ' || byte == b'\t'))
+                .map_or(0, |_| at + removed.len() - start);
+            let rest = edit.edit.map(at, Bias::Before) + put.len();
+            (rest, Some(self.col.saturating_sub(indent)))
+        } else {
+            (edit.edit.map_keeping(start, Bias::After), None)
+        };
+        let byte = byte.min(after.len_bytes());
+        let line = after.byte_to_line(byte);
+        self.start = after.line_to_byte(line);
+        self.line = line as u64;
+        // Joined on where the rest of its line now starts.
+        if let Some(kept) = kept {
+            self.col = kept + (byte - self.start);
+        }
+    }
+
+    /// The text of its file is new: it goes to its line in it.
+    fn replaced(&mut self, text: &Rope) {
+        let last = text.len_lines() - 1;
+        let line = usize::try_from(self.line).map_or(last, |line| line.min(last));
+        self.start = text.line_to_byte(line);
+        self.line = line as u64;
+    }
 }
 
 /// A file's selection, kept for `gv` and `'<,'>`.
@@ -247,6 +334,8 @@ pub(crate) struct Selected {
     end: FilePlace,
     /// ...and its last character, where `>` is.
     last: FilePlace,
+    /// Its first and last ends, as Vim keeps them.
+    cols: [Column; 2],
     pub(crate) shape: Shape,
 }
 
@@ -259,9 +348,11 @@ impl Selected {
             start: place(start),
             end: place(end),
             last: place(start),
+            cols: [Column::at(text, start); 2],
             shape,
         };
         selected.settle(text);
+        selected.cols[1] = Column::at(text, selected.last.byte);
         selected
     }
 
@@ -270,12 +361,18 @@ impl Selected {
         (self.start.byte, self.last.byte)
     }
 
+    /// Its first and last ends, as Vim keeps them.
+    pub(crate) fn columns(&self) -> [Column; 2] {
+        self.cols
+    }
+
     /// Puts it at bytes `start` to `end` of `text`, in place.
     fn place(&mut self, text: &Rope, (start, end): (usize, usize), shape: Shape) {
         self.start.byte = start;
         self.end.byte = end;
         self.shape = shape;
         self.settle(text);
+        self.cols = [Column::at(text, start), Column::at(text, self.last.byte)];
     }
 
     /// Moves it through `edits`, made to its file in turn, which leave its
@@ -288,9 +385,12 @@ impl Selected {
     /// A selection of lines keeps the line its last character was on,
     /// though that's deleted, as `=` takes away the indent the cursor was
     /// in: the lines are what's selected.
-    fn edited(&mut self, edits: &[Passing<'_>], text: &Rope) {
+    fn edited(&mut self, edits: &[Passing<'_>], afters: &[Rope], text: &Rope) {
         let lines = self.shape.kind == Selection::Lines;
-        for edit in edits {
+        for (edit, after) in edits.iter().zip(afters) {
+            for col in &mut self.cols {
+                col.edited(edit, after);
+            }
             let gone = self.start.byte == self.end.byte;
             let moved_end = edit.moved.and_then(|moved| {
                 if gone {
@@ -319,6 +419,7 @@ impl Selected {
                 self.end.byte = self.start.byte + 1;
                 self.start.byte = first;
                 self.last.byte = self.end.byte - 1;
+                self.cols.swap(0, 1);
                 self.shape.backward = !self.shape.backward;
             }
             self.end.byte = self.end.byte.max(self.start.byte);
@@ -338,6 +439,9 @@ impl Selected {
     /// The text of its file is new: it goes to its lines and columns in
     /// it, as marks do.
     fn replaced(&mut self, text: &Rope) {
+        for col in &mut self.cols {
+            col.replaced(text);
+        }
         let gone = self.start.byte == self.end.byte;
         self.start.find_byte(text);
         self.last.find_byte(text);
@@ -375,6 +479,20 @@ impl Selected {
     fn file(&self) -> File<'_> {
         self.start.file()
     }
+}
+
+/// The text after each of `edits`, the last's being `text`, worked back to
+/// by undoing them in turn: `text` for each if they didn't make it.
+fn afters_of(edits: &[Passing<'_>], text: &Rope) -> Vec<Rope> {
+    let mut afters = vec![text.clone(); edits.len()];
+    for index in (1..edits.len()).rev() {
+        let mut before = afters[index].clone();
+        if edits[index].edit.invert().apply(&mut before).is_err() {
+            return vec![text.clone(); edits.len()];
+        }
+        afters[index - 1] = before;
+    }
+    afters
 }
 
 /// The byte after the character at `byte` of `text`, or its end.
@@ -473,14 +591,16 @@ impl Marks {
     }
 
     fn selections_edited(&mut self, file: File<'_>, edits: &[Passing<'_>], text: &Rope) {
+        let mut afters = None;
         for kept in self
             .selections
             .iter_mut()
             .filter(|kept| kept.last.file() == file)
         {
-            kept.last.edited(edits, text);
+            let afters = afters.get_or_insert_with(|| afters_of(edits, text));
+            kept.last.edited(edits, afters, text);
             if let Some(before) = &mut kept.before {
-                before.edited(edits, text);
+                before.edited(edits, afters, text);
             }
         }
     }
