@@ -29,6 +29,8 @@ use crate::motion::{Cells, Lines, Point, Walk, line_end, previous_cell, text_end
 mod quotes;
 mod words;
 
+pub(crate) use words::back_fails;
+
 /// How far a bracket object looks for each of its brackets, in cells.
 const BRACKET_SEARCH: usize = 100_000;
 

@@ -814,3 +814,18 @@ fn deleting_in_an_empty_text_keeps_the_register() {
         ("", "{\n  g h\n", true)
     );
 }
+
+#[test]
+fn a_count_of_words_back_that_starts_one_at_the_texts_start_fails() {
+    let text = "\n  \n\none two.\nx \"a b\" y\n";
+    // The second `b` would start at the text's start: nothing's taken,
+    // and the cursor goes as far as it got, as Vim's.
+    assert_eq!(in_cells(text, (3, 0), "d5b"), (text.into(), (1, 0)));
+    assert_eq!(in_cells(text, (5, 2), "d9b").0, text);
+    // Running into it on the way stops there, taking what it went over.
+    assert_eq!(in_cells("ab cd\n", (1, 4), "d3b").0, "d\n");
+    assert_eq!(in_cells("ab cd\n", (1, 4), "d3ge").0, "\n");
+    let mut setup = Setup::new(text);
+    setup.keys("2j5b");
+    assert!(setup.editor.take_failed());
+}

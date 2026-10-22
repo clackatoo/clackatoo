@@ -292,6 +292,29 @@ impl<L: Lines> Pos<'_, L> {
     }
 }
 
+/// Whether `b`, or `ge` if `end`, `count` times from `at`, fails as Vim's
+/// `bck_word()` or `bckend_word()` does: when one of the count starts at
+/// the text's start, which one that runs into it on the way doesn't, as
+/// it stops there; `big` for `B` and `gE`.
+pub(crate) fn back_fails(
+    lines: &impl Lines,
+    at: Point,
+    (end, big): (bool, bool),
+    count: usize,
+) -> bool {
+    let mut pos = Pos {
+        lines,
+        at,
+        big,
+        words: lines.words(),
+    };
+    !if end {
+        pos.bckend_word(count, false)
+    } else {
+        pos.bck_word(count, false)
+    }
+}
+
 /// What [`current`] found: from `start` to `end`, which is in it if
 /// `inclusive`, or else a line's start just after it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

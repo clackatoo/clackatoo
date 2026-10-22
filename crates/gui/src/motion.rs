@@ -659,6 +659,20 @@ impl Motion {
         }
     }
 
+    /// Whether it's `b`, `B`, `ge` or `gE` with a count, one of which
+    /// starts at the text's start, from `from`: Vim's fail then, and an
+    /// operator takes nothing, though the cursor goes as far as it got.
+    pub(crate) fn runs_out(self, from: Point, count: Option<usize>, lines: &impl Lines) -> bool {
+        let kind = match self {
+            Self::WordBack => (false, false),
+            Self::BigWordBack => (false, true),
+            Self::WordEndBack => (true, false),
+            Self::BigWordEndBack => (true, true),
+            _ => return false,
+        };
+        crate::objects::back_fails(lines, from, kind, count.unwrap_or(1))
+    }
+
     /// Whether it's `t` finding its character right after `at`, so going
     /// nowhere without failing, as Vim's `t)` does with `)` next.
     pub(crate) fn found_in_place(self, at: Point, lines: &impl Lines) -> bool {
@@ -737,7 +751,8 @@ impl Taken {
     /// What `motion`, with `count` typed, takes from `from` to `moved`,
     /// where it went, in `lines`: none if it went nowhere it could (see
     /// [`Motion::reach_from`]), or there's no line to take, as `dj` and
-    /// `d2_` on the last line.
+    /// `d2_` on the last line, or a count of words back ran out at the
+    /// text's start (see [`Motion::runs_out`]).
     pub(crate) fn between(
         motion: Motion,
         count: Option<usize>,
@@ -752,6 +767,9 @@ impl Taken {
             _ => false,
         };
         if down && moved.at.line == from.line {
+            return None;
+        }
+        if motion.runs_out(from, count, lines) {
             return None;
         }
         let reach = motion.reach_from(from, moved.at, count, lines)?;
