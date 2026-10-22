@@ -185,6 +185,40 @@ pub(crate) fn page_rows(view: u64, across: Option<[Option<u64>; 4]>) -> u64 {
     }
 }
 
+/// The last `f`, `t`, `F` or `T`, for `;` and `,` to find again: each
+/// pane that takes them keeps one.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Finds {
+    last: Option<Motion>,
+}
+
+impl Finds {
+    /// Notes `motion` if it's a find, and gives it back.
+    pub(crate) fn remember(&mut self, motion: Motion) -> Motion {
+        if matches!(motion, Motion::Find { .. }) {
+            self.last = Some(motion);
+        }
+        motion
+    }
+
+    /// `;`, or `,` if `reverse`: the last find again, the other way for
+    /// `,`, if there's been one.
+    pub(crate) fn again(&self, reverse: bool) -> Option<Motion> {
+        let Some(Motion::Find {
+            ch, forward, till, ..
+        }) = self.last
+        else {
+            return None;
+        };
+        Some(Motion::Find {
+            ch,
+            forward: forward != reverse,
+            till,
+            again: true,
+        })
+    }
+}
+
 /// A command, how many times to do it, and the register it takes text
 /// from or keeps it in, if one's named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -311,6 +345,35 @@ mod tests {
         // Never nothing, however small the view.
         assert_eq!(paging.rows(half, None, 1), 1);
         assert_eq!(paging.rows(page, None, 1), 1);
+    }
+
+    #[test]
+    fn finds_again_the_last_find_the_same_way_or_back() {
+        let mut finds = Finds::default();
+        assert_eq!(finds.again(false), None);
+        let t = Motion::Find {
+            ch: 'x',
+            forward: true,
+            till: true,
+            again: false,
+        };
+        assert_eq!(finds.remember(Motion::WordStart), Motion::WordStart);
+        assert_eq!(finds.again(false), None, "only finds are remembered");
+        finds.remember(t);
+        let again = Motion::Find {
+            ch: 'x',
+            forward: true,
+            till: true,
+            again: true,
+        };
+        assert_eq!(finds.again(false), Some(again));
+        let back = Motion::Find {
+            ch: 'x',
+            forward: false,
+            till: true,
+            again: true,
+        };
+        assert_eq!(finds.again(true), Some(back));
     }
 
     #[test]

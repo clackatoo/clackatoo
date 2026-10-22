@@ -537,10 +537,13 @@ pub(crate) enum Motion {
     BigWordEnd,
     /// `f`, `t`, `F` and `T`: the next `ch` on the line, or the previous
     /// one if not `forward`, or the character just before it if `till`.
+    /// Found `again`, by `;` or `,`, a `t` or `T` doesn't stop at one right
+    /// by the cursor, as Vim's doesn't.
     Find {
         ch: char,
         forward: bool,
         till: bool,
+        again: bool,
     },
     /// `%`: the bracket that pairs with the one under the cursor, or with
     /// the next one on its line.
@@ -742,13 +745,7 @@ impl Cursor {
                 self.at.col = start_of_cell(row, col.min(end.saturating_sub(1)));
                 self.want = self.at.col;
             }
-            Motion::Find { ch, forward, till } => {
-                let row = lines.row(at.line);
-                if let Some(col) = find(row.as_deref(), at.col, ch, forward, till) {
-                    self.at.col = col;
-                    self.want = col;
-                }
-            }
+            Motion::Find { .. } => self.find(motion, 1, lines),
             // Keeping the column, as Neovim does: `go` puts them at the
             // first non-blank, with `startofline`.
             Motion::First => self.go_to_line(first, lines),
@@ -956,6 +953,7 @@ impl Cursor {
             Motion::Down(by) => self.apply(Motion::Down(by.saturating_mul(n)), lines),
             Motion::RowUp(by) => self.apply(Motion::RowUp(by.saturating_mul(n)), lines),
             Motion::RowDown(by) => self.apply(Motion::RowDown(by.saturating_mul(n)), lines),
+            Motion::Find { .. } => self.find(motion, times, lines),
             // Until it goes nowhere, so a count bigger than the text is
             // quick.
             _ => {
@@ -967,6 +965,32 @@ impl Cursor {
                     }
                 }
             }
+        }
+    }
+
+    /// `f`, `t`, `F` or `T`, `find`, to the `times`th of its character on
+    /// the line, as Vim's go: nowhere if there aren't that many.
+    fn find(&mut self, find: Motion, times: usize, lines: &impl Lines) {
+        let Motion::Find {
+            ch,
+            forward,
+            till,
+            again,
+        } = find
+        else {
+            return;
+        };
+        let row = lines.row(self.at.line);
+        let skip = till && again && times == 1;
+        if let Some(col) = find_char(
+            row.as_deref(),
+            self.at.col,
+            (ch, forward, till),
+            times,
+            skip,
+        ) {
+            self.at.col = col;
+            self.want = col;
         }
     }
 
@@ -1365,21 +1389,29 @@ pub(crate) fn previous_cell(row: Option<&impl Cells>, col: usize) -> Option<usiz
     Some(start_of_cell(row, previous))
 }
 
-/// The cell of `ch` after `col` on the row, or before it if not `forward`,
-/// or the cell next to that one, towards `col`, if `till`.
-fn find(
+/// The `times`th cell of `ch` after `col` on the row, or before it if not
+/// `forward`, not looking at the one right by `col` if `skip`; or the cell
+/// next to that one, towards `col`, if `till`.
+fn find_char(
     row: Option<&impl Cells>,
     col: usize,
-    ch: char,
-    forward: bool,
-    till: bool,
+    (ch, forward, till): (char, bool, bool),
+    times: usize,
+    skip: bool,
 ) -> Option<usize> {
     let cells = row?;
     let found = |(_, spot): &(usize, Spot)| spot.ch == ch && !spot.spacer;
+    // The character right by the cursor isn't looked at if `skip`.
+    let skipped = usize::from(skip);
+    let nth = times.max(1) - 1;
     let (found, _) = if forward {
-        cells.on_from(col + 1).find(found)?
+        (cells.on_from(col + 1).skip(skipped).filter(found)).nth(nth)?
     } else {
-        cells.back_from(col.checked_sub(1)?).find(found)?
+        (cells
+            .back_from(col.checked_sub(1)?)
+            .skip(skipped)
+            .filter(found))
+        .nth(nth)?
     };
     if !till {
         return Some(found);

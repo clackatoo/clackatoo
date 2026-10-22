@@ -201,3 +201,25 @@ fn yanks_keep_the_column_whatever_startofline_says_but_gg_doesnt() {
     // As does `'a`, back to the mark's line, startofline or not.
     assert_eq!(lines_after("2G4l", "ma3jy'a", false).1, (1, 2));
 }
+
+#[test]
+fn a_count_finds_that_many_and_semicolon_after_t_goes_on() {
+    let at = |keys: &str| {
+        let mut setup = Setup::new("ab.cd.ef.gh\n");
+        setup.keys(keys);
+        (setup.text(), setup.cursor().1)
+    };
+    let line = "ab.cd.ef.gh\n".to_owned();
+    // Before the second `.`, not stuck before the first.
+    assert_eq!(at("2t."), (line.clone(), 4));
+    // Not that many: nowhere, nor anything deleted.
+    assert_eq!(at("4f."), (line.clone(), 0));
+    assert_eq!(at("d4f."), (line, 0));
+    assert_eq!(at("d2t.").0, ".ef.gh\n");
+    // `;` after `t` goes past the `.` it stopped before, but a count
+    // counts it.
+    assert_eq!(at("t.;").1, 4);
+    assert_eq!(at("t.2;").1, 4);
+    assert_eq!(at("$T.;").1, 6);
+    assert_eq!(at("$2T.").1, 6);
+}

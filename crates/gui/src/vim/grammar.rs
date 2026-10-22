@@ -527,6 +527,7 @@ impl Reader<'_> {
                             ch: target,
                             forward: ch.is_lowercase(),
                             till: ch.eq_ignore_ascii_case(&'t'),
+                            again: false,
                         },
                     ));
                 }
@@ -689,6 +690,7 @@ mod tests {
             ch: '(',
             forward: false,
             till: true,
+            again: false,
         };
         assert_eq!(read("T("), command(None, Action::Move(find)));
     }

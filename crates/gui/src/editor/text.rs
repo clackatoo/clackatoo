@@ -1470,11 +1470,13 @@ mod tests {
                 ch: 'a',
                 forward: true,
                 till: false,
+                again: false,
             },
             Motion::Find {
                 ch: '(',
                 forward: false,
                 till: true,
+                again: false,
             },
         ];
         let objects = [

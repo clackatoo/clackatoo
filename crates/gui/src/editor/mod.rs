@@ -512,7 +512,7 @@ pub(crate) struct Editor {
     /// How many times what's typed in insert mode goes in, as after `3i`.
     insert_times: usize,
     /// The last `f`, `t`, `F` or `T`.
-    last_find: Option<Motion>,
+    finds: vim::Finds,
     /// What's being typed in the bar.
     prompt: Option<Prompt>,
     /// The last search.
@@ -775,7 +775,7 @@ impl Editor {
             changing: None,
             last_change: None,
             insert_times: 1,
-            last_find: None,
+            finds: vim::Finds::default(),
             prompt: None,
             search: None,
             found: None,
@@ -1579,7 +1579,7 @@ impl Editor {
         let from = self.cursor.at;
         match command.action {
             Action::Move(motion) => {
-                let motion = self.remember_find(motion);
+                let motion = self.finds.remember(motion);
                 let motion = self.by_rows(motion);
                 self.cursor = self.moved(copy, motion, command.count);
                 if self.cursor.at == from && can_fail(motion) {
@@ -1774,12 +1774,7 @@ impl Editor {
     /// over. Fails if it can't move.
     fn find_again(&mut self, reverse: bool, times: usize, copy: &BufferCopy) {
         let from = self.cursor.at;
-        if let Some(Motion::Find { ch, forward, till }) = self.last_find {
-            let motion = Motion::Find {
-                ch,
-                forward: forward != reverse,
-                till,
-            };
+        if let Some(motion) = self.finds.again(reverse) {
             self.cursor = self.moved(copy, motion, Some(times));
         }
         if self.cursor.at == from {
@@ -1844,14 +1839,6 @@ impl Editor {
         }
         self.end_repeat_selection(copy);
         self.last_change = Some(change);
-    }
-
-    /// Notes `motion` if it's a find, for `;` and `,`.
-    fn remember_find(&mut self, motion: Motion) -> Motion {
-        if matches!(motion, Motion::Find { .. }) {
-            self.last_find = Some(motion);
-        }
-        motion
     }
 
     /// `motion` as it goes here: where lines don't wrap, `gj` and `gk` are
@@ -2307,7 +2294,7 @@ impl Editor {
         let at = self.cursor.at;
         let lines = |first: u64, last: u64| Span::lines(&text, first, last);
         let chars = |start: Point, last: Point| Span::chars(&text, start, last);
-        let motion = self.remember_find(motion);
+        let motion = self.finds.remember(motion);
         let motion = self.by_rows(motion);
         // `cw` changes to the end of the word, not the next.
         let word = matches!(motion, Motion::WordStart | Motion::BigWordStart);
