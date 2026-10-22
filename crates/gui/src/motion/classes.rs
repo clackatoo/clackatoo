@@ -1,12 +1,14 @@
-//! The classes Vim sorts characters past Latin-1 into, for words: as
-//! Neovim 0.11's `charclass()` has them, which is its `utf_class()`, a
-//! table of ranges and emoji, everything else a word's, class 2. A run of
-//! characters of one class is a word, so `中文` is a word apart from the
-//! `x` after it, as are kana, hangul and emoji. Made by asking Neovim for
-//! each code point's class, with:
+//! The classes Vim sorts characters past ASCII into, for words: as
+//! Neovim 0.11's `charclass()` has them, which is its `utf_class()`: in
+//! Latin-1, as the default `iskeyword` makes them, `µ` and `192-255` a
+//! word's, the no-break space blank and the rest, `ª`, `²` and `½` among
+//! them, punctuation; past it, a table of ranges and emoji, everything
+//! else a word's, class 2. A run of characters of one class is a word, so
+//! `中文` is a word apart from the `x` after it, as are kana, hangul and
+//! emoji. Made by asking Neovim for each code point's class, with:
 //!
 //! ```lua
-//! for cp = 0x100, 0x3134f do print(cp, vim.fn.charclass(vim.fn.nr2char(cp))) end
+//! for cp = 0x80, 0x3134f do print(cp, vim.fn.charclass(vim.fn.nr2char(cp))) end
 //! ```
 //!
 //! and keeping the ranges whose class isn't 2.
@@ -14,6 +16,10 @@
 /// The ranges, in order, first and last code points and their class: 0
 /// is blank, 1 punctuation, 3 emoji, and the rest a script's own.
 const CLASSES: &[(u32, u32, u32)] = &[
+    (0x80, 0x9f, 1),
+    (0xa0, 0xa0, 0),
+    (0xa1, 0xb4, 1),
+    (0xb6, 0xbf, 1),
     (0x37e, 0x37e, 1),
     (0x387, 0x387, 1),
     (0x55a, 0x55f, 1),

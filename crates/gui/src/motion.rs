@@ -223,9 +223,14 @@ impl Words {
     }
 
     /// Whether `ch` is part of a word: a letter, a digit, `_` or one of
-    /// them.
+    /// them, or past ASCII, of a class of words, as Vim's `vim_iswordc()`
+    /// has it (see [`classes`]).
     pub(crate) fn is_word(self, ch: char) -> bool {
-        ch.is_alphanumeric() || ch == '_' || self.has(ch)
+        if ch.is_ascii() {
+            ch.is_ascii_alphanumeric() || ch == '_' || self.has(ch)
+        } else {
+            classes::of(ch) >= 2
+        }
     }
 
     /// Them, in the order of their codes.
@@ -1809,16 +1814,15 @@ pub(crate) fn class_at(row: Option<&impl Cells>, col: usize, words: Words) -> Cl
     if spot.blank() {
         return Class::Blank;
     }
-    // Latin-1 as Vim's `iskeyword` has it, `192-255` all a word's.
-    let code = u32::from(spot.ch);
-    if code < 0x100 {
-        return if words.is_word(spot.ch) || code >= 0xc0 {
+    // ASCII as Vim's `iskeyword` has it, with what the language adds.
+    if spot.ch.is_ascii() {
+        return if words.is_word(spot.ch) {
             Class::Word
         } else {
             Class::Punctuation
         };
     }
-    // Past Latin-1, as Vim's classes have it.
+    // Past it, as Vim's classes have it.
     match classes::of(spot.ch) {
         0 => Class::Blank,
         1 => Class::Punctuation,

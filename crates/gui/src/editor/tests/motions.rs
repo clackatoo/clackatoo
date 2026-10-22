@@ -913,6 +913,12 @@ fn words_past_latin_1_are_sorted_as_vims_classes_have_them() {
     assert_eq!(kept("x中\t中y\n\n", (1, 4), "3yiw").1, "中y");
     // Latin-1 from 192 on is a word's, `×` too, as Vim's `iskeyword`.
     assert_eq!(in_cells("é× ab\n", (1, 0), "w").1, (1, 3));
+    // Before it, `µ` too, but `ª` and `²` are punctuation, and the no-break
+    // space is blank.
+    assert_eq!(in_cells("aµb cd\n", (1, 0), "w").1, (1, 4));
+    assert_eq!(in_cells("aªb cd\n", (1, 0), "w").1, (1, 1));
+    assert_eq!(in_cells("a²b cd\n", (1, 0), "w").1, (1, 1));
+    assert_eq!(in_cells("a\u{a0}b cd\n", (1, 0), "w").1, (1, 2));
 }
 
 #[test]
