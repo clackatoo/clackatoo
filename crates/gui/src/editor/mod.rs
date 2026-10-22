@@ -1652,8 +1652,8 @@ impl Editor {
             Action::Visual { lines } => self.visual(lines),
             Action::BlockVisual => self.block_visual(),
             Action::Search { backward } => self.prompt = Some(Prompt::search(backward)),
-            Action::SearchAgain { reverse } => self.search_again(reverse, copy, shared),
-            Action::SearchWord { backward } => self.search_word(backward, copy, shared),
+            Action::SearchAgain { reverse } => self.search_again(reverse, times, copy, shared),
+            Action::SearchWord { backward } => self.search_word(backward, times, copy, shared),
             Action::Tilde => self.tilde(times, copy),
             Action::FindAgain { reverse } => self.find_again(reverse, times, copy),
             Action::Scroll(scroll) => self.scroll(scroll, command.count, copy),
@@ -3857,7 +3857,7 @@ impl Editor {
                         search.backward = backward;
                     }
                     let from = self.cursor.at;
-                    self.search_again(false, copy, shared);
+                    self.search_again(false, 1, copy, shared);
                     if self.cursor.at != from {
                         self.left_from(from, copy);
                     }
@@ -4011,8 +4011,9 @@ impl Editor {
             .collect()
     }
 
-    /// `n`, or `N` if `reverse`: the next match of the last search.
-    fn search_again(&mut self, reverse: bool, copy: &BufferCopy, shared: &Shared) {
+    /// `n`, or `N` if `reverse`: the next match of the last search, the
+    /// `times`th, as Vim's count takes it.
+    fn search_again(&mut self, reverse: bool, times: usize, copy: &BufferCopy, shared: &Shared) {
         // Aiming for where the cursor is, found or not, as Vim's
         // `normal_search()` sets `curswant` before it searches.
         self.cursor = Cursor::new(self.cursor.at);
@@ -4043,9 +4044,15 @@ impl Editor {
         };
         let (whole, len) = self.haystack(copy);
         let text = self.text(copy);
-        let from = text.byte_at(self.cursor.at);
         let backward = backward != reverse;
-        if let Some(found) = find(&whole[..len], &compiled, from, backward) {
+        for _ in 0..times.max(1) {
+            let from = text.byte_at(self.cursor.at);
+            let Some(found) = find(&whole[..len], &compiled, from, backward) else {
+                self.found = None;
+                self.status = Some(compiled.not_found(format!("{pattern} isn't in the file")));
+                self.fail();
+                return;
+            };
             // The last character's first byte.
             let last = (whole[..found.end].char_indices().next_back())
                 .map_or(found.start, |(at, _)| at)
@@ -4058,10 +4065,6 @@ impl Editor {
             } else if backward && found.start >= from {
                 self.status = Some(vim::WRAPPED_TO_BOTTOM.into());
             }
-        } else {
-            self.found = None;
-            self.status = Some(compiled.not_found(format!("{pattern} isn't in the file")));
-            self.fail();
         }
     }
 
@@ -4088,7 +4091,7 @@ impl Editor {
         Some(text.slice(start, end))
     }
 
-    fn search_word(&mut self, backward: bool, copy: &BufferCopy, shared: &Shared) {
+    fn search_word(&mut self, backward: bool, times: usize, copy: &BufferCopy, shared: &Shared) {
         let text = self.text(copy);
         let Some((start, end)) = self.word_here(&text) else {
             self.status = Some("no word under the cursor".into());
@@ -4103,7 +4106,7 @@ impl Editor {
             backward,
             star: true,
         });
-        self.search_again(false, copy, shared);
+        self.search_again(false, times, copy, shared);
     }
 
     /// `]d`, or `[d` if `backward`: to the start of the `times`th

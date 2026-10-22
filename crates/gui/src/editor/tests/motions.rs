@@ -1076,3 +1076,13 @@ fn star_takes_words_as_vims_classes_sort_them() {
     assert_eq!(in_cells("中文x 中文\n", (1, 0), "*").1, (1, 6));
     assert_eq!(in_cells("x 😀 x 😀\n", (1, 2), "*").1, (1, 7));
 }
+
+#[test]
+fn a_count_searches_that_many_matches_on() {
+    let text = "a x a x a x\n";
+    assert_eq!(in_cells(text, (1, 0), "2*").1, (1, 8));
+    assert_eq!(in_cells(text, (1, 0), "3*").1, (1, 0));
+    assert_eq!(in_cells(text, (1, 0), "*2n").1, (1, 0));
+    assert_eq!(in_cells(text, (1, 0), "*3N").1, (1, 4));
+    assert_eq!(in_cells(text, (1, 10), "2#").1, (1, 2));
+}
