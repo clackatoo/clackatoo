@@ -47,6 +47,19 @@ for n = 1, 60 do
   wrapping[n] = n % 2 == 1 and (('%02d'):format(n) .. string.rep('x', 28)) or ('line ' .. n)
 end
 
+-- Sixty lines, the odd ones over three rows of 20.
+local tall = {}
+for n = 1, 60 do
+  tall[n] = n % 2 == 1 and (('%02d'):format(n) .. string.rep('x', 48)) or ('line ' .. n)
+end
+
+-- `wrapping`, and a 61st line over five rows of 20.
+local endlong = {}
+for n = 1, 60 do
+  endlong[n] = wrapping[n]
+end
+endlong[61] = '61' .. string.rep('z', 88)
+
 local cases = {
   -- CLACKA-127: a count before `gg`, or `G` as an operator's target, is a
   -- line number.
@@ -215,6 +228,21 @@ local cases = {
   { name = 'zz wrapped, the second row', lines = wrapping, at = { 21, 25 }, view = { height = 10, top = 11, columns = 20 }, keys = 'zz' },
   { name = 'zz in nine rows', lines = sixty, at = { 20, 4 }, view = { height = 9, top = 11 }, keys = 'zz' },
   { name = '5zt from the top', lines = sixty, at = { 1, 4 }, view = { height = 10, top = 1 }, keys = '5zt' },
+  -- The stage 2 fix round's review: zz and zb start the view at a line's
+  -- start; a counted zt keeps the column it's in; pages keep scrolloff
+  -- in whole lines; zt at the end keeps scrolloff; big scrolloff.
+  { name = 'zz wrapped from line 14', lines = wrapping, at = { 14, 4 }, view = { height = 10, top = 11, columns = 20 }, keys = 'zz' },
+  { name = 'zz wrapped in nine rows', lines = wrapping, at = { 4, 4 }, view = { height = 9, top = 1, columns = 20 }, keys = 'zz' },
+  { name = 'zb tall', lines = tall, at = { 57, 4 }, view = { height = 9, top = 57, columns = 20 }, keys = 'zb' },
+  { name = 'k10zt', lines = sixty, at = { 12, 8 }, view = { height = 10, top = 5 }, keys = 'k10zt' },
+  { name = 'k10ztjj', lines = sixty, at = { 12, 8 }, view = { height = 10, top = 5 }, keys = 'k10ztjj' },
+  { name = '<PageUp> so=3 endlong', lines = endlong, at = { 4, 4 }, view = { height = 10, top = 2, columns = 20 }, keys = '<PageUp>', set = 'scrolloff=3' },
+  { name = '<PageUp> so=3 wrapping', lines = wrapping, at = { 5, 4 }, view = { height = 10, top = 2, columns = 20 }, keys = '<PageUp>', set = 'scrolloff=3' },
+  { name = '<PageDown> so=3 endlong', lines = endlong, at = { 55, 4 }, view = { height = 10, top = 52, columns = 20 }, keys = '<PageDown>', set = 'scrolloff=3' },
+  { name = 'zt so=3 at the end', lines = sixty, at = { 60, 4 }, view = { height = 10, top = 51 }, keys = 'zt', set = 'scrolloff=3' },
+  { name = '<C-f> so=3 end in view', lines = sixty, at = { 55, 4 }, view = { height = 10, top = 52 }, keys = '<C-f>', set = 'scrolloff=3' },
+  { name = '3H so=5 sol at the end', lines = sixty, at = { 56, 4 }, view = { height = 10, top = 52 }, keys = '3H', set = 'scrolloff=5 sol' },
+  { name = 'M so=5 at the end', lines = sixty, at = { 56, 4 }, view = { height = 10, top = 51 }, keys = 'M', set = 'scrolloff=5' },
 }
 
 -- Quiet: "3 fewer lines" would land in what's printed, as would a
@@ -228,7 +256,8 @@ end
 
 for _, case in ipairs(cases) do
   vim.cmd('enew!')
-  vim.cmd('set nostartofline scrolloff=0')
+  -- Window options carry over from case to case: `smoothscroll` too.
+  vim.cmd('set nostartofline nosmoothscroll scrolloff=0')
   vim.wo.scroll = 0
   vim.o.columns = (case.view and case.view.columns) or 80
   if case.set then
@@ -244,12 +273,15 @@ for _, case in ipairs(cases) do
       lnum = case.at[1],
       col = case.at[2],
       curswant = case.at[2],
+      skipcol = 0,
     })
   else
     vim.api.nvim_win_set_cursor(0, case.at)
   end
   local keys = vim.api.nvim_replace_termcodes(case.keys, true, false, true)
   local ok, why = pcall(vim.cmd, 'silent normal! ' .. keys)
+  -- As a redraw would, so the view's top is as Neovim settles it.
+  vim.fn.line('w0')
   local cursor = vim.api.nvim_win_get_cursor(0)
   say(('== %s%s'):format(case.name, ok and '' or ('  (failed: ' .. tostring(why) .. ')')))
   say(('   cursor %d,%d  mode %s  top %d'):format(
