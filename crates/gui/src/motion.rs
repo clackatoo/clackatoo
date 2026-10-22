@@ -849,6 +849,12 @@ impl Cursor {
         self.want.unwrap_or(self.at.col)
     }
 
+    /// The column it aims for, if one's been set, as Vim's `curswant`
+    /// keeps the last a motion set; not if it aims for where it is.
+    pub(crate) fn wanted(&self) -> Option<usize> {
+        self.want
+    }
+
     /// The column moving up and down aims for, in `lines`: where it aims
     /// for where the cursor is, on a tab that's its last cell, as Vim's
     /// cursor sits there in normal mode.

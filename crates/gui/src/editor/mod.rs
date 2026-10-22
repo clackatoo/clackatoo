@@ -2160,6 +2160,13 @@ impl Editor {
             } else {
                 1
             };
+            // Aiming for the column a motion set, as `|` sets it, which
+            // Vim's `op_shift()` goes to without `startofline`.
+            if let (Target::Motion(_), Some(want)) =
+                (target, span.moved.and_then(|went| went.wanted()))
+            {
+                self.cursor = Cursor::wanting(self.cursor.at, want);
+            }
             self.shift(span, steps, operator == Operator::Dedent, copy);
             return true;
         }

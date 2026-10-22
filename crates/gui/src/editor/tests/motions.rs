@@ -1115,3 +1115,13 @@ fn recasing_an_object_puts_the_cursor_at_its_start() {
         ("x{\nAB\n}abc\n".into(), (2, 0))
     );
 }
+
+#[test]
+fn shifting_without_startofline_goes_to_the_column_a_motion_set() {
+    // `|` sets the column, which Vim's `op_shift()` goes back to.
+    assert_eq!(in_cells("x (p q) y\n", (1, 7), ">1|").1, (1, 0));
+    assert_eq!(
+        in_cells("x (p q) y\nabcdefghijkl\n", (1, 7), ">j").1,
+        (1, 7)
+    );
+}
