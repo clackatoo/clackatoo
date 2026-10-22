@@ -194,6 +194,26 @@ fn a_page_puts_the_cursor_at_the_views_top_or_bottom_line_wherever_it_was() {
 }
 
 #[test]
+fn with_scrolloff_a_page_keeps_whole_lines_from_the_views_edges() {
+    let wrapping = wrapping();
+    let endlong = format!("{wrapping}61{}\n", "z".repeat(88));
+    let at = |text: &str, top, line, keys| {
+        after(with_margin(viewed(text, top, (line, 4), true), 3), keys)
+    };
+    // Up to the text's start: line 4, the last shown whole but line 5,
+    // cut, is where three rows below meet; the view stays put.
+    assert_eq!(at(&endlong, 2, 4, "<PageUp>"), (1, 4, 4));
+    assert_eq!(at(&wrapping, 2, 5, "<PageUp>"), (1, 4, 4));
+    // Down from line 52: line 57 starts the view, the cursor a line on,
+    // where three rows of whole lines are above it.
+    assert_eq!(at(&endlong, 52, 55, "<PageDown>"), (57, 58, 4));
+    // With the end in view, Ctrl+F goes on to the last line.
+    let sixty = sixty();
+    let setup = with_margin(viewed(&sixty, 52, (55, 4), false), 3);
+    assert_eq!(after(setup, "<C-f>"), (60, 60, 4));
+}
+
+#[test]
 fn a_page_that_cant_move_the_view_leaves_the_cursor_be_startofline_or_not() {
     let text = sixty();
     assert_eq!(

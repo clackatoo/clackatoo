@@ -382,7 +382,7 @@ The marks are drawn behind the text, and the selection over it. See [the options
 |---|---|
 | `j` `k`, `gj` `gk`, Ctrl+E Ctrl+Y | A line, or as many as a count says |
 | Ctrl+D Ctrl+U | Half a view, rounded down, or as far as a count before one set, a view at most |
-| Ctrl+F, Page Down, Page Up | A view, keeping two lines of the last; a count goes that many |
+| Ctrl+F, Page Down, Page Up | A view less two lines, which stay in view; a count goes that many |
 | `gg` `G` | The top, the end; `10G` or `10gg`, the block holding line 10 |
 
 The wheel scrolls it too. Any other key is the text's: the text comes back where the view was, and the key does there what it does, so `i` types at the start of the top block, and `/` searches the text. `:w`, `:q` and the rest of the command line are the same either way.
@@ -415,7 +415,7 @@ An editor in a window of its own starts in normal mode, as in Vim. One you go to
 | `gj` `gk` | The next or previous screen row, where lines wrap; a count moves that many. With `nowrap`, as `j` and `k`. |
 | `g0` `g$` | The screen row's first or last character; with `nowrap`, the first or last in view. |
 | Ctrl+D, Ctrl+U | Half the view's screen rows down or up, rounded down, the view and the cursor together. As Vim's, the view goes no further down than shows the file's last line at its bottom, and starts at a line's start where lines wrap, while the cursor goes as far as the view would have. A count sets how far they go from then on, a whole view at most. |
-| Ctrl+F, Page Down, Page Up | The view's screen rows less two down, or up with Page Up, so two lines of what was in view stay, to the start of a line; then the cursor goes to the view's top line, or its bottom line going up, `scrolloff` rows in, as Vim's does. With the text's end in view, Ctrl+F goes a whole view. If the view can't move, nothing does. A count goes that many pages. |
+| Ctrl+F, Page Down, Page Up | A view down, or up with Page Up, to the start of a line, as Vim's does: its screen rows less two, keeping two lines of what was in view where they fit, or one, or none, or a whole view with the text's end in view, and no further down than puts the last line at the top. Then the cursor goes to the first line shown whole, or the last going up, as many rows of whole lines in as `scrolloff` asks, as far as they fit. If the view can't move, nothing does. A count goes that many pages. |
 | Ctrl+E Ctrl+Y | The view a screen row down or up, or as many as a count says, keeping the cursor in view, `scrolloff` rows in, as the wheel does. While a panel by the cursor is shown, they scroll it instead. |
 | `zt` `zz` `zb` | Scrolls the cursor's line to the top, middle or bottom, keeping `scrolloff` lines above or below it, with the view starting at a line's start, as Vim's does: where lines wrap, one that doesn't fit is left out. With a count, that line, the cursor going to it in the column it's in, as a jump, as Vim's does: `5zt`. |
 | `]d` `[d` | The next mistake a [language server](#language-servers) found, or the one before, going round the file's ends. A count goes that many. |

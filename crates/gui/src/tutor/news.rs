@@ -639,7 +639,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "onepage",
         date: "2026-10-21",
         lesson: "basics",
-        what: "In editors and terminals Ctrl+F keeps two lines and puts the cursor at the top; a count sets Ctrl+D's reach",
+        what: "In editors and terminals Ctrl+F keeps two lines where they fit, cursor at top; a count sets Ctrl+D's reach",
     },
     News {
         id: "linescolumn",
