@@ -1118,6 +1118,14 @@ impl Lines for Text<'_> {
         self.line_len(line) == 0
     }
 
+    /// The line's last character, blank or not, as a file's line has its
+    /// blanks at the end, where a terminal's row can't tell them from none.
+    fn last_cell(&self, line: u64) -> usize {
+        self.laid(line)
+            .and_then(|laid| Some(laid.extent(laid.cells().checked_sub(1)?).0))
+            .unwrap_or(0)
+    }
+
     fn screen_rows(&self, line: u64) -> Rc<[ScreenRow]> {
         let Some((wrap, laid)) = self.wrap.and_then(|wrap| Some((wrap, self.laid(line)?))) else {
             return Rc::new([ScreenRow::WHOLE]);

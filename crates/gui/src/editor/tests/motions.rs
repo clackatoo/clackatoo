@@ -425,3 +425,17 @@ fn semicolon_after_t_goes_past_a_character_not_a_cell() {
     assert_eq!(in_cells("中x中x中y\n", (1, 0), "tx;").1, (1, 3));
     assert_eq!(in_cells("中x中x中y\n", (1, 0), "$T中;").1, (1, 5));
 }
+
+#[test]
+fn the_cursor_goes_onto_blanks_at_a_lines_end_as_vims_does() {
+    let text = "a  b  \none\n";
+    assert_eq!(in_cells(text, (1, 0), "$").1, (1, 5));
+    assert_eq!(in_cells(text, (1, 3), "3l").1, (1, 5));
+    assert_eq!(in_cells(text, (1, 3), "3<Space>").1, (2, 0));
+    assert_eq!(in_cells(text, (2, 0), "<BS>").1, (1, 5));
+    // Backspace from the next line's start takes just the line break,
+    // and Space the blanks before it.
+    assert_eq!(in_cells(text, (2, 0), "d<BS>").0, "a  b  one\n");
+    assert_eq!(in_cells(text, (1, 3), "d2<Space>").0, "a   \none\n");
+    assert_eq!(in_cells(text, (1, 3), "d3<Space>").0, "a  \none\n");
+}

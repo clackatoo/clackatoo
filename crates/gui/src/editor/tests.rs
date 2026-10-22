@@ -1620,10 +1620,11 @@ fn star_and_hash_search_for_the_word_under_the_cursor_whole() {
     let mut blank = Setup::new("a  b b\n");
     blank.keys("l*");
     assert_eq!(blank.cursor(), (0, 5));
-    // With none after it, it says so.
+    // With none after it, it says so, staying on the last blank `$` goes
+    // to, as Vim's.
     let mut none = Setup::new("a  \n");
     none.keys("$*");
-    assert_eq!(none.cursor(), (0, 0));
+    assert_eq!(none.cursor(), (0, 2));
 }
 
 #[test]
