@@ -25,8 +25,9 @@
 //! there with `$`. A count before `.` changes nothing, as in Vim: the
 //! change keeps its own, as `V3>` indents by three steps each time.
 //!
-//! Where clackatoo differs from Vim: as its selections never take a line
-//! break, neither does the text `.` takes past a line's end. In visual
+//! Where clackatoo differs from Vim: as many columns as a selection took
+//! take no line break past a shorter line's end, where Vim's join the
+//! lines; to a line's end after `$`, they do, as Vim's. In visual
 //! mode, `.` makes a change made in visual mode again on what's selected,
 //! where Vim's does nothing, so `V>` then `.` indents the lines again, as
 //! `>` keeps them selected. And `.` after `p` over a selection puts the
@@ -65,12 +66,14 @@ pub(super) const INDENTS_ENTRIES: &str =
 pub(super) enum Extent {
     /// Whole lines, this many.
     Lines(u64),
-    /// Characters on one line, across this many columns, or to its end if
-    /// `usize::MAX`.
+    /// Characters on one line, across this many columns.
     Across(usize),
-    /// Characters over `lines` lines, to column `to` of the last, or to its
-    /// end if `usize::MAX`.
+    /// Characters over `lines` lines, to column `to` of the last.
     Down { lines: u64, to: usize },
+    /// Characters over `lines` lines, one or more, to just past the last's
+    /// last character, as a selection taken there with `$` is, so its
+    /// line break goes too.
+    ToEnd { lines: u64 },
     /// A block of `lines` lines, `cols` columns wide, or to each line's end
     /// if `None` (see [`super::block`]).
     Block { lines: u64, cols: Option<usize> },
@@ -183,14 +186,11 @@ impl Editor {
             Selection::Block => return self.selected_block(copy).map(Editor::block_extent),
             Selection::Characters => {}
         }
-        let to_end = self.cursor.want() == usize::MAX;
-        let last = if to_end {
-            usize::MAX
-        } else {
-            last_col(&self.text(copy), end)
-        };
+        if self.cursor.want() == usize::MAX {
+            return Some(Extent::ToEnd { lines });
+        }
+        let last = last_col(&self.text(copy), end);
         Some(match lines {
-            1 if to_end => Extent::Across(usize::MAX),
             1 => Extent::Across(last + 1 - start.col.min(last)),
             _ => Extent::Down { lines, to: last },
         })
@@ -228,16 +228,17 @@ impl Editor {
                     col: to,
                 },
             ),
+            // Just past the line's last character, so its line break goes
+            // too, as Vim's.
+            Extent::ToEnd { lines } => {
+                let line = down(lines);
+                let col = text.line_cells(line);
+                (Selection::Characters, Point { line, col })
+            }
             Extent::Block { .. } => return,
         };
-        // To the line's end, just past its last character, so its line
-        // break goes too, as Vim's.
-        let to_end = head.col == usize::MAX && text.line_cells(head.line) > 0;
-        let head = if to_end {
-            Point {
-                col: text.line_cells(head.line),
-                ..head
-            }
+        let head = if matches!(extent, Extent::ToEnd { .. }) {
+            head
         } else {
             on_character(head, &text)
         };

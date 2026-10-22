@@ -614,6 +614,13 @@ fn in_visual_mode_the_cursor_goes_just_past_a_lines_end_and_takes_its_break() {
     let mut setup = Setup::new("abc\nde\n");
     setup.keys("v$d");
     assert_eq!(setup.text(), "de\n");
+    // `.` takes the line break again, from a line's start too.
+    let mut setup = Setup::new("ab\ncd\nef\ngh\n");
+    setup.keys("v$dj.");
+    assert_eq!(setup.text(), "cd\ngh\n");
+    let mut setup = Setup::new("ab\ncd\nef\ngh\nij\n");
+    setup.keys("vj$d.");
+    assert_eq!(setup.text(), "ij\n");
 }
 
 #[test]
