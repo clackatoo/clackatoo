@@ -1631,9 +1631,6 @@ impl Editor {
                 let motion = self.finds.remember(motion);
                 let motion = self.by_rows(motion);
                 self.cursor = self.moved(copy, motion, command.count);
-                if visual {
-                    self.past_line_end(motion, from, times, copy);
-                }
                 let once = command.count.is_none_or(|count| count == 1);
                 let text = self.text(copy);
                 let stays = once && motion.found_in_place(from, &text);
@@ -1644,7 +1641,13 @@ impl Editor {
                 );
                 let no_line = down && !once && from.line >= text.last_line();
                 drop(text);
-                if (self.cursor.at == from && can_fail(motion) && !stays) || no_line {
+                let failed =
+                    |cursor: Cursor| (cursor.at == from && can_fail(motion) && !stays) || no_line;
+                if visual {
+                    let went = !failed(self.cursor);
+                    self.past_line_end(motion, (from, times), went, copy);
+                }
+                if failed(self.cursor) {
                     self.fail();
                 }
             }
@@ -1938,8 +1941,15 @@ impl Editor {
     /// break: `l` or Space on from the last character, Backspace back over
     /// a line's start, and any motion that aims for a column past the end,
     /// as `$` and `|` past it do, and after them up and down, `gg` or `G`
-    /// (`v$j`).
-    fn past_line_end(&mut self, motion: Motion, from: Point, times: usize, copy: &BufferCopy) {
+    /// (`v$j`), if it `went`: not where it failed, as `j` on the last line
+    /// does.
+    fn past_line_end(
+        &mut self,
+        motion: Motion,
+        (from, times): (Point, usize),
+        went: bool,
+        copy: &BufferCopy,
+    ) {
         let text = self.text(copy);
         let past = |line: u64| text.line_cells(line);
         match motion {
@@ -1980,6 +1990,7 @@ impl Editor {
                 }
                 self.cursor = Cursor::new(at);
             }
+            _ if !went => {}
             _ => {
                 let at = self.cursor.at;
                 let end = past(at.line);

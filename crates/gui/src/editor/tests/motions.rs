@@ -696,3 +696,17 @@ fn a_count_takes_dollar_to_a_line_further_down() {
     assert_eq!(kept(text, (1, 2), "d2$").0, "ab\nij\n");
     assert_eq!(kept(text, (1, 0), "V2$y").1, "ab cd\nef gh\n");
 }
+
+#[test]
+fn j_on_the_last_line_and_k_on_the_first_go_nowhere() {
+    // Not even along the line to the column wanted, as Vim's.
+    assert_eq!(in_cells("ab cd\nef gh\nij\n", (3, 0), "2$j").1, (3, 0));
+    assert_eq!(in_cells("abc\nxy\n", (1, 0), "$jk").1, (1, 2));
+    let mut setup = Setup::new("ab cd\nef gh\nij\n");
+    setup.keys("G2$");
+    setup.keys("j");
+    assert_eq!(setup.cursor(), (2, 0));
+    assert!(setup.editor.take_failed());
+    // Nor past the end in visual mode.
+    assert_eq!(in_cells("abc\nxy\n", (1, 0), "$vk").1, (1, 2));
+}

@@ -868,8 +868,15 @@ impl Cursor {
                 }
                 self.want = None;
             }
-            Motion::Up(n) => self.go_to_line(at.line.saturating_sub(n).max(first), lines),
-            Motion::Down(n) => self.go_to_line(at.line.saturating_add(n).min(last), lines),
+            // Nowhere from the first or last line, as Vim's, which fails
+            // without moving along the line either.
+            Motion::Up(n) if at.line > first => {
+                self.go_to_line(at.line.saturating_sub(n).max(first), lines);
+            }
+            Motion::Down(n) if at.line < last => {
+                self.go_to_line(at.line.saturating_add(n).min(last), lines);
+            }
+            Motion::Up(_) | Motion::Down(_) => {}
             Motion::LineStart => {
                 self.at.col = 0;
                 self.want = None;
