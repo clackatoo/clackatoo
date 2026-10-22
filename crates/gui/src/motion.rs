@@ -1365,12 +1365,18 @@ impl Cursor {
         let mut walk = Walk::new(lines, self.at).seeing(kind);
         // Aiming for where it is, failing too, as Vim's.
         self.want = None;
+        // At the text's end, past its last character, blank or not, as
+        // Vim's, which pulls it back onto that outside visual mode.
+        let at_end = |walk: &Walk<'_, _>| Point {
+            col: line_end(walk.at.line, lines),
+            ..walk.at
+        };
         if !walk.forward() {
-            return;
+            return self.settle(at_end(&walk).max(self.at));
         }
         while walk.class() == Class::Blank {
             if !walk.forward() {
-                return self.settle(walk.at);
+                return self.settle(at_end(&walk));
             }
         }
         let class = walk.class();

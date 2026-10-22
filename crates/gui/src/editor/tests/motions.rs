@@ -829,3 +829,11 @@ fn a_count_of_words_back_that_starts_one_at_the_texts_start_fails() {
     setup.keys("2j5b");
     assert!(setup.editor.take_failed());
 }
+
+#[test]
+fn e_at_the_texts_end_goes_over_its_blanks() {
+    assert_eq!(kept("ab\n  \n", (2, 0), "ye").1, "  ");
+    assert_eq!(in_cells("ab\n  \n", (2, 0), "e").1, (2, 1));
+    // Past them in visual mode, as Vim's.
+    assert_eq!(in_cells("ab\n  \n", (2, 0), "ve").1, (2, 2));
+}
