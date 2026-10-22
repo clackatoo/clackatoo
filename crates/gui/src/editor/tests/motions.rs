@@ -904,6 +904,9 @@ fn j_joins_with_a_space_where_vims_do_join_puts_one() {
     // short is the count `.` joins again, as Vim's `prep_redo()` has it.
     assert_eq!(in_cells("ab \n", (1, 1), "4Ju").1, (1, 1));
     assert_eq!(in_cells(".\n中\n", (1, 0), "4J.").1, (1, 1));
+    // Made again by `.`, it's cut short again, and `.` after that joins
+    // as many as were there then.
+    assert_eq!(in_cells("abc\nde\nf\n", (1, 0), "5J.ll.").1, (1, 2));
     assert_eq!(in_cells("ab\ncd  ef\n", (2, 4), "J").1, (2, 4));
 }
 

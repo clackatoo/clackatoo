@@ -492,6 +492,9 @@ pub(crate) struct Editor {
     word_run: usize,
     /// The change being made, while insert mode goes on after it.
     changing: Option<Change>,
+    /// The count the change just made goes by for `.`, if it cut the one
+    /// typed short, as a count of `J` past the last line is.
+    cut_count: Option<usize>,
     /// The last change, for `.`.
     last_change: Option<Change>,
     /// How many times what's typed in insert mode goes in, as after `3i`.
@@ -759,6 +762,7 @@ impl Editor {
             new_step: true,
             word_run: 0,
             changing: None,
+            cut_count: None,
             last_change: None,
             insert_times: 1,
             finds: vim::Finds::default(),
@@ -1595,6 +1599,7 @@ impl Editor {
         }
         let done = Done::REDRAW;
         let visual = matches!(self.mode, Mode::Visual(_));
+        self.cut_count = None;
         if !again {
             self.start_change(command, copy);
         }
@@ -1677,8 +1682,11 @@ impl Editor {
         // A change done in normal mode is finished; one that went into
         // insert mode finishes when that does.
         if self.mode != Mode::Insert
-            && let Some(change) = self.changing.take()
+            && let Some(mut change) = self.changing.take()
         {
+            if let Some(count) = self.cut_count {
+                change.command.count = Some(count);
+            }
             self.last_change = Some(change);
         }
         if self.mode != Mode::Insert {
@@ -1897,6 +1905,9 @@ impl Editor {
             change.command.register = char::from_digit(digit as u32 - '0' as u32 + 1, 10);
         }
         let done = self.execute(change.command, copy, shared, true);
+        if let Some(count) = self.cut_count.take() {
+            change.command.count = Some(count);
+        }
         self.put_again = None;
         // A command waiting for the daemon finishes once it answers.
         if let Some(change) = self.awaiting_again(change) {
@@ -2844,9 +2855,7 @@ impl Editor {
         // its start, an undo step all the same.
         let there = text.last_line().saturating_sub(line);
         if times > 1 && times as u64 > there {
-            if let Some(change) = &mut self.changing {
-                change.command.count = usize::try_from(there + 1).ok();
-            }
+            self.cut_count = usize::try_from(there + 1).ok();
             if there == 0 {
                 copy.unchanged_step(text.byte_at(self.cursor.at));
                 self.cursor = Cursor::new(Point { line, col: 0 });
