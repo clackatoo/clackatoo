@@ -1002,3 +1002,28 @@ fn inside_brackets_is_what_vims_current_block_leaves() {
         ("{\n  a\n  {\n  }\n}\n".into(), (4, 2))
     );
 }
+
+#[test]
+fn an_empty_region_is_still_acted_on() {
+    // `>` and `<` take its line, as Vim's `op_shift()` takes lines.
+    let shifted = |text: &str, at, keys| in_cells(text, at, keys).0;
+    assert_eq!(
+        shifted("ab\ncd\n", (1, 0), ">0"),
+        shifted("ab\ncd\n", (1, 0), ">>")
+    );
+    assert_eq!(
+        shifted("c()\n", (1, 1), ">i("),
+        shifted("c()\n", (1, 1), ">>")
+    );
+    assert_eq!(in_cells("  c()\n", (1, 3), "<i("), ("c()\n".into(), (1, 2)));
+    // Recasing steps back a character first, as Vim's `op_tilde()`: at a
+    // line's start, over the line break, so the whole line changes.
+    assert_eq!(
+        in_cells("ab\ncd\n", (2, 0), "gU0"),
+        ("ab\nCD\n".into(), (2, 0))
+    );
+    assert_eq!(in_cells("ab\ncd\n", (2, 0), "gUh").0, "ab\nCD\n");
+    assert_eq!(in_cells("ab\ncd\n", (1, 0), "g~0").0, "Ab\ncd\n");
+    // `c` types there, up to a mark at the cursor too.
+    assert_eq!(in_cells("ab cd\n", (1, 3), "mac`aZ<Esc>").0, "ab Zcd\n");
+}

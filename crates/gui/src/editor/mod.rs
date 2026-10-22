@@ -2113,10 +2113,6 @@ impl Editor {
         let Some(span) = span else {
             return false;
         };
-        if span.lines.is_none() && span.start() == span.end() {
-            self.operate_on_nothing(operator, span, copy);
-            return true;
-        }
         // Nothing to delete in an empty text, as Vim's `op_delete()` finds
         // an empty buffer: the register keeps what it had.
         if operator == Operator::Delete && copy.text().len_bytes() == 0 {
@@ -2139,7 +2135,8 @@ impl Editor {
             return true;
         }
         if let Operator::Recase(recase) = operator {
-            self.recase(span.start(), span.end(), recase, copy);
+            let (start, end) = recased(&self.text(copy), span);
+            self.recase(start, end, recase, copy);
             // To the start of what it took, as Vim's: by lines, the
             // cursor or where the motion went, whichever's first, which
             // keeps the cursor's column going on down (`gU50%`, `3gUU`).
@@ -2182,6 +2179,12 @@ impl Editor {
                 1
             };
             self.shift(span, steps, operator == Operator::Dedent, copy);
+            return true;
+        }
+        // An empty region has nothing to keep, as Vim's `op_delete()` and
+        // `op_yank()` find it.
+        if span.lines.is_none() && span.start() == span.end() {
+            self.operate_on_nothing(operator, span, copy);
             return true;
         }
         let mut text = self.text(copy).slice(span.start(), span.end());
@@ -2245,7 +2248,7 @@ impl Editor {
         let at = self.cursor.at;
         let (start, end) = if to < at { (to, at) } else { (at, to) };
         if exact {
-            return exclusive(&text, start, end);
+            return Some(exclusive(&text, start, end));
         }
         // `'a` goes to the mark's line's first non-blank, as `y'a` leaves
         // the cursor if that's back.
@@ -2479,8 +2482,7 @@ impl Editor {
                 // may make it whole lines (`d2iw`, `di(`).
                 let (start, last) = (found.start(), found.last());
                 if !found.inclusive() {
-                    let span =
-                        exclusive(&text, start, last).unwrap_or_else(|| Span::empty(&text, start));
+                    let span = exclusive(&text, start, last);
                     return Some(span.went(Cursor::new(start)));
                 }
                 if !found.lines() {
@@ -2563,9 +2565,7 @@ impl Editor {
         let span = match reach {
             Reach::Lines => lines(start.line, end.line),
             Reach::Inclusive => chars(start, end),
-            Reach::Exclusive => {
-                exclusive(&text, start, end).unwrap_or_else(|| Span::empty(&text, start))
-            }
+            Reach::Exclusive => exclusive(&text, start, end),
         };
         // `y_` leaves the cursor where it is, as Vim's.
         let moved = if operator == Operator::Yank && motion == Motion::LineFirstNonBlank {
@@ -6087,6 +6087,23 @@ fn indent_before(text: &Text<'_>, byte: usize) -> usize {
     if byte > indent { indent } else { start }
 }
 
+/// The bytes `gU`, `gu`, `g~` and `g?` change of `span`, as Vim's
+/// `op_tilde()` takes it: an empty region steps its end back a character
+/// first, so at a line's start it goes back over the line break, and the
+/// whole line is changed; at the text's start, its first character.
+fn recased(text: &Text<'_>, span: Span) -> (usize, usize) {
+    let (start, end) = (span.start(), span.end());
+    if span.lines.is_some() || start < end {
+        return (start, end);
+    }
+    let at = text.point_of(start);
+    match (at.col, at.line) {
+        (0, 0) => (start, text.char_end(at)),
+        (0, line) => (start, text.line_end(line)),
+        _ => (start, end),
+    }
+}
+
 /// `cursor`, on its line's last character, just past it if it aims for a
 /// column there or further on, as Vim's `coladvance()` puts it in visual
 /// and insert mode.
@@ -6102,15 +6119,19 @@ fn past_end_if_aimed(cursor: Cursor, text: &Text<'_>) -> Cursor {
 
 /// What an operator takes of `text` with an exclusive motion from
 /// `start` to `end`, as [`crate::motion::exclusive`] says.
-fn exclusive(text: &Text<'_>, start: Point, end: Point) -> Option<Span> {
-    Some(match crate::motion::exclusive(text, start, end)? {
-        Exclusive::Lines(first, last) => Span::lines(text, first, last).leaving_first_non_blank(),
-        Exclusive::ToLineEnd(start, line) => {
+fn exclusive(text: &Text<'_>, start: Point, end: Point) -> Span {
+    match crate::motion::exclusive(text, start, end) {
+        Some(Exclusive::Lines(first, last)) => {
+            Span::lines(text, first, last).leaving_first_non_blank()
+        }
+        Some(Exclusive::ToLineEnd(start, line)) => {
             let start = text.byte_at(start);
             Span::bytes(start, text.line_end(line).max(start))
         }
-        Exclusive::Chars(start, last) => Span::chars(text, start, last),
-    })
+        Some(Exclusive::Chars(start, last)) => Span::chars(text, start, last),
+        // Nothing: an empty region, which operators still act on.
+        None => Span::empty(text, start),
+    }
 }
 
 /// What `d` deletes of `span`, which a motion, a mark or an object took:
