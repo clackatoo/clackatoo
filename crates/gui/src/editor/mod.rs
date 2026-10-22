@@ -4098,9 +4098,10 @@ impl Editor {
     /// Where a view scrolled from row `top` to another, `to`, goes to start
     /// a line, as Vim's pages and half pages do, and how many rows the
     /// cursor goes, of `rows`, to stay with it: partway down a line, the
-    /// view goes back to its start if that's a line on going down, or on to
-    /// the next line's start if it's two or more back going up; or else on
-    /// to the next line's start going down, or its own going up.
+    /// view goes back to its start if that's a line on going down, or the
+    /// text's last line, which there's no going past, or on to the next
+    /// line's start if it's two or more back going up; or else on to the
+    /// next line's start going down, or its own going up.
     fn to_line_start(top: RowAt, to: RowAt, rows: u64, text: &Text<'_>) -> (RowAt, u64) {
         if to.row == 0 {
             return (to, rows);

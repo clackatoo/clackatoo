@@ -1,12 +1,27 @@
 //! The keys that go by the view: paging (Ctrl+D, Ctrl+U, Ctrl+F, Page Down
 //! and Page Up), Ctrl+E and Ctrl+Y, `H`, `M` and `L`, and `zt`, `zz` and
 //! `zb`, each case checked against Neovim 0.11 headless
-//! (`crates/gui/tests/nvim/check.lua`), in a view of ten rows. Where
-//! clackatoo differs on purpose: Ctrl+E and Ctrl+Y go by screen rows where
-//! lines wrap, as the wheel does, not by lines, so `H` counts from the
-//! first line shown whole after one leaves a line partly shown; and a page
-//! that stops partway down a wrapped line keeps the column wanted, where
-//! Neovim's leaves the cursor at that line's end.
+//! (`crates/gui/tests/nvim/check.lua`), in a view of ten rows unless a
+//! case says. Where clackatoo differs on purpose:
+//!
+//! - Ctrl+E and Ctrl+Y go by screen rows where lines wrap, as the wheel
+//!   does, not by lines, so `H` counts from the first line shown whole
+//!   after one leaves a line partly shown.
+//! - Neovim's page scrolls by rows with `smoothscroll` on, then on or back
+//!   to a line's start. If the rows stop partway down a line the cursor
+//!   has been pushed onto, the column it wants moves on a row's width at
+//!   a time until it's in a row shown, and stays so: the cursor lands as
+//!   many rows further along the line the page leaves it on, or at its end
+//!   if that's shorter (Page Down from a view at line 57, of three-row lines
+//!   in five rows: line 59 at byte 24, not 4). clackatoo keeps the column
+//!   wanted.
+//! - With `scrolloff` half the view or more, at the text's end, Neovim's
+//!   `H`, `M` and `L` move the view too, to keep that many lines above the
+//!   cursor where they can't fit: `3H` with the view from line 52 and a
+//!   `scrolloff` of 5 ends on line 55 with the view from 51, where
+//!   `cursor_correct()` alone gives line 56 with the view kept, as
+//!   clackatoo's does. clackatoo keeps such a big `scrolloff` to the
+//!   middle by rows, as its view always does.
 
 use std::fmt::Write;
 
