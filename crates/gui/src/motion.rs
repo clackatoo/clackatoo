@@ -859,18 +859,20 @@ impl Cursor {
         let (first, last) = lines.bounds();
         let at = self.at;
         match motion {
+            // Aiming for where they land only if they go, as Vim's `oneleft`
+            // and `oneright`: failing, the column wanted stays.
             Motion::Left => {
                 let row = lines.row(at.line);
-                self.at.col = previous_cell(row.as_deref(), at.col).unwrap_or(at.col);
-                self.want = None;
+                if let Some(col) = previous_cell(row.as_deref(), at.col) {
+                    self.settle(Point { col, ..at });
+                }
             }
             Motion::Right => {
                 let row = lines.row(at.line);
                 let last = lines.last_cell(at.line);
                 if let Some(col) = next_cell(row.as_deref(), at.col).filter(|&col| col <= last) {
-                    self.at.col = col;
+                    self.settle(Point { col, ..at });
                 }
-                self.want = None;
             }
             // Nowhere from the first or last line, as Vim's, which fails
             // without moving along the line either.
@@ -1100,7 +1102,8 @@ impl Cursor {
                     self.apply(motion, lines);
                     let at_edge = self.at.line == edge;
                     if left > 0 && at_edge && (!lines.empty(edge) || self.at == before) {
-                        *self = start;
+                        // Aiming for where it is, failing too, as Vim's.
+                        *self = Self::new(start.at);
                         return;
                     }
                 }
@@ -1344,6 +1347,8 @@ impl Cursor {
 
     fn word_end(&mut self, lines: &impl Lines, kind: fn(Class) -> Class) {
         let mut walk = Walk::new(lines, self.at).seeing(kind);
+        // Aiming for where it is, failing too, as Vim's.
+        self.want = None;
         if !walk.forward() {
             return;
         }
@@ -1361,6 +1366,8 @@ impl Cursor {
 
     fn word_back(&mut self, lines: &impl Lines, kind: fn(Class) -> Class) {
         let mut walk = Walk::new(lines, self.at).seeing(kind);
+        // Aiming for where it is, failing too, as Vim's.
+        self.want = None;
         if !walk.back() {
             return;
         }
@@ -1423,6 +1430,8 @@ impl Cursor {
     fn word_end_back(&mut self, lines: &impl Lines, kind: fn(Class) -> Class) {
         let mut walk = Walk::new(lines, self.at).seeing(kind);
         let class = walk.class();
+        // Aiming for where it is, failing too, as Vim's.
+        self.want = None;
         if !walk.back() {
             return;
         }

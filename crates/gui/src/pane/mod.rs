@@ -2130,8 +2130,10 @@ mod tests {
         // From past `  five`'s end, as near as `  one` goes.
         keys(&mut pane, "gg");
         assert_eq!(cursor(&pane), ("  one".into(), 0, 4));
+        // `l` can't go on from `one`'s end, and so wants the column it did,
+        // as Vim's.
         keys(&mut pane, "lG");
-        assert_eq!(cursor(&pane), ("  five".into(), 4, 4));
+        assert_eq!(cursor(&pane), ("  five".into(), 4, 5));
         keys(&mut pane, "1G");
         assert_eq!(cursor(&pane), ("  one".into(), 0, 4));
         keys(&mut pane, "hL");

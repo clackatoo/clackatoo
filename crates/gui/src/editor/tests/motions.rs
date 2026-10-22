@@ -739,3 +739,15 @@ fn a_count_of_paragraphs_short_of_them_goes_nowhere() {
     // Taking nothing.
     assert_eq!(in_cells(text, (1, 0), "d5}").0, text);
 }
+
+#[test]
+fn a_motion_that_fails_keeps_the_column_wanted_where_vims_does() {
+    // h and l that can't go keep it, as Vim's `oneleft` and `oneright`.
+    assert_eq!(in_cells("ab\n\t\nabcdefgh\n", (1, 0), "jlj").1, (3, 0));
+    assert_eq!(in_cells("ab\nx\t\nabcdefgh\n", (1, 0), "j$lj").1, (3, 7));
+    assert_eq!(in_cells("abcdef\nab\n", (1, 5), "jlk").1, (1, 5));
+    // A count of paragraphs short of them, as words that can't go, aim
+    // for where the cursor is.
+    assert_eq!(in_cells("abcdef\nxy\n\nz\n", (1, 5), "j3}k").1, (1, 1));
+    assert_eq!(in_cells("abcdef\nx\n", (1, 5), "jek").1, (1, 0));
+}
