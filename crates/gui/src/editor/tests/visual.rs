@@ -661,6 +661,10 @@ fn past_a_lines_end_in_every_kind_of_selection_and_back_to_it() {
     // Only an end that was past a line's end: one an edit leaves at a
     // line's end is on its last character.
     assert_eq!(cursor("ab\n\n", "vjcZ<Esc>gv"), (0, 0));
+    // But an end in a column the line no longer reaches goes past its end,
+    // as Vim's keeps the column.
+    assert_eq!(cursor("abc\n", "lvldgv"), (0, 1));
+    assert_eq!(cursor("ab\ncd\n", "lvjdgv"), (0, 1));
     assert_eq!(copied("abc\nxy\n", "v$<Esc>gvy"), "abc\n");
     assert_eq!(copied("abc\nxy\n", "v$ggy"), "abc\n");
     assert_eq!(copied("xy\nabc\n", "jv$ggy"), "\na");
