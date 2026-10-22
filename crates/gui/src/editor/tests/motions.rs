@@ -896,3 +896,15 @@ fn j_joins_with_a_space_where_vims_do_join_puts_one() {
     // After an empty line joined on, one again.
     assert_eq!(in_cells("ab\t\n\ncd\n", (1, 0), "3J").0, "ab\t cd\n");
 }
+
+#[test]
+fn words_past_latin_1_are_sorted_as_vims_classes_have_them() {
+    // CJK ideographs are a word apart from letters, as are kana, hangul
+    // and emoji.
+    assert_eq!(in_cells("中文 x中\nab\n", (1, 0), "2w").1, (1, 6));
+    assert_eq!(in_cells("ひらがなカタカナ漢字\n", (1, 0), "2w").1, (1, 16));
+    assert_eq!(in_cells("한글abc\n", (1, 0), "w").1, (1, 4));
+    assert_eq!(kept("x中\t中y\n\n", (1, 4), "3yiw").1, "中y");
+    // Latin-1 from 192 on is a word's, `×` too, as Vim's `iskeyword`.
+    assert_eq!(in_cells("é× ab\n", (1, 0), "w").1, (1, 3));
+}

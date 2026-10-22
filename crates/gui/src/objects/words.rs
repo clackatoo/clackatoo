@@ -54,7 +54,7 @@ impl<L: Lines> Pos<'_, L> {
         }
         let row = self.lines.row(self.at.line);
         match class_at(row.as_deref(), self.at.col, self.words) {
-            Class::Punctuation if self.big => Class::Word,
+            Class::Punctuation | Class::Script(_) if self.big => Class::Word,
             class => class,
         }
     }

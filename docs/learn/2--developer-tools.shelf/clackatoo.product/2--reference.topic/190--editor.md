@@ -430,7 +430,7 @@ An editor in a window of its own starts in normal mode, as in Vim. One you go to
 | `K` | What's under the cursor, as the [language server](#language-servers) says, in a panel by the cursor, with what's wrong there in full above it, its code coloured and the name it's about underlined. `K` again pages through a long one, Ctrl+E and Ctrl+Y scroll it, and Esc, moving the cursor or an edit closes it. |
 | Ctrl+W `d` | What's wrong under the cursor, or else on its line, in full, in the same panel. |
 
-A word is letters, digits and `_`, and in a language whose pack says so, more: in CSS, `margin-top` and `--main-color` are each one word to `w`, `b`, `e`, `iw`, `aw`, `cw`, `*`, `#` and Ctrl+W in insert mode, and to `\<`, `\>` and `\k` in a search. A search with `\<` or `\>` in such a file that would take too long to finish says it's too complex, and changes nothing. `W`, `B` and `E` are the same in every language, and terminals keep plain words.
+A word is letters, digits and `_`, and in a language whose pack says so, more: in CSS, `margin-top` and `--main-color` are each one word to `w`, `b`, `e`, `iw`, `aw`, `cw`, `*`, `#` and Ctrl+W in insert mode, and to `\<`, `\>` and `\k` in a search. A search with `\<` or `\>` in such a file that would take too long to finish says it's too complex, and changes nothing. `W`, `B` and `E` are the same in every language, and terminals keep plain words. Past Latin-1, characters make words as Vim sorts them: CJK ideographs, kana, hangul and emoji each a kind of word of their own, apart from letters, so `w` goes from `中文` to the `x` after it.
 
 ### Jumps
 

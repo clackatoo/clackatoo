@@ -2573,7 +2573,7 @@ impl Editor {
         let row = text.row(at.line);
         let class = |col| {
             let class = class_at(row.as_deref(), col, text.words());
-            if big && class == Class::Punctuation {
+            if big && matches!(class, Class::Punctuation | Class::Script(_)) {
                 Class::Word
             } else {
                 class

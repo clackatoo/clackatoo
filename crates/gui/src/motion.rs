@@ -12,6 +12,8 @@ use std::rc::Rc;
 
 use clackatoo_term::{Cell, Row};
 
+mod classes;
+
 /// A position in the document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Point {
@@ -805,10 +807,13 @@ pub(crate) struct Cursor {
 pub(crate) enum Class {
     Blank,
     /// Letters, digits and `_`, and the characters the file's language
-    /// adds to them (see [`Words`]).
+    /// adds to them (see [`Words`]), and most others past Latin-1.
     Word,
     /// Any other printing character.
     Punctuation,
+    /// A script's own kind of word past Latin-1, as Vim's `utf_class()`
+    /// sorts them: CJK ideographs, kana, hangul, emoji (see [`classes`]).
+    Script(u32),
 }
 
 impl Cursor {
@@ -1494,7 +1499,7 @@ impl Class {
     fn big(class: Self) -> Self {
         match class {
             Self::Blank => Self::Blank,
-            Self::Word | Self::Punctuation => Self::Word,
+            Self::Word | Self::Punctuation | Self::Script(_) => Self::Word,
         }
     }
 }
@@ -1802,11 +1807,23 @@ pub(crate) fn class_at(row: Option<&impl Cells>, col: usize, words: Words) -> Cl
         return Class::Blank;
     };
     if spot.blank() {
-        Class::Blank
-    } else if words.is_word(spot.ch) || spot.wide {
-        Class::Word
-    } else {
-        Class::Punctuation
+        return Class::Blank;
+    }
+    // Latin-1 as Vim's `iskeyword` has it, `192-255` all a word's.
+    let code = u32::from(spot.ch);
+    if code < 0x100 {
+        return if words.is_word(spot.ch) || code >= 0xc0 {
+            Class::Word
+        } else {
+            Class::Punctuation
+        };
+    }
+    // Past Latin-1, as Vim's classes have it.
+    match classes::of(spot.ch) {
+        0 => Class::Blank,
+        1 => Class::Punctuation,
+        2 => Class::Word,
+        class => Class::Script(class),
     }
 }
 
