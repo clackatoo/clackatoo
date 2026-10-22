@@ -5104,7 +5104,8 @@ impl Editor {
             return;
         };
         let text = self.text(copy);
-        self.cursor = Cursor::new(text.point_of(cursor));
+        // Only moved with the text: still aiming for the column it was.
+        self.cursor = self.cursor.moved(text.point_of(cursor));
         self.anchor = anchor.map(|anchor| text.point_of(anchor));
     }
 

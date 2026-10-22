@@ -438,6 +438,22 @@ fn an_agents_edit_moves_the_cursor_with_the_text() {
 }
 
 #[test]
+fn an_edit_from_elsewhere_keeps_the_column_the_cursor_aims_for() {
+    let mut setup = Setup::new("abcdefghij\nab\nabcdefghij\nzz\n");
+    setup.keys("8lj");
+    assert_eq!(setup.cursor(), (1, 1));
+    // On a line below, as an agent or another pane would: the cursor's
+    // only moved with the text, as Vim's other windows' cursors are.
+    let update = setup.daemon.agent(25, "x");
+    setup.editor.hold(&setup.copy);
+    let mut heard = setup.copy.update(update);
+    setup.editor.heard(&mut heard, false, &mut setup.copy);
+    assert_eq!(setup.text(), "abcdefghij\nab\nabcdefghij\nxzz\n");
+    setup.keys("j");
+    assert_eq!(setup.cursor(), (2, 8));
+}
+
+#[test]
 fn lines_are_numbered_from_the_cursors() {
     let mut setup = Setup::new("a\nb\nc\nd\n");
     setup.keys("jj");
