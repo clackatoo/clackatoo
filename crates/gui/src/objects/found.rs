@@ -3,7 +3,7 @@
 //! its end: `iw` on an empty last line finds the word's end back on the
 //! line before.
 
-use crate::motion::{Cells, Lines, Point, line_end, previous_cell};
+use crate::motion::{Exclusive, Lines, Point, exclusive, line_end};
 
 /// Where an object was found: from [`start`](Self::start) to
 /// [`last`](Self::last), in that order, and whether it's whole lines, as a
@@ -66,36 +66,16 @@ impl Found {
         if self.inclusive {
             return Some(self);
         }
-        let Self { start, last, .. } = self;
-        // Up to a character on the line: the one before.
-        if last.col > 0 {
-            let row = lines.row(last.line);
-            let col = previous_cell(row.as_deref(), last.col)?;
-            let last = Point { col, ..last };
-            return (start <= last).then_some(Self {
-                last,
-                inclusive: true,
-                ..self
-            });
-        }
-        if last.line <= start.line {
-            return None;
-        }
-        let line = last.line - 1;
-        let row = lines.row(start.line);
-        let indent = row.as_deref().map_or(0, |row| {
-            (row.on_from(0))
-                .find(|(_, spot)| !spot.blank())
-                .map_or(usize::MAX, |(col, _)| col)
-        });
-        Some(Self {
-            start,
-            last: Point {
-                line,
-                col: lines.last_cell(line),
-            },
-            lines: start.col <= indent,
-            inclusive: true,
+        // A line's end is its last cell, as the copy takes it.
+        let end_of = |line| Point {
+            line,
+            col: lines.last_cell(line),
+        };
+        Some(match exclusive(lines, self.start, self.last)? {
+            Exclusive::Chars(start, last) => Self::new((start, last), false, true),
+            Exclusive::ToLineEnd(start, line) => Self::new((start, end_of(line)), false, true),
+            // From where it starts, as the cursor goes there.
+            Exclusive::Lines(_, line) => Self::new((self.start, end_of(line)), true, true),
         })
     }
 

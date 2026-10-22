@@ -110,8 +110,8 @@ use crate::colors;
 use crate::input::KeyPress;
 use crate::keymap::Chord;
 use crate::motion::{
-    Block, Class, Cursor, Lines, Motion, Point, Reach, RowAt, Taken, View, Words, before, class_at,
-    deleted_back, last_row, over_back, row_at, rows_between, rows_down, rows_up,
+    Block, Class, Cursor, Exclusive, Lines, Motion, Point, Reach, RowAt, Taken, View, Words,
+    class_at, deleted_back, last_row, over_back, row_at, rows_between, rows_down, rows_up,
 };
 use crate::objects::{Object, Selected};
 use crate::options::{Case, CompleteAccept, Options};
@@ -6038,22 +6038,16 @@ fn indent_before(text: &Text<'_>, byte: usize) -> usize {
 }
 
 /// What an operator takes of `text` with an exclusive motion from
-/// `start` to `end`: up to `end`, but not it.
+/// `start` to `end`, as [`crate::motion::exclusive`] says.
 fn exclusive(text: &Text<'_>, start: Point, end: Point) -> Option<Span> {
-    // As Vim's: one that ends at a line's start, from another line, ends
-    // at the end of the line before; and from at or before its line's
-    // first character that isn't blank, takes whole lines, as `d}` does.
-    if end.col == 0 && end.line > start.line {
-        let mut first = Cursor::new(start);
-        first.apply(Motion::FirstNonBlank, text);
-        if start.col <= first.at.col {
-            return Some(Span::lines(text, start.line, end.line - 1).leaving_first_non_blank());
+    Some(match crate::motion::exclusive(text, start, end)? {
+        Exclusive::Lines(first, last) => Span::lines(text, first, last).leaving_first_non_blank(),
+        Exclusive::ToLineEnd(start, line) => {
+            let start = text.byte_at(start);
+            Span::bytes(start, text.line_end(line).max(start))
         }
-        let start = text.byte_at(start);
-        return Some(Span::bytes(start, text.line_end(end.line - 1).max(start)));
-    }
-    let last = before(text, start, end)?;
-    Some(Span::chars(text, start, last))
+        Exclusive::Chars(start, last) => Span::chars(text, start, last),
+    })
 }
 
 /// What `d` deletes of `span`, which a motion, a mark or an object took:

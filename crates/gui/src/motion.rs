@@ -1936,6 +1936,42 @@ pub(crate) fn before(lines: &impl Lines, start: Point, end: Point) -> Option<Poi
     })
 }
 
+/// What an operator takes of an exclusive motion or object from `start` to
+/// `end` (see [`exclusive`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Exclusive {
+    /// The characters from the first to the second, both in it.
+    Chars(Point, Point),
+    /// From the point to the end of the line, without its line break.
+    ToLineEnd(Point, u64),
+    /// The lines from the first to the second, whole.
+    Lines(u64, u64),
+}
+
+/// What an operator takes of an exclusive motion or object from `start` to
+/// `end`, as Vim's `do_pending()`: up to `end`, not it, but an end at a
+/// line's start, from another line, ends at the end of the line before,
+/// and from at or before the first line's first character that isn't
+/// blank (Vim's `inindent()`), it's whole lines, as `d}` takes. None if
+/// that's nothing.
+pub(crate) fn exclusive(lines: &impl Lines, start: Point, end: Point) -> Option<Exclusive> {
+    if end.col == 0 && end.line > start.line {
+        let line = end.line - 1;
+        let row = lines.row(start.line);
+        let in_indent = row.as_deref().is_none_or(|row| {
+            (row.on_from(0))
+                .take_while(|&(col, _)| col < start.col)
+                .all(|(_, spot)| spot.blank())
+        });
+        return Some(if in_indent {
+            Exclusive::Lines(start.line, line)
+        } else {
+            Exclusive::ToLineEnd(start, line)
+        });
+    }
+    Some(Exclusive::Chars(start, before(lines, start, end)?))
+}
+
 /// The first cell of the character in cell `col`: `col` moved left off a
 /// wide character's right half, or a tab's cells past its first.
 pub(crate) fn start_of_cell(row: Option<&impl Cells>, mut col: usize) -> usize {

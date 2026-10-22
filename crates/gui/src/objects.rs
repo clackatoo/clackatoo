@@ -78,12 +78,12 @@ impl Object {
         }
     }
 
-    /// Where the object around `at` starts and ends, both included: just
+    /// Where the object around `at` starts and ends (see [`Found`]): just
     /// its insides if `inner`, and `count` of them where that's a thing (a
-    /// paragraph, words). An error if there's no such object there, or
-    /// it's empty, with where Vim's leaves the cursor if it moves it
-    /// failing, as counting words past the text's end does. Blocks and
-    /// pieces of code aren't found here (see the module docs).
+    /// paragraph, words). An error if there's no such object there, with
+    /// where Vim's leaves the cursor if it moves it failing, as counting
+    /// words past the text's end does. Blocks and pieces of code aren't
+    /// found here (see the module docs).
     pub(crate) fn find(
         self,
         lines: &impl Lines,
