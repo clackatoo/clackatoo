@@ -224,6 +224,13 @@ impl Action {
     }
 }
 
+/// Whether `command` is a jump, which the jump list records: one whose
+/// action is (see [`Action::jumps`]), or `zt`, `zz` or `zb` with a count,
+/// going to that line, as Vim's are.
+pub(crate) fn jumps(command: &Command) -> bool {
+    command.action.jumps() || matches!(command.action, Action::View(_)) && command.count.is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

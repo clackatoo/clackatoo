@@ -2341,6 +2341,30 @@ mod tests {
         keys(&mut pane, "7zz");
         serve(&mut pane, &terminal);
         assert_eq!(cursor(&pane), ("line 7".into(), 2, 2));
+        // In the column it's in, still wanting the one it wanted: `$` and
+        // `k` left it at 5 on line 9, wanting its end. Line 11 goes no higher than
+        // the live screen lets it.
+        keys(&mut pane, "10G$k11zt");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 11".into(), 2, 5));
+        keys(&mut pane, "j");
+        assert_eq!(cursor(&pane), ("line 12".into(), 3, 6));
+    }
+
+    #[test]
+    fn zt_with_a_count_goes_on_waiting_for_the_first_non_blank() {
+        let terminal = terminal(&numbered_lines("  line "));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        pane.set_options(&Options {
+            startofline: true,
+            ..Options::default()
+        });
+        // Neither line has come when the keys are read: line 1 waits to
+        // go to its first non-blank, so line 3 does.
+        keys(&mut pane, "$gg3zt");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("  line 3".into(), 0, 2));
     }
 
     #[test]

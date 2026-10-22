@@ -363,7 +363,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 | Ctrl+D Ctrl+U | Half the view down or up, rounded down, view and cursor together. A count sets how far they go from then on, a whole view at most, as Vim's does. |
 | Ctrl+F, Page Down Page Up | The view down or up, less two lines, so two lines of what was in view stay, and the cursor to its top line, or its bottom line going up, as Vim's does. At the live screen, or history's start, nothing moves. A count goes that many pages. Ctrl+B is [the window's](#ctrl-b). |
 | Ctrl+E Ctrl+Y | The view a line down or up, or as many as a count says, with the cursor kept in it. |
-| `zt` `zz` `zb` | The view scrolled to put the cursor's line at its top, middle or bottom, as far as history goes and no further than the live screen. With a count, that line, counted as `G` counts, the cursor going to it in its column, as Vim's does. |
+| `zt` `zz` `zb` | The view scrolled to put the cursor's line at its top, middle or bottom, as far as history goes and no further than the live screen. With a count, that line, counted as `G` counts, the cursor going to it in the column it's in, as Vim's does. |
 
 Moving past the top of the view scrolls into history. In normal mode the view holds still while output arrives, so the cursor stays on its text. On the alternate screen the cursor moves over the screen only.
 

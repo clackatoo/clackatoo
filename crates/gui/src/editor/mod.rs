@@ -1620,7 +1620,7 @@ impl Editor {
             Action::Mark { mark, exact } => self.go_to_mark(mark, exact, copy, &shared.marks),
             Action::Own(own) => self.own(own, times, copy, shared),
         }
-        if command.action.jumps() && self.cursor.at != from {
+        if keys::jumps(&command) && self.cursor.at != from {
             self.left_from(from, copy);
         }
         // A change done in normal mode is finished; one that went into
@@ -4172,15 +4172,15 @@ impl Editor {
     }
 
     /// Puts the cursor on line `count`, counting from 1, as far as the text
-    /// goes, in the column it wanted, as `5zt` does whatever `startofline`
-    /// says, as Vim's.
+    /// goes, as `5zt` does: in the column it's in, as far as the line goes,
+    /// whatever `startofline` says, still wanting the one it wanted, as
+    /// Vim's.
     fn onto_counted_line(&mut self, count: usize, copy: &BufferCopy) {
         let text = self.text(copy);
         let line = (count as u64).saturating_sub(1).min(text.last_line());
-        let mut cursor = Cursor::wanting(Point { line, col: 0 }, self.cursor.want());
-        cursor.onto_line(line, false, &text);
+        let col = self.cursor.at.col.min(text.last_cell(line));
         drop(text);
-        self.cursor = cursor;
+        self.cursor = Cursor::wanting(Point { line, col }, self.cursor.want());
     }
 
     /// `zt`, `zz` and `zb`: the cursor's line at the view's top, middle or

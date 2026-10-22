@@ -387,6 +387,34 @@ fn zt_zz_and_zb_with_a_count_put_that_line_there_and_the_cursor_on_it() {
 }
 
 #[test]
+fn zt_with_a_count_keeps_the_column_its_in_and_is_a_jump() {
+    let text = sixty();
+    // `k` keeps wanting byte 8 on line 11, at its 6; `10zt` stays at 6,
+    // and `j` goes on wanting 8.
+    assert_eq!(
+        after(viewed(&text, 5, (12, 8), false), "k10zt"),
+        (10, 10, 6)
+    );
+    assert_eq!(
+        after(viewed(&text, 5, (12, 8), false), "k10ztjj"),
+        (10, 12, 8)
+    );
+    // A jump, for Ctrl+O, from line 11; none to the line it's on.
+    let mut setup = viewed(&text, 5, (12, 8), false);
+    setup.keys("k");
+    let _ = setup.editor.take_left();
+    setup.keys("10zt");
+    let line_11 = text
+        .lines()
+        .take(10)
+        .map(|line| line.len() + 1)
+        .sum::<usize>();
+    assert_eq!(setup.editor.take_left(), Some(line_11 + 6));
+    setup.keys("10zb");
+    assert_eq!(setup.editor.take_left(), None);
+}
+
+#[test]
 fn zt_zz_and_zb_start_the_view_at_a_lines_start() {
     let text = wrapping();
     // Line 11 doesn't fit above line 14 in the middle of ten rows.

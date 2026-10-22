@@ -25,13 +25,23 @@ use crate::vim::{
 };
 
 /// Where a motion left the cursor on a line of history not fetched yet,
-/// with the column it wanted, and whether it goes to the line's first
-/// non-blank, as `gg` does with `startofline`, or else to the wanted
-/// column, once the line comes.
+/// with the column it wanted, and where on the line it goes once the
+/// line comes.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Unplaced {
     cursor: Cursor,
-    start_of_line: bool,
+    goes: Place,
+}
+
+/// Where on its line a cursor waiting for the line goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Place {
+    /// The column it wants, as `j` goes to.
+    Wanted,
+    /// The first non-blank, as `gg` goes to with `startofline`.
+    FirstNonBlank,
+    /// This column, as far as the line goes, as `5zt` keeps.
+    Column(usize),
 }
 
 /// What waits for its line: the cursor's place, and a selection's other
@@ -526,19 +536,45 @@ impl Pane {
             return;
         };
         cursor.onto_line(cursor.at.line, true, &Document(self));
-        self.note_unplaced(cursor, true);
+        self.note_unplaced(cursor, Place::FirstNonBlank);
         self.cursor = Some(cursor);
     }
 
     /// Notes where the cursor is, `cursor`, if its line hasn't come yet,
-    /// to put it where it goes on the line, at its first non-blank if
-    /// `start_of_line`, once it has; or forgets what was noted.
-    fn note_unplaced(&mut self, cursor: Cursor, start_of_line: bool) {
+    /// to put it where it `goes` on the line once it has; or forgets what
+    /// was noted.
+    fn note_unplaced(&mut self, cursor: Cursor, goes: Place) {
         let fetched = Document(self).row(cursor.at.line).is_some();
-        self.unplaced.cursor = (!fetched).then_some(Unplaced {
-            cursor,
-            start_of_line,
-        });
+        self.unplaced.cursor = (!fetched).then_some(Unplaced { cursor, goes });
+    }
+
+    /// Puts the cursor on line `count` from history's oldest, as `G`
+    /// counts, as `5zt` does: in the column it's in, as far as the line
+    /// goes, still wanting the one it wanted, as Vim's. One still waiting
+    /// for its line, as after a page with `startofline`, goes on to wait to
+    /// go where it would have gone.
+    fn onto_counted_line(&mut self, count: usize) {
+        let Some(cursor) = self.cursor else {
+            return;
+        };
+        let (first, last) = Document(self).bounds();
+        let line = first.saturating_add(count as u64 - 1).min(last);
+        let goes = match self.unplaced.cursor {
+            Some(waiting) if waiting.cursor.at == cursor.at => waiting.goes,
+            _ => Place::Column(cursor.at.col),
+        };
+        let moved = Unplaced {
+            cursor: Cursor::wanting(
+                Point {
+                    line,
+                    col: cursor.at.col,
+                },
+                cursor.want(),
+            ),
+            goes,
+        };
+        self.cursor = Some(self.placed(moved).unwrap_or(moved.cursor));
+        self.note_unplaced(moved.cursor, goes);
     }
 
     /// `zt`, `zz` and `zb`: scrolls the view to put the cursor's line at
@@ -548,8 +584,7 @@ impl Pane {
     /// cursor going there in its column, as Vim's.
     fn view_at(&mut self, at: ViewAt, count: Option<usize>) -> bool {
         if let Some(count) = count {
-            let (first, last) = Document(self).bounds();
-            self.move_to_line(first.saturating_add(count as u64 - 1).min(last));
+            self.onto_counted_line(count);
         }
         let Some(cursor) = self.cursor else {
             return false;
@@ -627,7 +662,12 @@ impl Pane {
                 | Motion::ViewBottom
         );
         if vertical || to_line {
-            self.note_unplaced(cursor, to_line && self.startofline);
+            let goes = if to_line && self.startofline {
+                Place::FirstNonBlank
+            } else {
+                Place::Wanted
+            };
+            self.note_unplaced(cursor, goes);
         } else {
             self.unplaced.cursor = None;
         }
@@ -667,7 +707,10 @@ impl Pane {
         let line = unplaced.cursor.at.line;
         document.row(line)?;
         let mut cursor = unplaced.cursor;
-        cursor.onto_line(line, unplaced.start_of_line, &document);
+        match unplaced.goes {
+            Place::Column(col) => cursor.at.col = col.min(document.last_cell(line)),
+            goes => cursor.onto_line(line, goes == Place::FirstNonBlank, &document),
+        }
         Some(cursor)
     }
 
