@@ -60,6 +60,12 @@ for n = 1, 60 do
 end
 endlong[61] = '61' .. string.rep('z', 88)
 
+-- Thirty lines, all but every fifth over four rows of 20.
+local long = {}
+for n = 1, 30 do
+  long[n] = n % 5 == 0 and ('  line ' .. n) or (('%02d'):format(n) .. string.rep('y', 68))
+end
+
 local cases = {
   -- CLACKA-127: a count before `gg`, or `G` as an operator's target, is a
   -- line number.
@@ -242,6 +248,7 @@ local cases = {
   { name = 'zt so=3 at the end', lines = sixty, at = { 60, 4 }, view = { height = 10, top = 51 }, keys = 'zt', set = 'scrolloff=3' },
   { name = '<C-f> so=3 end in view', lines = sixty, at = { 55, 4 }, view = { height = 10, top = 52 }, keys = '<C-f>', set = 'scrolloff=3' },
   { name = '3H so=5 sol at the end', lines = sixty, at = { 56, 4 }, view = { height = 10, top = 52 }, keys = '3H', set = 'scrolloff=5 sol' },
+  { name = 'M with a line cut off', lines = long, at = { 3, 4 }, view = { height = 10, top = 2, columns = 20 }, keys = 'M' },
   { name = 'M so=5 at the end', lines = sixty, at = { 56, 4 }, view = { height = 10, top = 51 }, keys = 'M', set = 'scrolloff=5' },
 }
 

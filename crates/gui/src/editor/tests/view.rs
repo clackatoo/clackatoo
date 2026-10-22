@@ -373,6 +373,21 @@ fn where_lines_wrap_h_and_l_count_lines_and_scrolloff_screen_rows() {
 }
 
 #[test]
+fn m_halves_the_rows_of_the_lines_shown_whole() {
+    // Lines of four rows: from line 2, lines 2 and 3 fill eight of ten,
+    // and line 4 is cut off; half of eight is line 2's four.
+    let long = (1..=30).fold(String::new(), |mut text, n| {
+        let _ = if n % 5 == 0 {
+            writeln!(text, "  line {n}")
+        } else {
+            writeln!(text, "{n:02}{}", "y".repeat(68))
+        };
+        text
+    });
+    assert_eq!(after(viewed(&long, 2, (3, 4), true), "M"), (2, 2, 4));
+}
+
+#[test]
 fn h_counts_from_the_first_line_shown_whole() {
     let text = wrapping();
     // Ctrl+E leaves line 11's second row at the top: H goes to line 12,

@@ -919,8 +919,11 @@ impl Cursor {
             Motion::ViewBottom if keep_margin => bottom.saturating_sub(from_edge).max(highest),
             Motion::ViewBottom => bottom.saturating_sub(from_edge).max(first),
             _ => {
-                // Half the rows shown, past the text's end not counted.
-                let half = (rows_between(top, bottom_row, lines) + 1).div_ceil(2);
+                // Half the rows of the lines shown whole, as Vim's: rows
+                // past the text's end, or of a line cut off at the bottom,
+                // don't count.
+                let end = last_row(lines, bottom).min(bottom_row);
+                let half = (rows_between(top, end, lines) + 1).div_ceil(2);
                 let mut used = 0;
                 let mut line = top.line;
                 loop {
@@ -930,7 +933,7 @@ impl Cursor {
                     } else {
                         rows
                     };
-                    if used >= half || line >= bottom_row.line {
+                    if used >= half || line >= bottom {
                         break line;
                     }
                     line += 1;
