@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026.10.71 (2026-10-22)
+
+### Features
+
+- **gui:** one page amount for every pane, as Vim's: half the view, a count setting it, and pages that keep the cursor in view (CLACKA-127) (443328d)
+- **gui:** the editor takes H, M and L, as moves and as what an operator takes (CLACKA-127) (03a992a)
+- **gui:** the editor takes Ctrl+E and Ctrl+Y, with counts (CLACKA-127) (e50e570)
+- **gui:** startofline reaches the paging keys and whole-line deletes, shifts and indents (CLACKA-127) (d3349c5)
+- **gui:** a terminal takes zt, zz and zb (CLACKA-127) (030be64)
+- **gui:** a terminal's zt, zz and zb take a count (CLACKA-127) (36a4208)
+- **gui:** the editor's zt, zz and zb take a count too (CLACKA-127) (adb7890)
+
+### Fixes
+
+- **gui:** a page puts the cursor at the view's top or bottom line (CLACKA-127) (2c4bbe6)
+- **gui:** H counts from the first line shown whole (CLACKA-127) (efef5d4)
+- **gui:** :d goes to the first non-blank whatever startofline says (CLACKA-127) (6166f20)
+- **gui:** a count before Ctrl+D goes a whole view at most (CLACKA-127) (60cf426)
+- **gui:** Ctrl+D's count is forgotten when the view's height changes (CLACKA-127) (04bcce4)
+- **gui:** H, M and L meet where Vim's do with a big scrolloff (CLACKA-127) (857b09b)
+- **gui:** d99L and d99H take as far as the text goes (CLACKA-127) (bf5a20e)
+- **gui:** the editor's half pages stop at the text's end and a line's start (CLACKA-127) (dc7d9a7)
+- **gui:** y'a leaves the cursor at the mark's line's first non-blank (CLACKA-127) (237b8f0)
+- **gui:** the editor's zz puts the line where Vim's does in an even view (CLACKA-127) (01e570c)
+- **gui:** a page that can't move leaves a view partway down a line be (CLACKA-127) (4df7111)
+- **gui:** the editor's zz puts a wrapped line's middle in the view's (CLACKA-127) (6f00491)
+
 ## 2026.10.70 (2026-10-21)
 
 ### Features
