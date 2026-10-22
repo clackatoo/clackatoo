@@ -947,3 +947,26 @@ fn a_search_found_or_not_aims_for_where_the_cursor_is() {
         assert_eq!(in_cells(text, (1, 2), keys).1, (1, 3), "{keys}");
     }
 }
+
+#[test]
+fn up_and_down_in_insert_mode_go_just_past_a_short_lines_end() {
+    // Aiming further on than the line goes, just past its last character,
+    // as Vim's `coladvance()` goes in insert mode.
+    assert_eq!(
+        in_cells("abcd\nab\n", (1, 2), "i<Down>Q<Esc>").0,
+        "abcd\nabQ\n"
+    );
+    assert_eq!(
+        in_cells("ab\nabcd\n", (2, 2), "i<Up>Q<Esc>").0,
+        "abQ\nabcd\n"
+    );
+    assert_eq!(
+        in_cells("abcdefgh\na中\n", (1, 3), "i<Down>Q<Esc>").0,
+        "abcdefgh\na中Q\n"
+    );
+    // Short of the end, on the character there, as before.
+    assert_eq!(
+        in_cells("abcd\nab\n", (1, 1), "i<Down>Q<Esc>").0,
+        "abcd\naQb\n"
+    );
+}

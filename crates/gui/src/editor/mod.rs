@@ -1971,14 +1971,7 @@ impl Editor {
                 self.cursor = Cursor::new(at);
             }
             _ if !went => {}
-            _ => {
-                let at = self.cursor.at;
-                let end = past(at.line);
-                let aims_past = self.cursor.aim(&text) >= end;
-                if end > 0 && at.col == text.last_cell(at.line) && aims_past {
-                    self.cursor = self.cursor.moved(Point { col: end, ..at });
-                }
-            }
+            _ => self.cursor = past_end_if_aimed(self.cursor, &text),
         }
     }
 
@@ -3139,10 +3132,16 @@ impl Editor {
             }
             Stroke::Left => self.cursor.apply(Motion::Left, &text),
             Stroke::Home => self.cursor.apply(Motion::LineStart, &text),
+            // Just past the last character of a line short of the column
+            // aimed for, as Vim's `coladvance()` goes in insert mode.
             Stroke::Up | Stroke::PageUp | Stroke::ShiftUp => {
                 self.cursor.apply(Motion::Up(1), &text);
+                self.cursor = past_end_if_aimed(self.cursor, &text);
             }
-            _ => self.cursor.apply(Motion::Down(1), &text),
+            _ => {
+                self.cursor.apply(Motion::Down(1), &text);
+                self.cursor = past_end_if_aimed(self.cursor, &text);
+            }
         }
     }
 
@@ -6059,6 +6058,19 @@ fn indent_before(text: &Text<'_>, byte: usize) -> usize {
     let shown = &text.line_text(line)[start - text.line_start(line)..];
     let indent = start + indent_of(shown).len();
     if byte > indent { indent } else { start }
+}
+
+/// `cursor`, on its line's last character, just past it if it aims for a
+/// column there or further on, as Vim's `coladvance()` puts it in visual
+/// and insert mode.
+fn past_end_if_aimed(cursor: Cursor, text: &Text<'_>) -> Cursor {
+    let at = cursor.at;
+    let end = text.line_cells(at.line);
+    if end > 0 && at.col == text.last_cell(at.line) && cursor.aim(text) >= end {
+        cursor.moved(Point { col: end, ..at })
+    } else {
+        cursor
+    }
 }
 
 /// What an operator takes of `text` with an exclusive motion from
