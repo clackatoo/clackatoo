@@ -207,3 +207,18 @@ fn copying_an_object_after_the_cursor_goes_to_its_start() {
     assert_eq!(at("x \"ab\"\n", "yi\""), (1, 3));
     assert_eq!(at("x ((y)) z\n", "y2i("), (1, 4));
 }
+
+#[test]
+fn d_takes_an_object_over_lines_from_the_indent_to_a_lines_end_whole() {
+    let (text, _, taken, lines) = after("(a\nb)\nz\n", (1, 0), "da(");
+    assert_eq!(
+        (text.as_str(), taken.as_str(), lines),
+        ("z\n", "(a\nb)\n", true)
+    );
+    assert_eq!(after("  (a\nb)\nz\n", (1, 2), "da(").0, "z\n");
+    // Not from after the indent, nor to before a line's end.
+    assert_eq!(after("x (a\nb)\nz\n", (1, 2), "da(").0, "x \nz\n");
+    assert_eq!(after("(a\nb) y\nz\n", (1, 0), "da(").0, " y\nz\n");
+    // Nor what's selected.
+    assert_eq!(after("(a\nb)\nz\n", (1, 0), "va(d").0, "\nz\n");
+}

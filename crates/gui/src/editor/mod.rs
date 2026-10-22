@@ -2080,6 +2080,13 @@ impl Editor {
         let Some(span) = span else {
             return false;
         };
+        // What a motion, a mark or an object took, not a selection: `d`
+        // may take it as whole lines (see `whole_lines_deleted`).
+        let span = if operator == Operator::Delete && target != Target::Selection {
+            whole_lines_deleted(&self.text(copy), span)
+        } else {
+            span
+        };
         // Characters over lines would join a listing's lines, taking the
         // marks of all but the first.
         if matches!(operator, Operator::Delete | Operator::Change)
@@ -2500,11 +2507,6 @@ impl Editor {
             Reach::Lines => lines(start.line, end.line),
             Reach::Inclusive => chars(start, end),
             Reach::Exclusive => exclusive(&text, start, end)?,
-        };
-        let span = if operator == Operator::Delete {
-            whole_lines_deleted(&text, span)
-        } else {
-            span
         };
         // `y_` leaves the cursor where it is, as Vim's.
         let moved = if operator == Operator::Yank && motion == Motion::LineFirstNonBlank {
@@ -5993,10 +5995,11 @@ fn exclusive(text: &Text<'_>, start: Point, end: Point) -> Option<Span> {
     })
 }
 
-/// What `d` deletes of `span`, which a motion took: over lines, from at or
-/// before its first line's first character that isn't blank, to the end
-/// of a line or only blanks before it, whole lines, as Vim's `d` takes
-/// them (`d2e` from a line's start).
+/// What `d` deletes of `span`, which a motion, a mark or an object took:
+/// over lines, from at or before its first line's first character that
+/// isn't blank, to the end of a line or only blanks before it, whole
+/// lines, as Vim's `d` takes them (`d2e` from a line's start, `da(` from
+/// a `(` that starts a line and a `)` that ends one).
 fn whole_lines_deleted(text: &Text<'_>, span: Span) -> Span {
     if span.lines.is_some() || span.end <= span.start {
         return span;

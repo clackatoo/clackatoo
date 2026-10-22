@@ -2450,8 +2450,10 @@ fn a_function_is_deleted_once_the_grammar_says_where_it_is() {
     assert_eq!(at, TWO.find("    two").unwrap());
     assert_eq!(setup.text(), TWO, "not until it answers");
     setup.answer(asked, Answer::Pieces(vec![one(TWO)]));
-    assert_eq!(setup.text(), "\n\nfn three() {\n    x;\n}");
-    assert_eq!(setup.register().text, "fn one(a, bb) {\n    two(a);\n}");
+    // Its whole lines, as Vim's `d` takes what starts a line and ends one.
+    assert_eq!(setup.text(), "\nfn three() {\n    x;\n}");
+    assert_eq!(setup.register().text, "fn one(a, bb) {\n    two(a);\n}\n");
+    assert!(setup.register().lines);
     assert_eq!(setup.cursor(), (0, 0));
 }
 
@@ -2462,14 +2464,15 @@ fn keys_typed_while_waiting_are_read_after_the_answer() {
     assert_eq!(setup.text(), TWO);
     assert_eq!(setup.editor.mode, Mode::Normal, "the i is held");
     setup.answer(setup.last_query().0, Answer::Pieces(vec![one(TWO)]));
-    assert_eq!(setup.text(), "y\n\nfn three() {\n    x;\n}");
+    assert_eq!(setup.text(), "y\nfn three() {\n    x;\n}");
     assert_eq!(setup.editor.mode, Mode::Normal);
     // A command in the keys held waits in turn, and the keys after it.
     setup.keys("Gdafx");
     let text = setup.copy.text().to_string();
     let three = piece_of(&text, "fn three() {\n    x;\n}", Some("x;"));
     setup.answer(setup.last_query().0, Answer::Pieces(vec![three]));
-    assert_eq!(setup.text(), "y\n\n", "the x had nothing to delete");
+    // The function's lines go, and the x deletes the `y` left.
+    assert_eq!(setup.text(), "");
 }
 
 #[test]
@@ -2690,7 +2693,7 @@ fn a_cursor_moved_while_waiting_gives_up_but_others_edits_dont() {
     setup.editor.heard(&mut heard, true, &mut setup.copy);
     let text = format!("// x\n{TWO}");
     setup.answer(setup.last_query().0, Answer::Pieces(vec![one(&text)]));
-    assert_eq!(setup.text(), "// x\n\n\nfn three() {\n    x;\n}");
+    assert_eq!(setup.text(), "// x\n\nfn three() {\n    x;\n}");
 }
 
 #[test]
@@ -2728,7 +2731,7 @@ fn the_menu_of_code_actions_and_keys_held_for_the_grammar_get_along() {
     assert!(matches!(query, Query::CodeActions { .. }), "{query:?}");
     setup.answer(list, Answer::CodeActions(actions));
     assert!(action_menu(&mut setup).is_some());
-    assert_eq!(setup.text(), "\n\nfn three() {\n    x;\n}");
+    assert_eq!(setup.text(), "\nfn three() {\n    x;\n}");
 }
 
 // --- Registers, macros and marks --------------------------------------------
