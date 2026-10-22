@@ -88,13 +88,14 @@ impl Pane {
                 Ok(selected) => (Some(selected), false),
                 Err(selected) => (selected, true),
             };
-            if let (Some(selected), Mode::Visual(kind)) = (selected, self.mode) {
-                let kind = object.selection(kind, selected.lines, failed);
-                self.select(selected.anchor, selected.cursor, kind);
-            }
-            // Aiming for where it is, as Vim's after an object either way.
-            if failed {
-                self.cursor = self.cursor.map(|cursor| Cursor::new(cursor.at));
+            match (selected, self.mode) {
+                (Some(selected), Mode::Visual(kind)) => {
+                    let kind = object.selection(kind, selected.lines, failed);
+                    self.select(selected.anchor, selected.cursor, kind);
+                }
+                // Failing where it is, aiming for its column, as Vim's.
+                _ if failed => self.cursor = self.cursor.map(|cursor| Cursor::new(cursor.at)),
+                _ => {}
             }
             return !failed;
         }

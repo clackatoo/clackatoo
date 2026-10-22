@@ -1798,16 +1798,26 @@ impl Editor {
             Ok(selected) => (Some(selected), false),
             Err(selected) => (selected, true),
         };
+        // Failing where it is, aiming for its column, as Vim's: on a tab
+        // where visual mode started, its last cell, as Vim's keeps the
+        // column it worked out there before, and else as visual mode has
+        // it (see `settle_want`).
+        let aim = Cursor::new(self.cursor.at).aim(&text);
         drop(text);
-        if let (Some(selected), Mode::Visual(kind)) = (selected, self.mode) {
-            let kind = object.selection(kind, selected.lines, failed);
-            self.mode = Mode::Visual(kind);
-            self.anchor = Some(selected.anchor);
-            self.cursor = Cursor::new(selected.cursor);
+        match (selected, self.mode) {
+            (Some(selected), Mode::Visual(kind)) => {
+                let kind = object.selection(kind, selected.lines, failed);
+                self.mode = Mode::Visual(kind);
+                self.anchor = Some(selected.anchor);
+                self.cursor = Cursor::new(selected.cursor);
+            }
+            _ if failed && self.anchor == Some(self.cursor.at) => {
+                self.cursor = Cursor::wanting(self.cursor.at, aim);
+            }
+            _ if failed => self.cursor = Cursor::new(self.cursor.at),
+            _ => {}
         }
         if failed {
-            // Aiming for where it is, as Vim's after an object either way.
-            self.cursor = Cursor::new(self.cursor.at);
             self.fail();
         }
     }

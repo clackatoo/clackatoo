@@ -229,4 +229,15 @@ fn an_object_that_fails_aims_for_where_the_cursor_is() {
     // goes to the column the cursor's in, as Vim's.
     assert_eq!(after("abc\nabcdef\n", (1, 1), "v$a(j").1, (2, 3));
     assert_eq!(after("abc\nabcdef\n", (1, 1), "v$j").1, (2, 6));
+    // On a tab, its last cell, as it aimed for before visual mode.
+    let text = "b c\n\n\n  \nb c\n\t\n  \n";
+    let mut setup = Setup::new(text);
+    setup.set(|options| options.tabstop = 4);
+    setup.keys("5jvapj");
+    assert_eq!(setup.cursor(), (6, 2));
+    // Moved there in visual mode, its first, before the other end.
+    let mut setup = Setup::new("a\tb\n  \n.a.a.a.\n\tab cd\t\n\na\tb\n");
+    setup.set(|options| options.tabstop = 4);
+    setup.keys("4jVka(d");
+    assert_eq!(setup.cursor(), (3, 0));
 }
