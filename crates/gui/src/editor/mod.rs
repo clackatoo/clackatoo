@@ -1604,7 +1604,9 @@ impl Editor {
                 let motion = self.finds.remember(motion);
                 let motion = self.by_rows(motion);
                 self.cursor = self.moved(copy, motion, command.count);
-                if self.cursor.at == from && can_fail(motion) {
+                let stays = command.count.is_none_or(|count| count == 1)
+                    && motion.found_in_place(from, &self.text(copy));
+                if self.cursor.at == from && can_fail(motion) && !stays {
                     self.fail();
                 }
             }
@@ -2348,14 +2350,9 @@ impl Editor {
             });
         }
         let moved = self.taken_to(copy, motion, count);
-        // `dj` on the last line has no line to take with it, nor `d2_`.
-        let down = matches!(motion, Motion::LineFirstNonBlank | Motion::LastNonBlank) && times > 1;
-        if (matches!(motion, Motion::Up(_) | Motion::Down(_)) || down) && moved.at.line == at.line {
-            return None;
-        }
         let Taken {
             start, end, reach, ..
-        } = Taken::between(motion, at, moved, &text)?;
+        } = Taken::between(motion, count, at, moved, &text)?;
         // After `$`, `gj` and `gk` take the character they go to,
         // as in Vim.
         let rows = matches!(motion, Motion::RowUp(_) | Motion::RowDown(_));

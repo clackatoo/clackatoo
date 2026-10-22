@@ -618,8 +618,20 @@ impl Motion {
     /// What an operator takes with it from `from` to `to`, in `lines`; or
     /// `None` if the motion went nowhere it could, as `%` with no bracket,
     /// which takes nothing.
-    pub(crate) fn reach_from(self, from: Point, to: Point, lines: &impl Lines) -> Option<Reach> {
+    pub(crate) fn reach_from(
+        self,
+        from: Point,
+        to: Point,
+        count: Option<usize>,
+        lines: &impl Lines,
+    ) -> Option<Reach> {
+        let once = count.is_none_or(|count| count == 1);
         match self {
+            // `dt)` with `)` right after the cursor takes the character
+            // it's on, as Vim's.
+            Self::Find { .. } if from == to && once && self.found_in_place(from, lines) => {
+                Some(Reach::Inclusive)
+            }
             Self::Match
             | Self::Find { .. }
             | Self::WordEndBack
@@ -636,6 +648,22 @@ impl Motion {
             Self::Paragraph { forward: true } if !lines.empty(to.line) => Some(Reach::Inclusive),
             _ => Some(self.reach()),
         }
+    }
+
+    /// Whether it's `t` finding its character right after `at`, so going
+    /// nowhere without failing, as Vim's `t)` does with `)` next.
+    pub(crate) fn found_in_place(self, at: Point, lines: &impl Lines) -> bool {
+        let Self::Find {
+            ch,
+            forward: true,
+            till: true,
+            again,
+        } = self
+        else {
+            return false;
+        };
+        let row = lines.row(at.line);
+        find_char(row.as_deref(), at.col, (ch, true, true), 1, again) == Some(at.col)
     }
 
     pub(crate) fn reach(self) -> Reach {
@@ -697,16 +725,27 @@ pub(crate) struct Taken {
 }
 
 impl Taken {
-    /// What `motion` takes from `from` to `moved`, where it went, in
-    /// `lines`: none if it went nowhere it could (see
-    /// [`Motion::reach_from`]).
+    /// What `motion`, with `count` typed, takes from `from` to `moved`,
+    /// where it went, in `lines`: none if it went nowhere it could (see
+    /// [`Motion::reach_from`]), or there's no line to take, as `dj` and
+    /// `d2_` on the last line.
     pub(crate) fn between(
         motion: Motion,
+        count: Option<usize>,
         from: Point,
         moved: Cursor,
         lines: &impl Lines,
     ) -> Option<Self> {
-        let reach = motion.reach_from(from, moved.at, lines)?;
+        let counted = count.is_some_and(|count| count > 1);
+        let down = match motion {
+            Motion::Up(_) | Motion::Down(_) => true,
+            Motion::LineFirstNonBlank | Motion::LastNonBlank => counted,
+            _ => false,
+        };
+        if down && moved.at.line == from.line {
+            return None;
+        }
+        let reach = motion.reach_from(from, moved.at, count, lines)?;
         let (start, end) = if moved.at < from {
             (moved.at, from)
         } else {
@@ -971,12 +1010,7 @@ impl Cursor {
     ) -> Option<Taken> {
         let mut moved = *self;
         moved.go_to_take(motion, count, lines, start_of_line);
-        // `y2_` on the last line has no line to take with it.
-        let down = matches!(motion, Motion::LineFirstNonBlank | Motion::LastNonBlank);
-        if down && count.is_some_and(|count| count > 1) && moved.at.line == self.at.line {
-            return None;
-        }
-        Taken::between(motion, self.at, moved, lines)
+        Taken::between(motion, count, self.at, moved, lines)
     }
 
     /// Moves to line `line`: to its first character that isn't blank if
@@ -1646,12 +1680,12 @@ fn find_char(
     if !till {
         return Some(found);
     }
-    let near = if forward {
-        previous_cell(row, found)?
+    // Right by `col`, `t` stays where it is, having found it.
+    if forward {
+        previous_cell(row, found)
     } else {
-        next_cell(row, found)?
-    };
-    (near != col).then_some(near)
+        next_cell(row, found)
+    }
 }
 
 /// The last character before `end`, from `start`, for an exclusive

@@ -439,3 +439,20 @@ fn the_cursor_goes_onto_blanks_at_a_lines_end_as_vims_does() {
     assert_eq!(in_cells(text, (1, 3), "d2<Space>").0, "a   \none\n");
     assert_eq!(in_cells(text, (1, 3), "d3<Space>").0, "a  \none\n");
 }
+
+#[test]
+fn t_right_before_its_character_takes_the_one_under_the_cursor() {
+    assert_eq!(in_cells("ab)c\n", (1, 1), "dt)"), ("a)c\n".into(), (1, 1)));
+    assert_eq!(
+        in_cells("ab)c)d\n", (1, 1), "dt)."),
+        ("a)d\n".into(), (1, 1))
+    );
+    assert_eq!(in_cells("ab)c\n", (1, 1), "ct)X<Esc>").0, "aX)c\n");
+    // With a count, there must be that many.
+    assert_eq!(in_cells("ab)c\n", (1, 1), "d2t)").0, "ab)c\n");
+    // Moving, it stays, and doesn't fail.
+    let mut setup = Setup::new("ab)c\n");
+    setup.keys("lt)");
+    assert_eq!(setup.cursor(), (0, 1));
+    assert!(!setup.editor.take_failed());
+}
