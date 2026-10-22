@@ -1234,15 +1234,24 @@ impl Cursor {
 
     fn word_start(&mut self, lines: &impl Lines, kind: fn(Class) -> Class) {
         let mut walk = Walk::new(lines, self.at).seeing(kind);
+        // At the text's end, past its last character, blank or not, as
+        // Vim's, which pulls it back onto that outside visual mode.
+        let at_end = |walk: &Walk<'_, _>| Point {
+            col: line_end(walk.at.line, lines),
+            ..walk.at
+        };
         let class = walk.class();
         while class != Class::Blank && walk.class() == class {
             if !walk.forward() {
-                return self.settle(walk.at);
+                return self.settle(at_end(&walk));
             }
         }
         // Over blanks and line ends, stopping at an empty line, as Vim's.
         while walk.class() == Class::Blank {
-            if !walk.forward() || (walk.at.col == 0 && lines.empty(walk.at.line)) {
+            if !walk.forward() {
+                return self.settle(at_end(&walk));
+            }
+            if walk.at.col == 0 && lines.empty(walk.at.line) {
                 break;
             }
         }

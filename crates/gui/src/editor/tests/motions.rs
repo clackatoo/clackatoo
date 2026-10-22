@@ -627,3 +627,12 @@ fn b_stops_at_empty_lines_as_w_does() {
     // A line of blanks isn't empty.
     assert_eq!(in_cells("ab\n  \ncd\n", (3, 0), "b").1, (1, 0));
 }
+
+#[test]
+fn w_at_the_texts_end_goes_to_its_last_character_blank_or_not() {
+    assert_eq!(in_cells("ab\n  \n", (1, 0), "W").1, (2, 1));
+    assert_eq!(in_cells("ab  \n", (1, 0), "w").1, (1, 3));
+    assert_eq!(in_cells("ab\n\t\n", (1, 0), "W").1, (2, 0));
+    // Past it in visual mode, as Vim's.
+    assert_eq!(kept("ab  \n", (1, 0), "vwy").1, "ab  ");
+}
