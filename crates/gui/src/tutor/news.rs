@@ -654,6 +654,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "A count before zt, zz or zb puts that line at the top, middle or bottom, the cursor on it, as in Vim",
     },
     News {
+        id: "terminalfind",
+        date: "2026-10-22",
+        lesson: "basics",
+        what: "A terminal takes f, t, F and T, with ; and , to find again, and y with them, as yt) copies up to a )",
+    },
+    News {
         id: "remoterestore",
         date: "2026-10-23",
         lesson: "shell",

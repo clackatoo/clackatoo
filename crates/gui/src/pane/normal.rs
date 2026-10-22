@@ -131,14 +131,13 @@ impl Dialect for TerminalKeys {
             return false;
         }
         match command.action {
-            Action::Move(motion) | Action::Operate(Operator::Yank, Target::Motion(motion)) => {
-                !matches!(motion, Motion::Find { .. })
-            }
             Action::Insert(entry) => entry == Entry::Before,
-            Action::Operate(
+            Action::Move(_)
+            | Action::Operate(
                 Operator::Yank,
-                Target::Lines | Target::Object { .. } | Target::Selection,
+                Target::Motion(_) | Target::Lines | Target::Object { .. } | Target::Selection,
             )
+            | Action::FindAgain { .. }
             | Action::Visual { .. }
             | Action::BlockVisual
             | Action::Reselect
@@ -161,7 +160,6 @@ impl Dialect for TerminalKeys {
             | Action::Redo
             | Action::Repeat
             | Action::SearchWord { .. }
-            | Action::FindAgain { .. }
             | Action::SetMark(_)
             | Action::Mark { .. }
             | Action::Tilde => false,
@@ -207,10 +205,18 @@ impl Pane {
     fn execute(&mut self, command: Command<TerminalAction>) -> bool {
         let count = command.count;
         match command.action {
-            Action::Move(motion) => self.move_cursor(motion, count),
+            Action::Move(motion) => {
+                let motion = self.finds.remember(motion);
+                self.move_cursor(motion, count)
+            }
             Action::Operate(Operator::Yank, Target::Motion(motion)) => {
+                let motion = self.finds.remember(motion);
                 self.yank_motion(motion, count)
             }
+            Action::FindAgain { reverse } => match self.finds.again(reverse) {
+                Some(motion) => self.move_cursor(motion, count),
+                None => false,
+            },
             Action::Operate(Operator::Yank, Target::Lines) => self.yank_lines(command.times()),
             Action::Operate(Operator::Yank, Target::Selection) => self.yank_selection(),
             // Copied after `y`, selected in visual mode.
@@ -257,7 +263,6 @@ impl Pane {
             | Action::Redo
             | Action::Repeat
             | Action::SearchWord { .. }
-            | Action::FindAgain { .. }
             | Action::SetMark(_)
             | Action::Mark { .. }
             | Action::Tilde => {

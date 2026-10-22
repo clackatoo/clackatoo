@@ -120,6 +120,8 @@ pub(crate) struct Pane {
     startofline: bool,
     /// How far Ctrl+D and its kin go.
     paging: vim::Paging,
+    /// The last `f`, `t`, `F` or `T`, for `;` and `,`.
+    finds: vim::Finds,
     /// Where motions left the cursor, or a selection's other end, on
     /// lines not fetched yet.
     unplaced: normal::Unplacements,
@@ -186,6 +188,7 @@ impl Pane {
             case: Case::default(),
             startofline: Options::default().startofline,
             paging: vim::Paging::default(),
+            finds: vim::Finds::default(),
             unplaced: normal::Unplacements::default(),
             blockmarks: Options::default().blockmarks,
             carryover: Options::default().carryover,
@@ -2773,14 +2776,41 @@ mod tests {
     }
 
     #[test]
+    fn f_t_f_and_t_find_on_the_line_and_semicolon_and_comma_again() {
+        // Checked against Neovim (`crates/gui/tests/nvim/check.lua`).
+        let terminal = terminal("ab.cd.ef.gh");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let col = |pane: &mut Pane, keys_: &str| {
+            keys(pane, keys_);
+            cursor(pane).2
+        };
+        assert_eq!(col(&mut pane, "gg0t."), 1);
+        // `;` after `t` goes on past the character it stopped before.
+        assert_eq!(col(&mut pane, ";"), 4);
+        assert_eq!(col(&mut pane, ";"), 7);
+        // `,` the other way: `T`.
+        assert_eq!(col(&mut pane, ","), 6);
+        assert_eq!(col(&mut pane, "0f.2;"), 8);
+        assert_eq!(col(&mut pane, "$F."), 8);
+        assert_eq!(col(&mut pane, ","), 8, "no `.` after it");
+        assert_eq!(col(&mut pane, "02f."), 5);
+        // `y` takes to the character, and back to it.
+        let mut yank = |keys_: &str| yanked(&mut pane, &terminal, keys_);
+        assert_eq!(yank("0yt.").as_deref(), Some("ab"));
+        assert_eq!(yank("$yF.").as_deref(), Some(".g"));
+        assert_eq!(cursor(&pane).2, 8);
+    }
+
+    #[test]
     fn commands_a_terminal_doesnt_take_are_nothing_and_spend_their_keys() {
         let terminal = terminal("one two six\r\nfour five");
         let mut pane = pane(&terminal);
         normal_mode(&mut pane);
         keys(&mut pane, "gg");
-        // An operator but `y`, a register, `z` and `f` wait for the rest of
+        // An operator but `y`, a register, `z` and `m` wait for the rest of
         // their command, which isn't a terminal's: all its keys are spent.
-        for keys_ in ["dw", "\"aw", "zw", "fw"] {
+        for keys_ in ["dw", "\"aw", "zw", "mw"] {
             keys(&mut pane, "0");
             keys(&mut pane, &keys_[..keys_.len() - 1]);
             assert!(pane.pending(), "{keys_}");

@@ -357,6 +357,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 | `gj` `gk` `g0` `g$` | As `j`, `k`, `0` and `$`: a terminal's lines don't wrap. |
 | `gg` `G` | The oldest line of history, the screen's last line, or with a count, that line, keeping the column, as Neovim's do; at its first character that isn't blank with the [option](~clackatoo/reference/config#options) `startofline`. |
 | `gx` | Opens the link under the cursor, as Ctrl+click does. |
+| `f` `t` `F` `T`, `;` `,` | To the next of the character typed after them on the line, or just before it, or back to the one before, or just after it; `;` finds it again, and `,` the other way, as Vim's do. With `y`, they take to it: `yt)`. |
 | `%` `{` `}` | The bracket that pairs with the one under the cursor; the blank line before or after the paragraph. |
 | `H` `M` `L` | The top, middle and bottom lines in view, keeping the column as `gg` does. |
 | `5k`, `3w`, `10G`, `2gg` | A count before a motion repeats it, as in Vim; before `G` or `gg`, it goes to that line, counting from the oldest line of history. `3H` and `3L` count from the view's top and bottom, no further than the other, but `y99L` takes to the oldest line, as Vim's does. |
@@ -367,7 +368,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 
 Moving past the top of the view scrolls into history. In normal mode the view holds still while output arrives, so the cursor stays on its text. On the alternate screen the cursor moves over the screen only.
 
-The keys are read as an editor reads them, so a command half typed, as `y3` or `"a`, shows at the start of the bar until it's done, as Vim's `showcmd` shows it. A command a terminal doesn't take, as `dw`, `x`, `"ayy` or `fx`, does nothing, all its keys spent, as in a file Vim won't change: so after `d`, the next key is the command's too, `:` included. Esc after keys half typed only forgets them, as in Vim: `vg` or `vi` and Esc is still in visual mode, and a second Esc leaves it. Esc after only a count or a register, as `v3` or `v"a`, does what Esc alone does, and leaves visual mode.
+The keys are read as an editor reads them, so a command half typed, as `y3` or `"a`, shows at the start of the bar until it's done, as Vim's `showcmd` shows it. A command a terminal doesn't take, as `dw`, `x`, `"ayy` or `ma`, does nothing, all its keys spent, as in a file Vim won't change: so after `d`, the next key is the command's too, `:` included. Esc after keys half typed only forgets them, as in Vim: `vg` or `vi` and Esc is still in visual mode, and a second Esc leaves it. Esc after only a count or a register, as `v3` or `v"a`, does what Esc alone does, and leaves visual mode.
 
 ### Selecting and copying
 
