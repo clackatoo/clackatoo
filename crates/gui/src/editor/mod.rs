@@ -109,7 +109,7 @@ use crate::input::KeyPress;
 use crate::keymap::Chord;
 use crate::motion::{
     Block, Class, Cursor, Lines, Motion, Point, Reach, RowAt, Taken, View, Words, before, class_at,
-    deleted_back, last_row, row_at, rows_between, rows_down, rows_up,
+    deleted_back, last_row, over_back, row_at, rows_between, rows_down, rows_up,
 };
 use crate::objects::{Object, Selected};
 use crate::options::{Case, CompleteAccept, Options};
@@ -1631,7 +1631,7 @@ impl Editor {
                 let motion = self.finds.remember(motion);
                 let motion = self.by_rows(motion);
                 self.cursor = self.moved(copy, motion, command.count);
-                if self.mode == Mode::Visual(Selection::Characters) {
+                if visual {
                     self.past_line_end(motion, from, times, copy);
                 }
                 let once = command.count.is_none_or(|count| count == 1);
@@ -1915,10 +1915,12 @@ impl Editor {
         self.last_change = Some(change);
     }
 
-    /// In visual mode by characters, puts the cursor just past its line's
-    /// last character where Vim's goes, so a selection takes the line
-    /// break: `l` or Space on from the last character, `$`, `|` past the
-    /// end, and up and down wanting a column past it (`v$j`).
+    /// In visual mode, puts the cursor just past its line's last character
+    /// where Vim's goes, so a selection by characters takes the line
+    /// break: `l` or Space on from the last character, Backspace back over
+    /// a line's start, and any motion that aims for a column past the end,
+    /// as `$` and `|` past it do, and after them up and down, `gg` or `G`
+    /// (`v$j`).
     fn past_line_end(&mut self, motion: Motion, from: Point, times: usize, copy: &BufferCopy) {
         let text = self.text(copy);
         let past = |line: u64| text.line_cells(line);
@@ -1948,19 +1950,26 @@ impl Editor {
                 }
                 self.cursor = Cursor::new(at);
             }
-            Motion::LineEnd
-            | Motion::Column
-            | Motion::Up(_)
-            | Motion::Down(_)
-            | Motion::RowUp(_)
-            | Motion::RowDown(_) => {
+            // A character at a time, from a line's start to just past the
+            // end of the line before.
+            Motion::LeftOver => {
+                let mut at = from;
+                for _ in 0..times {
+                    match over_back(at, &text) {
+                        Some(back) => at = back,
+                        None => break,
+                    }
+                }
+                self.cursor = Cursor::new(at);
+            }
+            _ => {
                 let at = self.cursor.at;
                 let end = past(at.line);
-                if end > 0 && at.col == text.last_cell(at.line) && self.cursor.want() >= end {
+                let aims_past = self.cursor.aim(&text) >= end;
+                if end > 0 && at.col == text.last_cell(at.line) && aims_past {
                     self.cursor = self.cursor.moved(Point { col: end, ..at });
                 }
             }
-            _ => {}
         }
     }
 
@@ -4419,7 +4428,7 @@ impl Editor {
         // can be (see [`past_line_end`](Self::past_line_end)).
         let at = self.cursor.at;
         let past = at.line <= text.last_line() && at.col == text.line_cells(at.line);
-        if !(self.mode == Mode::Visual(Selection::Characters) && past) {
+        if !(matches!(self.mode, Mode::Visual(_)) && past) {
             self.cursor.at = on_character(at, &text);
         }
         if let Some(anchor) = &mut self.anchor {

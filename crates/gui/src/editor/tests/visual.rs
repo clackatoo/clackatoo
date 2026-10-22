@@ -635,3 +635,31 @@ fn copying_lines_selected_leaves_the_cursor_where_vims_does() {
     assert_eq!(at("j3lVjy"), (1, 0));
     assert_eq!(at("jj3lVky"), (1, 3));
 }
+
+#[test]
+fn past_a_lines_end_in_every_kind_of_selection_and_back_to_it() {
+    let copied = |text: &str, keys: &str| {
+        let mut setup = Setup::new(text);
+        setup.keys(keys);
+        setup.register().text
+    };
+    let cursor = |text: &str, keys: &str| {
+        let mut setup = Setup::new(text);
+        setup.keys(keys);
+        setup.cursor()
+    };
+    // Backspace from a line's start stops just past the end of the line
+    // before.
+    assert_eq!(copied("abc\nxy\n", "jv<BS>y"), "\nx");
+    assert_eq!(copied("abc\nxy\n", "jv2<BS>y"), "c\nx");
+    // By lines and in a block too.
+    assert_eq!(cursor("abc\nxy\n", "V3<Space>"), (0, 3));
+    assert_eq!(cursor("abc\nxy\n", "V$"), (0, 3));
+    assert_eq!(cursor("abc\nxy\n", "<C-v>$"), (0, 3));
+    // gv selects it again there, and gg, G and switching kinds keep it.
+    assert_eq!(copied("abc\nxy\n", "v$ygvy"), "abc\n");
+    assert_eq!(copied("abc\nxy\n", "v$<Esc>gvy"), "abc\n");
+    assert_eq!(copied("abc\nxy\n", "v$ggy"), "abc\n");
+    assert_eq!(copied("xy\nabc\n", "jv$ggy"), "\na");
+    assert_eq!(copied("abc\nxy\n", "v$Vvy"), "abc\n");
+}

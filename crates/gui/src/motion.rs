@@ -1590,7 +1590,7 @@ pub(crate) fn deleted_back(at: Point, times: usize, lines: &impl Lines) -> Optio
 
 /// One step back for `deleted_back`: to the character before, or from a
 /// line's start to just after the previous line's last character.
-fn over_back(at: Point, lines: &impl Lines) -> Option<Point> {
+pub(crate) fn over_back(at: Point, lines: &impl Lines) -> Option<Point> {
     if at.col > 0 {
         let row = lines.row(at.line);
         let col = previous_cell(row.as_deref(), at.col.min(line_end(at.line, lines))).unwrap_or(0);

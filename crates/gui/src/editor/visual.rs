@@ -148,7 +148,15 @@ impl Editor {
     fn select_kept(&mut self, selected: &Selected, copy: &BufferCopy) {
         let text = self.text(copy);
         let len = text.rope().len_bytes();
-        let point = |byte: usize| on_character(text.point_of(byte.min(len)), &text);
+        // Just past a line's end, as Vim's selection can be, it stays.
+        let point = |byte: usize| {
+            let at = text.point_of(byte.min(len));
+            if at.col >= text.line_cells(at.line) {
+                at
+            } else {
+                on_character(at, &text)
+            }
+        };
         let (start, last) = selected.ends();
         let (first, last) = (point(start), point(last));
         let shape = selected.shape;
