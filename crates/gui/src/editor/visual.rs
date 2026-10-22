@@ -103,10 +103,15 @@ impl Editor {
         };
         let text = self.text(copy);
         let bytes = (text.byte_at(first), next_char(&text, text.byte_at(last)));
+        let past = |at: Point| {
+            let cells = text.line_cells(at.line);
+            cells > 0 && at.col >= cells
+        };
         let shape = Shape {
             kind,
             backward: at < anchor,
             to_end: self.cursor.want() == usize::MAX,
+            past_end: (past(first), past(last)),
         };
         Some((bytes, shape))
     }
@@ -148,18 +153,22 @@ impl Editor {
     fn select_kept(&mut self, selected: &Selected, copy: &BufferCopy) {
         let text = self.text(copy);
         let len = text.rope().len_bytes();
-        // Just past a line's end, as Vim's selection can be, it stays.
-        let point = |byte: usize| {
+        let shape = selected.shape;
+        // Just past a line's end, as Vim's selection can be, it stays, if
+        // it was there.
+        let point = |byte: usize, past: bool| {
             let at = text.point_of(byte.min(len));
-            if at.col >= text.line_cells(at.line) {
+            if past && at.col >= text.line_cells(at.line) {
                 at
             } else {
                 on_character(at, &text)
             }
         };
         let (start, last) = selected.ends();
-        let (first, last) = (point(start), point(last));
-        let shape = selected.shape;
+        let (first, last) = (
+            point(start, shape.past_end.0),
+            point(last, shape.past_end.1),
+        );
         let (anchor, head) = if shape.backward {
             (last, first)
         } else {

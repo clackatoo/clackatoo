@@ -231,6 +231,10 @@ pub(crate) struct Shape {
     pub(crate) backward: bool,
     /// The cursor kept to line ends, as after `$`.
     pub(crate) to_end: bool,
+    /// Its first and last ends were just past their lines' ends, as Vim's
+    /// selection can be, taking the line break: so only they are again,
+    /// not ends an edit has left at a line's end.
+    pub(crate) past_end: (bool, bool),
 }
 
 /// A file's selection, kept for `gv` and `'<,'>`.

@@ -658,6 +658,9 @@ fn past_a_lines_end_in_every_kind_of_selection_and_back_to_it() {
     assert_eq!(cursor("abc\nxy\n", "<C-v>$"), (0, 3));
     // gv selects it again there, and gg, G and switching kinds keep it.
     assert_eq!(copied("abc\nxy\n", "v$ygvy"), "abc\n");
+    // Only an end that was past a line's end: one an edit leaves at a
+    // line's end is on its last character.
+    assert_eq!(cursor("ab\n\n", "vjcZ<Esc>gv"), (0, 0));
     assert_eq!(copied("abc\nxy\n", "v$<Esc>gvy"), "abc\n");
     assert_eq!(copied("abc\nxy\n", "v$ggy"), "abc\n");
     assert_eq!(copied("xy\nabc\n", "jv$ggy"), "\na");
