@@ -456,3 +456,26 @@ fn t_right_before_its_character_takes_the_one_under_the_cursor() {
     assert_eq!(setup.cursor(), (0, 1));
     assert!(!setup.editor.take_failed());
 }
+
+#[test]
+fn d_over_lines_from_the_indent_to_a_lines_end_takes_them_whole() {
+    let text = "abc\n  de\nfg hi\n";
+    // Vim's d: over lines, from at or before the first non-blank, to the
+    // end of a line, whole lines.
+    assert_eq!(in_cells(text, (1, 0), "d2e").0, "fg hi\n");
+    assert_eq!(in_cells(text, (1, 0), "d2g_").0, "fg hi\n");
+    assert_eq!(in_cells(text, (1, 0), "d2w").0, "fg hi\n");
+    assert_eq!(in_cells("hello\nworld x\nx\n", (1, 0), "d2e").0, " x\nx\n");
+    // dw stops at the end of the line its last word is on.
+    assert_eq!(in_cells("a b\n  de\n", (1, 2), "d2w").0, "a \n");
+    assert_eq!(in_cells("abc\nde fg\n", (1, 0), "d2w").0, "fg\n");
+    // An empty line is a word.
+    assert_eq!(in_cells("abc\n\nx\n", (1, 0), "d2w").0, "x\n");
+}
+
+#[test]
+fn backspace_onto_an_empty_line_takes_it_as_an_exclusive_motion_does() {
+    let text = "abc\n\nx y\n";
+    assert_eq!(in_cells(text, (3, 0), "c<BS>Z<Esc>").0, "abc\nZ\nx y\n");
+    assert_eq!(in_cells(text, (3, 0), "d<BS>").0, "abc\nx y\n");
+}

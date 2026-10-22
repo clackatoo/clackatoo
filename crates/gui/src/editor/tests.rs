@@ -1636,11 +1636,13 @@ fn motions_that_go_nowhere_take_nothing_and_the_last_paragraph_goes_to_the_end()
     setup.keys("dfz");
     assert_eq!(setup.text(), "hello\nworld\n");
     // `}` with no empty line after goes to the end of the last line, and
-    // `d}` takes it all.
+    // `d}` takes it all, whole lines, as Vim's `d` does from a line's
+    // start to its end.
     setup.keys("}");
     assert_eq!(setup.cursor(), (1, 4));
     setup.keys("gg0d}");
-    assert_eq!(setup.text(), "\n");
+    assert_eq!(setup.text(), "");
+    assert!(setup.register().lines);
     // A line of blanks isn't empty: the paragraph goes on past it.
     let mut blanks = Setup::new("a\n  \nb\n\nc\n");
     blanks.keys("}");

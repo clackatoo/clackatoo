@@ -1179,8 +1179,9 @@ impl Cursor {
                 return self.settle(walk.at);
             }
         }
+        // Over blanks and line ends, stopping at an empty line, as Vim's.
         while walk.class() == Class::Blank {
-            if !walk.forward() {
+            if !walk.forward() || (walk.at.col == 0 && lines.empty(walk.at.line)) {
                 break;
             }
         }
@@ -1434,8 +1435,9 @@ impl<'a, L: Lines> Walk<'a, L> {
     }
 }
 
-/// Where a line's end is, as Space and Backspace stop at taken by an
-/// operator: just past its last character, or its start if it's empty.
+/// The column just after line `line`'s last character, or 0 if the line
+/// is empty. Space and Backspace stop there when an operator takes them,
+/// so the line break counts as a character.
 fn line_end(line: u64, lines: &impl Lines) -> usize {
     if lines.empty(line) {
         0
@@ -1459,24 +1461,31 @@ fn over_on(at: Point, lines: &impl Lines) -> Option<Point> {
     })
 }
 
-/// What `d` or `c` takes with Backspace typed `times` from `at`: from
-/// where it goes to the character before `at`, inclusive, a line's end,
-/// past its last character, counting as one, so back from a line's start
-/// it takes the line break, as Vim's does. `None` if it can't go back.
+/// What `d` or `c` with `times` Backspaces from `at` deletes, as Vim's
+/// does: the characters from where the cursor ends up to the one just
+/// before `at`, both included. Going back over the start of a line onto
+/// one that isn't empty, the line break counts as a character, so `d`
+/// and Backspace at a line's start joins it to the line before.
+///
+/// `None` if it never goes back onto a line that isn't empty: then the
+/// usual rules for an exclusive motion apply, which take an empty line
+/// whole.
 pub(crate) fn deleted_back(at: Point, times: usize, lines: &impl Lines) -> Option<(Point, Point)> {
     let last = over_back(at, lines)?;
     let mut start = last;
+    let mut joins = start.line < at.line && !lines.empty(start.line);
     for _ in 1..times {
-        match over_back(start, lines) {
-            Some(back) => start = back,
-            None => break,
-        }
+        let Some(back) = over_back(start, lines) else {
+            break;
+        };
+        joins |= back.line < start.line && !lines.empty(back.line);
+        start = back;
     }
-    Some((start, last))
+    joins.then_some((start, last))
 }
 
-/// The step Backspace takes from `at` for `d`: back along the line, then
-/// to the end of the line before, past its last character.
+/// One step back for `deleted_back`: to the character before, or from a
+/// line's start to just after the previous line's last character.
 fn over_back(at: Point, lines: &impl Lines) -> Option<Point> {
     if at.col > 0 {
         let row = lines.row(at.line);
@@ -1916,7 +1925,8 @@ pub(crate) mod tests {
             at(4, 0),
             "lines at a time"
         );
-        assert_eq!(repeated(Motion::WordStart, 2, at(2, 2)), at(5, 0));
+        // An empty line is a word, as Vim's.
+        assert_eq!(repeated(Motion::WordStart, 2, at(2, 2)), at(4, 0));
         let forward = Motion::Paragraph { forward: true };
         assert_eq!(repeated(forward, 2, at(0, 0)), at(4, 0));
         let mut cursor = Cursor::new(at(0, 4));

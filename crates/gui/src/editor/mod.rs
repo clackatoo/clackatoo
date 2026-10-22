@@ -2342,8 +2342,11 @@ impl Editor {
             return Some(chars(at, cursor.at));
         }
         // Back over a line's start, `d` and `c` take the line break.
-        if matches!(operator, Operator::Delete | Operator::Change) && motion == Motion::LeftOver {
-            let (start, last) = deleted_back(at, times, &text)?;
+        let deletes = matches!(operator, Operator::Delete | Operator::Change);
+        if deletes
+            && motion == Motion::LeftOver
+            && let Some((start, last)) = deleted_back(at, times, &text)
+        {
             return Some(Span {
                 moved: Some(Cursor::new(start)),
                 ..Span::chars_to_break(&text, start, last)
@@ -2364,6 +2367,11 @@ impl Editor {
             Reach::Lines => lines(start.line, end.line),
             Reach::Inclusive => chars(start, end),
             Reach::Exclusive => exclusive(&text, start, end, word)?,
+        };
+        let span = if operator == Operator::Delete {
+            whole_lines_deleted(&text, span)
+        } else {
+            span
         };
         Some(Span {
             moved: Some(moved),
@@ -5802,11 +5810,18 @@ fn indent_before(text: &Text<'_>, byte: usize) -> usize {
 /// `start` to `end`, if it's a `w` or `W` if `word`: up to `end`, but
 /// not it.
 fn exclusive(text: &Text<'_>, start: Point, end: Point, word: bool) -> Option<Span> {
-    // `dw` on a line's last word stops at the line's end.
-    if word && end.line > start.line {
+    // `dw` stops at the end of the line its last word is on, rather than
+    // going on to the next word's line, as Vim's.
+    let first_non_blank = |line| {
+        let mut first = Cursor::new(Point { line, col: 0 });
+        first.apply(Motion::FirstNonBlank, text);
+        first.at.col
+    };
+    // At a line's start, it's as any exclusive motion, below.
+    if word && end.line > start.line && end.col > 0 && end.col <= first_non_blank(end.line) {
         return Some(Span {
             start: text.byte_at(start),
-            end: text.line_end(start.line).max(text.byte_at(start)),
+            end: text.line_end(end.line - 1).max(text.byte_at(start)),
             lines: None,
             moved: None,
         });
@@ -5839,6 +5854,30 @@ fn exclusive(text: &Text<'_>, start: Point, end: Point, word: bool) -> Option<Sp
         lines: None,
         moved: None,
     })
+}
+
+/// What `d` deletes of `span`, which a motion took: over lines, from at or
+/// before its first line's first character that isn't blank, to the end
+/// of a line or only blanks before it, whole lines, as Vim's `d` takes
+/// them (`d2e` from a line's start).
+fn whole_lines_deleted(text: &Text<'_>, span: Span) -> Span {
+    if span.lines.is_some() || span.end <= span.start {
+        return span;
+    }
+    let start = text.point_of(span.start);
+    let last = text.point_of(span.end - 1).line;
+    let mut first = Cursor::new(Point {
+        line: start.line,
+        col: 0,
+    });
+    first.apply(Motion::FirstNonBlank, text);
+    let rest = text.slice(span.end, text.line_end(last).max(span.end));
+    let blank = rest.chars().all(|ch| ch == ' ' || ch == '\t');
+    if last > start.line && start.col <= first.at.col && blank {
+        Span::lines(text, start.line, last)
+    } else {
+        span
+    }
 }
 
 /// A buffer's text as one string, and the buffer and revision it's of.
