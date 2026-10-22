@@ -780,3 +780,18 @@ fn the_column_on_a_tab_is_worked_out_again_only_where_the_cursor_moved() {
     );
     assert_eq!(in_cells("\tfoo\nabcdefgh\n", (1, 0), "i<Esc>j").1, (2, 3));
 }
+
+#[test]
+fn case_changed_by_lines_leaves_the_cursor_at_the_start_of_what_it_took() {
+    let text = "abcd\nefgh\nij\n";
+    // The cursor, or where the motion went, whichever's first, as Vim's.
+    assert_eq!(in_cells(text, (1, 2), "gU50%").1, (1, 2));
+    assert_eq!(in_cells(text, (1, 2), "gU2%").1, (1, 2));
+    assert_eq!(in_cells(text, (2, 2), "gUk").1, (1, 2));
+    assert_eq!(in_cells("  ab\ncd\n", (1, 3), "gUU").1, (1, 2));
+    assert_eq!(in_cells("  ab\ncd\n", (1, 1), "gUU").1, (1, 1));
+    assert_eq!(in_cells(text, (1, 2), "3gUU").1, (1, 2));
+    // Selected, the other end's line's start, or the cursor before it.
+    assert_eq!(in_cells(text, (2, 2), "VkU").1, (1, 2));
+    assert_eq!(in_cells(text, (1, 2), "VjU").1, (1, 0));
+}

@@ -2155,26 +2155,28 @@ impl Editor {
         }
         if let Operator::Recase(recase) = operator {
             self.recase(span.start, span.end, recase, copy);
-            // To the start, as Vim goes, but for whole lines typed, which
-            // keep the cursor's column when there are more than one.
+            // To the start of what it took, as Vim's: by lines, the
+            // cursor or where the motion went, whichever's first, which
+            // keeps the cursor's column going on down (`gU50%`, `3gUU`).
             let text = self.text(copy);
-            let col = self.cursor.at.col;
-            // Back to where a motion or an object starts, as `gU-` and
-            // `gUip` go, where it's before the cursor.
-            let back = span.moved.filter(|moved| moved.at < self.cursor.at);
-            self.cursor = match span.lines {
-                Some(_) if let Some(moved) = back => moved,
-                // Lines a motion by characters became stay where it
-                // started, as Vim's.
-                Some(_) if span.first_non_blank => self.cursor,
-                Some((first, last)) if first < last && target != Target::Selection => {
-                    Cursor::wanting(Point { line: first, col }, col)
+            let went = match (target, span.lines, self.anchor) {
+                // Where `gUU` goes, the last line's first non-blank, as
+                // Vim's `nv_lineop()` puts it.
+                (Target::Lines, Some((_, last)), _) => {
+                    Some(Cursor::at_first_non_blank(last, &text))
                 }
-                Some((first, _)) => Cursor::new(Point {
-                    line: first,
+                // A selection by lines starts at the other end's line's
+                // start.
+                (Target::Selection, _, Some(anchor)) => Some(Cursor::new(Point {
+                    line: anchor.line,
                     col: 0,
-                }),
-                None => Cursor::new(text.point_of(span.start)),
+                })),
+                _ => span.moved,
+            };
+            self.cursor = match (span.lines, went) {
+                (Some(_), Some(went)) if went.at < self.cursor.at => went,
+                (Some(_), _) => self.cursor,
+                (None, _) => Cursor::new(text.point_of(span.start)),
             };
             drop(text);
             self.leave_visual();
