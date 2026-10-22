@@ -2882,7 +2882,12 @@ impl Editor {
             } else {
                 text.char_end(at)
             };
-            (byte, byte + put.len() - 1)
+            // On its last character, or over lines its first, as Vim's.
+            if register.text.contains('\n') {
+                (byte, byte)
+            } else {
+                (byte, byte + put.len() - 1)
+            }
         };
         let edit = Edit::replace(len, byte, "", &put);
         drop(text);

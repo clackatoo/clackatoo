@@ -877,3 +877,13 @@ fn esc_out_of_visual_mode_aims_for_where_the_cursor_is() {
     assert_eq!(in_cells("\tfoo\nabcdefgh\n", (1, 4), "vh<Esc>j").1, (2, 0));
     assert_eq!(in_cells("\tfoo\nabcdefgh\n", (1, 0), "v<Esc>j").1, (2, 3));
 }
+
+#[test]
+fn putting_characters_over_lines_leaves_the_cursor_at_their_start() {
+    let text = "ab cd\nef gh\nij\n";
+    assert_eq!(in_cells(text, (1, 3), "vjygg0p").1, (1, 1));
+    assert_eq!(in_cells(text, (1, 3), "vjygg0P").1, (1, 0));
+    assert_eq!(in_cells(text, (1, 3), "vjyG$p").1, (3, 2));
+    // On one line, its last character, as before.
+    assert_eq!(in_cells(text, (1, 3), "vlygg03p").1, (1, 6));
+}
