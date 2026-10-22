@@ -749,3 +749,22 @@ fn the_column_clicked_is_the_one_wanted_after_the_wheel_moves_the_cursor() {
     setup.keys("gg");
     assert_eq!(setup.cursor(), (0, 10));
 }
+
+#[test]
+fn a_click_aims_for_the_column_clicked_not_the_characters() {
+    // Past the line's end, in a tab, or on a wide character's right half:
+    // `j` goes on to that column, as Vim's `jump_to_mouse()` sets
+    // `curswant` to it.
+    for (text, col, went) in [
+        ("ab\nabcdefghijkl\n", 8, (1, 8)),
+        ("\tx\nabcdefghijkl\n", 1, (1, 1)),
+        ("中\nabcdefghijkl\n", 1, (1, 1)),
+    ] {
+        let mut setup = Setup::new(text);
+        setup.editor.settle(&setup.copy);
+        setup.press(0, col, 1);
+        setup.release();
+        setup.keys("j");
+        assert_eq!(setup.cursor(), went, "{text:?} at {col}");
+    }
+}

@@ -492,7 +492,7 @@ A count before `i`, `a` or `o` types what's typed that many times: `3ix` Esc typ
 
 ### The mouse
 
-A click puts the cursor where it's clicked, or at the line's start if it's on the line's number, and the wheel scrolls. A click beside a row a line goes on over goes to that row's start.
+A click puts the cursor where it's clicked, or at the line's start if it's on the line's number, and the wheel scrolls. A click beside a row a line goes on over goes to that row's start. Moving up and down after a click aims for the column clicked, as Neovim's cursor does, even past the end of a short line or in the middle of a tab.
 
 With Alt held, or Ctrl and Alt, dragging selects a block of columns. Dragging selects, as in Neovim: from where the button went down to where the mouse is, in visual mode, ready for `d`, `y`, `c`, `>` and the rest once you let go. A double click selects a word, by the file's own word characters, and dragging after it selects whole words; a triple click selects the line, and dragging after it whole lines. A long line wrapped over several rows is selected row by row, and an inlay hint is never selected: the mouse on one takes the character it's drawn before. A click ends the selection, and `gv` selects it again. An editor showing a folder selects the same way, but a double click there opens what's clicked, as Enter does.
 

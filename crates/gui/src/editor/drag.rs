@@ -131,7 +131,8 @@ impl Editor {
         let first = (self.clicked)
             .filter(|_| clicks > 1)
             .map(|byte| self.text(copy).point_of(byte));
-        let Some(at) = first.or_else(|| self.point_under(line, col, copy)) else {
+        let first = first.map(|at| (at, at.col));
+        let Some((at, want)) = first.or_else(|| self.point_under(line, col, copy)) else {
             return;
         };
         // A click ends a selection, and one the mouse made from insert
@@ -150,7 +151,7 @@ impl Editor {
         drop(text);
         let by = match (clicks, word) {
             (1, _) => {
-                self.place_click(at, copy);
+                self.place_click(at, want, copy);
                 self.clicked = Some(at_byte);
                 if block { By::Block } else { By::Characters }
             }
@@ -330,8 +331,16 @@ impl Editor {
     /// row the line goes on over, the row's; past a row's end, its last
     /// character, or in insert mode the cell after it; on an inlay hint,
     /// the character it's drawn before. Below the text, on its last row.
-    /// Only that row is laid out.
-    fn point_under(&mut self, line: usize, col: usize, copy: &BufferCopy) -> Option<Point> {
+    /// Only that row is laid out. With it, the column of the line clicked,
+    /// past its end or in the middle of a tab or a wide character as it
+    /// may be, which the cursor goes on aiming for, as Vim's
+    /// `jump_to_mouse()` sets `curswant`.
+    fn point_under(
+        &mut self,
+        line: usize,
+        col: usize,
+        copy: &BufferCopy,
+    ) -> Option<(Point, usize)> {
         self.place_gutter(copy);
         let text = self.text(copy);
         self.clamp_top(&text);
@@ -341,25 +350,27 @@ impl Editor {
         let mut placed = Vec::new();
         let shown = wrap::view(&text, (row, 1), end, self.left, &mut placed);
         let row = shown.first()?;
-        let col = match col.checked_sub(self.gutter) {
+        let (col, want) = match col.checked_sub(self.gutter) {
             // Past the row's end, its last character; on an inlay hint,
             // the character it's drawn before.
             Some(col) => {
                 let cell = row.cell_at(col, &placed);
-                cell.min(row.end().saturating_sub(1)).max(row.start)
+                (cell.min(row.end().saturating_sub(1)).max(row.start), cell)
             }
-            None if row.row == 0 => 0,
-            None => row.start,
+            None if row.row == 0 => (0, 0),
+            None => (row.start, row.start),
         };
-        Some(Point {
+        let at = Point {
             line: row.line.min(text.last_line()),
             col,
-        })
+        };
+        Some((at, want))
     }
 
-    /// Puts the cursor at `at`, as a click does: in insert mode, where
-    /// typing goes on from, which it moved, as the arrow keys move it.
-    fn place_click(&mut self, at: Point, copy: &BufferCopy) {
+    /// Puts the cursor at `at`, as a click does, aiming for column `want`,
+    /// the one clicked: in insert mode, where typing goes on from, which it
+    /// moved, as the arrow keys move it.
+    fn place_click(&mut self, at: Point, want: usize, copy: &BufferCopy) {
         self.cursor = Cursor::new(at);
         if self.mode == Mode::Insert {
             let byte = self.insert_byte(copy);
@@ -368,9 +379,9 @@ impl Editor {
         } else {
             self.normal_cursor(copy);
         }
-        // Aiming for the column clicked, as Vim's after the click, which
-        // is a key to it, before the wheel moves the cursor.
-        self.settle_want(copy);
+        // Aiming for the column clicked, as Vim's `jump_to_mouse()` sets
+        // `curswant` to it, before the wheel moves the cursor.
+        self.cursor = Cursor::wanting(self.cursor.at, want);
     }
 
     /// Selects from `anchor` to `head`, by `kind`, in visual mode: from
@@ -402,7 +413,7 @@ impl Editor {
         let (line, col) = drag.cell;
         let line = usize::try_from(line.max(0)).unwrap_or(usize::MAX);
         let col = usize::try_from(col.max(0)).unwrap_or(usize::MAX);
-        let Some(at) = self.point_under(line, col, copy) else {
+        let Some((at, _)) = self.point_under(line, col, copy) else {
             return false;
         };
         let text = self.text(copy);
