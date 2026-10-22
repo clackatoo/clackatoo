@@ -1035,3 +1035,14 @@ fn an_undo_aims_for_where_it_leaves_the_cursor() {
     assert_eq!(in_cells(text, (2, 4), "xuj").1, (3, 4));
     assert_eq!(in_cells(text, (2, 0), "xuj").1, (3, 3));
 }
+
+#[test]
+fn a_join_of_the_last_line_alone_is_an_undo_step_of_its_own() {
+    // Each is one, under the steps made before it, as in Vim's undo tree.
+    let text = "abc\ndef\n";
+    assert_eq!(in_cells(text, (2, 2), "x3J3Juu").0, "abc\nde\n");
+    assert_eq!(in_cells(text, (2, 2), "x3Ju<C-r>u").0, "abc\nde\n");
+    assert_eq!(in_cells(text, (2, 2), "3Jkxuu"), (text.into(), (2, 2)));
+    // Undone, the cursor aims afresh from where it goes back to.
+    assert_eq!(in_cells("abcdefghij\nab\n", (1, 8), "j3Juk").1, (1, 1));
+}

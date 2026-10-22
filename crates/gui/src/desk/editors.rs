@@ -737,8 +737,8 @@ impl Desk {
         };
         let marks = &mut editors.shared.marks;
         match &heard {
-            Heard::Edited(edit) | Heard::Reversed(edit) => {
-                let ours = matches!(heard, Heard::Reversed(_));
+            Heard::Edited(edit) | Heard::Reversed { edit, .. } => {
+                let ours = matches!(heard, Heard::Reversed { .. });
                 let made = std::slice::from_ref(edit);
                 follow_places(&mut self.jumps, marks, copy, made, ours);
                 // Moved too, while disconnected.

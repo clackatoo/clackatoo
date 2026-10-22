@@ -82,8 +82,8 @@ pub(crate) enum Heard {
     Replaced,
     /// Someone else's edit was made to it.
     Edited(Edit),
-    /// The window's undo or redo was made: this edit.
-    Reversed(Edit),
+    /// The window's undo, if `undo`, or redo was made: this edit.
+    Reversed { edit: Edit, undo: bool },
     /// The window's undo or redo found nothing to do: an undo if `undo`.
     NothingToReverse { undo: bool },
     /// The language server answered the query numbered `id`.
@@ -169,6 +169,10 @@ pub(crate) struct BufferCopy {
     /// The edits made here since last taken, for other panes showing the
     /// buffer to follow.
     made: Vec<Rc<Edit>>,
+    /// The window's undo steps, as far as it knows them, to undo and to
+    /// redo: some, as Vim's `3J` on the last line makes, change nothing,
+    /// and are the window's alone.
+    own: OwnSteps,
     /// What each piece of the text is, as its grammar reads it.
     highlights: Highlights,
     /// What its language server says is wrong with it.
@@ -216,6 +220,83 @@ pub(crate) struct BufferCopy {
     answers: Vec<BufferUpdate>,
 }
 
+/// The most undo steps [`OwnSteps`] keeps, as Vim's `undolevels`.
+const MOST_OWN_STEPS: usize = 1000;
+
+/// One of the window's undo steps: an edit's, which the daemon undoes, or
+/// one that changed nothing, with the byte the cursor was at before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnStep {
+    Edit,
+    Unchanged(usize),
+}
+
+/// The window's undo steps in a buffer, as far as it knows them, to undo
+/// and to redo: in step with the daemon's for the window's edits, and with
+/// the steps that change nothing, which the daemon never hears of, among
+/// them, as Vim keeps them in its undo tree.
+#[derive(Debug, Default)]
+struct OwnSteps {
+    undo: Vec<OwnStep>,
+    redo: Vec<OwnStep>,
+}
+
+impl OwnSteps {
+    fn push(steps: &mut Vec<OwnStep>, step: OwnStep) {
+        if steps.len() >= MOST_OWN_STEPS {
+            steps.remove(0);
+        }
+        steps.push(step);
+    }
+
+    /// An edit started a step.
+    fn made(&mut self) {
+        Self::push(&mut self.undo, OwnStep::Edit);
+        self.redo.clear();
+    }
+
+    /// A step that changed nothing, the cursor at byte `at` before it.
+    fn unchanged(&mut self, at: usize) {
+        Self::push(&mut self.undo, OwnStep::Unchanged(at));
+        self.redo.clear();
+    }
+
+    /// An undo, if `undo`, or a redo: the byte to put the cursor at if
+    /// it's of a step that changed nothing, which it does here; if not, the
+    /// daemon's to do.
+    fn reverse(&mut self, undo: bool) -> Option<usize> {
+        let (from, to) = if undo {
+            (&mut self.undo, &mut self.redo)
+        } else {
+            (&mut self.redo, &mut self.undo)
+        };
+        let step = from.pop()?;
+        Self::push(to, step);
+        match step {
+            OwnStep::Unchanged(at) => Some(at),
+            OwnStep::Edit => None,
+        }
+    }
+
+    /// The daemon had no step to undo, if `undo`, or redo: the one
+    /// [`reverse`](Self::reverse) moved over wasn't there.
+    fn not_there(&mut self, undo: bool) {
+        let to = if undo { &mut self.redo } else { &mut self.undo };
+        if to.last() == Some(&OwnStep::Edit) {
+            to.pop();
+        }
+    }
+
+    /// Keeps the bytes the cursor was at with the text through `edit`.
+    fn edited(&mut self, edit: &Edit) {
+        for step in self.undo.iter_mut().chain(&mut self.redo) {
+            if let OwnStep::Unchanged(at) = step {
+                *at = edit.map(*at, Bias::Before);
+            }
+        }
+    }
+}
+
 impl BufferCopy {
     pub(crate) fn new(id: BufferId) -> Self {
         Self {
@@ -234,6 +315,7 @@ impl BufferCopy {
             kept: None,
             outbox: Vec::new(),
             made: Vec::new(),
+            own: OwnSteps::default(),
             highlights: Highlights::new(),
             diagnostics: Diagnostics::new(),
             hunks: Hunks::new(),
@@ -485,6 +567,7 @@ impl BufferCopy {
         // Without their bases, which the daemon keeps: it says when one
         // goes.
         self.agents.map(edit, None);
+        self.own.edited(edit);
         true
     }
 
@@ -509,6 +592,9 @@ impl BufferCopy {
             return false;
         }
         self.steps += u64::from(step);
+        if step {
+            self.own.made();
+        }
         let edit = Rc::new(edit);
         self.made.push(Rc::clone(&edit));
         // An edit joining the last step joins the last edit, if that's
@@ -587,7 +673,11 @@ impl BufferCopy {
         self.hints.map(&edit);
         self.hunks.map(&edit);
         self.agents.map(&edit, None);
+        self.own.edited(&edit);
         self.steps += u64::from(step);
+        if step {
+            self.own.made();
+        }
         let edit = Rc::new(edit);
         self.made.push(Rc::clone(&edit));
         self.waiting.insert(at, Waiting::Edit { edit, step });
@@ -595,12 +685,26 @@ impl BufferCopy {
     }
 
     /// Asks the daemon to undo the user's last step, or redo the last
-    /// undone.
-    pub(crate) fn reverse(&mut self, undo: bool) {
+    /// undone. If that's a step that changed nothing (see
+    /// [`unchanged_step`](Self::unchanged_step)), it's undone or redone
+    /// here: the byte the cursor was at before it, which it goes back to,
+    /// as Vim's undo of it puts the cursor.
+    pub(crate) fn reverse(&mut self, undo: bool) -> Option<usize> {
         self.steps += 1;
+        if let Some(at) = self.own.reverse(undo) {
+            return Some(at);
+        }
         self.waiting
             .push_back(if undo { Waiting::Undo } else { Waiting::Redo });
         self.send_next();
+        None
+    }
+
+    /// Notes an undo step that changes nothing, as Vim's `do_join()` of
+    /// one line makes, with the cursor at byte `at` before it.
+    pub(crate) fn unchanged_step(&mut self, at: usize) {
+        self.steps += 1;
+        self.own.unchanged(at);
     }
 
     /// Asks the buffer's language server `query` about byte `at` of the
@@ -1018,8 +1122,9 @@ impl BufferCopy {
                 ..
             } => {
                 let reversal = answers.is_some() && answers == self.sent;
+                let mut undo = false;
                 if reversal {
-                    self.waiting.pop_front();
+                    undo = matches!(self.waiting.pop_front(), Some(Waiting::Undo));
                     self.sent = None;
                 }
                 let Some(edit) = self.bring_past_waiting(edit) else {
@@ -1031,7 +1136,7 @@ impl BufferCopy {
                 self.version = version;
                 self.send_next();
                 if reversal {
-                    Heard::Reversed(edit)
+                    Heard::Reversed { edit, undo }
                 } else {
                     Heard::Edited(edit)
                 }
@@ -1042,6 +1147,7 @@ impl BufferCopy {
                 }
                 let undo = matches!(self.waiting.pop_front(), Some(Waiting::Undo));
                 self.sent = None;
+                self.own.not_there(undo);
                 self.send_next();
                 Heard::NothingToReverse { undo }
             }
@@ -2655,7 +2761,7 @@ pub(super) mod tests {
         // Typing while the undo is on its way.
         typed(&mut copy, 2, "c", true);
         let (answer, _) = daemon.take(undo);
-        assert!(matches!(copy.update(answer), Heard::Reversed(_)));
+        assert!(matches!(copy.update(answer), Heard::Reversed { .. }));
         assert_eq!(copy.text.to_string(), "ac");
         for message in copy.take_outbox() {
             let (ack, _) = daemon.take(message);

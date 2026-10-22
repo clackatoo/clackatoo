@@ -118,7 +118,7 @@ impl Setup {
     fn heard_marks(&mut self, heard: &super::Heard) {
         let (file, text) = (self.copy.file(), self.copy.text());
         match heard {
-            super::Heard::Edited(edit) | super::Heard::Reversed(edit) => {
+            super::Heard::Edited(edit) | super::Heard::Reversed { edit, .. } => {
                 (self.shared.marks).edited(file, std::slice::from_ref(edit), text);
             }
             super::Heard::Replaced => self.shared.marks.replaced(file, text),
@@ -451,6 +451,22 @@ fn an_edit_from_elsewhere_keeps_the_column_the_cursor_aims_for() {
     assert_eq!(setup.text(), "abcdefghij\nab\nabcdefghij\nxzz\n");
     setup.keys("j");
     assert_eq!(setup.cursor(), (2, 8));
+}
+
+#[test]
+fn an_undo_step_that_changed_nothing_keeps_its_place_through_others_edits() {
+    let mut setup = Setup::new("abc\ndef\n");
+    setup.keys("jll3J");
+    assert_eq!(setup.cursor(), (1, 0));
+    // A line put in above by an agent: undone, the cursor goes back to
+    // where it was on its line, which is a line further down.
+    let update = setup.daemon.agent(0, "new\n");
+    setup.editor.hold(&setup.copy);
+    let mut heard = setup.copy.update(update);
+    setup.editor.heard(&mut heard, false, &mut setup.copy);
+    setup.keys("u");
+    assert_eq!(setup.text(), "new\nabc\ndef\n");
+    assert_eq!(setup.cursor(), (2, 2));
 }
 
 #[test]

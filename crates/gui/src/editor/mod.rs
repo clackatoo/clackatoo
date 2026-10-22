@@ -484,10 +484,6 @@ pub(crate) struct Editor {
     /// Whether the next edit starts an undo step: it's the first of a
     /// command, or of a go of insert mode.
     new_step: bool,
-    /// Where the cursor was before a command that changed nothing but
-    /// would have made an undo step in Vim, as `3J` on the last line does:
-    /// `u` next takes the cursor back there, as undoing that step does.
-    step_unchanged: Option<Cursor>,
     /// How many of a word's characters have been typed in a row in insert
     /// mode, just before the cursor: so only a word typed there, such as
     /// `else`, has its line's indent worked out again, not one that was
@@ -760,7 +756,6 @@ impl Editor {
             cursor_cell: None,
             keys: vim::Keys::default(),
             new_step: true,
-            step_unchanged: None,
             word_run: 0,
             changing: None,
             last_change: None,
@@ -1644,14 +1639,12 @@ impl Editor {
             // No more steps than Vim's `undolevels` keeps, so a huge
             // count doesn't queue millions.
             Action::Undo | Action::Redo => {
-                let mut times = times.min(MOST_UNDOS);
-                let unchanged = self.step_unchanged.take();
-                if let Some(cursor) = unchanged.filter(|_| command.action == Action::Undo) {
-                    self.cursor = cursor;
-                    times -= 1;
-                }
-                for _ in 0..times {
-                    copy.reverse(command.action == Action::Undo);
+                for _ in 0..times.min(MOST_UNDOS) {
+                    // A step that changed nothing is undone at once, the
+                    // cursor where it was before it, aiming afresh.
+                    if let Some(at) = copy.reverse(command.action == Action::Undo) {
+                        self.cursor = Cursor::new(self.text(copy).point_of(at));
+                    }
                 }
             }
             Action::Repeat => return self.repeat(command.count, copy, shared),
@@ -2851,7 +2844,7 @@ impl Editor {
                 change.command.count = usize::try_from(there + 1).ok();
             }
             if there == 0 {
-                self.step_unchanged = Some(self.cursor);
+                copy.unchanged_step(text.byte_at(self.cursor.at));
                 self.cursor = Cursor::new(Point { line, col: 0 });
                 return;
             }
@@ -3294,7 +3287,6 @@ impl Editor {
         };
         copy.edit(edit, step);
         self.new_step = false;
-        self.step_unchanged = None;
     }
 
     /// Moves the word being completed, the places its items are at, and
@@ -4619,7 +4611,7 @@ impl Editor {
         match heard {
             Heard::Replaced => self.replaced(copy),
             Heard::Edited(edit) => self.follow_edit(edit, copy),
-            Heard::Reversed(edit) => {
+            Heard::Reversed { edit, .. } => {
                 if jump {
                     // To where the step undone or redone was, as in Vim.
                     let at = edit.changes().next().map(|(at, _, _)| at);
@@ -4697,7 +4689,7 @@ impl Editor {
         }
         // A new text, or the window's own undo, closes the panel, as an
         // edit typed does, and the menu.
-        if matches!(heard, Heard::Replaced | Heard::Reversed(_)) {
+        if matches!(heard, Heard::Replaced | Heard::Reversed { .. }) {
             self.panel = None;
             self.actions = None;
             self.close_completion();
