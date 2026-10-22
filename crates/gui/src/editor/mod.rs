@@ -6109,7 +6109,16 @@ fn whole_lines_deleted(text: &Text<'_>, span: Span) -> Span {
         return span;
     }
     let start = text.point_of(span.start);
-    let last = text.point_of(span.end - 1).line;
+    // The line it ends on, as Vim's `oap->end`: an end just before an
+    // empty line is on it, as taking that line's nothing, inclusive, puts
+    // it (`3D` onto an empty line); an exclusive end at a line's start has
+    // become the end of the line before (see `exclusive`).
+    let end = text.point_of(span.end);
+    let last = if end.col == 0 && text.empty(end.line) && end.line > start.line {
+        end.line
+    } else {
+        text.point_of(span.end - 1).line
+    };
     let mut first = Cursor::new(Point {
         line: start.line,
         col: 0,

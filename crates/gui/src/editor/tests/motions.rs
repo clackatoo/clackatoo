@@ -795,3 +795,13 @@ fn case_changed_by_lines_leaves_the_cursor_at_the_start_of_what_it_took() {
     assert_eq!(in_cells(text, (2, 2), "VkU").1, (1, 2));
     assert_eq!(in_cells(text, (1, 2), "VjU").1, (1, 0));
 }
+
+#[test]
+fn d_over_lines_onto_an_empty_line_takes_it_too() {
+    assert_eq!(
+        kept("ab\ncd\n\n", (1, 0), "3D"),
+        (String::new(), "ab\ncd\n\n".into(), true)
+    );
+    assert_eq!(in_cells("  foo\n  \n\nbar\n", (1, 2), "d2aw").0, "bar\n");
+    assert_eq!(in_cells("  \n  \n\nend\t\n", (3, 0), "5dgE").0, "end\t\n");
+}
