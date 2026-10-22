@@ -1806,6 +1806,8 @@ impl Editor {
             self.cursor = Cursor::new(selected.cursor);
         }
         if failed {
+            // Aiming for where it is, as Vim's after an object either way.
+            self.cursor = Cursor::new(self.cursor.at);
             self.fail();
         }
     }

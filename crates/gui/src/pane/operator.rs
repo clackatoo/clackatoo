@@ -92,6 +92,10 @@ impl Pane {
                 let kind = object.selection(kind, selected.lines, failed);
                 self.select(selected.anchor, selected.cursor, kind);
             }
+            // Aiming for where it is, as Vim's after an object either way.
+            if failed {
+                self.cursor = self.cursor.map(|cursor| Cursor::new(cursor.at));
+            }
             return !failed;
         }
         let found = match object.find(&Document(self), cursor.at, inner, count) {

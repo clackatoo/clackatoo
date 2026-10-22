@@ -222,3 +222,11 @@ fn d_takes_an_object_over_lines_from_the_indent_to_a_lines_end_whole() {
     // Nor what's selected.
     assert_eq!(after("(a\nb)\nz\n", (1, 0), "va(d").0, "\nz\n");
 }
+
+#[test]
+fn an_object_that_fails_aims_for_where_the_cursor_is() {
+    // `$` aims for lines' ends; a( with no brackets fails, and `j` after
+    // goes to the column the cursor's in, as Vim's.
+    assert_eq!(after("abc\nabcdef\n", (1, 1), "v$a(j").1, (2, 3));
+    assert_eq!(after("abc\nabcdef\n", (1, 1), "v$j").1, (2, 6));
+}
