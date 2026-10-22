@@ -1066,6 +1066,11 @@ impl<'a> Text<'a> {
         start + self.laid(at.line).map_or(0, |laid| laid.byte_at(at.col))
     }
 
+    /// How many cells line `line` takes.
+    pub(crate) fn line_cells(&self, line: u64) -> usize {
+        self.laid(line).map_or(0, |laid| laid.cells())
+    }
+
     /// The byte after the character at `at`.
     pub(crate) fn char_end(&self, at: Point) -> usize {
         let start = self.line_start(at.line);

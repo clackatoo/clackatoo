@@ -111,7 +111,7 @@ use crate::motion::{
     Block, Class, Cursor, Lines, Motion, Point, Reach, RowAt, Taken, View, Words, before, class_at,
     deleted_back, last_row, row_at, rows_between, rows_down, rows_up,
 };
-use crate::objects::Object;
+use crate::objects::{Object, Selected};
 use crate::options::{Case, CompleteAccept, Options};
 use crate::pane::corners;
 use crate::render::{CursorStyle, FLASH, Highlight, HighlightKind, SceneCursor};
@@ -209,6 +209,22 @@ impl Span {
             end: text.char_end(last),
             lines: None,
             moved: None,
+        }
+    }
+
+    /// As [`chars`](Self::chars), but `last` past its line's last
+    /// character, as on an empty line, is the line break, as Vim's visual
+    /// mode and `d` with Backspace take it.
+    fn chars_to_break(text: &Text<'_>, start: Point, last: Point) -> Self {
+        // The last line's break isn't the text's to take.
+        let end = if last.col >= text.line_cells(last.line) && last.line < text.last_line() {
+            text.line_start(last.line + 1)
+        } else {
+            text.char_end(last)
+        };
+        Self {
+            end,
+            ..Self::chars(text, start, last)
         }
     }
 }
@@ -1729,15 +1745,20 @@ impl Editor {
             return self.select_piece(construct, inner, times, copy);
         }
         let text = self.text(copy);
-        if let Some(found) = object.find(&text, self.cursor.at, inner, times) {
-            let kind = if found.lines {
+        let selected = Selected {
+            anchor: self.anchor.unwrap_or(self.cursor.at),
+            cursor: self.cursor.at,
+            lines: self.mode == Mode::Visual(Selection::Lines),
+        };
+        if let Some(selected) = object.select(&text, selected, inner, times) {
+            let kind = if selected.lines {
                 Selection::Lines
             } else {
                 Selection::Characters
             };
             self.mode = Mode::Visual(kind);
-            self.anchor = Some(found.start);
-            self.cursor = Cursor::new(found.last);
+            self.anchor = Some(selected.anchor);
+            self.cursor = Cursor::new(selected.cursor);
         }
     }
 
@@ -2239,7 +2260,7 @@ impl Editor {
                 };
                 match self.mode {
                     Mode::Visual(Selection::Lines) => Some(lines(start.line, last.line)),
-                    _ => Some(chars(start, last)),
+                    _ => Some(Span::chars_to_break(&text, start, last)),
                 }
             }
             Target::Object {
@@ -2321,17 +2342,9 @@ impl Editor {
         // Back over a line's start, `d` and `c` take the line break.
         if matches!(operator, Operator::Delete | Operator::Change) && motion == Motion::LeftOver {
             let (start, last) = deleted_back(at, times, &text)?;
-            // A line's end past its last character is its line break.
-            let end = if text.byte_at(last) >= text.line_end(last.line) {
-                text.line_start(last.line + 1)
-            } else {
-                text.char_end(last)
-            };
             return Some(Span {
-                start: text.byte_at(start),
-                end,
-                lines: None,
                 moved: Some(Cursor::new(start)),
+                ..Span::chars_to_break(&text, start, last)
             });
         }
         let moved = self.taken_to(copy, motion, count);

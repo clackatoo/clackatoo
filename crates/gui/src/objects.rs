@@ -120,6 +120,98 @@ pub(crate) struct Found {
     pub(crate) lines: bool,
 }
 
+/// Whether line `line` has nothing but blanks, as Vim's `linewhite()`
+/// says, which paragraphs as objects end at, where `{` and `}` stop only
+/// at empty lines.
+fn blank(lines: &impl Lines, line: u64) -> bool {
+    text_end(lines.row(line).as_deref()) == 0
+}
+
+/// What's selected in visual mode: from `anchor` to `cursor`, whole lines
+/// if `lines`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Selected {
+    pub(crate) anchor: Point,
+    pub(crate) cursor: Point,
+    pub(crate) lines: bool,
+}
+
+impl Object {
+    /// What's selected once `count` of the object are, in visual mode, from
+    /// `selected`: the object around the cursor, or for a paragraph, as
+    /// Vim's `current_par()` goes, the selection taken on by `count`
+    /// paragraphs if it's more than a line, by lines or not. None if
+    /// there's no such object there.
+    pub(crate) fn select(
+        self,
+        lines: &impl Lines,
+        selected: Selected,
+        inner: bool,
+        count: usize,
+    ) -> Option<Selected> {
+        if self != Self::Paragraph {
+            let found = self.find(lines, selected.cursor, inner, count)?;
+            return Some(Selected {
+                anchor: found.start,
+                cursor: found.last,
+                lines: found.lines,
+            });
+        }
+        let line = selected.cursor.line;
+        if selected.anchor.line == line {
+            let (start, end) = paragraph(lines, line, inner, count.max(1))?;
+            // By lines already, on a line that starts one: on to the next.
+            if !(selected.lines && start == line) {
+                let at = |line| Point { line, col: 0 };
+                return Some(Selected {
+                    anchor: at(start),
+                    cursor: at(end),
+                    lines: true,
+                });
+            }
+        }
+        let line = more_paragraphs(lines, selected, inner, count.max(1));
+        Some(Selected {
+            cursor: Point { line, col: 0 },
+            ..selected
+        })
+    }
+}
+
+/// Where the cursor of `selected`, more than a line, goes for `count`
+/// more paragraphs: on away from the anchor, over a paragraph and, unless
+/// `inner`, the blank lines after it, as Vim's `current_par()` extends a
+/// selection, stopping at the text's end.
+fn more_paragraphs(lines: &impl Lines, selected: Selected, inner: bool, count: usize) -> u64 {
+    let (first, last) = lines.bounds();
+    let back = selected.cursor.line < selected.anchor.line;
+    let end = if back { first } else { last };
+    let step = |line: u64| if back { line - 1 } else { line + 1 };
+    let mut at = selected.cursor.line;
+    for _ in 0..count {
+        if at == end {
+            break;
+        }
+        let mut was_white = None;
+        for _ in 0..2 {
+            let next = step(at);
+            let white = blank(lines, next);
+            if was_white == Some(white) {
+                break;
+            }
+            at = next;
+            while at != end && blank(lines, step(at)) == white {
+                at = step(at);
+            }
+            if inner || at == end {
+                break;
+            }
+            was_white = Some(white);
+        }
+    }
+    at
+}
+
 /// `ip` and `ap`, `count` of them, around line `line`, as Vim's
 /// `current_par()` finds them: the first and last lines. A run of blank
 /// lines is a paragraph for `ip`; `ap` takes a paragraph's blank lines
@@ -130,7 +222,7 @@ fn paragraph(lines: &impl Lines, line: u64, inner: bool, count: usize) -> Option
     let (first, last) = lines.bounds();
     // Line numbers that can be one before the first, as Vim's go.
     let (first, last) = (first.cast_signed(), last.cast_signed());
-    let white = |line: i64| lines.empty(line.cast_unsigned());
+    let white = |line: i64| blank(lines, line.cast_unsigned());
     let white_in_front = white(line.cast_signed());
     // Back to the start of the paragraph, or of the blank lines.
     let mut start = line.cast_signed();

@@ -12,7 +12,7 @@ use clackatoo_protocol::{Block, Request, Which};
 
 use super::{Copy, Document, Mode, Pane, Pending, Selection};
 use crate::motion::{Cursor, Motion, Point, Reach, Taken, before};
-use crate::objects::Object;
+use crate::objects::{Object, Selected};
 
 /// What a block asked of the daemon is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +77,23 @@ impl Pane {
             self.ask_for_block(cursor.at.line, Which::At, use_);
             return false;
         }
+        if visual {
+            let selected = Selected {
+                anchor: self.anchor.unwrap_or(cursor.at),
+                cursor: cursor.at,
+                lines: self.mode == Mode::Visual(Selection::Lines),
+            };
+            let Some(selected) = object.select(&Document(self), selected, inner, count) else {
+                return false;
+            };
+            let kind = if selected.lines {
+                Selection::Lines
+            } else {
+                Selection::Characters
+            };
+            self.select(selected.anchor, selected.cursor, kind);
+            return true;
+        }
         let Some(found) = object.find(&Document(self), cursor.at, inner, count) else {
             return false;
         };
@@ -85,13 +102,9 @@ impl Pane {
         } else {
             Selection::Characters
         };
-        if visual {
-            self.select(found.start, found.last, kind);
-        } else {
-            self.copy(found.start, found.last, kind, Copy::Clipboard);
-            self.cursor = Some(Cursor::new(found.start));
-            self.follow_cursor();
-        }
+        self.copy(found.start, found.last, kind, Copy::Clipboard);
+        self.cursor = Some(Cursor::new(found.start));
+        self.follow_cursor();
         true
     }
 

@@ -105,3 +105,31 @@ fn vip_selects_whole_lines() {
     assert_eq!(setup.cursor(), (1, 0));
     assert_eq!(copied((2, 3), "vipy"), ("one\n  two\n".into(), (1, 0)));
 }
+
+#[test]
+fn a_line_of_blanks_ends_a_paragraph_as_an_empty_one_does() {
+    let text = "one\n  \ntwo\n\t\n\nthree\n";
+    assert_eq!(after(text, (1, 0), "yip").2, "one\n");
+    assert_eq!(after(text, (1, 0), "dap").0, "two\n\t\n\nthree\n");
+}
+
+/// What `y` copies after `keys` from line `line`, column 0, of `PARA`.
+fn selected(line: u64, keys: &str) -> String {
+    after(PARA, (line, 0), &format!("{keys}y")).2
+}
+
+#[test]
+fn ip_and_ap_take_a_selection_on_by_paragraphs() {
+    let two = "one\n  two\n\n\n";
+    assert_eq!(selected(1, "vipip"), two);
+    assert_eq!(selected(1, "vip2ip"), "one\n  two\n\n\nthree\nfour\n");
+    assert_eq!(selected(1, "vapap"), "one\n  two\n\n\nthree\nfour\n\n");
+    // By characters, it stays so, taking the empty line's break.
+    assert_eq!(selected(1, "vjip"), two);
+    assert_eq!(selected(1, "Vjip"), two);
+    // Back, from the second paragraph's last line.
+    assert_eq!(selected(6, "vkap"), "one\n  two\n\n\nthree\nf");
+    let mut setup = Setup::new(PARA);
+    setup.keys("vjip");
+    assert_eq!(setup.editor.mode, Mode::Visual(Selection::Characters));
+}
