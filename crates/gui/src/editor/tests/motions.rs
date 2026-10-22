@@ -1027,3 +1027,11 @@ fn an_empty_region_is_still_acted_on() {
     // `c` types there, up to a mark at the cursor too.
     assert_eq!(in_cells("ab cd\n", (1, 3), "mac`aZ<Esc>").0, "ab Zcd\n");
 }
+
+#[test]
+fn an_undo_aims_for_where_it_leaves_the_cursor() {
+    // Not the column wanted before it, as an edit from elsewhere keeps.
+    let text = "abcdefghijkl\n\tx\ty\nabcdefghijkl\n";
+    assert_eq!(in_cells(text, (2, 4), "xuj").1, (3, 4));
+    assert_eq!(in_cells(text, (2, 0), "xuj").1, (3, 3));
+}

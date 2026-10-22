@@ -4631,6 +4631,8 @@ impl Editor {
                         session.edited(edit, snippet::Grows::Nothing);
                     }
                     self.place_held(copy);
+                    // Aiming for where it's put, as Vim's after an undo.
+                    self.cursor = Cursor::new(self.cursor.at);
                 } else {
                     self.follow_edit(edit, copy);
                 }
