@@ -2276,7 +2276,10 @@ impl Editor {
                 None => Cursor::new(start),
             },
         };
-        if went_back.at < self.cursor.at {
+        // Characters no motion took, as an object's, from their start,
+        // which may be after it, as Vim's `yi"` from before the quotes.
+        let taken = span.lines.is_none() && span.moved.is_none();
+        if went_back.at < self.cursor.at || taken {
             self.cursor = went_back;
         }
         self.leave_visual();

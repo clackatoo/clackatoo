@@ -200,3 +200,10 @@ fn brackets_as_vims_current_block_finds_them() {
     );
     assert!(setup.editor.take_failed());
 }
+
+#[test]
+fn copying_an_object_after_the_cursor_goes_to_its_start() {
+    let at = |text, keys| after(text, (1, 0), keys).1;
+    assert_eq!(at("x \"ab\"\n", "yi\""), (1, 3));
+    assert_eq!(at("x ((y)) z\n", "y2i("), (1, 4));
+}
