@@ -216,6 +216,19 @@ impl Span {
         }
     }
 
+    /// Nothing, at `at` in `text`, as an exclusive motion that goes
+    /// nowhere takes.
+    fn empty(text: &Text<'_>, at: Point) -> Self {
+        let byte = text.byte_at(at);
+        Self {
+            start: byte,
+            end: byte,
+            lines: None,
+            moved: None,
+            first_non_blank: false,
+        }
+    }
+
     /// The characters of `text` from `start` to `last`, both in it.
     fn chars(text: &Text<'_>, start: Point, last: Point) -> Self {
         Self {
@@ -2137,6 +2150,10 @@ impl Editor {
         let Some(span) = span else {
             return false;
         };
+        if span.lines.is_none() && span.start == span.end {
+            self.operate_on_nothing(operator, span, copy);
+            return true;
+        }
         // Nothing to delete in an empty text, as Vim's `op_delete()` finds
         // an empty buffer: the register keeps what it had.
         if operator == Operator::Delete && copy.text().len_bytes() == 0 {
@@ -2236,6 +2253,18 @@ impl Editor {
             Operator::Indent | Operator::Dedent | Operator::Recase(_) | Operator::Reindent => {}
         }
         true
+    }
+
+    /// `operator` on an empty region, `span`, as Vim's without `E` in
+    /// `cpoptions`: `c` types there, and the rest leave the cursor there.
+    /// Where Vim's `y` keeps nothing, the registers, as the clipboard, keep
+    /// what they had.
+    fn operate_on_nothing(&mut self, operator: Operator, span: Span, copy: &mut BufferCopy) {
+        match operator {
+            Operator::Change => self.change_span(span, copy),
+            _ => self.cursor = Cursor::new(self.text(copy).point_of(span.start)),
+        }
+        self.leave_visual();
     }
 
     /// What an operator acting up to `mark` acts on: its line and the
@@ -2500,7 +2529,8 @@ impl Editor {
                 // may make it whole lines (`d2iw`, `di(`).
                 if !found.inclusive {
                     let moved = Some(Cursor::new(found.start));
-                    let span = exclusive(&text, found.start, found.last)?;
+                    let span = exclusive(&text, found.start, found.last)
+                        .unwrap_or_else(|| Span::empty(&text, found.start));
                     return Some(Span { moved, ..span });
                 }
                 if !found.lines {
@@ -2589,7 +2619,9 @@ impl Editor {
         let span = match reach {
             Reach::Lines => lines(start.line, end.line),
             Reach::Inclusive => chars(start, end),
-            Reach::Exclusive => exclusive(&text, start, end)?,
+            Reach::Exclusive => {
+                exclusive(&text, start, end).unwrap_or_else(|| Span::empty(&text, start))
+            }
         };
         // `y_` leaves the cursor where it is, as Vim's.
         let moved = if operator == Operator::Yank && motion == Motion::LineFirstNonBlank {

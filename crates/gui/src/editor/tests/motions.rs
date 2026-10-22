@@ -848,3 +848,20 @@ fn a_count_of_c_past_the_last_line_fails_as_d_does() {
     assert_eq!(setup.text(), text);
     assert_eq!(in_cells("ab cd\nef\n", (1, 2), "2CZ<Esc>").0, "abZ\n");
 }
+
+#[test]
+fn c_over_nothing_types_there_as_vims_does() {
+    // Without `E` in Vim's `cpoptions`, an empty region is no error.
+    assert_eq!(in_cells("ab\n", (1, 0), "c0Z<Esc>").0, "Zab\n");
+    assert_eq!(in_cells("ab cd\n", (1, 0), "chZ<Esc>").0, "Zab cd\n");
+    assert_eq!(
+        in_cells("\"\"\n", (1, 0), "ci\"Z<Esc>"),
+        ("\"Z\"\n".into(), (1, 1))
+    );
+    assert_eq!(in_cells("()\n", (1, 0), "ci(Z<Esc>").0, "(Z)\n");
+    // d takes nothing, leaving the cursor where it would have started.
+    assert_eq!(
+        in_cells("\"\"\n", (1, 0), "di\""),
+        ("\"\"\n".into(), (1, 1))
+    );
+}

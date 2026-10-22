@@ -610,10 +610,15 @@ fn inside(lines: &impl Lines, open: Point, close: Point) -> Option<(Point, Point
         };
         return (first < last).then_some((first, last, false));
     }
+    // Nothing between: an empty region at the closing bracket, as Vim's
+    // `ci(` types there.
+    if first == close {
+        return Some((first, first, false));
+    }
     let mut walk = Walk::new(lines, close);
     walk.back();
     let last = walk.at();
-    (first <= last && first != close).then_some((first, last, true))
+    (first <= last).then_some((first, last, true))
 }
 
 #[cfg(test)]
