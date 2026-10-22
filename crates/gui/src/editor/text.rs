@@ -1557,7 +1557,7 @@ mod tests {
                 for &object in objects {
                     for inner in [true, false] {
                         let ends =
-                            |found: Option<Found>| found.map(|found| (found.start, found.last));
+                            |found: Option<Found>| found.map(|found| (found.start(), found.last()));
                         let found = ends(object.find(&short, from, inner, 1).ok());
                         let far = ends(object.find(&long, along(from), inner, 1).ok());
                         if far.is_none_or(|(start, _)| start.line > 0 || start.col >= shift) {

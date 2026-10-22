@@ -112,13 +112,13 @@ impl Pane {
                 return false;
             }
         };
-        let kind = if found.lines {
+        let kind = if found.lines() {
             Selection::Lines
         } else {
             Selection::Characters
         };
-        self.copy(found.start, found.last, kind, Copy::Clipboard);
-        self.cursor = Some(Cursor::new(found.start));
+        self.copy(found.start(), found.last(), kind, Copy::Clipboard);
+        self.cursor = Some(Cursor::new(found.start()));
         self.follow_cursor();
         true
     }

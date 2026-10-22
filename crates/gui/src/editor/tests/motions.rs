@@ -908,3 +908,21 @@ fn words_past_latin_1_are_sorted_as_vims_classes_have_them() {
     // Latin-1 from 192 on is a word's, `×` too, as Vim's `iskeyword`.
     assert_eq!(in_cells("é× ab\n", (1, 0), "w").1, (1, 3));
 }
+
+#[test]
+fn a_word_on_an_empty_last_line_reaches_back_over_the_line_break() {
+    // Its end is back on the line before, and taken first, as Vim's
+    // `do_pending()` orders the ends.
+    let text = "ab\n\n";
+    for keys in ["yiw", "yiW", "viwy"] {
+        assert_eq!(kept(text, (2, 0), keys).1, "b\n", "{keys}");
+        assert_eq!(in_cells(text, (2, 0), keys).1, (1, 1), "{keys}");
+    }
+    assert_eq!(in_cells(text, (2, 0), "diw"), ("a\n".into(), (1, 0)));
+    assert_eq!(in_cells(text, (2, 0), "ciwZ<Esc>"), ("aZ\n".into(), (1, 1)));
+    // Again, once `diw` has left the last line empty.
+    assert_eq!(in_cells("x\nab\na\n", (3, 0), "diw.").0, "x\na\n");
+    // Blanks before the line break, and an empty line before.
+    assert_eq!(kept("ab  \n\n", (2, 0), "yiw").1, " \n");
+    assert_eq!(kept("ab\n\n\n", (3, 0), "yiw").1, "\n");
+}

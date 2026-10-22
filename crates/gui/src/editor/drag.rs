@@ -498,7 +498,7 @@ impl Editor {
 /// The word around `at`, as `iw` finds it, by the text's word
 /// characters: its first and last characters.
 fn word_around(text: &Text<'_>, at: Point) -> (Point, Point) {
-    (Object::Word.find(text, at, true, 1)).map_or((at, at), |found| (found.start, found.last))
+    (Object::Word.find(text, at, true, 1)).map_or((at, at), |found| (found.start(), found.last()))
 }
 
 /// `value` as a row or column that can be off the pane.

@@ -26,9 +26,11 @@ use crate::vim::Selection;
 
 use crate::motion::{Cells, Lines, Point, Walk, line_end, previous_cell, text_end};
 
+mod found;
 mod quotes;
 mod words;
 
+pub(crate) use found::Found;
 pub(crate) use words::back_fails;
 
 /// How far a bracket object looks for each of its brackets, in cells.
@@ -94,12 +96,7 @@ impl Object {
                 let big = self == Self::BigWord;
                 let found = words::current(lines, at, None, (inner, big), count)
                     .map_err(|failed| Some(failed.end))?;
-                Ok(Found {
-                    start: found.start,
-                    last: found.end,
-                    lines: false,
-                    inclusive: found.inclusive,
-                })
+                Ok(Found::new((found.start, found.end), false, found.inclusive))
             }
             Self::Quote(quote) => {
                 let row = lines.row(at.line);
@@ -107,107 +104,20 @@ impl Object {
                 let found =
                     quotes::current(line, at.col, None, (!inner, count), quote).ok_or(None)?;
                 let point = |col| Point { line: at.line, col };
-                Ok(Found {
-                    start: point(found.start),
-                    last: point(found.end),
-                    lines: false,
-                    inclusive: found.inclusive,
-                })
+                let ends = (point(found.start), point(found.end));
+                Ok(Found::new(ends, false, found.inclusive))
             }
             Self::Bracket { open, close } => {
                 let (start, last, inclusive) =
                     bracketed(lines, at, (open, close), inner, count).ok_or(None)?;
-                Ok(Found {
-                    start,
-                    last,
-                    lines: false,
-                    inclusive,
-                })
+                Ok(Found::new((start, last), false, inclusive))
             }
             Self::Paragraph => {
                 let (first, last) = paragraph(lines, at.line, inner, count.max(1)).ok_or(None)?;
-                Ok(Found {
-                    start: Point {
-                        line: first,
-                        col: 0,
-                    },
-                    last: Point { line: last, col: 0 },
-                    lines: true,
-                    inclusive: true,
-                })
+                let at = |line| Point { line, col: 0 };
+                Ok(Found::new((at(first), at(last)), true, true))
             }
             Self::Block | Self::Code(_) => Err(None),
-        }
-    }
-}
-
-/// Where an object was found: from `start` to `last`, both included, and
-/// whether it's whole lines, as a paragraph is, or characters. Unless
-/// `inclusive`, `last` is a line's start just after it, which an operator
-/// takes up to as it does an exclusive motion, as Vim's: the end of the
-/// line before, or whole lines from the first's indent (see
-/// [`taken`](Self::taken)).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Found {
-    pub(crate) start: Point,
-    pub(crate) last: Point,
-    pub(crate) lines: bool,
-    pub(crate) inclusive: bool,
-}
-
-impl Found {
-    /// What an operator takes of it, as Vim's `do_pending()` takes an
-    /// exclusive end at a line's start: to the end of the line before, or
-    /// from at or before the first line's first non-blank, whole lines.
-    /// None if that's nothing. The editor's operators take it as they do
-    /// any exclusive motion; this is for what only copies.
-    pub(crate) fn taken(self, lines: &impl Lines) -> Option<Self> {
-        if self.inclusive {
-            return Some(self);
-        }
-        let Self { start, last, .. } = self;
-        // Up to a character on the line: the one before.
-        if last.col > 0 {
-            let row = lines.row(last.line);
-            let col = previous_cell(row.as_deref(), last.col)?;
-            let last = Point { col, ..last };
-            return (start <= last).then_some(Self {
-                last,
-                inclusive: true,
-                ..self
-            });
-        }
-        if last.line <= start.line {
-            return None;
-        }
-        let line = last.line - 1;
-        let row = lines.row(start.line);
-        let indent = row.as_deref().map_or(0, |row| {
-            (row.on_from(0))
-                .find(|(_, spot)| !spot.blank())
-                .map_or(usize::MAX, |(col, _)| col)
-        });
-        Some(Self {
-            start,
-            last: Point {
-                line,
-                col: lines.last_cell(line),
-            },
-            lines: start.col <= indent,
-            inclusive: true,
-        })
-    }
-
-    /// Where a selection of it ends: just past the end of the line before
-    /// a line's start it's up to, so the line break's in it, as Vim's.
-    fn selected_last(self, lines: &impl Lines) -> Point {
-        if self.inclusive || self.last.line == 0 {
-            return self.last;
-        }
-        let line = self.last.line - 1;
-        Point {
-            line,
-            col: line_end(line, lines),
         }
     }
 }
@@ -300,9 +210,9 @@ impl Object {
                 .find(lines, selected.cursor, inner, count)
                 .map_err(|_| None)?;
             return Ok(Selected {
-                anchor: found.start,
+                anchor: found.start(),
                 cursor: found.selected_last(lines),
-                lines: found.lines,
+                lines: found.lines(),
             });
         }
         let line = selected.cursor.line;
@@ -589,12 +499,7 @@ fn bracket_selected(
         end = partner(lines, start, pair)?;
     };
     let (start, last, inclusive) = found;
-    let found = Found {
-        start,
-        last,
-        lines: false,
-        inclusive,
-    };
+    let found = Found::new((start, last), false, inclusive);
     Some(Selected {
         anchor: start,
         cursor: found.selected_last(lines),
@@ -652,7 +557,7 @@ mod tests {
         let inner = keys.next() == Some('i');
         let object = Object::of_key(keys.next().unwrap()).unwrap();
         let found = object.find(text, from, inner, 1).ok()?.taken(text)?;
-        Some((found.start, found.last))
+        Some((found.start(), found.last()))
     }
 
     fn cols(range: Option<(Point, Point)>) -> Option<(usize, usize)> {
@@ -671,6 +576,10 @@ mod tests {
         assert_eq!(cols(found(&text, at(0, 2), "aw")), Some((2, 5)));
         // The last word has no blanks after, so takes those before.
         assert_eq!(cols(found(&text, at(0, 15), "aw")), Some((14, 15)));
+        // On an empty last line, back over the line break before: the
+        // ends in order, as a terminal's copy is asked for them.
+        let text = Text::new(&["ab", ""]);
+        assert_eq!(found(&text, at(1, 0), "iw"), Some((at(0, 1), at(1, 0))));
     }
 
     #[test]
@@ -702,7 +611,7 @@ mod tests {
             inner
                 .ok()
                 .and_then(|found| found.taken(&text))
-                .is_some_and(|found| found.lines)
+                .is_some_and(Found::lines)
         );
         assert_eq!(found(&text, at(2, 2), "a("), Some((at(1, 1), at(3, 0))));
         // With none around it, the next, as Neovim's.
@@ -716,7 +625,7 @@ mod tests {
             let found = Object::of_key('(')
                 .unwrap()
                 .find(&Text::new(text), from, true, count);
-            found.ok().map(|found| (found.start, found.last))
+            found.ok().map(|found| (found.start(), found.last()))
         };
         // Out a level, as Vim's.
         let text = ["f(a, (b), c)"];

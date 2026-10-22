@@ -2533,19 +2533,20 @@ impl Editor {
                 };
                 // Up to a line's start, as an exclusive motion takes, which
                 // may make it whole lines (`d2iw`, `di(`).
-                if !found.inclusive {
-                    let moved = Some(Cursor::new(found.start));
-                    let span = exclusive(&text, found.start, found.last)
-                        .unwrap_or_else(|| Span::empty(&text, found.start));
+                let (start, last) = (found.start(), found.last());
+                if !found.inclusive() {
+                    let moved = Some(Cursor::new(start));
+                    let span =
+                        exclusive(&text, start, last).unwrap_or_else(|| Span::empty(&text, start));
                     return Some(Span { moved, ..span });
                 }
-                if !found.lines {
-                    return Some(chars(found.start, found.last));
+                if !found.lines() {
+                    return Some(chars(start, last));
                 }
                 // Whole lines, the cursor to the first's start, as Vim's.
                 Some(Span {
-                    moved: Some(Cursor::new(found.start)),
-                    ..lines(found.start.line, found.last.line)
+                    moved: Some(Cursor::new(start)),
+                    ..lines(start.line, last.line)
                 })
             }
             Target::Motion(motion) => self.motion_span(operator, motion, count, copy),
