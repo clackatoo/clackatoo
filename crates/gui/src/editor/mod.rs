@@ -115,6 +115,7 @@ use crate::objects::Object;
 use crate::options::{Case, CompleteAccept, Options};
 use crate::pane::corners;
 use crate::render::{CursorStyle, FLASH, Highlight, HighlightKind, SceneCursor};
+use crate::scroll;
 use crate::vim::{
     self, Entry, Mode, Operator, Paging, Recase, Scroll, Selection, Stroke, Target, ViewAt, strokes,
 };
@@ -4183,33 +4184,39 @@ impl Editor {
     }
 
     /// `zt`, `zz` and `zb`: the cursor's line at the view's top, middle or
-    /// bottom. At the top or bottom it's shown whole, as in Vim, unless
-    /// it's too long to be with the cursor in view.
+    /// bottom, the view starting at a line's start, as Vim's without
+    /// `smoothscroll` (see [`scroll::view_top`]). A line too long for the
+    /// view is shown from the cursor's row, or as much as fits with it.
     fn view_at(&mut self, at: ViewAt, copy: &BufferCopy) {
         let text = self.text(copy);
         let height = self.height.max(1);
         let cursor = row_at(self.cursor.at, &text);
+        let rows = text.screen_rows(cursor.line).len();
         let top = match at {
+            _ if rows <= height => {
+                let (first, last) = text.bounds();
+                let lines = scroll::Lines {
+                    rows: |line| text.screen_rows(line).len() as u64,
+                    first,
+                    last,
+                };
+                let top = self.top.row(&text).line;
+                let line = scroll::view_top(
+                    at,
+                    cursor.line,
+                    top,
+                    height as u64,
+                    self.scrolloff as u64,
+                    &lines,
+                );
+                RowAt { line, row: 0 }
+            }
             ViewAt::Top if cursor.row < height => RowAt {
                 line: cursor.line,
                 row: 0,
             },
             ViewAt::Top => cursor,
-            // The cursor's whole line in the middle, as Vim's, a row above
-            // it where the rows left are odd; or, if it's too long, the
-            // cursor's row.
-            ViewAt::Middle => {
-                let rows = text.screen_rows(cursor.line).len();
-                if rows < height {
-                    let start = RowAt {
-                        line: cursor.line,
-                        row: 0,
-                    };
-                    rows_up(start, ((height - rows) / 2) as u64, 0, &text)
-                } else {
-                    rows_up(cursor, ((height - 1) / 2) as u64, 0, &text)
-                }
-            }
+            ViewAt::Middle => rows_up(cursor, ((height - 1) / 2) as u64, 0, &text),
             ViewAt::Bottom => {
                 let last = last_row(&text, cursor.line);
                 let bottom = if last.row - cursor.row < height {

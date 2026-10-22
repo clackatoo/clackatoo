@@ -183,17 +183,22 @@ fn scrolloff_and_paging_count_screen_rows() {
     setup.keys("<C-u>");
     assert_eq!(top(&setup), RowAt { line: 2, row: 0 });
     assert_eq!(setup.cursor(), (3, 72), "three rows up");
-    // zt, zz and zb put the cursor's line's rows at the top, middle and
-    // bottom, scrolloff allowing.
-    setup.keys("0zb");
-    assert_eq!(top(&setup), RowAt { line: 1, row: 1 });
-    setup.keys("zt");
-    assert_eq!(top(&setup), RowAt { line: 1, row: 2 });
+    // zt, zz and zb put the cursor's whole line at the top, middle and
+    // bottom, the view starting at a line's start, as Vim's: three lines
+    // fit above line 3's last row, and one each side of it in the middle.
+    setup.set(|options| options.scrolloff = 0);
+    setup.keys("0zt");
+    assert_eq!(top(&setup), RowAt { line: 3, row: 0 });
+    setup.keys("zb");
+    assert_eq!(top(&setup), RowAt { line: 1, row: 0 });
+    setup.keys("zz");
+    assert_eq!(top(&setup), RowAt { line: 2, row: 0 });
     // The wheel scrolls by rows.
     setup.editor.wheel(-2, &setup.copy);
-    assert_eq!(top(&setup), RowAt { line: 2, row: 1 });
+    assert_eq!(top(&setup), RowAt { line: 2, row: 2 });
     // As far down as it goes, the last line's last row shows at the
     // bottom, scrolloff rows below the top.
+    setup.set(|options| options.scrolloff = 4);
     setup.keys("G");
     assert_eq!(drawn(&mut setup)[9], "    xxxxxxxx");
     assert_eq!(top(&setup), RowAt { line: 26, row: 2 });

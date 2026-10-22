@@ -51,6 +51,7 @@ mod pane;
 mod render;
 mod review;
 mod screen;
+mod scroll;
 mod session;
 mod start;
 mod tutor;

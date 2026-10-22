@@ -40,7 +40,12 @@ fn wrapping() -> String {
 /// An editor showing `text` ten rows tall, 20 columns of text wide if
 /// `wrap`, with no `scrolloff`, its view's top at line `top` and its cursor
 /// at `line` and byte `col`, counting lines from 1 as check.lua does.
-fn viewed(text: &str, top: u64, (line, col): (u64, usize), wrap: bool) -> Setup {
+fn viewed(text: &str, top: u64, at: (u64, usize), wrap: bool) -> Setup {
+    viewed_in(10, text, top, at, wrap)
+}
+
+/// `viewed`, `rows` tall.
+fn viewed_in(rows: u16, text: &str, top: u64, (line, col): (u64, usize), wrap: bool) -> Setup {
     let mut setup = Setup::new(text);
     setup.set(|options| {
         options.scrolloff = 0;
@@ -50,7 +55,7 @@ fn viewed(text: &str, top: u64, (line, col): (u64, usize), wrap: bool) -> Setup 
     });
     setup
         .editor
-        .resize(Size::new(if wrap { 20 } else { 40 }, 10).unwrap());
+        .resize(Size::new(if wrap { 20 } else { 40 }, rows).unwrap());
     setup.keys(&format!("{line}G0"));
     for _ in 0..col {
         setup.keys("l");
@@ -379,6 +384,34 @@ fn zt_zz_and_zb_with_a_count_put_that_line_there_and_the_cursor_on_it() {
     let mut setup = viewed(&text, 11, (15, 4), false);
     setup.set(|options| options.startofline = true);
     assert_eq!(after(setup, "3zt"), (3, 3, 4));
+}
+
+#[test]
+fn zt_zz_and_zb_start_the_view_at_a_lines_start() {
+    let text = wrapping();
+    // Line 11 doesn't fit above line 14 in the middle of ten rows.
+    assert_eq!(after(viewed(&text, 11, (14, 4), true), "zz"), (12, 14, 4));
+    assert_eq!(after(viewed_in(9, &text, 1, (4, 4), true), "zz"), (2, 4, 4));
+    // Lines of three rows: 54 to 57 fill eight of nine.
+    let tall = (1..=60).fold(String::new(), |mut text, n| {
+        let _ = if n % 2 == 1 {
+            writeln!(text, "{n:02}{}", "x".repeat(48))
+        } else {
+            writeln!(text, "line {n}")
+        };
+        text
+    });
+    assert_eq!(
+        after(viewed_in(9, &tall, 57, (57, 4), true), "zb"),
+        (54, 57, 4)
+    );
+}
+
+#[test]
+fn zt_keeps_scrolloff_lines_above_even_at_the_texts_end() {
+    let text = sixty();
+    let setup = with_margin(viewed(&text, 51, (60, 4), false), 3);
+    assert_eq!(after(setup, "zt"), (57, 60, 4));
 }
 
 #[test]
