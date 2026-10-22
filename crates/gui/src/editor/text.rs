@@ -1090,17 +1090,36 @@ impl<'a> Text<'a> {
         Point { line, col }
     }
 
-    /// The text from byte `start` to byte `end`, whichever is first, as
-    /// much of it as there is, and from the start of the character either
-    /// is in: never a panic, whatever a range a bug makes.
-    pub(crate) fn slice(&self, start: usize, end: usize) -> String {
+    /// The bytes from `start` to `end`, whichever is first, as far as
+    /// there's text, each from the start of the character it's in: what a
+    /// range a bug makes, backwards, past the end or inside a character,
+    /// can be taken as.
+    fn bounds(&self, start: usize, end: usize) -> (usize, usize) {
         let len = self.rope.len_bytes();
         let char_start = |byte: usize| {
             self.rope
                 .char_to_byte(self.rope.byte_to_char(byte.min(len)))
         };
-        let (start, end) = (char_start(start.min(end)), char_start(start.max(end)));
+        (char_start(start.min(end)), char_start(start.max(end)))
+    }
+
+    /// The text from byte `start` to byte `end`, as [`bounds`](Self::bounds)
+    /// takes them: never a panic, whatever a range a bug makes.
+    pub(crate) fn slice(&self, start: usize, end: usize) -> String {
+        let (start, end) = self.bounds(start, end);
         self.rope.byte_slice(start..end).to_string()
+    }
+
+    /// An edit taking away the text from byte `start` to byte `end`, as
+    /// [`bounds`](Self::bounds) takes them, and the byte it starts at: an
+    /// edit that fits the text, whatever a range a bug makes.
+    pub(crate) fn removal(&self, start: usize, end: usize) -> (usize, clackatoo_text::Edit) {
+        let (start, end) = self.bounds(start, end);
+        let removed = self.rope.byte_slice(start..end).to_string();
+        (
+            start,
+            clackatoo_text::Edit::replace(self.rope.len_bytes(), start, &removed, ""),
+        )
     }
 }
 

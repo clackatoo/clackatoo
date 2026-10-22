@@ -475,6 +475,16 @@ fn an_undo_step_that_changed_nothing_keeps_its_place_through_others_edits() {
 }
 
 #[test]
+fn text_taken_away_from_inside_a_character_is_taken_from_its_start() {
+    // A range a bug makes, from the middle of `中`: taken from its start,
+    // as an edit that fits the text, not a panic.
+    let mut setup = Setup::new("ab\n中\n");
+    setup.editor.delete_text(4, 7, &mut setup.copy);
+    setup.serve();
+    assert_eq!(setup.text(), "ab\n");
+}
+
+#[test]
 fn lines_are_numbered_from_the_cursors() {
     let mut setup = Setup::new("a\nb\nc\nd\n");
     setup.keys("jj");

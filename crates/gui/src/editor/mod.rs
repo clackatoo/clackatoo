@@ -2382,7 +2382,7 @@ impl Editor {
         } else {
             span.start()
         };
-        let edit = Edit::replace(len, start, &text.slice(start, span.end()), "");
+        let (start, edit) = text.removal(start, span.end());
         drop(text);
         self.make(edit, copy);
         match span.lines {
@@ -2409,7 +2409,7 @@ impl Editor {
             }
             None => (span.start(), span.end()),
         };
-        let edit = Edit::replace(text.rope().len_bytes(), start, &text.slice(start, end), "");
+        let (start, edit) = text.removal(start, end);
         drop(text);
         self.make(edit, copy);
         self.cursor = Cursor::new(self.text(copy).point_of(start));
@@ -2649,7 +2649,7 @@ impl Editor {
         let last = (at.line + times as u64 - 1).min(text.last_line());
         let end = text.line_end(last).max(start);
         let removed = text.slice(start, end);
-        let edit = Edit::replace(text.rope().len_bytes(), start, &removed, "");
+        let (_, edit) = text.removal(start, end);
         drop(text);
         let small = !removed.contains('\n');
         let wrote = Wrote::Delete {
@@ -3277,8 +3277,7 @@ impl Editor {
             return;
         }
         let text = self.text(copy);
-        let removed = text.slice(start, end);
-        let edit = Edit::replace(text.rope().len_bytes(), start, &removed, "");
+        let (start, edit) = text.removal(start, end);
         drop(text);
         self.make(edit, copy);
         self.cursor = Cursor::new(self.text(copy).point_of(start));
