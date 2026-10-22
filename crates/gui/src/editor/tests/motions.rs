@@ -900,9 +900,8 @@ fn j_joins_with_a_space_where_vims_do_join_puts_one() {
         in_cells("ab\ncd  ef\n", (2, 4), "3J"),
         ("ab\ncd  ef\n".into(), (2, 0))
     );
-    // Which is an undo step, though nothing changed, and a count cut
-    // short is the count `.` joins again, as Vim's `prep_redo()` has it.
-    assert_eq!(in_cells("ab \n", (1, 1), "4Ju").1, (1, 1));
+    // A count cut short is the count `.` joins again, as Vim's
+    // `prep_redo()` has it.
     assert_eq!(in_cells(".\n中\n", (1, 0), "4J.").1, (1, 1));
     // Made again by `.`, it's cut short again, and `.` after that joins
     // as many as were there then.
@@ -1046,17 +1045,6 @@ fn an_undo_aims_for_where_it_leaves_the_cursor() {
 }
 
 #[test]
-fn a_join_of_the_last_line_alone_is_an_undo_step_of_its_own() {
-    // Each is one, under the steps made before it, as in Vim's undo tree.
-    let text = "abc\ndef\n";
-    assert_eq!(in_cells(text, (2, 2), "x3J3Juu").0, "abc\nde\n");
-    assert_eq!(in_cells(text, (2, 2), "x3Ju<C-r>u").0, "abc\nde\n");
-    assert_eq!(in_cells(text, (2, 2), "3Jkxuu"), (text.into(), (2, 2)));
-    // Undone, the cursor aims afresh from where it goes back to.
-    assert_eq!(in_cells("abcdefghij\nab\n", (1, 8), "j3Juk").1, (1, 1));
-}
-
-#[test]
 fn gv_selects_where_vims_marks_say_after_joins_deletes_and_undos() {
     let gv = |text: &str, at, keys| in_cells(text, at, keys).1;
     // An undo puts back the selection as it was before what it undoes,
@@ -1124,4 +1112,40 @@ fn shifting_without_startofline_goes_to_the_column_a_motion_set() {
         in_cells("x (p q) y\nabcdefghijkl\n", (1, 7), ">j").1,
         (1, 7)
     );
+}
+
+#[test]
+fn undo_and_redo_are_the_daemons_alone() {
+    // The undo history is the daemon's, which every window shares: no
+    // step of the window's own goes between, so an undo past the oldest
+    // change does nothing, and a redo still redoes.
+    let mut setup = Setup::new("abc\ndef\n");
+    setup.keys("jllx3Juuu<C-r>");
+    assert_eq!(setup.text(), "abc\nde\n");
+    // A selection an undo puts back after another's edit has moved with
+    // it, not to where it was before that edit.
+    let mut setup = Setup::new("a\nb\nc\nd\n");
+    setup.keys("jjVj<Esc>ggx");
+    let update = setup.daemon.agent(0, "new\n");
+    setup.editor.hold(&setup.copy);
+    let mut heard = setup.copy.update(update);
+    setup.heard_marks(&heard);
+    setup.editor.heard(&mut heard, false, &mut setup.copy);
+    setup.keys("ugvd");
+    assert_eq!(setup.text(), "anew\n\nb\n");
+}
+
+#[test]
+fn a_line_broken_leaves_the_selection_and_lines_put_above_take_it_down() {
+    let gv = |text: &str, at, keys| in_cells(text, at, keys).1;
+    // Enter, even at the line's start, leaves its ends on their line, as
+    // Vim's `open_line()` does.
+    assert_eq!(gv("x\nabcdef\n", (2, 2), "vl<Esc>0i<CR><Esc>gv"), (2, 0));
+    assert_eq!(gv("abcdef\n", (1, 2), "vl<Esc>ix<CR><Esc>gv"), (1, 3));
+    // Lines put or opened above take them down, empty or not; below, not.
+    let empties = "\n\nabc\n";
+    assert_eq!(gv(empties, (2, 0), "v<Esc>ggyypgv"), (3, 0));
+    assert_eq!(gv(empties, (2, 0), "v<Esc>ggyyjPgv"), (3, 0));
+    assert_eq!(gv(empties, (2, 0), "v<Esc>O<Esc>gv"), (3, 0));
+    assert_eq!(gv(empties, (2, 0), "v<Esc>o<Esc>gv"), (2, 0));
 }

@@ -248,8 +248,8 @@ pub(crate) struct Shape {
 /// joined onto the one before takes it along, its column moved with the
 /// line's text, less the indent `J` takes away; lines `:m` moves take it
 /// with them; and an edit within its line leaves it at its column. An undo
-/// or a redo puts back the selection kept with its step (see
-/// [`Selections`]), as Vim's `uh_visual`.
+/// or a redo that makes a text again puts back the selection it had then
+/// (see [`Selections`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Selected {
     /// Its first end, where `<` is...
@@ -399,12 +399,15 @@ fn end_changed(end: &mut FilePlace, (at, removed, put): (usize, &str, &str), bef
         end.line = line + breaks - (last - first);
         return;
     }
-    // Whole lines put in at its line's start, as `P`, `p` and `O` put
-    // them, take it down with its line; but a line break alone on an
-    // empty line is taken as `o` opening one after it.
-    let opened = put == "\n"
-        && usize::try_from(first).is_ok_and(|first| before.line(first).len_chars() <= 1);
-    if at_col == 0 && removed.is_empty() && put.ends_with('\n') && !opened {
+    // Whole lines put in at its line's start, as `P` and `O` put them
+    // above the first line, take it down with its line. A line broken
+    // there, as Enter breaks it, starts with the break, and leaves it on
+    // its line, as Vim's `open_line()` does; and lines the editor puts
+    // after a line start with the break at that line's end (see
+    // `Editor::put_register`). At the text's very start a break alone is
+    // taken as a line put above.
+    let above = !put.starts_with('\n') || (at == 0 && put == "\n");
+    if at_col == 0 && removed.is_empty() && put.ends_with('\n') && above {
         end.line = line + breaks;
         return;
     }
@@ -438,23 +441,24 @@ fn end_changed(end: &mut FilePlace, (at, removed, put): (usize, &str, &str), bef
     };
 }
 
-/// The most undo steps a file's [`Selections`] keeps selections for, as
-/// Vim's `undolevels`.
-const MOST_STEPS: usize = 1000;
+/// How many of a file's texts [`Selections`] remembers the last selection
+/// in.
+const MOST_SEEN: usize = 100;
 
-/// A file's last selection, and the one before it, and the last selection
-/// as each of the window's undo steps in the file began, which undoing it
-/// puts back, and as each step undone was, which redoing it puts back, as
-/// Vim keeps a buffer's in `uh_visual`. A step begun with none selected
-/// leaves the selection as edits leave it.
+/// A file's last selection, and the one before it; and the last selection
+/// in each of the file's recent texts, so an undo or a redo that makes one
+/// of them again puts back the selection it had, as Vim's undo puts back
+/// the one kept with its step (`uh_visual`). Kept by the text itself, not
+/// by the steps, whose undo is the daemon's, it can't fall out of step:
+/// an undo that makes a text not seen, as after another's edit, moves the
+/// selection as any edit does.
 #[derive(Debug)]
 struct Selections {
     path: String,
     machine: Option<MachineId>,
     last: Option<Selected>,
     before: Option<Selected>,
-    undone: Vec<Option<Selected>>,
-    redone: Vec<Option<Selected>>,
+    seen: std::collections::VecDeque<(Rope, Option<Selected>)>,
 }
 
 impl Selections {
@@ -463,62 +467,40 @@ impl Selections {
     }
 
     /// Moves them through `edits`, made in turn to the file, whose text
-    /// each made and was made to `texts` says, as `whose` they are.
+    /// each made and was made to `texts` says, the last making `text`: an
+    /// undo's or a redo's, if `reversed`.
     fn edited(
         &mut self,
         edits: &[Passing<'_>],
         texts: &[(Rope, Rope)],
-        whose: Whose<'_>,
         text: &Rope,
+        reversed: bool,
     ) {
-        for (index, (edit, texts)) in edits.iter().zip(texts).enumerate() {
-            let edit = std::slice::from_ref(edit);
-            let texts = std::slice::from_ref(texts);
-            match whose {
-                Whose::Ours(steps) if steps.get(index).copied().unwrap_or(false) => {
-                    if self.undone.len() >= MOST_STEPS {
-                        self.undone.remove(0);
-                    }
-                    self.undone.push(self.last.clone());
-                    self.redone.clear();
-                }
-                Whose::Reversed { undo } => {
-                    let (from, to) = if undo {
-                        (&mut self.undone, &mut self.redone)
-                    } else {
-                        (&mut self.redone, &mut self.undone)
-                    };
-                    if let Some(Some(kept)) = from.pop() {
-                        to.push(self.last.replace(kept));
-                        if let Some(before) = &mut self.before {
-                            before.edited(edit, texts);
-                        }
-                        continue;
-                    }
-                    to.push(None);
-                }
-                _ => {}
-            }
-            for selected in [&mut self.last, &mut self.before].into_iter().flatten() {
-                selected.edited(edit, texts);
-            }
+        if let Some((before, _)) = texts.first() {
+            self.remember(before);
         }
         for selected in [&mut self.last, &mut self.before].into_iter().flatten() {
+            selected.edited(edits, texts);
             selected.settle(text);
         }
+        if reversed {
+            let kept = (self.seen.iter().rev())
+                .find(|(seen, _)| seen.len_bytes() == text.len_bytes() && seen == text)
+                .and_then(|(_, selected)| selected.clone());
+            if let Some(kept) = kept {
+                self.last = Some(kept);
+            }
+        }
+        self.remember(text);
     }
-}
 
-/// Whose edits marks are moved through, for the selections kept with
-/// undo steps (see [`Selections`]).
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Whose<'a> {
-    /// Another's, or the text's made afresh: no step of the window's.
-    Theirs,
-    /// The window's, and whether each started an undo step.
-    Ours(&'a [bool]),
-    /// The window's undo, if `undo`, or redo.
-    Reversed { undo: bool },
+    /// Notes the last selection as it is in `text`.
+    fn remember(&mut self, text: &Rope) {
+        if self.seen.len() >= MOST_SEEN {
+            self.seen.pop_front();
+        }
+        self.seen.push_back((text.clone(), self.last.clone()));
+    }
 }
 
 /// What each of `edits`, made in turn, was made to and made, the last
@@ -594,19 +576,14 @@ impl Marks {
     }
 
     /// Moves the marks in `file` through `edits`, made to it in turn,
-    /// which leave its text as `text`: another's edits, not the window's.
-    #[cfg(test)]
-    pub(crate) fn edited(&mut self, file: File<'_>, edits: &[impl Borrow<Edit>], text: &Rope) {
-        self.edited_as(file, edits, text, Whose::Theirs);
-    }
-
-    /// As [`edited`](Self::edited), for edits `whose` they are.
-    pub(crate) fn edited_as(
+    /// which leave its text as `text`: an undo's or a redo's, if
+    /// `reversed`, which can put back a selection (see [`Selections`]).
+    pub(crate) fn edited(
         &mut self,
         file: File<'_>,
         edits: &[impl Borrow<Edit>],
         text: &Rope,
-        whose: Whose<'_>,
+        reversed: bool,
     ) {
         if edits.is_empty() {
             return;
@@ -615,24 +592,23 @@ impl Marks {
         for (_, place) in self.list.iter_mut().filter(|(_, at)| at.is_in(file)) {
             place.edited(&edits, text);
         }
-        self.selections_edited(file, &edits, text, whose);
+        self.selections_edited(file, &edits, text, reversed);
     }
 
     /// Moves the selections kept for `file` through `edits`,
-    /// as [`edited_as`](Self::edited_as) does, but no other marks: for a
-    /// text that's no file, as a folder's listing is, which keeps them
-    /// anyway.
+    /// as [`edited`](Self::edited) does, but no other marks: for a text
+    /// that's no file, as a folder's listing is, which keeps them anyway.
     pub(crate) fn edited_selections(
         &mut self,
         file: File<'_>,
         edits: &[impl Borrow<Edit>],
         text: &Rope,
-        whose: Whose<'_>,
+        reversed: bool,
     ) {
         if edits.is_empty() {
             return;
         }
-        self.selections_edited(file, &passing(edits, text), text, whose);
+        self.selections_edited(file, &passing(edits, text), text, reversed);
     }
 
     fn selections_edited(
@@ -640,17 +616,13 @@ impl Marks {
         file: File<'_>,
         edits: &[Passing<'_>],
         text: &Rope,
-        whose: Whose<'_>,
+        reversed: bool,
     ) {
-        // The window's steps are kept for, selected or not yet.
-        if matches!(whose, Whose::Ours(steps) if steps.contains(&true)) {
-            self.selections_of(file);
-        }
         let Some(kept) = self.selections.iter_mut().find(|kept| kept.is_of(file)) else {
             return;
         };
         let texts = texts_of(edits, text);
-        kept.edited(edits, &texts, whose, text);
+        kept.edited(edits, &texts, text, reversed);
     }
 
     /// The selections kept for `file`, made if there are none yet.
@@ -663,8 +635,7 @@ impl Marks {
                 machine: file.machine,
                 last: None,
                 before: None,
-                undone: Vec::new(),
-                redone: Vec::new(),
+                seen: std::collections::VecDeque::new(),
             });
             self.selections.len() - 1
         };
@@ -735,9 +706,7 @@ impl Marks {
             );
             place.moved(machine, from, to);
             kept.path = place.path;
-            let selections = [&mut kept.last, &mut kept.before].into_iter().flatten();
-            let steps = kept.undone.iter_mut().chain(&mut kept.redone).flatten();
-            for selected in selections.chain(steps) {
+            for selected in [&mut kept.last, &mut kept.before].into_iter().flatten() {
                 selected.moved(machine, from, to);
             }
         }
@@ -745,7 +714,7 @@ impl Marks {
 
     /// The text of `file` is new, as when it's opened again: its marks go
     /// to their lines and columns in it, and its selections stay at theirs,
-    /// as Vim's do; the undo steps they were kept for are gone.
+    /// as Vim's do.
     pub(crate) fn replaced(&mut self, file: File<'_>, text: &Rope) {
         for (_, place) in self.list.iter_mut().filter(|(_, at)| at.is_in(file)) {
             place.find_byte(text);
@@ -754,8 +723,7 @@ impl Marks {
             for selected in [&mut kept.last, &mut kept.before].into_iter().flatten() {
                 selected.settle(text);
             }
-            kept.undone.clear();
-            kept.redone.clear();
+            kept.seen.clear();
         }
     }
 }
@@ -824,8 +792,13 @@ mod tests {
         assert_eq!(place(&marks), (2, 2));
         let edit = Edit::replace(14, 0, "", "zero\n");
         let text = Rope::from_str("zero\none\ntwo\nthree\n");
-        marks.edited(File::here("/f"), std::slice::from_ref(&edit), &text);
-        marks.edited(File::here("/other"), std::slice::from_ref(&edit), &text);
+        marks.edited(File::here("/f"), std::slice::from_ref(&edit), &text, false);
+        marks.edited(
+            File::here("/other"),
+            std::slice::from_ref(&edit),
+            &text,
+            false,
+        );
         assert_eq!(place(&marks), (3, 2));
         marks.replaced(File::here("/f"), &Rope::from_str("zero\nx\n"));
         assert_eq!(place(&marks), (1, 1));
@@ -840,7 +813,7 @@ mod tests {
         let mut edit = Edit::new();
         edit.retain(2).delete("\n").retain(2).insert("\n").retain(2);
         let text = Rope::from_str("a\nb\n\nc\n");
-        marks.edited(File::here("/f"), std::slice::from_ref(&edit), &text);
+        marks.edited(File::here("/f"), std::slice::from_ref(&edit), &text, false);
         let at = marks.get('a', File::here("/f")).unwrap();
         assert_eq!((at.line, at.col), (1, 0), "where the line was");
     }

@@ -86,7 +86,7 @@ pub(crate) use ex::is_editor_command;
 pub(crate) use hints::HINTS_WAIT;
 use kept::Kept;
 use keys::{Action, Command, EditorAction, EditorKeys, Parsed};
-pub(crate) use marks::{File, FilePlace, Marks, Whose, passing};
+pub(crate) use marks::{File, FilePlace, Marks, passing};
 #[cfg(test)]
 pub(crate) use panel::Line as PanelLine;
 pub(crate) use panel::{BESIDE_GAP, Beside, PanelView};
@@ -1646,11 +1646,7 @@ impl Editor {
             // count doesn't queue millions.
             Action::Undo | Action::Redo => {
                 for _ in 0..times.min(MOST_UNDOS) {
-                    // A step that changed nothing is undone at once, the
-                    // cursor where it was before it, aiming afresh.
-                    if let Some(at) = copy.reverse(command.action == Action::Undo) {
-                        self.cursor = Cursor::new(self.text(copy).point_of(at));
-                    }
+                    copy.reverse(command.action == Action::Undo);
                 }
             }
             Action::Repeat => return self.repeat(command.count, copy, shared),
@@ -2825,11 +2821,15 @@ impl Editor {
         let mut put = register.text.repeat(times);
         let (byte, landing) = if register.lines {
             let line = if before { at.line } else { at.line + 1 };
-            let mut byte = text.line_start(line);
-            // After a last line with no line break, one goes before.
-            if byte == len && len > 0 && text.rope().byte(len - 1) != b'\n' {
-                put = format!("\n{}", put.trim_end_matches('\n'));
-                byte = len;
+            let byte = text.line_start(line);
+            // After the line before, with a line break before them, which
+            // makes the same text as them put at their line's start, but
+            // says where they go: after a line, not splitting the next, so
+            // the selection's ends know (see `marks::end_changed`). Above
+            // the first line, at its start.
+            if line > 0 {
+                let byte = text.line_end(line - 1);
+                put = format!("\n{}", put.strip_suffix('\n').unwrap_or(&put));
                 (byte, byte + 1)
             } else {
                 (byte, byte)
@@ -2873,7 +2873,6 @@ impl Editor {
         if times > 1 && times as u64 > there {
             self.cut_count = usize::try_from(there + 1).ok();
             if there == 0 {
-                copy.unchanged_step(text.byte_at(self.cursor.at));
                 self.cursor = Cursor::new(Point { line, col: 0 });
                 return;
             }
@@ -3001,8 +3000,12 @@ impl Editor {
                 let line_text = text.line_text(at.line);
                 let indent = indent_of(&line_text).to_owned();
                 let len = text.rope().len_bytes();
+                // Above, after the line before if there is one, as `P` puts
+                // lines.
                 let (byte, inserted, line) = if entry == Entry::Below {
                     (text.line_end(at.line), format!("\n{indent}"), at.line + 1)
+                } else if at.line > 0 {
+                    (text.line_end(at.line - 1), format!("\n{indent}"), at.line)
                 } else {
                     (text.line_start(at.line), format!("{indent}\n"), at.line)
                 };
@@ -4646,7 +4649,7 @@ impl Editor {
         match heard {
             Heard::Replaced => self.replaced(copy),
             Heard::Edited(edit) => self.follow_edit(edit, copy),
-            Heard::Reversed { edit, .. } => {
+            Heard::Reversed(edit) => {
                 if jump {
                     // To where the step undone or redone was, as in Vim.
                     let at = edit.changes().next().map(|(at, _, _)| at);
@@ -4724,7 +4727,7 @@ impl Editor {
         }
         // A new text, or the window's own undo, closes the panel, as an
         // edit typed does, and the menu.
-        if matches!(heard, Heard::Replaced | Heard::Reversed { .. }) {
+        if matches!(heard, Heard::Replaced | Heard::Reversed(_)) {
             self.panel = None;
             self.actions = None;
             self.close_completion();
