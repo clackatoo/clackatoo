@@ -724,6 +724,10 @@ fn a_count_takes_percent_to_a_line_so_far_through() {
         kept(text, (1, 0), "d50%"),
         ("d\ne\n".into(), "a\nb\nc\n".into(), true)
     );
+    // Onto the cursor's own line too.
+    let own = kept("a\nb\nc\nd\n", (2, 0), "d50%");
+    assert_eq!(own, ("a\nc\nd\n".into(), "b\n".into(), true));
+    assert_eq!(kept("one two three four\nb\n", (1, 11), "d3%").0, "b\n");
     // Aiming for the column wanted, as `gg` does with `nostartofline`.
     assert_eq!(in_cells("abc\nb\nc\nd\ne\n", (1, 0), "$40%").1, (2, 0));
     assert_eq!(in_cells("abc\n  bcd\nc\nd\ne\n", (1, 2), "40%").1, (2, 2));

@@ -632,6 +632,8 @@ impl Motion {
             Self::Find { .. } if from == to && once && self.found_in_place(from, lines) => {
                 Some(Reach::Inclusive)
             }
+            // `50%` takes whole lines, as Vim's, the cursor's own too.
+            Self::Match if count.is_some_and(|percent| percent <= 100) => Some(Reach::Lines),
             Self::Match
             | Self::Find { .. }
             | Self::WordEndBack
@@ -642,8 +644,6 @@ impl Motion {
             {
                 None
             }
-            // `50%` takes whole lines, as Vim's.
-            Self::Match if count.is_some_and(|percent| percent <= 100) => Some(Reach::Lines),
             // `dl` short of its count, at the line's last character, takes
             // that too, as Vim's.
             Self::Right if !lines.empty(to.line) && steps(from, to, lines) < count.unwrap_or(1) => {
