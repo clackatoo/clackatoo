@@ -562,3 +562,25 @@ fn a_motion_by_characters_that_takes_whole_lines_leaves_d_at_the_first_non_blank
     );
     assert_eq!(in_cells("  ab\n\n    bar\n", (2, 0), "dw").1, (2, 4));
 }
+
+#[test]
+fn a_lines_end_is_past_its_last_character_however_wide() {
+    // d and Backspace at a line's start join it to the line before, which
+    // ends in a wide character or a tab.
+    assert_eq!(
+        in_cells("x中\ny\n", (2, 0), "d<BS>"),
+        ("x中y\n".into(), (1, 3))
+    );
+    assert_eq!(
+        in_cells("x\t\ny\n", (2, 0), "d<BS>"),
+        ("x\ty\n".into(), (1, 4))
+    );
+    assert_eq!(
+        in_cells("x\t\ny\n", (2, 0), "d2<BS>"),
+        ("xy\n".into(), (1, 1))
+    );
+    assert_eq!(in_cells("x中\ny\n", (2, 0), "c<BS>Z<Esc>").0, "x中Zy\n");
+    // w taken stops past it.
+    assert_eq!(kept("a 中\ny\n", (1, 2), "dw").1, "中");
+    assert_eq!(kept("a\t\ny\n", (1, 0), "yw").1, "a\t");
+}

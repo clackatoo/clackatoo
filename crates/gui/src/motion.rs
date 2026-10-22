@@ -1481,10 +1481,10 @@ impl<'a, L: Lines> Walk<'a, L> {
 /// so the line break counts as a character.
 fn line_end(line: u64, lines: &impl Lines) -> usize {
     if lines.empty(line) {
-        0
-    } else {
-        lines.last_cell(line) + 1
+        return 0;
     }
+    let last = lines.last_cell(line);
+    lines.row(line).map_or(last, |row| row.extent(last).1) + 1
 }
 
 /// The step Space takes from `at` for an operator: on along the line, to
