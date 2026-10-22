@@ -1550,6 +1550,8 @@ impl Editor {
         }
         if stroke == Stroke::Escape && !self.keys.pending() {
             self.escape();
+            // Back onto a character from just past a line's end.
+            self.normal_cursor(copy);
             return Done::REDRAW;
         }
         // `q` stops a macro being recorded, whatever comes after.
@@ -1604,9 +1606,17 @@ impl Editor {
                 let motion = self.finds.remember(motion);
                 let motion = self.by_rows(motion);
                 self.cursor = self.moved(copy, motion, command.count);
-                let stays = command.count.is_none_or(|count| count == 1)
-                    && motion.found_in_place(from, &self.text(copy));
-                if self.cursor.at == from && can_fail(motion) && !stays {
+                if self.mode == Mode::Visual(Selection::Characters) {
+                    self.past_line_end(motion, from, times, copy);
+                }
+                let once = command.count.is_none_or(|count| count == 1);
+                let text = self.text(copy);
+                let stays = once && motion.found_in_place(from, &text);
+                // `2_` and `2g_` have no line to go to from the last.
+                let down = matches!(motion, Motion::LineFirstNonBlank | Motion::LastNonBlank);
+                let no_line = down && !once && from.line >= text.last_line();
+                drop(text);
+                if (self.cursor.at == from && can_fail(motion) && !stays) || no_line {
                     self.fail();
                 }
             }
@@ -1875,6 +1885,55 @@ impl Editor {
         self.last_change = Some(change);
     }
 
+    /// In visual mode by characters, puts the cursor just past its line's
+    /// last character where Vim's goes, so a selection takes the line
+    /// break: `l` or Space on from the last character, `$`, `|` past the
+    /// end, and up and down wanting a column past it (`v$j`).
+    fn past_line_end(&mut self, motion: Motion, from: Point, times: usize, copy: &BufferCopy) {
+        let text = self.text(copy);
+        let past = |line: u64| text.line_cells(line);
+        match motion {
+            Motion::Right | Motion::RightOver => {
+                // A character at a time, the line's end one more.
+                let mut at = from;
+                for _ in 0..times {
+                    let end = past(at.line);
+                    if at.col >= end || end == 0 {
+                        if motion == Motion::RightOver && at.line < text.last_line() {
+                            at = Point {
+                                line: at.line + 1,
+                                col: 0,
+                            };
+                            continue;
+                        }
+                        break;
+                    }
+                    let mut step = Cursor::new(at);
+                    step.apply(Motion::Right, &text);
+                    at = if step.at == at {
+                        Point { col: end, ..at }
+                    } else {
+                        step.at
+                    };
+                }
+                self.cursor = Cursor::new(at);
+            }
+            Motion::LineEnd
+            | Motion::Column
+            | Motion::Up(_)
+            | Motion::Down(_)
+            | Motion::RowUp(_)
+            | Motion::RowDown(_) => {
+                let at = self.cursor.at;
+                let end = past(at.line);
+                if end > 0 && at.col == text.last_cell(at.line) && self.cursor.want() >= end {
+                    self.cursor = Cursor::wanting(Point { col: end, ..at }, self.cursor.want());
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// `motion` as it goes here: where lines don't wrap, `gj` and `gk` are
     /// `j` and `k`, as in Vim, taking whole lines with an operator.
     fn by_rows(&self, motion: Motion) -> Motion {
@@ -1997,7 +2056,11 @@ impl Editor {
             // keep the cursor's column when there are more than one.
             let text = self.text(copy);
             let col = self.cursor.at.col;
+            // Back to where a motion or an object starts, as `gU-` and
+            // `gUip` go, where it's before the cursor.
+            let back = span.moved.filter(|moved| moved.at < self.cursor.at);
             self.cursor = match span.lines {
+                Some(_) if let Some(moved) = back => moved,
                 Some((first, last)) if first < last && target != Target::Selection => {
                     Cursor::wanting(Point { line: first, col }, col)
                 }
@@ -2261,7 +2324,19 @@ impl Editor {
                     (at, anchor)
                 };
                 match self.mode {
-                    Mode::Visual(Selection::Lines) => Some(lines(start.line, last.line)),
+                    // Copied, the cursor goes to the first line's start,
+                    // or stays where it is on it, as Vim's.
+                    Mode::Visual(Selection::Lines) => Some(Span {
+                        moved: Some(if at.line < anchor.line {
+                            self.cursor
+                        } else {
+                            Cursor::new(Point {
+                                line: start.line,
+                                col: 0,
+                            })
+                        }),
+                        ..lines(start.line, last.line)
+                    }),
                     _ => Some(Span::chars_to_break(&text, start, last)),
                 }
             }
@@ -2372,6 +2447,12 @@ impl Editor {
             whole_lines_deleted(&text, span)
         } else {
             span
+        };
+        // `y_` leaves the cursor where it is, as Vim's.
+        let moved = if operator == Operator::Yank && motion == Motion::LineFirstNonBlank {
+            self.cursor
+        } else {
+            moved
         };
         Some(Span {
             moved: Some(moved),
@@ -4279,7 +4360,13 @@ impl Editor {
     /// past the line's end, and onto the start of a wide or tab character.
     fn normal_cursor(&mut self, copy: &BufferCopy) {
         let text = self.text(copy);
-        self.cursor.at = on_character(self.cursor.at, &text);
+        // Just past the line's end, in visual mode by characters, as Vim's
+        // can be (see [`past_line_end`](Self::past_line_end)).
+        let at = self.cursor.at;
+        let past = at.line <= text.last_line() && at.col == text.line_cells(at.line);
+        if !(self.mode == Mode::Visual(Selection::Characters) && past) {
+            self.cursor.at = on_character(at, &text);
+        }
         if let Some(anchor) = &mut self.anchor {
             anchor.line = anchor.line.min(text.last_line());
         }

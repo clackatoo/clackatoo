@@ -230,7 +230,17 @@ impl Editor {
             ),
             Extent::Block { .. } => return,
         };
-        let head = on_character(head, &text);
+        // To the line's end, just past its last character, so its line
+        // break goes too, as Vim's.
+        let to_end = head.col == usize::MAX && text.line_cells(head.line) > 0;
+        let head = if to_end {
+            Point {
+                col: text.line_cells(head.line),
+                ..head
+            }
+        } else {
+            on_character(head, &text)
+        };
         drop(text);
         self.mode = Mode::Visual(kind);
         self.anchor = Some(at);

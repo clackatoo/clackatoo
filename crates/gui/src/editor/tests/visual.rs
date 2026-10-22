@@ -53,9 +53,13 @@ fn over_several_lines_dot_goes_as_many_lines_to_the_same_column() {
         grid_after("llvjldj05l."),
         "abmnop\nqrstu2345\n6789ABCD\nEFGHIJKL\n"
     );
-    // Taken to the end with `$`, it goes to the end of the last line.
-    assert_eq!(grid_after("llvj$dj0l."), "ab\nq\n6789ABCD\nEFGHIJKL\n");
-    assert_eq!(grid_after("llv$dj0l."), format!("ab\ni\n{}", &GRID[18..]));
+    // Taken to the end with `$`, it goes past the end of the last line,
+    // taking its line break, as Vim's.
+    assert_eq!(grid_after("llvj$dj0l."), "abqrstuvwx\nyEFGHIJKL\n");
+    assert_eq!(
+        grid_after("llv$dj0l."),
+        format!("abijklmnop\nq{}", &GRID[27..])
+    );
 }
 
 #[test]
@@ -295,10 +299,10 @@ fn gv_puts_the_cursor_at_the_end_it_was_at() {
         setup.editor.anchor.map(|at| (at.line, at.col)),
         Some((1, 3))
     );
-    // Kept to the line's end, after `$`.
+    // Kept to the line's end, after `$`: just past it, as Vim's.
     let mut setup = Setup::new("short\nmuch longer\n");
     setup.keys("v$y0gvj");
-    assert_eq!(setup.cursor(), (1, 10));
+    assert_eq!(setup.cursor(), (1, 11));
 }
 
 #[test]
@@ -588,4 +592,39 @@ fn indenting_a_listings_lines_is_refused() {
         setup.text(),
         format!("..\n{one}lpha\n{two}eta/\n{three}gamma\n")
     );
+}
+
+#[test]
+fn in_visual_mode_the_cursor_goes_just_past_a_lines_end_and_takes_its_break() {
+    let copied = |text: &str, keys: &str| {
+        let mut setup = Setup::new(text);
+        setup.keys(keys);
+        setup.register().text
+    };
+    assert_eq!(copied("abc\nde\n", "v$y"), "abc\n");
+    assert_eq!(copied("x\nde\n", "vly"), "x\n");
+    assert_eq!(copied("abc\nde\n", "v9|y"), "abc\n");
+    let mut setup = Setup::new("abc\nde\n");
+    setup.keys("v$");
+    assert_eq!(setup.cursor(), (0, 3));
+    setup.keys("j");
+    assert_eq!(setup.cursor(), (1, 2), "still past the end");
+    setup.keys("<Esc>");
+    assert_eq!(setup.cursor(), (1, 1), "back onto a character");
+    let mut setup = Setup::new("abc\nde\n");
+    setup.keys("v$d");
+    assert_eq!(setup.text(), "de\n");
+}
+
+#[test]
+fn copying_lines_selected_leaves_the_cursor_where_vims_does() {
+    let at = |keys: &str| {
+        let mut setup = Setup::new("abc\n  de\nfg hi\n");
+        setup.keys(keys);
+        setup.cursor()
+    };
+    // At the first line's start, unless the cursor is the first.
+    assert_eq!(at("j3lVy"), (1, 0));
+    assert_eq!(at("j3lVjy"), (1, 0));
+    assert_eq!(at("jj3lVky"), (1, 3));
 }

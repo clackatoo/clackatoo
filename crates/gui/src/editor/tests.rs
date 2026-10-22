@@ -2786,7 +2786,7 @@ fn the_black_hole_takes_deletes_and_leaves_the_registers_alone() {
 #[test]
 fn registers_in_visual_mode_and_p_over_a_selection() {
     let mut setup = Setup::new("one two\nthree\n");
-    setup.keys("v$\"cy");
+    setup.keys("vg_\"cy");
     assert_eq!(setup.held('c').as_deref(), Some("one two"));
     // `p` over a word puts in its place, keeping the word.
     setup.keys("wyiwbviwp");

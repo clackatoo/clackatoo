@@ -479,3 +479,18 @@ fn backspace_onto_an_empty_line_takes_it_as_an_exclusive_motion_does() {
     assert_eq!(in_cells(text, (3, 0), "c<BS>Z<Esc>").0, "abc\nZ\nx y\n");
     assert_eq!(in_cells(text, (3, 0), "d<BS>").0, "abc\nx y\n");
 }
+
+#[test]
+fn operators_over_lines_leave_the_cursor_where_vims_do() {
+    let text = "one\n  two\nthree\n";
+    // gU goes back to where the motion or the object starts.
+    assert_eq!(in_cells(text, (2, 4), "gU-").1, (1, 0));
+    assert_eq!(in_cells(text, (2, 4), "gU_").1, (2, 2));
+    assert_eq!(in_cells("one\n  two\n\nx\n", (2, 4), "gUip").1, (1, 0));
+    // y_ leaves it where it is.
+    assert_eq!(in_cells(text, (2, 4), "y_").1, (2, 4));
+    // 2_ fails from the last line.
+    let mut setup = Setup::new("ab\ncd\n");
+    setup.keys("j2_");
+    assert!(setup.editor.take_failed());
+}
