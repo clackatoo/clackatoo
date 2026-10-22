@@ -401,6 +401,7 @@ After `y`, or in visual mode, `i` or `a` and one more key pick out a piece of te
 | `iW` `aW` | The same, for anything between blanks. |
 | `i"` `a"`, `i'` `a'`, `` i` `` `` a` `` | What's between the quotes around the cursor, or the next pair on its line; with `a`, the quotes too. |
 | `i(` `a(`, `i[` `a[`, `i{` `a{`, `i<` `a<` | What's between the brackets around the cursor, across lines; with `a`, the brackets too. The closing bracket works as well. |
+| `ip` `ap` | A paragraph, or the blank lines the cursor is on, as whole lines; with `a`, the blank lines after it too, or before it if there are none after, as Vim's. A count takes that many. |
 | `ib` `ab` | A [command's](#commands) output; with `a`, its prompt and command line too. |
 
 In Vim, `b` is another name for `(`. Here it's the command, the more useful thing in a terminal, and `(` still means parentheses.

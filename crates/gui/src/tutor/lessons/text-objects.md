@@ -1,6 +1,6 @@
 # Text objects
 
-Functions, classes and arguments as the language's grammar finds them: `af`, `if`, `ac` and `aa` after `d`, `c` or `y`, and `]f` and `[f` to move between functions.
+Functions, classes and arguments as the language's grammar finds them: `af`, `if`, `ac` and `aa` after `d`, `c` or `y`, and `]f` and `[f` to move between functions. `ip` and `ap` take a paragraph as whole lines, as Vim's do, here and in a terminal.
 
 The practice file is Rust. If Rust's grammar isn't installed, the bottom bar asks to install it as the file opens: press `y`. Its language server needn't be.
 

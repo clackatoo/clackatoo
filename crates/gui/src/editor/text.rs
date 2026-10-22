@@ -31,6 +31,8 @@ use super::kept::{Kept, LineLog};
 use super::wrap::{Placed, Top, Wrap};
 use crate::colors;
 use crate::motion::{Cells, Lines, Point, ScreenRow, Spot, View, Words};
+#[cfg(test)]
+use crate::objects::Found;
 
 /// The column after a tab that starts at column `col`, with tabs stopping
 /// at multiples of `tabstop`.
@@ -1535,8 +1537,10 @@ mod tests {
                 };
                 for &object in objects {
                     for inner in [true, false] {
-                        let found = object.find(&short, from, inner);
-                        let far = object.find(&long, along(from), inner);
+                        let ends =
+                            |found: Option<Found>| found.map(|found| (found.start, found.last));
+                        let found = ends(object.find(&short, from, inner, 1));
+                        let far = ends(object.find(&long, along(from), inner, 1));
                         if far.is_none_or(|(start, _)| start.line > 0 || start.col >= shift) {
                             let found = found.map(|(start, last)| (along(start), along(last)));
                             assert_eq!(found, far, "{context}: {object:?}, {inner}");

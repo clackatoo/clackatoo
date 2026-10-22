@@ -1723,10 +1723,15 @@ impl Editor {
             return self.select_piece(construct, inner, times, copy);
         }
         let text = self.text(copy);
-        if let Some((start, last)) = object.find(&text, self.cursor.at, inner) {
-            self.mode = Mode::Visual(Selection::Characters);
-            self.anchor = Some(start);
-            self.cursor = Cursor::new(last);
+        if let Some(found) = object.find(&text, self.cursor.at, inner, times) {
+            let kind = if found.lines {
+                Selection::Lines
+            } else {
+                Selection::Characters
+            };
+            self.mode = Mode::Visual(kind);
+            self.anchor = Some(found.start);
+            self.cursor = Cursor::new(found.last);
         }
     }
 
@@ -2268,14 +2273,21 @@ impl Editor {
                 })
             }
             Target::Object { object, inner } => {
-                let Some((start, last)) = object.find(&text, at, inner) else {
+                let Some(found) = object.find(&text, at, inner, times) else {
                     self.status = Some(match object {
                         Object::Block => "a file has no shell blocks".into(),
                         _ => "nothing there".into(),
                     });
                     return None;
                 };
-                Some(chars(start, last))
+                if !found.lines {
+                    return Some(chars(found.start, found.last));
+                }
+                // Whole lines, the cursor to the first's start, as Vim's.
+                Some(Span {
+                    moved: Some(Cursor::new(found.start)),
+                    ..lines(found.start.line, found.last.line)
+                })
             }
             Target::Motion(motion) => self.motion_span(operator, motion, count, copy),
         }

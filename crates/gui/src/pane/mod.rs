@@ -2835,6 +2835,17 @@ mod tests {
     }
 
     #[test]
+    fn y_takes_a_paragraph_as_whole_lines() {
+        let terminal = terminal("one\r\n  two\r\n\r\nthree");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let mut yank = |keys_: &str| yanked(&mut pane, &terminal, keys_);
+        assert_eq!(yank("gg03lyip").as_deref(), Some("one\n  two"));
+        assert_eq!(yank("ggyap").as_deref(), Some("one\n  two\n"));
+        assert_eq!(cursor(&pane).2, 0, "at the paragraph's start");
+    }
+
+    #[test]
     fn commands_a_terminal_doesnt_take_are_nothing_and_spend_their_keys() {
         let terminal = terminal("one two six\r\nfour five");
         let mut pane = pane(&terminal);

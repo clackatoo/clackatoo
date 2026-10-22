@@ -63,7 +63,7 @@ impl Pane {
 
     /// `object`, found around the cursor, just its insides if `inner`:
     /// copied after `y`, or selected in visual mode.
-    pub(super) fn use_object(&mut self, object: Object, inner: bool) -> bool {
+    pub(super) fn use_object(&mut self, object: Object, inner: bool, count: usize) -> bool {
         let Some(cursor) = self.cursor else {
             return false;
         };
@@ -77,14 +77,19 @@ impl Pane {
             self.ask_for_block(cursor.at.line, Which::At, use_);
             return false;
         }
-        let Some((start, last)) = object.find(&Document(self), cursor.at, inner) else {
+        let Some(found) = object.find(&Document(self), cursor.at, inner, count) else {
             return false;
         };
-        if visual {
-            self.select(start, last, Selection::Characters);
+        let kind = if found.lines {
+            Selection::Lines
         } else {
-            self.copy(start, last, Selection::Characters, Copy::Clipboard);
-            self.cursor = Some(Cursor::new(start));
+            Selection::Characters
+        };
+        if visual {
+            self.select(found.start, found.last, kind);
+        } else {
+            self.copy(found.start, found.last, kind, Copy::Clipboard);
+            self.cursor = Some(Cursor::new(found.start));
             self.follow_cursor();
         }
         true

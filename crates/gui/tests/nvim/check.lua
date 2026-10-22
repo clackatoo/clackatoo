@@ -70,6 +70,9 @@ end
 -- `_`, `g_`, `|`, `ge` and Space and Backspace.
 local spaced = { '  one two.three', 'four  five', '', '  six seven  ', 'eight' }
 
+-- Two paragraphs, two blank lines, two more, for `ip` and `ap`.
+local para = { 'one', '  two', '', '', 'three', 'four', '', 'five' }
+
 local cases = {
   -- CLACKA-127: a count before `gg`, or `G` as an operator's target, is a
   -- line number.
@@ -317,6 +320,20 @@ local cases = {
   { name = 'd3<BS>', lines = spaced, at = { 2, 1 }, keys = 'd3<BS>' },
   { name = 'y3<BS>', lines = spaced, at = { 2, 1 }, keys = 'y3<BS>' },
   { name = 'y<BS> at the start', lines = spaced, at = { 2, 0 }, keys = 'y<BS>' },
+  -- Paragraphs, whole lines.
+  { name = 'yip', lines = para, at = { 2, 3 }, keys = 'yip' },
+  { name = 'yap', lines = para, at = { 2, 3 }, keys = 'yap' },
+  { name = 'dip', lines = para, at = { 6, 1 }, keys = 'dip' },
+  { name = 'dap', lines = para, at = { 6, 1 }, keys = 'dap' },
+  { name = 'dap last', lines = para, at = { 8, 2 }, keys = 'dap' },
+  { name = 'yip blank', lines = para, at = { 3, 0 }, keys = 'yip' },
+  { name = 'yap blank', lines = para, at = { 3, 0 }, keys = 'yap' },
+  { name = '2yip', lines = para, at = { 1, 0 }, keys = '2yip' },
+  { name = '2yap', lines = para, at = { 1, 0 }, keys = '2yap' },
+  { name = 'vip', lines = para, at = { 2, 3 }, keys = 'vip' },
+  { name = '3yip last', lines = para, at = { 8, 0 }, keys = '3yip' },
+  { name = 'cip', lines = para, at = { 2, 3 }, keys = 'cipx<Esc>' },
+  { name = 'y2ap', lines = para, at = { 5, 2 }, keys = 'y2ap' },
   { name = 'M with a line cut off', lines = long, at = { 3, 4 }, view = { height = 10, top = 2, columns = 20 }, keys = 'M' },
   { name = 'M so=5 at the end', lines = sixty, at = { 56, 4 }, view = { height = 10, top = 51 }, keys = 'M', set = 'scrolloff=5' },
 }

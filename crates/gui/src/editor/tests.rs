@@ -21,6 +21,7 @@ mod hints;
 mod indent;
 mod motions;
 mod mouse;
+mod objects;
 mod prose;
 mod rendered;
 mod snippets;

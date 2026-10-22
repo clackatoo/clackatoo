@@ -9,6 +9,10 @@
 //! prompt, command and output. Only the daemon knows where blocks are, so
 //! the pane asks it for those.
 //!
+//! `ip` is the paragraph around the cursor, or the run of blank lines it's
+//! in, and `ap` the paragraph with the blank lines after it, or before it
+//! if there are none after: whole lines, as Vim's take, a count that many.
+//!
 //! In an editor, `f`, `c` and `a` are pieces of code its grammar finds:
 //! `af` is a function and `if` its body, `ac` a class and `ic` its body,
 //! and `aa` an argument with its comma and `ia` the argument. Only the
@@ -36,6 +40,8 @@ pub(crate) enum Object {
     /// `(`, `[`, `{` or `<` (or their closing halves): what's between a
     /// pair, which may span lines.
     Bracket { open: char, close: char },
+    /// `p`: a paragraph, whole lines.
+    Paragraph,
     /// `b`: the shell's block.
     Block,
     /// `f`, `c` or `a`: a piece of code.
@@ -54,6 +60,7 @@ impl Object {
             '[' | ']' => bracket('[', ']'),
             '{' | '}' => bracket('{', '}'),
             '<' | '>' => bracket('<', '>'),
+            'p' => Some(Self::Paragraph),
             'b' => Some(Self::Block),
             'f' => Some(Self::Code(Construct::Function)),
             'c' => Some(Self::Code(Construct::Class)),
@@ -63,21 +70,108 @@ impl Object {
     }
 
     /// Where the object around `at` starts and ends, both included: just
-    /// its insides if `inner`. None if there's no such object there, or
-    /// it's empty. Blocks and pieces of code aren't found here (see the
-    /// module docs).
-    pub(crate) fn find(self, lines: &impl Lines, at: Point, inner: bool) -> Option<(Point, Point)> {
+    /// its insides if `inner`, and `count` of them where that's a thing (a
+    /// paragraph). None if there's no such object there, or it's empty.
+    /// Blocks and pieces of code aren't found here (see the module docs).
+    pub(crate) fn find(
+        self,
+        lines: &impl Lines,
+        at: Point,
+        inner: bool,
+        count: usize,
+    ) -> Option<Found> {
+        let chars = |(start, last)| Found {
+            start,
+            last,
+            lines: false,
+        };
         match self {
             Self::Word | Self::BigWord => {
                 let row = lines.row(at.line);
                 let big = self == Self::BigWord;
-                Some(word(row.as_deref(), at, inner, big, lines.words()))
+                Some(chars(word(row.as_deref(), at, inner, big, lines.words())))
             }
-            Self::Quote(quote) => quoted(lines.row(at.line).as_deref(), at, quote, inner),
-            Self::Bracket { open, close } => bracketed(lines, at, open, close, inner),
+            Self::Quote(quote) => {
+                quoted(lines.row(at.line).as_deref(), at, quote, inner).map(chars)
+            }
+            Self::Bracket { open, close } => bracketed(lines, at, open, close, inner).map(chars),
+            Self::Paragraph => {
+                let (first, last) = paragraph(lines, at.line, inner, count.max(1))?;
+                Some(Found {
+                    start: Point {
+                        line: first,
+                        col: 0,
+                    },
+                    last: Point { line: last, col: 0 },
+                    lines: true,
+                })
+            }
             Self::Block | Self::Code(_) => None,
         }
     }
+}
+
+/// Where an object was found: from `start` to `last`, both included, and
+/// whether it's whole lines, as a paragraph is, or characters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Found {
+    pub(crate) start: Point,
+    pub(crate) last: Point,
+    pub(crate) lines: bool,
+}
+
+/// `ip` and `ap`, `count` of them, around line `line`, as Vim's
+/// `current_par()` finds them: the first and last lines. A run of blank
+/// lines is a paragraph for `ip`; `ap` takes a paragraph's blank lines
+/// after it, or if there are none, before it. None if there aren't
+/// `count` of them.
+fn paragraph(lines: &impl Lines, line: u64, inner: bool, count: usize) -> Option<(u64, u64)> {
+    let include = !inner;
+    let (first, last) = lines.bounds();
+    // Line numbers that can be one before the first, as Vim's go.
+    let (first, last) = (first.cast_signed(), last.cast_signed());
+    let white = |line: i64| lines.empty(line.cast_unsigned());
+    let white_in_front = white(line.cast_signed());
+    // Back to the start of the paragraph, or of the blank lines.
+    let mut start = line.cast_signed();
+    while start > first && white(start - 1) == white_in_front {
+        start -= 1;
+    }
+    // Past the blank lines it starts with, if any.
+    let mut end = start;
+    while end <= last && white(end) {
+        end += 1;
+    }
+    end -= 1;
+    let mut left = count - usize::from(!include && white_in_front);
+    while left > 0 {
+        left -= 1;
+        if end == last {
+            return None;
+        }
+        let blank_next = !include && white(end + 1);
+        if include || !blank_next {
+            end += 1;
+            while end < last && !white(end + 1) {
+                end += 1;
+            }
+        }
+        if left == 0 && white_in_front && include {
+            break;
+        }
+        if include || blank_next {
+            while end < last && white(end + 1) {
+                end += 1;
+            }
+        }
+    }
+    // With no blank lines after, `ap` takes those before.
+    if !white_in_front && !white(end) && include {
+        while start > first && white(start - 1) {
+            start -= 1;
+        }
+    }
+    Some((start.cast_unsigned(), end.cast_unsigned()))
 }
 
 /// `iw` and `aw`, with `words` part of words; or if `big`, `iW` and
@@ -264,7 +358,9 @@ mod tests {
         let mut keys = keys.chars();
         let inner = keys.next() == Some('i');
         let object = Object::of_key(keys.next().unwrap()).unwrap();
-        object.find(text, from, inner)
+        let found = object.find(text, from, inner, 1)?;
+        assert!(!found.lines);
+        Some((found.start, found.last))
     }
 
     fn cols(range: Option<(Point, Point)>) -> Option<(usize, usize)> {

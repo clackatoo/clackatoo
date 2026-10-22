@@ -660,6 +660,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "A terminal takes f, t, F and T, with ; and , to find again, and y with them, as yt) copies up to a )",
     },
     News {
+        id: "paragraphs",
+        date: "2026-10-22",
+        lesson: "text-objects",
+        what: "ip and ap take a paragraph as whole lines, ap with its blank lines, in editors and terminals, as Vim's",
+    },
+    News {
         id: "linemotions",
         date: "2026-10-22",
         lesson: "basics",

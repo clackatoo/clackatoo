@@ -221,7 +221,7 @@ impl Pane {
             Action::Operate(Operator::Yank, Target::Selection) => self.yank_selection(),
             // Copied after `y`, selected in visual mode.
             Action::Operate(Operator::Yank, Target::Object { object, inner })
-            | Action::Select { object, inner } => self.use_object(object, inner),
+            | Action::Select { object, inner } => self.use_object(object, inner, command.times()),
             Action::Insert(Entry::Before) => self.insert(),
             Action::Visual { lines: false } => self.toggle_visual(Selection::Characters),
             Action::Visual { lines: true } => self.toggle_visual(Selection::Lines),
