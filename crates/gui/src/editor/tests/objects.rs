@@ -253,3 +253,21 @@ fn more_paragraphs_than_there_are_fail_as_far_as_they_go() {
     setup.keys("<Esc>ggVjap");
     assert!(!setup.editor.take_failed());
 }
+
+#[test]
+fn an_object_up_to_a_lines_start_is_taken_as_an_exclusive_motion() {
+    // Whole lines from the indent, the cursor at the first non-blank
+    // after, as Vim's.
+    let (text, cursor, ..) = after("  foo\n\nbarbaz\n", (1, 2), "d2iw");
+    assert_eq!((text.as_str(), cursor), ("barbaz\n", (1, 0)));
+    // `i(` up to the line `)` starts: the lines between, whole.
+    let (text, _, taken, lines) = after("(\n  abc\n)\nxyzw\n", (2, 3), "di(");
+    assert_eq!(
+        (text.as_str(), taken.as_str(), lines),
+        ("(\n)\nxyzw\n", "  abc\n", true)
+    );
+    let (_, cursor, taken, _) = after("(\n  abc\n)\nxyzw\n", (2, 3), "yi(");
+    assert_eq!((cursor, taken.as_str()), ((2, 0), "  abc\n"));
+    // Selected, to just past the line's end.
+    assert_eq!(after("f(a\n  x,\n)\n", (2, 2), "vi(d").0, "f()\n");
+}

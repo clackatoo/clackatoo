@@ -100,7 +100,10 @@ impl Pane {
             return !failed;
         }
         let found = match object.find(&Document(self), cursor.at, inner, count) {
-            Ok(found) => found,
+            Ok(found) => match found.taken(&Document(self)) {
+                Some(found) => found,
+                None => return false,
+            },
             Err(moved) => {
                 if let Some(at) = moved {
                     self.cursor = Some(Cursor::new(at));

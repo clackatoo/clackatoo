@@ -2488,6 +2488,13 @@ impl Editor {
                         return None;
                     }
                 };
+                // Up to a line's start, as an exclusive motion takes, which
+                // may make it whole lines (`d2iw`, `di(`).
+                if !found.inclusive {
+                    let moved = Some(Cursor::new(found.start));
+                    let span = exclusive(&text, found.start, found.last)?;
+                    return Some(Span { moved, ..span });
+                }
                 if !found.lines {
                     return Some(chars(found.start, found.last));
                 }
