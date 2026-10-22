@@ -513,7 +513,7 @@ pub(crate) fn onto_row(cursor: &mut Cursor, text: &Text<'_>, up: bool) {
     if begun >= start {
         return;
     }
-    let want = cursor.want();
+    let kept = *cursor;
     let next = laid.char_end(byte);
     if up {
         cursor.at.col = begun;
@@ -525,7 +525,7 @@ pub(crate) fn onto_row(cursor: &mut Cursor, text: &Text<'_>, up: bool) {
     } else {
         cursor.at.col = begun;
     }
-    *cursor = Cursor::wanting(cursor.at, want);
+    *cursor = kept.moved(cursor.at);
 }
 
 /// Where an editor's view starts: a line, and the cell of it the first

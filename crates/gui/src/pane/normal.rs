@@ -572,13 +572,10 @@ impl Pane {
             _ => Place::Column(cursor.at.col),
         };
         let moved = Unplaced {
-            cursor: Cursor::wanting(
-                Point {
-                    line,
-                    col: cursor.at.col,
-                },
-                cursor.want(),
-            ),
+            cursor: cursor.moved(Point {
+                line,
+                col: cursor.at.col,
+            }),
             goes,
         };
         self.cursor = Some(self.placed(moved).unwrap_or(moved.cursor));

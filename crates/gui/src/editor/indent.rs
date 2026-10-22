@@ -339,7 +339,7 @@ impl Editor {
     /// character that isn't blank. Returns whether there was anything to
     /// indent, saying why not in the bar.
     pub(super) fn reindent(&mut self, copy: &mut BufferCopy) -> bool {
-        let want = self.cursor.want();
+        let from = self.cursor;
         let mut indents = match self.answered.take() {
             Some(Answer::Indents(indents)) => indents,
             Some(Answer::Nothing) => {
@@ -392,7 +392,7 @@ impl Editor {
             self.status = Some(format!("{} lines indented", lines.len()));
         }
         self.leave_visual();
-        self.after_lines(first, want, copy);
+        self.after_lines(first, from, copy);
         true
     }
 }

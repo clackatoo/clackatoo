@@ -767,7 +767,10 @@ pub(crate) struct Cursor {
     pub(crate) at: Point,
     /// The column moving up and down aims for, as in Vim: it survives
     /// passing through shorter lines. `usize::MAX` keeps to line ends.
-    want: usize,
+    /// `None` aims for where the cursor is, worked out when it's needed,
+    /// as Vim's `w_set_curswant` has it: a tab's last cell, where Vim's
+    /// cursor sits on one (see [`aim`](Self::aim)).
+    want: Option<usize>,
 }
 
 /// What kind of character a cell holds, for word motions.
@@ -783,17 +786,63 @@ pub(crate) enum Class {
 
 impl Cursor {
     pub(crate) fn new(at: Point) -> Self {
-        Self { at, want: at.col }
+        Self { at, want: None }
     }
 
     /// A cursor at `at`, aiming for column `want` moving up and down.
     pub(crate) fn wanting(at: Point, want: usize) -> Self {
-        Self { at, want }
+        Self {
+            at,
+            want: Some(want),
+        }
+    }
+
+    /// This cursor at `at`, aiming for the same column moving up and down.
+    pub(crate) fn moved(self, at: Point) -> Self {
+        Self { at, ..self }
     }
 
     /// The column moving up and down aims for: `usize::MAX` after `$`.
+    /// Where it aims for where the cursor is, its column, which on a tab
+    /// is the tab's first cell: [`aim`](Self::aim) knows better.
     pub(crate) fn want(&self) -> usize {
-        self.want
+        self.want.unwrap_or(self.at.col)
+    }
+
+    /// The column moving up and down aims for, in `lines`: where it aims
+    /// for where the cursor is, on a tab that's its last cell, as Vim's
+    /// cursor sits there in normal mode.
+    pub(crate) fn aim(&self, lines: &impl Lines) -> usize {
+        self.want.unwrap_or_else(|| {
+            let row = lines.row(self.at.line);
+            match row.as_deref() {
+                Some(row) if row.cell(self.at.col).is_some_and(|spot| spot.ch == '\t') => {
+                    row.extent(self.at.col).1
+                }
+                _ => self.at.col,
+            }
+        })
+    }
+
+    /// Whether the column moving up and down aims for is where the cursor
+    /// is, not settled yet.
+    pub(crate) fn aims_here(&self) -> bool {
+        self.want.is_none()
+    }
+
+    /// Settles the column moving up and down aims for, if it aims for
+    /// where the cursor is: at its first cell if `at_start`, as Vim's
+    /// cursor sits on a tab in insert mode, or in visual mode at or before
+    /// the selection's other end, or else as [`aim`](Self::aim) has it.
+    /// Vim settles it before each key, in the mode the key finds.
+    pub(crate) fn settle_want(&mut self, lines: &impl Lines, at_start: bool) {
+        if self.want.is_none() {
+            self.want = Some(if at_start {
+                self.at.col
+            } else {
+                self.aim(lines)
+            });
+        }
     }
 
     /// Moves by `motion`, staying within `lines`.
@@ -804,7 +853,7 @@ impl Cursor {
             Motion::Left => {
                 let row = lines.row(at.line);
                 self.at.col = previous_cell(row.as_deref(), at.col).unwrap_or(at.col);
-                self.want = self.at.col;
+                self.want = None;
             }
             Motion::Right => {
                 let row = lines.row(at.line);
@@ -812,17 +861,17 @@ impl Cursor {
                 if let Some(col) = next_cell(row.as_deref(), at.col).filter(|&col| col <= last) {
                     self.at.col = col;
                 }
-                self.want = self.at.col;
+                self.want = None;
             }
             Motion::Up(n) => self.go_to_line(at.line.saturating_sub(n).max(first), lines),
             Motion::Down(n) => self.go_to_line(at.line.saturating_add(n).min(last), lines),
             Motion::LineStart => {
                 self.at.col = 0;
-                self.want = 0;
+                self.want = None;
             }
             Motion::LineEnd => {
                 self.at.col = lines.last_cell(at.line);
-                self.want = usize::MAX;
+                self.want = Some(usize::MAX);
             }
             Motion::FirstNonBlank => {
                 let row = lines.row(at.line);
@@ -833,7 +882,7 @@ impl Cursor {
                     col = next_cell(row, col).unwrap_or(end);
                 }
                 self.at.col = start_of_cell(row, col.min(end.saturating_sub(1)));
-                self.want = self.at.col;
+                self.want = None;
             }
             Motion::Find { .. } => self.find(motion, 1, lines),
             Motion::NextLine
@@ -858,7 +907,7 @@ impl Cursor {
             Motion::Match => {
                 if let Some(at) = pair(at, lines) {
                     self.at = at;
-                    self.want = at.col;
+                    self.want = None;
                 }
             }
             Motion::Paragraph { forward } => {
@@ -871,7 +920,7 @@ impl Cursor {
                     0
                 };
                 self.at = Point { line, col };
-                self.want = col;
+                self.want = None;
             }
             Motion::RowUp(n) => self.go_to_row(rows_up(row_at(at, lines), n, first, lines), lines),
             Motion::RowDown(n) => {
@@ -885,7 +934,7 @@ impl Cursor {
                     _ => usize::MAX,
                 };
                 self.at.col = on_row(lines, at.line, &rows, index, col);
-                self.want = self.at.col;
+                self.want = None;
             }
             Motion::TextEnd => self.onto_line_end(last, lines),
             Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom => {
@@ -901,7 +950,7 @@ impl Cursor {
             line,
             col: lines.last_cell(line),
         };
-        self.want = usize::MAX;
+        self.want = Some(usize::MAX);
     }
 
     /// Moves by `motion` as a command with `count` typed before it does:
@@ -982,7 +1031,7 @@ impl Cursor {
                 let col = count.unwrap_or(1).saturating_sub(1);
                 let row = lines.row(self.at.line);
                 self.at.col = start_of_cell(row.as_deref(), col.min(lines.last_cell(self.at.line)));
-                self.want = col;
+                self.want = Some(col);
             }
             // Taken by an operator, Space stops at a line's end, past its
             // last character, before going on, as Vim's counts the line
@@ -1132,7 +1181,7 @@ impl Cursor {
             skip,
         ) {
             self.at.col = col;
-            self.want = col;
+            self.want = None;
         }
     }
 
@@ -1152,10 +1201,11 @@ impl Cursor {
         let here = here[row_index(&here, self.at.col)];
         let rows = lines.screen_rows(to.line);
         let index = to.row.min(rows.len() - 1);
-        let col = if self.want == usize::MAX {
+        let want = self.aim(lines);
+        let col = if want == usize::MAX {
             usize::MAX
         } else {
-            let offset = here.indent + self.want.saturating_sub(here.start);
+            let offset = here.indent + want.saturating_sub(here.start);
             let offset = match lines.row_width() {
                 Some(width) => offset.min(width.saturating_sub(1)),
                 None => offset,
@@ -1166,14 +1216,16 @@ impl Cursor {
             line: to.line,
             col: on_row(lines, to.line, &rows, index, col),
         };
-        self.want = col;
+        self.want = Some(col);
     }
 
     /// Moves to `line`, aiming for the wanted column.
     fn go_to_line(&mut self, line: u64, lines: &impl Lines) {
         let row = lines.row(line);
         let row = row.as_deref();
-        let col = self.want.min(lines.last_cell(line));
+        let want = self.aim(lines);
+        self.want = Some(want);
+        let col = want.min(lines.last_cell(line));
         self.at = Point {
             line,
             col: start_of_cell(row, col),
@@ -1333,7 +1385,7 @@ impl Cursor {
     /// character.
     fn settle(&mut self, at: Point) {
         self.at = at;
-        self.want = at.col;
+        self.want = None;
     }
 }
 

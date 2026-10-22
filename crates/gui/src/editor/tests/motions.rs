@@ -584,3 +584,36 @@ fn a_lines_end_is_past_its_last_character_however_wide() {
     assert_eq!(kept("a 中\ny\n", (1, 2), "dw").1, "中");
     assert_eq!(kept("a\t\ny\n", (1, 0), "yw").1, "a\t");
 }
+
+#[test]
+fn on_a_tab_up_and_down_aim_for_its_last_cell() {
+    // Vim's cursor sits on a tab's last cell, and aims for it.
+    let below = "\tfoo\nabcdefgh\n";
+    assert_eq!(in_cells(below, (1, 0), "j").1, (2, 3));
+    assert_eq!(in_cells("a\tb\nabcdef\n", (1, 0), "lj").1, (2, 3));
+    assert_eq!(in_cells(below, (1, 0), "0j").1, (2, 3));
+    assert_eq!(in_cells(below, (1, 0), "vj").1, (2, 3));
+    assert_eq!(
+        in_cells("abcdefgh\nx\tab\nabcdefgh\n", (2, 0), "xj").1,
+        (3, 3)
+    );
+    assert_eq!(
+        in_cells("abcdefgh\n\tx\nabcdefgh\n", (2, 0), "ddk").1,
+        (1, 3)
+    );
+    // But on its first in visual mode before the other end, as Vim's
+    // cursor is drawn there.
+    assert_eq!(in_cells(below, (1, 5), "vhhj").1, (2, 0));
+    // A wide character's first.
+    assert_eq!(in_cells("中文\nabcdef\n", (1, 0), "lj").1, (2, 2));
+    // Pulled back from past a line's end after `2x` or `d$`, it aims for
+    // where it is.
+    assert_eq!(in_cells("abc\ncd\n", (1, 1), "2xj").1, (2, 0));
+    assert_eq!(in_cells("abc\ncd\n", (1, 1), "d$j").1, (2, 0));
+    // Passing a tab, the column wanted stays.
+    assert_eq!(in_cells("abcd\n\tx\nabcdefgh\n", (1, 0), "jj").1, (3, 0));
+    // Past a line's end in visual mode, as a motion can leave Vim's
+    // cursor, it aims for there.
+    let text = "  \n  indented line.\na\t(b)\tc\n";
+    assert_eq!(in_cells(text, (3, 5), "V3ed").1, (2, 9));
+}

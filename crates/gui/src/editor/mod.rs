@@ -1195,6 +1195,23 @@ impl Editor {
         done
     }
 
+    /// Settles the column moving up and down aims for, if it aims for
+    /// where the cursor is, as Vim's does before each key (see
+    /// [`Cursor::settle_want`]): on a tab, its first cell in insert mode,
+    /// or in visual mode at or before the selection's other end, and else
+    /// its last. After a key too, so the wheel and the like, which move
+    /// the cursor between keys, find it settled.
+    fn settle_want(&mut self, copy: &BufferCopy) {
+        if !self.cursor.aims_here() {
+            return;
+        }
+        let visual = matches!(self.mode, Mode::Visual(_));
+        let at_start = self.mode == Mode::Insert
+            || (visual && self.anchor.is_some_and(|anchor| self.cursor.at <= anchor));
+        let text = self.text(copy);
+        self.cursor.settle_want(&text, at_start);
+    }
+
     /// The keys `press` makes, for [`typed`](Self::typed).
     pub(crate) fn strokes(&self, press: &KeyPress<'_>) -> Vec<Stroke> {
         if self.prompt.is_some() {
@@ -1225,6 +1242,7 @@ impl Editor {
         }
         self.replaying = replaying;
         self.snippet_before_key(copy);
+        self.settle_want(copy);
         // The rendered view's keys scroll it; any other shows the text, to
         // do there what it does.
         let done = match self.rendered_key(stroke, copy, shared) {
@@ -1232,6 +1250,7 @@ impl Editor {
             None => self.stroke(stroke, copy, shared),
         };
         self.snippet_record(stroke);
+        self.settle_want(copy);
         // A macro or a binding goes back to insert mode once it's done
         // (see `desk::macros`), not after the command that ended a
         // selection.
@@ -1933,7 +1952,7 @@ impl Editor {
                 let at = self.cursor.at;
                 let end = past(at.line);
                 if end > 0 && at.col == text.last_cell(at.line) && self.cursor.want() >= end {
-                    self.cursor = Cursor::wanting(Point { col: end, ..at }, self.cursor.want());
+                    self.cursor = self.cursor.moved(Point { col: end, ..at });
                 }
             }
             _ => {}
@@ -2170,7 +2189,7 @@ impl Editor {
     /// and Vim's do; a selection stays, on the same characters, so `>` can
     /// be pressed again.
     fn shift(&mut self, span: Span, steps: usize, out: bool, copy: &mut BufferCopy) {
-        let want = self.cursor.want();
+        let from = self.cursor;
         let text = self.text(copy);
         let (first, last) = span.lines.unwrap_or_else(|| {
             let last = span.end.saturating_sub(1).max(span.start);
@@ -2216,7 +2235,7 @@ impl Editor {
             self.anchor = Some(text.point_of(anchor));
             self.cursor = Cursor::new(text.point_of(cursor));
         } else {
-            self.after_lines(first, want, copy);
+            self.after_lines(first, from, copy);
         }
     }
 
@@ -2259,7 +2278,7 @@ impl Editor {
     }
 
     fn delete_span(&mut self, span: Span, copy: &mut BufferCopy) {
-        let want = self.cursor.want();
+        let from = self.cursor;
         let text = self.text(copy);
         let len = text.rope().len_bytes();
         // Whole lines at the end take the line break before them.
@@ -2280,7 +2299,7 @@ impl Editor {
                 let text = self.text(copy);
                 self.cursor = Cursor::at_first_non_blank(first.min(text.last_line()), &text);
             }
-            Some((first, _)) => self.after_lines(first, want, copy),
+            Some((first, _)) => self.after_lines(first, from, copy),
             None => self.cursor = Cursor::new(self.text(copy).point_of(start)),
         }
         self.leave_visual();
@@ -4130,16 +4149,17 @@ impl Editor {
         // when neither the view nor the cursor could move.
         if self.startofline && (self.top != top || self.cursor.at != at) {
             let line = self.cursor.at.line;
-            self.after_lines(line, self.cursor.want(), copy);
+            self.after_lines(line, self.cursor, copy);
         }
     }
 
     /// Puts the cursor on line `line`, as far as the text goes, after a
     /// command that acts on whole lines or pages: at its first character
     /// that isn't blank with `startofline`, as Vim's, or else aiming for
-    /// the column `want` it wanted before, as Neovim's.
-    fn after_lines(&mut self, line: u64, want: usize, copy: &BufferCopy) {
+    /// the column it wanted before, `from`, as Neovim's.
+    fn after_lines(&mut self, line: u64, from: Cursor, copy: &BufferCopy) {
         let text = self.text(copy);
+        let want = from.aim(&text);
         let line = line.min(text.last_line());
         let mut cursor = Cursor::wanting(Point { line, col: 0 }, want);
         cursor.onto_line(line, self.startofline, &text);
@@ -4196,7 +4216,7 @@ impl Editor {
             self.cursor.at.line
         };
         if line != self.cursor.at.line {
-            let mut cursor = Cursor::wanting(Point { line, col: 0 }, self.cursor.want());
+            let mut cursor = Cursor::wanting(Point { line, col: 0 }, self.cursor.aim(&text));
             cursor.onto_line(line, false, &text);
             self.cursor = cursor;
         }
@@ -4278,7 +4298,7 @@ impl Editor {
         let (highest, bottom) = view.whole_lines(&text);
         let line = view.correct(if down { highest } else { bottom }, &text);
         self.top = Top::of(to, &text);
-        let mut cursor = Cursor::wanting(Point { line, col: 0 }, self.cursor.want());
+        let mut cursor = Cursor::wanting(Point { line, col: 0 }, self.cursor.aim(&text));
         cursor.onto_line(line, false, &text);
         self.cursor = cursor;
         self.view_placed = Some(line);
@@ -4314,8 +4334,7 @@ impl Editor {
         let text = self.text(copy);
         let line = (count as u64).saturating_sub(1).min(text.last_line());
         let col = self.cursor.at.col.min(text.last_cell(line));
-        drop(text);
-        self.cursor = Cursor::wanting(Point { line, col }, self.cursor.want());
+        self.cursor = Cursor::wanting(Point { line, col }, self.cursor.aim(&text));
     }
 
     /// `zt`, `zz` and `zb`: the cursor's line at the view's top, middle or
@@ -4371,6 +4390,12 @@ impl Editor {
     /// In normal or visual mode, puts the cursor on a character: back from
     /// past the line's end, and onto the start of a wide or tab character.
     fn normal_cursor(&mut self, copy: &BufferCopy) {
+        // In visual mode, Vim's cursor stays past the line's end where a
+        // motion leaves it, and aims for there: so does this one, pulled
+        // back.
+        if matches!(self.mode, Mode::Visual(_)) {
+            self.settle_want(copy);
+        }
         let text = self.text(copy);
         // Just past the line's end, in visual mode by characters, as Vim's
         // can be (see [`past_line_end`](Self::past_line_end)).
@@ -5125,10 +5150,10 @@ impl Editor {
         let at = row_at(self.cursor.at, text);
         let to = at.max(highest).min(lowest);
         if to != at {
-            let want = self.cursor.want();
+            let kept = self.cursor;
             self.cursor.go_to_row(to, text);
             wrap::onto_row(&mut self.cursor, text, to < at);
-            self.cursor = Cursor::wanting(self.cursor.at, want);
+            self.cursor = kept.moved(self.cursor.at);
         }
     }
 
