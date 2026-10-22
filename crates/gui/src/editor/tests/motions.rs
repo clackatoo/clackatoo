@@ -887,3 +887,12 @@ fn putting_characters_over_lines_leaves_the_cursor_at_their_start() {
     // On one line, its last character, as before.
     assert_eq!(in_cells(text, (1, 3), "vlygg03p").1, (1, 6));
 }
+
+#[test]
+fn j_joins_with_a_space_where_vims_do_join_puts_one() {
+    // None after a tab, nor onto an empty line.
+    assert_eq!(in_cells("ab\t\ncd\n", (1, 0), "J").0, "ab\tcd\n");
+    assert_eq!(in_cells("\n  cd\n", (1, 0), "J").0, "cd\n");
+    // After an empty line joined on, one again.
+    assert_eq!(in_cells("ab\t\n\ncd\n", (1, 0), "3J").0, "ab\t cd\n");
+}

@@ -2916,6 +2916,9 @@ impl Editor {
             self.refuse_join();
             return;
         }
+        // The last character of the line, or of the last joined to it, as
+        // Vim's `do_join()` keeps it: none after an empty one.
+        let mut last = self.text(copy).line_text(line).chars().last();
         for _ in 0..times {
             let text = self.text(copy);
             let line = self.cursor.at.line;
@@ -2928,11 +2931,14 @@ impl Editor {
             let removed = text.slice(end, text.line_start(line + 1) + indent);
             let here = text.line_text(line);
             let rest = &next[indent..];
-            let space = if rest.is_empty() || here.ends_with(' ') || rest.starts_with(')') {
-                ""
-            } else {
-                " "
-            };
+            // As Vim's `do_join()`: none onto an empty line, after a blank,
+            // or before a `)` or nothing.
+            let none = rest.is_empty()
+                || here.is_empty()
+                || matches!(last, Some(' ' | '\t'))
+                || rest.starts_with(')');
+            let space = if none { "" } else { " " };
+            last = rest.chars().last();
             let edit = Edit::replace(text.rope().len_bytes(), end, &removed, space);
             drop(text);
             self.make(edit, copy);
