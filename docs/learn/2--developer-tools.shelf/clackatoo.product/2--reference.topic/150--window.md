@@ -354,13 +354,13 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 | `w` `b` `e` | To the next word's start, this or the previous word's start, this or the next word's end. Words are runs of letters, digits and `_`, or runs of other characters; both cross line ends. |
 | `W` `B` `E` | The same, for anything between blanks. |
 | `0` `^` `$`, Home End | The line's first column, its first character that isn't blank, its last character. |
-| `+` `-` `_` | The next line's first character that isn't blank, the line before's, this line's; with a count, that many lines on, back, or down less one, as Vim's do. With `y`, they take whole lines. Enter, Space and Backspace aren't motions in a terminal, which is typed into with them. |
+| `+` `-` `_` | The next line's first character that isn't blank, the line before's, this line's; with a count, that many lines on, back, or down less one, as Vim's do. With `y`, they take whole lines. Enter, Space and Backspace aren't motions in a terminal, which is typed into with them, but `y` takes them as Vim's does: `y<CR>` copies this line and the next. |
 | `g_` `\|` | The line's last character that isn't blank; the column a count says. |
 | `ge` `gE` | The end of the word before, or of the run of anything but blanks before. |
 | `gj` `gk` `g0` `g$` | As `j`, `k`, `0` and `$`: a terminal's lines don't wrap. |
 | `gg` `G` | The oldest line of history, the screen's last line, or with a count, that line, keeping the column, as Neovim's do; at its first character that isn't blank with the [option](~clackatoo/reference/config#options) `startofline`. |
 | `gx` | Opens the link under the cursor, as Ctrl+click does. |
-| `f` `t` `F` `T`, `;` `,` | To the next of the character typed after them on the line, or just before it, or back to the one before, or just after it; `;` finds it again, and `,` the other way, as Vim's do. With `y`, they take to it: `yt)`. |
+| `f` `t` `F` `T`, `;` `,` | To the next of the character typed after them on the line, or just before it, or back to the one before, or just after it; `;` finds it again, and `,` the other way, as Vim's do; each pane keeps its own last find, where Vim keeps one for every window. With `y`, they take to it: `yt)`. |
 | `%` `{` `}` | The bracket that pairs with the one under the cursor; the blank line before or after the paragraph. |
 | `H` `M` `L` | The top, middle and bottom lines in view, keeping the column as `gg` does. |
 | `5k`, `3w`, `10G`, `2gg` | A count before a motion repeats it, as in Vim; before `G` or `gg`, it goes to that line, counting from the oldest line of history. `3H` and `3L` count from the view's top and bottom, no further than the other, but `y99L` takes to the oldest line, as Vim's does. |

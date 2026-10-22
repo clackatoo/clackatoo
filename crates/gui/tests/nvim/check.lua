@@ -25,6 +25,8 @@
 -- - A motion that fails inside `normal!` silently ends that case's keys.
 -- - `.` carries over from earlier cases.
 -- - Anything that waits for input (`:s///c`) hangs the run: keep `timeout`.
+-- - `normal!` skips blanks its keys start with: a case starting with
+--   Space starts `1<Space>`.
 
 -- Eight lines, each indented by its number's parity, so the first
 -- non-blank and the column kept are told apart.
@@ -305,7 +307,7 @@ local cases = {
   { name = 'dge', lines = spaced, at = { 1, 6 }, keys = 'dge' },
   { name = 'dgE', lines = spaced, at = { 2, 6 }, keys = 'dgE' },
   { name = '3<Space>', lines = spaced, at = { 1, 13 }, keys = '3<Space><Esc>' },
-  { name = '<Space> at the end', lines = spaced, at = { 2, 9 }, keys = '<Space><Esc>' },
+  { name = '<Space> at the end', lines = spaced, at = { 2, 9 }, keys = '1<Space><Esc>' },
   { name = '<Space> to an empty line', lines = spaced, at = { 2, 9 }, keys = '2<Space><Esc>' },
   { name = 'd<Space> at the end', lines = spaced, at = { 2, 9 }, keys = 'd<Space><Esc>' },
   { name = 'd2<Space> at the end', lines = spaced, at = { 2, 9 }, keys = 'd2<Space><Esc>' },

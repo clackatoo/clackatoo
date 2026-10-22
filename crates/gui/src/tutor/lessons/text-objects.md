@@ -88,3 +88,14 @@ at "fn last"
 In visual mode, `af` selects a function, and typed again grows the selection to the next one out. A count takes the one that many out: `d2af`. With none around the cursor, they take the next one.
 
 While the daemon finds the pieces, keys you type wait their turn; if it takes over a second, or you press Esc, nothing is done. Without the grammar's own rules for a language, its pieces are found by the kinds of its nodes.
+
+## Delete a paragraph with dap
+
+`ip` is the paragraph around the cursor, as whole lines, and `ap` the paragraph with the blank lines after it. A count takes that many; in visual mode, typed again, they take the selection on by paragraphs.
+
+Put the cursor in `fn area`, and type `dap`.
+
+```check
+not has "fn area"
+has "fn last"
+```

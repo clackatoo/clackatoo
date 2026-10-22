@@ -653,8 +653,13 @@ fn the_text_objects_lesson_is_done_from_start_to_end_with_the_grammar_answering(
         serve_lesson(&mut desk, &mut daemon);
     }
     assert_eq!(step(&desk), 5, "{}", editor_text(&desk));
-    // The last is to read.
+    // Growing a selection is to read.
     type_keys(&mut desk, "]s");
+    assert_eq!(step(&desk), 6);
+    go_to_line(&mut desk, "fn area");
+    type_keys(&mut desk, "dap");
+    serve_lesson(&mut desk, &mut daemon);
+    assert!(!editor_text(&desk).contains("fn area"));
     assert_eq!(step(&desk), lesson.steps.len());
     assert_eq!(daemon.text().to_string(), editor_text(&desk));
 }

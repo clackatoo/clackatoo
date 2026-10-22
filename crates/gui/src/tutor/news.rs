@@ -668,7 +668,7 @@ pub(crate) const NEWS: &[News] = &[
     News {
         id: "linemotions",
         date: "2026-10-22",
-        lesson: "basics",
+        lesson: "words",
         what: "New motions in editors and terminals: + - _ g_ | ge gE, and in editors Enter, Space and Backspace as Vim's",
     },
     News {

@@ -46,3 +46,17 @@ has "  margin-top: 4px;"
 ```
 
 A language pack you write says what else its words are made of in its `language.toml`, as Vim's `iskeyword` does: `word = "-"`, or for Lisp, `word = "-?!*"`.
+
+## Lines' first characters with + and -
+
+`+` or Enter goes to the next line's first character that isn't blank, and `-` to the line before's; `_` to this line's, or with a count, that many lines down. `g_` goes to the line's last character that isn't blank, `|` to the column a count says, and `ge` back to the end of the word before. Space and Backspace go on over a line's end, as `l` and `h` don't.
+
+```setup
+cursor 7
+```
+
+On the `margin-top` line in `.wide`, press `-` to go to `.wide {`.
+
+```check
+at ".wide"
+```
