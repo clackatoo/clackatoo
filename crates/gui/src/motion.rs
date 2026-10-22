@@ -649,8 +649,10 @@ impl Motion {
             Self::Right if !lines.empty(to.line) && steps(from, to, lines) < count.unwrap_or(1) => {
                 Some(Reach::Inclusive)
             }
-            // `+` on the last line has no line to take.
+            // `+` on the last line has no line to take, nor `5}` short of
+            // paragraphs.
             Self::NextLine | Self::PreviousLine if from.line == to.line => None,
+            Self::Paragraph { .. } if from == to && !once => None,
             // `}` with no empty line after takes the last line's end.
             Self::Paragraph { forward: true } if !lines.empty(to.line) => Some(Reach::Inclusive),
             _ => Some(self.reach()),
@@ -1087,6 +1089,21 @@ impl Cursor {
                 };
                 self.repeat(motion, count.unwrap_or(1) - 1, lines);
                 self.word_start_taken(lines, kind);
+            }
+            // As Vim's `findpar()`: a paragraph before the last that runs
+            // into the text's end goes nowhere, `5}` with fewer.
+            (Motion::Paragraph { forward }, Some(count)) if count > 1 => {
+                let start = *self;
+                let edge = if forward { last } else { first };
+                for left in (0..count).rev() {
+                    let before = self.at;
+                    self.apply(motion, lines);
+                    let at_edge = self.at.line == edge;
+                    if left > 0 && at_edge && (!lines.empty(edge) || self.at == before) {
+                        *self = start;
+                        return;
+                    }
+                }
             }
             (motion, count) => self.repeat(motion, count.unwrap_or(1), lines),
         }

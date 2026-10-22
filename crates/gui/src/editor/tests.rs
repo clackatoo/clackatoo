@@ -1586,7 +1586,10 @@ fn braces_go_to_the_blank_lines_round_paragraphs() {
     assert_eq!(setup.cursor(), (5, 0));
     setup.keys("{");
     assert_eq!(setup.cursor(), (2, 0));
+    // Not two paragraphs back, there being one, as Vim's.
     setup.keys("2{");
+    assert_eq!(setup.cursor(), (2, 0));
+    setup.keys("{");
     assert_eq!(
         setup.cursor(),
         (0, 0),

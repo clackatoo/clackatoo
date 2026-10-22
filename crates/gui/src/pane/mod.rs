@@ -2448,6 +2448,9 @@ mod tests {
         assert_eq!(cursor(&pane).1, 3);
         keys(&mut pane, "2{");
         assert_eq!(cursor(&pane).1, 0);
+        // More than there are go nowhere, as Vim's.
+        keys(&mut pane, "9}");
+        assert_eq!(cursor(&pane).1, 0);
         // A 0 that doesn't follow a digit goes to the line's start.
         keys(&mut pane, "$0");
         assert_eq!(cursor(&pane).2, 0);

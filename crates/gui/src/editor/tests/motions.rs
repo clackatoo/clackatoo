@@ -728,3 +728,14 @@ fn a_count_takes_percent_to_a_line_so_far_through() {
     assert_eq!(in_cells("abc\nb\nc\nd\ne\n", (1, 0), "$40%").1, (2, 0));
     assert_eq!(in_cells("abc\n  bcd\nc\nd\ne\n", (1, 2), "40%").1, (2, 2));
 }
+
+#[test]
+fn a_count_of_paragraphs_short_of_them_goes_nowhere() {
+    let text = "a\n\nb\n\nc\n";
+    assert_eq!(in_cells(text, (1, 0), "5}").1, (1, 0));
+    assert_eq!(in_cells(text, (5, 0), "5{").1, (5, 0));
+    // The last may run into the text's end.
+    assert_eq!(in_cells(text, (1, 0), "3}").1, (5, 0));
+    // Taking nothing.
+    assert_eq!(in_cells(text, (1, 0), "d5}").0, text);
+}
