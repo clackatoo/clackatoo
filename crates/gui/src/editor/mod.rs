@@ -4574,14 +4574,14 @@ impl Editor {
     /// In normal or visual mode, puts the cursor on a character: back from
     /// past the line's end, and onto the start of a wide or tab character.
     fn normal_cursor(&mut self, copy: &BufferCopy) {
-        // In visual mode, Vim's cursor stays past the line's end where a
-        // motion leaves it, and aims for there: so does this one, pulled
-        // back.
+        // In visual mode, Vim's cursor stays where a motion leaves it, and
+        // aims for there: so does this one, aiming for there before it's
+        // pulled back from any further past a line's end.
         if matches!(self.mode, Mode::Visual(_)) {
             self.settle_want(copy);
         }
         let text = self.text(copy);
-        // Just past the line's end, in visual mode by characters, as Vim's
+        // Just past the line's end, in visual mode of any kind, as Vim's
         // can be (see [`past_line_end`](Self::past_line_end)).
         let at = self.cursor.at;
         let past = at.line <= text.last_line() && at.col == text.line_cells(at.line);
