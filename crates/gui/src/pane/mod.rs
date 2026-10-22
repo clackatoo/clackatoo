@@ -2355,6 +2355,19 @@ mod tests {
     }
 
     #[test]
+    fn zt_with_a_count_keeps_off_a_wide_characters_right_half() {
+        let terminal = terminal("a中文b\r\nxyzw");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg");
+        serve(&mut pane, &terminal);
+        // Column 2 on line 2 is the right half of the first wide one.
+        keys(&mut pane, "j02l1zt");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane).2, 1);
+    }
+
+    #[test]
     fn zt_with_a_count_goes_on_waiting_for_the_first_non_blank() {
         let terminal = terminal(&numbered_lines("  line "));
         let mut pane = pane(&terminal);

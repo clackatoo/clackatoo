@@ -713,7 +713,10 @@ impl Pane {
         document.row(line)?;
         let mut cursor = unplaced.cursor;
         match unplaced.goes {
-            Place::Column(col) => cursor.at.col = col.min(document.last_cell(line)),
+            Place::Column(col) => {
+                let col = col.min(document.last_cell(line));
+                cursor.at.col = start_of_cell(document.row(line), col);
+            }
             goes => cursor.onto_line(line, goes == Place::FirstNonBlank, &document),
         }
         Some(cursor)
