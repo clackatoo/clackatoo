@@ -271,3 +271,27 @@ fn an_object_up_to_a_lines_start_is_taken_as_an_exclusive_motion() {
     // Selected, to just past the line's end.
     assert_eq!(after("f(a\n  x,\n)\n", (2, 2), "vi(d").0, "f()\n");
 }
+
+#[test]
+fn brackets_and_quotes_selected_grow_as_vims_do() {
+    let taken = |text, at, keys| after(text, at, keys).2;
+    // a( again goes out a pair; a selection starting on `(` isn't in it.
+    assert_eq!(taken("f(a, (b), c)\n", (1, 6), "va(a(y"), "(a, (b), c)");
+    assert_eq!(taken("f(a, (b), c)\n", (1, 5), "v2li(y"), "a, (b), c");
+    assert_eq!(taken("f(a, (bc), d)\n", (1, 7), "vi(i(y"), "a, (bc), d");
+    let mut setup = Setup::new("x (p q) y\n");
+    setup.keys("llvla(");
+    assert!(setup.editor.take_failed());
+    assert_eq!(
+        setup.editor.anchor,
+        Some(crate::motion::Point { line: 0, col: 2 })
+    );
+    // i" again takes the quotes, a" again the next string.
+    assert_eq!(taken("x \"ab cd\" y\n", (1, 4), "vi\"i\"y"), "\"ab cd\"");
+    assert_eq!(
+        taken("x \"ab\" \"cd\" y\n", (1, 3), "va\"a\"y"),
+        "\"ab\" \"cd\" "
+    );
+    // Between two strings, from the quote before, as Vim's.
+    assert_eq!(taken("a \"b c\" d \"e\"\n", (1, 8), "yi\""), " d ");
+}

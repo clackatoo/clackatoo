@@ -24,10 +24,9 @@ use clackatoo_text::Construct;
 
 use crate::vim::Selection;
 
-use crate::motion::{
-    Cells, Class, Lines, Point, Walk, Words, class_at, line_end, next_cell, previous_cell, text_end,
-};
+use crate::motion::{Cells, Lines, Point, Walk, line_end, previous_cell, text_end};
 
+mod quotes;
 mod words;
 
 /// How far a bracket object looks for each of its brackets, in cells.
@@ -88,12 +87,6 @@ impl Object {
         inner: bool,
         count: usize,
     ) -> Result<Found, Option<Point>> {
-        let chars = |(start, last)| Found {
-            start,
-            last,
-            lines: false,
-            inclusive: true,
-        };
         match self {
             Self::Word | Self::BigWord => {
                 let big = self == Self::BigWord;
@@ -106,9 +99,19 @@ impl Object {
                     inclusive: found.inclusive,
                 })
             }
-            Self::Quote(quote) => quoted(lines.row(at.line).as_deref(), at, quote, inner)
-                .map(chars)
-                .ok_or(None),
+            Self::Quote(quote) => {
+                let row = lines.row(at.line);
+                let line = (row.as_deref(), line_end(at.line, lines));
+                let found =
+                    quotes::current(line, at.col, None, (!inner, count), quote).ok_or(None)?;
+                let point = |col| Point { line: at.line, col };
+                Ok(Found {
+                    start: point(found.start),
+                    last: point(found.end),
+                    lines: false,
+                    inclusive: found.inclusive,
+                })
+            }
             Self::Bracket { open, close } => {
                 let (start, last, inclusive) =
                     bracketed(lines, at, (open, close), inner, count).ok_or(None)?;
@@ -161,6 +164,17 @@ impl Found {
             return Some(self);
         }
         let Self { start, last, .. } = self;
+        // Up to a character on the line: the one before.
+        if last.col > 0 {
+            let row = lines.row(last.line);
+            let col = previous_cell(row.as_deref(), last.col)?;
+            let last = Point { col, ..last };
+            return (start <= last).then_some(Self {
+                last,
+                inclusive: true,
+                ..self
+            });
+        }
         if last.line <= start.line {
             return None;
         }
@@ -255,17 +269,31 @@ impl Object {
                 .map(chars)
                 .map_err(|failed| Some(chars(failed)));
         }
+        if let Self::Bracket { open, close } = self {
+            return bracket_selected(lines, selected, (open, close), inner, count).ok_or(None);
+        }
+        // As Vim's `current_quote()`, on one line.
+        if let Self::Quote(quote) = self {
+            let at = selected.cursor;
+            if selected.anchor.line != at.line {
+                return Err(None);
+            }
+            let row = lines.row(at.line);
+            let line = (row.as_deref(), line_end(at.line, lines));
+            let anchor = Some(selected.anchor.col);
+            let found =
+                quotes::current(line, at.col, anchor, (!inner, count), quote).ok_or(None)?;
+            let point = |col| Point { line: at.line, col };
+            return Ok(Selected {
+                anchor: point(found.anchor.unwrap_or(found.start)),
+                cursor: point(found.end),
+                lines: false,
+            });
+        }
         if self != Self::Paragraph {
-            // As Vim's: brackets are looked for from the selection's start,
-            // and a quoted string can't be over lines.
-            let from = match self {
-                Self::Bracket { .. } => selected.anchor.min(selected.cursor),
-                Self::Quote(_) if selected.anchor.line != selected.cursor.line => {
-                    return Err(None);
-                }
-                _ => selected.cursor,
-            };
-            let found = self.find(lines, from, inner, count).map_err(|_| None)?;
+            let found = self
+                .find(lines, selected.cursor, inner, count)
+                .map_err(|_| None)?;
             return Ok(Selected {
                 anchor: found.start,
                 cursor: found.selected_last(lines),
@@ -399,49 +427,6 @@ fn paragraph(lines: &impl Lines, line: u64, inner: bool, count: usize) -> Option
     Some((start.cast_unsigned(), end.cast_unsigned()))
 }
 
-/// `start` to `last`, with the blanks after it, or if there are none, the
-/// blanks before it, as `aw` and `a"` take.
-fn with_blanks(row: Option<&impl Cells>, start: usize, last: usize, end: usize) -> (usize, usize) {
-    let blank = |col| class_at(row, col, Words::NONE) == Class::Blank;
-    let mut after = last;
-    while let Some(next) = next_cell(row, after).filter(|&n| n < end && blank(n)) {
-        after = next;
-    }
-    if after != last {
-        return (start, after);
-    }
-    let mut before = start;
-    while let Some(previous) = previous_cell(row, before).filter(|&p| blank(p)) {
-        before = previous;
-    }
-    (before, last)
-}
-
-/// `i"` and `a"`: the quoted string the cursor is in or on, or else the
-/// next one on the line. Quotes pair up from the line's start, and one
-/// after a backslash doesn't count.
-fn quoted(row: Option<&impl Cells>, at: Point, quote: char, inner: bool) -> Option<(Point, Point)> {
-    // The quotes, each with whether the cell before is a backslash.
-    let mut before = ' ';
-    let mut quotes = row?.on_from(0).filter_map(|(col, spot)| {
-        let escaped = before == '\\';
-        before = spot.ch;
-        (spot.ch == quote && !escaped).then_some(col)
-    });
-    let (open, close) = std::iter::from_fn(|| Some((quotes.next()?, quotes.next()?)))
-        .find(|&(_, close)| at.col <= close)?;
-    let point = |col| Point { line: at.line, col };
-    if inner {
-        if open + 1 == close {
-            return None;
-        }
-        Some((point(open + 1), point(previous_cell(row, close)?)))
-    } else {
-        let (start, last) = with_blanks(row, open, close, text_end(row));
-        Some((point(start), point(last)))
-    }
-}
-
 /// `i(` and `a(`, and the like, as Vim's `current_block()` finds them:
 /// the brackets around the cursor, or that it's on, or `count` levels out;
 /// or if there are none around it, as Neovim's, the next after it, and
@@ -449,57 +434,60 @@ fn quoted(row: Option<&impl Cells>, at: Point, quote: char, inner: bool) -> Opti
 fn bracketed(
     lines: &impl Lines,
     at: Point,
-    (open, close): (char, char),
+    pair: (char, char),
     inner: bool,
     count: usize,
 ) -> Option<(Point, Point, bool)> {
-    let ch = |point: Point| {
-        let row = lines.row(point.line)?;
-        row.cell(point.col).map(|spot| spot.ch)
-    };
-    // The first opening bracket back from `from`, or on if `forward`, that
-    // isn't matched by a closing one between.
-    let unmatched = |from: Point, forward: bool| {
-        let mut walk = Walk::new(lines, from);
-        let mut depth = 0usize;
-        for _ in 0..BRACKET_SEARCH {
-            if !(if forward { walk.forward() } else { walk.back() }) {
-                return None;
-            }
-            match ch(walk.at()) {
-                Some(c) if c == close => depth += 1,
-                Some(c) if c == open => match depth.checked_sub(1) {
-                    Some(fewer) => depth = fewer,
-                    None => return Some(walk.at()),
-                },
-                _ => {}
-            }
-        }
-        None
-    };
-    // From just after an opening bracket the cursor's on, so it's the
-    // first, as Vim's.
-    let from = if ch(at) == Some(open) {
-        let mut walk = Walk::new(lines, at);
-        walk.forward();
-        walk.at()
+    let (start, end) = brackets(lines, at, pair, count, true)?;
+    if inner {
+        inside(lines, start, end)
     } else {
-        at
-    };
-    let forward = unmatched(from, false).is_none();
-    let mut start = from;
-    for _ in 0..count.max(1) {
-        start = unmatched(start, forward)?;
+        Some((start, end, true))
     }
+}
+
+/// The character in cell `at` of `lines`.
+fn char_at(lines: &impl Lines, at: Point) -> Option<char> {
+    let row = lines.row(at.line)?;
+    row.cell(at.col).map(|spot| spot.ch)
+}
+
+/// The first opening bracket of `pair` back from `from`, or on if
+/// `forward`, not `from`'s own, that isn't matched by a closing one
+/// between, as Vim's `findmatchlimit()` looks.
+fn unmatched(
+    lines: &impl Lines,
+    from: Point,
+    (open, close): (char, char),
+    forward: bool,
+) -> Option<Point> {
+    let mut walk = Walk::new(lines, from);
+    let mut depth = 0usize;
+    for _ in 0..BRACKET_SEARCH {
+        if !(if forward { walk.forward() } else { walk.back() }) {
+            return None;
+        }
+        match char_at(lines, walk.at()) {
+            Some(c) if c == close => depth += 1,
+            Some(c) if c == open => match depth.checked_sub(1) {
+                Some(fewer) => depth = fewer,
+                None => return Some(walk.at()),
+            },
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The closing bracket that pairs with the opening one at `start`.
+fn partner(lines: &impl Lines, start: Point, (open, close): (char, char)) -> Option<Point> {
     let mut walk = Walk::new(lines, start);
-    let start = walk.at();
-    // Its partner.
     let mut depth = 0usize;
     for _ in 0..BRACKET_SEARCH {
         if !walk.forward() {
             return None;
         }
-        match ch(walk.at()) {
+        match char_at(lines, walk.at()) {
             Some(c) if c == open => depth += 1,
             Some(c) if c == close => match depth.checked_sub(1) {
                 Some(fewer) => depth = fewer,
@@ -509,13 +497,86 @@ fn bracketed(
         }
     }
     let end = walk.at();
-    if ch(end) != Some(close) || end <= start {
-        return None;
+    (char_at(lines, end) == Some(close) && end > start).then_some(end)
+}
+
+/// The brackets of `pair` around `at`, `count` levels out, or the next
+/// after it (see [`bracketed`]). On an opening bracket, it's the first if
+/// `on_open`, as Vim's goes from just after one the cursor's on, but not
+/// from the start of a selection of more than a character.
+fn brackets(
+    lines: &impl Lines,
+    at: Point,
+    pair: (char, char),
+    count: usize,
+    on_open: bool,
+) -> Option<(Point, Point)> {
+    let from = if on_open && char_at(lines, at) == Some(pair.0) {
+        let mut walk = Walk::new(lines, at);
+        walk.forward();
+        walk.at()
+    } else {
+        at
+    };
+    let forward = unmatched(lines, from, pair, false).is_none();
+    let mut start = from;
+    for _ in 0..count.max(1) {
+        start = unmatched(lines, start, pair, forward)?;
     }
-    if !inner {
-        return Some((start, end, true));
-    }
-    inside(lines, start, end)
+    Some((start, partner(lines, start, pair)?))
+}
+
+/// `i(` and `a(` and the like in visual mode, from `selected`, as Vim's
+/// `current_block()` goes: from a selection of more than a character, the
+/// brackets around its start; and inside them, if that's no more than is
+/// selected, the brackets out from those, until it's more. None if there
+/// are none.
+fn bracket_selected(
+    lines: &impl Lines,
+    selected: Selected,
+    pair: (char, char),
+    inner: bool,
+    count: usize,
+) -> Option<Selected> {
+    let single = selected.anchor == selected.cursor;
+    let low = selected.anchor.min(selected.cursor);
+    let high = selected.anchor.max(selected.cursor);
+    let (mut start, mut end) = brackets(lines, low, pair, count, single)?;
+    let found = loop {
+        if !inner {
+            break (start, end, true);
+        }
+        let (first, last, inclusive) = inside(lines, start, end)?;
+        // Its last character, before the line `)` starts.
+        let last_char = if inclusive {
+            last
+        } else {
+            let mut walk = Walk::new(lines, last);
+            walk.back();
+            walk.at()
+        };
+        let grows = first < low || high < last_char;
+        if single || grows || first == last_char {
+            break (first, last, inclusive);
+        }
+        // No more than is selected: the brackets out from these.
+        let mut walk = Walk::new(lines, low);
+        walk.back();
+        start = unmatched(lines, walk.at(), pair, false)?;
+        end = partner(lines, start, pair)?;
+    };
+    let (start, last, inclusive) = found;
+    let found = Found {
+        start,
+        last,
+        lines: false,
+        inclusive,
+    };
+    Some(Selected {
+        anchor: start,
+        cursor: found.selected_last(lines),
+        lines: false,
+    })
 }
 
 /// What's strictly between the brackets at `open` and `close`, leaving
@@ -592,7 +653,9 @@ mod tests {
         assert_eq!(cols(found(&text, at(0, 2), "a\"")), Some((2, 7)));
         // Before the first pair: the next one. An escaped quote is text.
         assert_eq!(cols(found(&text, at(0, 0), "i\"")), Some((3, 5)));
-        assert_eq!(cols(found(&text, at(0, 8), "i\"")), Some((11, 14)));
+        assert_eq!(cols(found(&text, at(0, 11), "i\"")), Some((11, 14)));
+        // Between two, from the quote before, whichever it is, as Vim's.
+        assert_eq!(cols(found(&text, at(0, 8), "i\"")), Some((7, 9)));
         assert_eq!(found(&Text::new(&["\"\""]), at(0, 0), "i\""), None);
     }
 

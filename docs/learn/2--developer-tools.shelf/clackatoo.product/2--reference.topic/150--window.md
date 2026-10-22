@@ -399,8 +399,8 @@ After `y`, or in visual mode, `i` or `a` and one more key pick out a piece of te
 |---|---|
 | `iw` `aw` | A word, and with `a` the blanks after it (or before it, at the end of a line). A count takes that many, over lines too, a run of blanks counting as one with `iw`; in visual mode, with more than a character selected, it takes on another, as Vim's. |
 | `iW` `aW` | The same, for anything between blanks. |
-| `i"` `a"`, `i'` `a'`, `` i` `` `` a` `` | What's between the quotes around the cursor, or the next pair on its line; with `a`, the quotes too. |
-| `i(` `a(`, `i[` `a[`, `i{` `a{`, `i<` `a<` | What's between the brackets around the cursor, across lines, or with none around it the next pair after it, as Neovim's; with `a`, the brackets too. A count goes out that many pairs. The closing bracket works as well. |
+| `i"` `a"`, `i'` `a'`, `` i` `` `` a` `` | What's between the quotes on the cursor's line, as Vim's pairs them: around a quote the cursor's on, or else from the quote before it to the next, or the next pair; with `a`, the quotes too, and the blanks after or before. In visual mode `i"` again takes the quotes, and `a"` again the next string too. |
+| `i(` `a(`, `i[` `a[`, `i{` `a{`, `i<` `a<` | What's between the brackets around the cursor, across lines, or with none around it the next pair after it, as Neovim's; with `a`, the brackets too. A count goes out that many pairs; in visual mode, typed again, they take the next pair out. The closing bracket works as well. |
 | `ip` `ap` | A paragraph, or the blank lines the cursor is on, as whole lines; with `a`, the blank lines after it too, or before it if there are none after, as Vim's. A count takes that many. |
 | `ib` `ab` | A [command's](#commands) output; with `a`, its prompt and command line too. |
 

@@ -2221,7 +2221,11 @@ impl Editor {
         };
         registers.wrote(name, Register::new(text, lines), wrote);
         match operator {
-            Operator::Yank => self.yanked(span, copy),
+            // An object or a selection from its start, as Vim's.
+            Operator::Yank => {
+                let from_start = matches!(target, Target::Object { .. } | Target::Selection);
+                self.yanked(span, from_start, copy);
+            }
             Operator::Delete => self.delete_span(span, copy),
             Operator::Change => self.change_span(span, copy),
             Operator::Indent | Operator::Dedent | Operator::Recase(_) | Operator::Reindent => {}
@@ -2326,7 +2330,7 @@ impl Editor {
     /// the motion went if that's before it, as Vim's: `yk` and `ygg` to
     /// their line in the column, or where the motion put it (`span.moved`,
     /// as `gg` with `startofline`), `yb` to the span's start.
-    fn yanked(&mut self, span: Span, copy: &BufferCopy) {
+    fn yanked(&mut self, span: Span, from_start: bool, copy: &BufferCopy) {
         let text = self.text(copy);
         let (start, last, kind) = match span.lines {
             Some((first, last)) => (
@@ -2354,10 +2358,9 @@ impl Editor {
                 None => Cursor::new(start),
             },
         };
-        // Characters no motion took, as an object's, from their start,
-        // which may be after it, as Vim's `yi"` from before the quotes.
-        let taken = span.lines.is_none() && span.moved.is_none();
-        if went_back.at < self.cursor.at || taken {
+        // What no motion took, as an object, from its start, which may be
+        // after the cursor, as Vim's `yi"` from before the quotes.
+        if went_back.at < self.cursor.at || from_start {
             self.cursor = went_back;
         }
         self.leave_visual();
