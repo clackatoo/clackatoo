@@ -441,11 +441,12 @@ pub(crate) struct Editor {
     /// The pane has been resized since the view last followed the cursor,
     /// which the next settle does, as rows may have wrapped afresh.
     resized: bool,
-    /// A page or `zt` has put the view and the cursor in it where they
-    /// go, `scrolloff` counted in whole lines as Vim's does, so following
-    /// the cursor next only keeps it in view, as Vim's `VALID_TOPLINE`
-    /// keeps its view from being moved for `scrolloff` again.
-    view_placed: bool,
+    /// The cursor's line, when a page or `zt` put the view and the cursor
+    /// in it where they go, `scrolloff` counted in whole lines as Vim's
+    /// does: following the cursor then only keeps it in view, until it
+    /// goes to another line, an edit lands, the pane is resized or the
+    /// view scrolls, as Vim's `VALID_TOPLINE` keeps its view.
+    view_placed: Option<u64>,
     /// Lines laid out, and the rows they wrap onto, kept from frame to
     /// frame while the text stays as it is.
     kept: Kept,
@@ -747,7 +748,7 @@ impl Editor {
             top: Top { line: 0, cell: 0 },
             left: 0,
             resized: false,
-            view_placed: false,
+            view_placed: None,
             kept: Kept::default(),
             hide: None,
             keep: None,
@@ -917,7 +918,10 @@ impl Editor {
 
     pub(crate) fn resize(&mut self, size: Size) {
         let (height, width) = (usize::from(size.rows()), usize::from(size.cols()));
-        self.resized |= (height, width) != (self.height, self.width);
+        if (height, width) != (self.height, self.width) {
+            self.resized = true;
+            self.view_placed = None;
+        }
         if height != self.height {
             self.paging.resized();
         }
@@ -996,6 +1000,8 @@ impl Editor {
         if !self.as_you_type.signature {
             self.close_signature();
         }
+        // New options, as a new `scrolloff`, keep the view to them.
+        self.view_placed = None;
         self.follow(copy);
     }
 
@@ -3036,6 +3042,8 @@ impl Editor {
     /// the snippet's places, through `edit`, made to the text, which
     /// `grows` them as it says.
     fn edited(&mut self, edit: &Edit, grows: snippet::Grows) {
+        // The view keeps `scrolloff` from the cursor again.
+        self.view_placed = None;
         self.corrections_follow(edit);
         if let Some(session) = &mut self.snippet {
             session.edited(edit, grows);
@@ -4092,14 +4100,19 @@ impl Editor {
         self.cursor.apply(motion, &text);
         wrap::onto_row(&mut self.cursor, &text, !down);
         self.top = Top::of(to, &text);
-        // `scrolloff` lines from the view's edges, as far as they fit.
-        self.view_placed = true;
-        let line = self.view_from(to).correct(self.cursor.at.line, &text);
+        // `scrolloff` lines from the view's edges, as far as they fit, as
+        // Vim's corrects the cursor only with some.
+        let line = if self.scrolloff > 0 {
+            self.view_from(to).correct(self.cursor.at.line, &text)
+        } else {
+            self.cursor.at.line
+        };
         if line != self.cursor.at.line {
             let mut cursor = Cursor::wanting(Point { line, col: 0 }, self.cursor.want());
             cursor.onto_line(line, false, &text);
             self.cursor = cursor;
         }
+        self.view_placed = Some(self.cursor.at.line);
     }
 
     /// The view as it would be from row `top`.
@@ -4177,10 +4190,10 @@ impl Editor {
         let (highest, bottom) = view.whole_lines(&text);
         let line = view.correct(if down { highest } else { bottom }, &text);
         self.top = Top::of(to, &text);
-        self.view_placed = true;
         let mut cursor = Cursor::wanting(Point { line, col: 0 }, self.cursor.want());
         cursor.onto_line(line, false, &text);
         self.cursor = cursor;
+        self.view_placed = Some(line);
     }
 
     /// How many rows each of the four lines across the view's edge that a
@@ -4262,7 +4275,7 @@ impl Editor {
             }
         };
         self.top = Top::of(top, &text);
-        self.view_placed = true;
+        self.view_placed = Some(self.cursor.at.line);
     }
 
     // --- Following the text and the cursor ----------------------------------
@@ -4687,6 +4700,7 @@ impl Editor {
     pub(crate) fn go_to_top(&mut self, line: u64, copy: &BufferCopy) {
         self.go_to(line, 0, copy);
         self.view_at(ViewAt::Top, copy);
+        self.follow(copy);
     }
 
     /// The point on `line`, `col` bytes into it, as far as the text goes,
@@ -4906,14 +4920,19 @@ impl Editor {
         self.clamp_top(&text);
         let top = self.top.row(&text);
         let height = self.height.max(1) as u64;
-        let margin = if std::mem::take(&mut self.view_placed) {
+        if self.view_placed != Some(self.cursor.at.line) {
+            self.view_placed = None;
+        }
+        let margin = if self.view_placed.is_some() {
             0
         } else {
             self.margin()
         };
         let end = self.view_end(&text);
         let cursor = row_at(self.cursor.at, &text);
-        if cursor < rows_down(top, margin, end, &text) {
+        // Counted as rows shown, so a view past the text's end, as a page
+        // can leave it, comes back for them too.
+        if cursor < top || rows_between(top, cursor, &text) < margin {
             self.top = Top::of(rows_up(cursor, margin, 0, &text), &text);
         } else {
             // Not so far as to show past the file's end, unless the cursor
@@ -4955,6 +4974,7 @@ impl Editor {
     /// Scrolls the view by `rows` screen rows, up if negative, as the mouse
     /// wheel does, keeping the cursor in it.
     pub(crate) fn wheel(&mut self, rows: i64, copy: &BufferCopy) {
+        self.view_placed = None;
         let text = self.text(copy);
         self.clamp_top(&text);
         let top = self.top.row(&text);

@@ -525,3 +525,71 @@ fn pages_land_at_the_first_non_blank_with_startofline_but_ctrl_e_doesnt() {
     assert_eq!(sol(21, (25, 4), "<PageUp>"), (13, 22, 2));
     assert_eq!(sol(11, (11, 4), "<C-e>"), (12, 12, 4));
 }
+
+/// Sixty lines, the odd ones over three rows of 20, as check.lua's `tall`.
+fn tall() -> String {
+    (1..=60).fold(String::new(), |mut text, n| {
+        let _ = if n % 2 == 1 {
+            writeln!(text, "{n:02}{}", "x".repeat(48))
+        } else {
+            writeln!(text, "line {n}")
+        };
+        text
+    })
+}
+
+/// Thirty lines, all but every fifth over four rows of 20, as check.lua's
+/// `long`.
+fn long() -> String {
+    (1..=30).fold(String::new(), |mut text, n| {
+        let _ = if n % 5 == 0 {
+            writeln!(text, "  line {n}")
+        } else {
+            writeln!(text, "{n:02}{}", "y".repeat(68))
+        };
+        text
+    })
+}
+
+/// `wrapping`, and a 61st line over five rows of 20, as check.lua's
+/// `endlong`.
+fn endlong() -> String {
+    format!("{}61{}\n", wrapping(), "z".repeat(88))
+}
+
+#[test]
+fn without_scrolloff_a_half_page_leaves_the_cursor_where_its_rows_took_it() {
+    // Neovim corrects the cursor into the view only with `scrolloff`.
+    assert_eq!(
+        after(viewed(&tall(), 48, (52, 4), true), "<C-d>"),
+        (51, 55, 4)
+    );
+    assert_eq!(
+        after(viewed(&endlong(), 53, (58, 4), true), "<C-d>"),
+        (56, 61, 24)
+    );
+}
+
+#[test]
+fn the_view_a_page_or_zz_placed_stays_on_the_next_key_on_the_line() {
+    let long = long();
+    let zz = || with_margin(viewed_in(15, &long, 1, (7, 4), true), 5);
+    assert_eq!(after(zz(), "zz"), (6, 7, 4));
+    assert_eq!(after(zz(), "zzl"), (6, 7, 5));
+    assert_eq!(after(zz(), "zzi<Esc>"), (6, 7, 3));
+    let tall = with_margin(viewed(&tall(), 1, (3, 4), true), 3);
+    assert_eq!(after(tall, "zzl"), (2, 3, 5));
+    let endlong = with_margin(viewed_in(9, &endlong(), 52, (54, 4), true), 3);
+    assert_eq!(after(endlong, "<PageDown>l"), (57, 58, 5));
+}
+
+#[test]
+fn an_edit_after_a_page_keeps_scrolloff_again() {
+    let sixty = sixty();
+    let page = with_margin(viewed_in(9, &sixty, 51, (54, 4), false), 3);
+    assert_eq!(after(page, "<PageDown>x"), (57, 60, 4));
+    let page = with_margin(viewed(&sixty, 48, (51, 4), false), 3);
+    assert_eq!(after(page, "2<PageDown>x"), (57, 60, 4));
+    let page = with_margin(viewed(&wrapping(), 48, (50, 4), true), 3);
+    assert_eq!(after(page, "2<PageDown>x"), (58, 60, 4));
+}
