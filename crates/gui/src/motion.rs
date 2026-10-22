@@ -1444,8 +1444,10 @@ impl Cursor {
         self.settle(walk.at);
     }
 
-    /// Lands on `at`, pulled back from a line's end onto its last
-    /// character.
+    /// Lands on `at`, aiming for where it is: a line's end, past its last
+    /// character, is the caller's to pull back from (see the editor's
+    /// `normal_cursor`), as Vim's `adjust_cursor` does outside visual
+    /// mode.
     fn settle(&mut self, at: Point) {
         self.at = at;
         self.want = None;
@@ -1804,8 +1806,9 @@ fn on_row(lines: &impl Lines, line: u64, rows: &[ScreenRow], index: usize, col: 
     start_of_cell(lines.row(line).as_deref(), col).max(start)
 }
 
-/// The cell after the one at `col`, stepping over a wide character's
-/// right half.
+/// The first cell of the character after the one at `col`, stepping over
+/// the rest of its cells: a wide character's right half, or a tab's cells
+/// past its first. Past the line's last cell, `None`.
 pub(crate) fn next_cell(row: Option<&impl Cells>, col: usize) -> Option<usize> {
     let row = row?;
     let mut next = col + 1;
@@ -1815,8 +1818,9 @@ pub(crate) fn next_cell(row: Option<&impl Cells>, col: usize) -> Option<usize> {
     (next <= row.width()).then_some(next)
 }
 
-/// The cell before the one at `col`, landing on a wide character's left
-/// half.
+/// The first cell of the character before the one at `col`: a wide
+/// character's left half, or a tab's first cell. At the line's start,
+/// `None`.
 pub(crate) fn previous_cell(row: Option<&impl Cells>, col: usize) -> Option<usize> {
     let previous = col.checked_sub(1)?;
     Some(start_of_cell(row, previous))
@@ -1884,8 +1888,8 @@ pub(crate) fn before(lines: &impl Lines, start: Point, end: Point) -> Option<Poi
     })
 }
 
-/// `col`, moved left onto a wide character's left half if it's on the
-/// right.
+/// The first cell of the character in cell `col`: `col` moved left off a
+/// wide character's right half, or a tab's cells past its first.
 pub(crate) fn start_of_cell(row: Option<&impl Cells>, mut col: usize) -> usize {
     // Back over a wide character's right half, or a tab's cells.
     while col > 0

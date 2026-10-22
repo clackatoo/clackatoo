@@ -1103,7 +1103,7 @@ mod tests {
             let (old, new) = (Laid::new(before, 4), Laid::new(after, 4));
             // What's laid out again of the new text starts from the
             // character before the cut, which an accent may join.
-            let from = old.col_before(old.col_of(cut)).unwrap_or(0);
+            let from = crate::motion::previous_cell(Some(&old), old.col_of(cut)).unwrap_or(0);
             let old_inlays = hints(&mut random, &old, &[], 0);
             let new_inlays = hints(&mut random, &new, &old_inlays, from);
             let wrap = Wrap {

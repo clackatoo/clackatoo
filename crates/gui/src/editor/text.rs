@@ -432,14 +432,6 @@ impl Laid {
         }
     }
 
-    /// The first cell of the character before the one at `col`, if there's
-    /// one.
-    #[cfg(test)]
-    pub(crate) fn col_before(&self, col: usize) -> Option<usize> {
-        let index = self.starts.to_cell(col).checked_sub(2)?;
-        self.starts.get(index).map(|(cell, _)| cell)
-    }
-
     /// Each character's first cell, the cell after it, and the character,
     /// in order. Characters drawn in the cell before, such as accents,
     /// aren't apart.
@@ -1332,7 +1324,7 @@ mod tests {
         assert_eq!((plain.byte_at(3), plain.col_of(4)), (3, 4));
         let mixed = Laid::new("a\tb字".to_owned(), 4);
         assert!(matches!(mixed.starts, Starts::Table(_)));
-        assert_eq!(mixed.col_before(5), Some(4));
+        assert_eq!(crate::motion::previous_cell(Some(&mixed), 5), Some(4));
         // A tab is never plain, even one a cell wide.
         assert!(!Laid::new("abc\td".to_owned(), 4).is_plain());
     }
