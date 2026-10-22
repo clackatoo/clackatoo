@@ -729,3 +729,23 @@ fn dot_changes_as_much_as_was_dragged_over_typing_the_same() {
     setup.keys("gg0.");
     assert_eq!(setup.text(), "fourthorld\nbyed line\nfourth row\n");
 }
+
+#[test]
+fn the_column_clicked_is_the_one_wanted_after_the_wheel_moves_the_cursor() {
+    let text = format!("abcdefghijklmnop\n{}", "ab\n".repeat(30));
+    let mut setup = Setup::new(&text);
+    setup.set(|options| {
+        options.scrolloff = 0;
+        options.startofline = false;
+    });
+    setup.editor.settle(&setup.copy);
+    setup.press(0, 10, 1);
+    setup.release();
+    assert_eq!(setup.cursor(), (0, 10));
+    // The wheel takes the cursor down onto a short line; gg goes back to
+    // the column clicked, as Vim's.
+    setup.editor.wheel(-5, &setup.copy);
+    assert_ne!(setup.cursor().0, 0);
+    setup.keys("gg");
+    assert_eq!(setup.cursor(), (0, 10));
+}

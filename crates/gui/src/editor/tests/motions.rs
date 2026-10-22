@@ -755,3 +755,28 @@ fn a_motion_that_fails_keeps_the_column_wanted_where_vims_does() {
     assert_eq!(in_cells("abcdef\nxy\n\nz\n", (1, 5), "j3}k").1, (1, 1));
     assert_eq!(in_cells("abcdef\nx\n", (1, 5), "jek").1, (1, 0));
 }
+
+#[test]
+fn the_column_on_a_tab_is_worked_out_again_only_where_the_cursor_moved() {
+    // As Neovim's typed keys have it, which keep the column the cursor
+    // sits in until it moves: on a tab where visual mode started, normal
+    // mode's, its last cell; moved there in visual mode before the other
+    // end, its first.
+    assert_eq!(in_cells("a\tb\nabcdefgh\n", (1, 1), "viwj").1, (2, 3));
+    assert_eq!(in_cells("a\tb\nabcdefgh\n", (1, 1), "vlhi(j").1, (2, 1));
+    assert_eq!(
+        in_cells("a\tb\nabcdefgh\nabcdefgh\n", (2, 3), "kVoj").1,
+        (2, 3)
+    );
+    assert_eq!(
+        in_cells("b c\n\n\n  \nb c\n\t\n  \n", (6, 0), "vapj").1,
+        (7, 2)
+    );
+    // Insert mode works it out again, its first cell, and normal mode
+    // after, its last.
+    assert_eq!(
+        in_cells("abcdefgh\n\tx\nabcdefgh\n", (2, 0), "i<Down><Esc>").1,
+        (3, 0)
+    );
+    assert_eq!(in_cells("\tfoo\nabcdefgh\n", (1, 0), "i<Esc>j").1, (2, 3));
+}

@@ -179,6 +179,15 @@ impl Done {
     const REDRAW: Self = Self { redraw: true };
 }
 
+/// Where the cursor was, at which revision of the text, when the column it
+/// sits in was worked out, and that column (see `Editor::seen`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Seen {
+    at: Point,
+    revision: u64,
+    col: usize,
+}
+
 /// The text an operator acts on.
 #[derive(Clone, Copy, Debug)]
 struct Span {
@@ -469,6 +478,12 @@ pub(crate) struct Editor {
     /// goes to another line, an edit lands, the pane is resized or the
     /// view scrolls, as Vim's `VALID_TOPLINE` keeps its view.
     view_placed: Option<u64>,
+    /// The column the cursor sits in, as Vim's `w_virtcol` keeps it, valid
+    /// while the cursor stays where it was, `at`, and the text as it was,
+    /// at `revision`: worked out again only then, in the mode it's in, so
+    /// a cursor that moved in visual mode and one that didn't sit as
+    /// Vim's do on a tab (see [`settle_want`](Self::settle_want)).
+    seen: Option<Seen>,
     /// Lines laid out, and the rows they wrap onto, kept from frame to
     /// frame while the text stays as it is.
     kept: Kept,
@@ -771,6 +786,7 @@ impl Editor {
             left: 0,
             resized: false,
             view_placed: None,
+            seen: None,
             kept: Kept::default(),
             hide: None,
             keep: None,
@@ -1196,20 +1212,26 @@ impl Editor {
     }
 
     /// Settles the column moving up and down aims for, if it aims for
-    /// where the cursor is, as Vim's does before each key (see
-    /// [`Cursor::settle_want`]): on a tab, its first cell in insert mode,
-    /// or in visual mode at or before the selection's other end, and else
-    /// its last. After a key too, so the wheel and the like, which move
-    /// the cursor between keys, find it settled.
+    /// where the cursor is, as Vim's `validate_cursor()` and
+    /// `update_curswant()` do before each key: to the column the cursor
+    /// sits in, which is worked out again only if it moved or the text
+    /// changed since (Vim's `VALID_VIRTCOL`), in the mode it's in then (see
+    /// [`Cursor::column`]). Around each key, click and turn of the wheel,
+    /// so no move between them finds it unsettled.
     fn settle_want(&mut self, copy: &BufferCopy) {
-        if !self.cursor.aims_here() {
-            return;
-        }
-        let visual = matches!(self.mode, Mode::Visual(_));
-        let at_start = self.mode == Mode::Insert
-            || (visual && self.anchor.is_some_and(|anchor| self.cursor.at <= anchor));
-        let text = self.text(copy);
-        self.cursor.settle_want(&text, at_start);
+        let (at, revision) = (self.cursor.at, copy.revision());
+        let col = match self.seen {
+            Some(seen) if seen.at == at && seen.revision == revision => seen.col,
+            _ => {
+                let visual = matches!(self.mode, Mode::Visual(_));
+                let at_start = self.mode == Mode::Insert
+                    || (visual && self.anchor.is_some_and(|anchor| at <= anchor));
+                let col = self.cursor.column(&self.text(copy), at_start);
+                self.seen = Some(Seen { at, revision, col });
+                col
+            }
+        };
+        self.cursor.settle_want(col);
     }
 
     /// The keys `press` makes, for [`typed`](Self::typed).
@@ -1798,12 +1820,10 @@ impl Editor {
             Ok(selected) => (Some(selected), false),
             Err(selected) => (selected, true),
         };
-        // Failing where it is, aiming for its column, as Vim's: on a tab
-        // where visual mode started, its last cell, as Vim's keeps the
-        // column it worked out there before, and else as visual mode has
-        // it (see `settle_want`).
-        let aim = Cursor::new(self.cursor.at).aim(&text);
         drop(text);
+        // Aiming for where the cursor is after, found or not, as Vim's
+        // `nv_object()`: the column it sits in, as `settle_want` works it
+        // out, where it was if it didn't move.
         match (selected, self.mode) {
             (Some(selected), Mode::Visual(kind)) => {
                 let kind = object.selection(kind, selected.lines, failed);
@@ -1811,11 +1831,7 @@ impl Editor {
                 self.anchor = Some(selected.anchor);
                 self.cursor = Cursor::new(selected.cursor);
             }
-            _ if failed && self.anchor == Some(self.cursor.at) => {
-                self.cursor = Cursor::wanting(self.cursor.at, aim);
-            }
-            _ if failed => self.cursor = Cursor::new(self.cursor.at),
-            _ => {}
+            _ => self.cursor = Cursor::new(self.cursor.at),
         }
         if failed {
             self.fail();
@@ -2960,6 +2976,10 @@ impl Editor {
     }
 
     fn enter_insert(&mut self, times: usize) {
+        // Aiming for where it is in insert mode, on a tab its first cell,
+        // as Vim's `edit()` works it out again there.
+        self.cursor = Cursor::new(self.cursor.at);
+        self.seen = None;
         self.mode = Mode::Insert;
         self.anchor = None;
         self.blocks.spread = None;
@@ -3002,6 +3022,9 @@ impl Editor {
         let mut cursor = self.cursor;
         cursor.apply(Motion::Left, &self.text(copy));
         self.cursor = Cursor::new(back_to.unwrap_or(cursor.at));
+        // Sitting where normal mode has it again, on a tab its last cell,
+        // as Vim's `ins_esc()` works it out again there.
+        self.seen = None;
         self.normal_cursor(copy);
     }
 
@@ -5194,6 +5217,7 @@ impl Editor {
     /// wheel does, keeping the cursor in it.
     pub(crate) fn wheel(&mut self, rows: i64, copy: &BufferCopy) {
         self.view_placed = None;
+        self.settle_want(copy);
         let text = self.text(copy);
         self.clamp_top(&text);
         let top = self.top.row(&text);

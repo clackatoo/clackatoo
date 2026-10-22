@@ -833,24 +833,22 @@ impl Cursor {
         })
     }
 
-    /// Whether the column moving up and down aims for is where the cursor
-    /// is, not settled yet.
-    pub(crate) fn aims_here(&self) -> bool {
-        self.want.is_none()
+    /// The column the cursor sits in, as Vim's `w_virtcol` has it: on a
+    /// tab, its first cell if `at_start`, as in insert mode, or in visual
+    /// mode at or before the selection's other end, and else its last.
+    pub(crate) fn column(&self, lines: &impl Lines, at_start: bool) -> usize {
+        if at_start {
+            self.at.col
+        } else {
+            Self::new(self.at).aim(lines)
+        }
     }
 
-    /// Settles the column moving up and down aims for, if it aims for
-    /// where the cursor is: at its first cell if `at_start`, as Vim's
-    /// cursor sits on a tab in insert mode, or in visual mode at or before
-    /// the selection's other end, or else as [`aim`](Self::aim) has it.
-    /// Vim settles it before each key, in the mode the key finds.
-    pub(crate) fn settle_want(&mut self, lines: &impl Lines, at_start: bool) {
+    /// Aims for `col` moving up and down, if it aims for where the cursor
+    /// is, as Vim's `update_curswant()` settles it.
+    pub(crate) fn settle_want(&mut self, col: usize) {
         if self.want.is_none() {
-            self.want = Some(if at_start {
-                self.at.col
-            } else {
-                self.aim(lines)
-            });
+            self.want = Some(col);
         }
     }
 

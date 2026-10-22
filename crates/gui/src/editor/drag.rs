@@ -368,6 +368,9 @@ impl Editor {
         } else {
             self.normal_cursor(copy);
         }
+        // Aiming for the column clicked, as Vim's after the click, which
+        // is a key to it, before the wheel moves the cursor.
+        self.settle_want(copy);
     }
 
     /// Selects from `anchor` to `head`, by `kind`, in visual mode: from
@@ -386,6 +389,7 @@ impl Editor {
         self.mode = Mode::Visual(kind);
         self.anchor = Some(anchor);
         self.cursor = Cursor::new(head);
+        self.settle_want(copy);
     }
 
     /// Takes the selection on to the character under the mouse, held at
