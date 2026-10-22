@@ -217,7 +217,7 @@ impl Reader<'_> {
     ) -> Read<T> {
         match self.next() {
             None => Read::More,
-            Some(next) => match next.plain().filter(|&ch| wanted(ch)) {
+            Some(next) => match next.typed().filter(|&ch| wanted(ch)) {
                 Some(ch) => Read::Yes(make(ch)),
                 None => Read::No,
             },

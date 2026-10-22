@@ -9,6 +9,7 @@
 //! `startofline` go to the line's first non-blank, as Vim's do.
 
 use super::Setup;
+use crate::motion::{Cursor, Point};
 
 /// Eight lines, every other one indented, so a first non-blank shows.
 const EIGHT: &str = "one\n  two\nthree\n  four\nfive\n  six\nseven\n  eight\n";
@@ -384,4 +385,43 @@ fn space_takes_a_lines_end_as_a_character_and_d_backspace_the_line_break() {
     assert_eq!(spaced(2, 1, "y3<BS>").1, (1, 13));
     assert_eq!(spaced(2, 1, "y3<BS>").2, "ee\nf");
     assert_eq!(spaced(2, 0, "y<BS>").2, "e");
+}
+
+/// The text and the cursor, its column in cells, after `keys` from cell
+/// `col` of line `line` (from 1) of `text`, with tabs four cells wide.
+fn in_cells(text: &str, (line, col): (u64, usize), keys: &str) -> (String, (u64, usize)) {
+    let mut setup = Setup::new(text);
+    setup.set(|options| options.tabstop = 4);
+    setup.editor.cursor = Cursor::new(Point {
+        line: line - 1,
+        col,
+    });
+    setup.keys(keys);
+    let (at_line, at_col) = setup.cursor();
+    (setup.text(), (at_line + 1, at_col))
+}
+
+#[test]
+fn a_tab_is_one_character_to_every_motion() {
+    let text = "\tx\ty.z\n";
+    // Space and Backspace step over a tab whole, as h and l do.
+    assert_eq!(in_cells(text, (1, 0), "<Space>").1, (1, 4));
+    assert_eq!(in_cells(text, (1, 4), "2<Space>").1, (1, 8));
+    assert_eq!(in_cells("\t\tq\n", (1, 8), "4<BS>").1, (1, 0));
+    assert_eq!(in_cells("a\tb\tc\n", (1, 0), "3l").1, (1, 5));
+    assert_eq!(in_cells("a\tb\tc\n", (1, 8), "3h").1, (1, 1));
+    assert_eq!(in_cells(text, (1, 0), "d2<Space>").0, "\ty.z\n");
+    assert_eq!(in_cells(text, (1, 10), "gU9<BS>").0, "\tX\tY.z\n");
+    // A tab's cells are a tab to find, not blanks.
+    assert_eq!(in_cells("a\tb c\n", (1, 0), "f<Tab>").1, (1, 1));
+    assert_eq!(in_cells("a\tb c\n", (1, 0), "f ").1, (1, 5));
+    assert_eq!(in_cells("a\tb\tc\td\n", (1, 0), "t<Tab>;").1, (1, 4));
+    assert_eq!(in_cells("a\tb\tc\n", (1, 0), "df<Tab>").0, "b\tc\n");
+}
+
+#[test]
+fn semicolon_after_t_goes_past_a_character_not_a_cell() {
+    // Wide characters take two cells each.
+    assert_eq!(in_cells("中x中x中y\n", (1, 0), "tx;").1, (1, 3));
+    assert_eq!(in_cells("中x中x中y\n", (1, 0), "$T中;").1, (1, 5));
 }

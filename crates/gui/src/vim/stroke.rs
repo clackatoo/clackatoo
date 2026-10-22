@@ -64,6 +64,15 @@ impl Stroke {
         }
     }
 
+    /// The character it types as what `f` or `r` takes: a plain one, or a
+    /// tab.
+    pub(crate) fn typed(self) -> Option<char> {
+        match self {
+            Self::Tab => Some('\t'),
+            stroke => stroke.plain(),
+        }
+    }
+
     /// The keys `text` writes down, for tests, as `@` types a register
     /// holding it (see [`crate::keymap::read_macro`]): a character for
     /// itself, and a key that types none by its name in angle brackets,

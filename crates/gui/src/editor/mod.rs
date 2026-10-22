@@ -1921,29 +1921,6 @@ impl Editor {
                     });
                 }
             }
-            // A character at a time, however many cells it takes, as a tab
-            // does.
-            Motion::Left | Motion::Right => {
-                let line = cursor.at.line;
-                let Some(laid) = text.laid(line) else {
-                    return cursor;
-                };
-                for _ in 0..times {
-                    let byte = laid.byte_at(cursor.at.col);
-                    let to = if motion == Motion::Left {
-                        laid.col_before(laid.col_of(byte))
-                    } else {
-                        let next = laid.char_end(byte);
-                        (next < laid.text().len())
-                            .then(|| laid.col_of(next))
-                            .filter(|&next| next <= text.last_cell(line))
-                    };
-                    let Some(col) = to else {
-                        break;
-                    };
-                    cursor = Cursor::new(Point { line, col });
-                }
-            }
             _ if taking => cursor.go_to_take(motion, count, &text, self.startofline),
             _ => cursor.go(motion, count, &text, self.startofline),
         }

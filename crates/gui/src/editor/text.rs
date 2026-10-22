@@ -434,6 +434,7 @@ impl Laid {
 
     /// The first cell of the character before the one at `col`, if there's
     /// one.
+    #[cfg(test)]
     pub(crate) fn col_before(&self, col: usize) -> Option<usize> {
         let index = self.starts.to_cell(col).checked_sub(2)?;
         self.starts.get(index).map(|(cell, _)| cell)
@@ -623,7 +624,8 @@ impl Cells for Laid {
 /// character's right half is a spacer.
 fn spot_in(ch: char, cell: usize, next: usize, col: usize) -> Spot {
     match ch {
-        '\t' => Spot::narrow(' '),
+        '\t' if col == cell => Spot::narrow('\t'),
+        '\t' => Spot::TAB_REST,
         '\0'..='\x1f' | '\x7f' if col == cell => Spot::narrow('^'),
         '\0'..='\x1f' | '\x7f' => Spot::narrow(letter_of(ch)),
         ch if ch.is_control() => Spot::narrow('\u{fffd}'),
@@ -1289,7 +1291,8 @@ mod tests {
         };
         assert_eq!(laid.cell(70_000), Some(wide));
         assert_eq!(laid.cell(70_001), Some(Spot::SPACER));
-        assert_eq!(laid.cell(70_003), Some(Spot::narrow(' ')), "the tab");
+        assert_eq!(laid.cell(70_002), Some(Spot::narrow('\t')), "the tab");
+        assert_eq!(laid.cell(70_003), Some(Spot::TAB_REST), "its second cell");
         assert_eq!(laid.cell(70_004), Some(Spot::narrow('b')));
         assert_eq!(laid.cell(70_005), None);
         let back: Vec<_> = laid.back_from(usize::MAX).take(3).collect();
@@ -1297,8 +1300,8 @@ mod tests {
             back,
             [
                 (70_004, Spot::narrow('b')),
-                (70_003, Spot::narrow(' ')),
-                (70_002, Spot::narrow(' '))
+                (70_003, Spot::TAB_REST),
+                (70_002, Spot::narrow('\t'))
             ]
         );
         // Drawn from far along, as a row it wraps onto is.
@@ -1421,19 +1424,30 @@ mod tests {
             let laid = Laid::new(text.clone(), tabstop);
             let (row, filled) = as_a_row(&text, tabstop);
             assert_eq!(laid.cells(), filled, "{text:?}");
+            // But for a tab's cells, which say they're a tab's, where a
+            // terminal's row has blanks.
+            let blank = |spot: Spot| match spot.ch {
+                '\t' => Spot::narrow(' '),
+                _ => spot,
+            };
             let cells: Vec<_> = (0..=filled).map(|col| row.cell(col)).collect();
-            let each: Vec<_> = (0..=filled).map(|col| laid.cell(col)).collect();
+            let each: Vec<_> = (0..=filled).map(|col| laid.cell(col).map(blank)).collect();
             assert_eq!(each[..filled], cells[..filled], "{text:?}");
             assert_eq!(each[filled], None, "{text:?}");
             assert_eq!(text_end(Some(&laid)), text_end(Some(&row)), "{text:?}");
             // Read one after another, either way, from anywhere.
             for col in 0..filled + 2 {
-                let on: Vec<_> = laid.on_from(col).collect();
+                let on: Vec<_> = laid
+                    .on_from(col)
+                    .map(|(at, spot)| (at, blank(spot)))
+                    .collect();
                 let row_on: Vec<_> = (row.on_from(col))
                     .take_while(|&(at, _)| at < filled)
                     .collect();
                 assert_eq!(on, row_on, "{text:?} on from {col}");
-                let back: Vec<_> = laid.back_from(col).collect();
+                let back: Vec<_> = (laid.back_from(col))
+                    .map(|(at, spot)| (at, blank(spot)))
+                    .collect();
                 let row_back: Vec<_> = match filled {
                     0 => Vec::new(),
                     _ => row.back_from(col.min(filled - 1)).collect(),

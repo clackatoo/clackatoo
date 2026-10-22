@@ -22,12 +22,13 @@ pub(crate) struct Point {
 /// One cell of a line, as the cursor reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Spot {
-    /// The character drawn there: a blank in a tab, or on a wide
-    /// character's right half.
+    /// The character there: a tab in each of a tab's cells, as a file's
+    /// line has them, and a blank on a wide character's right half.
     pub(crate) ch: char,
     /// Whether it's a wide character's left half.
     pub(crate) wide: bool,
-    /// Whether it's a wide character's right half, with nothing of its own.
+    /// Whether it's a cell after a character's first, with nothing of its
+    /// own: a wide character's right half, or a tab's.
     pub(crate) spacer: bool,
 }
 
@@ -48,6 +49,13 @@ impl Spot {
         spacer: true,
     };
 
+    /// A tab's cells after its first.
+    pub(crate) const TAB_REST: Self = Self {
+        ch: '\t',
+        wide: false,
+        spacer: true,
+    };
+
     fn of(cell: Cell) -> Self {
         Self {
             ch: cell.ch(),
@@ -58,7 +66,7 @@ impl Spot {
 
     /// Whether it's blank: a space, or a tab's.
     pub(crate) fn blank(self) -> bool {
-        self.ch == ' ' && !self.spacer
+        self.ch == '\t' || (self.ch == ' ' && !self.spacer)
     }
 }
 
@@ -761,8 +769,8 @@ impl Cursor {
             }
             Motion::Right => {
                 let row = lines.row(at.line);
-                let row = row.as_deref();
-                if let Some(col) = next_cell(row, at.col).filter(|&col| col < text_end(row)) {
+                let last = lines.last_cell(at.line);
+                if let Some(col) = next_cell(row.as_deref(), at.col).filter(|&col| col <= last) {
                     self.at.col = col;
                 }
                 self.want = self.at.col;
@@ -1580,7 +1588,9 @@ fn on_row(lines: &impl Lines, line: u64, rows: &[ScreenRow], index: usize, col: 
         Some(next) => col.clamp(start, next.start.saturating_sub(1).max(start)),
         None => col.min(lines.last_cell(line).max(start)),
     };
-    start_of_cell(lines.row(line).as_deref(), col)
+    // On the row: a tab begun on the row before is left to the caller
+    // (see `wrap::onto_row`).
+    start_of_cell(lines.row(line).as_deref(), col).max(start)
 }
 
 /// The cell after the one at `col`, stepping over a wide character's
@@ -1601,9 +1611,9 @@ pub(crate) fn previous_cell(row: Option<&impl Cells>, col: usize) -> Option<usiz
     Some(start_of_cell(row, previous))
 }
 
-/// The `times`th cell of `ch` after `col` on the row, or before it if not
-/// `forward`, not looking at the one right by `col` if `skip`; or the cell
-/// next to that one, towards `col`, if `till`.
+/// The `times`th character `ch` after `col` on the row, or before it if not
+/// `forward`, not counting the one right by `col` if `skip`; or the
+/// character next to that one, towards `col`, if `till`.
 fn find_char(
     row: Option<&impl Cells>,
     col: usize,
@@ -1612,18 +1622,26 @@ fn find_char(
     skip: bool,
 ) -> Option<usize> {
     let cells = row?;
-    let found = |(_, spot): &(usize, Spot)| spot.ch == ch && !spot.spacer;
+    // A character at a time: its first cell, not the rest of a tab's or a
+    // wide character's.
+    let first = |(_, spot): &(usize, Spot)| !spot.spacer;
+    let found = |(_, spot): &(usize, Spot)| spot.ch == ch;
     // The character right by the cursor isn't looked at if `skip`.
     let skipped = usize::from(skip);
     let nth = times.max(1) - 1;
     let (found, _) = if forward {
-        (cells.on_from(col + 1).skip(skipped).filter(found)).nth(nth)?
-    } else {
         (cells
-            .back_from(col.checked_sub(1)?)
+            .on_from(col + 1)
+            .filter(first)
             .skip(skipped)
             .filter(found))
         .nth(nth)?
+    } else {
+        (cells.back_from(col.checked_sub(1)?))
+            .filter(first)
+            .skip(skipped)
+            .filter(found)
+            .nth(nth)?
     };
     if !till {
         return Some(found);
@@ -1657,11 +1675,16 @@ pub(crate) fn before(lines: &impl Lines, start: Point, end: Point) -> Option<Poi
 
 /// `col`, moved left onto a wide character's left half if it's on the
 /// right.
-pub(crate) fn start_of_cell(row: Option<&impl Cells>, col: usize) -> usize {
-    let spacer = row
-        .and_then(|row| row.cell(col))
-        .is_some_and(|spot| spot.spacer);
-    if spacer { col.saturating_sub(1) } else { col }
+pub(crate) fn start_of_cell(row: Option<&impl Cells>, mut col: usize) -> usize {
+    // Back over a wide character's right half, or a tab's cells.
+    while col > 0
+        && row
+            .and_then(|row| row.cell(col))
+            .is_some_and(|spot| spot.spacer)
+    {
+        col -= 1;
+    }
+    col
 }
 
 #[cfg(test)]
