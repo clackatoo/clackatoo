@@ -353,7 +353,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 | Shift+Left Shift+Right, Ctrl+Left Ctrl+Right | As `b` and `w`, and `B` and `W`, as in Vim. Ctrl+Home is `gg`, Ctrl+End goes to the last line's last character, and Shift+Up and Shift+Down page up and down. In insert mode they all go to the program. |
 | `w` `b` `e` | To the next word's start, this or the previous word's start, this or the next word's end. Words are runs of letters, digits and `_`, or runs of other characters; both cross line ends. |
 | `W` `B` `E` | The same, for anything between blanks. |
-| `0` `^` `$`, Home End | The line's first column, its first character that isn't blank, its last character. |
+| `0` `^` `$`, Home End | The line's first column, its first character that isn't blank, its last character; `2$` the next line's last, a count that many lines down less one, as Vim's. |
 | `+` `-` `_` | The next line's first character that isn't blank, the line before's, this line's; with a count, that many lines on, back, or down less one, as Vim's do. With `y`, they take whole lines. Enter, Space and Backspace aren't motions in a terminal, which is typed into with them, but `y` takes them as Vim's does: `y<CR>` copies this line and the next. |
 | `g_` `\|` | The line's last character that isn't blank; the column a count says. |
 | `ge` `gE` | The end of the word before, or of the run of anything but blanks before. |

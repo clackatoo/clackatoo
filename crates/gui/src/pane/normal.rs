@@ -675,6 +675,8 @@ impl Pane {
             }
             Motion::LastNonBlank => Some(Place::LastNonBlank),
             Motion::Column => Some(Place::Column(cursor.want())),
+            // `2$` to another line's end.
+            Motion::LineEnd if count.is_some_and(|count| count > 1) => Some(Place::Wanted),
             _ => None,
         };
         match goes {

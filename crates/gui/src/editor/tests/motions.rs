@@ -677,3 +677,22 @@ fn dl_short_of_its_count_at_a_lines_end_takes_the_last_character() {
     // An empty line has none.
     assert_eq!(in_cells("\nx\n", (1, 0), "dl").0, "\nx\n");
 }
+
+#[test]
+fn a_count_takes_dollar_to_a_line_further_down() {
+    let text = "ab cd\nef gh\nij\n";
+    assert_eq!(in_cells(text, (1, 0), "2$").1, (2, 4));
+    assert_eq!(in_cells(text, (1, 0), "5$").1, (3, 1));
+    // From the last line there's none to go to, but it aims for lines'
+    // ends all the same.
+    assert_eq!(in_cells(text, (3, 0), "2$").1, (3, 0));
+    assert_eq!(in_cells("a中b\tc\n\t\n", (2, 0), "V2$d").1, (1, 8));
+    // Over lines from a line's start, d takes them whole, as `2D` does.
+    assert_eq!(
+        kept(text, (1, 0), "d2$"),
+        ("ij\n".into(), "ab cd\nef gh\n".into(), true)
+    );
+    assert_eq!(kept(text, (1, 0), "2D").0, "ij\n");
+    assert_eq!(kept(text, (1, 2), "d2$").0, "ab\nij\n");
+    assert_eq!(kept(text, (1, 0), "V2$y").1, "ab cd\nef gh\n");
+}

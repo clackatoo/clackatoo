@@ -407,7 +407,7 @@ An editor in a window of its own starts in normal mode, as in Vim. One you go to
 | `w` `b` `e` | The start of the next word, the start of this one or the one before, the end of this one or the next. |
 | `ge` `gE` | The end of the word before, or of the run of anything but blanks before, back over line ends, stopping at an empty line. With an operator, they take the character under the cursor too. |
 | `W` `B` `E` | The same, for anything between blanks. |
-| `0` `^` `$` | The line's start, its first character that isn't blank, its last character. |
+| `0` `^` `$` | The line's start, its first character that isn't blank (on a line of blanks, the last), its last character; `2$` the next line's last, a count that many lines down less one, as Vim's. |
 | `g_` | The line's last character that isn't blank, or with a count, that many lines down less one. |
 | `\|` | The column a count says, counting from 1, or the line's last character if it's shorter, wanting that column on as `j` and `k` go. |
 | `gg` `G` | The first line, the last, keeping the column, as Neovim's do, or at its first character that isn't blank with the [option](~clackatoo/reference/config#options) `startofline`, as `:` and a line number do. With a count, that line: `12G` and `12gg` are line 12. A count works the same after an operator, so `d3G` deletes from the cursor's line to line 3, and `y2gg` copies from line 2 to the cursor's. |

@@ -2487,6 +2487,19 @@ mod tests {
     }
 
     #[test]
+    fn a_count_takes_dollar_to_a_line_further_down() {
+        let terminal = terminal("one two six\r\nfour five");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        assert_eq!(
+            yanked(&mut pane, &terminal, "gg0wy2$").as_deref(),
+            Some("two six\nfour five")
+        );
+        keys(&mut pane, "gg02$");
+        assert_eq!(cursor(&pane), ("four five".into(), 1, 8));
+    }
+
+    #[test]
     fn yw_stops_at_the_end_of_its_last_words_line() {
         let terminal = terminal("one\r\n  two three");
         let mut pane = pane(&terminal);

@@ -744,7 +744,7 @@ impl Taken {
         let counted = count.is_some_and(|count| count > 1);
         let down = match motion {
             Motion::Up(_) | Motion::Down(_) => true,
-            Motion::LineFirstNonBlank | Motion::LastNonBlank => counted,
+            Motion::LineFirstNonBlank | Motion::LastNonBlank | Motion::LineEnd => counted,
             _ => false,
         };
         if down && moved.at.line == from.line {
@@ -1020,8 +1020,18 @@ impl Cursor {
             }
             // A count less one lines down, as Vim's: none from the last
             // line.
-            (Motion::LineFirstNonBlank | Motion::LastNonBlank, Some(count))
-                if count > 1 && self.at.line >= last => {}
+            // `2$` and `2g_` aim for lines' ends all the same, as Vim's.
+            (Motion::LastNonBlank | Motion::LineEnd, Some(count))
+                if count > 1 && self.at.line >= last =>
+            {
+                self.want = Some(usize::MAX);
+            }
+            (Motion::LineFirstNonBlank, Some(count)) if count > 1 && self.at.line >= last => {}
+            // `2$` to the next line's end, as Vim's, as far as there are.
+            (Motion::LineEnd, Some(count)) if count > 1 => {
+                let down = (count as u64).saturating_sub(1);
+                self.onto_line_end(self.at.line.saturating_add(down).min(last), lines);
+            }
             (Motion::LineFirstNonBlank | Motion::LastNonBlank, count) => {
                 let down = (count.unwrap_or(1) as u64).saturating_sub(1);
                 let line = self.at.line.saturating_add(down).min(last);

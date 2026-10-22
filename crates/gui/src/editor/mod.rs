@@ -1637,8 +1637,11 @@ impl Editor {
                 let once = command.count.is_none_or(|count| count == 1);
                 let text = self.text(copy);
                 let stays = once && motion.found_in_place(from, &text);
-                // `2_` and `2g_` have no line to go to from the last.
-                let down = matches!(motion, Motion::LineFirstNonBlank | Motion::LastNonBlank);
+                // `2_`, `2g_` and `2$` have no line to go to from the last.
+                let down = matches!(
+                    motion,
+                    Motion::LineFirstNonBlank | Motion::LastNonBlank | Motion::LineEnd
+                );
                 let no_line = down && !once && from.line >= text.last_line();
                 drop(text);
                 if (self.cursor.at == from && can_fail(motion) && !stays) || no_line {
@@ -1830,6 +1833,21 @@ impl Editor {
                     ..block
                 };
                 self.operate_block(operator, block, times, copy, registers);
+            }
+            // `D` is `d$`, as Vim's, which over lines from a line's start
+            // takes them whole (`2D`).
+            Action::DeleteToEnd { change: false } if !matches!(self.mode, Mode::Visual(_)) => {
+                let (to_end, count) = (Target::Motion(Motion::LineEnd), command.count);
+                if !self.operate(
+                    Operator::Delete,
+                    to_end,
+                    count,
+                    copy,
+                    &shared.marks,
+                    registers,
+                ) {
+                    self.fail();
+                }
             }
             Action::DeleteToEnd { change } => self.delete_to_end(change, times, copy, registers),
             Action::Substitute => {
