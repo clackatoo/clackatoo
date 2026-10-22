@@ -805,3 +805,12 @@ fn d_over_lines_onto_an_empty_line_takes_it_too() {
     assert_eq!(in_cells("  foo\n  \n\nbar\n", (1, 2), "d2aw").0, "bar\n");
     assert_eq!(in_cells("  \n  \n\nend\t\n", (3, 0), "5dgE").0, "end\t\n");
 }
+
+#[test]
+fn deleting_in_an_empty_text_keeps_the_register() {
+    let (text, register, lines) = kept("{\n  g h\n", (2, 0), "d1%.");
+    assert_eq!(
+        (text.as_str(), register.as_str(), lines),
+        ("", "{\n  g h\n", true)
+    );
+}

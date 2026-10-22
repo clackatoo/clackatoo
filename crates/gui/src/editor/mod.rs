@@ -2137,6 +2137,11 @@ impl Editor {
         let Some(span) = span else {
             return false;
         };
+        // Nothing to delete in an empty text, as Vim's `op_delete()` finds
+        // an empty buffer: the register keeps what it had.
+        if operator == Operator::Delete && copy.text().len_bytes() == 0 {
+            return true;
+        }
         // What a motion, a mark or an object took, not a selection: `d`
         // may take it as whole lines (see `whole_lines_deleted`).
         let span = if operator == Operator::Delete && target != Target::Selection {
