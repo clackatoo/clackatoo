@@ -232,10 +232,13 @@ impl Object {
     /// The kind of selection selecting it in visual mode leaves, from
     /// `kind`: whole lines if `lines`, as a paragraph is, or characters,
     /// but a block stays one for words and quoted strings, as Vim's do; and
-    /// failing, as it was.
+    /// failing, as it was. Paragraphs taken on from a selection of more
+    /// than a line, which isn't by lines, keep its kind, as Vim's
+    /// `current_par()` does.
     pub(crate) fn selection(self, kind: Selection, lines: bool, failed: bool) -> Selection {
         let keeps_block = matches!(self, Self::Word | Self::BigWord | Self::Quote(_));
-        if failed || (kind == Selection::Block && keeps_block) {
+        let taken_on = self == Self::Paragraph && !lines;
+        if failed || taken_on || (kind == Selection::Block && keeps_block) {
             kind
         } else if lines {
             Selection::Lines

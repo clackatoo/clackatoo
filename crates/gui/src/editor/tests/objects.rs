@@ -307,3 +307,17 @@ fn brackets_with_nothing_inside_fail_to_be_selected() {
         assert_eq!(setup.editor.anchor, Some(setup.editor.cursor.at), "{keys}");
     }
 }
+
+#[test]
+fn paragraphs_taken_on_keep_the_kind_of_selection() {
+    let mode = |keys: &str| {
+        let mut setup = Setup::new("a\nb\n\nc\nd\n");
+        setup.keys(keys);
+        setup.editor.mode
+    };
+    assert_eq!(mode("<C-v>jap"), Mode::Visual(Selection::Block));
+    assert_eq!(mode("vjap"), Mode::Visual(Selection::Characters));
+    assert_eq!(mode("Vjap"), Mode::Visual(Selection::Lines));
+    // From a line, by lines, as Vim's.
+    assert_eq!(mode("<C-v>ap"), Mode::Visual(Selection::Lines));
+}
