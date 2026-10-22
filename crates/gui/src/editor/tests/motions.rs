@@ -837,3 +837,14 @@ fn e_at_the_texts_end_goes_over_its_blanks() {
     // Past them in visual mode, as Vim's.
     assert_eq!(in_cells("ab\n  \n", (2, 0), "ve").1, (2, 2));
 }
+
+#[test]
+fn a_count_of_c_past_the_last_line_fails_as_d_does() {
+    let text = "\tx y\none two.\none two.\n}\n";
+    let mut setup = Setup::new(text);
+    setup.keys("G5C");
+    assert!(setup.editor.take_failed());
+    setup.keys("<Esc>");
+    assert_eq!(setup.text(), text);
+    assert_eq!(in_cells("ab cd\nef\n", (1, 2), "2CZ<Esc>").0, "abZ\n");
+}

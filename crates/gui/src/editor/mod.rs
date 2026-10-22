@@ -1866,18 +1866,17 @@ impl Editor {
                 };
                 self.operate_block(operator, block, times, copy, registers);
             }
-            // `D` is `d$`, as Vim's, which over lines from a line's start
-            // takes them whole (`2D`).
-            Action::DeleteToEnd { change: false } if !matches!(self.mode, Mode::Visual(_)) => {
+            // `D` is `d$` and `C` is `c$`, as Vim's: over lines from a
+            // line's start `D` takes them whole (`2D`), and with a count
+            // past the last line, they fail.
+            Action::DeleteToEnd { change } if !matches!(self.mode, Mode::Visual(_)) => {
                 let (to_end, count) = (Target::Motion(Motion::LineEnd), command.count);
-                if !self.operate(
-                    Operator::Delete,
-                    to_end,
-                    count,
-                    copy,
-                    &shared.marks,
-                    registers,
-                ) {
+                let operator = if change {
+                    Operator::Change
+                } else {
+                    Operator::Delete
+                };
+                if !self.operate(operator, to_end, count, copy, &shared.marks, registers) {
                     self.fail();
                 }
             }
