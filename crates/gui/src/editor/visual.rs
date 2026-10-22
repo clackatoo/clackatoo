@@ -319,7 +319,7 @@ impl Editor {
         let text = self.text(copy);
         let (start, end) = match span.lines {
             Some((first, last)) => (text.line_start(first), text.line_end(last)),
-            None => (span.start, span.end),
+            None => (span.start(), span.end()),
         };
         let first = text.point_of(start).line;
         let last = text.point_of(end.saturating_sub(1).max(start)).line;

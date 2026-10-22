@@ -314,8 +314,8 @@ impl Editor {
         };
         let text = self.text(copy);
         let (first, last) = span.lines.unwrap_or_else(|| {
-            let last = span.end.saturating_sub(1).max(span.start);
-            (text.point_of(span.start).line, text.point_of(last).line)
+            let last = span.end().saturating_sub(1).max(span.start());
+            (text.point_of(span.start()).line, text.point_of(last).line)
         });
         let (start, end) = (text.line_start(first), text.line_start(last));
         // Given up on if the cursor moves meanwhile.

@@ -1090,8 +1090,16 @@ impl<'a> Text<'a> {
         Point { line, col }
     }
 
-    /// The text from byte `start` to byte `end`.
+    /// The text from byte `start` to byte `end`, whichever is first, as
+    /// much of it as there is, and from the start of the character either
+    /// is in: never a panic, whatever a range a bug makes.
     pub(crate) fn slice(&self, start: usize, end: usize) -> String {
+        let len = self.rope.len_bytes();
+        let char_start = |byte: usize| {
+            self.rope
+                .char_to_byte(self.rope.byte_to_char(byte.min(len)))
+        };
+        let (start, end) = (char_start(start.min(end)), char_start(start.max(end)));
         self.rope.byte_slice(start..end).to_string()
     }
 }
@@ -1175,6 +1183,17 @@ mod tests {
         let text = Text::new(&rope, 4);
         assert_eq!(text.line_text(1), "two");
         assert_eq!((text.line_start(1), text.line_end(1)), (4, 7));
+    }
+
+    #[test]
+    fn a_slice_is_never_a_panic_whatever_its_range() {
+        let rope = Rope::from_str("ab\n中\n");
+        let text = Text::new(&rope, 4);
+        assert_eq!(text.slice(1, 6), "b\n中");
+        // Backwards, past the end, or in a character: as much as is there.
+        assert_eq!(text.slice(6, 1), "b\n中");
+        assert_eq!(text.slice(4, 99), "中\n");
+        assert_eq!(text.slice(99, 98), "");
     }
 
     #[test]

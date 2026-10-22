@@ -60,6 +60,7 @@ mod registers;
 mod rendered;
 mod scratch;
 mod snippet;
+mod span;
 mod substitute;
 mod text;
 mod uses;
@@ -96,6 +97,7 @@ use preview::Preview;
 use registers::Wrote;
 pub(crate) use registers::{Register, Registers};
 use rendered::Rendered;
+use span::Span;
 pub(crate) use text::Stretch;
 use text::{Text, Underlines, tab_end};
 #[cfg(test)]
@@ -186,75 +188,6 @@ struct Seen {
     at: Point,
     revision: u64,
     col: usize,
-}
-
-/// The text an operator acts on.
-#[derive(Clone, Copy, Debug)]
-struct Span {
-    start: usize,
-    end: usize,
-    /// Whole lines, `first` to `last`.
-    lines: Option<(u64, u64)>,
-    /// Where the motion that took it went, if one did: where `y` leaves
-    /// the cursor, if it went back.
-    moved: Option<Cursor>,
-    /// Whether `d` leaves the cursor at the first non-blank of the line
-    /// after the lines it takes, `startofline` or not, as Vim's does after
-    /// `:d`, or a motion by characters that became whole lines.
-    first_non_blank: bool,
-}
-
-impl Span {
-    /// Lines `first` to `last` of `text`, whole.
-    fn lines(text: &Text<'_>, first: u64, last: u64) -> Self {
-        Self {
-            start: text.line_start(first),
-            end: text.line_start(last + 1),
-            lines: Some((first, last)),
-            moved: None,
-            first_non_blank: false,
-        }
-    }
-
-    /// Nothing, at `at` in `text`, as an exclusive motion that goes
-    /// nowhere takes.
-    fn empty(text: &Text<'_>, at: Point) -> Self {
-        let byte = text.byte_at(at);
-        Self {
-            start: byte,
-            end: byte,
-            lines: None,
-            moved: None,
-            first_non_blank: false,
-        }
-    }
-
-    /// The characters of `text` from `start` to `last`, both in it.
-    fn chars(text: &Text<'_>, start: Point, last: Point) -> Self {
-        Self {
-            start: text.byte_at(start),
-            end: text.char_end(last),
-            lines: None,
-            moved: None,
-            first_non_blank: false,
-        }
-    }
-
-    /// As [`chars`](Self::chars), but `last` past its line's last
-    /// character, as on an empty line, is the line break, as Vim's visual
-    /// mode and `d` with Backspace take it.
-    fn chars_to_break(text: &Text<'_>, start: Point, last: Point) -> Self {
-        // The last line's break isn't the text's to take.
-        let end = if last.col >= text.line_cells(last.line) && last.line < text.last_line() {
-            text.line_start(last.line + 1)
-        } else {
-            text.char_end(last)
-        };
-        Self {
-            end,
-            ..Self::chars(text, start, last)
-        }
-    }
 }
 
 /// A change being made, for `.` to make again: the command, what was
@@ -2156,7 +2089,7 @@ impl Editor {
         let Some(span) = span else {
             return false;
         };
-        if span.lines.is_none() && span.start == span.end {
+        if span.lines.is_none() && span.start() == span.end() {
             self.operate_on_nothing(operator, span, copy);
             return true;
         }
@@ -2176,13 +2109,13 @@ impl Editor {
         // marks of all but the first.
         if matches!(operator, Operator::Delete | Operator::Change)
             && span.lines.is_none()
-            && self.takes_hidden((span.start, span.end), copy)
+            && self.takes_hidden((span.start(), span.end()), copy)
         {
             self.refuse_join();
             return true;
         }
         if let Operator::Recase(recase) = operator {
-            self.recase(span.start, span.end, recase, copy);
+            self.recase(span.start(), span.end(), recase, copy);
             // To the start of what it took, as Vim's: by lines, the
             // cursor or where the motion went, whichever's first, which
             // keeps the cursor's column going on down (`gU50%`, `3gUU`).
@@ -2204,7 +2137,7 @@ impl Editor {
             self.cursor = match (span.lines, went) {
                 (Some(_), Some(went)) if went.at < self.cursor.at => went,
                 (Some(_), _) => self.cursor,
-                (None, _) => Cursor::new(text.point_of(span.start)),
+                (None, _) => Cursor::new(text.point_of(span.start())),
             };
             drop(text);
             self.leave_visual();
@@ -2227,7 +2160,7 @@ impl Editor {
             self.shift(span, steps, operator == Operator::Dedent, copy);
             return true;
         }
-        let mut text = self.text(copy).slice(span.start, span.end);
+        let mut text = self.text(copy).slice(span.start(), span.end());
         let lines = span.lines.is_some();
         if lines && !text.ends_with('\n') {
             text.push('\n');
@@ -2268,7 +2201,7 @@ impl Editor {
     fn operate_on_nothing(&mut self, operator: Operator, span: Span, copy: &mut BufferCopy) {
         match operator {
             Operator::Change => self.change_span(span, copy),
-            _ => self.cursor = Cursor::new(self.text(copy).point_of(span.start)),
+            _ => self.cursor = Cursor::new(self.text(copy).point_of(span.start())),
         }
         self.leave_visual();
     }
@@ -2297,13 +2230,7 @@ impl Editor {
             col: 0,
         });
         moved.apply(Motion::FirstNonBlank, &text);
-        Some(Span {
-            start: text.line_start(start.line),
-            end: text.line_start(end.line + 1),
-            lines: Some((start.line, end.line)),
-            moved: Some(moved),
-            first_non_blank: false,
-        })
+        Some(Span::lines(&text, start.line, end.line).went(moved))
     }
 
     /// `>` and `<`: indents the lines `span` is on by `steps` of
@@ -2319,8 +2246,8 @@ impl Editor {
         let from = self.cursor;
         let text = self.text(copy);
         let (first, last) = span.lines.unwrap_or_else(|| {
-            let last = span.end.saturating_sub(1).max(span.start);
-            (text.point_of(span.start).line, text.point_of(last).line)
+            let last = span.end().saturating_sub(1).max(span.start());
+            (text.point_of(span.start()).line, text.point_of(last).line)
         });
         let by = self.indent.step.saturating_mul(steps);
         let tabs = self.indent.tabs_near(&text, first, last);
@@ -2382,8 +2309,8 @@ impl Editor {
                 Selection::Lines,
             ),
             None => (
-                text.point_of(span.start),
-                text.point_of(span.end.saturating_sub(1)),
+                text.point_of(span.start()),
+                text.point_of(span.end().saturating_sub(1)),
                 Selection::Characters,
             ),
         };
@@ -2412,15 +2339,15 @@ impl Editor {
         let len = text.rope().len_bytes();
         // Whole lines at the end take the line break before them.
         let last_lines = span.lines.is_some()
-            && span.end == len
-            && span.start > 0
-            && !text.slice(span.start, span.end).ends_with('\n');
+            && span.end() == len
+            && span.start() > 0
+            && !text.slice(span.start(), span.end()).ends_with('\n');
         let start = if last_lines {
-            span.start - 1
+            span.start() - 1
         } else {
-            span.start
+            span.start()
         };
-        let edit = Edit::replace(len, start, &text.slice(start, span.end), "");
+        let edit = Edit::replace(len, start, &text.slice(start, span.end()), "");
         drop(text);
         self.make(edit, copy);
         match span.lines {
@@ -2445,7 +2372,7 @@ impl Editor {
                 let indent = hidden + indent_of(&line[hidden..]).len();
                 (text.line_start(first) + indent, text.line_end(last))
             }
-            None => (span.start, span.end),
+            None => (span.start(), span.end()),
         };
         let edit = Edit::replace(text.rope().len_bytes(), start, &text.slice(start, end), "");
         drop(text);
@@ -2485,17 +2412,16 @@ impl Editor {
                 match self.mode {
                     // Copied, the cursor goes to the first line's start,
                     // or stays where it is on it, as Vim's.
-                    Mode::Visual(Selection::Lines) => Some(Span {
-                        moved: Some(if at.line < anchor.line {
+                    Mode::Visual(Selection::Lines) => {
+                        Some(lines(start.line, last.line).went(if at.line < anchor.line {
                             self.cursor
                         } else {
                             Cursor::new(Point {
                                 line: start.line,
                                 col: 0,
                             })
-                        }),
-                        ..lines(start.line, last.line)
-                    }),
+                        }))
+                    }
                     _ => Some(Span::chars_to_break(&text, start, last)),
                 }
             }
@@ -2505,13 +2431,7 @@ impl Editor {
             } => {
                 drop(text);
                 let (start, end) = self.piece_span(construct, inner, times, copy)?;
-                Some(Span {
-                    start,
-                    end,
-                    lines: None,
-                    moved: None,
-                    first_non_blank: false,
-                })
+                Some(Span::bytes(start, end))
             }
             Target::Object { object, inner } => {
                 let found = match object.find(&text, at, inner, times) {
@@ -2535,19 +2455,15 @@ impl Editor {
                 // may make it whole lines (`d2iw`, `di(`).
                 let (start, last) = (found.start(), found.last());
                 if !found.inclusive() {
-                    let moved = Some(Cursor::new(start));
                     let span =
                         exclusive(&text, start, last).unwrap_or_else(|| Span::empty(&text, start));
-                    return Some(Span { moved, ..span });
+                    return Some(span.went(Cursor::new(start)));
                 }
                 if !found.lines() {
                     return Some(chars(start, last));
                 }
                 // Whole lines, the cursor to the first's start, as Vim's.
-                Some(Span {
-                    moved: Some(Cursor::new(start)),
-                    ..lines(start.line, last.line)
-                })
+                Some(lines(start.line, last.line).went(Cursor::new(start)))
             }
             Target::Motion(motion) => self.motion_span(operator, motion, count, copy),
         }
@@ -2601,10 +2517,7 @@ impl Editor {
             && motion == Motion::LeftOver
             && let Some((start, last)) = deleted_back(at, times, &text)
         {
-            return Some(Span {
-                moved: Some(Cursor::new(start)),
-                ..Span::chars_to_break(&text, start, last)
-            });
+            return Some(Span::chars_to_break(&text, start, last).went(Cursor::new(start)));
         }
         let moved = self.taken_to(copy, motion, count);
         // A count of words back that runs out at the text's start fails,
@@ -2636,10 +2549,7 @@ impl Editor {
         } else {
             moved
         };
-        Some(Span {
-            moved: Some(moved),
-            ..span
-        })
+        Some(span.went(moved))
     }
 
     /// `x`, or `X` if `before`: `times` characters at the cursor, or
@@ -2802,18 +2712,18 @@ impl Editor {
         let Some(span) = self.span(Operator::Delete, Target::Selection, None, copy) else {
             return;
         };
-        if span.lines.is_none() && self.takes_hidden((span.start, span.end), copy) {
+        if span.lines.is_none() && self.takes_hidden((span.start(), span.end()), copy) {
             self.refuse_join();
             return;
         }
-        let mut taken = self.text(copy).slice(span.start, span.end);
+        let mut taken = self.text(copy).slice(span.start(), span.end());
         let lines = span.lines.is_some();
         if lines && !taken.ends_with('\n') {
             taken.push('\n');
         }
         let len = self.text(copy).rope().len_bytes();
         // Whole lines taken from the end leave none after to put before.
-        let at_end = lines && span.end >= len;
+        let at_end = lines && span.end() >= len;
         self.delete_span(span, copy);
         if !before {
             let small = !lines && !taken.contains('\n');
@@ -6137,30 +6047,13 @@ fn exclusive(text: &Text<'_>, start: Point, end: Point) -> Option<Span> {
         let mut first = Cursor::new(start);
         first.apply(Motion::FirstNonBlank, text);
         if start.col <= first.at.col {
-            return Some(Span {
-                start: text.line_start(start.line),
-                end: text.line_start(end.line),
-                lines: Some((start.line, end.line - 1)),
-                moved: None,
-                first_non_blank: true,
-            });
+            return Some(Span::lines(text, start.line, end.line - 1).leaving_first_non_blank());
         }
-        return Some(Span {
-            start: text.byte_at(start),
-            end: text.line_end(end.line - 1).max(text.byte_at(start)),
-            lines: None,
-            moved: None,
-            first_non_blank: false,
-        });
+        let start = text.byte_at(start);
+        return Some(Span::bytes(start, text.line_end(end.line - 1).max(start)));
     }
     let last = before(text, start, end)?;
-    Some(Span {
-        start: text.byte_at(start),
-        end: text.char_end(last),
-        lines: None,
-        moved: None,
-        first_non_blank: false,
-    })
+    Some(Span::chars(text, start, last))
 }
 
 /// What `d` deletes of `span`, which a motion, a mark or an object took:
@@ -6169,26 +6062,26 @@ fn exclusive(text: &Text<'_>, start: Point, end: Point) -> Option<Span> {
 /// lines, as Vim's `d` takes them (`d2e` from a line's start, `da(` from
 /// a `(` that starts a line and a `)` that ends one).
 fn whole_lines_deleted(text: &Text<'_>, span: Span) -> Span {
-    if span.lines.is_some() || span.end <= span.start {
+    if span.lines.is_some() || span.end() <= span.start() {
         return span;
     }
-    let start = text.point_of(span.start);
+    let start = text.point_of(span.start());
     // The line it ends on, as Vim's `oap->end`: an end just before an
     // empty line is on it, as taking that line's nothing, inclusive, puts
     // it (`3D` onto an empty line); an exclusive end at a line's start has
     // become the end of the line before (see `exclusive`).
-    let end = text.point_of(span.end);
+    let end = text.point_of(span.end());
     let last = if end.col == 0 && text.empty(end.line) && end.line > start.line {
         end.line
     } else {
-        text.point_of(span.end - 1).line
+        text.point_of(span.end() - 1).line
     };
     let mut first = Cursor::new(Point {
         line: start.line,
         col: 0,
     });
     first.apply(Motion::FirstNonBlank, text);
-    let rest = text.slice(span.end, text.line_end(last).max(span.end));
+    let rest = text.slice(span.end(), text.line_end(last).max(span.end()));
     let blank = rest.chars().all(|ch| ch == ' ' || ch == '\t');
     if last > start.line && start.col <= first.at.col && blank {
         Span::lines(text, start.line, last)

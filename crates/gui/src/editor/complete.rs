@@ -483,7 +483,8 @@ impl Completion {
         let Some(edit) = splice(text, changes) else {
             return Some(Err("the language server's edits for it don't fit".into()));
         };
-        let replaced = text.byte_slice(start..cursor).chars().count();
+        let replaced =
+            (text.get_byte_slice(start..cursor)).map_or(0, |typed| typed.chars().count());
         let at = start.saturating_add_signed(moved);
         Some(Ok(Accepted {
             cursor: at + offset,
@@ -728,9 +729,14 @@ fn already_there(text: &Rope, start: usize, cursor: usize, line_start: usize, pu
     if start < line_start {
         return 0;
     }
-    let typed = text.byte_slice(start..cursor).to_string();
+    let (Some(typed), Some(line)) = (
+        text.get_byte_slice(start..cursor),
+        text.get_byte_slice(line_start..start),
+    ) else {
+        return 0;
+    };
+    let typed = typed.to_string();
     let reach = put.len().min(MOST_BEFORE);
-    let line = text.byte_slice(line_start..start);
     let mut back = Vec::new();
     let mut len = typed.len();
     for ch in line.chars_at(line.len_chars()).reversed() {

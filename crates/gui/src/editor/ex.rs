@@ -972,7 +972,9 @@ impl Editor {
             // Someone else may have changed it meanwhile.
             if end > len
                 || asked.start < through
-                || text.byte_slice(asked.start..end) != asked.matched.as_str()
+                || text
+                    .get_byte_slice(asked.start..end)
+                    .is_none_or(|was| was != asked.matched.as_str())
             {
                 continue;
             }
@@ -1215,7 +1217,7 @@ impl Editor {
         copy: &mut BufferCopy,
         shared: &mut Shared,
     ) {
-        let (block, start, end, _) = self.lines_text(lines, copy);
+        let (block, ..) = self.lines_text(lines, copy);
         let history = Wrote::Delete {
             small: false,
             history: true,
@@ -1223,14 +1225,10 @@ impl Editor {
         shared
             .registers
             .wrote(register, Register::new(block, true), history);
-        let span = super::Span {
-            start,
-            end,
-            lines: Some((lines.first, lines.last)),
-            moved: None,
-            // As Vim's: only `dd` and its kin keep the column.
-            first_non_blank: true,
-        };
+        // As Vim's: only `dd` and its kin keep the column.
+        let text = self.text(copy);
+        let span = super::Span::lines(&text, lines.first, lines.last).leaving_first_non_blank();
+        drop(text);
         self.delete_span(span, copy);
         self.report_lines(lines, "fewer lines");
     }
