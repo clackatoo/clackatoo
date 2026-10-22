@@ -1303,8 +1303,10 @@ impl Cursor {
         if !walk.back() {
             return;
         }
+        // Back over blanks and line ends, stopping at an empty line, as
+        // Vim's.
         while walk.class() == Class::Blank {
-            if !walk.back() {
+            if (walk.at.col == 0 && lines.empty(walk.at.line)) || !walk.back() {
                 return self.settle(walk.at);
             }
         }

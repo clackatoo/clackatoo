@@ -617,3 +617,13 @@ fn on_a_tab_up_and_down_aim_for_its_last_cell() {
     let text = "  \n  indented line.\na\t(b)\tc\n";
     assert_eq!(in_cells(text, (3, 5), "V3ed").1, (2, 9));
 }
+
+#[test]
+fn b_stops_at_empty_lines_as_w_does() {
+    let text = "  - item\n\n\n";
+    assert_eq!(in_cells(text, (3, 0), "b").1, (2, 0));
+    assert_eq!(in_cells(text, (3, 0), "2B").1, (1, 4));
+    assert_eq!(in_cells("ab\n\n\ncd\n", (4, 0), "3b").1, (1, 0));
+    // A line of blanks isn't empty.
+    assert_eq!(in_cells("ab\n  \ncd\n", (3, 0), "b").1, (1, 0));
+}
