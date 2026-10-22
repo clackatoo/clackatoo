@@ -551,3 +551,14 @@ fn w_taken_stops_at_the_end_of_its_last_words_line() {
     assert_eq!(taken("foo\nbar baz\n", (1, 0), "d2w").0, "baz\n");
     assert_eq!(taken("foo\nbar baz\n", (1, 0), "d3w").0, "");
 }
+
+#[test]
+fn a_motion_by_characters_that_takes_whole_lines_leaves_d_at_the_first_non_blank() {
+    // `dw` on an empty line takes it whole, and the cursor goes to the
+    // next line's first non-blank, `startofline` or not, as Vim's.
+    assert_eq!(
+        in_cells("\n  bar\n", (1, 0), "dw"),
+        ("  bar\n".into(), (1, 2))
+    );
+    assert_eq!(in_cells("  ab\n\n    bar\n", (2, 0), "dw").1, (2, 4));
+}

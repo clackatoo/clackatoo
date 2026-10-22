@@ -189,6 +189,10 @@ struct Span {
     /// Where the motion that took it went, if one did: where `y` leaves
     /// the cursor, if it went back.
     moved: Option<Cursor>,
+    /// Whether `d` leaves the cursor at the first non-blank of the line
+    /// after the lines it takes, `startofline` or not, as Vim's does after
+    /// `:d`, or a motion by characters that became whole lines.
+    first_non_blank: bool,
 }
 
 impl Span {
@@ -199,6 +203,7 @@ impl Span {
             end: text.line_start(last + 1),
             lines: Some((first, last)),
             moved: None,
+            first_non_blank: false,
         }
     }
 
@@ -209,6 +214,7 @@ impl Span {
             end: text.char_end(last),
             lines: None,
             moved: None,
+            first_non_blank: false,
         }
     }
 
@@ -2150,6 +2156,7 @@ impl Editor {
             end: text.line_start(end.line + 1),
             lines: Some((start.line, end.line)),
             moved: Some(moved),
+            first_non_blank: false,
         })
     }
 
@@ -2269,6 +2276,10 @@ impl Editor {
         drop(text);
         self.make(edit, copy);
         match span.lines {
+            Some((first, _)) if span.first_non_blank => {
+                let text = self.text(copy);
+                self.cursor = Cursor::at_first_non_blank(first.min(text.last_line()), &text);
+            }
             Some((first, _)) => self.after_lines(first, want, copy),
             None => self.cursor = Cursor::new(self.text(copy).point_of(start)),
         }
@@ -2351,6 +2362,7 @@ impl Editor {
                     end,
                     lines: None,
                     moved: None,
+                    first_non_blank: false,
                 })
             }
             Target::Object { object, inner } => {
@@ -5908,6 +5920,7 @@ fn exclusive(text: &Text<'_>, start: Point, end: Point) -> Option<Span> {
                 end: text.line_start(end.line),
                 lines: Some((start.line, end.line - 1)),
                 moved: None,
+                first_non_blank: true,
             });
         }
         return Some(Span {
@@ -5915,6 +5928,7 @@ fn exclusive(text: &Text<'_>, start: Point, end: Point) -> Option<Span> {
             end: text.line_end(end.line - 1).max(text.byte_at(start)),
             lines: None,
             moved: None,
+            first_non_blank: false,
         });
     }
     let last = before(text, start, end)?;
@@ -5923,6 +5937,7 @@ fn exclusive(text: &Text<'_>, start: Point, end: Point) -> Option<Span> {
         end: text.char_end(last),
         lines: None,
         moved: None,
+        first_non_blank: false,
     })
 }
 

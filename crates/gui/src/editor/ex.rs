@@ -1228,13 +1228,10 @@ impl Editor {
             end,
             lines: Some((lines.first, lines.last)),
             moved: None,
+            // As Vim's: only `dd` and its kin keep the column.
+            first_non_blank: true,
         };
         self.delete_span(span, copy);
-        // At the first non-blank, `startofline` or not, as Vim's: only
-        // `dd` and its kin keep the column.
-        let text = self.text(copy);
-        self.cursor.apply(Motion::FirstNonBlank, &text);
-        drop(text);
         self.report_lines(lines, "fewer lines");
     }
 

@@ -1137,7 +1137,7 @@ impl Cursor {
     }
 
     /// A cursor at line `line`'s first character that isn't blank.
-    fn at_first_non_blank(line: u64, lines: &impl Lines) -> Self {
+    pub(crate) fn at_first_non_blank(line: u64, lines: &impl Lines) -> Self {
         let mut cursor = Self::new(Point { line, col: 0 });
         cursor.apply(Motion::FirstNonBlank, lines);
         cursor
