@@ -918,7 +918,7 @@ impl Cursor {
         lines: &impl Lines,
         start_of_line: bool,
     ) {
-        self.going(motion, count, lines, start_of_line, true);
+        self.going(motion, count, lines, start_of_line, false);
     }
 
     /// Where `motion` goes, `count` typed, when an operator takes it: as
@@ -931,17 +931,18 @@ impl Cursor {
         lines: &impl Lines,
         start_of_line: bool,
     ) {
-        self.going(motion, count, lines, start_of_line, false);
+        self.going(motion, count, lines, start_of_line, true);
     }
 
-    /// [`go`](Self::go), keeping the view's margin if `keep_margin`.
+    /// [`go`](Self::go), or [`go_to_take`](Self::go_to_take) if `taking`:
+    /// as an operator takes the motion.
     fn going(
         &mut self,
         motion: Motion,
         count: Option<usize>,
         lines: &impl Lines,
         start_of_line: bool,
-        keep_margin: bool,
+        taking: bool,
     ) {
         let (first, last) = lines.bounds();
         // Line `number`, counting the first as 1, or the last if there
@@ -956,7 +957,7 @@ impl Cursor {
             (Motion::TextEnd, Some(number)) => self.onto_line_end(numbered(number), lines),
             (Motion::Last, None) => self.onto_line(last, start_of_line, lines),
             (Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom, count) => {
-                self.go_in_view(motion, count.unwrap_or(1), lines, keep_margin);
+                self.go_in_view(motion, count.unwrap_or(1), lines, taking);
                 if start_of_line {
                     *self = Self::at_first_non_blank(self.at.line, lines);
                 }
@@ -986,7 +987,7 @@ impl Cursor {
             // Taken by an operator, Space stops at a line's end, past its
             // last character, before going on, as Vim's counts the line
             // break as one.
-            (Motion::RightOver, count) if !keep_margin => {
+            (Motion::RightOver, count) if taking => {
                 for _ in 0..count.unwrap_or(1) {
                     match over_on(self.at, lines) {
                         Some(at) => self.settle(at),
@@ -1027,11 +1028,11 @@ impl Cursor {
     /// to, as Vim's do: `count` lines from the first line in view or the
     /// last shown whole, counting from 1, or the line half the rows shown
     /// reach; aiming for the wanted column. Moving, as opposed to being
-    /// taken by an operator (`keep_margin`), it keeps the view's margin of
+    /// taken by an operator (`taking`), it keeps the view's margin of
     /// screen rows from the view's edges, as Vim's `scrolloff` does,
     /// unless the view is at the text's start or end. Nothing without a
     /// view.
-    fn go_in_view(&mut self, motion: Motion, count: usize, lines: &impl Lines, keep_margin: bool) {
+    fn go_in_view(&mut self, motion: Motion, count: usize, lines: &impl Lines, taking: bool) {
         let Some(view) = lines.view() else {
             return;
         };
@@ -1044,9 +1045,9 @@ impl Cursor {
         // an operator takes as far as the text goes, as Vim's: `d99L` to
         // its start.
         let mut line = match motion {
-            Motion::ViewTop if keep_margin => highest.saturating_add(from_edge).min(bottom),
+            Motion::ViewTop if !taking => highest.saturating_add(from_edge).min(bottom),
             Motion::ViewTop => highest.saturating_add(from_edge).min(last),
-            Motion::ViewBottom if keep_margin => bottom.saturating_sub(from_edge).max(highest),
+            Motion::ViewBottom if !taking => bottom.saturating_sub(from_edge).max(highest),
             Motion::ViewBottom => bottom.saturating_sub(from_edge).max(first),
             _ => {
                 // Half the rows of the lines shown whole, as Vim's: rows
@@ -1070,7 +1071,7 @@ impl Cursor {
                 }
             }
         };
-        if keep_margin {
+        if !taking {
             line = view.correct(line, lines);
         }
         self.go_to_line(line, lines);
@@ -1236,7 +1237,7 @@ impl Cursor {
                 *self = Self::at_first_non_blank(at.line - 1, lines);
             }
             Motion::LineFirstNonBlank | Motion::LastNonBlank | Motion::Column => {
-                self.going(motion, None, lines, false, true);
+                self.going(motion, None, lines, false, false);
             }
             Motion::RightOver => {
                 self.apply(Motion::Right, lines);
