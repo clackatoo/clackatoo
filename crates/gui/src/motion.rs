@@ -995,7 +995,15 @@ impl Cursor {
                     }
                 }
             }
-
+            (Motion::WordStart | Motion::BigWordStart, count) if taking => {
+                let kind = if motion == Motion::WordStart {
+                    Class::of
+                } else {
+                    Class::big
+                };
+                self.repeat(motion, count.unwrap_or(1) - 1, lines);
+                self.word_start_taken(lines, kind);
+            }
             (motion, count) => self.repeat(motion, count.unwrap_or(1), lines),
         }
     }
@@ -1185,6 +1193,38 @@ impl Cursor {
             if !walk.forward() || (walk.at.col == 0 && lines.empty(walk.at.line)) {
                 break;
             }
+        }
+        self.settle(walk.at);
+    }
+
+    /// The last `w` or `W` of a count an operator takes, as Vim's
+    /// `fwd_word` goes for one: it stops at the end of the line it's on,
+    /// past the last character, rather than going over the line break, so
+    /// `dw` on a line's last word leaves the break. From an empty line,
+    /// it's at the next line's start.
+    fn word_start_taken(&mut self, lines: &impl Lines, kind: fn(Class) -> Class) {
+        let mut walk = Walk::new(lines, self.at).seeing(kind);
+        let class = walk.class();
+        // A step on, or false where the word stops instead.
+        let step = |walk: &mut Walk<'_, _>| {
+            let line = walk.at.line;
+            if walk.forward() && walk.at.line == line {
+                return true;
+            }
+            if !lines.empty(line) {
+                walk.at = Point {
+                    line,
+                    col: line_end(line, lines),
+                };
+            }
+            false
+        };
+        let mut going = step(&mut walk);
+        while going && class != Class::Blank && walk.class() == class {
+            going = step(&mut walk);
+        }
+        while going && walk.class() == Class::Blank {
+            going = step(&mut walk);
         }
         self.settle(walk.at);
     }

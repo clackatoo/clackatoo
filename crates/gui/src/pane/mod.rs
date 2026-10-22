@@ -2476,6 +2476,16 @@ mod tests {
     }
 
     #[test]
+    fn yw_stops_at_the_end_of_its_last_words_line() {
+        let terminal = terminal("one\r\n  two three");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let mut yank = |keys: &str| yanked(&mut pane, &terminal, keys);
+        assert_eq!(yank("gg0yw").as_deref(), Some("one"));
+        assert_eq!(yank("gg0y2w").as_deref(), Some("one\n  two "));
+    }
+
+    #[test]
     fn a_copy_the_daemon_cut_short_says_so() {
         let terminal = terminal("one");
         let mut pane = pane(&terminal);

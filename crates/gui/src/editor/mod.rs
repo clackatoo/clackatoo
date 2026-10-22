@@ -2136,7 +2136,7 @@ impl Editor {
         let at = self.cursor.at;
         let (start, end) = if to < at { (to, at) } else { (at, to) };
         if exact {
-            return exclusive(&text, start, end, false);
+            return exclusive(&text, start, end);
         }
         // `'a` goes to the mark's line's first non-blank, as `y'a` leaves
         // the cursor if that's back.
@@ -2441,7 +2441,7 @@ impl Editor {
         let span = match reach {
             Reach::Lines => lines(start.line, end.line),
             Reach::Inclusive => chars(start, end),
-            Reach::Exclusive => exclusive(&text, start, end, word)?,
+            Reach::Exclusive => exclusive(&text, start, end)?,
         };
         let span = if operator == Operator::Delete {
             whole_lines_deleted(&text, span)
@@ -5894,25 +5894,8 @@ fn indent_before(text: &Text<'_>, byte: usize) -> usize {
 }
 
 /// What an operator takes of `text` with an exclusive motion from
-/// `start` to `end`, if it's a `w` or `W` if `word`: up to `end`, but
-/// not it.
-fn exclusive(text: &Text<'_>, start: Point, end: Point, word: bool) -> Option<Span> {
-    // `dw` stops at the end of the line its last word is on, rather than
-    // going on to the next word's line, as Vim's.
-    let first_non_blank = |line| {
-        let mut first = Cursor::new(Point { line, col: 0 });
-        first.apply(Motion::FirstNonBlank, text);
-        first.at.col
-    };
-    // At a line's start, it's as any exclusive motion, below.
-    if word && end.line > start.line && end.col > 0 && end.col <= first_non_blank(end.line) {
-        return Some(Span {
-            start: text.byte_at(start),
-            end: text.line_end(end.line - 1).max(text.byte_at(start)),
-            lines: None,
-            moved: None,
-        });
-    }
+/// `start` to `end`: up to `end`, but not it.
+fn exclusive(text: &Text<'_>, start: Point, end: Point) -> Option<Span> {
     // As Vim's: one that ends at a line's start, from another line, ends
     // at the end of the line before; and from at or before its line's
     // first character that isn't blank, takes whole lines, as `d}` does.

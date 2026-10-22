@@ -494,3 +494,60 @@ fn operators_over_lines_leave_the_cursor_where_vims_do() {
     setup.keys("j2_");
     assert!(setup.editor.take_failed());
 }
+
+/// The text after `keys` from `at`, as [`in_cells`] has it, and what the
+/// register holds, and whether as whole lines.
+fn kept(text: &str, (line, col): (u64, usize), keys: &str) -> (String, String, bool) {
+    let mut setup = Setup::new(text);
+    setup.set(|options| options.tabstop = 4);
+    setup.editor.cursor = Cursor::new(Point {
+        line: line - 1,
+        col,
+    });
+    setup.keys(keys);
+    let register = setup.register();
+    (setup.text(), register.text, register.lines)
+}
+
+#[test]
+fn w_taken_stops_at_the_end_of_its_last_words_line() {
+    let chars = |text: &str| (text.to_string(), false);
+    let taken = |text, at, keys| {
+        let (text, register, lines) = kept(text, at, keys);
+        (text, (register, lines))
+    };
+    // As Vim's: the line break stays, whatever the next line starts with.
+    assert_eq!(
+        taken("foo\nbar\n", (1, 0), "dw"),
+        ("\nbar\n".into(), chars("foo"))
+    );
+    assert_eq!(taken("  \nend\n", (1, 0), "yw").1, chars("  "));
+    assert_eq!(
+        taken("foo  \nbar\n", (1, 0), "dw"),
+        ("\nbar\n".into(), chars("foo  "))
+    );
+    assert_eq!(
+        taken("  x\nbar\n", (1, 2), "dw"),
+        ("  \nbar\n".into(), chars("x"))
+    );
+    assert_eq!(
+        taken("a b\nc\n", (1, 0), "d2w"),
+        ("\nc\n".into(), chars("a b"))
+    );
+    assert_eq!(
+        taken("foo\n\nbar\n", (1, 0), "dw"),
+        ("\n\nbar\n".into(), chars("foo"))
+    );
+    assert_eq!(
+        taken("foo\n  bar\n", (1, 0), "dW"),
+        ("\n  bar\n".into(), chars("foo"))
+    );
+    // At the text's end, to the end of its blanks.
+    assert_eq!(
+        taken("x foo  ", (1, 2), "dw"),
+        ("x ".into(), chars("foo  "))
+    );
+    // Over lines before the last, on as `w` goes.
+    assert_eq!(taken("foo\nbar baz\n", (1, 0), "d2w").0, "baz\n");
+    assert_eq!(taken("foo\nbar baz\n", (1, 0), "d3w").0, "");
+}
