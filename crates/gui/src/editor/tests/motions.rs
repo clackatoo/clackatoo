@@ -648,3 +648,21 @@ fn a_line_of_blanks_first_non_blank_is_its_last_blank() {
     assert_eq!(in_cells("  \nab\n", (1, 1), "d2w").0, "");
     assert_eq!(in_cells("a\t(b)\tc\n  \n\n", (2, 1), "5gUW").1, (2, 1));
 }
+
+#[test]
+fn i_on_a_line_of_blanks_types_after_them_and_selected_at_the_start() {
+    assert_eq!(in_cells("  \nx\n", (1, 0), "Iy<Esc>").0, "  y\nx\n");
+    assert_eq!(in_cells("\t\nx\n", (1, 0), "Iy<Esc>").0, "\ty\nx\n");
+    // Selected by characters or lines, at the start of the other end's
+    // line, or the cursor if it's on a line before.
+    assert_eq!(in_cells("  abc\nx\n", (1, 3), "vIy<Esc>").0, "y  abc\nx\n");
+    assert_eq!(in_cells("foo  \n", (1, 4), "vFoIy<Esc>").0, "yfoo  \n");
+    assert_eq!(
+        in_cells("  abc\n  de\n", (1, 3), "vjIy<Esc>").0,
+        "y  abc\n  de\n"
+    );
+    assert_eq!(
+        in_cells("  abc\nde\n", (2, 1), "vkIy<Esc>").0,
+        " y abc\nde\n"
+    );
+}

@@ -2851,6 +2851,22 @@ impl Editor {
         {
             return self.insert_block(entry == Entry::LineEnd, times, block, copy);
         }
+        // `I` in a selection by characters or lines types at the start of
+        // the other end's line, or where the cursor is if it's on a line
+        // before, as Vim's.
+        if let (Entry::LineStart, Mode::Visual(_), Some(anchor)) = (entry, self.mode, self.anchor) {
+            let at = self.cursor.at;
+            let at = if at.line < anchor.line {
+                at
+            } else {
+                Point {
+                    line: anchor.line,
+                    col: 0,
+                }
+            };
+            self.cursor = Cursor::new(at);
+            return self.enter_insert(times);
+        }
         let text = self.text(copy);
         let at = self.cursor.at;
         let laid = text.laid(at.line);
@@ -2862,7 +2878,18 @@ impl Editor {
                     self.cursor = Cursor::new(text.point_of(text.char_end(at)));
                 }
             }
-            Entry::LineStart => self.cursor.apply(Motion::FirstNonBlank, &text),
+            // At the first non-blank, or on a line of blanks, after them,
+            // as Vim's `I`.
+            Entry::LineStart => {
+                self.cursor.apply(Motion::FirstNonBlank, &text);
+                let col = self.cursor.at.col;
+                if class_at(laid.as_deref(), col, Words::NONE) == Class::Blank {
+                    self.cursor = Cursor::new(Point {
+                        line: at.line,
+                        col: cells,
+                    });
+                }
+            }
             Entry::LineEnd => {
                 self.cursor = Cursor::new(Point {
                     line: at.line,

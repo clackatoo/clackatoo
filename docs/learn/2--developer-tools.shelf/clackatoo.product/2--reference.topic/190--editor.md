@@ -444,7 +444,7 @@ A jump from the line the last one left replaces it, so going back never stops tw
 
 | Keys | Does |
 |---|---|
-| `i` `a` `I` `A` | Insert mode before or after the cursor, at the line's first character that isn't blank, at its end. |
+| `i` `a` `I` `A` | Insert mode before or after the cursor, at the line's first character that isn't blank (after a line of blanks), at its end. `I` in a selection by characters or lines types at the start of the line its other end is on, or at the cursor if it's on a line before, as Vim's. |
 | `o` `O` | Insert mode on a new line below or above, indented as the language says, or as the cursor's line is where it has no rules. |
 | `d`, `c`, `y` and a motion | Deletes, changes or copies what the motion moves over: `dw`, `c$`, `y2j`. |
 | `d`, `c`, `y` and an object | The same, for a [text object](~clackatoo/reference/window#text-objects): `diw`, `ci"`, `ya(`. |
