@@ -361,7 +361,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 | `gg` `G` | The oldest line of history, the screen's last line, or with a count, that line, keeping the column, as Neovim's do; at its first character that isn't blank with the [option](~clackatoo/reference/config#options) `startofline`. |
 | `gx` | Opens the link under the cursor, as Ctrl+click does. |
 | `f` `t` `F` `T`, `;` `,` | To the next of the character typed after them on the line, or just before it, or back to the one before, or just after it; `;` finds it again, and `,` the other way, as Vim's do; each pane keeps its own last find, where Vim keeps one for every window. With `y`, they take to it: `yt)`. |
-| `%` `{` `}` | The bracket that pairs with the one under the cursor; the blank line before or after the paragraph. |
+| `%` `{` `}` | The bracket that pairs with the one under the cursor, or with a count, the line that far through, `50%` half way; the blank line before or after the paragraph. |
 | `H` `M` `L` | The top, middle and bottom lines in view, keeping the column as `gg` does. |
 | `5k`, `3w`, `10G`, `2gg` | A count before a motion repeats it, as in Vim; before `G` or `gg`, it goes to that line, counting from the oldest line of history. `3H` and `3L` count from the view's top and bottom, no further than the other, but `y99L` takes to the oldest line, as Vim's does. |
 | Ctrl+D Ctrl+U | Half the view down or up, rounded down, view and cursor together. A count sets how far they go from then on, a whole view at most, as Vim's does. |

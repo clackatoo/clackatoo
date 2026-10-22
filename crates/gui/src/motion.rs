@@ -642,6 +642,8 @@ impl Motion {
             {
                 None
             }
+            // `50%` takes whole lines, as Vim's.
+            Self::Match if count.is_some_and(|percent| percent <= 100) => Some(Reach::Lines),
             // `dl` short of its count, at the line's last character, takes
             // that too, as Vim's.
             Self::Right if !lines.empty(to.line) && steps(from, to, lines) < count.unwrap_or(1) => {
@@ -1018,6 +1020,15 @@ impl Cursor {
             }
             (Motion::First, None) => self.onto_line(first, start_of_line, lines),
             (Motion::TextEnd, Some(number)) => self.onto_line_end(numbered(number), lines),
+            // `50%` to the line half way through, rounding up, as Vim's;
+            // nowhere past 100.
+            (Motion::Match, Some(percent)) => {
+                if percent <= 100 {
+                    let count = (last - first + 1).saturating_mul(percent as u64);
+                    let number = count.saturating_add(99) / 100;
+                    self.onto_line(numbered(number.max(1) as usize), start_of_line, lines);
+                }
+            }
             (Motion::Last, None) => self.onto_line(last, start_of_line, lines),
             (Motion::ViewTop | Motion::ViewMiddle | Motion::ViewBottom, count) => {
                 self.go_in_view(motion, count.unwrap_or(1), lines, taking);

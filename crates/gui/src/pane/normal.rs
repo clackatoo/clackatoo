@@ -660,6 +660,9 @@ impl Pane {
             {
                 Some(Place::FirstNonBlank)
             }
+            // `50%` to a line, as `gg` goes.
+            Motion::Match if count.is_some() && self.startofline => Some(Place::FirstNonBlank),
+            Motion::Match if count.is_some() => Some(Place::Wanted),
             Motion::Up(_)
             | Motion::Down(_)
             | Motion::RowUp(_)

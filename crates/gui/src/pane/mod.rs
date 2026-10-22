@@ -2500,6 +2500,19 @@ mod tests {
     }
 
     #[test]
+    fn a_count_takes_percent_to_a_line_so_far_through() {
+        let terminal = terminal("a\r\nb\r\nc\r\nd\r\ne");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg");
+        let (first, last) = crate::motion::Lines::bounds(&Document(&pane));
+        keys(&mut pane, "100%");
+        assert_eq!(cursor(&pane).1 as u64, last - first);
+        keys(&mut pane, "1%");
+        assert_eq!(cursor(&pane).1, 0);
+    }
+
+    #[test]
     fn yw_stops_at_the_end_of_its_last_words_line() {
         let terminal = terminal("one\r\n  two three");
         let mut pane = pane(&terminal);

@@ -710,3 +710,21 @@ fn j_on_the_last_line_and_k_on_the_first_go_nowhere() {
     // Nor past the end in visual mode.
     assert_eq!(in_cells("abc\nxy\n", (1, 0), "$vk").1, (1, 2));
 }
+
+#[test]
+fn a_count_takes_percent_to_a_line_so_far_through() {
+    let text = "a\nb\nc\nd\ne\n";
+    assert_eq!(in_cells(text, (1, 0), "50%").1, (3, 0));
+    assert_eq!(in_cells(text, (1, 0), "5%").1, (1, 0));
+    assert_eq!(in_cells(text, (1, 0), "100%").1, (5, 0));
+    // Nowhere past 100.
+    assert_eq!(in_cells(text, (3, 0), "101%").1, (3, 0));
+    // Whole lines.
+    assert_eq!(
+        kept(text, (1, 0), "d50%"),
+        ("d\ne\n".into(), "a\nb\nc\n".into(), true)
+    );
+    // Aiming for the column wanted, as `gg` does with `nostartofline`.
+    assert_eq!(in_cells("abc\nb\nc\nd\ne\n", (1, 0), "$40%").1, (2, 0));
+    assert_eq!(in_cells("abc\n  bcd\nc\nd\ne\n", (1, 2), "40%").1, (2, 2));
+}

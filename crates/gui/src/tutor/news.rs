@@ -678,6 +678,12 @@ pub(crate) const NEWS: &[News] = &[
         what: "Counts for aw and iw, over lines, and aw again in visual mode takes on the next word, as Vim's",
     },
     News {
+        id: "percent",
+        date: "2026-10-22",
+        lesson: "words",
+        what: "A count before % goes to the line that far through the file, 50% half way, as Vim's",
+    },
+    News {
         id: "remoterestore",
         date: "2026-10-23",
         lesson: "shell",
