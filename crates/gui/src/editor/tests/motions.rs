@@ -1046,3 +1046,23 @@ fn a_join_of_the_last_line_alone_is_an_undo_step_of_its_own() {
     // Undone, the cursor aims afresh from where it goes back to.
     assert_eq!(in_cells("abcdefghij\nab\n", (1, 8), "j3Juk").1, (1, 1));
 }
+
+#[test]
+fn gv_selects_where_vims_marks_say_after_joins_deletes_and_undos() {
+    let gv = |text: &str, at, keys| in_cells(text, at, keys).1;
+    // An undo puts back the selection as it was before what it undoes,
+    // and a redo as it was after.
+    assert_eq!(gv("abc\n  de\n", (1, 2), "vjo<Esc>Jugvo"), (2, 2));
+    assert_eq!(gv("ab\n  cd\n  ef\n", (1, 0), "vjjl<Esc>gg3Jugv"), (3, 1));
+    assert_eq!(gv("中文\n  éa\n", (2, 2), "vl<Esc>kJugv"), (2, 3));
+    assert_eq!(gv("abcdef\nxy\n", (1, 1), "vj<Esc>kJugv"), (2, 1));
+    assert_eq!(gv("abc\nde\n", (1, 1), "vj<Esc>kJu<C-r>ugv"), (2, 1));
+    assert_eq!(gv("    defg\né\n", (2, 0), "V<Esc>ddugv"), (2, 0));
+    assert_eq!(gv("\t\nx中y\n  de\n", (1, 0), "<C-v>j<Esc>ddugv"), (2, 3));
+    // A line taken away leaves its end at that line, its column kept,
+    // the last line's on the line before.
+    assert_eq!(gv("abc\ndefgh\n", (1, 1), "vjl<Esc>ddgv"), (1, 2));
+    assert_eq!(gv("a\nbcdef\ngh\n", (2, 2), "vl<Esc>ddgv"), (2, 2));
+    // Lines put in above take it down, whether put or opened.
+    assert_eq!(gv("abcdef\ngh\nij\n", (2, 0), "vl<Esc>jddkpgv"), (3, 1));
+}

@@ -13,9 +13,13 @@
 //! A mark moves with the text, as the jump list's places do (see
 //! [`FilePlace`]): edits made above it, by anyone, take it down with them,
 //! one on a character put back in other words, as when its case is
-//! changed, stays on it, and one on lines `:m` moves goes with them, as
-//! the last selection does, so `gv` selects the lines moved. Marks are the
-//! window's own, kept until it closes.
+//! changed, stays on it, and one on lines `:m` moves goes with them. Marks
+//! are the window's own, kept until it closes.
+//!
+//! The last selection's `<` and `>` are kept as Vim keeps them instead: a
+//! line and a column each, which edits within the line leave as they are,
+//! and an undo puts back as they were (see [`Selected`]), so `gv` selects
+//! what Vim's would.
 //!
 //! A file is its path on the machine it's on: the daemon's own, or another
 //! machine whose workspaces `:connect` brought in, where the same path may
@@ -233,282 +237,306 @@ pub(crate) struct Shape {
     pub(crate) to_end: bool,
 }
 
-/// One end of a selection as Vim keeps it, for `gv`: its line, and its
-/// column in bytes, which edits within the line leave as it is and a line
-/// joined onto the one before moves with its text, as Vim's
-/// `mark_col_adjust()` does: so it may be past the line's end, as Vim's
-/// may, which `gv` takes as just past it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Column {
-    /// The byte its line starts at, in the window's copy of the text.
-    start: usize,
-    /// Its line, from 0.
-    line: u64,
-    /// Bytes from the line's start.
-    col: usize,
-}
-
-impl Column {
-    /// The end at `byte` of `text`.
-    fn at(text: &Rope, byte: usize) -> Self {
-        let byte = byte.min(text.len_bytes());
-        let line = text.byte_to_line(byte);
-        let start = text.line_to_byte(line);
-        Self {
-            start,
-            line: line as u64,
-            col: byte - start,
-        }
-    }
-
-    /// Whether it's at or past the end of its line of `text`, as Vim's
-    /// `gv` puts the cursor just past it.
-    pub(crate) fn past_end(&self, text: &Rope) -> bool {
-        let Ok(line) = usize::try_from(self.line) else {
-            return true;
-        };
-        if line >= text.len_lines() {
-            return true;
-        }
-        let row = text.line(line);
-        let len = row.len_bytes() - usize::from(row.bytes().last() == Some(b'\n'));
-        self.col >= len
-    }
-
-    /// Moves it through `edit`, which leaves the text as `after`. A change
-    /// that takes away the line break before its line joins the line onto
-    /// the one it's taken to, and the column goes with the line's text, as
-    /// Vim's `do_join()` takes it, less the indent `J` takes away (Vim's
-    /// `spaces_removed`); otherwise its line goes where its start does: in
-    /// lines `:m` moves, with them, and down with lines put in above it.
-    fn edited(&mut self, edit: &Passing<'_>, after: &Rope) {
-        let start = self.start;
-        let moved = edit.moved.and_then(|moved| moved.place(start));
-        let joined = (start > 0 && moved.is_none())
-            .then(|| {
-                (edit.edit.changes()).find(|&(at, removed, put)| {
-                    // Lines put back as many as were taken, as recasing
-                    // them does, aren't joined.
-                    let breaks = |text: &str| text.bytes().filter(|&byte| byte == b'\n').count();
-                    at < start && at + removed.len() >= start && breaks(removed) > breaks(put)
-                })
-            })
-            .flatten();
-        let (byte, kept) = if let Some(moved) = moved {
-            (moved, None)
-        } else if let Some((at, removed, put)) = joined {
-            // `J`'s: the line break and the indent after it, nothing else.
-            let indent = (removed.strip_prefix('\n'))
-                .filter(|rest| rest.bytes().all(|byte| byte == b' ' || byte == b'\t'))
-                .map_or(0, |_| at + removed.len() - start);
-            let rest = edit.edit.map(at, Bias::Before) + put.len();
-            (rest, Some(self.col.saturating_sub(indent)))
-        } else {
-            (edit.edit.map_keeping(start, Bias::After), None)
-        };
-        let byte = byte.min(after.len_bytes());
-        let line = after.byte_to_line(byte);
-        self.start = after.line_to_byte(line);
-        self.line = line as u64;
-        // Joined on where the rest of its line now starts.
-        if let Some(kept) = kept {
-            self.col = kept + (byte - self.start);
-        }
-    }
-
-    /// The text of its file is new: it goes to its line in it.
-    fn replaced(&mut self, text: &Rope) {
-        let last = text.len_lines() - 1;
-        let line = usize::try_from(self.line).map_or(last, |line| line.min(last));
-        self.start = text.line_to_byte(line);
-        self.line = line as u64;
-    }
-}
-
-/// A file's selection, kept for `gv` and `'<,'>`.
+/// A file's selection, kept for `gv` and `'<,'>`: `'<` and `'>`, its first
+/// and last ends, each a line and a column in bytes, as Vim keeps them,
+/// which may be past the line's end, as Vim's may.
+///
+/// Edits move them as Vim's `mark_adjust()` and `mark_col_adjust()` move
+/// marks, not as the file's other marks, which keep to their characters:
+/// lines put in or taken away above take an end with them; a line taken
+/// away leaves it at that line number, its column as it was; a line
+/// joined onto the one before takes it along, its column moved with the
+/// line's text, less the indent `J` takes away; lines `:m` moves take it
+/// with them; and an edit within its line leaves it at its column. An undo
+/// or a redo puts back the selection kept with its step (see
+/// [`Selections`]), as Vim's `uh_visual`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Selected {
-    /// Its first character, where `<` is...
+    /// Its first end, where `<` is...
     start: FilePlace,
-    /// ...the byte after its last...
-    end: FilePlace,
-    /// ...and its last character, where `>` is.
+    /// ...and its last, where `>` is.
     last: FilePlace,
-    /// Its first and last ends, as Vim keeps them.
-    cols: [Column; 2],
+    /// Where `<` and `>` are, as marks to go to: its ends, or by lines,
+    /// the first line's start and the last's end, as Vim's.
+    marked: [FilePlace; 2],
     pub(crate) shape: Shape,
 }
 
 impl Selected {
-    /// The selection of `file` from byte `start` to just before byte
-    /// `end` of `text`.
-    fn new(file: File<'_>, text: &Rope, (start, end): (usize, usize), shape: Shape) -> Self {
+    /// The selection of `file` from byte `first` to byte `last` of `text`,
+    /// both in it.
+    fn new(file: File<'_>, text: &Rope, (first, last): (usize, usize), shape: Shape) -> Self {
         let place = |byte| FilePlace::at(file, text, byte);
         let mut selected = Self {
-            start: place(start),
-            end: place(end),
-            last: place(start),
-            cols: [Column::at(text, start); 2],
+            start: place(first),
+            last: place(last),
+            marked: [place(first), place(last)],
             shape,
         };
         selected.settle(text);
-        selected.cols[1] = Column::at(text, selected.last.byte);
         selected
     }
 
-    /// The bytes of its first and last characters.
-    pub(crate) fn ends(&self) -> (usize, usize) {
-        (self.start.byte, self.last.byte)
+    /// Its first and last ends: each a line and a column in bytes, which
+    /// may be past the line's end, or the text's last line.
+    pub(crate) fn ends(&self) -> [(u64, usize); 2] {
+        [
+            (self.start.line, self.start.col),
+            (self.last.line, self.last.col),
+        ]
     }
 
-    /// Its first and last ends, as Vim keeps them.
-    pub(crate) fn columns(&self) -> [Column; 2] {
-        self.cols
-    }
-
-    /// Puts it at bytes `start` to `end` of `text`, in place.
-    fn place(&mut self, text: &Rope, (start, end): (usize, usize), shape: Shape) {
-        self.start.byte = start;
-        self.end.byte = end;
+    /// Puts it at bytes `first` to `last` of `text`, in place.
+    fn place(&mut self, text: &Rope, (first, last): (usize, usize), shape: Shape) {
+        self.start.byte = first;
+        self.last.byte = last;
+        self.start.find_line(text);
+        self.last.find_line(text);
         self.shape = shape;
         self.settle(text);
-        self.cols = [Column::at(text, start), Column::at(text, self.last.byte)];
     }
 
-    /// Moves it through `edits`, made to its file in turn, which leave its
-    /// text as `text`. Text put in where it starts is in it, and where it
-    /// ends isn't, as Vim's columns would have it; but once all of it has
-    /// been deleted, text put back there is, as an undo puts it back. In
-    /// text moved, its end goes with its last character, or once all of
-    /// it's been deleted, with its start.
-    ///
-    /// A selection of lines keeps the line its last character was on,
-    /// though that's deleted, as `=` takes away the indent the cursor was
-    /// in: the lines are what's selected.
-    fn edited(&mut self, edits: &[Passing<'_>], afters: &[Rope], text: &Rope) {
-        let lines = self.shape.kind == Selection::Lines;
-        for (edit, after) in edits.iter().zip(afters) {
-            for col in &mut self.cols {
-                col.edited(edit, after);
-            }
-            let gone = self.start.byte == self.end.byte;
-            let moved_end = edit.moved.and_then(|moved| {
-                if gone {
-                    moved.place(self.start.byte)
-                } else {
-                    moved.place(self.end.byte - 1).map(|last| last + 1)
-                }
-            });
-            self.start.follow(edit, Bias::Before);
-            if lines && gone {
-                self.last.byte = self.start.byte;
-            } else if lines {
-                self.last.follow(edit, Bias::After);
-            }
-            if let Some(end) = moved_end {
-                self.end.byte = end;
-            } else {
-                let bias = if gone { Bias::After } else { Bias::Before };
-                self.end.follow(edit, bias);
-            }
-            if edit.moved.is_some() && !gone && self.start.byte >= self.end.byte {
-                // Lines moved past one end from inside it cross its ends
-                // over, which are taken in order, as Vim takes `'<` and
-                // `'>`: the cursor's end is the other.
-                let first = self.end.byte.saturating_sub(1);
-                self.end.byte = self.start.byte + 1;
-                self.start.byte = first;
-                self.last.byte = self.end.byte - 1;
-                self.cols.swap(0, 1);
-                self.shape.backward = !self.shape.backward;
-            }
-            self.end.byte = self.end.byte.max(self.start.byte);
+    /// Moves it through `edits`, made to its file in turn, as `texts` says
+    /// what each was made to and made, `text` being the last's.
+    fn edited(&mut self, edits: &[Passing<'_>], texts: &[(Rope, Rope)]) {
+        for (edit, (before, after)) in edits.iter().zip(texts) {
+            end_edited(&mut self.start, edit, (before, after));
+            end_edited(&mut self.last, edit, (before, after));
         }
-        if lines && self.end.byte > self.start.byte {
-            self.end.byte = self.end.byte.max(next_char(text, self.last.byte));
+        // Lines moved past one end from inside it cross its ends over,
+        // which are taken in order, as Vim takes `'<` and `'>`: the
+        // cursor's end is the other.
+        if (self.start.line, self.start.col) > (self.last.line, self.last.col) {
+            std::mem::swap(&mut self.start, &mut self.last);
+            self.shape.backward = !self.shape.backward;
         }
-        // On a character's start, as an end crossed over may not be.
-        let end = self.end.byte.min(text.len_bytes());
-        let back = text.char_to_byte(text.byte_to_char(end));
-        if back < end {
-            self.end.byte = next_char(text, back);
-        }
-        self.settle(text);
     }
 
-    /// The text of its file is new: it goes to its lines and columns in
-    /// it, as marks do.
-    fn replaced(&mut self, text: &Rope) {
-        for col in &mut self.cols {
-            col.replaced(text);
-        }
-        let gone = self.start.byte == self.end.byte;
-        self.start.find_byte(text);
-        self.last.find_byte(text);
-        self.end.byte = if gone {
-            self.start.byte
-        } else {
-            next_char(text, self.last.byte)
-        };
-        self.settle(text);
-    }
-
-    /// Works out its lines and columns, and its last character, from its
-    /// bytes.
+    /// Works out its ends' bytes in `text`, as far as they go in it, and
+    /// where `<` and `>` are.
     fn settle(&mut self, text: &Rope) {
-        let len = text.len_bytes();
-        self.start.byte = self.start.byte.min(len);
-        self.end.byte = self.end.byte.clamp(self.start.byte, len);
-        self.last.byte = if self.end.byte > self.start.byte {
-            text.char_to_byte(text.byte_to_char(self.end.byte).saturating_sub(1))
-                .max(self.start.byte)
-        } else {
-            self.start.byte
-        };
-        for place in [&mut self.start, &mut self.end, &mut self.last] {
-            place.find_line(text);
+        for end in [&mut self.start, &mut self.last] {
+            end.byte = byte_of(text, end.line, end.col);
+        }
+        self.marked = [self.start.clone(), self.last.clone()];
+        if self.shape.kind == Selection::Lines {
+            let [first, last] = &mut self.marked;
+            first.col = 0;
+            last.col = usize::MAX;
+            for end in &mut self.marked {
+                end.byte = byte_of(text, end.line, end.col);
+                end.col = end.byte - byte_of(text, end.line, 0);
+            }
         }
     }
 
     fn moved(&mut self, machine: Option<MachineId>, from: &str, to: &str) {
-        for place in [&mut self.start, &mut self.end, &mut self.last] {
-            place.moved(machine, from, to);
+        for end in [&mut self.start, &mut self.last]
+            .into_iter()
+            .chain(&mut self.marked)
+        {
+            end.moved(machine, from, to);
         }
     }
-
-    fn file(&self) -> File<'_> {
-        self.start.file()
-    }
 }
 
-/// The text after each of `edits`, the last's being `text`, worked back to
-/// by undoing them in turn: `text` for each if they didn't make it.
-fn afters_of(edits: &[Passing<'_>], text: &Rope) -> Vec<Rope> {
-    let mut afters = vec![text.clone(); edits.len()];
-    for index in (1..edits.len()).rev() {
-        let mut before = afters[index].clone();
-        if edits[index].edit.invert().apply(&mut before).is_err() {
-            return vec![text.clone(); edits.len()];
+/// The byte `col` bytes into line `line` of `text`, as far as the line,
+/// and the text, go, on a character's start.
+fn byte_of(text: &Rope, line: u64, col: usize) -> usize {
+    let lines = text.len_lines();
+    let Some(line) = usize::try_from(line).ok().filter(|&line| line < lines) else {
+        return text.len_bytes();
+    };
+    let start = text.line_to_byte(line);
+    let row = text.line(line);
+    let len = row.len_bytes() - usize::from(row.bytes().last() == Some(b'\n'));
+    text.char_to_byte(text.byte_to_char(start + col.min(len)))
+}
+
+/// Moves `end`, an end of a selection, through `edit`, made to `before`
+/// and making `after`, as [`Selected`] says.
+fn end_edited(end: &mut FilePlace, edit: &Passing<'_>, (before, after): (&Rope, &Rope)) {
+    // In lines `:m` moves, with them.
+    let line = usize::try_from(end.line)
+        .ok()
+        .filter(|&line| line < before.len_lines());
+    if let Some(line) = line {
+        let start = before.line_to_byte(line);
+        if let Some(moved) = edit.moved.and_then(|moved| moved.place(start)) {
+            end.line = after.byte_to_line(moved.min(after.len_bytes())) as u64;
+            return;
         }
-        afters[index - 1] = before;
     }
-    afters
+    // Each change, the last first, so the lines of those before it are as
+    // they were.
+    let changes: Vec<_> = edit.edit.changes().collect();
+    for &(at, removed, put) in changes.iter().rev() {
+        end_changed(end, (at, removed, put), before);
+    }
 }
 
-/// The byte after the character at `byte` of `text`, or its end.
-fn next_char(text: &Rope, byte: usize) -> usize {
-    let len = text.len_bytes();
-    if byte >= len {
-        return len;
+/// Moves `end` through one change of an edit to `before`: `removed` taken
+/// away at byte `at` and `put` put in its place.
+fn end_changed(end: &mut FilePlace, (at, removed, put): (usize, &str, &str), before: &Rope) {
+    let len = before.len_bytes();
+    let point = |byte: usize| {
+        let byte = byte.min(len);
+        let line = before.byte_to_line(byte);
+        (line as u64, byte - before.line_to_byte(line))
+    };
+    let ((first, at_col), (last, end_col)) = (point(at), point(at + removed.len()));
+    let breaks = put.bytes().filter(|&byte| byte == b'\n').count() as u64;
+    // Where what follows the change starts on its line after it.
+    let rest = match put.rfind('\n') {
+        Some(newline) => put.len() - newline - 1,
+        None => at_col + put.len(),
+    };
+    let (line, col) = (end.line, end.col);
+    if line < first {
+        return;
     }
-    text.char_to_byte(text.byte_to_char(byte) + 1)
+    if line > last {
+        end.line = line + breaks - (last - first);
+        return;
+    }
+    // Whole lines put in at its line's start, as `P`, `p` and `O` put
+    // them, take it down with its line; but a line break alone on an
+    // empty line is taken as `o` opening one after it.
+    let opened = put == "\n"
+        && usize::try_from(first).is_ok_and(|first| before.line(first).len_chars() <= 1);
+    if at_col == 0 && removed.is_empty() && put.ends_with('\n') && !opened {
+        end.line = line + breaks;
+        return;
+    }
+    // Within its line, or on the line a change starts on, from where it
+    // is on, or taken away whole from its start, or on lines put back as
+    // many as were taken, as recasing them does: as it is, as Vim's.
+    let taken = removed.bytes().filter(|&byte| byte == b'\n').count() as u64;
+    if line == first || taken == breaks {
+        return;
+    }
+    // Its line joined on: as `J` joins it, the indent taken away and any
+    // space put in its place, the column with the text, back to the space
+    // if it was in the indent; or as `d` joins it, the column on from
+    // where its line now goes on, as Vim's `do_join()` after
+    // `op_delete()` puts it, or a line taken away between, left at the
+    // first line's, its column on as far.
+    let joins = line == last
+        && removed
+            .strip_prefix('\n')
+            .is_some_and(|indent| indent.bytes().all(|byte| byte == b' ' || byte == b'\t'))
+        && put.bytes().all(|byte| byte == b' ');
+    end.line = first + breaks;
+    end.col = if joins {
+        if col + put.len() < end_col {
+            at_col
+        } else {
+            col + put.len() + at_col - end_col
+        }
+    } else {
+        col + rest
+    };
 }
 
-/// A file's last selection, and the one before it.
+/// The most undo steps a file's [`Selections`] keeps selections for, as
+/// Vim's `undolevels`.
+const MOST_STEPS: usize = 1000;
+
+/// A file's last selection, and the one before it, and the last selection
+/// as each of the window's undo steps in the file began, which undoing it
+/// puts back, and as each step undone was, which redoing it puts back, as
+/// Vim keeps a buffer's in `uh_visual`. A step begun with none selected
+/// leaves the selection as edits leave it.
 #[derive(Debug)]
 struct Selections {
-    last: Selected,
+    path: String,
+    machine: Option<MachineId>,
+    last: Option<Selected>,
     before: Option<Selected>,
+    undone: Vec<Option<Selected>>,
+    redone: Vec<Option<Selected>>,
+}
+
+impl Selections {
+    fn is_of(&self, file: File<'_>) -> bool {
+        self.machine == file.machine && self.path == file.path
+    }
+
+    /// Moves them through `edits`, made in turn to the file, whose text
+    /// each made and was made to `texts` says, as `whose` they are.
+    fn edited(
+        &mut self,
+        edits: &[Passing<'_>],
+        texts: &[(Rope, Rope)],
+        whose: Whose<'_>,
+        text: &Rope,
+    ) {
+        for (index, (edit, texts)) in edits.iter().zip(texts).enumerate() {
+            let edit = std::slice::from_ref(edit);
+            let texts = std::slice::from_ref(texts);
+            match whose {
+                Whose::Ours(steps) if steps.get(index).copied().unwrap_or(false) => {
+                    if self.undone.len() >= MOST_STEPS {
+                        self.undone.remove(0);
+                    }
+                    self.undone.push(self.last.clone());
+                    self.redone.clear();
+                }
+                Whose::Reversed { undo } => {
+                    let (from, to) = if undo {
+                        (&mut self.undone, &mut self.redone)
+                    } else {
+                        (&mut self.redone, &mut self.undone)
+                    };
+                    if let Some(Some(kept)) = from.pop() {
+                        to.push(self.last.replace(kept));
+                        if let Some(before) = &mut self.before {
+                            before.edited(edit, texts);
+                        }
+                        continue;
+                    }
+                    to.push(None);
+                }
+                _ => {}
+            }
+            for selected in [&mut self.last, &mut self.before].into_iter().flatten() {
+                selected.edited(edit, texts);
+            }
+        }
+        for selected in [&mut self.last, &mut self.before].into_iter().flatten() {
+            selected.settle(text);
+        }
+    }
+}
+
+/// Whose edits marks are moved through, for the selections kept with
+/// undo steps (see [`Selections`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Whose<'a> {
+    /// Another's, or the text's made afresh: no step of the window's.
+    Theirs,
+    /// The window's, and whether each started an undo step.
+    Ours(&'a [bool]),
+    /// The window's undo, if `undo`, or redo.
+    Reversed { undo: bool },
+}
+
+/// What each of `edits`, made in turn, was made to and made, the last
+/// making `text`, worked back to by undoing them: `text` for each if
+/// they didn't make it.
+fn texts_of(edits: &[Passing<'_>], text: &Rope) -> Vec<(Rope, Rope)> {
+    let mut texts = Vec::with_capacity(edits.len());
+    let mut after = text.clone();
+    for edit in edits.iter().rev() {
+        let mut before = after.clone();
+        if edit.edit.invert().apply(&mut before).is_err() {
+            return vec![(text.clone(), text.clone()); edits.len()];
+        }
+        texts.push((before.clone(), after));
+        after = before;
+    }
+    texts.reverse();
+    texts
 }
 
 /// The marks set, in every file.
@@ -540,8 +568,8 @@ impl Marks {
     /// any file.
     pub(crate) fn get(&self, mark: char, file: File<'_>) -> Option<&FilePlace> {
         match mark {
-            '<' => return self.selected(file).map(|selected| &selected.start),
-            '>' => return self.selected(file).map(|selected| &selected.last),
+            '<' => return self.selected(file).map(|selected| &selected.marked[0]),
+            '>' => return self.selected(file).map(|selected| &selected.marked[1]),
             _ => {}
         }
         let local = local(mark);
@@ -558,7 +586,7 @@ impl Marks {
             .map(|(mark, at)| (*mark, at))
             .collect();
         if let Some(selected) = self.selected(file) {
-            marks.extend([('<', &selected.start), ('>', &selected.last)]);
+            marks.extend([('<', &selected.marked[0]), ('>', &selected.marked[1])]);
         }
         // As Vim lists them: `'`, `a` to `z`, `.`, then `A` to `Z`.
         marks.sort_by_key(|&(mark, _)| (mark != '\'', !local(mark), mark == '.', mark));
@@ -566,8 +594,20 @@ impl Marks {
     }
 
     /// Moves the marks in `file` through `edits`, made to it in turn,
-    /// which leave its text as `text`.
+    /// which leave its text as `text`: another's edits, not the window's.
+    #[cfg(test)]
     pub(crate) fn edited(&mut self, file: File<'_>, edits: &[impl Borrow<Edit>], text: &Rope) {
+        self.edited_as(file, edits, text, Whose::Theirs);
+    }
+
+    /// As [`edited`](Self::edited), for edits `whose` they are.
+    pub(crate) fn edited_as(
+        &mut self,
+        file: File<'_>,
+        edits: &[impl Borrow<Edit>],
+        text: &Rope,
+        whose: Whose<'_>,
+    ) {
         if edits.is_empty() {
             return;
         }
@@ -575,46 +615,72 @@ impl Marks {
         for (_, place) in self.list.iter_mut().filter(|(_, at)| at.is_in(file)) {
             place.edited(&edits, text);
         }
-        self.selections_edited(file, &edits, text);
+        self.selections_edited(file, &edits, text, whose);
     }
 
     /// Moves the selections kept for `file` through `edits`,
-    /// as [`edited`](Self::edited) does, but no other marks: for a text
-    /// that's no file, as a folder's listing is, which keeps them anyway.
+    /// as [`edited_as`](Self::edited_as) does, but no other marks: for a
+    /// text that's no file, as a folder's listing is, which keeps them
+    /// anyway.
     pub(crate) fn edited_selections(
         &mut self,
         file: File<'_>,
         edits: &[impl Borrow<Edit>],
         text: &Rope,
+        whose: Whose<'_>,
     ) {
-        self.selections_edited(file, &passing(edits, text), text);
+        if edits.is_empty() {
+            return;
+        }
+        self.selections_edited(file, &passing(edits, text), text, whose);
     }
 
-    fn selections_edited(&mut self, file: File<'_>, edits: &[Passing<'_>], text: &Rope) {
-        let mut afters = None;
-        for kept in self
-            .selections
-            .iter_mut()
-            .filter(|kept| kept.last.file() == file)
-        {
-            let afters = afters.get_or_insert_with(|| afters_of(edits, text));
-            kept.last.edited(edits, afters, text);
-            if let Some(before) = &mut kept.before {
-                before.edited(edits, afters, text);
-            }
+    fn selections_edited(
+        &mut self,
+        file: File<'_>,
+        edits: &[Passing<'_>],
+        text: &Rope,
+        whose: Whose<'_>,
+    ) {
+        // The window's steps are kept for, selected or not yet.
+        if matches!(whose, Whose::Ours(steps) if steps.contains(&true)) {
+            self.selections_of(file);
         }
+        let Some(kept) = self.selections.iter_mut().find(|kept| kept.is_of(file)) else {
+            return;
+        };
+        let texts = texts_of(edits, text);
+        kept.edited(edits, &texts, whose, text);
+    }
+
+    /// The selections kept for `file`, made if there are none yet.
+    fn selections_of(&mut self, file: File<'_>) -> &mut Selections {
+        let index = if let Some(index) = self.selections.iter().position(|kept| kept.is_of(file)) {
+            index
+        } else {
+            self.selections.push(Selections {
+                path: file.path.to_owned(),
+                machine: file.machine,
+                last: None,
+                before: None,
+                undone: Vec::new(),
+                redone: Vec::new(),
+            });
+            self.selections.len() - 1
+        };
+        &mut self.selections[index]
     }
 
     /// The last selection in `file`, if it's had one.
     pub(crate) fn selected(&self, file: File<'_>) -> Option<&Selected> {
         (self.selections.iter())
-            .find(|kept| kept.last.file() == file)
-            .map(|kept| &kept.last)
+            .find(|kept| kept.is_of(file))
+            .and_then(|kept| kept.last.as_ref())
     }
 
-    /// Notes the selection in `file`, bytes `start` to just
-    /// before `end` of its `text`, as its last. If it's `anew`, as visual
-    /// mode has just begun, the last is kept as the one before it.
+    /// Notes the selection in `file`, from byte `first` to byte `last` of
+    /// its `text`, both in it, as its last. If it's `anew`, as visual mode
+    /// has just begun, the last is kept as the one before it.
     pub(crate) fn select(
         &mut self,
         file: File<'_>,
@@ -623,40 +689,31 @@ impl Marks {
         shape: Shape,
         anew: bool,
     ) {
-        match self
-            .selections
-            .iter_mut()
-            .find(|kept| kept.last.file() == file)
-        {
-            Some(kept) => {
+        let kept = self.selections_of(file);
+        match &mut kept.last {
+            Some(last) => {
                 if anew {
-                    kept.before = Some(kept.last.clone());
+                    kept.before = Some(last.clone());
                 }
-                kept.last.place(text, bytes, shape);
+                last.place(text, bytes, shape);
             }
-            None => self.selections.push(Selections {
-                last: Selected::new(file, text, bytes, shape),
-                before: None,
-            }),
+            None => kept.last = Some(Selected::new(file, text, bytes, shape)),
         }
     }
 
     /// Swaps the last selection in `file` with the one before it, as `gv`
     /// does in visual mode: the one it selects, if there is one.
     pub(crate) fn swap(&mut self, file: File<'_>) -> Option<Selected> {
-        let kept = self
-            .selections
-            .iter_mut()
-            .find(|kept| kept.last.file() == file)?;
+        let kept = self.selections.iter_mut().find(|kept| kept.is_of(file))?;
         let before = kept.before.take()?;
-        kept.before = Some(std::mem::replace(&mut kept.last, before.clone()));
+        kept.before = kept.last.replace(before.clone());
         Some(before)
     }
 
     /// Forgets the selections kept for `file`, as when a folder's listing
     /// is made afresh.
     pub(crate) fn forget_selections(&mut self, file: File<'_>) {
-        self.selections.retain(|kept| kept.last.file() != file);
+        self.selections.retain(|kept| !kept.is_of(file));
     }
 
     /// The file or directory at `from` on `machine`, the daemon's own if
@@ -667,28 +724,38 @@ impl Marks {
             place.moved(machine, from, to);
         }
         for kept in &mut self.selections {
-            kept.last.moved(machine, from, to);
-            if let Some(before) = &mut kept.before {
-                before.moved(machine, from, to);
+            let mut place = FilePlace::at_line(
+                File {
+                    machine: kept.machine,
+                    path: &kept.path,
+                },
+                0,
+                0,
+                None,
+            );
+            place.moved(machine, from, to);
+            kept.path = place.path;
+            let selections = [&mut kept.last, &mut kept.before].into_iter().flatten();
+            let steps = kept.undone.iter_mut().chain(&mut kept.redone).flatten();
+            for selected in selections.chain(steps) {
+                selected.moved(machine, from, to);
             }
         }
     }
 
     /// The text of `file` is new, as when it's opened again: its marks go
-    /// to their lines and columns in it.
+    /// to their lines and columns in it, and its selections stay at theirs,
+    /// as Vim's do; the undo steps they were kept for are gone.
     pub(crate) fn replaced(&mut self, file: File<'_>, text: &Rope) {
         for (_, place) in self.list.iter_mut().filter(|(_, at)| at.is_in(file)) {
             place.find_byte(text);
         }
-        for kept in self
-            .selections
-            .iter_mut()
-            .filter(|kept| kept.last.file() == file)
-        {
-            kept.last.replaced(text);
-            if let Some(before) = &mut kept.before {
-                before.replaced(text);
+        if let Some(kept) = self.selections.iter_mut().find(|kept| kept.is_of(file)) {
+            for selected in [&mut kept.last, &mut kept.before].into_iter().flatten() {
+                selected.settle(text);
             }
+            kept.undone.clear();
+            kept.redone.clear();
         }
     }
 }

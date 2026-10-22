@@ -24,7 +24,7 @@ use clackatoo_text::Edit;
 use super::jumps::{FilePlace, Jump, Jumps};
 use super::{Asked, Desk, Purpose};
 use crate::command::Place;
-use crate::editor::{BufferCopy, Done, Editor, GiveUp, Heard, HunkAction, Marks, Shared};
+use crate::editor::{BufferCopy, Done, Editor, GiveUp, Heard, HunkAction, Marks, Shared, Whose};
 use crate::explorer::Explorer;
 use crate::finder::Finder;
 use crate::input::{KeptPress, KeyPress};
@@ -134,24 +134,24 @@ fn copy_later(yanked: &mut Vec<(String, Copy)>, text: String, to: Copy) {
 }
 
 /// Moves the places kept in the file `copy` is of, the jump list's and the
-/// marks, through `made`, edits just made to it in turn. Those the window
-/// made, if `ours`, set the file's `.` mark, at the last.
+/// marks, through `made`, edits just made to it in turn, `whose` they are.
+/// Those the window made, if `ours`, set the file's `.` mark, at the last.
 fn follow_places(
     jumps: &mut Jumps,
     marks: &mut Marks,
     copy: &BufferCopy,
     made: &[impl Borrow<Edit>],
-    ours: bool,
+    (ours, whose): (bool, Whose<'_>),
 ) {
     // A folder's listing isn't a file places are kept in, but for its
     // selections, for `gv`.
     if copy.is_scratch() {
-        marks.edited_selections(copy.file(), made, copy.text());
+        marks.edited_selections(copy.file(), made, copy.text(), whose);
         return;
     }
     let (file, text) = (copy.file(), copy.text());
     jumps.edited(file, made, text);
-    marks.edited(file, made, text);
+    marks.edited_as(file, made, text, whose);
     if ours
         && let Some(last) = made.last().map(Borrow::borrow)
         && let Some((at, _, _)) = last.changes().last()
@@ -250,7 +250,7 @@ impl Desk {
             &mut editors.shared.marks,
             copy,
             &made,
-            false,
+            (false, Whose::Ours(copy.taken_steps())),
         );
     }
 
@@ -738,9 +738,12 @@ impl Desk {
         let marks = &mut editors.shared.marks;
         match &heard {
             Heard::Edited(edit) | Heard::Reversed { edit, .. } => {
-                let ours = matches!(heard, Heard::Reversed { .. });
+                let (ours, whose) = match heard {
+                    Heard::Reversed { undo, .. } => (true, Whose::Reversed { undo }),
+                    _ => (false, Whose::Theirs),
+                };
                 let made = std::slice::from_ref(edit);
-                follow_places(&mut self.jumps, marks, copy, made, ours);
+                follow_places(&mut self.jumps, marks, copy, made, (ours, whose));
                 // Moved too, while disconnected.
                 if copy.path() != was {
                     self.jumps.moved(copy.machine(), &was, copy.path());
@@ -1208,7 +1211,7 @@ impl Desk {
             &mut editors.shared.marks,
             copy,
             &made,
-            true,
+            (true, Whose::Ours(copy.taken_steps())),
         );
         for (text, to) in editors.shared.registers.take_to_system() {
             copy_later(&mut self.yanked, text, to);
@@ -1422,7 +1425,7 @@ impl Desk {
             &mut editors.shared.marks,
             copy,
             &made,
-            true,
+            (true, Whose::Ours(copy.taken_steps())),
         );
         true
     }
@@ -1447,7 +1450,7 @@ impl Desk {
                 &mut editors.shared.marks,
                 copy,
                 &made,
-                true,
+                (true, Whose::Ours(copy.taken_steps())),
             );
         }
     }

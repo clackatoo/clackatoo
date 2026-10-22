@@ -568,7 +568,8 @@ fn marks_on_lines_moved_go_with_them_and_gv_selects_them_again() {
     assert_eq!(marked(&setup, 'a'), (2, 1));
     assert_eq!(marked(&setup, 'c'), (0, 0), "up by as many as were moved");
     assert_eq!(marked(&setup, 'd'), (3, 0));
-    assert_eq!((marked(&setup, '<'), marked(&setup, '>')), ((1, 0), (2, 0)));
+    // By lines, `>` is at the last line's end, as Vim's.
+    assert_eq!((marked(&setup, '<'), marked(&setup, '>')), ((1, 0), (2, 2)));
     assert_eq!(reselected(&mut setup), ((1, 0), (2, 0)));
     // Again, and so on down.
     run(&mut setup, "'<,'>m '>+1");
@@ -616,14 +617,14 @@ fn lines_moved_out_past_one_end_of_the_selection_cross_its_ends_over() {
     setup.keys("jVj<Esc>");
     run(&mut setup, "3m0");
     assert_eq!(setup.text(), "c\na\nb\nd\n");
-    assert_eq!((marked(&setup, '<'), marked(&setup, '>')), ((0, 0), (2, 0)));
+    assert_eq!((marked(&setup, '<'), marked(&setup, '>')), ((0, 0), (2, 1)));
     assert_eq!(reselected(&mut setup), ((2, 0), (0, 0)));
     // Its first line down below it.
     let mut setup = Setup::new("a\nb\nc\nd\n");
     setup.keys("jVj<Esc>");
     run(&mut setup, "2m$");
     assert_eq!(setup.text(), "a\nc\nd\nb\n");
-    assert_eq!((marked(&setup, '<'), marked(&setup, '>')), ((1, 0), (3, 0)));
+    assert_eq!((marked(&setup, '<'), marked(&setup, '>')), ((1, 0), (3, 1)));
     assert_eq!(reselected(&mut setup), ((3, 0), (1, 0)));
 }
 

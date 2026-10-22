@@ -46,10 +46,10 @@ use std::rc::Rc;
 
 use clackatoo_protocol::Edit;
 
-use super::marks::{Column, Marks, Selected, Shape};
+use super::marks::{Marks, Selected, Shape};
 use super::registers::Register;
 use super::text::Text;
-use super::{BufferCopy, Editor, Mode, next_char, on_character};
+use super::{BufferCopy, Editor, Mode, on_character};
 use crate::motion::{Cursor, Motion, Point};
 use crate::vim::{Operator, Selection, Target};
 
@@ -89,8 +89,8 @@ pub(super) struct Again {
 }
 
 impl Editor {
-    /// The selection, as bytes, from its first character to just after
-    /// its last, and how it was made, while in visual mode.
+    /// The selection, as the bytes of its first and last characters, and
+    /// how it was made, while in visual mode.
     fn selection_now(&self, copy: &BufferCopy) -> Option<((usize, usize), Shape)> {
         let (Mode::Visual(kind), Some(anchor)) = (self.mode, self.anchor) else {
             return None;
@@ -102,7 +102,7 @@ impl Editor {
             (at, anchor)
         };
         let text = self.text(copy);
-        let bytes = (text.byte_at(first), next_char(&text, text.byte_at(last)));
+        let bytes = (text.byte_at(first), text.byte_at(last));
         let shape = Shape {
             kind,
             backward: at < anchor,
@@ -147,24 +147,24 @@ impl Editor {
     /// Selects `selected`, as `gv` does.
     fn select_kept(&mut self, selected: &Selected, copy: &BufferCopy) {
         let text = self.text(copy);
-        let len = text.rope().len_bytes();
         let shape = selected.shape;
-        // Just past a line's end, as Vim's selection can be, if its column
-        // as Vim keeps it is there or further on.
-        let point = |byte: usize, col: Column| {
-            let at = text.point_of(byte.min(len));
-            if col.past_end(text.rope()) {
-                Point {
-                    line: at.line,
-                    col: text.line_cells(at.line),
-                }
-            } else {
-                on_character(at, &text)
+        // On a line there is, and just past its end, as Vim's selection can
+        // be, if the column is there or further on.
+        let point = |(line, col): (u64, usize)| {
+            let line = line.min(text.last_line());
+            let start = text.line_start(line);
+            if start + col >= text.line_end(line) {
+                return Point {
+                    line,
+                    col: text.line_cells(line),
+                };
             }
+            let rope = text.rope();
+            let byte = rope.char_to_byte(rope.byte_to_char(start + col));
+            on_character(text.point_of(byte), &text)
         };
-        let (start, last) = selected.ends();
-        let [first_col, last_col] = selected.columns();
-        let (first, last) = (point(start, first_col), point(last, last_col));
+        let [start, last] = selected.ends();
+        let (first, last) = (point(start), point(last));
         let (anchor, head) = if shape.backward {
             (last, first)
         } else {

@@ -167,8 +167,10 @@ pub(crate) struct BufferCopy {
     kept: Option<Kept>,
     outbox: Vec<ClientMessage>,
     /// The edits made here since last taken, for other panes showing the
-    /// buffer to follow.
+    /// buffer to follow, and whether each started an undo step.
     made: Vec<Rc<Edit>>,
+    made_steps: Vec<bool>,
+    taken_steps: Vec<bool>,
     /// The window's undo steps, as far as it knows them, to undo and to
     /// redo: some, as Vim's `3J` on the last line makes, change nothing,
     /// and are the window's alone.
@@ -315,6 +317,8 @@ impl BufferCopy {
             kept: None,
             outbox: Vec::new(),
             made: Vec::new(),
+            made_steps: Vec::new(),
+            taken_steps: Vec::new(),
             own: OwnSteps::default(),
             highlights: Highlights::new(),
             diagnostics: Diagnostics::new(),
@@ -597,6 +601,7 @@ impl BufferCopy {
         }
         let edit = Rc::new(edit);
         self.made.push(Rc::clone(&edit));
+        self.made_steps.push(step);
         // An edit joining the last step joins the last edit, if that's
         // still to be sent, unless that's grown long, as a macro's many
         // edits all over the file would make it: joining one more costs
@@ -680,6 +685,7 @@ impl BufferCopy {
         }
         let edit = Rc::new(edit);
         self.made.push(Rc::clone(&edit));
+        self.made_steps.push(step);
         self.waiting.insert(at, Waiting::Edit { edit, step });
         self.send_next();
     }
@@ -1546,9 +1552,17 @@ impl BufferCopy {
         std::mem::take(&mut self.outbox)
     }
 
-    /// The edits made here since last asked, oldest first.
+    /// The edits made here since last asked, oldest first. Which of them
+    /// started an undo step is [`taken_steps`](Self::taken_steps)'s.
     pub(crate) fn take_made(&mut self) -> Vec<Rc<Edit>> {
+        self.taken_steps = std::mem::take(&mut self.made_steps);
         std::mem::take(&mut self.made)
+    }
+
+    /// Whether each of the edits [`take_made`](Self::take_made) last took
+    /// started an undo step.
+    pub(crate) fn taken_steps(&self) -> &[bool] {
+        &self.taken_steps
     }
 
     /// `edit`, made to the daemon's text, brought past the window's edits

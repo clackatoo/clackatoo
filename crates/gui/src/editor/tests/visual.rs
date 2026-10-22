@@ -306,31 +306,31 @@ fn gv_puts_the_cursor_at_the_end_it_was_at() {
 }
 
 #[test]
-fn gv_keeps_to_the_characters_selected_through_edits() {
+fn gv_keeps_its_ends_through_edits_as_vims_marks_are() {
     // Lines put in above take it down with them.
     assert_eq!(
         grid_after("jlvjlyggOnew<Esc>gvd"),
         format!("new\nabcdefgh\nituvwx\n{}", &GRID[27..])
     );
-    // Text typed before it in its line takes it along, where Neovim's
-    // stays at its column.
+    // Text typed in its lines leaves its ends at their columns, as Vim's
+    // `'<` and `'>` are kept: before it, it's a column on.
     assert_eq!(
         grid_after("lvjly0iZZ<Esc>gvd"),
-        format!("ZZalmnop\n{}", &GRID[18..])
+        format!("Zlmnop\n{}", &GRID[18..])
     );
-    // Text typed in it is in it.
     assert_eq!(
         grid_after("lvjly0jiZZ<Esc>gvd"),
-        format!("almnop\n{}", &GRID[18..])
+        format!("ajklmnop\n{}", &GRID[18..])
     );
-    // Deleted, it's where it was.
+    // Deleted, its start is where it was, and its end, as Vim's, on as
+    // far from where its line goes on, joined.
     let mut setup = Setup::new(GRID);
     setup.keys("lvjldgv");
     assert_eq!(
         setup.editor.anchor.map(|at| (at.line, at.col)),
         Some((0, 1))
     );
-    assert_eq!(setup.cursor(), (0, 1));
+    assert_eq!(setup.cursor(), (0, 3));
 }
 
 #[test]
