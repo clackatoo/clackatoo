@@ -873,15 +873,17 @@ impl Cursor {
                 self.at.col = lines.last_cell(at.line);
                 self.want = Some(usize::MAX);
             }
+            // On a line of blanks, the last, as Vim's `beginline()` with
+            // `BL_FIX` goes.
             Motion::FirstNonBlank => {
                 let row = lines.row(at.line);
                 let row = row.as_deref();
-                let end = text_end(row);
+                let end = line_end(at.line, lines);
                 let mut col = 0;
                 while col < end && class_at(row, col, Words::NONE) == Class::Blank {
                     col = next_cell(row, col).unwrap_or(end);
                 }
-                self.at.col = start_of_cell(row, col.min(end.saturating_sub(1)));
+                self.at.col = start_of_cell(row, col.min(lines.last_cell(at.line)));
                 self.want = None;
             }
             Motion::Find { .. } => self.find(motion, 1, lines),

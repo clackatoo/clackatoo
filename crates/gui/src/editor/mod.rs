@@ -2107,6 +2107,9 @@ impl Editor {
             let back = span.moved.filter(|moved| moved.at < self.cursor.at);
             self.cursor = match span.lines {
                 Some(_) if let Some(moved) = back => moved,
+                // Lines a motion by characters became stay where it
+                // started, as Vim's.
+                Some(_) if span.first_non_blank => self.cursor,
                 Some((first, last)) if first < last && target != Target::Selection => {
                     Cursor::wanting(Point { line: first, col }, col)
                 }

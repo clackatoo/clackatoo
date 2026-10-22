@@ -636,3 +636,15 @@ fn w_at_the_texts_end_goes_to_its_last_character_blank_or_not() {
     // Past it in visual mode, as Vim's.
     assert_eq!(kept("ab  \n", (1, 0), "vwy").1, "ab  ");
 }
+
+#[test]
+fn a_line_of_blanks_first_non_blank_is_its_last_blank() {
+    assert_eq!(in_cells("  \nx\n", (2, 0), "k_").1, (1, 1));
+    assert_eq!(in_cells("  \nx\n", (2, 0), "-").1, (1, 1));
+    assert_eq!(in_cells("x\n  \n", (1, 0), "+").1, (2, 1));
+    assert_eq!(in_cells("\t\t\n", (1, 0), "^").1, (1, 4));
+    // Still in its indent, for d, and gU, which takes the line whole and
+    // leaves the cursor where it was.
+    assert_eq!(in_cells("  \nab\n", (1, 1), "d2w").0, "");
+    assert_eq!(in_cells("a\t(b)\tc\n  \n\n", (2, 1), "5gUW").1, (2, 1));
+}
