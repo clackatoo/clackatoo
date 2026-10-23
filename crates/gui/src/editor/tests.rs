@@ -110,7 +110,8 @@ impl Setup {
     /// Moves the marks through the edits just made, as the desk does.
     fn follow_marks(&mut self) {
         let made = self.copy.take_made();
-        (self.shared.marks).edited(self.copy.file(), &made, self.copy.text());
+        let came = super::Came::Made;
+        (self.shared.marks).edited(self.copy.file(), &made, self.copy.text(), came);
     }
 
     /// Moves the marks through an edit the copy heard of, an undo or
@@ -119,7 +120,12 @@ impl Setup {
         let (file, text) = (self.copy.file(), self.copy.text());
         match heard {
             super::Heard::Edited(edit) | super::Heard::Reversed(edit) => {
-                (self.shared.marks).edited(file, std::slice::from_ref(edit), text);
+                let came = if matches!(heard, super::Heard::Reversed(_)) {
+                    super::Came::Undone
+                } else {
+                    super::Came::Elsewhere
+                };
+                (self.shared.marks).edited(file, std::slice::from_ref(edit), text, came);
             }
             super::Heard::Replaced => self.shared.marks.replaced(file, text),
             _ => {}

@@ -86,7 +86,7 @@ pub(crate) use ex::is_editor_command;
 pub(crate) use hints::HINTS_WAIT;
 use kept::Kept;
 use keys::{Action, Command, EditorAction, EditorKeys, Parsed};
-pub(crate) use marks::{File, FilePlace, Marks, passing};
+pub(crate) use marks::{Came, File, FilePlace, Marks, passing};
 #[cfg(test)]
 pub(crate) use panel::Line as PanelLine;
 pub(crate) use panel::{BESIDE_GAP, Beside, PanelView};

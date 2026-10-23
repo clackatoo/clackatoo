@@ -1477,3 +1477,32 @@ fn a_count_of_searches_goes_where_as_many_n_go() {
     setup.keys("1000n");
     assert!(finds() - before < 100, "{} searches", finds() - before);
 }
+
+#[test]
+fn only_the_windows_own_undo_puts_back_its_selection() {
+    // `P` after `dd` makes the text as it was, but isn't an undo: the
+    // selection moves as with any edit, as Neovim's goes to 2 to 4.
+    let mut setup = Setup::new("a\nb\nc\nd\ne\n");
+    setup.editor.cursor = Cursor::new(Point { line: 2, col: 0 });
+    setup.keys("Vk<Esc>jddPgv");
+    assert_eq!(setup.cursor(), (1, 0));
+    assert_eq!(setup.editor.anchor.map(|at| at.line), Some(3));
+    // Nor is another's edit that puts back the line the window took:
+    // lines put above take the ends down.
+    let mut setup = Setup::new("a\nb\nc\nd\n");
+    setup.keys("jVj<Esc>kdd");
+    let update = setup.daemon.agent(2, "b\n");
+    setup.editor.hold(&setup.copy);
+    let mut heard = setup.copy.update(update);
+    setup.heard_marks(&heard);
+    setup.editor.heard(&mut heard, false, &mut setup.copy);
+    setup.keys("gv");
+    assert_eq!(setup.text(), "a\nb\nc\nd\n");
+    assert_eq!(setup.editor.anchor.map(|at| at.line), Some(2));
+    assert_eq!(setup.cursor().0, 2);
+    // The window's own undo does, as Vim's.
+    let mut setup = Setup::new("a\nb\nc\nd\n");
+    setup.keys("jVj<Esc>kddugv");
+    assert_eq!(setup.editor.anchor.map(|at| at.line), Some(1));
+    assert_eq!(setup.cursor().0, 2);
+}
