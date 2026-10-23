@@ -703,9 +703,16 @@ impl Motion {
     }
 
     /// Whether it's `b`, `B`, `ge` or `gE` with a count, one of which
-    /// starts at the text's start, from `from`: Vim's fail then, and an
-    /// operator takes nothing, though the cursor goes as far as it got.
-    pub(crate) fn runs_out(self, from: Point, count: Option<usize>, lines: &impl Lines) -> bool {
+    /// starts at the text's start, from `from` to `to`, where it went:
+    /// Vim's fail then, and an operator takes nothing, though the cursor
+    /// goes as far as it got, the text's start. Gone anywhere else, it
+    /// didn't, which is known without going over the text again.
+    pub(crate) fn runs_out(
+        self,
+        (from, to): (Point, Point),
+        count: Option<usize>,
+        lines: &impl Lines,
+    ) -> bool {
         let kind = match self {
             Self::WordBack => (false, false),
             Self::BigWordBack => (false, true),
@@ -713,6 +720,13 @@ impl Motion {
             Self::BigWordEndBack => (true, true),
             _ => return false,
         };
+        let start = Point {
+            line: lines.bounds().0,
+            col: 0,
+        };
+        if to != start {
+            return false;
+        }
         crate::objects::back_fails(lines, from, kind, count.unwrap_or(1))
     }
 
@@ -814,7 +828,7 @@ impl Taken {
         if down && moved.at.line == from.line {
             return None;
         }
-        if motion.runs_out(from, count, lines) {
+        if motion.runs_out((from, moved.at), count, lines) {
             return None;
         }
         let reach = motion.reach_from(from, moved.at, count, lines)?;

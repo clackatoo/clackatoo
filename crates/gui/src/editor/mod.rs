@@ -1620,7 +1620,8 @@ impl Editor {
                     Motion::LineFirstNonBlank | Motion::LastNonBlank | Motion::LineEnd
                 );
                 let no_line = down && !once && from.line >= text.last_line();
-                let no_line = no_line || motion.runs_out(from, command.count, &text);
+                let no_line =
+                    no_line || motion.runs_out((from, self.cursor.at), command.count, &text);
                 drop(text);
                 let failed =
                     |cursor: Cursor| (cursor.at == from && can_fail(motion) && !stays) || no_line;
@@ -2578,7 +2579,7 @@ impl Editor {
         let moved = self.taken_to(copy, motion, count);
         // A count of words back that runs out at the text's start fails,
         // the cursor where it got to, as Vim's.
-        if motion.runs_out(at, count, &text) {
+        if motion.runs_out((at, moved.at), count, &text) {
             self.cursor = moved;
             return None;
         }

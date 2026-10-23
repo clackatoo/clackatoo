@@ -1689,3 +1689,23 @@ fn a_word_object_on_a_long_line_looks_the_line_up_once() {
         );
     }
 }
+
+#[test]
+fn whether_a_count_of_words_back_runs_out_is_asked_only_at_the_texts_start() {
+    // Anywhere else it didn't, which is known without going back over
+    // the line again.
+    let text = long_line();
+    let lines = || crate::objects::LINES_LOOKED_UP.with(std::cell::Cell::get);
+    for (at, keys) in [((1, 0), "$b"), ((1, 100_000), "2b"), ((1, 100_000), "dge")] {
+        let before = lines();
+        in_cells(&text, at, keys);
+        assert_eq!(lines() - before, 0, "{keys}");
+    }
+    // Back at the text's start, it's asked: `3ge` from the third word
+    // fails there, taking nothing, and `3b` doesn't, as Neovim's.
+    assert_eq!(
+        in_cells("x y z\n", (1, 4), "3dge"),
+        ("x y z\n".into(), (1, 0))
+    );
+    assert_eq!(in_cells("x y z\n", (1, 4), "3db").0, "z\n");
+}
