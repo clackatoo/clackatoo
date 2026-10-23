@@ -1166,3 +1166,26 @@ fn a_huge_count_of_searches_goes_round_as_many_times_at_once() {
     assert_eq!(in_cells(&big, (1, 0), "/a<CR>99999999N").1, (3, 0));
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
+
+#[test]
+fn a_line_of_megabytes_is_searched_for_words_without_giving_up() {
+    use super::super::pattern::{Found, Matching, Pattern};
+    use crate::motion::Words;
+    // Minified code: one line, no words past the regex crate's, where its
+    // own word boundaries are Vim's, which never give up.
+    let text = "xa".repeat(1_500_000) + "+x;\n";
+    let pattern = Pattern::new("\\<x\\>", Matching::Exact, "", Words::NONE).unwrap();
+    let at = text.len() - "x;\n".len();
+    assert_eq!(
+        pattern.find_at(&text, 0),
+        Some(Found {
+            start: at,
+            end: at + 1
+        })
+    );
+    assert!(!pattern.gave_up());
+    // With a script's own class in it, the edges are looked for, as Vim's
+    // find them.
+    let text = "x中".repeat(10) + " a\n";
+    assert_eq!(in_cells(&text, (1, 0), "/\\<中<CR>").1, (1, 1));
+}

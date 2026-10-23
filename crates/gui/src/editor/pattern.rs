@@ -80,6 +80,9 @@ pub(crate) struct Pattern {
     multiline: bool,
     /// Whether a search with it has given up since it was made.
     gave_up: Cell<bool>,
+    /// The text last searched, by where it is and how long, and whether
+    /// its words are the regex crate's, so `\<` and `\>` can be its.
+    plain_in: Cell<Option<(usize, usize, bool)>>,
 }
 
 /// What matches a pattern.
@@ -95,6 +98,14 @@ enum Engine {
     Looking {
         regex: fancy_regex::Regex,
         loose: Regex,
+        /// The pattern with the regex crate's own word boundaries, which
+        /// find the same matches as `regex` in a text without `odd` in
+        /// it, and never give up: as minified code, a line of megabytes,
+        /// would make `regex` do.
+        bounded: Box<Regex>,
+        /// A character the regex crate's words and Vim's disagree about,
+        /// or of a script's own class.
+        odd: Box<Regex>,
     },
 }
 
@@ -169,9 +180,20 @@ impl Pattern {
                     fancy_regex::Error::CompileError(_) => format!("{source} is too big a pattern"),
                     _ => cant(),
                 })?;
+            let bounded = (translated.regex)
+                .replace(&edge(words, true), r"\b{start}")
+                .replace(&edge(words, false), r"\b{end}");
+            let classes = word_classes_inside(words);
+            let odd = format!(
+                r"[[\w--[{words}]][[{words}]--\w][{scripts}]]",
+                words = classes[0],
+                scripts = classes[1..].concat(),
+            );
             Engine::Looking {
                 regex,
                 loose: plain(&loose)?,
+                bounded: Box::new(plain(&bounded)?),
+                odd: Box::new(Regex::new(&odd).map_err(|_| cant())?),
             }
         } else {
             Engine::Plain(plain(&translated.regex)?)
@@ -182,6 +204,7 @@ impl Pattern {
             focus: translated.focus,
             multiline: translated.multiline,
             gave_up: Cell::new(false),
+            plain_in: Cell::new(None),
         })
     }
 
@@ -228,7 +251,13 @@ impl Pattern {
             (Engine::Plain(regex), Locations::Plain(kept)) => {
                 regex.captures_read_at(kept, text, at)?;
             }
-            (Engine::Looking { regex, loose }, kept) => {
+            (Engine::Looking { bounded, odd, .. }, kept) if self.plain_in(text, odd) => {
+                let mut found = bounded.capture_locations();
+                bounded.captures_read_at(&mut found, text, at)?;
+                *kept =
+                    Locations::Looking((0..found.len()).map(|index| found.get(index)).collect());
+            }
+            (Engine::Looking { regex, loose, .. }, kept) => {
                 *kept = Locations::Looking(self.looking(loose, text, at, |hay, at| {
                     let captures = regex.captures_from_pos(hay, at).map_err(Box::new)?;
                     Ok(captures.map(|captures| {
@@ -245,6 +274,21 @@ impl Pattern {
         }
         let (start, end) = locations.get(self.focus.unwrap_or(0))?;
         Some(Found { start, end })
+    }
+
+    /// Whether `text`'s words are the regex crate's: it has no character
+    /// `odd` finds, where Vim's words and the crate's differ, so the
+    /// crate's word boundaries are Vim's. Worked out once for a text.
+    fn plain_in(&self, text: &str, odd: &Regex) -> bool {
+        let key = (text.as_ptr() as usize, text.len());
+        match self.plain_in.get() {
+            Some((at, len, plain)) if (at, len) == key => plain,
+            _ => {
+                let plain = !odd.is_match(text);
+                self.plain_in.set(Some((key.0, key.1, plain)));
+                plain
+            }
+        }
     }
 
     /// The first match `search` finds in `text` from byte `at`, as
@@ -293,7 +337,11 @@ impl Pattern {
                 let found = regex.find_at(text, at)?;
                 (found.start(), found.end())
             }
-            Engine::Looking { regex, loose } => self.looking(loose, text, at, |hay, at| {
+            Engine::Looking { bounded, odd, .. } if self.plain_in(text, odd) => {
+                let found = bounded.find_at(text, at)?;
+                (found.start(), found.end())
+            }
+            Engine::Looking { regex, loose, .. } => self.looking(loose, text, at, |hay, at| {
                 let found = regex.find_from_pos(hay, at).map_err(Box::new)?;
                 Ok(found.map(|found| (found.start(), found.end())))
             })?,
