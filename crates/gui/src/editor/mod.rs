@@ -2829,21 +2829,14 @@ impl Editor {
         let len = text.rope().len_bytes();
         let at = self.cursor.at;
         let mut put = register.text.repeat(times);
+        let line = if before { at.line } else { at.line + 1 };
+        let ends_bare = len > 0 && text.rope().byte(len - 1) != b'\n';
         let (byte, landing) = if register.lines {
-            let line = if before { at.line } else { at.line + 1 };
             let mut byte = text.line_start(line);
             // After a last line with no line break, one goes before.
-            if byte == len && len > 0 && text.rope().byte(len - 1) != b'\n' {
+            if byte == len && ends_bare {
                 put = format!("\n{}", put.trim_end_matches('\n'));
                 byte = len;
-                (byte, byte + 1)
-            } else if line > 0 && put.bytes().all(|byte| byte == b'\n') {
-                // Empty lines, which at a line's start would be a line
-                // broken there, as Enter breaks it, go at the end of the
-                // line before, which makes the same text but says they're
-                // put, so the selection's ends know (see
-                // `marks::end_changed`).
-                let byte = text.line_end(line - 1);
                 (byte, byte + 1)
             } else {
                 (byte, byte)
@@ -2862,7 +2855,14 @@ impl Editor {
                 (byte, byte + put.len() - 1)
             }
         };
-        let edit = Edit::replace(len, byte, "", &put);
+        let (edit, landing) = if register.lines
+            && put.bytes().all(|byte| byte == b'\n')
+            && !(text.line_start(line) == len && ends_bare)
+        {
+            empty_lines_above(&text, line, &put)
+        } else {
+            (Edit::replace(len, byte, "", &put), landing)
+        };
         drop(text);
         self.make(edit, copy);
         let text = self.text(copy);
@@ -3015,16 +3015,14 @@ impl Editor {
                 let line_text = text.line_text(at.line);
                 let indent = indent_of(&line_text).to_owned();
                 let len = text.rope().len_bytes();
-                // Above, an empty line at the end of the line before if
-                // there is one, as `P` puts empty lines.
-                let (byte, inserted, line) = if entry == Entry::Below {
-                    (text.line_end(at.line), format!("\n{indent}"), at.line + 1)
-                } else if at.line > 0 && indent.is_empty() {
-                    (text.line_end(at.line - 1), "\n".to_owned(), at.line)
+                let edit = if entry == Entry::Below {
+                    Edit::replace(len, text.line_end(at.line), "", &format!("\n{indent}"))
+                } else if indent.is_empty() {
+                    empty_lines_above(&text, at.line, "\n").0
                 } else {
-                    (text.line_start(at.line), format!("{indent}\n"), at.line)
+                    Edit::replace(len, text.line_start(at.line), "", &format!("{indent}\n"))
                 };
-                let edit = Edit::replace(len, byte, "", &inserted);
+                let line = at.line + u64::from(entry == Entry::Below);
                 drop(text);
                 self.make(edit, copy);
                 let text = self.text(copy);
@@ -4704,7 +4702,8 @@ impl Editor {
             Heard::Reversed(edit) => {
                 if jump {
                     // To where the step undone or redone was, as in Vim.
-                    let at = edit.changes().next().map(|(at, _, _)| at);
+                    let at = (edit.changes().next())
+                        .map(|(at, taken, put)| at + usize::from(rewrites_break(taken, put)));
                     if let (Some(at), Some((cursor, _))) = (at, &mut self.held) {
                         *cursor = at;
                     }
@@ -6226,6 +6225,32 @@ fn exclusive(text: &Text<'_>, start: Point, end: Point) -> Span {
 /// isn't blank, to the end of a line or only blanks before it, whole
 /// lines, as Vim's `d` takes them (`d2e` from a line's start, `da(` from
 /// a `(` that starts a line and a `)` that ends one).
+/// The edit that puts `breaks`, empty lines, in above line `line` of
+/// `text`, and the byte the first starts at after it. After a line, it
+/// takes the line break before them and puts it back with them after it:
+/// the same text as them put at their line's start, but not a line broken
+/// there, as Enter breaks it, which the selection's ends stay on (see
+/// `marks::end_changed`); and its undo, its redo, or another window's,
+/// takes away or puts back the line after the break, which the cursor
+/// goes to (see [`rewrites_break`]).
+fn empty_lines_above(text: &Text<'_>, line: u64, breaks: &str) -> (Edit, usize) {
+    let len = text.rope().len_bytes();
+    if line == 0 {
+        return (Edit::replace(len, 0, "", breaks), 0);
+    }
+    let at = text.line_end(line - 1);
+    (Edit::replace(len, at, "\n", &format!("\n{breaks}")), at + 1)
+}
+
+/// Whether a change that takes `taken` and puts `put`, both from a line
+/// break at a line's end, is one of empty lines put in or taken away
+/// after it (see [`empty_lines_above`]): an undo or a redo of it puts the
+/// cursor at the start of the line after, as Vim's goes to the lines it
+/// changed.
+fn rewrites_break(taken: &str, put: &str) -> bool {
+    taken.starts_with('\n') && put.starts_with('\n')
+}
+
 fn whole_lines_deleted(text: &Text<'_>, span: Span) -> Span {
     if span.lines.is_some() || span.end() <= span.start() {
         return span;

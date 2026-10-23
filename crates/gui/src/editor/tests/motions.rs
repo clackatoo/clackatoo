@@ -1347,3 +1347,22 @@ fn an_undo_or_a_redo_goes_to_where_its_text_changes() {
     setup.keys("u");
     assert_eq!(setup.cursor(), (6, 0));
 }
+
+#[test]
+fn an_undo_or_a_redo_of_empty_lines_goes_to_the_line_after_them() {
+    let at = |keys| in_cells("a\n\nb\n", (2, 0), keys);
+    assert_eq!(at("yyPu<C-r>"), ("a\n\n\nb\n".into(), (2, 0)));
+    assert_eq!(at("O<Esc>u<C-r>"), ("a\n\n\nb\n".into(), (2, 0)));
+    assert_eq!(at("yyPu"), ("a\n\nb\n".into(), (2, 0)));
+    assert_eq!(at("O<Esc>u"), ("a\n\nb\n".into(), (2, 0)));
+    // As another window's undo leaves the cursor on the line after.
+    let mut setup = Setup::new("a\n\nb\n");
+    setup.editor.cursor = Cursor::new(Point { line: 1, col: 0 });
+    setup.keys("yyP");
+    let update = setup.daemon.agent_replace(1, "\n\n", "\n");
+    setup.editor.hold(&setup.copy);
+    let mut heard = setup.copy.update(update);
+    setup.heard_marks(&heard);
+    setup.editor.heard(&mut heard, false, &mut setup.copy);
+    assert_eq!(setup.cursor(), (1, 0));
+}
