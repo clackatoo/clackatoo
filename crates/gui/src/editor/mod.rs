@@ -2825,15 +2825,19 @@ impl Editor {
         let mut put = register.text.repeat(times);
         let (byte, landing) = if register.lines {
             let line = if before { at.line } else { at.line + 1 };
-            let byte = text.line_start(line);
-            // After the line before, with a line break before them, which
-            // makes the same text as them put at their line's start, but
-            // says where they go: after a line, not splitting the next, so
-            // the selection's ends know (see `marks::end_changed`). Above
-            // the first line, at its start.
-            if line > 0 {
+            let mut byte = text.line_start(line);
+            // After a last line with no line break, one goes before.
+            if byte == len && len > 0 && text.rope().byte(len - 1) != b'\n' {
+                put = format!("\n{}", put.trim_end_matches('\n'));
+                byte = len;
+                (byte, byte + 1)
+            } else if line > 0 && put.bytes().all(|byte| byte == b'\n') {
+                // Empty lines, which at a line's start would be a line
+                // broken there, as Enter breaks it, go at the end of the
+                // line before, which makes the same text but says they're
+                // put, so the selection's ends know (see
+                // `marks::end_changed`).
                 let byte = text.line_end(line - 1);
-                put = format!("\n{}", put.strip_suffix('\n').unwrap_or(&put));
                 (byte, byte + 1)
             } else {
                 (byte, byte)
@@ -3004,12 +3008,12 @@ impl Editor {
                 let line_text = text.line_text(at.line);
                 let indent = indent_of(&line_text).to_owned();
                 let len = text.rope().len_bytes();
-                // Above, after the line before if there is one, as `P` puts
-                // lines.
+                // Above, an empty line at the end of the line before if
+                // there is one, as `P` puts empty lines.
                 let (byte, inserted, line) = if entry == Entry::Below {
                     (text.line_end(at.line), format!("\n{indent}"), at.line + 1)
-                } else if at.line > 0 {
-                    (text.line_end(at.line - 1), format!("\n{indent}"), at.line)
+                } else if at.line > 0 && indent.is_empty() {
+                    (text.line_end(at.line - 1), "\n".to_owned(), at.line)
                 } else {
                     (text.line_start(at.line), format!("{indent}\n"), at.line)
                 };

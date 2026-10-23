@@ -1222,3 +1222,16 @@ fn a_mark_that_isnt_set_still_leaves_the_aim_where_the_cursor_is() {
     // `g_` shifts to the line's end, as it sets the column, as `$` does.
     assert_eq!(in_cells(text, (1, 5), ">g_j").1, (2, 8));
 }
+
+#[test]
+fn lines_put_and_opened_above_are_put_above() {
+    // Undone, lines put above leave the cursor on its line, not the end
+    // of the line before.
+    assert_eq!(in_cells("ab cd\nefgh\nijkl\n", (2, 2), "yyjPu").1.0, 3);
+    // A line opened above with an indent takes the selection's ends on
+    // the line down with it.
+    assert_eq!(
+        in_cells("  ab\n  cd\n", (2, 2), "v<Esc>Ox<Esc>gv").1,
+        (3, 2)
+    );
+}
