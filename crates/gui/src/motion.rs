@@ -1859,25 +1859,76 @@ pub(crate) fn class_at(row: Option<&impl Cells>, col: usize, words: Words) -> Cl
     if spot.blank() {
         return Class::Blank;
     }
-    // A character with a cell of its own that only goes on the one before
-    // it, as a skin tone on an emoji, is of that one's class: Vim's
-    // motions go by whole characters as drawn, and never see it alone.
-    if extends(spot.ch)
-        && let Some(row) = row
-        && let Some(before) = row.extent(col).0.checked_sub(1)
+    // A skin tone on a character is of that one's class, blank on a
+    // space: Vim's motions go by whole characters as drawn, and never see
+    // it alone.
+    if let Some(row) = row
+        && let Some((_, base)) = tone_base_at(row, col)
     {
-        return class_at(Some(row), row.extent(before).0, words);
+        return if base.blank() {
+            Class::Blank
+        } else {
+            class_of(base.ch, words)
+        };
     }
     class_of(spot.ch, words)
 }
 
-/// Whether `ch` only goes on the character before it, as a skin tone on
-/// an emoji does, though it takes cells of its own as it's laid out: the
-/// other characters that go on one before them, as accents, variation
-/// selectors and what follows a zero width joiner, are laid out in that
-/// one's cell (see [`class_at`]).
+/// Whether `ch` is a skin tone, which goes on the character before it
+/// (see [`tone_base`]), though it takes cells of its own as it's laid
+/// out: the other characters that go on one before them, as accents,
+/// variation selectors and what follows a zero width joiner, are laid out
+/// in that one's cell.
 pub(crate) fn extends(ch: char) -> bool {
     matches!(ch, '\u{1f3fb}'..='\u{1f3ff}')
+}
+
+/// The most skin tones in a row that go on the character before them:
+/// past them, a tone is a character of its own. Unicode sets no limit, but
+/// finding what a tone goes on means going back over the tones before it,
+/// for each cell a motion looks at, and no emoji takes more than one.
+pub(crate) const MOST_TONES: usize = 4;
+
+/// What a skin tone goes on, of the characters before it, `before`,
+/// nearest first: the first that isn't a tone, as Unicode's grapheme
+/// clusters have it, a tone being `Grapheme_Cluster_Break=Extend`, so
+/// anything but a control character, as a tab is, past no more than
+/// [`MOST_TONES`] in all. None if it goes on nothing, as at a line's
+/// start, and is a character of its own, punctuation.
+pub(crate) fn tone_base<T>(before: impl IntoIterator<Item = (T, char)>) -> Option<T> {
+    let mut tones = 1;
+    for (at, ch) in before {
+        #[cfg(test)]
+        TONE_STEPS.with(|steps| steps.set(steps.get() + 1));
+        if !extends(ch) {
+            return (!ch.is_control()).then_some(at);
+        }
+        tones += 1;
+        if tones > MOST_TONES {
+            return None;
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many characters [`tone_base`] has looked at.
+    pub(crate) static TONE_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Where the character the skin tone in cell `col` goes on is, and its
+/// cell, if it's a tone that goes on one (see [`tone_base`]).
+pub(crate) fn tone_base_at(row: &impl Cells, col: usize) -> Option<(usize, Spot)> {
+    let spot = row.cell(col)?;
+    if !extends(spot.ch) {
+        return None;
+    }
+    // A cell at a time, back from the one before it, the first of each
+    // character's.
+    let before = row.extent(col).0.checked_sub(1);
+    let cells = before.into_iter().flat_map(|before| row.back_from(before));
+    tone_base((cells.filter(|(_, spot)| !spot.spacer)).map(|(at, spot)| ((at, spot), spot.ch)))
 }
 
 /// The class of `ch`, with `words` part of words: ASCII as Vim's

@@ -111,8 +111,8 @@ use crate::input::KeyPress;
 use crate::keymap::Chord;
 use crate::motion::{
     Block, Class, Cursor, Exclusive, Lines, Motion, Point, Reach, RowAt, Taken, View, Words,
-    class_at, class_of, deleted_back, extends, last_row, over_back, row_at, rows_between,
-    rows_between_most, rows_down, rows_up,
+    class_at, class_of, deleted_back, last_row, over_back, row_at, rows_between, rows_between_most,
+    rows_down, rows_up, tone_base_at,
 };
 use crate::objects::{Object, Selected};
 use crate::options::{Case, CompleteAccept, Options};
@@ -4138,7 +4138,14 @@ impl Editor {
     /// Where the word under the cursor starts and ends in `text`, or the
     /// next on its line, as Vim's `*` finds it.
     fn word_here(&self, text: &Text<'_>) -> Option<(usize, usize)> {
-        let here = text.byte_at(self.cursor.at);
+        // On a skin tone, from what it goes on.
+        let mut at = self.cursor.at;
+        if let Some(laid) = text.laid(at.line)
+            && let Some((col, _)) = tone_base_at(&*laid, at.col)
+        {
+            at.col = col;
+        }
+        let here = text.byte_at(at);
         let line_end = text.line_end(self.cursor.at.line);
         let words = text.words();
         let next = (text.slice(here, line_end).char_indices())
@@ -6292,11 +6299,7 @@ fn word_at(text: &Text<'_>, at: usize) -> (usize, usize) {
 fn ident_at(text: &Text<'_>, at: usize) -> (usize, usize) {
     let rope = text.rope();
     let words = text.words();
-    let mut char_at = rope.byte_to_char(at.min(rope.len_bytes()));
-    // A skin tone and the like goes with the character before it.
-    while char_at > 0 && char_at < rope.len_chars() && extends(rope.char(char_at)) {
-        char_at -= 1;
-    }
+    let char_at = rope.byte_to_char(at.min(rope.len_bytes()));
     if char_at >= rope.len_chars() || !words.is_word(rope.char(char_at)) {
         return (at, at);
     }

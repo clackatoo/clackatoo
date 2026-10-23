@@ -1614,3 +1614,56 @@ fn a_block_changed_on_a_last_line_with_no_line_break_types_there() {
     assert_eq!(in_cells("abc\ndef\n", (1, 0), "<C-v>j$cX<Esc>").0, "X\nX\n");
     assert_eq!(in_cells("ab\ncd", (1, 0), "l<C-v>jcX<Esc>").0, "aX\ncX");
 }
+
+#[test]
+fn a_skin_tone_goes_on_what_is_before_it_but_a_control_character() {
+    // As Unicode's grapheme clusters, and Neovim's motions, have it.
+    let text = |text: &str, keys| in_cells(text, (1, 0), keys).0;
+    let at = |text: &str, keys| in_cells(text, (1, 0), keys).1;
+    // On a space, it's blank.
+    assert_eq!(at("a 🏽 b\n", "w"), (1, 5));
+    assert_eq!(text("a 🏽 b\n", "dw"), "b\n");
+    assert_eq!(text("a 🏽 b\n", "wdaw"), "a\n");
+    // After a tab, or at a line's start, it's punctuation of its own.
+    assert_eq!(at("a\t🏽 b\n", "w"), (1, 4));
+    assert_eq!(text("a\t🏽 b\n", "wdaw"), "a\tb\n");
+    assert_eq!(at("🏽x y\n", "w"), (1, 2));
+    assert_eq!(text("🏽x y\n", "dw"), "x y\n");
+    // On a letter, an ideograph or punctuation, it's of its class.
+    assert_eq!(at("x🏽 y\n", "w"), (1, 4));
+    assert_eq!(at("ab🏽cd x\n", "w"), (1, 7));
+    assert_eq!(text("ab🏽cd x\n", "diw"), " x\n");
+    assert_eq!(at("日本🏽語 x\n", "w"), (1, 9));
+    assert_eq!(at("(🏽) x\n", "w"), (1, 5));
+    // A tone on a tone goes on what that one does.
+    assert_eq!(at("👍🏽🏽 x 👍🏽🏽\n", "w"), (1, 7));
+    assert_eq!(text("👍🏽🏽 x 👍🏽🏽\n", "dw"), "x 👍🏽🏽\n");
+    // `*` from a tone looks for the word it goes on, from the start of
+    // what's drawn as one, a family joined with zero width joiners too.
+    let family = "👨\u{200d}👩\u{200d}👧🏽 x 👨\u{200d}👩\u{200d}👧🏽\n";
+    assert_eq!(at(family, "l*"), (1, 7));
+    assert_eq!(at("a🏽 b a🏽\n", "l*"), (1, 6));
+}
+
+#[test]
+fn a_long_run_of_skin_tones_costs_no_more_than_a_few_steps_a_cell() {
+    // What a tone goes on is looked for no further than MOST_TONES back,
+    // so a motion over a run of them goes over each cell in a few steps,
+    // and no deeper on the stack.
+    let tones = 200_000;
+    let text = format!("a{} b\n", "🏽".repeat(tones));
+    let steps = || crate::motion::TONE_STEPS.with(std::cell::Cell::get);
+    for keys in ["w", "$b"] {
+        let before = steps();
+        in_cells(&text, (1, 0), keys);
+        let taken = steps() - before;
+        assert!(
+            taken <= 4 * (crate::motion::MOST_TONES + 1) * tones,
+            "{keys}: {taken} steps"
+        );
+    }
+    // As far as MOST_TONES, they go on the `a`; past them, they're
+    // punctuation, a word of their own.
+    let most = crate::motion::MOST_TONES;
+    assert_eq!(in_cells(&text, (1, 0), "w").1, (1, 1 + 2 * most));
+}
