@@ -1564,3 +1564,37 @@ fn the_view_following_the_cursor_lays_out_no_more_than_it_shows() {
         assert!(setup.editor.top.line > 99_900);
     }
 }
+
+#[test]
+fn a_character_drawn_as_one_is_one_to_the_word_motions() {
+    let text = |text: &str, keys| in_cells(text, (1, 0), keys).0;
+    let at = |text: &str, keys| in_cells(text, (1, 0), keys).1;
+    // A skin tone goes with its emoji, a word of its own, as Neovim's.
+    let thumbs = "👍🏽 x 👍🏽y\n";
+    assert_eq!(text(thumbs, "dw"), "x 👍🏽y\n");
+    assert_eq!(text(thumbs, "diw"), " x 👍🏽y\n");
+    assert_eq!(text(thumbs, "daw"), "x 👍🏽y\n");
+    assert_eq!(text(thumbs, "cwZ<Esc>"), "Z x 👍🏽y\n");
+    assert_eq!(at(thumbs, "w"), (1, 5));
+    assert_eq!(at(thumbs, "$b"), (1, 7));
+    assert_eq!(at(thumbs, "*"), (1, 7));
+    // A family joined with zero width joiners, a flag, an accent put on,
+    // and an emoji asked for with a variation selector, likewise.
+    let family = "a 👨\u{200d}👩\u{200d}👧 b 👨\u{200d}👩\u{200d}👧\n";
+    assert_eq!(text(family, "wdw"), "a b 👨\u{200d}👩\u{200d}👧\n");
+    assert_eq!(text(family, "wdiw"), "a  b 👨\u{200d}👩\u{200d}👧\n");
+    assert_eq!(text(family, "wx"), "a  b 👨\u{200d}👩\u{200d}👧\n");
+    assert_eq!(at(family, "w*"), (1, 7));
+    let flag = "x 🇫🇷 y 🇫🇷\n";
+    assert_eq!(text(flag, "wdw"), "x y 🇫🇷\n");
+    assert_eq!(text(flag, "wdiw"), "x  y 🇫🇷\n");
+    let accent = "cafe\u{301} cafe\n";
+    assert_eq!(at(accent, "w"), (1, 5));
+    assert_eq!(at(accent, "e"), (1, 3));
+    assert_eq!(text(accent, "dw"), "cafe\n");
+    assert_eq!(text(accent, "3lx"), "caf cafe\n");
+    let smile = "a \u{263a}\u{fe0f} b \u{263a}\u{fe0f}\n";
+    assert_eq!(text(smile, "wdw"), "a b \u{263a}\u{fe0f}\n");
+    assert_eq!(text(smile, "wx"), "a  b \u{263a}\u{fe0f}\n");
+    assert_eq!(text(smile, "wdaw"), "a b \u{263a}\u{fe0f}\n");
+}

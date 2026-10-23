@@ -111,8 +111,8 @@ use crate::input::KeyPress;
 use crate::keymap::Chord;
 use crate::motion::{
     Block, Class, Cursor, Exclusive, Lines, Motion, Point, Reach, RowAt, Taken, View, Words,
-    class_at, class_of, deleted_back, last_row, over_back, row_at, rows_between, rows_between_most,
-    rows_down, rows_up,
+    class_at, class_of, deleted_back, extends, last_row, over_back, row_at, rows_between,
+    rows_between_most, rows_down, rows_up,
 };
 use crate::objects::{Object, Selected};
 use crate::options::{Case, CompleteAccept, Options};
@@ -6292,7 +6292,11 @@ fn word_at(text: &Text<'_>, at: usize) -> (usize, usize) {
 fn ident_at(text: &Text<'_>, at: usize) -> (usize, usize) {
     let rope = text.rope();
     let words = text.words();
-    let char_at = rope.byte_to_char(at.min(rope.len_bytes()));
+    let mut char_at = rope.byte_to_char(at.min(rope.len_bytes()));
+    // A skin tone and the like goes with the character before it.
+    while char_at > 0 && char_at < rope.len_chars() && extends(rope.char(char_at)) {
+        char_at -= 1;
+    }
     if char_at >= rope.len_chars() || !words.is_word(rope.char(char_at)) {
         return (at, at);
     }

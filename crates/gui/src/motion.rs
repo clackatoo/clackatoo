@@ -1859,7 +1859,25 @@ pub(crate) fn class_at(row: Option<&impl Cells>, col: usize, words: Words) -> Cl
     if spot.blank() {
         return Class::Blank;
     }
+    // A character with a cell of its own that only goes on the one before
+    // it, as a skin tone on an emoji, is of that one's class: Vim's
+    // motions go by whole characters as drawn, and never see it alone.
+    if extends(spot.ch)
+        && let Some(row) = row
+        && let Some(before) = row.extent(col).0.checked_sub(1)
+    {
+        return class_at(Some(row), row.extent(before).0, words);
+    }
     class_of(spot.ch, words)
+}
+
+/// Whether `ch` only goes on the character before it, as a skin tone on
+/// an emoji does, though it takes cells of its own as it's laid out: the
+/// other characters that go on one before them, as accents, variation
+/// selectors and what follows a zero width joiner, are laid out in that
+/// one's cell (see [`class_at`]).
+pub(crate) fn extends(ch: char) -> bool {
+    matches!(ch, '\u{1f3fb}'..='\u{1f3ff}')
 }
 
 /// The class of `ch`, with `words` part of words: ASCII as Vim's
