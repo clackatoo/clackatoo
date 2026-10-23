@@ -296,6 +296,12 @@ const MOST_UNDOABLE: usize = 1 << 20;
 /// The most files whose selections are kept: the longest unused go first.
 const MOST_SELECTIONS: usize = 100;
 
+#[cfg(test)]
+thread_local! {
+    /// How many changes the selections' ends have been moved through.
+    pub(crate) static ENDS_CHANGED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl Selected {
     /// The selection of `file` from byte `first` to byte `last` of `text`,
     /// both in it.
@@ -409,6 +415,22 @@ fn end_edited(
             return;
         }
     }
+    // With no line breaks taken or put, only the changes on its line can
+    // move it, as `>` makes on every line, so the rest aren't looked at.
+    let breaks = |text: &str| text.contains('\n');
+    let changes = match line {
+        Some(line)
+            if !changes
+                .iter()
+                .any(|&(_, taken, put)| breaks(taken) || breaks(put)) =>
+        {
+            let (start, end) = (before.line_to_byte(line), before.line_to_byte(line + 1));
+            let from = changes.partition_point(|&(at, taken, _)| at + taken.len() < start);
+            let to = changes.partition_point(|&(at, _, _)| at <= end);
+            &changes[from..to.max(from)]
+        }
+        _ => changes,
+    };
     // Each change, the last first, so the lines of those before it are as
     // they were.
     for &(at, removed, put) in changes.iter().rev() {
@@ -425,6 +447,8 @@ fn end_changed(
     before: &Rope,
     is_last: bool,
 ) {
+    #[cfg(test)]
+    ENDS_CHANGED.with(|changed| changed.set(changed.get() + 1));
     let len = before.len_bytes();
     let point = |byte: usize| {
         let byte = byte.min(len);

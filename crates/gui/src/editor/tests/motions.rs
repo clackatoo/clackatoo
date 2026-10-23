@@ -1506,3 +1506,19 @@ fn only_the_windows_own_undo_puts_back_its_selection() {
     assert_eq!(setup.editor.anchor.map(|at| at.line), Some(1));
     assert_eq!(setup.cursor().0, 2);
 }
+
+#[test]
+fn a_selection_kept_goes_through_only_the_changes_on_its_lines() {
+    // `>` on every line changes each, with no line break: only those on
+    // a selection's ends' lines can move them.
+    let changed = || crate::editor::marks::ENDS_CHANGED.with(std::cell::Cell::get);
+    let mut setup = Setup::new(&"a line\n".repeat(2000));
+    setup.keys("Vj<Esc>gg");
+    let before = changed();
+    setup.keys("VG>");
+    assert!(changed() - before < 20, "{} changes", changed() - before);
+    assert_eq!(setup.text(), "    a line\n".repeat(2000));
+    setup.keys("<Esc>gv");
+    assert_eq!(setup.editor.anchor.map(|at| at.line), Some(0));
+    assert_eq!(setup.cursor().0, 1999);
+}
