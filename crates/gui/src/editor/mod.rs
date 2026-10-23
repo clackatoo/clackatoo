@@ -1757,12 +1757,13 @@ impl Editor {
     /// takes (see [`visual`]).
     fn start_change(&mut self, command: Command, copy: &BufferCopy) {
         let visual = matches!(self.mode, Mode::Visual(_));
-        // In a block, `I`, `A`, `D` and `C` act on it too.
-        let on_block = self.mode == Mode::Visual(Selection::Block)
-            && matches!(
-                command.action,
-                Action::Insert(Entry::LineStart | Entry::LineEnd) | Action::DeleteToEnd { .. }
-            );
+        // `I` and `A` act on what's selected too, as Vim's operators, and
+        // in a block, `D` and `C`.
+        let on_block = match command.action {
+            Action::Insert(Entry::LineStart | Entry::LineEnd) => visual,
+            Action::DeleteToEnd { .. } => self.mode == Mode::Visual(Selection::Block),
+            _ => false,
+        };
         if command.action.changes() && (!visual || command.action.on_selection() || on_block) {
             let extent = visual.then(|| self.extent(copy)).flatten();
             self.changing = Some(Change {

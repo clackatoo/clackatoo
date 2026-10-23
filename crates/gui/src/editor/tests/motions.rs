@@ -1303,3 +1303,16 @@ fn an_operator_that_fails_is_no_change_to_make_again() {
     // The change before it still is.
     assert_eq!(in_cells("abc\n", (1, 0), "xgugel.").0, "b\n");
 }
+
+#[test]
+fn i_and_a_in_visual_mode_are_changes_dot_makes_again() {
+    // As Vim's `v_visop()` makes them operators, which `.` repeats.
+    assert_eq!(
+        in_cells("\nx\n\t\n  d e\n\t\n", (4, 0), "VIZ<Esc>.").0,
+        "\nx\n\t\nZZ  d e\n\t\n"
+    );
+    assert_eq!(
+        in_cells("abc def\nghi jkl\nmno\n", (1, 4), "VjIZ<Esc>j.").0,
+        "Zabc def\nZghi jkl\nmno\n"
+    );
+}
