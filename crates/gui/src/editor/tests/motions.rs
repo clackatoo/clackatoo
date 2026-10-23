@@ -1411,3 +1411,16 @@ fn an_undo_of_a_case_change_goes_back_to_where_it_acted() {
         (2, 1)
     );
 }
+
+#[test]
+fn an_undo_of_a_line_opened_above_and_typed_on_goes_to_the_line_after() {
+    // As the release's, which put the line in at the line's start.
+    let at = |text: &str, from, keys| in_cells(text, from, keys);
+    assert_eq!(
+        at("\nabc\n\ndef\n", (3, 0), "Ox<Esc>u"),
+        ("\nabc\n\ndef\n".into(), (3, 0))
+    );
+    assert_eq!(at("\nabc\n\ndef\n", (3, 0), "Ox<Esc>u<C-r>").1, (3, 0));
+    // `o`, as the release's, goes back to the line it opened below.
+    assert_eq!(at("abc\nxy\n", (1, 1), "ox<Esc>u").1, (1, 2));
+}

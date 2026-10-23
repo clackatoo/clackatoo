@@ -6232,15 +6232,14 @@ fn empty_lines_above(text: &Text<'_>, line: u64, breaks: &str) -> (Edit, usize) 
     (Edit::replace(len, at, "\n", &format!("\n{breaks}")), at + 1)
 }
 
-/// Whether a change that takes `taken` and puts `put` is one of empty
-/// lines put in or taken away after a line break, which it takes and puts
-/// back (see [`empty_lines_above`]): an undo or a redo of it puts the
-/// cursor at the start of the line after, as Vim's goes to the lines it
-/// changed.
+/// Whether a change that takes `taken` and puts `put` is one of lines put
+/// in or taken away after a line break, which it takes and puts back, as
+/// empty lines are put (see [`empty_lines_above`]), and a line opened with
+/// `O` and typed on: an undo or a redo of it puts the cursor at the start
+/// of the line after, as Vim's goes to the lines it changed.
 fn rewrites_break(taken: &str, put: &str) -> bool {
-    let breaks = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte == b'\n');
-    (taken == "\n" && put.len() > 1 && breaks(put))
-        || (put == "\n" && taken.len() > 1 && breaks(taken))
+    let lines = |text: &str| text.len() > 1 && text.starts_with('\n') && text.ends_with('\n');
+    (taken == "\n" && lines(put)) || (put == "\n" && lines(taken))
 }
 
 fn whole_lines_deleted(text: &Text<'_>, span: Span) -> Span {
