@@ -1731,3 +1731,17 @@ fn a_motion_along_a_long_line_looks_its_row_up_once() {
         );
     }
 }
+
+#[test]
+fn a_pattern_with_word_edges_is_compiled_for_fancy_regex_only_when_a_text_needs_it() {
+    let compiles = || super::super::pattern::FANCY_COMPILES.with(std::cell::Cell::get);
+    // A plain text's words are the regex crate's: `*` finds `abc` with
+    // its own word boundaries.
+    let before = compiles();
+    assert_eq!(in_cells("abc x abcd abc\n", (1, 0), "*n").1, (1, 0));
+    assert_eq!(compiles() - before, 0);
+    // One with a word of a script of its own needs fancy-regex: once.
+    let before = compiles();
+    assert_eq!(in_cells("abc 日本 abc\n", (1, 0), "*n").1, (1, 0));
+    assert_eq!(compiles() - before, 1);
+}

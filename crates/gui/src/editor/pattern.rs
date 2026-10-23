@@ -107,6 +107,37 @@ thread_local! {
     pub(crate) static PLAIN_SCANS: Cell<usize> = const { Cell::new(0) };
     /// How many searches [`Pattern::find_at`] has made.
     pub(crate) static FINDS: Cell<usize> = const { Cell::new(0) };
+    /// How many patterns fancy-regex has compiled.
+    pub(crate) static FANCY_COMPILES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// A pattern for fancy-regex, compiled the first time it's needed: only
+/// a text with `odd` in it needs it, and it's slow to compile, its word
+/// edges having every script's class in them, so a `*` on a plain text
+/// never pays for it. Shared by a pattern's clones, as a kept one's are.
+#[derive(Debug)]
+struct Fancy {
+    source: String,
+    ignore: bool,
+    compiled: std::cell::OnceCell<Result<fancy_regex::Regex, String>>,
+}
+
+impl Fancy {
+    /// The compiled pattern, or why it can't be, as too big.
+    fn regex(&self) -> Result<&fancy_regex::Regex, String> {
+        let compiled = self.compiled.get_or_init(|| {
+            #[cfg(test)]
+            FANCY_COMPILES.with(|compiles| compiles.set(compiles.get() + 1));
+            fancy_regex::RegexBuilder::new(&self.source)
+                .multi_line(true)
+                .case_insensitive(self.ignore)
+                .delegate_size_limit(MOST_COMPILED)
+                .backtrack_limit(MOST_BACKTRACKS)
+                .build()
+                .map_err(|err| err.to_string())
+        });
+        compiled.as_ref().map_err(Clone::clone)
+    }
 }
 
 /// What matches a pattern.
@@ -120,7 +151,7 @@ enum Engine {
     /// wherever it does and more, so a search starts no sooner than where
     /// that finds a match, and none is made where it finds none.
     Looking {
-        regex: fancy_regex::Regex,
+        regex: Rc<Fancy>,
         loose: Regex,
         /// The pattern with the regex crate's own word boundaries, which
         /// find the same matches as `regex` in a text without `odd` in
@@ -194,30 +225,22 @@ impl Pattern {
             let loose = (translated.regex)
                 .replace(&edge(words, true), "")
                 .replace(&edge(words, false), "");
-            let regex = fancy_regex::RegexBuilder::new(&translated.regex)
-                .multi_line(true)
-                .case_insensitive(ignore)
-                .delegate_size_limit(MOST_COMPILED)
-                .backtrack_limit(MOST_BACKTRACKS)
-                .build()
-                .map_err(|err| match err {
-                    fancy_regex::Error::CompileError(_) => format!("{source} is too big a pattern"),
-                    _ => cant(),
-                })?;
+            // Parsed now, so a pattern it can't take is refused now,
+            // though compiled only when a text needs it.
+            fancy_regex::Expr::parse_tree(&translated.regex).map_err(|_| cant())?;
+            let regex = Rc::new(Fancy {
+                source: translated.regex.clone(),
+                ignore,
+                compiled: std::cell::OnceCell::new(),
+            });
             let bounded = (translated.regex)
                 .replace(&edge(words, true), r"\b{start}")
                 .replace(&edge(words, false), r"\b{end}");
-            let classes = word_classes_inside(words);
-            let odd = format!(
-                r"[[\w--[{words}]][[{words}]--\w][{scripts}]]",
-                words = classes[0],
-                scripts = classes[1..].concat(),
-            );
             Engine::Looking {
                 regex,
                 loose: plain(&loose)?,
                 bounded: Box::new(plain(&bounded)?),
-                odd: Box::new(Regex::new(&odd).map_err(|_| cant())?),
+                odd: Box::new(odd(words).ok_or_else(cant)?),
             }
         } else {
             Engine::Plain(plain(&translated.regex)?)
@@ -283,7 +306,8 @@ impl Pattern {
             }
             (Engine::Looking { regex, loose, .. }, kept) => {
                 *kept = Locations::Looking(self.looking(loose, text, at, |hay, at| {
-                    let captures = regex.captures_from_pos(hay, at).map_err(Box::new)?;
+                    let captures = (regex.regex()?.captures_from_pos(hay, at))
+                        .map_err(|err| err.to_string())?;
                     Ok(captures.map(|captures| {
                         (0..captures.len())
                             .map(|index| captures.get(index).map(|got| (got.start(), got.end())))
@@ -351,7 +375,7 @@ impl Pattern {
         loose: &Regex,
         text: &str,
         at: usize,
-        mut search: impl FnMut(&str, usize) -> Result<Option<T>, Box<fancy_regex::Error>>,
+        mut search: impl FnMut(&str, usize) -> Result<Option<T>, String>,
     ) -> Option<T> {
         let mut at = at;
         loop {
@@ -391,7 +415,8 @@ impl Pattern {
                 (found.start(), found.end())
             }
             Engine::Looking { regex, loose, .. } => self.looking(loose, text, at, |hay, at| {
-                let found = regex.find_from_pos(hay, at).map_err(Box::new)?;
+                let found =
+                    (regex.regex()?.find_from_pos(hay, at)).map_err(|err| err.to_string())?;
                 Ok(found.map(|found| (found.start(), found.end())))
             })?,
         };
@@ -1176,6 +1201,34 @@ fn edge(words: Words, start: bool) -> String {
         format!("(?<=[{scripts}])")
     };
     format!("(?:{}|{at_script}(?:{}))", one(&classes[0]), each.join("|"))
+}
+
+/// What finds a character the regex crate's words and Vim's disagree
+/// about, with `words` part of words, or of a script's own class (see
+/// [`Engine::Looking`]): kept for the last words asked about, as it's
+/// slow to compile, every script's class being in it, and a file's words
+/// seldom change.
+fn odd(words: Words) -> Option<Regex> {
+    thread_local! {
+        static KEPT: std::cell::RefCell<Option<(Words, Regex)>> = const { std::cell::RefCell::new(None) };
+    }
+    KEPT.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        if let Some((known, odd)) = kept.as_ref()
+            && *known == words
+        {
+            return Some(odd.clone());
+        }
+        let classes = word_classes_inside(words);
+        let odd = Regex::new(&format!(
+            r"[[\w--[{words}]][[{words}]--\w][{scripts}]]",
+            words = classes[0],
+            scripts = classes[1..].concat(),
+        ))
+        .ok()?;
+        *kept = Some((words, odd.clone()));
+        Some(odd)
+    })
 }
 
 /// Adds `ch` to a class being written, escaped as the engine needs.
