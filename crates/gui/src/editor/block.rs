@@ -32,6 +32,8 @@
 //! line is left as it is, and a block put past the listing's end, which
 //! would make lines with no marks, is refused.
 
+use std::rc::Rc;
+
 use clackatoo_protocol::Edit;
 use clackatoo_text::Bias;
 
@@ -689,7 +691,11 @@ impl Editor {
             }
         };
         let text = self.text(copy);
-        let last = block.last.min(text.last_line());
+        // Its text taken from the last line of a text with no line break at
+        // its end leaves that line empty after one, past the last as the
+        // text counts lines, but typed on all the same, as the line after a
+        // line break at the end is.
+        let last = block.last.min(text.lines_typed_on() - 1);
         let end = text.line_end(line);
         let spread = Spread {
             start,
@@ -747,9 +753,9 @@ impl Editor {
         let typed = typed?;
         let mut splice = Splice::new();
         for line in first + 1..=last {
-            let Some(laid) = text.laid(line) else {
-                continue;
-            };
+            // The line after a line break at the text's end, empty.
+            let laid = (text.laid(line))
+                .unwrap_or_else(|| Rc::new(Laid::new(String::new(), self.indent.tabstop)));
             if self.kept_line(&text, line) {
                 continue;
             }

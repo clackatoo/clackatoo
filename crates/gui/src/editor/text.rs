@@ -992,6 +992,12 @@ impl<'a> Text<'a> {
         if ends_with_break { breaks - 1 } else { breaks }
     }
 
+    /// How many lines can be typed on: as [`Self::lines`], with the empty
+    /// one after a line break at the text's end, where the cursor can go.
+    pub(crate) fn lines_typed_on(&self) -> u64 {
+        self.rope.len_lines() as u64
+    }
+
     pub(crate) fn last_line(&self) -> u64 {
         self.lines() - 1
     }

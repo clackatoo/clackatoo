@@ -1598,3 +1598,19 @@ fn a_character_drawn_as_one_is_one_to_the_word_motions() {
     assert_eq!(text(smile, "wx"), "a  b \u{263a}\u{fe0f}\n");
     assert_eq!(text(smile, "wdaw"), "a b \u{263a}\u{fe0f}\n");
 }
+
+#[test]
+fn a_block_changed_on_a_last_line_with_no_line_break_types_there() {
+    // Taking the block's text leaves the text ending with a line break,
+    // its last line empty, past the last as the text counts them.
+    assert_eq!(in_cells("abc\ndef", (1, 0), "G0<C-v>$cX<Esc>").0, "abc\nX");
+    assert_eq!(in_cells("abc\ndef", (1, 0), "G<C-v>iwcX<Esc>").0, "abc\nX");
+    assert_eq!(in_cells("abc\ndef", (1, 0), "G<C-v>awsX<Esc>").0, "abc\nX");
+    // Down to it, typed on each line.
+    assert_eq!(
+        in_cells("abc\ndef", (1, 0), "<C-v>j$cX<Esc>"),
+        ("X\nX".into(), (1, 0))
+    );
+    assert_eq!(in_cells("abc\ndef\n", (1, 0), "<C-v>j$cX<Esc>").0, "X\nX\n");
+    assert_eq!(in_cells("ab\ncd", (1, 0), "l<C-v>jcX<Esc>").0, "aX\ncX");
+}
