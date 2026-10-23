@@ -1207,3 +1207,18 @@ fn gv_fails_when_its_anchors_line_is_gone() {
         assert!(setup.editor.take_failed(), "{keys}");
     }
 }
+
+#[test]
+fn a_mark_that_isnt_set_still_leaves_the_aim_where_the_cursor_is() {
+    // Gone to or taken up to, as Vim's `nv_cursormark()` sets `curswant`
+    // either way.
+    let text = "abcdefghijkl\n\tx\ty\nabcdefghijkl\n";
+    for keys in ["j`zj", "j'zj", "jd`<lt>j"] {
+        assert_eq!(in_cells(text, (1, 5), keys).1, (3, 7), "{keys}");
+    }
+    // With a selection made, `<` and `>` are its ends to go to.
+    assert_eq!(in_cells("abcdef\n", (1, 1), "vll<Esc>0`<lt>").1, (1, 1));
+    assert_eq!(in_cells("abcdef\n", (1, 1), "vll<Esc>0`>").1, (1, 3));
+    // `g_` shifts to the line's end, as it sets the column, as `$` does.
+    assert_eq!(in_cells(text, (1, 5), ">g_j").1, (2, 8));
+}

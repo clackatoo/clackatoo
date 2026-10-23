@@ -23,9 +23,10 @@ pub(super) fn is_settable_mark(ch: char) -> bool {
 }
 
 /// Whether `ch` names a mark to go to, after `'` or `` ` ``: one that can
-/// be set, or `.` for the last change.
+/// be set, `.` for the last change, or `<` and `>` for the last
+/// selection's ends.
 pub(super) fn is_mark(ch: char) -> bool {
-    is_settable_mark(ch) || ch == '.'
+    is_settable_mark(ch) || matches!(ch, '.' | '<' | '>')
 }
 
 /// A change of case.

@@ -2156,11 +2156,15 @@ impl Editor {
             } else {
                 1
             };
-            // Aiming for the column a motion set, as `|` sets it, which
-            // Vim's `op_shift()` goes to without `startofline`.
-            if let (Target::Motion(_), Some(want)) =
-                (target, span.moved.and_then(|went| went.wanted()))
-            {
+            // Aiming for the column a motion set, as `|` sets it, and `g_`
+            // the line's end, which Vim's `op_shift()` goes to without
+            // `startofline`.
+            let want = match target {
+                Target::Motion(Motion::LastNonBlank) => Some(usize::MAX),
+                Target::Motion(_) => span.moved.and_then(|went| went.wanted()),
+                _ => None,
+            };
+            if let Some(want) = want {
                 self.cursor = Cursor::wanting(self.cursor.at, want);
             }
             self.shift(span, steps, operator == Operator::Dedent, copy);
@@ -5155,7 +5159,10 @@ impl Editor {
             self.fail();
             return;
         }
+        // Set or not, the cursor aims for where it is after, as Vim's
+        // `nv_cursormark()` sets `curswant`.
         let Some(to) = self.mark_here(mark, copy, marks) else {
+            self.cursor = Cursor::new(self.cursor.at);
             self.fail();
             return;
         };
