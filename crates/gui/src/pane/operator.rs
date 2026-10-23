@@ -11,7 +11,7 @@
 use clackatoo_protocol::{Block, Request, Which};
 
 use super::{Copy, Document, Mode, Pane, Pending, Selection};
-use crate::motion::{Cursor, Motion, Point, Reach, Taken, before};
+use crate::motion::{Cursor, Lines, Motion, Point, Reach, Taken, before, last_char};
 use crate::objects::{Object, Selected};
 
 /// What a block asked of the daemon is for.
@@ -77,9 +77,30 @@ impl Pane {
             self.ask_for_block(cursor.at.line, Which::At, use_);
             return false;
         }
+        // Past its line's text, as the shell's cursor is, from its last
+        // character: Neovim's terminal lines end at their text, and its
+        // cursor goes there, so `yiw` takes the word just typed.
+        let last = last_char(Document(self).row(cursor.at.line));
+        let on_text = |at: Point| {
+            if at.line == cursor.at.line {
+                Point {
+                    col: at.col.min(last),
+                    ..at
+                }
+            } else {
+                at
+            }
+        };
+        let anchor = self.anchor.unwrap_or(cursor.at);
+        let anchor = if anchor == cursor.at {
+            on_text(anchor)
+        } else {
+            anchor
+        };
+        let cursor = Cursor::new(on_text(cursor.at));
         if visual {
             let selected = Selected {
-                anchor: self.anchor.unwrap_or(cursor.at),
+                anchor,
                 cursor: cursor.at,
                 lines: self.mode == Mode::Visual(Selection::Lines),
             };

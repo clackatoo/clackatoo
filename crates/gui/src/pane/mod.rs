@@ -2600,6 +2600,30 @@ mod tests {
     }
 
     #[test]
+    fn an_object_past_a_lines_text_is_found_from_its_last_character() {
+        // As Neovim's terminal, whose lines end at their text, puts its
+        // cursor: where the shell's cursor is, after what was just typed.
+        let yank = |output: &str, keys_: &str| {
+            let terminal = terminal(output);
+            let mut pane = pane(&terminal);
+            normal_mode(&mut pane);
+            yanked(&mut pane, &terminal, keys_)
+        };
+        assert_eq!(yank("one two", "yiw").as_deref(), Some("two"));
+        assert_eq!(yank("one two  ", "yiw").as_deref(), Some("two"));
+        assert_eq!(yank("one two", "viwy").as_deref(), Some("two"));
+        assert_eq!(yank("one two", "yaw").as_deref(), Some(" two"));
+        assert_eq!(yank("one two", "2yiw").as_deref(), Some("two\n"));
+        assert_eq!(yank("one two", "yiW").as_deref(), Some("two"));
+        assert_eq!(yank("echo \"a b\"", "yi\"").as_deref(), Some("a b"));
+        assert_eq!(yank("f(a)", "yi(").as_deref(), Some("a"));
+        // An empty row is an empty line, with the empty one after it, as
+        // in Neovim's terminal.
+        assert_eq!(yank("one\r\n", "yiw").as_deref(), Some(""));
+        assert_eq!(yank("one\r\n", "yaw").as_deref(), Some("\n"));
+    }
+
+    #[test]
     fn y_takes_a_text_object_and_visual_mode_selects_one() {
         let terminal = terminal("f(\"a b\")\r\nx");
         let mut pane = pane(&terminal);

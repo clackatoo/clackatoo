@@ -406,6 +406,8 @@ After `y`, or in visual mode, `i` or `a` and one more key pick out a piece of te
 
 In Vim, `b` is another name for `(`. Here it's the command, the more useful thing in a terminal, and `(` still means parentheses.
 
+With the cursor past the end of a line's text, as it is after what you've just typed at a prompt, objects are found from the line's last character, as in Neovim's terminal: `yiw` copies the word you just typed.
+
 ### Commands
 
 When the shell marks its prompts and commands, clackatoo knows where each command's prompt and output are, and how it exited.
