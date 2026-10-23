@@ -643,9 +643,11 @@ impl Editor {
             && kept.tilde == tilde
             && kept.words == words
         {
+            kept.pattern.searching(&self.haystack(copy).0);
             return Ok(kept.pattern.clone());
         }
         let pattern = Pattern::new(source, matching, tilde, words)?;
+        pattern.searching(&self.haystack(copy).0);
         *kept = Some(super::Compiled {
             source: source.to_owned(),
             matching,

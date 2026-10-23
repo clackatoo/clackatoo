@@ -1366,3 +1366,19 @@ fn an_undo_or_a_redo_of_empty_lines_goes_to_the_line_after_them() {
     setup.editor.heard(&mut heard, false, &mut setup.copy);
     assert_eq!(setup.cursor(), (1, 0));
 }
+
+#[test]
+fn a_search_again_goes_through_the_file_for_its_words_once_till_its_edited() {
+    // Whether the file's words are the regex crate's, for `\<`, is worked
+    // out once for its text, not for each `n`.
+    let scans = || crate::editor::pattern::PLAIN_SCANS.with(std::cell::Cell::get);
+    let mut setup = Setup::new(&"a x\n".repeat(2000));
+    setup.keys("/\\<x\\><CR>");
+    let before = scans();
+    setup.keys("nnnnnnnnnnnnnnnnnnnn");
+    assert_eq!(scans() - before, 0);
+    assert_eq!(setup.cursor(), (20, 2));
+    // An edit makes a new text, gone through once more.
+    setup.keys("xnn");
+    assert_eq!(scans() - before, 1);
+}

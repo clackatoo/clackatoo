@@ -31,8 +31,9 @@
 //! line's start and end, `.` doesn't take a line break, and nor does a
 //! class such as `[^a]` or `\S`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 use regex::{CaptureLocations, Regex, RegexBuilder};
 
@@ -80,9 +81,30 @@ pub(crate) struct Pattern {
     multiline: bool,
     /// Whether a search with it has given up since it was made.
     gave_up: Cell<bool>,
-    /// The text last searched, by where it is and how long, and whether
-    /// its words are the regex crate's, so `\<` and `\>` can be its.
-    plain_in: Cell<Option<(usize, usize, bool)>>,
+    /// The text it's searching, kept so it's still there, and whether its
+    /// words are the regex crate's, so `\<` and `\>` can be its; one for
+    /// it and every copy of it, as the editor keeps it and hands it out
+    /// for each search (see [`searching`](Self::searching)).
+    plain_in: Rc<RefCell<Option<Searching>>>,
+}
+
+/// A file's whole text being searched, kept so no other can be where it
+/// is, and whether its words are the regex crate's (see
+/// [`Pattern::plain_in`]).
+type Searching = (Rc<str>, bool);
+
+/// Whether `text` has no character `odd` finds (see [`Pattern::plain_in`]),
+/// which goes through it all.
+fn plain_words(text: &str, odd: &Regex) -> bool {
+    #[cfg(test)]
+    PLAIN_SCANS.with(|scans| scans.set(scans.get() + 1));
+    !odd.is_match(text)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times [`plain_words`] has gone through a text.
+    pub(crate) static PLAIN_SCANS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// What matches a pattern.
@@ -204,7 +226,7 @@ impl Pattern {
             focus: translated.focus,
             multiline: translated.multiline,
             gave_up: Cell::new(false),
-            plain_in: Cell::new(None),
+            plain_in: Rc::default(),
         })
     }
 
@@ -276,19 +298,42 @@ impl Pattern {
         Some(Found { start, end })
     }
 
+    /// Makes `whole` the text it searches, a file's whole text, and works
+    /// out whether its words are the regex crate's, once for it and its
+    /// copies: as the editor makes a file's text one string anew after
+    /// each edit, which it hands to every search till the next.
+    pub(crate) fn searching(&self, whole: &Rc<str>) {
+        let Engine::Looking { odd, .. } = &self.engine else {
+            return;
+        };
+        let mut kept = self.plain_in.borrow_mut();
+        if kept
+            .as_ref()
+            .is_none_or(|(text, _)| !Rc::ptr_eq(text, whole))
+        {
+            *kept = Some((Rc::clone(whole), plain_words(whole, odd)));
+        }
+    }
+
     /// Whether `text`'s words are the regex crate's: it has no character
     /// `odd` finds, where Vim's words and the crate's differ, so the
-    /// crate's word boundaries are Vim's. Worked out once for a text.
+    /// crate's word boundaries are Vim's. Known for the text it's
+    /// searching, or part of it, which it keeps so no other can be where
+    /// it is (see [`searching`](Self::searching)); for any other, worked
+    /// out each time. A part of a text that isn't plain may be, but the
+    /// look-arounds are right for it all the same.
     fn plain_in(&self, text: &str, odd: &Regex) -> bool {
-        let key = (text.as_ptr() as usize, text.len());
-        match self.plain_in.get() {
-            Some((at, len, plain)) if (at, len) == key => plain,
-            _ => {
-                let plain = !odd.is_match(text);
-                self.plain_in.set(Some((key.0, key.1, plain)));
-                plain
+        if let Some((whole, plain)) = self.plain_in.borrow().as_ref() {
+            let (start, end) = (
+                whole.as_ptr() as usize,
+                whole.as_ptr() as usize + whole.len(),
+            );
+            let at = text.as_ptr() as usize;
+            if start <= at && at + text.len() <= end {
+                return *plain;
             }
         }
+        plain_words(text, odd)
     }
 
     /// The first match `search` finds in `text` from byte `at`, as
