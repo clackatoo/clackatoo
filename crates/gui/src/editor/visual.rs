@@ -137,7 +137,14 @@ impl Editor {
         } else {
             marks.selected(copy.file()).cloned()
         };
-        let Some(selected) = selected else {
+        // None, or its anchor's line gone, fails, as Vim's `nv_gv_cmd()`
+        // does when `vi_start` is past the last line.
+        let anchor_gone = |selected: &Selected| {
+            let [start, last] = selected.ends();
+            let anchor = if selected.shape.backward { last } else { start };
+            anchor.0 > self.text(copy).last_line()
+        };
+        let Some(selected) = selected.filter(|selected| !anchor_gone(selected)) else {
             self.fail();
             return;
         };

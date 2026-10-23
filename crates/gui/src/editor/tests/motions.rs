@@ -1189,3 +1189,21 @@ fn a_line_of_megabytes_is_searched_for_words_without_giving_up() {
     let text = "x中".repeat(10) + " a\n";
     assert_eq!(in_cells(&text, (1, 0), "/\\<中<CR>").1, (1, 1));
 }
+
+#[test]
+fn gv_fails_when_its_anchors_line_is_gone() {
+    // As Vim's `nv_gv_cmd()`, past the last line: normal mode stays.
+    for (text, at, keys) in [
+        ("a\n  éa\n", (2, 2), "V<Esc>ddgv"),
+        ("a\nb\n", (1, 0), "jv<Esc>ddgv"),
+    ] {
+        let mut setup = Setup::new(text);
+        setup.editor.cursor = Cursor::new(Point {
+            line: at.0 - 1,
+            col: at.1,
+        });
+        setup.keys(keys);
+        assert_eq!(setup.editor.mode, crate::vim::Mode::Normal, "{keys}");
+        assert!(setup.editor.take_failed(), "{keys}");
+    }
+}
