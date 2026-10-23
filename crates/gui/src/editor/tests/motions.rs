@@ -1709,3 +1709,25 @@ fn whether_a_count_of_words_back_runs_out_is_asked_only_at_the_texts_start() {
     );
     assert_eq!(in_cells("x y z\n", (1, 4), "3db").0, "z\n");
 }
+
+#[test]
+fn a_motion_along_a_long_line_looks_its_row_up_once() {
+    let text = long_line();
+    let rows = || crate::motion::ROWS_LOOKED_UP.with(std::cell::Cell::get);
+    let mid = (1, 100_000);
+    for (at, keys) in [
+        ((1, 0), "$b"),
+        (mid, "b"),
+        (mid, "w"),
+        (mid, "e"),
+        (mid, "ge"),
+    ] {
+        let before = rows();
+        in_cells(&text, at, keys);
+        assert!(
+            rows() - before <= 20,
+            "{keys}: rows looked up {}",
+            rows() - before
+        );
+    }
+}

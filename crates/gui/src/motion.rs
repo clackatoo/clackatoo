@@ -1570,7 +1570,7 @@ impl Class {
 
 /// A position moving cell by cell through the document, with each line's
 /// end as a blank between it and the next.
-pub(crate) struct Walk<'a, L> {
+pub(crate) struct Walk<'a, L: Lines> {
     lines: &'a L,
     at: Point,
     kind: fn(Class) -> Class,
@@ -1580,6 +1580,9 @@ pub(crate) struct Walk<'a, L> {
     /// finding it reads back over the blanks after it, which a step along
     /// a line of many shouldn't do each time.
     end: std::cell::Cell<Option<(u64, usize)>>,
+    /// The last line whose row was asked for, and its row: a step along a
+    /// line costs a step, not a lookup of the line.
+    row: std::cell::RefCell<Option<(u64, Option<L::Row<'a>>)>>,
 }
 
 impl<'a, L: Lines> Walk<'a, L> {
@@ -1590,7 +1593,20 @@ impl<'a, L: Lines> Walk<'a, L> {
             kind: Class::of,
             words: lines.words(),
             end: std::cell::Cell::new(None),
+            row: std::cell::RefCell::new(None),
         }
+    }
+
+    /// `f` of line `line`'s row.
+    fn on_row<T>(&self, line: u64, f: impl FnOnce(Option<&L::Line>) -> T) -> T {
+        let mut kept = self.row.borrow_mut();
+        if kept.as_ref().is_none_or(|(kept, _)| *kept != line) {
+            #[cfg(test)]
+            ROWS_LOOKED_UP.with(|looked| looked.set(looked.get() + 1));
+            *kept = Some((line, self.lines.row(line)));
+        }
+        let (_, row) = kept.as_ref().expect("just kept");
+        f(row.as_deref())
     }
 
     /// Sees classes as `kind` does: as `W` sees them, say.
@@ -1607,11 +1623,7 @@ impl<'a, L: Lines> Walk<'a, L> {
     }
 
     fn class_of(&self, at: Point) -> Class {
-        (self.kind)(class_at(
-            self.lines.row(at.line).as_deref(),
-            at.col,
-            self.words,
-        ))
+        (self.kind)(self.on_row(at.line, |row| class_at(row, at.col, self.words)))
     }
 
     /// Steps to the next cell, or the next line's start. Returns false at
@@ -1657,11 +1669,14 @@ impl<'a, L: Lines> Walk<'a, L> {
     }
 
     fn next(&self) -> Option<Point> {
-        let row = self.lines.row(self.at.line);
-        let row = row.as_deref();
-        let end = self.text_end(self.at.line, row);
+        let (end, next) = self.on_row(self.at.line, |row| {
+            (
+                self.text_end(self.at.line, row),
+                next_cell(row, self.at.col),
+            )
+        });
         // A line's end is the position just past its text.
-        match next_cell(row, self.at.col) {
+        match next {
             Some(col) if col <= end && self.at.col < end => Some(Point {
                 line: self.at.line,
                 col,
@@ -1676,8 +1691,8 @@ impl<'a, L: Lines> Walk<'a, L> {
 
     fn previous(&self) -> Option<Point> {
         if self.at.col > 0 {
-            let row = self.lines.row(self.at.line);
-            return previous_cell(row.as_deref(), self.at.col).map(|col| Point {
+            let previous = self.on_row(self.at.line, |row| previous_cell(row, self.at.col));
+            return previous.map(|col| Point {
                 line: self.at.line,
                 col,
             });
@@ -1686,7 +1701,7 @@ impl<'a, L: Lines> Walk<'a, L> {
             let line = self.at.line - 1;
             return Some(Point {
                 line,
-                col: self.text_end(line, self.lines.row(line).as_deref()),
+                col: self.on_row(line, |row| self.text_end(line, row)),
             });
         }
         None
@@ -1927,6 +1942,8 @@ pub(crate) fn tone_base<T>(before: impl IntoIterator<Item = (T, char)>) -> Optio
 
 #[cfg(test)]
 thread_local! {
+    /// How many times a [`Walk`] has looked a line's row up.
+    pub(crate) static ROWS_LOOKED_UP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// How many characters [`tone_base`] has looked at.
     pub(crate) static TONE_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
