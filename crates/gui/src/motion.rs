@@ -563,6 +563,12 @@ pub(crate) enum Motion {
         till: bool,
         again: bool,
     },
+    /// `;`, or `,` if `reverse`, after an operator: the last find again,
+    /// which [`Finds::remember`](crate::vim::Finds::remember) puts in its
+    /// place; with none, it goes nowhere.
+    FindAgain {
+        reverse: bool,
+    },
     /// `%`: the bracket that pairs with the one under the cursor, or with
     /// the next one on its line.
     Match,
@@ -653,6 +659,7 @@ impl Motion {
             Self::Match if count.is_some_and(|percent| percent <= 100) => Some(Reach::Lines),
             Self::Match
             | Self::Find { .. }
+            | Self::FindAgain { .. }
             | Self::WordEndBack
             | Self::BigWordEndBack
             | Self::RightOver
@@ -724,7 +731,8 @@ impl Motion {
             | Self::RowStart
             | Self::Column
             | Self::RightOver
-            | Self::LeftOver => Reach::Exclusive,
+            | Self::LeftOver
+            | Self::FindAgain { .. } => Reach::Exclusive,
             Self::Find { forward, .. } => {
                 if forward {
                     Reach::Inclusive
@@ -925,7 +933,8 @@ impl Cursor {
             Motion::Down(n) if at.line < last => {
                 self.go_to_line(at.line.saturating_add(n).min(last), lines);
             }
-            Motion::Up(_) | Motion::Down(_) => {}
+            // `;` with no find before it goes nowhere.
+            Motion::Up(_) | Motion::Down(_) | Motion::FindAgain { .. } => {}
             Motion::LineStart => {
                 self.at.col = 0;
                 self.want = None;

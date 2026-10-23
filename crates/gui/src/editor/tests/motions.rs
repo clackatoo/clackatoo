@@ -1326,3 +1326,16 @@ fn t_back_with_its_character_just_before_goes_nowhere_without_failing() {
     assert_eq!(in_cells(text, (1, 5), "g~T(w.").0, "\t(P q)\t\n");
     assert_eq!(in_cells(text, (1, 5), "dT(w.").0, "\t(q)\t\n");
 }
+
+#[test]
+fn semicolon_and_comma_after_an_operator_find_again() {
+    let text = "a.b.c.d\n";
+    assert_eq!(in_cells(text, (1, 0), "f.d;"), ("ac.d\n".into(), (1, 1)));
+    assert_eq!(in_cells(text, (1, 6), "F.d;"), ("a.b.d\n".into(), (1, 3)));
+    assert_eq!(in_cells(text, (1, 0), "f.y;P").0, "a.b..b.c.d\n");
+    assert_eq!(in_cells(text, (1, 0), "f.d;.").0, "ad\n");
+    // Back with `,`, which fails at the line's start; or with no find
+    // before.
+    assert_eq!(in_cells(text, (1, 0), "f.d,").0, text);
+    assert_eq!(in_cells(text, (1, 0), "d;").0, text);
+}

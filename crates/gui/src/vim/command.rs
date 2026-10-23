@@ -194,10 +194,13 @@ pub(crate) struct Finds {
 }
 
 impl Finds {
-    /// Notes `motion` if it's a find, and gives it back.
+    /// Notes `motion` if it's a find, and gives it back; or for `;` or
+    /// `,` after an operator, the last find again, if there's been one.
     pub(crate) fn remember(&mut self, motion: Motion) -> Motion {
-        if matches!(motion, Motion::Find { .. }) {
-            self.last = Some(motion);
+        match motion {
+            Motion::Find { .. } => self.last = Some(motion),
+            Motion::FindAgain { reverse } => return self.again(reverse).unwrap_or(motion),
+            _ => {}
         }
         motion
     }

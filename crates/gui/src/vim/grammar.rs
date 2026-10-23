@@ -581,7 +581,14 @@ impl Reader<'_> {
                 target.map(|target| Action::Operate(operator, target)),
             );
         }
-        let target = match self.motion(stroke) {
+        // `;` and `,` are motions only after an operator; alone, they're
+        // `Action::FindAgain`.
+        let again = match stroke.plain() {
+            Some(';') => Some(Motion::FindAgain { reverse: false }),
+            Some(',') => Some(Motion::FindAgain { reverse: true }),
+            _ => None,
+        };
+        let target = match again.map(Read::Yes).or_else(|| self.motion(stroke)) {
             Some(motion) => motion.map(Target::Motion),
             None => Read::No,
         };
