@@ -1151,6 +1151,12 @@ fn word_classes_inside(words: Words) -> Vec<String> {
         .collect()
 }
 
+/// A skin tone, which goes with the character before it (see
+/// [`crate::motion::extends`]): no edge of a word is between them, and
+/// one after it is after that character, as Vim's, which takes them as
+/// one.
+const TONE: &str = r"[\x{1f3fb}-\x{1f3ff}]";
+
 /// `\<`, if `start`, or else `\>`, as fancy-regex looks for them, as Vim's
 /// regex engine finds them: where a word's character follows one of
 /// another class, or none, or the other way round; the classes as
@@ -1160,22 +1166,32 @@ fn word_classes_inside(words: Words) -> Vec<String> {
 /// ruled in or out in a step or two.
 fn edge(words: Words, start: bool) -> String {
     let classes = word_classes_inside(words);
-    let one = |inside: &str| {
+    let one = |inside: &str, toned: bool| {
         let class = format!("[{inside}]");
-        if start {
-            format!("(?={class})(?<!{class})")
-        } else {
-            format!("(?<={class})(?!{class})")
+        match (start, toned) {
+            (true, false) => format!("(?={class})(?<!{class})"),
+            (false, false) => format!("(?<={class})(?!{class})"),
+            (true, true) => format!("(?={class})(?<!{class})(?<!{class}{TONE})"),
+            (false, true) => {
+                format!("(?:(?<={class})|(?<={class}{TONE}))(?!{TONE}*{class})")
+            }
         }
     };
     let scripts: String = classes[1..].concat();
-    let each: Vec<String> = classes[1..].iter().map(|inside| one(inside)).collect();
+    // The first script's class is emoji's, the only one with skin tones.
+    let each: Vec<String> = (classes[1..].iter().enumerate())
+        .map(|(index, inside)| one(inside, index == 0))
+        .collect();
     let at_script = if start {
         format!("(?=[{scripts}])")
     } else {
-        format!("(?<=[{scripts}])")
+        format!("(?:(?<=[{scripts}])|(?<={TONE}))")
     };
-    format!("(?:{}|{at_script}(?:{}))", one(&classes[0]), each.join("|"))
+    format!(
+        "(?:{}|{at_script}(?:{}))",
+        one(&classes[0], false),
+        each.join("|")
+    )
 }
 
 /// Adds `ch` to a class being written, escaped as the engine needs.

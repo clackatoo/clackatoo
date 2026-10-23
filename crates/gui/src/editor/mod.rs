@@ -4138,9 +4138,16 @@ impl Editor {
     /// Where the word under the cursor starts and ends in `text`, or the
     /// next on its line, as Vim's `*` finds it.
     fn word_here(&self, text: &Text<'_>) -> Option<(usize, usize)> {
-        let here = text.byte_at(self.cursor.at);
         let line_end = text.line_end(self.cursor.at.line);
         let words = text.words();
+        // On a skin tone, from the emoji it goes on.
+        let rope = text.rope();
+        let line_start = rope.byte_to_char(text.line_start(self.cursor.at.line));
+        let mut here = rope.byte_to_char(text.byte_at(self.cursor.at));
+        while here > line_start && here < rope.len_chars() && extends(rope.char(here)) {
+            here -= 1;
+        }
+        let here = rope.char_to_byte(here);
         let next = (text.slice(here, line_end).char_indices())
             .find(|&(_, ch)| words.is_word(ch))
             .map(|(at, _)| here + at);
@@ -6302,12 +6309,20 @@ fn ident_at(text: &Text<'_>, at: usize) -> (usize, usize) {
     }
     let class = class_of(rope.char(char_at), words);
     let of_it = |ch| words.is_word(ch) && class_of(ch, words) == class;
+    // Back over the word's characters, with the skin tones on them.
     let mut start = char_at;
-    while start > 0 && of_it(rope.char(start - 1)) {
-        start -= 1;
+    while start > 0 {
+        let mut back = start - 1;
+        while back > 0 && extends(rope.char(back)) {
+            back -= 1;
+        }
+        if !of_it(rope.char(back)) {
+            break;
+        }
+        start = back;
     }
     let mut end = char_at;
-    while end < rope.len_chars() && of_it(rope.char(end)) {
+    while end < rope.len_chars() && (of_it(rope.char(end)) || extends(rope.char(end))) {
         end += 1;
     }
     (rope.char_to_byte(start), rope.char_to_byte(end))
