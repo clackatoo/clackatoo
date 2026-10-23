@@ -1138,16 +1138,21 @@ fn undo_and_redo_are_the_daemons_alone() {
 #[test]
 fn a_line_broken_leaves_the_selection_and_lines_put_above_take_it_down() {
     let gv = |text: &str, at, keys| in_cells(text, at, keys).1;
-    // Enter, even at the line's start, leaves its ends on their line, as
-    // Vim's `open_line()` does.
-    assert_eq!(gv("x\nabcdef\n", (2, 2), "vl<Esc>0i<CR><Esc>gv"), (2, 0));
+    // Enter leaves its ends on their line, as Vim's `open_line()` does.
     assert_eq!(gv("abcdef\n", (1, 2), "vl<Esc>ix<CR><Esc>gv"), (1, 3));
+    // At the line's start, it's empty lines put above, as `P` puts them,
+    // which the edit can't tell from it: ends past the start go down with
+    // their text, as the release's did, where Vim's stay at 2,0.
+    assert_eq!(gv("x\nabcdef\n", (2, 2), "vl<Esc>0i<CR><Esc>gv"), (3, 3));
     // Lines put or opened above take them down, empty or not; below, not.
     let empties = "\n\nabc\n";
     assert_eq!(gv(empties, (2, 0), "v<Esc>ggyypgv"), (3, 0));
     assert_eq!(gv(empties, (2, 0), "v<Esc>ggyyjPgv"), (3, 0));
     assert_eq!(gv(empties, (2, 0), "v<Esc>O<Esc>gv"), (3, 0));
-    assert_eq!(gv(empties, (2, 0), "v<Esc>o<Esc>gv"), (2, 0));
+    // Below an empty line, `o` puts the break where `P` would on the line
+    // after, so it's taken the same way, as the release took it, where
+    // Vim's stays at 2,0.
+    assert_eq!(gv(empties, (2, 0), "v<Esc>o<Esc>gv"), (3, 0));
 }
 
 #[test]
@@ -1437,4 +1442,12 @@ fn a_case_change_changes_only_what_it_changes() {
     setup.editor.heard(&mut heard, false, &mut setup.copy);
     setup.keys("u");
     assert_eq!(setup.text(), "\tfoo\n");
+}
+
+#[test]
+fn empty_lines_put_into_an_empty_text_go_in() {
+    // As the release put them, at the line's start: there's no line
+    // break before them to go after.
+    assert_eq!(in_cells("\n", (1, 0), "ddp").0, "\n");
+    assert_eq!(in_cells("\n", (1, 0), "yyP").0, "\n\n");
 }

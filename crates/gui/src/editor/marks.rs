@@ -360,8 +360,9 @@ impl Selected {
     /// [`Selected`]).
     fn edited_by_rules(&mut self, edits: &[Passing<'_>], texts: &[(Rope, Rope)]) {
         for (edit, (before, after)) in edits.iter().zip(texts) {
-            end_edited(&mut self.start, edit, (before, after));
-            end_edited(&mut self.last, edit, (before, after));
+            let changes: Vec<_> = edit.edit.changes().collect();
+            end_edited(&mut self.start, (edit, &changes), (before, after), false);
+            end_edited(&mut self.last, (edit, &changes), (before, after), true);
         }
         // Lines moved past one end from inside it cross its ends over,
         // which are taken in order, as Vim takes `'<` and `'>`: the
@@ -413,9 +414,15 @@ fn byte_of(text: &Rope, line: u64, col: usize) -> usize {
     text.char_to_byte(text.byte_to_char(start + col.min(len)))
 }
 
-/// Moves `end`, an end of a selection, through `edit`, made to `before`
-/// and making `after`, as [`Selected`] says.
-fn end_edited(end: &mut FilePlace, edit: &Passing<'_>, (before, after): (&Rope, &Rope)) {
+/// Moves `end`, an end of a selection, its last if `is_last`, through
+/// `edit`, whose changes are `changes`, made to `before` and making
+/// `after`, as [`Selected`] says.
+fn end_edited(
+    end: &mut FilePlace,
+    (edit, changes): (&Passing<'_>, &[(usize, &str, &str)]),
+    (before, after): (&Rope, &Rope),
+    is_last: bool,
+) {
     // In lines `:m` moves, with them.
     let line = usize::try_from(end.line)
         .ok()
@@ -429,15 +436,20 @@ fn end_edited(end: &mut FilePlace, edit: &Passing<'_>, (before, after): (&Rope, 
     }
     // Each change, the last first, so the lines of those before it are as
     // they were.
-    let changes: Vec<_> = edit.edit.changes().collect();
     for &(at, removed, put) in changes.iter().rev() {
-        end_changed(end, (at, removed, put), before);
+        end_changed(end, (at, removed, put), before, is_last);
     }
 }
 
-/// Moves `end` through one change of an edit to `before`: `removed` taken
-/// away at byte `at` and `put` put in its place.
-fn end_changed(end: &mut FilePlace, (at, removed, put): (usize, &str, &str), before: &Rope) {
+/// Moves `end`, a selection's last if `is_last`, through one change of an
+/// edit to `before`: `removed` taken away at byte `at` and `put` put in
+/// its place.
+fn end_changed(
+    end: &mut FilePlace,
+    (at, removed, put): (usize, &str, &str),
+    before: &Rope,
+    is_last: bool,
+) {
     let len = before.len_bytes();
     let point = |byte: usize| {
         let byte = byte.min(len);
@@ -460,18 +472,27 @@ fn end_changed(end: &mut FilePlace, (at, removed, put): (usize, &str, &str), bef
         return;
     }
     // Whole lines put in at its line's start, as `p`, `P` and `O` put
-    // them, take it down with its line. A line broken there, as Enter
-    // breaks it, starts with the break, and leaves it on its line, as
-    // Vim's `open_line()` does; empty lines the editor puts rewrite the
-    // line break before (see `Editor::put_register`), which the rules
-    // below take down. At the text's very start, before a line that isn't
-    // empty, a break alone is taken as a line put above, as `O` puts it
-    // there; after an empty first line, as `o` and `p` put one, it's that
-    // line's end.
+    // them, take it down with its line. At the text's very start, before a
+    // line that isn't empty, a break alone is taken as a line put above,
+    // as `O` puts it there; after an empty first line, as `o` and `p` put
+    // one, it's that line's end.
     let first_empty = before.bytes().next().is_none_or(|byte| byte == b'\n');
     let above = !put.starts_with('\n') || (at == 0 && put == "\n" && !first_empty);
     if at_col == 0 && removed.is_empty() && put.ends_with('\n') && above {
         end.line = line + breaks;
+        return;
+    }
+    // Line breaks alone at a line's start are empty lines put above it,
+    // as `P` and `O` put them, which Vim's marks go down with; or the line
+    // broken there, as Enter breaks it, which Vim's `'<` and `'>` stay on.
+    // The edit can't say which, so it goes as places in the text go, as
+    // the release kept them: an end past the line's start goes down with
+    // its text, and the selection's last end at the start too, but its
+    // first end at the start stays.
+    if at_col == 0 && line == first && !put.is_empty() && put.bytes().all(|byte| byte == b'\n') {
+        if col > 0 || is_last {
+            end.line = line + breaks;
+        }
         return;
     }
     // Within its line, or on the line a change starts on, from where it
