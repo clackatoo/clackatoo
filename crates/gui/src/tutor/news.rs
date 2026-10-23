@@ -653,6 +653,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "A count before zt, zz or zb puts that line at the top, middle or bottom, the cursor on it, as in Vim",
     },
+    News {
+        id: "remoterestore",
+        date: "2026-10-23",
+        lesson: "shell",
+        what: "Another machine's terminals offer R after it restarts, in your bar too; an offer outlasts an upgrade",
+    },
 ];
 
 impl News {

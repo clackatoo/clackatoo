@@ -491,9 +491,12 @@ impl Daemon {
             shown.list.extend(self.parked_workspaces());
         }
         for linked in &self.links.list {
-            shown
-                .list
-                .extend(linked.relayed.mirror.workspaces.iter().cloned());
+            let mirror = &linked.relayed.mirror;
+            shown.list.extend(mirror.workspaces.iter().cloned());
+            // Its offers to run a command again, and the rest, which only
+            // its own clients would see otherwise (CLACKA-131).
+            shown.restored.extend(mirror.restored.iter().cloned());
+            shown.kept.extend(mirror.kept.iter().cloned());
         }
         self.show_held(&mut shown);
         self.others_shown(&mut shown);

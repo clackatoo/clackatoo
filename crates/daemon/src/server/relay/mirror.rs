@@ -43,10 +43,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use clackatoo_protocol::{
-    BoardId, BufferId, ChatState, ChatSummary, Content, FilesId, Layout, Machine, MachineId,
-    OtherMachine, Pane, PaneId, PaneKind, ReviewId, Tab, TabId, TerminalId, Workspace, WorkspaceId,
-    Workspaces,
+    BoardId, BufferId, ChatState, ChatSummary, Content, FilesId, Kept as KeptRunning, Layout,
+    Machine, MachineId, OtherMachine, Pane, PaneId, PaneKind, Restored, ReviewId, Tab, TabId,
+    TerminalId, Workspace, WorkspaceId, Workspaces,
 };
+
+use crate::server::restore::kept_command;
 
 /// The most of another daemon's workspaces shown: more than anyone keeps.
 pub(crate) const MOST_WORKSPACES: usize = 256;
@@ -167,6 +169,14 @@ pub(crate) struct Mirror {
     run: Option<u64>,
     /// Its workspaces, as this daemon's clients are shown them.
     pub(crate) workspaces: Vec<Workspace>,
+    /// What the panes of its workspaces it made again as it started still
+    /// have to show for it, by this daemon's numbers: the offers to run a
+    /// command again, and where editors were (see
+    /// [`Workspaces::restored`]).
+    pub(crate) restored: Vec<Restored>,
+    /// The terminals of its workspaces it keeps running, by this daemon's
+    /// numbers (see [`Workspaces::kept`]).
+    pub(crate) kept: Vec<KeptRunning>,
     /// Its chats, summed up, as this daemon's clients are told them.
     pub(crate) chats: Vec<ChatSummary>,
     /// The panes it lent this daemon, by the number this daemon gave each
@@ -364,8 +374,14 @@ impl Mirror {
             keep_with(&mut self.board_numbers, kept.boards, boards);
         }
         self.cut = taken.cut;
-        taken.changed = taken.restarted || workspaces != self.workspaces;
+        let (restored, kept_running) = self.renumber_restored(remote, &workspaces);
+        taken.changed = taken.restarted
+            || workspaces != self.workspaces
+            || restored != self.restored
+            || kept_running != self.kept;
         self.workspaces = workspaces;
+        self.restored = restored;
+        self.kept = kept_running;
         taken.lent = taken.restarted || lent != self.lent;
         self.lent = lent;
         taken.held = held_for != self.held_for;
@@ -481,6 +497,57 @@ impl Mirror {
     /// last.
     pub(crate) fn keep_hunks(&mut self, kept: &BTreeSet<u64>) {
         self.hunk_numbers.keep(kept);
+    }
+
+    /// What `remote` says panes made again still have to show, and which
+    /// terminals it keeps running, for the panes of `workspaces`, its own
+    /// renumbered, that it hosts itself, by this daemon's numbers. A pane
+    /// it names that isn't shown here is left out, and so is one on yet
+    /// another machine, or this one, lent it (see [`held`](Self::held)):
+    /// what's asked of such a pane, as dismissing its offer, goes to the
+    /// machine it's on, never to `remote`. Each command is one this daemon
+    /// would offer itself, or none.
+    fn renumber_restored(
+        &self,
+        remote: &Workspaces,
+        workspaces: &[Workspace],
+    ) -> (Vec<Restored>, Vec<KeptRunning>) {
+        if remote.restored.is_empty() && remote.kept.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let shown: BTreeSet<PaneId> = (workspaces.iter())
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| tab.layout.panes())
+            .map(|pane| pane.id)
+            .filter(|pane| !self.held.contains_key(pane))
+            .collect();
+        let local = |pane: PaneId| {
+            (self.pane_numbers.local(pane.0))
+                .map(PaneId)
+                .filter(|local| shown.contains(local))
+        };
+        let restored = (remote.restored.iter())
+            .take(MOST_PANES)
+            .filter_map(|restored| {
+                let restored = Restored {
+                    pane: local(restored.pane)?,
+                    ran: restored.ran.as_deref().and_then(kept_command),
+                    place: restored.place,
+                };
+                (restored.ran.is_some() || restored.place.is_some()).then_some(restored)
+            })
+            .collect();
+        let kept = (remote.kept.iter())
+            .take(MOST_PANES)
+            .filter_map(|kept| {
+                Some(KeptRunning {
+                    pane: local(kept.pane)?,
+                    command: kept_command(&kept.command)?,
+                    ..kept.clone()
+                })
+            })
+            .collect();
+        (restored, kept)
     }
 
     /// `workspace`, one of the other daemon's, renumbered, as `shown`
@@ -903,6 +970,16 @@ mod tests {
         }
     }
 
+    /// A terminal pane, `id` there, on `home`, which knows it as `key`.
+    fn held(id: u32, home: MachineId, key: u64) -> Layout {
+        Layout::Pane(Pane {
+            id: PaneId(id),
+            content: Content::Terminal(TerminalId(id)),
+            home: Some(home),
+            key: Some(key),
+        })
+    }
+
     fn workspaces(list: Vec<Workspace>) -> Workspaces {
         Workspaces {
             list,
@@ -965,6 +1042,96 @@ mod tests {
         );
         assert!(!again.changed);
         assert_eq!(mirror.workspaces[0].id, WorkspaceId(101));
+    }
+
+    /// Another daemon's offers to run a command again, editors' places and
+    /// terminals kept running are shown by this daemon's numbers for their
+    /// panes (CLACKA-131): never for a pane not shown here, as one gone,
+    /// nor a command this daemon wouldn't offer; and their going is a
+    /// change.
+    #[test]
+    fn another_daemons_offers_and_kept_terminals_are_renumbered_for_the_panes_shown() {
+        let mut mirror = Mirror::default();
+        let mut fresh = Counters::default();
+        let split = Layout::Split {
+            axis: Axis::LeftToRight,
+            parts: vec![
+                pane(1, Content::Terminal(TerminalId(1))),
+                pane(2, Content::Terminal(TerminalId(2))),
+                pane(3, Content::Buffer(BufferId(1))),
+                // On yet another machine, and on this one, lent it.
+                held(4, MachineId([7; 16]), 5),
+                held(5, HERE, 6),
+            ],
+            shares: vec![1, 1, 1, 1, 1],
+        };
+        let mut remote = workspaces(vec![workspace(1, "main", split, 1)]);
+        let offer = |pane, ran: &str| Restored {
+            pane: PaneId(pane),
+            ran: Some(ran.to_owned()),
+            place: None,
+        };
+        let place = clackatoo_protocol::Place {
+            line: 4,
+            column: 2,
+            top: 1,
+        };
+        remote.restored = vec![
+            offer(1, "claude --resume"),
+            // A pane it no longer has, and a command with a control
+            // character in it, are left out.
+            offer(9, "cargo watch"),
+            offer(2, "rm -rf /\u{1b}[2K"),
+            // Nor are a pane it doesn't host, as dismissing them would
+            // never reach it.
+            offer(4, "make deploy"),
+            offer(5, "make test"),
+            Restored {
+                pane: PaneId(3),
+                ran: None,
+                place: Some(place),
+            },
+        ];
+        remote.kept = vec![KeptRunning {
+            pane: PaneId(2),
+            command: "trail serve".to_owned(),
+            always: true,
+            given_up: false,
+            paused: false,
+        }];
+        let take = |mirror: &mut Mirror, fresh: &mut Counters, remote: &Workspaces| {
+            mirror.take(remote, &machine(5), HERE, fresh, &following(&[]), true)
+        };
+        assert!(take(&mut mirror, &mut fresh, &remote).changed);
+        let offered: Vec<(PaneId, Option<&str>, Option<clackatoo_protocol::Place>)> =
+            (mirror.restored.iter())
+                .map(|restored| (restored.pane, restored.ran.as_deref(), restored.place))
+                .collect();
+        assert_eq!(
+            offered,
+            [
+                (PaneId(301), Some("claude --resume"), None),
+                (PaneId(303), None, Some(place)),
+            ]
+        );
+        let kept: Vec<(PaneId, &str)> = (mirror.kept.iter())
+            .map(|kept| (kept.pane, kept.command.as_str()))
+            .collect();
+        assert_eq!(kept, [(PaneId(302), "trail serve")]);
+        assert!(!take(&mut mirror, &mut fresh, &remote).changed);
+
+        // Dismissed there, it goes here, and that's a change.
+        remote.restored.remove(0);
+        assert!(take(&mut mirror, &mut fresh, &remote).changed);
+        assert!(
+            (mirror.restored.iter()).all(|restored| restored.pane != PaneId(301)),
+            "{:?}",
+            mirror.restored
+        );
+        // So is a mark taken away.
+        remote.kept.clear();
+        assert!(take(&mut mirror, &mut fresh, &remote).changed);
+        assert!(mirror.kept.is_empty());
     }
 
     #[test]

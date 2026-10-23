@@ -4844,3 +4844,283 @@ fn what_a_machine_lent_is_never_kept_running_nor_sent_to_the_background_but_by_i
         }
     }
 }
+
+// --- What another machine made again as it started ---------------------
+
+/// Writes the workspaces `host` keeps, as a daemon that stopped with them
+/// would have left them: `name`, a tab for each of `offers` whose shell
+/// was running it, and a background tab for each of `background`.
+fn keep_offering(world: &World, host: &str, name: &str, offers: &[&str], background: &[&str]) {
+    let dir = world.host(host);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cwd = dir.display().to_string();
+    let tab = |ran: &&str| {
+        serde_json::json!({
+            "name": null,
+            "layout": { "pane": { "terminal": { "cwd": cwd, "ran": ran } } },
+            "focused": 0,
+        })
+    };
+    let kept = serde_json::json!({
+        "clackatoo_workspaces": 1,
+        "workspaces": [{
+            "name": name,
+            "tabs": offers.iter().map(tab).collect::<Vec<_>>(),
+            "active_tab": 0,
+            "background": background.iter().map(tab).collect::<Vec<_>>(),
+        }],
+        "active": 0,
+    });
+    std::fs::write(dir.join("workspaces"), kept.to_string()).unwrap();
+}
+
+/// As [`keep_offering`]: `agents`, a tab whose shell was running
+/// `claude --resume`, and a background tab whose shell was running
+/// `trail serve`.
+fn kept_with_offer_and_background(world: &World, host: &str) {
+    keep_offering(
+        world,
+        host,
+        "agents",
+        &["claude --resume"],
+        &["trail serve"],
+    );
+}
+
+/// The command offered to run again in `pane`, in `workspaces`, if any.
+fn offered(workspaces: &Workspaces, pane: PaneId) -> Option<&str> {
+    (workspaces.restored.iter())
+        .find(|restored| restored.pane == pane)
+        .and_then(|restored| restored.ran.as_deref())
+}
+
+/// jack's report (2026-10-23): his desktop lost power with agents running
+/// in it, and his laptop's daemon, connected to the desktop's
+/// (`:connect`), showed none of the offers to run them again, which the
+/// desktop's own clients are shown. Desk's offer reaches laptop's
+/// windows, by laptop's number for the pane, and Esc there dismisses it
+/// on desk.
+#[test]
+fn another_machines_offer_to_run_a_command_again_is_shown_and_dismissed_through_this_daemon() {
+    let world = World::new();
+    kept_with_offer_and_background(&world, "desk");
+    let desk = world.start_with("desk", true);
+    let mut at_desk = desk.client();
+    let own = at_desk.watch_workspaces().unwrap();
+    let pane = own.list[0].tabs[0].layout.panes()[0].id;
+    assert_eq!(offered(&own, pane), Some("claude --resume"), "{own:#?}");
+
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "desk");
+    let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "agents").is_some());
+    let agents = theirs(&shown, "agents").unwrap();
+    let here = agents.tabs[0].layout.panes()[0].id;
+    assert_eq!(
+        offered(&shown, here),
+        Some("claude --resume"),
+        "desk's offer isn't shown here: {:?}",
+        shown.restored
+    );
+
+    // Dismissed here, it's dismissed on desk, and goes here too.
+    window.dismiss(here).unwrap();
+    wait_for_workspaces(&mut at_desk, |own| offered(own, pane).is_none());
+    wait_for_workspaces(&mut window, |shown| offered(shown, here).is_none());
+}
+
+/// jack's report (2026-10-23), the other half: desk's background tabs
+/// aren't shown in its workspace on laptop, so neither the icon after the
+/// tabs nor the list of background tabs has them. CLACKA-121 left this
+/// out on purpose (the window reference: a workspace on another machine
+/// "keeps its background tabs to itself for now"): this test is what
+/// showing them would pass.
+#[test]
+#[ignore = "CLACKA-122"]
+fn another_machines_background_tabs_are_shown_through_this_daemon() {
+    let world = World::new();
+    kept_with_offer_and_background(&world, "desk");
+    let desk = world.start_with("desk", true);
+    let own = desk.client().watch_workspaces().unwrap();
+    assert_eq!(own.list[0].background.len(), 1, "{own:#?}");
+
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "desk");
+    let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "agents").is_some());
+    let agents = theirs(&shown, "agents").unwrap();
+    assert_eq!(
+        agents.background.len(),
+        1,
+        "desk's background tab isn't shown here: {agents:#?}"
+    );
+}
+
+/// Each tab's first pane, in `workspace`, and the terminal it shows.
+fn tab_terminals(workspace: &Workspace) -> Vec<(PaneId, TerminalId)> {
+    (workspace.tabs.iter())
+        .map(|tab| {
+            let pane = tab.layout.panes()[0];
+            match pane.content {
+                Content::Terminal(terminal) => (pane.id, terminal),
+                other => panic!("{other:?} isn't a terminal"),
+            }
+        })
+        .collect()
+}
+
+/// Every way an offer ends on desk ends it in laptop's windows: typed into
+/// from laptop, as `R` puts it at the prompt, typed into on desk, and its
+/// pane closed there, which leaves nothing of it here (CLACKA-131).
+#[test]
+fn another_machines_offer_goes_here_as_it_goes_there() {
+    let world = World::new();
+    let offers = ["claude one", "claude two", "claude three", "claude four"];
+    keep_offering(&world, "desk", "agents", &offers, &[]);
+    let desk = world.start_with("desk", true);
+    let mut at_desk = desk.client();
+    let there = tab_terminals(&at_desk.watch_workspaces().unwrap().list[0]);
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    connect(&mut window, "desk");
+    let shown = wait_for_workspaces(&mut window, |shown| shown.restored.len() == offers.len());
+    let here = tab_terminals(theirs(&shown, "agents").unwrap());
+    for ((pane, _), ran) in here.iter().zip(offers) {
+        assert_eq!(offered(&shown, *pane), Some(ran), "{:?}", shown.restored);
+    }
+
+    // Typed into here, as `R` puts it at the prompt.
+    let (pane, terminal) = here[0];
+    attach_to(&mut window, terminal);
+    window.send_input(terminal, b"claude one").unwrap();
+    wait_for_workspaces(&mut at_desk, |own| offered(own, there[0].0).is_none());
+    wait_for_workspaces(&mut window, |shown| offered(shown, pane).is_none());
+    // Typed into there.
+    at_desk.send_input(there[1].1, b"x").unwrap();
+    wait_for_workspaces(&mut window, |shown| offered(shown, here[1].0).is_none());
+    // Its pane closed there.
+    at_desk.close_pane(there[2].0).unwrap();
+    let shown = wait_for_workspaces(&mut window, |shown| {
+        theirs(shown, "agents").is_some_and(|agents| agents.tabs.len() == 3)
+    });
+    assert!(
+        (shown.restored.iter()).all(|restored| restored.pane != here[2].0),
+        "{:?}",
+        shown.restored
+    );
+    // The last is still offered, by the same number.
+    assert_eq!(offered(&shown, here[3].0), Some("claude four"));
+    assert_eq!(shown.restored.len(), 1, "{:?}", shown.restored);
+}
+
+/// While desk can't be reached, laptop shows its offers as they last were;
+/// once it's back, as they are now: one dismissed on desk meanwhile is
+/// gone, and the other is still offered (CLACKA-131).
+#[test]
+fn another_machines_offers_are_as_it_says_once_its_connection_is_back() {
+    let world = World::new();
+    keep_offering(&world, "desk", "agents", &["claude one", "claude two"], &[]);
+    let desk = world.start_with("desk", true);
+    let mut at_desk = desk.client();
+    let there = tab_terminals(&at_desk.watch_workspaces().unwrap().list[0]);
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "desk");
+    let shown = wait_for_workspaces(&mut window, |shown| shown.restored.len() == 2);
+    let here = tab_terminals(theirs(&shown, "agents").unwrap());
+
+    // The connection ends, and is made again only once a window answers
+    // ssh's question.
+    world.password(Some("hunter2"));
+    kill(&pid(&world, "ssh.pid"));
+    wait_for_state(&mut window, "desk", |state| {
+        *state == ConnectionState::NeedsPassword
+    });
+    let shown = window.watch_workspaces().unwrap();
+    assert_eq!(offered(&shown, here[0].0), Some("claude one"));
+    assert_eq!(offered(&shown, here[1].0), Some("claude two"));
+    at_desk.dismiss(there[0].0).unwrap();
+    wait_for_workspaces(&mut at_desk, |own| offered(own, there[0].0).is_none());
+
+    let mut answering = laptop.client();
+    answering.watch_connections(true).unwrap();
+    let (ask, ..) = next_question(&mut answering);
+    answering.answer_login(ask, Some("hunter2".into())).unwrap();
+    wait_for_state(&mut window, "desk", connected);
+    let shown = wait_for_workspaces(&mut window, |shown| offered(shown, here[0].0).is_none());
+    assert_eq!(offered(&shown, here[1].0), Some("claude two"));
+}
+
+/// Two daemons connected to each other each show their own offers, and the
+/// other's, once each: never their own back (CLACKA-131).
+#[test]
+fn daemons_connected_both_ways_show_each_others_offers_once() {
+    let world = World::new();
+    keep_offering(&world, "desk", "desk-agents", &["claude desk"], &[]);
+    keep_offering(&world, "laptop", "laptop-agents", &["claude laptop"], &[]);
+    let desk = world.start_with("desk", true);
+    let laptop = world.start_with("laptop", true);
+    let mut at_desk = desk.client();
+    let mut at_laptop = laptop.client();
+    connect(&mut at_desk, "laptop");
+    connect(&mut at_laptop, "desk");
+    wait_for_workspaces(&mut at_desk, |shown| shown.restored.len() >= 2);
+    wait_for_workspaces(&mut at_laptop, |shown| shown.restored.len() >= 2);
+    // Each has had the other's, with what it shows of its own.
+    std::thread::sleep(Duration::from_millis(500));
+    for client in [&mut at_desk, &mut at_laptop] {
+        let shown = client.watch_workspaces().unwrap();
+        let mut offers: Vec<(&str, &str)> = (shown.restored.iter())
+            .map(|restored| {
+                let (workspace, ..) = shown
+                    .find_pane(restored.pane)
+                    .unwrap_or_else(|| panic!("{restored:?} isn't shown: {shown:#?}"));
+                (workspace.name.as_str(), restored.ran.as_deref().unwrap())
+            })
+            .collect();
+        offers.sort_unstable();
+        assert_eq!(
+            offers,
+            [
+                ("desk-agents", "claude desk"),
+                ("laptop-agents", "claude laptop")
+            ]
+        );
+    }
+}
+
+/// A machine passed on, server, connected to desk, which laptop connects
+/// to: server's offer shows on laptop, once, and on desk; and dismissed
+/// from laptop, it goes everywhere (CLACKA-131).
+#[test]
+fn a_machine_passed_ons_offer_is_shown_once_and_dismissed_from_anywhere() {
+    let world = World::new();
+    keep_offering(&world, "server", "srv", &["claude --resume"], &[]);
+    let server = world.start_with("server", true);
+    let mut at_server = server.client();
+    let there = tab_terminals(&at_server.watch_workspaces().unwrap().list[0]);
+    let desk = world.start("desk");
+    let mut at_desk = desk.client();
+    connect(&mut at_desk, "server");
+    let shown = wait_for_workspaces(&mut at_desk, |shown| shown.restored.len() == 1);
+    let on_desk = tab_terminals(theirs(&shown, "srv").unwrap())[0].0;
+    assert_eq!(offered(&shown, on_desk), Some("claude --resume"));
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    connect(&mut window, "desk");
+    wait_for_workspaces(&mut window, |shown| {
+        theirs(shown, "srv").is_some() && !shown.restored.is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    let shown = window.watch_workspaces().unwrap();
+    let pane = tab_terminals(theirs(&shown, "srv").unwrap())[0].0;
+    assert_eq!(offered(&shown, pane), Some("claude --resume"));
+    assert_eq!(shown.restored.len(), 1, "{:?}", shown.restored);
+    window.dismiss(pane).unwrap();
+    wait_for_workspaces(&mut at_server, |own| offered(own, there[0].0).is_none());
+    wait_for_workspaces(&mut at_desk, |shown| shown.restored.is_empty());
+    wait_for_workspaces(&mut window, |shown| shown.restored.is_empty());
+}

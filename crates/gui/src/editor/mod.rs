@@ -4629,8 +4629,10 @@ impl Editor {
     /// Puts its cursor and view back where `place` says they were, before
     /// a restart, as far as the text goes now.
     pub(crate) fn put_back(&mut self, place: clackatoo_protocol::Place, copy: &BufferCopy) {
+        // Within the text, wherever the place came from: another machine
+        // says it as its own text was, which this window hasn't checked.
         self.top = Top {
-            line: place.top,
+            line: place.top.min(self.text(copy).last_line()),
             cell: 0,
         };
         let column = usize::try_from(place.column).unwrap_or(usize::MAX);
