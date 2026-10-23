@@ -1389,22 +1389,6 @@ fn a_search_again_goes_through_the_file_for_its_words_once_till_its_edited() {
 }
 
 #[test]
-fn a_count_of_searches_goes_a_match_at_a_time_not_through_them_all() {
-    // `2n` searches twice, not through every match in the file.
-    let finds = || crate::editor::pattern::FINDS.with(std::cell::Cell::get);
-    let mut setup = Setup::new(&"abcd\n".repeat(5000));
-    setup.keys("/.<CR>");
-    let before = finds();
-    setup.keys("2n");
-    assert!(finds() - before < 10, "{} searches", finds() - before);
-    assert_eq!(setup.cursor(), (0, 3));
-    // From each match's end, as Vim's `n` goes with `cpoptions` `c`.
-    assert_eq!(in_cells("xaaaaa\n", (1, 0), "/aa<CR>2n").1, (1, 1));
-    assert_eq!(in_cells("a x a x a x\n", (1, 0), "/x<CR>2n").1, (1, 10));
-    assert_eq!(in_cells("a x a x a x\n", (1, 10), "?x<CR>2n").1, (1, 10));
-}
-
-#[test]
 fn an_undo_of_a_line_opened_above_and_typed_on_goes_to_the_line_after() {
     // As the release's, which put the line in at the line's start.
     let at = |text: &str, from, keys| in_cells(text, from, keys);
@@ -1450,4 +1434,46 @@ fn empty_lines_put_into_an_empty_text_go_in() {
     // break before them to go after.
     assert_eq!(in_cells("\n", (1, 0), "ddp").0, "\n");
     assert_eq!(in_cells("\n", (1, 0), "yyP").0, "\n\n");
+}
+
+#[test]
+fn a_count_of_searches_goes_where_as_many_n_go() {
+    let at = |text: &str, from, keys| in_cells(text, from, keys).1;
+    // A count goes where pressing `n` that many times goes.
+    for (text, from, counted, pressed) in [
+        ("xaaaaa\n", (1, 0), "/aa<CR>2n", "/aa<CR>nn"),
+        ("aaaaa\n", (1, 0), "/aa<CR>3n", "/aa<CR>nnn"),
+        ("a x a x a x\n", (1, 0), "/x<CR>2n", "/x<CR>nn"),
+        ("a x a x a x\n", (1, 10), "?x<CR>2n", "?x<CR>nn"),
+        (
+            "x\nx\nx\nx\nx\n",
+            (1, 0),
+            "/x\\nx<CR>ggj2n",
+            "/x\\nx<CR>ggjnn",
+        ),
+    ] {
+        assert_eq!(
+            at(text, from, counted),
+            at(text, from, pressed),
+            "{counted}"
+        );
+    }
+    // Matches over lines that overlap, as Neovim's go.
+    assert_eq!(at("x\nx\nx\nx\nx\n", (1, 0), "/x\\nx<CR>ggj2n"), (4, 0));
+    // `2n` searches twice, not through every match in the file.
+    let finds = || crate::editor::pattern::FINDS.with(std::cell::Cell::get);
+    let mut setup = Setup::new(&"abcd\n".repeat(5000));
+    setup.keys("/.<CR>");
+    let before = finds();
+    setup.keys("2n");
+    assert!(finds() - before < 10, "{} searches", finds() - before);
+    assert_eq!(setup.cursor(), (0, 3));
+    // However big the count, no more searches than it takes to go round
+    // the matches a few times, which come round again.
+    let text = format!("{}{}", "x\n".repeat(5), "filler line\n".repeat(2000));
+    let mut setup = Setup::new(&text);
+    setup.keys("/x\\nx<CR>");
+    let before = finds();
+    setup.keys("1000n");
+    assert!(finds() - before < 100, "{} searches", finds() - before);
 }

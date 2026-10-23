@@ -4103,7 +4103,7 @@ impl Editor {
             let went = if backward {
                 back_matches(hay, &compiled, found.start, times - 1)
             } else {
-                on_matches(hay, &compiled, from, times)
+                on_matches(hay, &compiled, found, times - 1)
             };
             let Some((there, round)) = went.filter(|_| !compiled.gave_up()) else {
                 self.found = None;
@@ -4112,7 +4112,7 @@ impl Editor {
                 return;
             };
             found = there;
-            wrapped = round || (backward && wrapped);
+            wrapped |= round;
         }
         // The last character's first byte.
         let last = (whole[..found.end].char_indices().next_back())
@@ -6352,61 +6352,68 @@ fn columns(options: &Options) -> Vec<usize> {
         .collect()
 }
 
-/// The match `steps` on from byte `from` in `text`, going round the end;
-/// and whether it went round. They're the matches made one after another
-/// from the start of `from`'s line, each from the end of the one before
-/// (see [`each_match`]), as Vim's `n` goes with `cpoptions` `c`: the first
-/// after `from`, and each after the one before. Once it's back at the
-/// first of them, it knows how many there are in a time round, and goes
-/// on only as many as are left of one. None if a search gave up.
+/// The match `steps` on from `first` in `text`, each as [`find`] finds
+/// the next, as `n` pressed that many times goes; and whether it went
+/// round the end. The matches it goes to are a sequence each of which
+/// follows from the one before, so it comes round to one it's been to and
+/// goes round and round from there: Brent's way of finding that loop, in
+/// no more room than a few matches, says how long it is, and the count is
+/// cut to less than once round it. So the searches it makes are bounded by
+/// how many matches there are, not by the count.
 fn on_matches(
     text: &str,
     pattern: &Pattern,
-    from: usize,
+    first: pattern::Found,
     steps: usize,
 ) -> Option<(pattern::Found, bool)> {
-    let next_from = |at: usize| {
-        (at <= text.len())
-            .then(|| pattern.find_at(text, at))
-            .flatten()
+    let next = |found: pattern::Found| find(text, pattern, found.start, false);
+    // Going on a match at a time from `first`, `steps` at most, and
+    // whether it went round the end.
+    let walk = |steps: usize| {
+        let (mut found, mut round) = (first, false);
+        for _ in 0..steps {
+            let went = next(found)?;
+            round |= went.start <= found.start;
+            found = went;
+        }
+        Some((found, round))
     };
-    // The first after `from`, from its line's start.
-    let mut at = text[..from.min(text.len())]
-        .rfind('\n')
-        .map_or(0, |line| line + 1);
-    let mut found = loop {
-        match next_from(at) {
-            Some(found) if found.start > from => break Some(found),
-            Some(found) => at = past(text, found),
-            None => break None,
+    // How long the loop is: the hare goes on a match at a time, and the
+    // tortoise jumps to it each time the steps since double. Got to
+    // `steps` first, that's the match.
+    let (mut tortoise, mut hare) = (first, next(first)?);
+    let (mut power, mut length, mut gone, mut round) = (1, 1, 1, hare.start <= first.start);
+    while tortoise.start != hare.start {
+        if gone == steps {
+            return Some((hare, round));
         }
-    };
-    let mut round = false;
-    let mut left = steps;
-    let mut lap: Option<(usize, usize)> = None;
-    loop {
-        let here = match found {
-            Some(here) => here,
-            None if pattern.gave_up() => return None,
-            None => {
-                round = true;
-                pattern.find_at(text, 0)?
-            }
-        };
-        left -= 1;
-        match lap {
-            None => lap = Some((here.start, 0)),
-            Some((start, steps)) if here.start == start => {
-                left %= steps + 1;
-                lap = Some((start, 0));
-            }
-            Some((start, steps)) => lap = Some((start, steps + 1)),
+        if power == length {
+            tortoise = hare;
+            power *= 2;
+            length = 0;
         }
-        if left == 0 {
-            return Some((here, round));
-        }
-        found = next_from(past(text, here));
+        let went = next(hare)?;
+        round |= went.start <= hare.start;
+        hare = went;
+        length += 1;
+        gone += 1;
     }
+    if gone == steps {
+        return Some((hare, round));
+    }
+    // Where the loop starts: a hare `length` ahead of a tortoise from
+    // `first` meets it there.
+    let (mut tortoise, mut hare) = (first, walk(length)?.0);
+    let mut start = 0;
+    while tortoise.start != hare.start {
+        tortoise = next(tortoise)?;
+        hare = next(hare)?;
+        start += 1;
+    }
+    // Round the loop as many times as fit, which goes round the end, and
+    // the rest of the way from its start.
+    let (found, _) = walk(start + (steps - start) % length)?;
+    Some((found, true))
 }
 
 /// The match `steps` back from the one at byte `from` in `text`, as
