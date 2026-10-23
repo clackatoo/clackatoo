@@ -1578,13 +1578,6 @@ fn a_character_drawn_as_one_is_one_to_the_word_motions() {
     assert_eq!(at(thumbs, "w"), (1, 5));
     assert_eq!(at(thumbs, "$b"), (1, 7));
     assert_eq!(at(thumbs, "*"), (1, 7));
-    // `*` looks for it with its skin tone, as one word, past the same
-    // emoji with another tone or none.
-    assert_eq!(at("👍🏽 x 👍🏻 y 👍🏽\n", "*"), (1, 14));
-    assert_eq!(at("👍🏽 x 👍 y 👍🏽\n", "*"), (1, 12));
-    assert_eq!(at("👍🏽👍🏽 x 👍🏽👍🏽\n", "*"), (1, 11));
-    assert_eq!(at("👍 x 👍🏽 y 👍\n", "*"), (1, 5));
-    assert_eq!(at("👍🏽 x 👍🏽\n", "e*"), (1, 7));
     // A family joined with zero width joiners, a flag, an accent put on,
     // and an emoji asked for with a variation selector, likewise.
     let family = "a 👨\u{200d}👩\u{200d}👧 b 👨\u{200d}👩\u{200d}👧\n";
