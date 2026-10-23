@@ -1339,3 +1339,12 @@ fn semicolon_and_comma_after_an_operator_find_again() {
     assert_eq!(in_cells(text, (1, 0), "f.d,").0, text);
     assert_eq!(in_cells(text, (1, 0), "d;").0, text);
 }
+
+#[test]
+fn i_on_a_selection_undone_goes_back_to_its_first_lines_start() {
+    // Vim's `v_visop()` makes `I` act on whole lines, so its undo goes
+    // back to where the lines start; `A`'s to where it typed.
+    assert_eq!(in_cells("abc\ndef\n", (1, 1), "vlIZ<Esc>u").1, (1, 0));
+    assert_eq!(in_cells("abc\ndef\n", (1, 1), "vjIZ<Esc>u").1, (1, 0));
+    assert_eq!(in_cells("abc\ndef\n", (1, 1), "vjAZ<Esc>u").1, (2, 2));
+}

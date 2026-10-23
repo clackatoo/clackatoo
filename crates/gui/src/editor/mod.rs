@@ -1616,8 +1616,14 @@ impl Editor {
         let visual = matches!(self.mode, Mode::Visual(_));
         self.cut_count = None;
         // In visual mode, where Vim's `do_pending()` puts the cursor before
-        // acting on what's selected.
-        self.step_cursor = self.selection_start();
+        // acting on what's selected: for `I`, which Vim's `v_visop()` makes
+        // act on whole lines, as by lines; `A` from where it types.
+        let block = self.mode == Mode::Visual(Selection::Block);
+        self.step_cursor = match command.action {
+            Action::Insert(Entry::LineEnd) if !block => None,
+            Action::Insert(Entry::LineStart) if !block => self.selection_start(true),
+            _ => self.selection_start(false),
+        };
         if !again {
             self.start_change(command, copy);
         }
@@ -2118,20 +2124,24 @@ impl Editor {
         let at = self.cursor.at;
         match target {
             Target::Object { .. } => self.text(copy).point_of(span.start()),
-            Target::Selection => self.selection_start().unwrap_or(at),
+            Target::Selection => self.selection_start(false).unwrap_or(at),
             _ => span.moved.map_or(at, |went| went.at.min(at)),
         }
     }
 
     /// Where Vim's `do_pending()` puts the cursor before acting on what's
-    /// selected: its start, or by lines, the other end's line's start if
-    /// that's first, or a block's top left corner.
-    fn selection_start(&self) -> Option<Point> {
+    /// selected: its start, or by lines, or if `by_lines`, the other end's
+    /// line's start if that's first, or a block's top left corner.
+    fn selection_start(&self, by_lines: bool) -> Option<Point> {
         let anchor = self
             .anchor
             .filter(|_| matches!(self.mode, Mode::Visual(_)))?;
         let at = self.cursor.at;
         Some(match self.mode {
+            _ if by_lines => {
+                let start = Point { col: 0, ..anchor };
+                if start < at { start } else { at }
+            }
             Mode::Visual(Selection::Lines) => {
                 let start = Point { col: 0, ..anchor };
                 if start < at { start } else { at }
