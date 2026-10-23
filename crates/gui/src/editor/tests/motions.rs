@@ -1149,3 +1149,20 @@ fn a_line_broken_leaves_the_selection_and_lines_put_above_take_it_down() {
     assert_eq!(gv(empties, (2, 0), "v<Esc>O<Esc>gv"), (3, 0));
     assert_eq!(gv(empties, (2, 0), "v<Esc>o<Esc>gv"), (2, 0));
 }
+
+#[test]
+fn a_huge_count_of_searches_goes_round_as_many_times_at_once() {
+    // As many times round as it takes, taken in one go: three matches,
+    // so 99999999 is as 3 to 99999998's 2.
+    let text = "a x a x a x\n";
+    assert_eq!(in_cells(text, (1, 0), "99999999*").1, (1, 0));
+    assert_eq!(in_cells(text, (1, 0), "99999998*").1, (1, 8));
+    assert_eq!(in_cells(text, (1, 8), "99999998#").1, (1, 0));
+    // In a big file, backwards, which went through the text for each.
+    let big = "a\n".repeat(20_000);
+    let started = std::time::Instant::now();
+    // From the second line, back one to the first, then 99999998 more:
+    // 19998 past four thousand nine hundred and ninety-nine times round.
+    assert_eq!(in_cells(&big, (1, 0), "/a<CR>99999999N").1, (3, 0));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}

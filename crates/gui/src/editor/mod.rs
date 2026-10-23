@@ -4077,28 +4077,65 @@ impl Editor {
             }
         };
         let (whole, len) = self.haystack(copy);
+        let hay = &whole[..len];
         let text = self.text(copy);
         let backward = backward != reverse;
-        for _ in 0..times.max(1) {
-            let from = text.byte_at(self.cursor.at);
-            let Some(found) = find(&whole[..len], &compiled, from, backward) else {
+        let from = text.byte_at(self.cursor.at);
+        let Some(mut found) = find(hay, &compiled, from, backward) else {
+            self.found = None;
+            self.status = Some(compiled.not_found(format!("{pattern} isn't in the file")));
+            self.fail();
+            return;
+        };
+        // A match back where it started went all the way round.
+        let mut wrapped = if backward {
+            found.start >= from
+        } else {
+            found.start <= from
+        };
+        // The rest of a count, from the matches found in one go through
+        // the text, as many times round as it takes: so no count takes
+        // longer than that, however big.
+        if times > 1 {
+            let matches = all_matches(hay, &compiled);
+            if compiled.gave_up() {
                 self.found = None;
                 self.status = Some(compiled.not_found(format!("{pattern} isn't in the file")));
                 self.fail();
                 return;
-            };
-            // The last character's first byte.
-            let last = (whole[..found.end].char_indices().next_back())
-                .map_or(found.start, |(at, _)| at)
-                .max(found.start);
-            self.found = Some((text.point_of(found.start), text.point_of(last)));
-            self.cursor = Cursor::new(text.point_of(found.start));
-            // A match back where it started went all the way round.
-            if !backward && found.start <= from {
-                self.status = Some(vim::WRAPPED_TO_TOP.into());
-            } else if backward && found.start >= from {
-                self.status = Some(vim::WRAPPED_TO_BOTTOM.into());
             }
+            let count = matches.len().max(1);
+            let index = (matches.iter())
+                .position(|other| other.start >= found.start)
+                .unwrap_or(0);
+            let steps = (times - 1) % count;
+            let laps = (times - 1) / count;
+            let to = if backward {
+                wrapped |= laps > 0 || steps > index;
+                (index + count - steps) % count
+            } else {
+                wrapped |= laps > 0 || index + steps >= count;
+                (index + steps) % count
+            };
+            if let Some(&there) = matches.get(to) {
+                found = there;
+            }
+        }
+        // The last character's first byte.
+        let last = (whole[..found.end].char_indices().next_back())
+            .map_or(found.start, |(at, _)| at)
+            .max(found.start);
+        self.found = Some((text.point_of(found.start), text.point_of(last)));
+        self.cursor = Cursor::new(text.point_of(found.start));
+        if wrapped {
+            self.status = Some(
+                if backward {
+                    vim::WRAPPED_TO_BOTTOM
+                } else {
+                    vim::WRAPPED_TO_TOP
+                }
+                .into(),
+            );
         }
     }
 
@@ -6321,6 +6358,24 @@ fn columns(options: &Options) -> Vec<usize> {
 
 /// Where `pattern` next matches in `text` after byte `from`, or before it
 /// if `backward`, going round the ends.
+/// Every match of `pattern` in `text`, in order, each going on from the
+/// end of the one before, or a character on past an empty one.
+fn all_matches(text: &str, pattern: &Pattern) -> Vec<pattern::Found> {
+    let mut matches = Vec::new();
+    let mut at = 0;
+    while at <= text.len()
+        && let Some(found) = pattern.find_at(text, at)
+    {
+        matches.push(found);
+        at = if found.end > found.start {
+            found.end
+        } else {
+            found.end + text[found.end..].chars().next().map_or(1, char::len_utf8)
+        };
+    }
+    matches
+}
+
 fn find(text: &str, pattern: &Pattern, from: usize, backward: bool) -> Option<pattern::Found> {
     if !backward {
         let after = from
