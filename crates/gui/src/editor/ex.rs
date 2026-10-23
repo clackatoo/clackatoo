@@ -1351,8 +1351,8 @@ impl Editor {
     // --- Case ---------------------------------------------------------------
 
     /// Changes the case of the text from byte `start` to `end`, as
-    /// `recase` says, as one edit from `start` to the last character that
-    /// changes: its undo goes back to `start`, and marks after stay put.
+    /// `recase` says, as one edit of only what changes, so marks in the
+    /// rest stay put.
     pub(super) fn recase(
         &mut self,
         start: usize,
@@ -1366,17 +1366,22 @@ impl Editor {
         // Each character stays one, so the two go character by character.
         let pairs: Vec<((usize, char), (usize, char))> =
             was.char_indices().zip(now.char_indices()).collect();
-        let Some(last) = pairs.iter().rposition(|((_, a), (_, b))| a != b) else {
+        let Some(first) = pairs.iter().position(|((_, a), (_, b))| a != b) else {
             return;
         };
+        let last = pairs
+            .iter()
+            .rposition(|((_, a), (_, b))| a != b)
+            .unwrap_or(first);
+        let ((was_start, _), (now_start, _)) = pairs[first];
         let ((was_last, was_char), (now_last, now_char)) = pairs[last];
-        let removed = &was[..was_last + was_char.len_utf8()];
-        let inserted = &now[..now_last + now_char.len_utf8()];
+        let removed = &was[was_start..was_last + was_char.len_utf8()];
+        let inserted = &now[now_start..now_last + now_char.len_utf8()];
         let mut edit = Edit::new();
-        edit.retain(start)
+        edit.retain(start + was_start)
             .delete(removed)
             .insert(inserted)
-            .retain(len - (start + removed.len()));
+            .retain(len - (start + was_start + removed.len()));
         self.make(edit, copy);
     }
 }

@@ -1400,19 +1400,6 @@ fn a_count_of_searches_goes_a_match_at_a_time_not_through_them_all() {
 }
 
 #[test]
-fn an_undo_of_a_case_change_goes_back_to_where_it_acted() {
-    // As the release's did, and Vim's: not to the first letter changed.
-    let at = |text: &str, from, keys| in_cells(text, from, keys).1;
-    assert_eq!(at("  \"z z\"  \n\"x\"\n  {\n", (2, 0), "2gU0u"), (2, 0));
-    assert_eq!(at("{ }\n\t\"a\tb\"  x\n[x]\n", (3, 0), "3g~0u"), (3, 0));
-    assert_eq!(at("  (\nf(a, (b), c)\n", (2, 9), "gU2iwu"), (2, 9));
-    assert_eq!(
-        at("  \ne\t\n  (\n\tx y\n\t\n  d e\n", (2, 1), "5gU2Wu"),
-        (2, 1)
-    );
-}
-
-#[test]
 fn an_undo_of_a_line_opened_above_and_typed_on_goes_to_the_line_after() {
     // As the release's, which put the line in at the line's start.
     let at = |text: &str, from, keys| in_cells(text, from, keys);
@@ -1423,4 +1410,31 @@ fn an_undo_of_a_line_opened_above_and_typed_on_goes_to_the_line_after() {
     assert_eq!(at("\nabc\n\ndef\n", (3, 0), "Ox<Esc>u<C-r>").1, (3, 0));
     // `o`, as the release's, goes back to the line it opened below.
     assert_eq!(at("abc\nxy\n", (1, 1), "ox<Esc>u").1, (1, 2));
+}
+
+#[test]
+fn a_case_change_changes_only_what_it_changes() {
+    // Another window's cursor in text it leaves as it was stays.
+    let mut setup = Setup::new("    let x = Y;\n");
+    let mut other = super::super::Editor::new(clackatoo_protocol::BufferId(1), &setup.options);
+    other.resize(clackatoo_protocol::Size::new(40, 10).unwrap());
+    other.cursor = Cursor::new(Point { line: 0, col: 2 });
+    other.hold(&setup.copy);
+    setup.keys("gUU");
+    for edit in &setup.copy.take_made() {
+        other.follow_edit(edit, &setup.copy);
+    }
+    assert_eq!(setup.text(), "    LET X = Y;\n");
+    assert_eq!((other.cursor.at.line, other.cursor.at.col), (0, 2));
+    // An agent's edit to what it left as it was, then its undo, keeps the
+    // agent's edit.
+    let mut setup = Setup::new("  foo\n");
+    setup.keys("gUU");
+    let update = setup.daemon.agent_replace(0, "  ", "\t");
+    setup.editor.hold(&setup.copy);
+    let mut heard = setup.copy.update(update);
+    setup.heard_marks(&heard);
+    setup.editor.heard(&mut heard, false, &mut setup.copy);
+    setup.keys("u");
+    assert_eq!(setup.text(), "\tfoo\n");
 }
