@@ -1288,3 +1288,18 @@ fn an_undo_puts_the_cursor_where_the_change_started_as_vims_does() {
     assert_eq!(at(".\n  \n)x\n", (2, 1), "vjJu"), (2, 1));
     assert_eq!(at("abcd\nefgh\nijkl\n", (2, 2), "Vjdu"), (2, 0));
 }
+
+#[test]
+fn an_operator_that_fails_is_no_change_to_make_again() {
+    // `ge` fails at the text's start, and `.` has nothing to make.
+    assert_eq!(
+        in_cells("[x]\n", (1, 0), "gugew."),
+        ("[x]\n".into(), (1, 1))
+    );
+    assert_eq!(
+        in_cells("ab\n\t\"a\tb\"  x\n", (1, 0), "g~gej.").0,
+        "ab\n\t\"a\tb\"  x\n"
+    );
+    // The change before it still is.
+    assert_eq!(in_cells("abc\n", (1, 0), "xgugel.").0, "b\n");
+}

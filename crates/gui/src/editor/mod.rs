@@ -2168,7 +2168,10 @@ impl Editor {
             Target::Mark { mark, exact } => self.mark_span(mark, exact, copy, marks),
             _ => self.span(operator, target, count, copy),
         };
+        // Failing, it's no change for `.` to make again, as Vim's
+        // `clearopbeep()` leaves the redo buffer.
         let Some(span) = span else {
+            self.changing = None;
             return false;
         };
         self.step_cursor = Some(self.operator_start(target, &span, copy));
