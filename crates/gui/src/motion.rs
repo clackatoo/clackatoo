@@ -420,6 +420,25 @@ pub(crate) fn rows_between(from: RowAt, to: RowAt, lines: &impl Lines) -> u64 {
     (rest_of_first + between + to.row) as u64
 }
 
+/// How many screen rows `to` is below `from`, in `lines`, but no more than
+/// `most`: it lays out only the lines it passes till it's counted that
+/// many, so as many as a view's margin cost no more however far apart.
+pub(crate) fn rows_between_most(from: RowAt, to: RowAt, most: u64, lines: &impl Lines) -> u64 {
+    if to.line <= from.line {
+        return (to.row.saturating_sub(from.row) as u64).min(most);
+    }
+    let mut rows = (lines.screen_rows(from.line).len() - from.row) as u64;
+    let mut line = from.line + 1;
+    while line < to.line {
+        if rows >= most {
+            return most;
+        }
+        rows += lines.screen_rows(line).len() as u64;
+        line += 1;
+    }
+    (rows + to.row as u64).min(most)
+}
+
 /// The screen row `n` rows up from `from`, or line `first`'s first if
 /// that's sooner. Lays out only the lines it passes.
 pub(crate) fn rows_up(from: RowAt, mut n: u64, first: u64, lines: &impl Lines) -> RowAt {

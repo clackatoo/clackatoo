@@ -1536,3 +1536,31 @@ fn a_selection_kept_goes_through_only_the_changes_on_its_lines() {
     assert_eq!(setup.editor.anchor.map(|at| at.line), Some(0));
     assert_eq!(setup.cursor().0, 1999);
 }
+
+#[test]
+fn the_view_following_the_cursor_lays_out_no_more_than_it_shows() {
+    // `G` on a long file asks for the rows of the lines it shows and
+    // `scrolloff` more, not of every line from the top down to the cursor.
+    let asked = || crate::editor::text::SCREEN_ROWS.with(std::cell::Cell::get);
+    for wrap in [false, true] {
+        let mut setup = Setup::new(&"a line\n".repeat(100_000));
+        setup.set(|options| {
+            options.scrolloff = 5;
+            options.wrap = wrap;
+        });
+        setup
+            .editor
+            .resize(clackatoo_protocol::Size::new(40, 20).unwrap());
+        setup.keys("gg");
+        let before = asked();
+        setup.keys("G");
+        setup.editor.follow(&setup.copy);
+        assert!(
+            asked() - before < 200,
+            "{} lines laid out",
+            asked() - before
+        );
+        assert_eq!(setup.cursor().0, 99_999);
+        assert!(setup.editor.top.line > 99_900);
+    }
+}

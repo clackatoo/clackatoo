@@ -1151,6 +1151,8 @@ impl Lines for Text<'_> {
     }
 
     fn screen_rows(&self, line: u64) -> Rc<[ScreenRow]> {
+        #[cfg(test)]
+        SCREEN_ROWS.with(|asked| asked.set(asked.get() + 1));
         let Some((wrap, laid)) = self.wrap.and_then(|wrap| Some((wrap, self.laid(line)?))) else {
             return Rc::new([ScreenRow::WHOLE]);
         };
@@ -1607,4 +1609,10 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times a line's screen rows have been asked for.
+    pub(crate) static SCREEN_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }

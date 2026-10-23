@@ -111,8 +111,8 @@ use crate::input::KeyPress;
 use crate::keymap::Chord;
 use crate::motion::{
     Block, Class, Cursor, Exclusive, Lines, Motion, Point, Reach, RowAt, Taken, View, Words,
-    class_at, class_of, deleted_back, last_row, over_back, row_at, rows_between, rows_down,
-    rows_up,
+    class_at, class_of, deleted_back, last_row, over_back, row_at, rows_between, rows_between_most,
+    rows_down, rows_up,
 };
 use crate::objects::{Object, Selected};
 use crate::options::{Case, CompleteAccept, Options};
@@ -5271,8 +5271,9 @@ impl Editor {
         let end = self.view_end(&text);
         let cursor = row_at(self.cursor.at, &text);
         // Counted as rows shown, so a view past the text's end, as a page
-        // can leave it, comes back for them too.
-        if cursor < top || rows_between(top, cursor, &text) < margin {
+        // can leave it, comes back for them too; no more than the margin,
+        // however far down the cursor is.
+        if cursor < top || rows_between_most(top, cursor, margin, &text) < margin {
             self.top = Top::of(rows_up(cursor, margin, 0, &text), &text);
         } else {
             // Not so far as to show past the file's end, unless the cursor
