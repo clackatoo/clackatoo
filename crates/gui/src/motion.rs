@@ -638,9 +638,16 @@ impl Motion {
         let once = count.is_none_or(|count| count == 1);
         match self {
             // `dt)` with `)` right after the cursor takes the character
-            // it's on, as Vim's.
-            Self::Find { .. } if from == to && once && self.found_in_place(from, lines) => {
-                Some(Reach::Inclusive)
+            // it's on, as Vim's, and `dT(` with `(` right before nothing,
+            // without failing.
+            Self::Find { forward, .. }
+                if from == to && once && self.found_in_place(from, lines) =>
+            {
+                Some(if forward {
+                    Reach::Inclusive
+                } else {
+                    Reach::Exclusive
+                })
             }
             // `50%` takes whole lines, as Vim's, the cursor's own too.
             Self::Match if count.is_some_and(|percent| percent <= 100) => Some(Reach::Lines),
@@ -683,12 +690,13 @@ impl Motion {
         crate::objects::back_fails(lines, from, kind, count.unwrap_or(1))
     }
 
-    /// Whether it's `t` finding its character right after `at`, so going
-    /// nowhere without failing, as Vim's `t)` does with `)` next.
+    /// Whether it's `t` finding its character right after `at`, or `T`
+    /// right before, so going nowhere without failing, as Vim's `t)` does
+    /// with `)` next.
     pub(crate) fn found_in_place(self, at: Point, lines: &impl Lines) -> bool {
         let Self::Find {
             ch,
-            forward: true,
+            forward,
             till: true,
             again,
         } = self
@@ -696,7 +704,7 @@ impl Motion {
             return false;
         };
         let row = lines.row(at.line);
-        find_char(row.as_deref(), at.col, (ch, true, true), 1, again) == Some(at.col)
+        find_char(row.as_deref(), at.col, (ch, forward, true), 1, again) == Some(at.col)
     }
 
     pub(crate) fn reach(self) -> Reach {

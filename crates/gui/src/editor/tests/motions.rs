@@ -1316,3 +1316,13 @@ fn i_and_a_in_visual_mode_are_changes_dot_makes_again() {
         "Zabc def\nZghi jkl\nmno\n"
     );
 }
+
+#[test]
+fn t_back_with_its_character_just_before_goes_nowhere_without_failing() {
+    // As Vim's `T(` with `(` just before: an empty change, but one `.`
+    // makes again.
+    let text = "\t(p q)\t\n";
+    assert_eq!(in_cells(text, (1, 5), "dT("), (text.into(), (1, 5)));
+    assert_eq!(in_cells(text, (1, 5), "g~T(w.").0, "\t(P q)\t\n");
+    assert_eq!(in_cells(text, (1, 5), "dT(w.").0, "\t(q)\t\n");
+}
