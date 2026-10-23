@@ -478,22 +478,26 @@ impl Selections {
         text: &Rope,
         reversed: bool,
     ) {
-        if let Some((before, _)) = texts.first() {
-            self.remember(before);
-        }
+        // As each edit starts, as Vim keeps it with the step it starts; so
+        // a redo finds it as its undo started.
+        let remembered = texts
+            .first()
+            .map(|(before, _)| self.remember(before))
+            .is_some();
         for selected in [&mut self.last, &mut self.before].into_iter().flatten() {
             selected.edited(edits, texts);
             selected.settle(text);
         }
+        // Not as this one started, which may be the same text, as after
+        // `:m` swaps two lines alike.
         if reversed {
-            let kept = (self.seen.iter().rev())
+            let kept = (self.seen.iter().rev().skip(usize::from(remembered)))
                 .find(|(seen, _)| seen.len_bytes() == text.len_bytes() && seen == text)
                 .and_then(|(_, selected)| selected.clone());
             if let Some(kept) = kept {
                 self.last = Some(kept);
             }
         }
-        self.remember(text);
     }
 
     /// Notes the last selection as it is in `text`.

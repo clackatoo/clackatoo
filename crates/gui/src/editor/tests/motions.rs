@@ -1247,3 +1247,20 @@ fn a_line_opened_below_an_empty_first_line_leaves_the_selection_on_it() {
         (1, 0)
     );
 }
+
+#[test]
+fn an_undo_puts_back_the_selection_from_before_what_it_undoes_not_after() {
+    // `:m0` swaps two lines alike, which changes no text but swaps the
+    // selection's ends; its undo swaps them back, as Vim's `uh_visual`.
+    let mut setup = Setup::new("    defg\n    defg\n  de\nabc\n");
+    setup.set(|options| options.startofline = false);
+    setup.editor.cursor = Cursor::new(Point { line: 0, col: 2 });
+    setup.keys("vj<Esc>");
+    let _ = setup
+        .editor
+        .ex("m0", &mut setup.copy, &mut setup.shared, false);
+    setup.follow_marks();
+    setup.serve();
+    setup.keys("u$gvo");
+    assert_eq!(setup.cursor(), (0, 2));
+}
