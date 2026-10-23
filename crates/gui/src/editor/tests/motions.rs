@@ -1235,3 +1235,15 @@ fn lines_put_and_opened_above_are_put_above() {
         (3, 2)
     );
 }
+
+#[test]
+fn a_line_opened_below_an_empty_first_line_leaves_the_selection_on_it() {
+    // `o` on an empty first line puts a line break at the text's start,
+    // which is that line's end: the end on it stays.
+    let text = "\n  éa\nxyzw\n";
+    assert_eq!(in_cells(text, (2, 1), "vk<Esc>o<Esc>gv").1, (1, 0));
+    assert_eq!(
+        in_cells(text, (2, 1), "vk<Esc>onew<Esc>Onew<Esc>Jgv").1,
+        (1, 0)
+    );
+}

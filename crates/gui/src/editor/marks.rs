@@ -399,14 +399,16 @@ fn end_changed(end: &mut FilePlace, (at, removed, put): (usize, &str, &str), bef
         end.line = line + breaks - (last - first);
         return;
     }
-    // Whole lines put in at its line's start, as `P` and `O` put them
-    // above the first line, take it down with its line. A line broken
-    // there, as Enter breaks it, starts with the break, and leaves it on
-    // its line, as Vim's `open_line()` does; and lines the editor puts
-    // after a line start with the break at that line's end (see
-    // `Editor::put_register`). At the text's very start a break alone is
-    // taken as a line put above.
-    let above = !put.starts_with('\n') || (at == 0 && put == "\n");
+    // Whole lines put in at its line's start, as `p`, `P` and `O` put
+    // them, take it down with its line. A line broken there, as Enter
+    // breaks it, starts with the break, and leaves it on its line, as
+    // Vim's `open_line()` does; empty lines the editor puts start with the
+    // break at the end of the line before (see `Editor::put_register`). At
+    // the text's very start, before a line that isn't empty, a break alone
+    // is taken as a line put above, as `O` puts it there; after an empty
+    // first line, as `o` and `p` put one, it's that line's end.
+    let first_empty = before.bytes().next().is_none_or(|byte| byte == b'\n');
+    let above = !put.starts_with('\n') || (at == 0 && put == "\n" && !first_empty);
     if at_col == 0 && removed.is_empty() && put.ends_with('\n') && above {
         end.line = line + breaks;
         return;
