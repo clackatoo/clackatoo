@@ -1451,6 +1451,20 @@ fn a_count_of_searches_goes_where_as_many_n_go() {
             "/x\\nx<CR>ggj2n",
             "/x\\nx<CR>ggjnn",
         ),
+        (
+            "x\nx\nx\nx\nx\n",
+            (1, 0),
+            "/x\\nx<CR>ggj3N",
+            "/x\\nx<CR>ggjNNN",
+        ),
+        ("ab ab ab\n", (1, 0), "/b<CR>5N", "/b<CR>NNNNN"),
+        ("a\nb\nc\n", (1, 0), "/$<CR>2N", "/$<CR>NN"),
+        (
+            "a\n\n\n\nb\n",
+            (1, 0),
+            "/\\n\\n<CR>ggjj2N",
+            "/\\n\\n<CR>ggjjNN",
+        ),
     ] {
         assert_eq!(
             at(text, from, counted),
