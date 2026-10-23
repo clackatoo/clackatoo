@@ -6232,13 +6232,15 @@ fn empty_lines_above(text: &Text<'_>, line: u64, breaks: &str) -> (Edit, usize) 
     (Edit::replace(len, at, "\n", &format!("\n{breaks}")), at + 1)
 }
 
-/// Whether a change that takes `taken` and puts `put`, both from a line
-/// break at a line's end, is one of empty lines put in or taken away
-/// after it (see [`empty_lines_above`]): an undo or a redo of it puts the
+/// Whether a change that takes `taken` and puts `put` is one of empty
+/// lines put in or taken away after a line break, which it takes and puts
+/// back (see [`empty_lines_above`]): an undo or a redo of it puts the
 /// cursor at the start of the line after, as Vim's goes to the lines it
 /// changed.
 fn rewrites_break(taken: &str, put: &str) -> bool {
-    taken.starts_with('\n') && put.starts_with('\n')
+    let breaks = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte == b'\n');
+    (taken == "\n" && put.len() > 1 && breaks(put))
+        || (put == "\n" && taken.len() > 1 && breaks(taken))
 }
 
 fn whole_lines_deleted(text: &Text<'_>, span: Span) -> Span {

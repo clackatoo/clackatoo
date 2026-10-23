@@ -1398,3 +1398,16 @@ fn a_count_of_searches_goes_a_match_at_a_time_not_through_them_all() {
     assert_eq!(in_cells("a x a x a x\n", (1, 0), "/x<CR>2n").1, (1, 10));
     assert_eq!(in_cells("a x a x a x\n", (1, 10), "?x<CR>2n").1, (1, 10));
 }
+
+#[test]
+fn an_undo_of_a_case_change_goes_back_to_where_it_acted() {
+    // As the release's did, and Vim's: not to the first letter changed.
+    let at = |text: &str, from, keys| in_cells(text, from, keys).1;
+    assert_eq!(at("  \"z z\"  \n\"x\"\n  {\n", (2, 0), "2gU0u"), (2, 0));
+    assert_eq!(at("{ }\n\t\"a\tb\"  x\n[x]\n", (3, 0), "3g~0u"), (3, 0));
+    assert_eq!(at("  (\nf(a, (b), c)\n", (2, 9), "gU2iwu"), (2, 9));
+    assert_eq!(
+        at("  \ne\t\n  (\n\tx y\n\t\n  d e\n", (2, 1), "5gU2Wu"),
+        (2, 1)
+    );
+}
