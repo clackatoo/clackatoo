@@ -56,6 +56,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
@@ -520,11 +522,18 @@ pub(crate) struct Writer {
 impl Writer {
     /// Starts the thread writing the file at `path`, waiting before each
     /// write for there to be a file at `gate`, if there's one, for tests.
+    /// A write that fails sets `failed`, and calls `notify`, for what was
+    /// to be written to be sent again.
     ///
     /// # Errors
     ///
     /// If the thread can't start.
-    pub(crate) fn start(path: PathBuf, gate: Option<PathBuf>) -> io::Result<Self> {
+    pub(crate) fn start(
+        path: PathBuf,
+        gate: Option<PathBuf>,
+        failed: Arc<AtomicBool>,
+        notify: impl Fn() + Send + 'static,
+    ) -> io::Result<Self> {
         let (states, receive) = mpsc::channel::<State>();
         let (stop, stopped) = mpsc::channel();
         std::thread::Builder::new()
@@ -541,6 +550,8 @@ impl Writer {
                             "the workspaces couldn't be kept in {}: {err}",
                             path.display()
                         );
+                        failed.store(true, Ordering::Release);
+                        notify();
                     }
                 }
                 let _ = stop.send(());
@@ -934,7 +945,8 @@ mod tests {
         let left = with_suffix(&path, ".new");
         let elsewhere = dir.path().join("elsewhere");
         std::os::unix::fs::symlink(&elsewhere, &left).unwrap();
-        let writer = Writer::start(path.clone(), None).unwrap();
+        let failed = Arc::new(AtomicBool::new(false));
+        let writer = Writer::start(path.clone(), None, Arc::clone(&failed), || {}).unwrap();
         let mut state = state();
         writer.write(state.clone());
         state.active = Some(1);
@@ -946,7 +958,9 @@ mod tests {
         assert!(!with_suffix(&path, ".new").exists());
         assert!(!elsewhere.exists());
         drop(lock);
-        assert!(super::lock(&path, Duration::ZERO).is_ok());
+        // Taken as a daemon takes it, waiting a moment for a copy a
+        // program another test's thread is starting took.
+        assert!(super::lock(&path, LOCK_PATIENCE).is_ok());
         // A folder already there is left as it is, but for clackatoo's
         // own, tightened as the daemon starts; what was read is copied
         // aside.

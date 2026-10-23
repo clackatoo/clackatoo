@@ -1013,22 +1013,20 @@ impl Daemon {
         }
         let listener = UnixListener::bind(socket_path)?;
         log::info!("listening on {}", socket_path.display());
-        let mut daemon = Self::listening(listener, config, true, None)?;
+        let mut daemon = Self::listening(listener, config, None)?;
         // What the daemons before it kept of buffers' changes not saved.
         daemon.start_recovery(None);
         Ok(daemon)
     }
 
-    /// A daemon with no terminals, listening on `listener`: starting
-    /// afresh, it waits a moment for the lock on the workspaces it keeps
-    /// if it's held (see [`saved::lock`](crate::saved::lock)). It's the
-    /// machine `machine`, handed over by the build before, or else the one
-    /// its config keeps.
+    /// A daemon with no terminals, listening on `listener`: it waits a
+    /// moment for the lock on the workspaces it keeps if it's held (see
+    /// [`saved::lock`](crate::saved::lock)). It's the machine `machine`,
+    /// handed over by the build before, or else the one its config keeps.
     #[allow(clippy::too_many_lines, reason = "a field each")]
     fn listening(
         mut listener: UnixListener,
         config: DaemonConfig,
-        afresh: bool,
         machine: Option<crate::machine::Handed>,
     ) -> io::Result<Self> {
         let poll = Poll::new()?;
@@ -1050,7 +1048,7 @@ impl Daemon {
             })
         };
         let boards = boards::BoardState::start(config.boards.clone(), &waker);
-        let keeping = restore::Keeping::new(&config, afresh);
+        let keeping = restore::Keeping::new(&config);
         // Chosen afresh, unless the build before hands its own over.
         let id = crate::client::random_window();
         let (machine, signer) = crate::machine::identity(
@@ -1163,7 +1161,7 @@ impl Daemon {
         let listener = std::os::unix::net::UnixListener::from(fds.take(state.listener)?);
         let machine =
             (state.machine).map(|id| (MachineId(id), state.key.map(crate::machine::Seed)));
-        let mut daemon = Self::listening(UnixListener::from_std(listener), config, false, machine)?;
+        let mut daemon = Self::listening(UnixListener::from_std(listener), config, machine)?;
         daemon.next_id = state.next_terminal;
         daemon.workspaces =
             WorkspaceState::resume(&state.workspaces, &state.lent).unwrap_or_else(|err| {
@@ -1173,6 +1171,9 @@ impl Daemon {
         daemon.workspaces.set_home(&daemon.config.home);
         daemon.workspaces.resume_background(&state.background);
         daemon.workspaces.resume_kept(&state.kept);
+        if let Some(restored) = &state.restored {
+            daemon.workspaces.resume_restored(restored);
+        }
         daemon.resume_machines(state);
 
         for terminal in &state.terminals {
@@ -1254,6 +1255,12 @@ impl Daemon {
             });
         daemon.start_recovery(lock);
         daemon.keep_places_kept();
+        // A build that couldn't hand its offers over kept them: after the
+        // terminals, and what their shells are known to have run. One that
+        // could has, even if it had none, and nothing is taken.
+        if state.restored.is_none() {
+            daemon.offers_kept();
+        }
         // The keys it knew other machines by, and the connections it had,
         // made again.
         for known in &state.keys {
@@ -1440,6 +1447,7 @@ impl Daemon {
                 lent,
                 background: self.workspaces.hand_over_background(),
                 kept: self.hand_over_kept(),
+                restored: Some(self.workspaces.hand_over_restored()),
                 borrowers,
                 lenders,
                 sharing,

@@ -357,6 +357,25 @@ impl HostedTerminal {
         front.is_some_and(|front| front.as_raw_nonzero().get().cast_unsigned() == self.pid)
     }
 
+    /// When the terminal's own program started, as the kernel says, to
+    /// the second or so: its start, in clock ticks after the machine
+    /// booted, which Linux counts 100 to the second whatever its own tick
+    /// (`USER_HZ`), and the boot, to the second. `None` if it's gone.
+    pub(crate) fn started_at(&self) -> Option<std::time::SystemTime> {
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", self.pid)).ok()?;
+        // After the command's name, in brackets, which may hold anything:
+        // the state is the 3rd field, the start the 22nd.
+        let fields = stat.rsplit_once(')')?.1;
+        let ticks: u64 = fields.split_whitespace().nth(19)?.parse().ok()?;
+        let boot: u64 = (std::fs::read_to_string("/proc/stat").ok()?.lines())
+            .find_map(|line| line.strip_prefix("btime "))?
+            .trim()
+            .parse()
+            .ok()?;
+        let since_boot = std::time::Duration::from_millis(ticks.checked_mul(10)?);
+        std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(boot) + since_boot)
+    }
+
     /// The directory the terminal's own program is in: for a shell, where
     /// it last changed to, whatever runs in front of it.
     pub(crate) fn own_directory(&self) -> Option<String> {

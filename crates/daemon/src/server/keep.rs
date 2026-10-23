@@ -665,7 +665,7 @@ fn runs_clackatoo(command: &str) -> bool {
 mod tests {
     use std::path::Path;
 
-    use clackatoo_protocol::{BackgroundAction, NewTerminal, Size};
+    use clackatoo_protocol::{BackgroundAction, NewTerminal, Size, WorkspaceId};
     use mio::Token;
 
     use super::*;
@@ -783,6 +783,215 @@ mod tests {
                 .and_then(|restored| restored.ran.clone()),
             Some("trail serve".to_owned())
         );
+    }
+
+    /// An offer to run a command again, made as the daemon started
+    /// afresh, is still open after an upgrade, which makes none of its
+    /// own: as after jack's desktop lost power, and the build that showed
+    /// its offers through `:connect` was deployed (CLACKA-131).
+    #[test]
+    fn an_offer_still_open_outlasts_an_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _, pane) = kept_daemon(dir.path());
+        daemon
+            .workspaces
+            .offer_again(pane, "claude --resume".to_owned());
+        let resumed = upgraded(daemon);
+        assert_eq!(
+            (resumed.workspaces.restored(pane)).and_then(|restored| restored.ran.as_deref()),
+            Some("claude --resume")
+        );
+    }
+
+    /// A daemon in `dir`, keeping its workspaces in `dir/workspaces`, and
+    /// writing them only while there's a file `dir/gate`, which there is.
+    fn keeping_daemon(dir: &Path) -> Daemon {
+        let (mut daemon, _) = daemon_with_chat(dir);
+        let mut config = daemon.config.clone();
+        config.workspaces = Some(dir.join("workspaces"));
+        config.keep_gate = Some(dir.join("gate"));
+        std::fs::write(dir.join("gate"), "").unwrap();
+        daemon.keeping = crate::server::restore::Keeping::new(&config);
+        daemon.config = config;
+        daemon
+    }
+
+    /// A new terminal running `cat`, as a shell that has run nothing yet,
+    /// in a new tab of `workspace`, or a new workspace: its terminal and
+    /// pane.
+    fn cat_in(daemon: &mut Daemon, workspace: Option<WorkspaceId>) -> (TerminalId, PaneId) {
+        let request = NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(vec!["cat".into()]),
+            cwd: None,
+            record_to: None,
+        };
+        let terminal = daemon.new_terminal(&request).unwrap();
+        let pane = if let Some(workspace) = workspace {
+            daemon.workspaces.new_tab(workspace, terminal)
+        } else {
+            let name = daemon.workspaces.name_for_new(None).unwrap();
+            daemon.workspaces.new_workspace(name, terminal)
+        };
+        (terminal, pane)
+    }
+
+    /// Writes the workspaces of `daemon`, in `dir`, and waits until they
+    /// say `what`.
+    fn written(daemon: &mut Daemon, dir: &Path, what: &str) {
+        daemon.keep();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !(std::fs::read_to_string(dir.join("workspaces")))
+            .is_ok_and(|kept| kept.contains(what))
+        {
+            assert!(Instant::now() < deadline, "{what} never written");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// `daemon`, in `dir`, handed over to the next build with its last
+    /// write stalled, as one that fails or doesn't finish in time, so the
+    /// workspaces kept are as they last were written: by a build of
+    /// handover version 26 or before, which hands over no offers, if
+    /// `old`. The writes stay stalled.
+    fn stalled_upgrade(daemon: Daemon, dir: &Path, old: bool) -> Daemon {
+        std::fs::remove_file(dir.join("gate")).unwrap();
+        let config = daemon.config.clone();
+        let mut daemon = daemon;
+        let mut handover = daemon.hand_over(Instant::now()).unwrap();
+        drop(daemon);
+        if old {
+            handover.state.restored = None;
+        }
+        Daemon::resume(handover, config).unwrap()
+    }
+
+    /// The offers `daemon` makes, by pane.
+    fn offers(daemon: &Daemon) -> Vec<(PaneId, Option<&str>)> {
+        (daemon.workspaces.get().restored.iter())
+            .map(|restored| (restored.pane, restored.ran.as_deref()))
+            .collect()
+    }
+
+    /// A build of handover version 26 or before, as jack's desktop runs,
+    /// hands over no offers: those still open are taken from the
+    /// workspaces it kept as it handed over, and only those, so deploying
+    /// the build that shows them through `:connect` doesn't lose them
+    /// (CLACKA-131).
+    #[test]
+    fn an_offer_a_build_before_handed_over_none_of_is_taken_from_the_workspaces_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = keeping_daemon(dir.path());
+        let (_, pane) = cat_in(&mut daemon, None);
+        let workspace = daemon.workspaces.get().list[0].id;
+        // One whose shell runs a command now, which is written as what it
+        // ran, and isn't an offer.
+        let (running, busy) = cat_in(&mut daemon, Some(workspace));
+        runs(&mut daemon, running, "sleep%2060");
+        daemon
+            .workspaces
+            .offer_again(pane, "claude --resume".to_owned());
+        let config = daemon.config.clone();
+        let mut handover = daemon.hand_over(Instant::now()).unwrap();
+        drop(daemon);
+        let kept = std::fs::read_to_string(dir.path().join("workspaces")).unwrap();
+        assert!(kept.contains("\"ran\": \"sleep 60\""), "{kept}");
+        // As a build of version 26 hands over.
+        handover.state.restored = None;
+        let resumed = Daemon::resume(handover, config).unwrap();
+        assert_eq!(offers(&resumed), [(pane, Some("claude --resume"))]);
+        assert!(resumed.workspaces.restored(busy).is_none());
+    }
+
+    /// A command that ran, and ended, after the workspaces were last
+    /// written, is never offered after an upgrade: from a build that
+    /// handed its offers over, nothing is taken from the file; from one
+    /// before, a shell that has run a command since it started can't have
+    /// an offer open (CLACKA-131).
+    #[test]
+    fn a_command_ended_since_the_last_write_is_never_offered_after_an_upgrade() {
+        for old in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut daemon = keeping_daemon(dir.path());
+            let (terminal, _) = cat_in(&mut daemon, None);
+            runs(&mut daemon, terminal, "sleep%2060");
+            written(&mut daemon, dir.path(), "\"ran\": \"sleep 60\"");
+            prints(&mut daemon, terminal, b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+            let resumed = stalled_upgrade(daemon, dir.path(), old);
+            assert_eq!(offers(&resumed), [], "from an old build: {old}");
+        }
+    }
+
+    /// A command a closed tab was running, written before it closed and a
+    /// new tab opened, is never offered in another pane after an upgrade:
+    /// from a build before, the file is older than a terminal of the
+    /// workspaces handed over (CLACKA-131).
+    #[test]
+    fn a_command_of_a_tab_closed_since_the_last_write_is_never_offered_elsewhere() {
+        for old in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut daemon = keeping_daemon(dir.path());
+            let (deploying, closed) = cat_in(&mut daemon, None);
+            let workspace = daemon.workspaces.get().list[0].id;
+            runs(&mut daemon, deploying, "make%20deploy");
+            cat_in(&mut daemon, Some(workspace));
+            written(&mut daemon, dir.path(), "\"ran\": \"make deploy\"");
+            // Written a while ago, as nothing changed since, until now.
+            let kept = std::fs::File::options()
+                .write(true)
+                .open(dir.path().join("workspaces"))
+                .unwrap();
+            let ago = std::time::SystemTime::now() - Duration::from_mins(1);
+            kept.set_modified(ago).unwrap();
+            daemon.workspaces.remove_pane(closed);
+            cat_in(&mut daemon, Some(workspace));
+            let resumed = stalled_upgrade(daemon, dir.path(), old);
+            assert_eq!(offers(&resumed), [], "from an old build: {old}");
+        }
+    }
+
+    /// A command a tab was running, written before the tabs were moved
+    /// about, is never offered in the tab now where it was: from a build
+    /// before, a file that differs from the workspaces handed over in any
+    /// other way than offers is older than them (CLACKA-131).
+    #[test]
+    fn a_command_of_a_tab_moved_since_the_last_write_is_never_offered_elsewhere() {
+        for old in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut daemon = keeping_daemon(dir.path());
+            let (deploying, moved) = cat_in(&mut daemon, None);
+            let workspace = daemon.workspaces.get().list[0].id;
+            runs(&mut daemon, deploying, "make%20deploy");
+            cat_in(&mut daemon, Some(workspace));
+            written(&mut daemon, dir.path(), "\"ran\": \"make deploy\"");
+            // To the background and back, it's the last tab now.
+            let tab = daemon.workspaces.get().find_pane(moved).unwrap().1.id;
+            let token = Token(usize::MAX);
+            (daemon.serve_background(token, &BackgroundAction::Tab { tab })).unwrap();
+            (daemon.serve_background(token, &BackgroundAction::Bring { tab })).unwrap();
+            let tabs = &daemon.workspaces.get().list[0].tabs;
+            assert_eq!(tabs[1].layout.panes()[0].id, moved);
+            let resumed = stalled_upgrade(daemon, dir.path(), old);
+            assert_eq!(offers(&resumed), [], "from an old build: {old}");
+        }
+    }
+
+    /// An offer dismissed after the workspaces were last written doesn't
+    /// come back after an upgrade from a build that hands its offers over
+    /// (CLACKA-131). One from a build before can't tell, should its last
+    /// writes have failed.
+    #[test]
+    fn an_offer_dismissed_since_the_last_write_stays_dismissed_after_an_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = keeping_daemon(dir.path());
+        let (_, pane) = cat_in(&mut daemon, None);
+        daemon
+            .workspaces
+            .offer_again(pane, "claude --resume".to_owned());
+        written(&mut daemon, dir.path(), "\"ran\": \"claude --resume\"");
+        daemon.serve_dismiss(pane);
+        let resumed = stalled_upgrade(daemon, dir.path(), false);
+        assert_eq!(offers(&resumed), []);
     }
 
     #[test]

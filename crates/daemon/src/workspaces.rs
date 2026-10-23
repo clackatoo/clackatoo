@@ -1178,6 +1178,37 @@ impl WorkspaceState {
         self.workspaces.restored = restored;
     }
 
+    /// What panes made again as the daemon started still have to show for
+    /// it, for the next build: an offer still open stays open through an
+    /// upgrade.
+    pub(crate) fn hand_over_restored(&self) -> Vec<handover::Restored> {
+        (self.workspaces.restored.iter())
+            .map(|restored| handover::Restored {
+                pane: restored.pane.0,
+                ran: restored.ran.clone(),
+                place: (restored.place).map(|place| (place.line, place.column, place.top)),
+            })
+            .collect()
+    }
+
+    /// Takes what panes made again still had to show from the last build,
+    /// which handed it over, forgetting what's no longer for what they
+    /// show.
+    pub(crate) fn resume_restored(&mut self, handed: &[handover::Restored]) {
+        self.workspaces.restored = (handed.iter())
+            .map(|restored| Restored {
+                pane: PaneId(restored.pane),
+                ran: restored.ran.clone(),
+                place: (restored.place).map(|(line, column, top)| clackatoo_protocol::Place {
+                    line,
+                    column,
+                    top,
+                }),
+            })
+            .collect();
+        self.sweep_restored();
+    }
+
     /// What `pane`, made again as the daemon started, still has to show
     /// for it, if anything.
     pub(crate) fn restored(&self, pane: PaneId) -> Option<&Restored> {

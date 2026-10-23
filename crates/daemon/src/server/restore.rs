@@ -30,6 +30,8 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
@@ -49,6 +51,10 @@ use crate::workspaces::Borrowed;
 /// a burst of changes, such as a layout being made, is written once, and
 /// they're written at most this often.
 pub(super) const KEEP_AFTER: Duration = Duration::from_secs(1);
+
+/// How long after a write fails the workspaces are written again, changed
+/// or not.
+const KEEP_AGAIN: Duration = Duration::from_secs(10);
 
 /// How long the daemon waits, as it stops or upgrades, for the workspaces
 /// to be written.
@@ -77,11 +83,14 @@ pub(super) struct Keeping {
     /// When they're next written, as something kept has changed since
     /// they last were.
     due: Option<Instant>,
-    /// What was last written, so the same isn't written again: at first,
-    /// no workspaces.
+    /// What was last written, or is being, so the same isn't written
+    /// again: at first, no workspaces; `None` once a write has failed, so
+    /// what's there now is written, changed or not.
     last: Option<State>,
     /// The thread writing them, started with the first write.
     writer: Option<saved::Writer>,
+    /// Set by the writer's thread when a write fails.
+    failed: Arc<AtomicBool>,
     /// For tests: a file the thread waits for before each write (see
     /// [`DaemonConfig::keep_gate`](crate::DaemonConfig::keep_gate)).
     gate: Option<PathBuf>,
@@ -98,18 +107,17 @@ type Shell = (Option<String>, Option<(u32, bool)>);
 
 impl Keeping {
     /// Keeping in the file `config` says, if this daemon is the only one
-    /// doing so (see [`saved::lock`]), or else nothing. Starting `afresh`,
-    /// it waits a moment for the lock, if it's held; carrying on from an
-    /// upgrade, the build before has let it go.
-    pub(super) fn new(config: &crate::DaemonConfig, afresh: bool) -> Self {
+    /// doing so (see [`saved::lock`]), or else nothing. It waits a moment
+    /// for the lock, if it's held: starting afresh, for a daemon that has
+    /// just stopped; carrying on from an upgrade, for a copy of the lock a
+    /// program the build before started took, until it runs its program.
+    /// Without it, the daemon would keep nothing for as long as it runs, and
+    /// take nothing from what the build before kept (CLACKA-131).
+    pub(super) fn new(config: &crate::DaemonConfig) -> Self {
         let Some(path) = config.workspaces.clone() else {
             return Self::default();
         };
-        let patience = if afresh {
-            saved::LOCK_PATIENCE
-        } else {
-            Duration::ZERO
-        };
+        let patience = saved::LOCK_PATIENCE;
         if let Some(dir) = path.parent() {
             // clackatoo's own folder is the user's alone; one they named,
             // as their home, is theirs to say.
@@ -160,26 +168,49 @@ impl Daemon {
         }
     }
 
-    /// Writes the workspaces, if it's time to.
+    /// Writes the workspaces, if it's time to: a while after a write
+    /// failed, too, whether they've changed since or not.
     pub(super) fn keep_if_due(&mut self) {
+        if self.write_failed() {
+            self.keeping.due.get_or_insert(Instant::now() + KEEP_AGAIN);
+        }
         if self.keeping.due.is_some_and(|due| due <= Instant::now()) {
             self.keeping.due = None;
             self.keep();
         }
     }
 
+    /// Whether a write has failed since this was last asked: what was
+    /// last sent to be written is then forgotten, so it's sent again.
+    fn write_failed(&mut self) -> bool {
+        let failed = self.keeping.failed.swap(false, Ordering::AcqRel);
+        if failed {
+            self.keeping.last = None;
+        }
+        failed
+    }
+
     /// Has the writer's thread write the workspaces as they are now, if
-    /// they've changed since they were last written.
-    fn keep(&mut self) {
+    /// they've changed since they were last written, or the last write
+    /// failed.
+    pub(super) fn keep(&mut self) {
         let Some(path) = self.keeping.path.clone() else {
             return;
         };
+        self.write_failed();
         let state = self.kept_state();
         if self.keeping.last.as_ref() == Some(&state) {
             return;
         }
         if self.keeping.writer.is_none() {
-            match saved::Writer::start(path, self.keeping.gate.clone()) {
+            let waker = Arc::clone(&self.waker);
+            let failed = Arc::clone(&self.keeping.failed);
+            let wake = move || {
+                if let Err(err) = waker.wake() {
+                    log::warn!("waking the event loop for a failed write failed: {err}");
+                }
+            };
+            match saved::Writer::start(path, self.keeping.gate.clone(), failed, wake) {
                 Ok(writer) => self.keeping.writer = Some(writer),
                 Err(err) => {
                     log::error!("the workspaces can't be kept: no thread to write them: {err}");
@@ -658,6 +689,162 @@ impl Daemon {
         self.unlend_unseen();
     }
 
+    /// Takes the offers to run a command again still open from the
+    /// workspaces kept, as a daemon carries on from a build that couldn't
+    /// hand them over, of handover version 26 or before, which would
+    /// otherwise lose every one, and the next write with them
+    /// (CLACKA-131). Never called after a build that could: it handed
+    /// over what it had, even none.
+    ///
+    /// That build wrote the file as it handed over, from these same
+    /// workspaces, if it could, so its panes are those written now, in
+    /// the same order. A terminal it wrote as having run a command, which
+    /// would be written now as having run none, and whose shell has run
+    /// nothing since it started, can only have had that offer open. But a
+    /// write that failed, or didn't finish in time, leaves a file older
+    /// than the workspaces it handed over, which nothing in the handover
+    /// dates; so nothing is taken from a file that differs in any other
+    /// way from what would be written now, nor from one written before
+    /// any of its terminals started. What it can't tell is an offer
+    /// dismissed since its last write, when its last writes failed.
+    pub(super) fn offers_kept(&mut self) {
+        let Some(path) = self.keeping.path.clone() else {
+            return;
+        };
+        let Ok(Some(kept)) = saved::read(&path) else {
+            return;
+        };
+        let refused = |why: &str| {
+            log::warn!("no offer to run a command again is taken from the workspaces kept: {why}");
+        };
+        let mut was = Vec::new();
+        for workspace in &kept.workspaces {
+            for tab in workspace.tabs.iter().chain(&workspace.background) {
+                saved_panes(&tab.layout, &mut was);
+            }
+        }
+        let panes = self.panes_kept();
+        if panes.len() != was.len() {
+            refused("they don't line up with those handed over");
+            return;
+        }
+        let offers: Vec<(usize, PaneId, String)> = (panes.iter().zip(&was).enumerate())
+            .filter_map(|(at, ((pane, now), was))| match (now, was) {
+                (
+                    Pane::Terminal {
+                        ran: None,
+                        keep: None,
+                        elsewhere: None,
+                        ..
+                    },
+                    Pane::Terminal {
+                        ran: Some(ran),
+                        keep: None,
+                        elsewhere: None,
+                        ..
+                    },
+                ) if self.ran_nothing(*pane) => Some((at, *pane, ran.clone())),
+                _ => None,
+            })
+            .collect();
+        if offers.is_empty() {
+            return;
+        }
+        // But for those, the file is what would be written now.
+        let mut unoffered = kept.workspaces;
+        let offered: Vec<usize> = offers.iter().map(|&(at, ..)| at).collect();
+        let mut at = 0;
+        for workspace in &mut unoffered {
+            for tab in workspace.tabs.iter_mut().chain(&mut workspace.background) {
+                unoffer(&mut tab.layout, &mut at, &offered);
+            }
+        }
+        if unoffered != self.kept_state().workspaces {
+            refused("they're older than the workspaces handed over");
+            return;
+        }
+        if self.started_since(&path, &panes) {
+            refused("they were written before a terminal of theirs started");
+            return;
+        }
+        let count = offers.len();
+        for (_, pane, ran) in offers {
+            self.workspaces.offer_again(pane, ran);
+        }
+        log::info!(
+            "{count} offers to run a command again, which the build before couldn't hand over, \
+             were taken from the workspaces kept"
+        );
+    }
+
+    /// The terminal pane `pane` shows, if it's one of this machine's.
+    fn pty_of(&self, pane: PaneId) -> Option<&crate::hosted::HostedTerminal> {
+        let workspaces = self.workspaces.get();
+        let found = (workspaces.find_pane(pane).map(|(.., found)| found)).or_else(|| {
+            workspaces
+                .find_background_pane(pane)
+                .map(|(.., found)| found)
+        });
+        let Content::Terminal(terminal) = found?.content else {
+            return None;
+        };
+        match &self.terminals.get(&terminal)?.terminal {
+            Hosted::Pty(terminal) => Some(terminal),
+            Hosted::Chat(_) => None,
+        }
+    }
+
+    /// Whether the shell of terminal pane `pane` has run nothing since it
+    /// started, as its marks say: it's at its first prompt, or has marked
+    /// none, and has said it ran no command with its secret.
+    fn ran_nothing(&self, pane: PaneId) -> bool {
+        self.pty_of(pane).is_some_and(|terminal| {
+            let emulator = terminal.emulator();
+            let first = (emulator.latest_block())
+                .is_none_or(|latest| latest == (0, Progress::Prompt))
+                && emulator.block_renumberings() == 0;
+            first && emulator.trusted_last_command().is_none()
+        })
+    }
+
+    /// Whether any terminal of `panes` started after the file at `path`
+    /// was last written, by more than the kernel's clocks can be trusted
+    /// to say: a file written since would know of it.
+    fn started_since(&self, path: &Path, panes: &[(PaneId, Pane)]) -> bool {
+        /// How far apart the file's time and a program's start may be and
+        /// not be told apart: the boot time is to the second.
+        const SLACK: Duration = Duration::from_secs(2);
+        let Ok(written) = std::fs::metadata(path).and_then(|meta| meta.modified()) else {
+            return true;
+        };
+        (panes.iter())
+            .filter_map(|&(pane, _)| self.pty_of(pane)?.started_at())
+            .any(|started| started > written + SLACK)
+    }
+
+    /// Each pane that's kept, by its ID, as it's written now, in the order
+    /// [`kept_state`](Self::kept_state) writes them: each workspace's tabs'
+    /// panes, then its background tabs', but for workspaces none of whose
+    /// tabs is kept.
+    fn panes_kept(&self) -> Vec<(PaneId, Pane)> {
+        let kept = |tab: &clackatoo_protocol::Tab| {
+            (tab.layout.panes().into_iter())
+                .filter_map(|pane| Some((pane.id, self.kept_pane(pane.id, pane.content)?)))
+                .collect::<Vec<_>>()
+        };
+        let mut panes = Vec::new();
+        for workspace in &self.workspaces.get().list {
+            let tabs: Vec<(PaneId, Pane)> = workspace.tabs.iter().flat_map(kept).collect();
+            if tabs.is_empty() {
+                continue;
+            }
+            panes.extend(tabs);
+            panes
+                .extend((workspace.background.iter()).flat_map(|background| kept(&background.tab)));
+        }
+        panes
+    }
+
     /// Takes where editors were from the workspaces kept, as a daemon
     /// carries on from an upgrade, which hands over no places: each editor
     /// of a file kept, where an editor of that file was. Windows say where
@@ -1050,6 +1237,39 @@ fn editor_places(layout: &saved::Layout, into: &mut HashMap<String, saved::Place
     }
 }
 
+/// Writes the terminals of `layout`, as kept, whose places in order,
+/// counted on from `at`, are among `offered`, as having run nothing.
+fn unoffer(layout: &mut saved::Layout, at: &mut usize, offered: &[usize]) {
+    match layout {
+        saved::Layout::Split { parts, .. } => {
+            for part in parts {
+                unoffer(part, at, offered);
+            }
+        }
+        saved::Layout::Pane(pane) => {
+            if offered.contains(at)
+                && let Pane::Terminal { ran, .. } = pane
+            {
+                *ran = None;
+            }
+            *at += 1;
+        }
+    }
+}
+
+/// The panes of `layout`, as kept, in order, from the top left, added to
+/// `into`.
+fn saved_panes<'a>(layout: &'a saved::Layout, into: &mut Vec<&'a Pane>) {
+    match layout {
+        saved::Layout::Split { parts, .. } => {
+            for part in parts {
+                saved_panes(part, into);
+            }
+        }
+        saved::Layout::Pane(pane) => into.push(pane),
+    }
+}
+
 /// Whether `bytes` are nothing but reports of a window gaining or losing
 /// the focus, `ESC [ I` and `ESC [ O`, which a program asks for.
 fn only_focus_reports(bytes: &[u8]) -> bool {
@@ -1089,7 +1309,74 @@ pub(super) fn kept_command(command: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    use clackatoo_protocol::{NewTerminal, Size};
+
     use super::kept_command;
+
+    /// A copy of the lock on the workspaces a program just started took
+    /// holds it a moment after the build before let it go: the next build,
+    /// carrying on from an upgrade, waits for it rather than keeping
+    /// nothing, and taking no offers from what was kept (CLACKA-131).
+    #[test]
+    fn keeping_waits_a_moment_for_a_lock_held_by_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let mut config = daemon.config.clone();
+        drop(daemon);
+        let path = dir.path().join("workspaces");
+        config.workspaces = Some(path.clone());
+        let held = crate::saved::lock(&path, std::time::Duration::ZERO).unwrap();
+        let letting_go = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(held);
+        });
+        let keeping = super::Keeping::new(&config);
+        letting_go.join().unwrap();
+        assert_eq!(keeping.path, Some(path));
+    }
+
+    /// A write that fails is made again, changed or not: a while later,
+    /// and as the daemon stops or upgrades, rather than taken for done
+    /// once it's sent to be written (CLACKA-131).
+    #[test]
+    fn a_write_that_failed_is_made_again_though_nothing_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let mut config = daemon.config.clone();
+        let path = dir.path().join("state/workspaces");
+        config.workspaces = Some(path.clone());
+        daemon.keeping = super::Keeping::new(&config);
+        // Where the file is written first, a folder: every write fails.
+        let blocking = dir.path().join("state/workspaces.new");
+        std::fs::create_dir(&blocking).unwrap();
+        let request = NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(vec!["cat".into()]),
+            cwd: None,
+            record_to: None,
+        };
+        let terminal = daemon.new_terminal(&request).unwrap();
+        daemon
+            .workspaces
+            .new_workspace("written".to_owned(), terminal);
+        daemon.keep();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !daemon.keeping.failed.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "the write never failed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Made again a while later.
+        daemon.keep_if_due();
+        assert!(daemon.keeping.due.is_some());
+        // Or as the daemon stops, as nothing changed meanwhile.
+        std::fs::remove_dir(&blocking).unwrap();
+        daemon.keep_last();
+        let kept = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(kept.contains("\"written\""), "{kept}");
+    }
 
     #[test]
     fn focus_reports_alone_type_nothing() {

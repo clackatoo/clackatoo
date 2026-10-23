@@ -63,6 +63,10 @@
 //!     tab bar, and the failure of each no window has said was seen.
 //! 26. The terminals the user marked to keep running, and the command
 //!     each keeps running.
+//! 27. What panes made again as the daemon last started afresh still have
+//!     to show for it: the command each terminal was running, still
+//!     offered to run again, and where each editor was. Before, an upgrade
+//!     lost every offer still open.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -75,11 +79,11 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 26;
+pub(crate) const VERSION: u32 = 27;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
     VERSION,
 ];
 
@@ -204,6 +208,25 @@ pub(crate) struct State {
     /// become another program in, as with `exec`, is still known to have
     /// no shell to type into. Since version 26; before, none was known.
     pub(crate) exes: Vec<Exe>,
+    /// What panes made again as the daemon last started afresh still have
+    /// to show for it (see
+    /// [`Workspaces::restored`](clackatoo_protocol::Workspaces::restored)).
+    /// Since version 27: `None` from a build before, which couldn't hand
+    /// them over, as distinct from one that had none to.
+    pub(crate) restored: Option<Vec<Restored>>,
+}
+
+/// What a pane made again as the daemon started still has to show for
+/// it (see [`clackatoo_protocol::Restored`]). Since version 27.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Restored {
+    /// Its pane, by its ID.
+    pub(crate) pane: u32,
+    /// The command its terminal was running, offered to run again.
+    pub(crate) ran: Option<String>,
+    /// Where its editor's cursor and view were: the cursor's line and
+    /// column, and the line at the top of the view.
+    pub(crate) place: Option<(u64, u64, u64)>,
 }
 
 /// A terminal the user marked to keep running (see
@@ -970,8 +993,90 @@ impl State {
             23 => Ok(postcard::from_bytes::<v23::State>(body)?.into()),
             24 => Ok(postcard::from_bytes::<v24::State>(body)?.into()),
             25 => Ok(postcard::from_bytes::<v25::State>(body)?.into()),
+            26 => Ok(postcard::from_bytes::<v26::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
+        }
+    }
+}
+
+/// Version 26, as the builds that wrote it wrote it: what panes made again
+/// still had to show wasn't handed over.
+mod v26 {
+    use serde::Deserialize;
+
+    use super::{
+        Applied, Background, Borrower, Buffer, Chat, Connection, EditLog, Exe, Files, Kept, Known,
+        Lender, Lent, Process, Reviews, Sharing, Shell, Terminal, Trusted, Workspaces,
+    };
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+        edits: EditLog,
+        applied: Vec<Applied>,
+        daemon: u64,
+        reviews: Reviews,
+        recovery_lock: Option<u32>,
+        shells: Vec<Shell>,
+        machine: Option<[u8; 16]>,
+        connections: Vec<Connection>,
+        lent: Vec<Lent>,
+        borrowers: Vec<Borrower>,
+        lenders: Vec<Lender>,
+        sharing: Vec<Sharing>,
+        key: Option<[u8; 32]>,
+        keys: Vec<Known>,
+        background: Vec<Background>,
+        kept: Vec<Kept>,
+        trusted: Vec<Trusted>,
+        exes: Vec<Exe>,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: state.recovery_lock,
+                shells: state.shells,
+                machine: state.machine,
+                connections: state.connections,
+                lent: state.lent,
+                borrowers: state.borrowers,
+                lenders: state.lenders,
+                sharing: state.sharing,
+                key: state.key,
+                keys: state.keys,
+                background: state.background,
+                kept: state.kept,
+                trusted: state.trusted,
+                exes: state.exes,
+                restored: None,
+            }
         }
     }
 }
@@ -1048,6 +1153,7 @@ mod v25 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -1123,6 +1229,7 @@ mod v24 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -1196,6 +1303,7 @@ mod v23 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -1282,6 +1390,7 @@ mod v22 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -1351,6 +1460,7 @@ mod v21 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -1418,6 +1528,7 @@ mod v20 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -1481,6 +1592,7 @@ mod v19 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -1544,6 +1656,7 @@ mod v18 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -2072,6 +2185,7 @@ mod v7 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -2159,6 +2273,7 @@ mod v8 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -2216,6 +2331,7 @@ mod v9 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -2275,6 +2391,7 @@ mod v11 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -2383,6 +2500,7 @@ mod v15 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -2445,6 +2563,7 @@ mod v14 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -2505,6 +2624,7 @@ mod v13 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -2607,6 +2727,7 @@ mod v12 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -2707,6 +2828,7 @@ mod v10 {
                 kept: Vec::new(),
                 trusted: Vec::new(),
                 exes: Vec::new(),
+                restored: None,
             }
         }
     }
@@ -2975,6 +3097,18 @@ mod tests {
                 dev: 0x803,
                 ino: 1_234_567,
             }],
+            restored: Some(vec![
+                Restored {
+                    pane: 11,
+                    ran: Some("claude --resume".to_owned()),
+                    place: None,
+                },
+                Restored {
+                    pane: 2,
+                    ran: None,
+                    place: Some((40, 8, 30)),
+                },
+            ]),
         }
     }
 
@@ -3175,6 +3309,26 @@ mod tests {
     }
 
     #[test]
+    fn version_27_is_read_with_what_panes_made_again_still_have_to_show() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v27.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        let Some([offer, place]) = state.restored.as_deref() else {
+            panic!("{:?}", state.restored);
+        };
+        assert_eq!(
+            (offer.pane, offer.ran.as_deref(), offer.place),
+            (11, Some("claude --resume"), None)
+        );
+        assert_eq!(
+            (place.pane, place.ran.as_deref(), place.place),
+            (2, None, Some((40, 8, 30)))
+        );
+        assert_eq!(state.kept[0].command, "trail serve");
+    }
+
+    #[test]
     fn version_26_is_read_with_the_terminals_kept_running() {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v26.bin"))
@@ -3204,6 +3358,8 @@ mod tests {
             (4, &[2, 5][..])
         );
         assert_eq!(state.background[0].tab.id, 3);
+        // What panes made again had to show wasn't handed over.
+        assert!(state.restored.is_none());
     }
 
     #[test]
@@ -3444,11 +3600,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v26.bin"]
+    #[ignore = "writes tests/fixtures/handover-v27.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v26.bin"
+            "/tests/fixtures/handover-v27.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();
