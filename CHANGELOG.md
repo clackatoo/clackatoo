@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026.10.72 (2026-10-23)
+
+### Fixes
+
+- **daemon:** offers to run a command again still open outlast an upgrade (CLACKA-131) (812b8cb)
+- **daemon:** another machine's offers to run a command again show through :connect (CLACKA-131) (a33720a)
+
 ## 2026.10.71 (2026-10-22)
 
 ### Features
