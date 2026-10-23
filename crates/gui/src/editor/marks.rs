@@ -28,7 +28,7 @@
 use std::borrow::Borrow;
 
 use clackatoo_protocol::MachineId;
-use clackatoo_text::{Bias, Edit, Moved, Rope};
+use clackatoo_text::{Bias, Edit, Moved, Rope, compose};
 
 use crate::vim::Selection;
 
@@ -247,9 +247,9 @@ pub(crate) struct Shape {
 /// away leaves it at that line number, its column as it was; a line
 /// joined onto the one before takes it along, its column moved with the
 /// line's text, less the indent `J` takes away; lines `:m` moves take it
-/// with them; and an edit within its line leaves it at its column. An undo
-/// or a redo that makes a text again puts back the selection it had then
-/// (see [`Selections`]).
+/// with them; and an edit within its line leaves it at its column. An edit
+/// that undoes the one just before it, as an undo or a redo does, puts it
+/// back as it was before that (see [`Undoable`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Selected {
     /// Its first end, where `<` is...
@@ -260,7 +260,28 @@ pub(crate) struct Selected {
     /// the first line's start and the last's end, as Vim's.
     marked: [FilePlace; 2],
     pub(crate) shape: Shape,
+    /// The last edit to its file, and it as it was before it.
+    undoable: Option<Box<Undoable>>,
 }
+
+/// The last edit to a selection's file, its edits made at once taken as
+/// one, and the selection as it was before it. The next edit, if it undoes
+/// just that, as an undo or a redo of it does, puts the selection back as
+/// it was, as Vim's undo puts back the one kept with its step
+/// (`uh_visual`). It goes by that edit alone, not the text, so it can't be
+/// taken for another: any other edit forgets it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Undoable {
+    edit: Edit,
+    /// The selection's ends before, lines and columns, and which the
+    /// cursor was at.
+    ends: [(u64, usize); 2],
+    backward: bool,
+}
+
+/// The most text, in bytes, an edit may take and put for a selection to
+/// remember it (see [`Undoable`]).
+const MOST_UNDOABLE: usize = 1 << 20;
 
 impl Selected {
     /// The selection of `file` from byte `first` to byte `last` of `text`,
@@ -272,6 +293,7 @@ impl Selected {
             last: place(last),
             marked: [place(first), place(last)],
             shape,
+            undoable: None,
         };
         selected.settle(text);
         selected
@@ -299,6 +321,44 @@ impl Selected {
     /// Moves it through `edits`, made to its file in turn, as `texts` says
     /// what each was made to and made, `text` being the last's.
     fn edited(&mut self, edits: &[Passing<'_>], texts: &[(Rope, Rope)]) {
+        // The edits as one, as an undo of them is.
+        let edit = match edits {
+            [] => None,
+            [edit] => Some(edit.edit.clone()),
+            [first, rest @ ..] => (rest.iter()).try_fold(first.edit.clone(), |made, next| {
+                compose(&made, next.edit).ok()
+            }),
+        };
+        let ends = self.ends();
+        let backward = self.shape.backward;
+        let undoable = self.undoable.take();
+        if let (Some(edit), Some(last)) = (&edit, &undoable)
+            && *edit == last.edit.invert()
+        {
+            let [(line, col), (last_line, last_col)] = last.ends;
+            (self.start.line, self.start.col) = (line, col);
+            (self.last.line, self.last.col) = (last_line, last_col);
+            self.shape.backward = last.backward;
+        } else {
+            self.edited_by_rules(edits, texts);
+        }
+        if let Some(edit) = edit
+            && (edit.changes())
+                .map(|(_, taken, put)| taken.len() + put.len())
+                .sum::<usize>()
+                <= MOST_UNDOABLE
+        {
+            self.undoable = Some(Box::new(Undoable {
+                edit,
+                ends,
+                backward,
+            }));
+        }
+    }
+
+    /// Moves it through `edits` by the rules of Vim's marks (see
+    /// [`Selected`]).
+    fn edited_by_rules(&mut self, edits: &[Passing<'_>], texts: &[(Rope, Rope)]) {
         for (edit, (before, after)) in edits.iter().zip(texts) {
             end_edited(&mut self.start, edit, (before, after));
             end_edited(&mut self.last, edit, (before, after));
@@ -443,24 +503,15 @@ fn end_changed(end: &mut FilePlace, (at, removed, put): (usize, &str, &str), bef
     };
 }
 
-/// How many of a file's texts [`Selections`] remembers the last selection
-/// in.
-const MOST_SEEN: usize = 100;
-
-/// A file's last selection, and the one before it; and the last selection
-/// in each of the file's recent texts, so an undo or a redo that makes one
-/// of them again puts back the selection it had, as Vim's undo puts back
-/// the one kept with its step (`uh_visual`). Kept by the text itself, not
-/// by the steps, whose undo is the daemon's, it can't fall out of step:
-/// an undo that makes a text not seen, as after another's edit, moves the
-/// selection as any edit does.
+/// A file's last selection, and the one before it. An undo or a redo
+/// moves them as any edit does: Vim's undo puts back the one kept with
+/// its step (`uh_visual`), but the daemon keeps the steps.
 #[derive(Debug)]
 struct Selections {
     path: String,
     machine: Option<MachineId>,
     last: Option<Selected>,
     before: Option<Selected>,
-    seen: std::collections::VecDeque<(Rope, Option<Selected>)>,
 }
 
 impl Selections {
@@ -469,43 +520,12 @@ impl Selections {
     }
 
     /// Moves them through `edits`, made in turn to the file, whose text
-    /// each made and was made to `texts` says, the last making `text`: an
-    /// undo's or a redo's, if `reversed`.
-    fn edited(
-        &mut self,
-        edits: &[Passing<'_>],
-        texts: &[(Rope, Rope)],
-        text: &Rope,
-        reversed: bool,
-    ) {
-        // As each edit starts, as Vim keeps it with the step it starts; so
-        // a redo finds it as its undo started.
-        let remembered = texts
-            .first()
-            .map(|(before, _)| self.remember(before))
-            .is_some();
+    /// each made and was made to `texts` says, the last making `text`.
+    fn edited(&mut self, edits: &[Passing<'_>], texts: &[(Rope, Rope)], text: &Rope) {
         for selected in [&mut self.last, &mut self.before].into_iter().flatten() {
             selected.edited(edits, texts);
             selected.settle(text);
         }
-        // Not as this one started, which may be the same text, as after
-        // `:m` swaps two lines alike.
-        if reversed {
-            let kept = (self.seen.iter().rev().skip(usize::from(remembered)))
-                .find(|(seen, _)| seen.len_bytes() == text.len_bytes() && seen == text)
-                .and_then(|(_, selected)| selected.clone());
-            if let Some(kept) = kept {
-                self.last = Some(kept);
-            }
-        }
-    }
-
-    /// Notes the last selection as it is in `text`.
-    fn remember(&mut self, text: &Rope) {
-        if self.seen.len() >= MOST_SEEN {
-            self.seen.pop_front();
-        }
-        self.seen.push_back((text.clone(), self.last.clone()));
     }
 }
 
@@ -582,15 +602,8 @@ impl Marks {
     }
 
     /// Moves the marks in `file` through `edits`, made to it in turn,
-    /// which leave its text as `text`: an undo's or a redo's, if
-    /// `reversed`, which can put back a selection (see [`Selections`]).
-    pub(crate) fn edited(
-        &mut self,
-        file: File<'_>,
-        edits: &[impl Borrow<Edit>],
-        text: &Rope,
-        reversed: bool,
-    ) {
+    /// which leave its text as `text`.
+    pub(crate) fn edited(&mut self, file: File<'_>, edits: &[impl Borrow<Edit>], text: &Rope) {
         if edits.is_empty() {
             return;
         }
@@ -598,7 +611,7 @@ impl Marks {
         for (_, place) in self.list.iter_mut().filter(|(_, at)| at.is_in(file)) {
             place.edited(&edits, text);
         }
-        self.selections_edited(file, &edits, text, reversed);
+        self.selections_edited(file, &edits, text);
     }
 
     /// Moves the selections kept for `file` through `edits`,
@@ -609,26 +622,19 @@ impl Marks {
         file: File<'_>,
         edits: &[impl Borrow<Edit>],
         text: &Rope,
-        reversed: bool,
     ) {
         if edits.is_empty() {
             return;
         }
-        self.selections_edited(file, &passing(edits, text), text, reversed);
+        self.selections_edited(file, &passing(edits, text), text);
     }
 
-    fn selections_edited(
-        &mut self,
-        file: File<'_>,
-        edits: &[Passing<'_>],
-        text: &Rope,
-        reversed: bool,
-    ) {
+    fn selections_edited(&mut self, file: File<'_>, edits: &[Passing<'_>], text: &Rope) {
         let Some(kept) = self.selections.iter_mut().find(|kept| kept.is_of(file)) else {
             return;
         };
         let texts = texts_of(edits, text);
-        kept.edited(edits, &texts, text, reversed);
+        kept.edited(edits, &texts, text);
     }
 
     /// The selections kept for `file`, made if there are none yet.
@@ -641,7 +647,6 @@ impl Marks {
                 machine: file.machine,
                 last: None,
                 before: None,
-                seen: std::collections::VecDeque::new(),
             });
             self.selections.len() - 1
         };
@@ -728,8 +733,8 @@ impl Marks {
         if let Some(kept) = self.selections.iter_mut().find(|kept| kept.is_of(file)) {
             for selected in [&mut kept.last, &mut kept.before].into_iter().flatten() {
                 selected.settle(text);
+                selected.undoable = None;
             }
-            kept.seen.clear();
         }
     }
 }
@@ -798,13 +803,8 @@ mod tests {
         assert_eq!(place(&marks), (2, 2));
         let edit = Edit::replace(14, 0, "", "zero\n");
         let text = Rope::from_str("zero\none\ntwo\nthree\n");
-        marks.edited(File::here("/f"), std::slice::from_ref(&edit), &text, false);
-        marks.edited(
-            File::here("/other"),
-            std::slice::from_ref(&edit),
-            &text,
-            false,
-        );
+        marks.edited(File::here("/f"), std::slice::from_ref(&edit), &text);
+        marks.edited(File::here("/other"), std::slice::from_ref(&edit), &text);
         assert_eq!(place(&marks), (3, 2));
         marks.replaced(File::here("/f"), &Rope::from_str("zero\nx\n"));
         assert_eq!(place(&marks), (1, 1));
@@ -819,7 +819,7 @@ mod tests {
         let mut edit = Edit::new();
         edit.retain(2).delete("\n").retain(2).insert("\n").retain(2);
         let text = Rope::from_str("a\nb\n\nc\n");
-        marks.edited(File::here("/f"), std::slice::from_ref(&edit), &text, false);
+        marks.edited(File::here("/f"), std::slice::from_ref(&edit), &text);
         let at = marks.get('a', File::here("/f")).unwrap();
         assert_eq!((at.line, at.col), (1, 0), "where the line was");
     }

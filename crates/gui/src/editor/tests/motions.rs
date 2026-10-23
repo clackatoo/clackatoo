@@ -1266,30 +1266,6 @@ fn an_undo_puts_back_the_selection_from_before_what_it_undoes_not_after() {
 }
 
 #[test]
-fn an_undo_puts_the_cursor_where_the_change_started_as_vims_does() {
-    let at = |text: &str, from, keys| in_cells(text, from, keys).1;
-    let text = "ab cd\nefgh\nijkl\n";
-    // Where an operator started, its object's start, or where the
-    // motion went if that's first, as Vim's `do_pending()` puts it.
-    assert_eq!(at(text, (1, 4), "gUiwu"), (1, 3));
-    assert_eq!(at(text, (1, 4), "diwu"), (1, 3));
-    assert_eq!(at(text, (2, 2), "dku"), (1, 2));
-    assert_eq!(at(text, (1, 4), "dbu<C-r>"), (1, 3));
-    // Though only lines further on changed.
-    assert_eq!(at("  \ne\t\n  (\n\tx y\n", (2, 1), "5gU2Wu"), (2, 1));
-    // Where the cursor was, if that's on the lines changed or next to
-    // them: after `O`, on the line below.
-    assert_eq!(at(text, (2, 2), "Ox<Esc>u"), (2, 2));
-    assert_eq!(at(text, (2, 2), "yyjPu"), (3, 2));
-    assert_eq!(at(text, (2, 2), "xjlu"), (2, 2));
-    // `X` from what it takes, as `dh`.
-    assert_eq!(at("ab\nx\ty\nab\n", (2, 4), "Xu"), (2, 1));
-    // A selection's start, by lines its line's start.
-    assert_eq!(at(".\n  \n)x\n", (2, 1), "vjJu"), (2, 1));
-    assert_eq!(at("abcd\nefgh\nijkl\n", (2, 2), "Vjdu"), (2, 0));
-}
-
-#[test]
 fn an_operator_that_fails_is_no_change_to_make_again() {
     // `ge` fails at the text's start, and `.` has nothing to make.
     assert_eq!(
@@ -1347,4 +1323,27 @@ fn i_on_a_selection_undone_goes_back_to_its_first_lines_start() {
     assert_eq!(in_cells("abc\ndef\n", (1, 1), "vlIZ<Esc>u").1, (1, 0));
     assert_eq!(in_cells("abc\ndef\n", (1, 1), "vjIZ<Esc>u").1, (1, 0));
     assert_eq!(in_cells("abc\ndef\n", (1, 1), "vjAZ<Esc>u").1, (2, 2));
+}
+
+#[test]
+fn an_undo_or_a_redo_goes_to_where_its_text_changes() {
+    let at = |text: &str, from, keys| in_cells(text, from, keys).1;
+    // A redo to the line it puts back, not where the next step began.
+    assert_eq!(at("a\nb\nc\nd\n", (1, 0), "ddjdduu<C-r>"), (1, 0));
+    // A step that starts from a text a later step starts from too goes
+    // back to its own change.
+    let lines = "a1 x\na2 x\na3 x\na4 x\na5 x\na6 x\na7 x\na8 x\na9 x\n";
+    assert_eq!(at(lines, (2, 0), "ddP6jdduuu"), (2, 0));
+    assert_eq!(at(lines, (2, 0), "xP7jxuuu"), (2, 0));
+    // After a copy, an ex command's undo goes to its own change.
+    let mut setup = Setup::new(lines);
+    setup.editor.cursor = Cursor::new(Point { line: 0, col: 2 });
+    setup.keys("yy");
+    let _ = setup
+        .editor
+        .ex("7d", &mut setup.copy, &mut setup.shared, false);
+    setup.follow_marks();
+    setup.serve();
+    setup.keys("u");
+    assert_eq!(setup.cursor(), (6, 0));
 }

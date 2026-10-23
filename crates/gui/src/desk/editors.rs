@@ -134,25 +134,24 @@ fn copy_later(yanked: &mut Vec<(String, Copy)>, text: String, to: Copy) {
 }
 
 /// Moves the places kept in the file `copy` is of, the jump list's and the
-/// marks, through `made`, edits just made to it in turn: an undo's or a
-/// redo's, if `reversed`. Those the window made, if `ours`, set the file's
-/// `.` mark, at the last.
+/// marks, through `made`, edits just made to it in turn. Those the window
+/// made, if `ours`, set the file's `.` mark, at the last.
 fn follow_places(
     jumps: &mut Jumps,
     marks: &mut Marks,
     copy: &BufferCopy,
     made: &[impl Borrow<Edit>],
-    (ours, reversed): (bool, bool),
+    ours: bool,
 ) {
     // A folder's listing isn't a file places are kept in, but for its
     // selections, for `gv`.
     if copy.is_scratch() {
-        marks.edited_selections(copy.file(), made, copy.text(), reversed);
+        marks.edited_selections(copy.file(), made, copy.text());
         return;
     }
     let (file, text) = (copy.file(), copy.text());
     jumps.edited(file, made, text);
-    marks.edited(file, made, text, reversed);
+    marks.edited(file, made, text);
     if ours
         && let Some(last) = made.last().map(Borrow::borrow)
         && let Some((at, _, _)) = last.changes().last()
@@ -251,7 +250,7 @@ impl Desk {
             &mut editors.shared.marks,
             copy,
             &made,
-            (false, false),
+            false,
         );
     }
 
@@ -741,7 +740,7 @@ impl Desk {
             Heard::Edited(edit) | Heard::Reversed(edit) => {
                 let ours = matches!(heard, Heard::Reversed(_));
                 let made = std::slice::from_ref(edit);
-                follow_places(&mut self.jumps, marks, copy, made, (ours, ours));
+                follow_places(&mut self.jumps, marks, copy, made, ours);
                 // Moved too, while disconnected.
                 if copy.path() != was {
                     self.jumps.moved(copy.machine(), &was, copy.path());
@@ -1209,7 +1208,7 @@ impl Desk {
             &mut editors.shared.marks,
             copy,
             &made,
-            (true, false),
+            true,
         );
         for (text, to) in editors.shared.registers.take_to_system() {
             copy_later(&mut self.yanked, text, to);
@@ -1423,7 +1422,7 @@ impl Desk {
             &mut editors.shared.marks,
             copy,
             &made,
-            (true, false),
+            true,
         );
         true
     }
@@ -1448,7 +1447,7 @@ impl Desk {
                 &mut editors.shared.marks,
                 copy,
                 &made,
-                (true, false),
+                true,
             );
         }
     }
