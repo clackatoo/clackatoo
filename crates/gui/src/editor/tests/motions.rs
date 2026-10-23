@@ -1382,3 +1382,19 @@ fn a_search_again_goes_through_the_file_for_its_words_once_till_its_edited() {
     setup.keys("xnn");
     assert_eq!(scans() - before, 1);
 }
+
+#[test]
+fn a_count_of_searches_goes_a_match_at_a_time_not_through_them_all() {
+    // `2n` searches twice, not through every match in the file.
+    let finds = || crate::editor::pattern::FINDS.with(std::cell::Cell::get);
+    let mut setup = Setup::new(&"abcd\n".repeat(5000));
+    setup.keys("/.<CR>");
+    let before = finds();
+    setup.keys("2n");
+    assert!(finds() - before < 10, "{} searches", finds() - before);
+    assert_eq!(setup.cursor(), (0, 3));
+    // From each match's end, as Vim's `n` goes with `cpoptions` `c`.
+    assert_eq!(in_cells("xaaaaa\n", (1, 0), "/aa<CR>2n").1, (1, 1));
+    assert_eq!(in_cells("a x a x a x\n", (1, 0), "/x<CR>2n").1, (1, 10));
+    assert_eq!(in_cells("a x a x a x\n", (1, 10), "?x<CR>2n").1, (1, 10));
+}

@@ -4106,33 +4106,23 @@ impl Editor {
         } else {
             found.start <= from
         };
-        // The rest of a count, from the matches found in one go through
-        // the text, as many times round as it takes: so no count takes
-        // longer than that, however big.
+        // The rest of a count, a match at a time as `n` goes, till it's
+        // back at the first, and then only as many as are left of a time
+        // round: so no count goes round more than once, however big.
         if times > 1 {
-            let matches = all_matches(hay, &compiled);
-            if compiled.gave_up() {
+            let went = if backward {
+                back_matches(hay, &compiled, found.start, times - 1)
+            } else {
+                on_matches(hay, &compiled, from, times)
+            };
+            let Some((there, round)) = went.filter(|_| !compiled.gave_up()) else {
                 self.found = None;
                 self.status = Some(compiled.not_found(format!("{pattern} isn't in the file")));
                 self.fail();
                 return;
-            }
-            let count = matches.len().max(1);
-            let index = (matches.iter())
-                .position(|other| other.start >= found.start)
-                .unwrap_or(0);
-            let steps = (times - 1) % count;
-            let laps = (times - 1) / count;
-            let to = if backward {
-                wrapped |= laps > 0 || steps > index;
-                (index + count - steps) % count
-            } else {
-                wrapped |= laps > 0 || index + steps >= count;
-                (index + steps) % count
             };
-            if let Some(&there) = matches.get(to) {
-                found = there;
-            }
+            found = there;
+            wrapped = round || (backward && wrapped);
         }
         // The last character's first byte.
         let last = (whole[..found.end].char_indices().next_back())
@@ -6399,26 +6389,127 @@ fn columns(options: &Options) -> Vec<usize> {
         .collect()
 }
 
-/// Where `pattern` next matches in `text` after byte `from`, or before it
-/// if `backward`, going round the ends.
-/// Every match of `pattern` in `text`, in order, each going on from the
-/// end of the one before, or a character on past an empty one.
-fn all_matches(text: &str, pattern: &Pattern) -> Vec<pattern::Found> {
-    let mut matches = Vec::new();
+/// The match `steps` on from byte `from` in `text`, going round the end;
+/// and whether it went round. They're the matches made one after another
+/// from the start of `from`'s line, each from the end of the one before
+/// (see [`each_match`]), as Vim's `n` goes with `cpoptions` `c`: the first
+/// after `from`, and each after the one before. Once it's back at the
+/// first of them, it knows how many there are in a time round, and goes
+/// on only as many as are left of one. None if a search gave up.
+fn on_matches(
+    text: &str,
+    pattern: &Pattern,
+    from: usize,
+    steps: usize,
+) -> Option<(pattern::Found, bool)> {
+    let next_from = |at: usize| {
+        (at <= text.len())
+            .then(|| pattern.find_at(text, at))
+            .flatten()
+    };
+    // The first after `from`, from its line's start.
+    let mut at = text[..from.min(text.len())]
+        .rfind('\n')
+        .map_or(0, |line| line + 1);
+    let mut found = loop {
+        match next_from(at) {
+            Some(found) if found.start > from => break Some(found),
+            Some(found) => at = past(text, found),
+            None => break None,
+        }
+    };
+    let mut round = false;
+    let mut left = steps;
+    let mut lap: Option<(usize, usize)> = None;
+    loop {
+        let here = match found {
+            Some(here) => here,
+            None if pattern.gave_up() => return None,
+            None => {
+                round = true;
+                pattern.find_at(text, 0)?
+            }
+        };
+        left -= 1;
+        match lap {
+            None => lap = Some((here.start, 0)),
+            Some((start, steps)) if here.start == start => {
+                left %= steps + 1;
+                lap = Some((start, 0));
+            }
+            Some((start, steps)) => lap = Some((start, steps + 1)),
+        }
+        if left == 0 {
+            return Some((here, round));
+        }
+        found = next_from(past(text, here));
+    }
+}
+
+/// The match `steps` back from the one at byte `from` in `text`, as
+/// [`find`] goes back, going round the start; and whether it went round.
+/// Back is through the matches made one after another from the text's
+/// start, so it counts them going through once, and goes through again
+/// to the one it wants. None if a search gave up.
+fn back_matches(
+    text: &str,
+    pattern: &Pattern,
+    from: usize,
+    steps: usize,
+) -> Option<(pattern::Found, bool)> {
+    let (mut count, mut index) = (0, 0);
+    each_match(text, pattern, |found| {
+        if found.start < from {
+            index += 1;
+        }
+        count += 1;
+        true
+    });
+    if pattern.gave_up() || count == 0 {
+        return None;
+    }
+    // The one at `from` is `index` along.
+    let round = steps > index;
+    let to = (index + count - steps % count) % count;
+    let mut there = None;
+    let mut seen = 0;
+    each_match(text, pattern, |found| {
+        if seen == to {
+            there = Some(found);
+        }
+        seen += 1;
+        there.is_none()
+    });
+    Some((there?, round))
+}
+
+/// Has `visit` see each match of `pattern` in `text` in order, each from
+/// the end of the one before, or a character on past an empty one, till it
+/// says to stop.
+fn each_match(text: &str, pattern: &Pattern, mut visit: impl FnMut(pattern::Found) -> bool) {
     let mut at = 0;
     while at <= text.len()
         && let Some(found) = pattern.find_at(text, at)
     {
-        matches.push(found);
-        at = if found.end > found.start {
-            found.end
-        } else {
-            found.end + text[found.end..].chars().next().map_or(1, char::len_utf8)
-        };
+        if !visit(found) {
+            return;
+        }
+        at = past(text, found);
     }
-    matches
 }
 
+/// Where the match after `found` in `text` is looked for: its end, or a
+/// character on past an empty one.
+fn past(text: &str, found: pattern::Found) -> usize {
+    if found.end > found.start {
+        found.end
+    } else {
+        found.end + text[found.end..].chars().next().map_or(1, char::len_utf8)
+    }
+}
+
+/// Where `pattern` next matches in `text` after byte `from`, or before it
+/// if `backward`, going round the ends.
 fn find(text: &str, pattern: &Pattern, from: usize, backward: bool) -> Option<pattern::Found> {
     if !backward {
         let after = from
@@ -6434,20 +6525,13 @@ fn find(text: &str, pattern: &Pattern, from: usize, backward: bool) -> Option<pa
             .or_else(|| (!pattern.gave_up()).then(|| pattern.find_at(text, 0))?);
     }
     let (mut before, mut last) = (None, None);
-    let mut at = 0;
-    while at <= text.len()
-        && let Some(found) = pattern.find_at(text, at)
-    {
+    each_match(text, pattern, |found| {
         if found.start < from {
             before = Some(found);
         }
         last = Some(found);
-        at = if found.end > found.start {
-            found.end
-        } else {
-            found.end + text[found.end..].chars().next().map_or(1, char::len_utf8)
-        };
-    }
+        true
+    });
     // Nor does one that gave up say which is nearest before it.
     if pattern.gave_up() {
         return None;

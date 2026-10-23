@@ -105,6 +105,8 @@ fn plain_words(text: &str, odd: &Regex) -> bool {
 thread_local! {
     /// How many times [`plain_words`] has gone through a text.
     pub(crate) static PLAIN_SCANS: Cell<usize> = const { Cell::new(0) };
+    /// How many searches [`Pattern::find_at`] has made.
+    pub(crate) static FINDS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// What matches a pattern.
@@ -374,6 +376,8 @@ impl Pattern {
 
     /// The first match in `text` tried from byte `at`.
     pub(crate) fn find_at(&self, text: &str, at: usize) -> Option<Found> {
+        #[cfg(test)]
+        FINDS.with(|finds| finds.set(finds.get() + 1));
         if self.focus.is_some() {
             return self.captures_at(text, at, &mut self.locations());
         }
