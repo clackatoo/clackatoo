@@ -33,6 +33,8 @@ mod words;
 use words::{Pos, Step};
 
 pub(crate) use found::Found;
+#[cfg(test)]
+pub(crate) use words::LINES_LOOKED_UP;
 pub(crate) use words::back_fails;
 
 /// How far a bracket object looks for each of its brackets, in cells.

@@ -1667,3 +1667,25 @@ fn a_long_run_of_skin_tones_costs_no_more_than_a_few_steps_a_cell() {
     let most = crate::motion::MOST_TONES;
     assert_eq!(in_cells(&text, (1, 0), "w").1, (1, 1 + 2 * most));
 }
+
+/// A line of minified code, megabytes long.
+fn long_line() -> String {
+    format!("x a{} b\n", "-".repeat(200_000))
+}
+
+#[test]
+fn a_word_object_on_a_long_line_looks_the_line_up_once() {
+    // A step along it is a step, not a lookup of the line, so an object
+    // costs as far as it goes.
+    let text = long_line();
+    let lines = || crate::objects::LINES_LOOKED_UP.with(std::cell::Cell::get);
+    for keys in ["diw", "daw", "yiW", "viwy"] {
+        let before = lines();
+        in_cells(&text, (1, 100_000), keys);
+        assert!(
+            lines() - before <= 4,
+            "{keys}: lines looked up {}",
+            lines() - before
+        );
+    }
+}

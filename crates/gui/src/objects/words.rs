@@ -9,6 +9,8 @@
 //! and `bckend_word` with `eol` stops at a line's end. So the motions keep
 //! their own (see [`crate::motion::Cursor`]).
 
+use std::cell::RefCell;
+
 use crate::motion::{Class, Lines, Point, Words, class_at, line_end, next_cell, previous_cell};
 
 /// What a step of a [`Pos`] did, as Vim's `inc` and `dec` return.
@@ -33,39 +35,66 @@ impl Step {
 }
 
 /// A position as Vim's word functions move one, and its block objects.
-pub(super) struct Pos<'a, L> {
+pub(super) struct Pos<'a, L: Lines> {
     lines: &'a L,
     pub(super) at: Point,
     big: bool,
     words: Words,
+    /// The line it was last on, with its row and where it ends, so a step
+    /// along it costs a step, not a lookup of the line, however long.
+    line: RefCell<Option<Line<'a, L>>>,
 }
+
+/// A line of `L`: its number, its row, and where it ends.
+type Line<'a, L> = (u64, Option<<L as Lines>::Row<'a>>, usize);
 
 impl<'a, L: Lines> Pos<'a, L> {
     /// At `at` of `lines`, to step a character at a time.
     pub(super) fn new(lines: &'a L, at: Point) -> Self {
+        Self::with(lines, at, false, Words::NONE)
+    }
+
+    /// At `at` of `lines`, with `words`, and punctuation a word's if
+    /// `big`.
+    fn with(lines: &'a L, at: Point, big: bool, words: Words) -> Self {
         Self {
             lines,
             at,
-            big: false,
-            words: Words::NONE,
+            big,
+            words,
+            line: RefCell::new(None),
         }
     }
-}
 
-impl<L: Lines> Pos<'_, L> {
+    /// `f` of line `line`'s row and where it ends, just past its last
+    /// character.
+    fn on_line<T>(&self, line: u64, f: impl FnOnce(Option<&L::Line>, usize) -> T) -> T {
+        let mut kept = self.line.borrow_mut();
+        if kept.as_ref().is_none_or(|(kept, _, _)| *kept != line) {
+            #[cfg(test)]
+            LINES_LOOKED_UP.with(|looked| looked.set(looked.get() + 1));
+            *kept = Some((line, self.lines.row(line), line_end(line, self.lines)));
+        }
+        let (_, row, end) = kept.as_ref().expect("just kept");
+        f(row.as_deref(), *end)
+    }
+
     /// Where line `line` ends, just past its last character.
     fn end(&self, line: u64) -> usize {
-        line_end(line, self.lines)
+        self.on_line(line, |_, end| end)
     }
 
     /// Vim's `cls()`: the class of the character here, a line's end blank,
     /// and punctuation a word's for the big objects.
     fn class(&self) -> Class {
-        if self.at.col >= self.end(self.at.line) {
-            return Class::Blank;
-        }
-        let row = self.lines.row(self.at.line);
-        match class_at(row.as_deref(), self.at.col, self.words) {
+        let class = self.on_line(self.at.line, |row, end| {
+            if self.at.col >= end {
+                Class::Blank
+            } else {
+                class_at(row, self.at.col, self.words)
+            }
+        });
+        match class {
             Class::Punctuation | Class::Script(_) if self.big => Class::Word,
             class => class,
         }
@@ -78,10 +107,11 @@ impl<L: Lines> Pos<'_, L> {
 
     /// Vim's `inc`.
     pub(super) fn inc(&mut self) -> Step {
-        let end = self.end(self.at.line);
-        if self.at.col < end {
-            let row = self.lines.row(self.at.line);
-            let next = next_cell(row.as_deref(), self.at.col).map_or(end, |col| col.min(end));
+        let (at, end) = (self.at, self.end(self.at.line));
+        if at.col < end {
+            let next = self.on_line(at.line, |row, end| {
+                next_cell(row, at.col).map_or(end, |col| col.min(end))
+            });
             self.at.col = next;
             return if next < end { Step::Along } else { Step::End };
         }
@@ -98,9 +128,10 @@ impl<L: Lines> Pos<'_, L> {
     /// Vim's `dec`.
     pub(super) fn dec(&mut self) -> Step {
         if self.at.col > 0 {
-            let row = self.lines.row(self.at.line);
-            let col = self.at.col.min(self.end(self.at.line));
-            self.at.col = previous_cell(row.as_deref(), col).unwrap_or(0);
+            let at = self.at;
+            self.at.col = self.on_line(at.line, |row, end| {
+                previous_cell(row, at.col.min(end)).unwrap_or(0)
+            });
             return Step::Along;
         }
         if self.at.line > self.lines.bounds().0 {
@@ -314,12 +345,7 @@ pub(crate) fn back_fails(
     (end, big): (bool, bool),
     count: usize,
 ) -> bool {
-    let mut pos = Pos {
-        lines,
-        at,
-        big,
-        words: lines.words(),
-    };
+    let mut pos = Pos::with(lines, at, big, lines.words());
     !if end {
         pos.bckend_word(count, false)
     } else {
@@ -352,12 +378,7 @@ pub(super) fn current(
     count: usize,
 ) -> Result<Worded, Worded> {
     let include = !inner;
-    let mut pos = Pos {
-        lines,
-        at,
-        big,
-        words: lines.words(),
-    };
+    let mut pos = Pos::with(lines, at, big, lines.words());
     let mut start = anchor.unwrap_or(at);
     let mut first = at;
     let mut inclusive = true;
@@ -445,4 +466,10 @@ pub(super) fn current(
         end: pos.at,
         inclusive,
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times a [`Pos`] has looked a line up.
+    pub(crate) static LINES_LOOKED_UP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
