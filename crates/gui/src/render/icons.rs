@@ -24,6 +24,7 @@ pub(crate) enum Icon {
     Redo,
     Shield,
     Ring,
+    Hatch,
     Progress(u8),
 }
 
@@ -71,6 +72,7 @@ impl Icon {
             Self::File => "M14 3H6V21H18V7Z M14 3V7H18 M9 12H15 M9 16H15".into(),
             Self::Undo => "M8 4L3 9L8 14 M3 9H14A6 6 0 0 1 14 21".into(),
             Self::Redo => "M16 4L21 9L16 14 M21 9H10A6 6 0 0 0 10 21".into(),
+            Self::Hatch => "M-16 24L8 0 M-8 24L16 0 M0 24L24 0 M8 24L32 0 M16 24L40 0".into(),
             Self::Close => "M6 6L18 18 M18 6L6 18".into(),
             Self::Send => "M12 20V4 M5 11L12 4L19 11".into(),
             Self::Shield => {
@@ -100,7 +102,9 @@ impl Icon {
         let scale = f32::from(size) / 24.0;
         mask.size(u32::from(size), u32::from(size))
             .transform(Some(Transform::scale(scale, scale)));
-        let mut stroke = Stroke::new(if matches!(self, Self::Ring | Self::Progress(_)) {
+        let mut stroke = Stroke::new(if self == Self::Hatch {
+            0.5
+        } else if matches!(self, Self::Ring | Self::Progress(_)) {
             1.3
         } else {
             1.7
@@ -147,6 +151,7 @@ mod tests {
                 Icon::Bolt,
                 Icon::BoltFilled,
                 Icon::Progress(42),
+                Icon::Hatch,
             ] {
                 assert_eq!(swash::zeno::validate_svg(&icon.path()), Ok(()), "{icon:?}");
                 let mask = icon.rasterize(size);

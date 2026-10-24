@@ -469,6 +469,15 @@ impl Theme {
             Paint::Chosen => self.chosen,
             Paint::Claude => hex_rgba(0xd9_77_57),
             Paint::Gemini => hex_rgba(0x8a_ab_ee),
+            Paint::Allowance(provider) => {
+                use crate::render::icons::Icon;
+                let colour = match provider {
+                    Icon::Claude => hex_rgba(0xd9_77_57),
+                    Icon::Gemini => hex_rgba(0x9b_88_d4),
+                    _ => self.foreground,
+                };
+                mix(self.palette_background, colour, 0.38)
+            }
             Paint::Workspace(index) => self.workspaces[usize::from(index) % self.workspaces.len()],
             Paint::Mode(mode) => self.modes[mode.colour()],
             Paint::Hover => self.hover,

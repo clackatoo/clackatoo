@@ -15,14 +15,15 @@ impl ChatView {
         if !self.usage_modal {
             return;
         }
+        self.note_usage_wake();
         self.hits.clear();
         self.shown.clear();
         paint.over_glyphs.clear();
         paint.ime = None;
         let [x, y] = place.origin;
         let [pane_width, pane_height] = place.size;
-        let width = m.em(39.0).min((pane_width - m.em(2.0)).max(1.0));
-        let height = m.em(38.0).min((pane_height - m.em(2.0)).max(1.0));
+        let width = m.em(80.0).min((pane_width - m.em(2.0)).max(1.0));
+        let height = m.em(62.0).min((pane_height - m.em(2.0)).max(1.0));
         let left = x + (pane_width - width) / 2.0;
         let top = y + (pane_height - height) / 2.0;
         let bounds = [left, top, width, height];
@@ -40,7 +41,7 @@ impl ChatView {
         self.hits.push((Hit::UsageSurface, place.in_pane(bounds)));
         self.usage_text(
             &mut canvas,
-            m,
+            Measures::of(m.em(1.2)),
             "Usage & limits",
             [left + m.em(1.2), top + m.em(1.0), width - m.em(4.0)],
             Tone::Plain,
@@ -108,6 +109,23 @@ impl ChatView {
         self.usage_body(&mut canvas, m, bounds);
     }
 
+    fn note_usage_wake(&mut self) {
+        let now = self.now();
+        if let Some(delay) = self
+            .node
+            .provider_usage
+            .iter()
+            .flat_map(|provider| &provider.limits)
+            .filter_map(|limit| limit.resets)
+            .filter(|reset| *reset > now)
+            .map(|reset| (reset - now - 1) % 60_000 + 1)
+            .min()
+        {
+            let next = std::time::Instant::now() + std::time::Duration::from_millis(delay);
+            self.live = Some(self.live.map_or(next, |live| live.min(next)));
+        }
+    }
+
     fn usage_body(&mut self, canvas: &mut Canvas<'_>, m: Measures, bounds: [f32; 4]) {
         let [left, top, width, height] = bounds;
         let small = Measures::of(m.em(0.8));
@@ -117,7 +135,10 @@ impl ChatView {
             width - m.em(1.2),
             (height - m.em(8.4)).max(1.0),
         ];
-        let content_height = m.em(4.3)
+        let inner = width - m.em(3.0);
+        let col = left + m.em(1.5);
+        let card = card_height(m, inner);
+        let content_height = m.em(3.0)
             + if self.node.provider_usage.is_empty() {
                 m.em(3.0)
             } else {
@@ -125,9 +146,17 @@ impl ChatView {
                     .provider_usage
                     .iter()
                     .map(|provider| {
-                        m.em(5.3
-                            + provider.limits.iter().map(|_| 4.35).sum::<f32>()
-                            + if provider.notice.is_some() { 2.2 } else { 0.0 })
+                        m.em(4.2)
+                            + provider
+                                .limits
+                                .iter()
+                                .map(|_| card + m.em(0.8))
+                                .sum::<f32>()
+                            + if provider.notice.is_some() {
+                                m.em(3.2)
+                            } else {
+                                0.0
+                            }
                     })
                     .sum::<f32>()
             };
@@ -135,22 +164,17 @@ impl ChatView {
         self.usage_scroll = self.usage_scroll.min(self.usage_max_scroll);
         let start = canvas.clip[1];
         let mut at = start - self.usage_scroll;
-        let inner = width - m.em(2.4);
-        let col = left + m.em(1.2);
-        self.usage_text(
-            canvas,
-            small,
-            "THIS CONVERSATION",
-            [col, at, inner],
-            Tone::Muted,
-        );
-        at += m.em(1.6);
         let context = self.node.usage.map_or_else(
-            || "Context not reported yet".into(),
-            |u| u.detail(self.now(), |_| String::new())[0].said.clone(),
+            || "Conversation context · not reported yet".into(),
+            |u| {
+                format!(
+                    "Conversation context · {}",
+                    u.detail(self.now(), |_| String::new())[0].said
+                )
+            },
         );
-        self.usage_text(canvas, m, &context, [col, at, inner], Tone::Plain);
-        at += m.em(2.7);
+        self.usage_text(canvas, small, &context, [col, at, inner], Tone::Muted);
+        at += m.em(3.0);
         let now = self.now();
         let zone = local_zone();
         let providers = self.node.provider_usage.clone();
@@ -195,24 +219,13 @@ impl ChatView {
         now: u64,
         zone: &jiff::tz::TimeZone,
     ) -> f32 {
-        let small = Measures::of(m.em(0.8));
-
-        canvas.fill(Fill::solid([col, at, inner, 1.0], Paint::RaisedEdge));
-        at += m.em(1.0);
+        let small = Measures::of(m.em(0.75));
         let icon = Icon::provider(&provider.agent);
         canvas.fill(Fill::icon(
             [col, at, m.em(1.25), m.em(1.25)],
             icon,
             super::models::icon_paint(icon),
         ));
-        self.usage_text(
-            canvas,
-            m,
-            &provider.title,
-            [col + m.em(1.8), at, inner - m.em(1.8)],
-            Tone::Plain,
-        );
-        at += m.em(1.8);
         let status = if provider.refreshing {
             "Refreshing…".to_owned()
         } else if provider.checked > 0 {
@@ -220,71 +233,179 @@ impl ChatView {
         } else {
             "No reading yet".into()
         };
-        self.usage_text(canvas, small, &status, [col, at, inner], Tone::Muted);
-        at += m.em(1.8);
+        let status_width = m.em(13.0).min(inner * 0.45);
+        self.usage_text(
+            canvas,
+            m,
+            &provider.title,
+            [col + m.em(1.9), at, inner - status_width - m.em(2.4)],
+            Tone::Plain,
+        );
+        self.usage_text(
+            canvas,
+            small,
+            &status,
+            [col + inner - status_width, at + m.em(0.2), status_width],
+            Tone::Muted,
+        );
+        at += m.em(2.4);
         for limit in &provider.limits {
-            let expired = limit.resets.is_some_and(|reset| reset <= now);
-            self.usage_text(
-                canvas,
-                small,
-                &limit.label,
-                [col, at, (inner - m.em(6.0)).max(1.0)],
-                Tone::Plain,
-            );
-            let amount = if expired {
-                "Needs refresh".into()
-            } else {
-                format!("{}% used", limit.used)
-            };
-            self.usage_text(
-                canvas,
-                small,
-                &amount,
-                [col + inner - m.em(6.0), at, m.em(6.0)],
-                Tone::Muted,
-            );
-            at += m.em(1.35);
-            let bar = [col, at, inner, m.em(0.3)];
-            canvas.fill(Fill::rounded(bar, Paint::RaisedEdge, m.em(0.15)));
-            if !expired && limit.used > 0 {
-                let ink = if limit.used >= 95 {
-                    Paint::Full
-                } else if limit.used >= 85 {
-                    Paint::Caution
-                } else {
-                    Paint::Gauge
-                };
-                canvas.fill(Fill::rounded(
-                    [
-                        col,
-                        at,
-                        inner * f32::from(limit.used.min(100)) / 100.0,
-                        bar[3],
-                    ],
-                    ink,
-                    m.em(0.15),
-                ));
+            let height = card_height(m, inner);
+            // Offscreen cards contribute to scrolling without shaping their text.
+            if at + height >= canvas.clip[1] && at < canvas.clip[1] + canvas.clip[3] {
+                self.usage_card(canvas, m, limit, [col, at, inner, height], icon, now);
             }
-            at += m.em(0.8);
-            let reset = limit.resets.map_or_else(
-                || "Reset time not reported".into(),
-                |reset| {
-                    if expired {
-                        "Reset passed · refresh for current usage".into()
-                    } else {
-                        format!("Resets {}", resets(reset, now, zone))
-                    }
-                },
-            );
-            self.usage_text(canvas, small, &reset, [col, at, inner], Tone::Muted);
-            at += m.em(2.2);
+            at += height + m.em(0.8);
         }
         if let Some(notice) = &provider.notice {
-            self.usage_text(canvas, small, notice, [col, at, inner], Tone::Muted);
-            at += m.em(2.2);
+            canvas.fill(
+                Fill::rounded([col, at, inner, m.em(2.6)], Paint::Clear, m.em(0.65))
+                    .bordered(1.0, Paint::RaisedEdge),
+            );
+            self.usage_text(
+                canvas,
+                small,
+                notice,
+                [col + m.em(1.0), at + m.em(0.8), inner - m.em(2.0)],
+                Tone::Muted,
+            );
+            at += m.em(3.2);
         }
-        at += m.em(0.7);
-        at
+        at + m.em(1.8)
+    }
+
+    fn usage_card(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        limit: &clackatoo_protocol::UsageLimit,
+        rect: [f32; 4],
+        icon: Icon,
+        now: u64,
+    ) {
+        let [col, at, width, height] = rect;
+        let narrow = width < m.em(40.0);
+        let inset = m.em(1.2);
+        let label_width = if narrow {
+            width - inset * 2.0
+        } else {
+            m.em(13.0)
+        };
+        let expired = limit.resets.is_some_and(|reset| reset <= now);
+        let left = remaining(limit, now);
+        canvas.fill(Fill::rounded(rect, Paint::Clear, m.em(0.8)).bordered(1.0, Paint::RaisedEdge));
+        let label = match limit.label.as_str() {
+            "5-hour" => "Session",
+            "7-day" => "Weekly",
+            label => label,
+        };
+        self.usage_text(
+            canvas,
+            m,
+            label,
+            [col + inset, at + m.em(1.15), label_width],
+            Tone::Plain,
+        );
+        let amount = left.map_or_else(|| "—".into(), |left| format!("{left}%"));
+        let amount_width = self.usage_text(
+            canvas,
+            Measures::of(m.em(2.15)),
+            &amount,
+            [col + inset, at + m.em(2.6), label_width],
+            Tone::Plain,
+        );
+        self.usage_text(
+            canvas,
+            Measures::of(m.em(0.9)),
+            if expired { "refresh needed" } else { "left" },
+            [
+                col + inset + amount_width + m.em(0.5),
+                at + m.em(3.65),
+                label_width.max(m.em(8.0)) - amount_width,
+            ],
+            Tone::Muted,
+        );
+        let bar = if narrow {
+            [
+                col + inset,
+                at + height - m.em(3.4),
+                width - 2.0 * inset,
+                m.em(2.5),
+            ]
+        } else {
+            [
+                col + m.em(15.5),
+                at + (height - m.em(2.5)) / 2.0,
+                width - m.em(16.7),
+                m.em(2.5),
+            ]
+        };
+        self.usage_bar(canvas, m, bar, icon, left, &reset_label(limit.resets, now));
+    }
+
+    fn usage_bar(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        bar: [f32; 4],
+        icon: Icon,
+        left: Option<u8>,
+        reset: &str,
+    ) {
+        let [x, y, width, height] = bar;
+        let colour = Paint::Allowance(icon);
+        canvas.fill(Fill::rounded(bar, Paint::ChatHover, m.em(0.6)));
+        let filled = left.map_or(0.0, |left| width * f32::from(left) / 100.0);
+        if filled > 0.0 {
+            canvas.fill(Fill::rounded([x, y, filled, height], colour, m.em(0.6)));
+        }
+        // The spent part has texture, so it remains distinct without relying on colour.
+        let saved = canvas.clip;
+        canvas.clip = super::intersection(
+            saved,
+            [
+                x + filled,
+                y + 1.0,
+                (width - filled - m.em(0.25)).max(0.0),
+                height - 2.0,
+            ],
+        );
+        let mut tile = x + filled;
+        while tile < x + width {
+            canvas.fill(Fill::icon([tile, y, height, height], Icon::Hatch, colour));
+            tile += height;
+        }
+        canvas.clip = saved;
+        let small = Measures::of(m.em(0.8));
+        let badge_label = self.short_label(canvas.fonts, small, reset, width * 0.6, Tone::Plain);
+        let badge_width = badge_label.width + m.em(1.0);
+        let badge = [
+            x + width - badge_width - m.em(0.5),
+            y + m.em(0.45),
+            badge_width,
+            height - m.em(0.9),
+        ];
+        canvas.fill(Fill::rounded(badge, Paint::Palette, m.em(0.4)));
+        draw_laid(
+            canvas,
+            small,
+            &badge_label,
+            [badge[0] + m.em(0.5), badge[1] + m.em(0.25)],
+            badge_width - m.em(0.9),
+        );
+        self.keep_label(badge_label);
+        let amount = left.map_or_else(|| "—".into(), |left| format!("{left}%"));
+        self.usage_text(
+            canvas,
+            small,
+            &amount,
+            [
+                x + m.em(0.65),
+                y + m.em(0.8),
+                (badge[0] - x - m.em(1.0)).max(1.0),
+            ],
+            Tone::Plain,
+        );
     }
 
     fn usage_text(
@@ -294,9 +415,63 @@ impl ChatView {
         text: &str,
         [x, y, width]: [f32; 3],
         tone: Tone,
-    ) {
+    ) -> f32 {
         let laid = self.short_label(canvas.fonts, m, text, width.max(1.0), tone);
         draw_laid(canvas, m, &laid, [x, y], width.max(1.0));
+        let width = laid.width;
         self.keep_label(laid);
+        width
+    }
+}
+
+fn card_height(m: Measures, width: f32) -> f32 {
+    m.em(if width < m.em(40.0) { 9.0 } else { 7.0 })
+}
+
+fn remaining(limit: &clackatoo_protocol::UsageLimit, now: u64) -> Option<u8> {
+    limit
+        .resets
+        .is_none_or(|reset| reset > now)
+        .then(|| 100_u8.saturating_sub(limit.used))
+}
+
+fn reset_label(reset: Option<u64>, now: u64) -> String {
+    let Some(reset) = reset else {
+        return "Reset not reported".into();
+    };
+    if reset <= now {
+        return "Refresh needed".into();
+    }
+    let minutes = (reset - now).div_ceil(60_000);
+    let hours = minutes / 60;
+    let days = hours / 24;
+    if days > 0 {
+        format!("↻ {days}d {}h", hours % 24)
+    } else if hours > 0 {
+        format!("↻ {hours}h {}m", minutes % 60)
+    } else {
+        format!("↻ {minutes}m")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn remaining_and_countdown_do_not_invent_an_allowance_after_reset() {
+        let limit = clackatoo_protocol::UsageLimit {
+            id: "weekly".into(),
+            label: "Weekly".into(),
+            used: 94,
+            resets: Some(60_001),
+        };
+        assert_eq!(remaining(&limit, 1), Some(6));
+        assert_eq!(remaining(&limit, 60_001), None);
+        assert_eq!(reset_label(Some(60_001), 1), "↻ 1m");
+        assert_eq!(reset_label(Some(60_002), 1), "↻ 2m");
+        assert_eq!(reset_label(Some(3_600_001), 1), "↻ 1h 0m");
+        assert_eq!(reset_label(Some(90_000_001), 1), "↻ 1d 1h");
+        assert_eq!(reset_label(Some(1), 1), "Refresh needed");
+        assert_eq!(reset_label(None, 1), "Reset not reported");
     }
 }

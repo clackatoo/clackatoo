@@ -1033,13 +1033,24 @@ fn render_chat_wide(
     (scale, ui, width): (f64, Option<&str>, f64),
     then: impl FnOnce(&mut crate::chat::ChatView, &mut crate::fonts::Fonts),
 ) -> Option<Vec<u8>> {
+    render_chat_sized(name, node, typed, (scale, ui, [width, 640.0]), then)
+}
+
+/// As `render_chat_wide`, with an explicit viewport height for larger modals.
+fn render_chat_sized(
+    name: &str,
+    node: clackatoo_protocol::ChatNode,
+    typed: &str,
+    (scale, ui, [width, height]): (f64, Option<&str>, [f64; 2]),
+    then: impl FnOnce(&mut crate::chat::ChatView, &mut crate::fonts::Fonts),
+) -> Option<Vec<u8>> {
     let gpu = gpu()?;
     let mut fonts = fonts(scale);
     if let Some(ui) = ui {
         fonts.load_ui(Some(ui), 11.0, scale);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let size = [(width * scale) as u32, (640.0 * scale) as u32];
+    let size = [(width * scale) as u32, (height * scale) as u32];
     let mut chat = crate::chat::ChatView::new("chat".into(), node);
     // The turn going has been going 12 seconds.
     chat.set_clock(12_002);
@@ -3136,6 +3147,12 @@ fn renders_usage_modal_with_provider_windows_and_unavailable_states() {
                     used: 94,
                     resets: Some(220_000_000),
                 },
+                UsageLimit {
+                    id: "model".into(),
+                    label: "Weekly · Fable".into(),
+                    used: 0,
+                    resets: Some(220_000_000),
+                },
             ],
             ..Default::default()
         },
@@ -3146,6 +3163,30 @@ fn renders_usage_modal_with_provider_windows_and_unavailable_states() {
             ..Default::default()
         },
     ];
+    render_chat_sized(
+        "usage-modal-wide",
+        node.clone(),
+        "Keep this draft",
+        (1.0, None, [1480.0, 1040.0]),
+        |chat, _| {
+            chat.usage_supported = true;
+            chat.toggle_detail();
+        },
+    );
+    let mut unavailable = node.clone();
+    unavailable.provider_usage[0].limits[0].used = 100;
+    unavailable.provider_usage[0].limits[0].resets = None;
+    unavailable.provider_usage[1].limits[0].resets = Some(1);
+    render_chat_wide(
+        "usage-modal-expired",
+        unavailable,
+        "",
+        (1.0, None, 720.0),
+        |chat, _| {
+            chat.usage_supported = true;
+            chat.toggle_detail();
+        },
+    );
     for width in [720_u16, 420] {
         let Some(pixels) = render_chat_wide(
             &format!("usage-modal-{width}"),

@@ -3134,7 +3134,9 @@ mod tests {
     fn frame_time_with_chat_previews() {
         let mut fonts = crate::chat::fixtures::fonts();
         let node = crate::chat::fixtures::talk(&[("[Image]", "A screenshot."); 16]);
-        for kind in ["text", "prompt", "tool", "modal", "handoff", "queue"] {
+        for kind in [
+            "text", "prompt", "tool", "modal", "handoff", "queue", "usage",
+        ] {
             let mut node = node.clone();
             if matches!(kind, "prompt" | "tool" | "modal") {
                 for turn in &mut node.turns {
@@ -3180,6 +3182,27 @@ mod tests {
                         target: None,
                     })
                     .collect();
+            }
+            if kind == "usage" {
+                chat.usage_supported = true;
+                chat.node.provider_usage = ["codex", "claude", "gemini"]
+                    .into_iter()
+                    .map(|agent| clackatoo_protocol::ProviderUsage {
+                        agent: agent.into(),
+                        title: agent.into(),
+                        checked: 1,
+                        limits: (0..8)
+                            .map(|id| clackatoo_protocol::UsageLimit {
+                                id: id.to_string(),
+                                label: "Weekly".into(),
+                                used: 94,
+                                resets: Some(u64::MAX / 2),
+                            })
+                            .collect(),
+                        ..Default::default()
+                    })
+                    .collect();
+                chat.toggle_detail();
             }
             let initial = crate::chat::fixtures::paint(&mut chat, &mut fonts);
             if kind == "modal" {

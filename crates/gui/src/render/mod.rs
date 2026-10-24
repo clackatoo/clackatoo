@@ -215,6 +215,8 @@ pub(crate) enum Paint {
     ChatHover,
     Claude,
     Gemini,
+    /// Muted provider colour for account allowance bars and their hatching.
+    Allowance(Icon),
     /// The dot by a workspace's name, by its place in the list.
     Workspace(u8),
     /// clackatoo's own colour, for what it shows over the panes.
