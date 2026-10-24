@@ -1089,6 +1089,22 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             ))]),
         })),
     ));
+    samples.push((
+        crate::wire::PROVIDER_USAGE,
+        Client(ClientMessage::Request(Request::Chat {
+            terminal,
+            action: ChatAction::RefreshUsage { force: true },
+        })),
+    ));
+    samples.push((
+        crate::wire::PROVIDER_USAGE,
+        Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::ProviderUsage(
+                chat().provider_usage,
+            ))]),
+        })),
+    ));
     samples
 }
 
@@ -2643,6 +2659,19 @@ fn chat() -> ChatNode {
         usage: Some(usage()),
         providers: vec![provider()],
         subagents: vec![subagent()],
+        provider_usage: vec![crate::ProviderUsage {
+            agent: "codex".into(),
+            title: "Codex".into(),
+            checked: 1,
+            refreshing: false,
+            limits: vec![crate::UsageLimit {
+                id: "weekly".into(),
+                label: "Weekly".into(),
+                used: 42,
+                resets: Some(2),
+            }],
+            notice: None,
+        }],
         delivery: crate::ChatDelivery::default(),
     }
 }

@@ -3101,3 +3101,77 @@ fn crowded_bars_keep_the_tab_shown_however_narrow_and_at_twice_the_size() {
         }
     }
 }
+
+#[test]
+fn renders_usage_modal_with_provider_windows_and_unavailable_states() {
+    use clackatoo_protocol::{ProviderUsage, UsageLimit};
+    let mut node = chat_node(false);
+    node.provider_usage = vec![
+        ProviderUsage {
+            agent: "codex".into(),
+            title: "Codex".into(),
+            checked: 12_000,
+            limits: vec![UsageLimit {
+                id: "week".into(),
+                label: "7-day".into(),
+                used: 16,
+                resets: Some(220_000_000),
+            }],
+            ..Default::default()
+        },
+        ProviderUsage {
+            agent: "claude".into(),
+            title: "Claude Code".into(),
+            checked: 12_000,
+            limits: vec![
+                UsageLimit {
+                    id: "five".into(),
+                    label: "5-hour".into(),
+                    used: 13,
+                    resets: Some(1_000_000),
+                },
+                UsageLimit {
+                    id: "week".into(),
+                    label: "Weekly".into(),
+                    used: 94,
+                    resets: Some(220_000_000),
+                },
+            ],
+            ..Default::default()
+        },
+        ProviderUsage {
+            agent: "gemini".into(),
+            title: "Gemini CLI".into(),
+            notice: Some("This adapter does not expose subscription limits.".into()),
+            ..Default::default()
+        },
+    ];
+    for width in [720_u16, 420] {
+        let Some(pixels) = render_chat_wide(
+            &format!("usage-modal-{width}"),
+            node.clone(),
+            "Keep this draft",
+            (1.0, None, f64::from(width)),
+            |chat, _| {
+                chat.usage_supported = true;
+                assert!(chat.toggle_detail());
+            },
+        ) else {
+            return;
+        };
+        assert!(pixels.chunks_exact(4).any(|p| p != &pixels[..4]));
+        render_chat_wide(
+            &format!("usage-modal-bottom-{width}"),
+            node.clone(),
+            "Keep this draft",
+            (1.0, None, f64::from(width)),
+            |chat, fonts| {
+                chat.usage_supported = true;
+                chat.toggle_detail();
+                chat.paint(fonts, [0.0; 2], [f32::from(width), 640.0], true);
+                chat.scroll_by(10_000.0);
+            },
+        )
+        .unwrap();
+    }
+}

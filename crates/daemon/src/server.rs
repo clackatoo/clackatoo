@@ -3369,6 +3369,10 @@ impl Daemon {
         }
         // Other agents are the server's.
         match action {
+            ChatAction::RefreshUsage { force } => {
+                self.refresh_usage(force);
+                return Ok(());
+            }
             ChatAction::Open { chat } => {
                 self.open_subagent(id, chat);
                 return Ok(());

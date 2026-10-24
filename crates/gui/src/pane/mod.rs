@@ -280,8 +280,8 @@ impl Pane {
     }
 
     /// Whether a local image modal owns the chat input.
-    pub(crate) fn chat_viewing_image(&self) -> bool {
-        self.chat.as_deref().is_some_and(ChatView::viewing_image)
+    pub(crate) fn chat_viewing_modal(&self) -> bool {
+        self.chat.as_deref().is_some_and(ChatView::viewing_modal)
     }
 
     pub(crate) fn chat_searching_models(&self) -> bool {

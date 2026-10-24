@@ -61,6 +61,7 @@ pub(super) struct AgentSlot {
 /// The agents chats talk to, and the ones being installed.
 #[derive(Debug, Default)]
 pub(super) struct Agents {
+    usage: crate::provider_usage::Cache,
     images: crate::tool_images::Queue,
     running: BTreeMap<AgentId, AgentSlot>,
     next: u32,
@@ -1473,6 +1474,27 @@ impl Daemon {
         self.offer_providers(None);
     }
 
+    pub(super) fn refresh_usage(&mut self, force: bool) {
+        self.agents
+            .usage
+            .refresh(&self.config.agents, force, self.waker.clone());
+        self.offer_usage();
+    }
+
+    fn offer_usage(&mut self) {
+        let reports = self.agents.usage.reports.clone();
+        let mut changed = Vec::new();
+        for (&id, slot) in &mut self.terminals {
+            if let Some(chat) = slot.terminal.chat() {
+                chat.set_provider_usage(reports.clone());
+                changed.push(id);
+            }
+        }
+        for id in changed {
+            self.collect_damage(id);
+        }
+    }
+
     /// Tells the chat in `id`, or every chat, which other agents it could
     /// move to, and their models, as far as they're known.
     fn offer_providers(&mut self, only: Option<TerminalId>) {
@@ -1608,6 +1630,9 @@ impl Daemon {
     /// asked for their models that haven't said in time, tells chats whose
     /// sessions are slow to open, and lets idle sessions go.
     pub(super) fn agent_chores(&mut self) {
+        if self.agents.usage.take() {
+            self.offer_usage();
+        }
         for done in self.agents.images.take() {
             let id = done.target.terminal;
             if let Some(chat) = self.chat(id)
@@ -1964,6 +1989,7 @@ impl Daemon {
     /// SIGTERM. They're waited for with the language servers (see
     /// [`super::stopping`]). The next build, if there's one, reaps them.
     pub(super) fn stop_agents(&mut self) {
+        self.agents.usage.stop();
         let running: Vec<AgentId> = self.agents.running.keys().copied().collect();
         for id in running {
             self.end_agent(id, End::Gently(AGENT_STOP_WAIT));

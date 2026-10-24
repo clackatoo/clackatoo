@@ -767,6 +767,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Enter queues while an agent works; Ctrl+Enter steers, with pending messages shared across windows.",
     },
+    News {
+        id: "provider-usage-modal",
+        date: "2026-10-24",
+        lesson: "agents",
+        what: "Click the context gauge for account usage across providers, with reset times and read-only refresh.",
+    },
 ];
 
 impl News {

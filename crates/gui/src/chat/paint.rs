@@ -19,6 +19,7 @@ mod queue;
 mod select;
 mod tables;
 mod usage;
+mod usage_modal;
 mod working;
 
 use std::collections::HashMap;
@@ -299,6 +300,7 @@ impl ChatView {
             self.draw_detail(&mut paint, fonts, m, place, anchor);
         }
         self.draw_image_viewer(&mut paint, fonts, m, place);
+        self.draw_usage_modal(&mut paint, fonts, m, place);
         paint
     }
 
@@ -1363,7 +1365,7 @@ impl ChatView {
             diameter,
         ];
         self.draw_meter(canvas, m, frame, gauge);
-        let right = if self.node.usage.is_some() {
+        let right = if self.node.usage.is_some() || self.usage_supported {
             gauge[0]
         } else {
             send_left
@@ -3071,7 +3073,7 @@ mod tests {
                     modifiers: Modifiers::default(),
                 });
                 assert!(chat.settle(&mut fonts).actions.is_empty());
-                assert!(chat.viewing_image(), "{source}");
+                assert!(chat.viewing_modal(), "{source}");
                 let modal = chat.paint(&mut fonts, origin, [900.0, 700.0], true);
                 let enlarged: Vec<_> = modal.images.iter().filter(|image| image.over).collect();
                 assert_eq!(enlarged.len(), 1);
@@ -3110,7 +3112,7 @@ mod tests {
                 } else {
                     Key::Named(NamedKey::Escape)
                 };
-                assert!(chat.image_viewer_key(&KeyPress {
+                assert!(chat.chat_modal_key(&KeyPress {
                     key: &key,
                     text: None,
                     location: KeyLocation::Standard,
@@ -3120,7 +3122,7 @@ mod tests {
                         ..Modifiers::default()
                     }
                 }));
-                assert!(!chat.viewing_image());
+                assert!(!chat.viewing_modal());
                 assert_eq!(chat.editor.raw_text(), "keep my draft");
                 assert_eq!(chat.images.len(), usize::from(source == "draft"));
             }
@@ -3184,7 +3186,7 @@ mod tests {
                 let rect = initial.images.last().unwrap().rect;
                 chat.press([rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0], 1, false);
                 chat.settle(&mut fonts);
-                assert!(chat.viewing_image());
+                assert!(chat.viewing_modal());
                 crate::chat::fixtures::paint(&mut chat, &mut fonts);
             }
             let start = std::time::Instant::now();

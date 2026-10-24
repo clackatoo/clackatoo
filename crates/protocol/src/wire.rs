@@ -240,6 +240,8 @@ gates! {
     CHAT_HANDOFF = 101,
     /// Daemon-owned pending user messages and explicit steering.
     CHAT_QUEUE = 102,
+    /// Cross-provider subscription usage snapshots and read-only refresh.
+    PROVIDER_USAGE = 103,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -406,6 +408,7 @@ impl Since for ChatPatch {
             | Self::Providers(_)
             | Self::Subagents(_) => EARLIER,
             Self::Delivery(_) => CHAT_QUEUE,
+            Self::ProviderUsage(_) => PROVIDER_USAGE,
         }
     }
 }
@@ -914,6 +917,17 @@ pub trait Downgrade: Sized {
 /// daemon still: refuse image messages rather than dropping attachments.
 impl Downgrade for ClientMessage {
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
+        if wire < PROVIDER_USAGE
+            && matches!(
+                self,
+                Self::Request(crate::Request::Chat {
+                    action: crate::ChatAction::RefreshUsage { .. },
+                    ..
+                })
+            )
+        {
+            return Downgraded::Refused;
+        }
         if wire < CHAT_QUEUE
             && matches!(
                 self,
@@ -1004,8 +1018,8 @@ fn without_tool_images(message: &ServerMessage) -> ServerMessage {
     message
 }
 
-/// Queue metadata is informative; omit it for clients without queue controls.
-fn without_delivery(message: &ServerMessage) -> Option<ServerMessage> {
+/// Informative chat updates can be omitted for clients without their controls.
+fn without_optional_chat_updates(message: &ServerMessage, wire: u32) -> Option<ServerMessage> {
     let ServerMessage::Event(Event::View {
         terminal,
         update: ViewUpdate::Patch(patches),
@@ -1013,10 +1027,11 @@ fn without_delivery(message: &ServerMessage) -> Option<ServerMessage> {
     else {
         return None;
     };
-    if !patches
-        .iter()
-        .any(|p| matches!(p, Patch::Chat(ChatPatch::Delivery(_))))
-    {
+    let unsupported = |patch: &Patch| {
+        matches!(patch, Patch::Chat(ChatPatch::Delivery(_)) if wire < CHAT_QUEUE)
+            || matches!(patch, Patch::Chat(ChatPatch::ProviderUsage(_)) if wire < PROVIDER_USAGE)
+    };
+    if !patches.iter().any(unsupported) {
         return None;
     }
     Some(ServerMessage::Event(Event::View {
@@ -1024,7 +1039,7 @@ fn without_delivery(message: &ServerMessage) -> Option<ServerMessage> {
         update: ViewUpdate::Patch(
             patches
                 .iter()
-                .filter(|p| !matches!(p, Patch::Chat(ChatPatch::Delivery(_))))
+                .filter(|patch| !unsupported(patch))
                 .cloned()
                 .collect(),
         ),
@@ -1068,8 +1083,8 @@ impl Downgrade for ServerMessage {
         if newest(self) <= wire {
             return Downgraded::AsIs;
         }
-        if wire < CHAT_QUEUE
-            && let Some(older) = without_delivery(self)
+        if wire < PROVIDER_USAGE
+            && let Some(older) = without_optional_chat_updates(self, wire)
         {
             return match older.downgrade(wire) {
                 Downgraded::AsIs => Downgraded::To(older),
@@ -1948,5 +1963,49 @@ mod original_tests {
             .downgrade(TOOL_IMAGES),
             Downgraded::Refused
         );
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    #[test]
+    fn usage_refresh_is_refused_and_quotas_are_omitted_for_older_peers() {
+        let request = ClientMessage::Request(crate::Request::Chat {
+            terminal: crate::TerminalId(1),
+            action: crate::ChatAction::RefreshUsage { force: true },
+        });
+        assert_eq!(request.downgrade(PROVIDER_USAGE - 1), Downgraded::Refused);
+        assert_eq!(request.downgrade(PROVIDER_USAGE), Downgraded::AsIs);
+        let reports = vec![crate::ProviderUsage {
+            agent: "codex".into(),
+            ..Default::default()
+        }];
+        let node = crate::ChatNode {
+            provider_usage: reports.clone(),
+            ..Default::default()
+        };
+        let bytes = speaking(PROVIDER_USAGE - 1, || postcard::to_allocvec(&node).unwrap());
+        let old: crate::ChatNode =
+            speaking(PROVIDER_USAGE - 1, || postcard::from_bytes(&bytes).unwrap());
+        assert!(old.provider_usage.is_empty());
+        let message = ServerMessage::Event(Event::View {
+            terminal: crate::TerminalId(1),
+            update: ViewUpdate::Patch(vec![
+                Patch::Chat(ChatPatch::ProviderUsage(reports)),
+                Patch::Chat(ChatPatch::Delivery(crate::ChatDelivery::default())),
+            ]),
+        });
+        let Downgraded::To(ServerMessage::Event(Event::View {
+            update: ViewUpdate::Patch(patches),
+            ..
+        })) = message.downgrade(PROVIDER_USAGE - 1)
+        else {
+            panic!("older peer gets known patches");
+        };
+        assert!(matches!(
+            patches.as_slice(),
+            [Patch::Chat(ChatPatch::Delivery(_))]
+        ));
     }
 }

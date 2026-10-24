@@ -948,6 +948,7 @@ impl HostedChat {
             | ChatAction::Submit { .. }
             | ChatAction::RemoveQueued { .. }
             | ChatAction::SendQueued { .. }
+            | ChatAction::RefreshUsage { .. }
             | ChatAction::LearnModels
             | ChatAction::Open { .. } => {}
             // Only a value the agent offers is kept, and asked for.
@@ -2915,6 +2916,13 @@ impl HostedChat {
         self.set_usage(None);
     }
 
+    pub(crate) fn set_provider_usage(&mut self, usage: Vec<clackatoo_protocol::ProviderUsage>) {
+        if self.node.provider_usage != usage {
+            self.node.provider_usage.clone_from(&usage);
+            self.journal.push(ChatPatch::ProviderUsage(usage));
+        }
+    }
+
     /// Its agent's account's limits are now `limits`, as heard from any of
     /// that agent's chats: shown with the context it fills, once it's
     /// said how much that is.
@@ -3037,6 +3045,20 @@ fn weight(patch: &ChatPatch) -> usize {
                     .sum::<usize>()
         }
         ChatPatch::Delivery(delivery) => delivery.queued.iter().map(|p| p.text.len() + 128).sum(),
+        ChatPatch::ProviderUsage(providers) => providers
+            .iter()
+            .map(|provider| {
+                provider.agent.len()
+                    + provider.title.len()
+                    + provider.notice.as_ref().map_or(0, String::len)
+                    + provider
+                        .limits
+                        .iter()
+                        .map(|limit| limit.id.len() + limit.label.len() + 32)
+                        .sum::<usize>()
+                    + 32
+            })
+            .sum(),
         ChatPatch::Item { value, .. } => item(value),
         ChatPatch::Append { text, .. }
         | ChatPatch::Output { text, .. }

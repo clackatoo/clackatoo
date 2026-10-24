@@ -45,6 +45,43 @@ pub struct ChatNode {
         deserialize_with = "wire::since::<{ wire::CHAT_QUEUE }, _, _>"
     )]
     pub delivery: ChatDelivery,
+    /// Latest account quota snapshots for the daemon's configured providers.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::PROVIDER_USAGE }, _>",
+        deserialize_with = "wire::since::<{ wire::PROVIDER_USAGE }, _, _>"
+    )]
+    pub provider_usage: Vec<ProviderUsage>,
+}
+
+/// One provider account's quota readings. Context belongs to the chat, not here.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderUsage {
+    /// Configured provider identity.
+    pub agent: String,
+    /// Display name.
+    pub title: String,
+    /// Last successful reading, in Unix milliseconds; zero means none yet.
+    pub checked: u64,
+    /// A read-only refresh is in progress.
+    pub refreshing: bool,
+    /// Every quota window reported by this provider, bounded to 32.
+    pub limits: Vec<UsageLimit>,
+    /// Unavailable, refresh failure, or adapter-specific explanation.
+    pub notice: Option<String>,
+}
+
+/// A subscription allowance, including model-specific and spend allowances.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageLimit {
+    /// Stable provider-local window identity.
+    pub id: String,
+    /// Human-readable window label.
+    pub label: String,
+    /// Percentage used, from zero through 100.
+    pub used: u8,
+    /// Reset time in Unix milliseconds, when reported.
+    pub resets: Option<u64>,
 }
 
 /// The daemon's pending user messages. Image bytes stay in the daemon.
@@ -967,6 +1004,8 @@ pub enum ChatPatch {
     Subagents(Vec<Subagent>),
     /// The user-message queue changed.
     Delivery(ChatDelivery),
+    /// Account quotas across the daemon's providers.
+    ProviderUsage(Vec<ProviderUsage>),
 }
 
 /// A small, decoded image for chat history. Shared by snapshots and paint
@@ -1157,6 +1196,11 @@ pub enum ChatAction {
         /// Steer the active work if it is still running.
         steer: bool,
     },
+    /// Refresh account quotas without sending a model prompt. Calls are paced.
+    RefreshUsage {
+        /// Ask to refresh a cached reading, subject to the minimum interval.
+        force: bool,
+    },
 }
 
 /// The number turn `index` of `turns` goes by, as people count them: from
@@ -1233,6 +1277,7 @@ impl ChatNode {
             ChatPatch::Providers(providers) => self.providers = providers,
             ChatPatch::Subagents(subagents) => self.subagents = subagents,
             ChatPatch::Delivery(delivery) => self.delivery = delivery,
+            ChatPatch::ProviderUsage(usage) => self.provider_usage = usage,
         }
     }
 

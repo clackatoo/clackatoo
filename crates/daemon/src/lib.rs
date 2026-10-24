@@ -38,6 +38,7 @@ pub mod mcp;
 mod memory;
 mod ports;
 mod profiles;
+mod provider_usage;
 mod pty;
 mod quic;
 mod recovery;

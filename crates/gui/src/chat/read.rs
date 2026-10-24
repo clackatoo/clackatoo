@@ -104,7 +104,7 @@ impl ChatView {
     /// redrawn, and whether the key goes to insert mode, to type a
     /// message.
     pub(crate) fn read_key(&mut self, press: &KeyPress<'_>) -> (bool, bool) {
-        if self.image_viewer_key(press) {
+        if self.chat_modal_key(press) {
             return (true, false);
         }
         // What the window said of the chat lasts until the next key, as

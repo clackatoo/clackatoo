@@ -1337,7 +1337,7 @@ impl App {
             self.notice_key(press, repeat);
             return;
         }
-        if self.desk.image_viewer_key(press) {
+        if self.desk.chat_modal_key(press) {
             self.update();
             self.request_redraw();
             return;
@@ -2223,6 +2223,9 @@ impl App {
         let quoted = self.desk.daemon_has(clackatoo_protocol::wire::COLOURS);
         let handoff = self.desk.daemon_has(clackatoo_protocol::wire::CHAT_HANDOFF);
         let queue = self.desk.daemon_has(clackatoo_protocol::wire::CHAT_QUEUE);
+        let usage = self
+            .desk
+            .daemon_has(clackatoo_protocol::wire::PROVIDER_USAGE);
         let prompting = self.desk.prompt_has_keys() || self.picker.is_some();
         for (terminal, tile, focused) in tiles {
             let Some(pane) = self.desk.pane_mut(terminal).filter(|pane| pane.is_chat()) else {
@@ -2232,6 +2235,7 @@ impl App {
                 chat.set_quoted(quoted);
                 chat.handoff_supported = handoff;
                 chat.queue_supported = queue;
+                chat.usage_supported = usage;
             }
             // In insert mode, the cursor is in the box; in normal mode, in
             // the conversation; and while a prompt has the keys, nowhere.

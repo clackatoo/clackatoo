@@ -410,6 +410,10 @@ impl AgentConfig {
         }
     }
 
+    pub(crate) fn usage_node(&self) -> Option<PathBuf> {
+        self.program("node")
+    }
+
     /// The program called `name`, as the daemon finds it.
     fn program(&self, name: &str) -> Option<PathBuf> {
         match &self.path {

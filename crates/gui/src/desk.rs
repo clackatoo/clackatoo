@@ -1868,7 +1868,7 @@ impl Desk {
         if input::is_modifier(press.key) {
             return false;
         }
-        if self.image_viewer_key(press) {
+        if self.chat_modal_key(press) {
             return true;
         }
         // While an editor's command waits for the grammar, or a macro for
@@ -2077,10 +2077,10 @@ impl Desk {
     }
 
     /// Local image viewing owns input even when the daemon is offline.
-    pub(crate) fn image_viewer_key(&mut self, press: &KeyPress<'_>) -> bool {
+    pub(crate) fn chat_modal_key(&mut self, press: &KeyPress<'_>) -> bool {
         self.focused_pane()
             .and_then(Pane::chat_mut)
-            .is_some_and(|chat| chat.image_viewer_key(press))
+            .is_some_and(|chat| chat.chat_modal_key(press))
     }
 
     /// The chat an explicit clipboard paste goes to, unless a prompt owns input.
@@ -2092,7 +2092,7 @@ impl Desk {
         self.panes
             .get(&id)
             .filter(|pane| {
-                pane.is_chat() && !pane.chat_searching_models() && !pane.chat_viewing_image()
+                pane.is_chat() && !pane.chat_searching_models() && !pane.chat_viewing_modal()
             })
             .map(|_| id)
     }
@@ -2101,7 +2101,7 @@ impl Desk {
         let Some(chat) = self.panes.get_mut(&id).and_then(|pane| pane.chat_mut()) else {
             return false;
         };
-        if chat.pasting || chat.viewing_image() {
+        if chat.pasting || chat.viewing_modal() {
             return false;
         }
         chat.begin_paste();

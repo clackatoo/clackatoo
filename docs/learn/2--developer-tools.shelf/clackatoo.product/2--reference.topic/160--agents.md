@@ -105,7 +105,11 @@ The permissions menu groups three separate settings: the agent's approval mode, 
 
 The circular gauge shows context used as a percentage in its centre. Its ring fills clockwise: quiet while there is room, amber past 80%, red past 95%. A Claude account limit above those thresholds also raises its warning colour; the details identify which limit needs attention. When the context capacity is unknown, the gauge shows a dash.
 
-Hover over it, click it, or press `K` in normal mode for the detail: the tokens used of the context, and each limit, how much of it is used and when it resets, as `at 15:40` or `Tuesday 09:00`. The limits are the account's, so every Claude chat shows the latest, from whichever chat heard it; one past its reset time isn't shown. Codex doesn't share its limits, so a Codex chat shows its context alone; its own `/status` says them.
+Hover over the gauge for the conversation's token counts and any account limits reported during that chat. Click it, or press `K` in normal mode, to open **Usage & limits**. The modal separates conversation context from account allowances and lists the installed providers, including those whose adapters cannot report limits. Escape, Ctrl+;, the close button or a click outside dismisses it without changing the draft. Scroll or use the arrow and page keys for more windows.
+
+Claude Code and Codex can read their subscription windows without sending a model prompt: short and weekly limits, plus model-specific or extra-spend allowances when reported. Each allowance shows the percentage used and its reset time in the window's local timezone. API-key accounts and adapters without this interface say when subscription limits are unavailable. Custom launch commands are not probed through another installation's sign-in.
+
+The daemon collects these readings, so windows connected remotely see the accounts on that daemon's machine. Opening the modal refreshes readings at most every five minutes; **Refresh** can check again after one minute. Concurrent windows share the refresh. Failed reads retain the last successful values and their update time; expired windows say they need a refresh rather than guessing that usage is zero. Readings are collected again after a daemon upgrade.
 
 Click a setting to open its menu, immediately above that button. Up and Down move through it, Enter or a click picks, and Esc or a click elsewhere closes it. Shift+Tab steps through the modes without opening the menu.
 
@@ -151,7 +155,7 @@ In normal mode, a solid cursor moves through the conversation's text, and the vi
 | `zl` `zh`, `zL` `zH` | Scroll the table the cursor's in sideways: a few characters, or half the column. |
 | `u` | Undoes what the turn under the cursor changed in files, if it's in view, or else the last turn's, keeping your edits since. The bar says which. |
 | Ctrl+R | Makes it again. |
-| `K` | Shows how much context the chat fills, and the account's limits, or hides it. Any other key hides it too. |
+| `K` | Opens Usage & limits. Escape or Ctrl+; closes it. |
 | `i`, `a`, `o`, Enter | Back to insert mode. |
 
 The mouse wheel scrolls in either mode. While you're at the end, the view follows the answer as it grows. Scrolled up, it stays put, and the bottom bar says so.
@@ -404,7 +408,7 @@ An upgrade stops the browser; the next page starts it again.
 - There's no menu of agents to pick from: name one after `:Agent`. Codex's Plan mode can't be changed from the box.
 - A file changed both by the agent and by something else at once isn't taken in, and the bar says so.
 - Agents can't yet see what you've selected in an editor. Commands run with the agent's own tool, rather than `run_in_terminal`, show their output once they're done.
-- Limits come only as Claude Code's adapter says them, when they change: after an upgrade they're blank until the next. Per-model weekly limits and extra usage aren't shown.
+- The account-usage modal is native-only. Gemini and custom adapters do not yet have read-only subscription probes; the phone keeps its existing per-chat usage detail.
 - `/` commands aren't listed or completed as you type them.
 - You can't click or type into a browser pane yourself.
 - An upgrade forgets the cards of subagents that had already closed, so their changes drop out of the chat's and turn's reviews. They stay in `:Review base` and in the gutter, as `chat N`.

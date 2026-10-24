@@ -81,8 +81,15 @@ impl ChatView {
         frame: &BoxFrame,
         rect: [f32; 4],
     ) {
-        let Some(usage) = self.node.usage else {
-            return;
+        let usage = match self.node.usage {
+            Some(usage) => usage,
+            None if self.usage_supported => clackatoo_protocol::Usage {
+                used: 0,
+                size: 0,
+                five_hour: None,
+                weekly: None,
+            },
+            None => return,
         };
         let percent = usage.percent();
         let fullness = percent.map_or(Fullness::Room, Fullness::of);

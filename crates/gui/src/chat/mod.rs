@@ -101,6 +101,9 @@ enum Hit {
     Favorite(String, String),
     RemoveImage(usize),
     CloseImage,
+    CloseUsage,
+    RefreshUsage,
+    UsageSurface,
     CancelHandoff,
     Send,
     Steer,
@@ -344,6 +347,10 @@ pub(crate) struct ChatView {
     column_right: f32,
     /// The meter's detail, while it's shown, and how it came to be.
     detail: Option<paint::Detail>,
+    pub(crate) usage_supported: bool,
+    usage_modal: bool,
+    usage_scroll: f32,
+    usage_max_scroll: f32,
     /// Where the meter was drawn, for its detail to open from, while
     /// drawing: its right, and the box's top.
     detail_anchor: Option<[f32; 2]>,
@@ -471,6 +478,10 @@ impl ChatView {
             edge_step: None,
             column_right: 0.0,
             detail: None,
+            usage_supported: false,
+            usage_modal: false,
+            usage_scroll: 0.0,
+            usage_max_scroll: 0.0,
             detail_anchor: None,
             asked_at: None,
             armed: None,
@@ -596,6 +607,10 @@ impl ChatView {
     /// meanwhile, the chat says nothing of its agent working, and nothing
     /// it shows wakes the window to count.
     pub(crate) fn set_offline(&mut self, offline: bool) {
+        if self.offline && !offline && self.usage_modal {
+            self.queued
+                .push(Input::Act(ChatAction::RefreshUsage { force: false }));
+        }
         self.offline = offline;
         if offline {
             self.live = None;
@@ -668,7 +683,7 @@ impl ChatView {
     // --- Input, queued until the fonts are at hand --------------------------
 
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) {
-        if self.image_viewer_key(press) {
+        if self.chat_modal_key(press) {
             return;
         }
         self.said = None;
@@ -767,7 +782,7 @@ impl ChatView {
     }
 
     pub(crate) fn paste(&mut self, text: &str) {
-        if self.image_viewer.is_some() {
+        if self.viewing_modal() {
             return;
         }
         self.queued.push(Input::Paste(text.to_owned()));
@@ -910,12 +925,35 @@ impl ChatView {
     /// Shows the meter's detail, as `K` does, or hides it again. Returns
     /// whether there's a meter to show it of.
     pub(crate) fn toggle_detail(&mut self) -> bool {
+        if self.usage_supported {
+            if self.usage_modal {
+                self.usage_modal = false;
+            } else {
+                self.open_usage();
+            }
+            return true;
+        }
         self.detail = match self.detail {
             Some(paint::Detail::Asked) => None,
             _ if self.node.usage.is_none() => return false,
             _ => Some(paint::Detail::Asked),
         };
         true
+    }
+
+    fn show_usage(&mut self) {
+        self.usage_modal = true;
+        self.usage_scroll = 0.0;
+        self.detail = None;
+        self.menu = None;
+        self.selecting = false;
+        self.picking = false;
+    }
+
+    fn open_usage(&mut self) {
+        self.show_usage();
+        self.queued
+            .push(Input::Act(ChatAction::RefreshUsage { force: false }));
     }
 
     /// Hides the meter's detail if a key or a click showed it, as the
@@ -1131,7 +1169,7 @@ impl ChatView {
     }
 
     fn settle_paste(&mut self, fonts: &mut Fonts, text: &str) {
-        if self.viewing_image() {
+        if self.viewing_modal() {
             return;
         }
         if self.searching_models() {
@@ -1510,21 +1548,38 @@ impl ChatView {
         }
     }
 
-    pub(crate) fn viewing_image(&self) -> bool {
-        self.image_viewer.is_some()
+    pub(crate) fn viewing_modal(&self) -> bool {
+        self.image_viewer.is_some() || self.usage_modal
     }
 
     /// The modal owns keys before bindings, permission answers, or either mode.
-    pub(crate) fn image_viewer_key(&mut self, press: &KeyPress<'_>) -> bool {
+    pub(crate) fn chat_modal_key(&mut self, press: &KeyPress<'_>) -> bool {
         self.modal_key(press.key, crate::vim::enters_normal_mode(press))
     }
 
     fn modal_key(&mut self, key: &Key, normal: bool) -> bool {
-        if self.image_viewer.is_none() {
+        if !self.viewing_modal() {
             return false;
         }
         if *key == Key::Named(NamedKey::Escape) || normal {
             self.image_viewer = None;
+            self.usage_modal = false;
+        } else if self.usage_modal {
+            match key {
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.scroll_by(40.0);
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.scroll_by(-40.0);
+                }
+                Key::Named(NamedKey::PageDown) => {
+                    self.scroll_by(240.0);
+                }
+                Key::Named(NamedKey::PageUp) => {
+                    self.scroll_by(-240.0);
+                }
+                _ => {}
+            }
         }
         true
     }
@@ -1718,6 +1773,16 @@ impl ChatView {
         let hit = (self.hits.iter().rev())
             .find(|(_, rect)| contains(*rect, at))
             .map(|(hit, _)| hit.clone());
+        if self.usage_modal {
+            match hit {
+                Some(Hit::CloseUsage) | None => self.usage_modal = false,
+                Some(Hit::RefreshUsage) => settled
+                    .actions
+                    .push(ChatAction::RefreshUsage { force: true }),
+                _ => {}
+            }
+            return;
+        }
         if self.image_viewer.is_some() {
             if hit == Some(Hit::CloseImage) {
                 self.image_viewer = None;
@@ -1745,6 +1810,13 @@ impl ChatView {
             self.hide_detail();
             self.selecting = false;
             self.picking = false;
+            return;
+        }
+        if hit == Some(Hit::Usage) && self.usage_supported {
+            self.show_usage();
+            settled
+                .actions
+                .push(ChatAction::RefreshUsage { force: false });
             return;
         }
         // A click closes the meter's detail, if a click showed it, unless
@@ -1775,7 +1847,14 @@ impl ChatView {
         }
         match hit {
             Some(
-                Hit::ModelSearch | Hit::MenuSurface | Hit::ModelRail | Hit::Usage | Hit::CloseImage,
+                Hit::ModelSearch
+                | Hit::MenuSurface
+                | Hit::ModelRail
+                | Hit::Usage
+                | Hit::CloseImage
+                | Hit::CloseUsage
+                | Hit::RefreshUsage
+                | Hit::UsageSurface,
             ) => {}
             Some(Hit::FastMode) => {
                 if let Some(setting) = picker::fast_mode(&self.node.settings).cloned() {
@@ -1971,6 +2050,9 @@ impl ChatView {
     /// Scrolls `lines` lines up, or down if negative. Returns whether the
     /// view moved.
     pub(crate) fn scroll_lines(&mut self, lines: f32) -> bool {
+        if self.usage_modal {
+            return self.scroll_by(-lines * self.line_height);
+        }
         if self.image_viewer.is_some() {
             return false;
         }
@@ -2003,7 +2085,10 @@ impl ChatView {
     }
 
     pub(crate) fn wheel_metrics(&self) -> Option<(f32, f32, f32)> {
-        (self.menu.is_none() && self.image_viewer.is_none()).then_some((
+        if self.usage_modal {
+            return Some((self.usage_scroll, self.usage_max_scroll, self.line_height));
+        }
+        (self.menu.is_none() && !self.viewing_modal()).then_some((
             self.scroll,
             self.max_scroll,
             self.line_height,
@@ -2011,6 +2096,11 @@ impl ChatView {
     }
 
     pub(crate) fn scroll_by(&mut self, pixels: f32) -> bool {
+        if self.usage_modal {
+            let old = self.usage_scroll;
+            self.usage_scroll = (old + pixels).clamp(0.0, self.usage_max_scroll);
+            return (old - self.usage_scroll).abs() > f32::EPSILON;
+        }
         if self.image_viewer.is_some() {
             return false;
         }
@@ -2128,7 +2218,8 @@ fn touches(patch: &clackatoo_protocol::ChatPatch) -> Option<usize> {
         | ChatPatch::Agent(_)
         | ChatPatch::Providers(_)
         | ChatPatch::Subagents(_)
-        | ChatPatch::Delivery(_) => None,
+        | ChatPatch::Delivery(_)
+        | ChatPatch::ProviderUsage(_) => None,
     }
 }
 
@@ -3776,5 +3867,61 @@ mod tests {
         fixtures::read_named(&mut view, NamedKey::Escape);
         fixtures::read(&mut view, "K");
         assert_eq!(view.detail, Some(paint::Detail::Asked));
+    }
+    #[test]
+    fn usage_modal_keeps_draft_and_owns_keys_scroll_refresh_and_reconnect() {
+        let mut view = ChatView::new("chat".into(), fixtures::talk(&[("hello", "answer")]));
+        let mut fonts = fonts();
+        view.usage_supported = true;
+        view.paste("keep this draft");
+        view.settle(&mut fonts);
+        fixtures::paint(&mut view, &mut fonts);
+        let meter = drawn_at(&view, &Hit::Usage).expect("gauge even before context is reported");
+        view.press(meter, 1, false);
+        let opened = view.settle(&mut fonts);
+        assert!(view.usage_modal);
+        assert!(
+            opened
+                .actions
+                .iter()
+                .any(|a| matches!(a, ChatAction::RefreshUsage { force: false }))
+        );
+        for index in 0..12 {
+            view.node
+                .provider_usage
+                .push(clackatoo_protocol::ProviderUsage {
+                    agent: "claude".into(),
+                    title: format!("Provider {index}"),
+                    ..Default::default()
+                });
+        }
+        fixtures::paint(&mut view, &mut fonts);
+        assert!(view.usage_max_scroll > 0.0);
+        assert!(view.modal_key(&Key::Named(NamedKey::PageDown), false));
+        assert!(view.usage_scroll > 0.0);
+        assert!(view.modal_key(&Key::Named(NamedKey::Enter), false));
+        assert_eq!(view.editor.text(), "keep this draft");
+        let refresh = drawn_at(&view, &Hit::RefreshUsage).unwrap();
+        view.press(refresh, 1, false);
+        assert!(
+            view.settle(&mut fonts)
+                .actions
+                .iter()
+                .any(|a| matches!(a, ChatAction::RefreshUsage { force: true }))
+        );
+        view.set_offline(true);
+        view.set_offline(false);
+        assert!(
+            view.settle(&mut fonts)
+                .actions
+                .iter()
+                .any(|a| matches!(a, ChatAction::RefreshUsage { force: false }))
+        );
+        assert!(view.modal_key(&Key::Named(NamedKey::Escape), false));
+        assert!(!view.viewing_modal());
+        view.toggle_detail();
+        assert!(view.modal_key(&Key::Character(";".into()), true));
+        assert!(!view.viewing_modal());
+        assert_eq!(view.editor.text(), "keep this draft");
     }
 }
