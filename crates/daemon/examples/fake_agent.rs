@@ -852,6 +852,42 @@ impl Fake {
             return true;
         }
         match text {
+            "polish" => {
+                say(
+                    &session,
+                    "I’ll check the attachment renderer and run the focused tests.\n",
+                );
+                for (tool, kind, title) in [
+                    (
+                        "read-preview",
+                        "read",
+                        "Read /home/jack/projects/clackatoo/.worktrees/image-paste/crates/gui/src/chat/images.rs",
+                    ),
+                    (
+                        "build-preview",
+                        "execute",
+                        "CARGO_INCREMENTAL=0 CLACKATOO_WEB_APP=required cargo test --locked --offline -p clackatoo-gui --lib chat::paint::tests -- --test-threads=4",
+                    ),
+                    (
+                        "view-preview",
+                        "read",
+                        "View Image /home/jack/projects/clackatoo/.worktrees/image-paste/target/preview-looks/narrow-history.png",
+                    ),
+                ] {
+                    update(
+                        &session,
+                        &json!({"sessionUpdate": "tool_call", "toolCallId": tool,
+                        "kind": kind, "title": title, "status": "completed",
+                        "content": if kind == "execute" { vec![json!({"type": "content", "content": {
+                            "type": "text", "text": "```console\nCompiling clackatoo-gui\nrunning 24 tests\ntest result: ok. 24 passed; 0 failed\n```"}})] } else { vec![] }}),
+                    );
+                }
+                say(
+                    &session,
+                    "### Image previews are ready\n\nAttachments now appear above your message, both while composing and in the conversation.\n\n- Paste a screenshot with **Ctrl+Shift+V**.\n- Remove an attachment with its **×** button.\n- Open a tool row to inspect the full command and output.\n\nThe focused rendering tests passed.\n",
+                );
+                done(&id, "end_turn");
+            }
             "cwd" => {
                 say(&session, &format!("in {}\n", self.sessions[&session]));
                 done(&id, "end_turn");

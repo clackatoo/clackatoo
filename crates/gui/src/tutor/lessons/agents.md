@@ -18,9 +18,9 @@ If the agent hasn't opened the chat's session after 30 seconds, the chat says so
 
 ## Pasting images
 
-Copy a screenshot or image to the clipboard, then press Ctrl+Shift+V in a chat. A thumbnail appears in the message box, and stays beside the sent message in the conversation. Add text if you like, then press Enter to send both; an image can go on its own too.
+Copy a screenshot or image to the clipboard, then press Ctrl+Shift+V in a chat. A thumbnail appears above the text in the message box, and above the sent message in the conversation. Add text if you like, then press Enter to send both; an image can go on its own too.
 
-Click the × below a thumbnail to remove it, or press Backspace while the message box is empty to remove the last one. You can prepare attachments while the agent answers; they stay in the draft until you send. Text on the clipboard still pastes as text.
+Click the × on a thumbnail to remove it, or press Backspace while the message box is empty to remove the last one. You can prepare attachments while the agent answers; they stay in the draft until you send. Text on the clipboard still pastes as text.
 
 A message holds up to four images, at most 16 million pixels each and 8 MiB of encoded image data in total. An agent that does not accept images reports that clearly. The full image is sent to the agent, whose session keeps it. Clackatoo keeps small previews (up to 256 pixels on a side) across window reconnects and daemon upgrades, including on remote connections. Each chat keeps up to 4 MiB of recent previews; older messages retain their image labels. Images sent before previews were supported, or history loaded anew from an agent session after a full daemon restart, show labels only. Switching to a different agent carries the labels with the conversation, so paste the image again if that agent needs to see it.
 
@@ -38,7 +38,7 @@ finder agent
 
 ## What it shows
 
-Below each message, what the agent did with it, in order: its words, its thinking, each tool it uses with `○` while it runs and `✓` or `✗` after, and each command it runs and change it makes, on a card of its own. Click a card to open it.
+Below each message, the agent’s words and thinking appear in order. Tools are compact rows with `○` while running and `✓` or `✗` after. Click a row to see its full title, command output or file changes; click its header again to collapse it. In normal mode, Enter or `za` on a tool opens or closes it; `zo` opens and `zc` closes. Failed commands keep the last few lines of output visible.
 
 Its words are Markdown: headings, lists, quotes, links, code, and tables. Code in a language you've installed is coloured as an editor colours it, once its block is whole. A table is a grid, its head in bold over a line; one too wide for the chat scrolls sideways with Shift and the wheel over it, or `zl` and `zh` in the chat's normal mode (`zL` and `zH` go half the width), and moving the cursor to a cell out of view brings it into view.
 

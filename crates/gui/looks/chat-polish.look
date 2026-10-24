@@ -1,0 +1,26 @@
+# Tool-heavy conversation, compact summaries and attachment composition.
+size 1100x900
+keys <C-;>:Agent claude<CR>
+keys i
+type polish
+keys <CR>
+wait-for Image previews are ready
+shot conversation
+keys <Esc>ggjjzo
+shot tools
+click 500 242
+shot expanded-command
+click 500 242
+keys i
+paste-image
+type Could you check this screenshot too?
+shot composer
+click 277 711
+shot removed-thumbnail
+paste-image
+size 620x800
+shot narrow
+
+keys <CR>
+wait-for echo: Could you check this screenshot too?
+shot image-history

@@ -21,7 +21,7 @@
 //! | Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y | Scroll half a view, or a line |
 //! | `v` `V` | Select characters, or lines; `o` goes to the other end |
 //! | `y` | Copy what's selected, or the block of code, message or card under the cursor |
-//! | `za` `zo` `zc`, Enter | Open or fold the turn's work, or on its card, the chats it started; `zR` and `zM` all of both |
+//! | `za` `zo` `zc`, Enter | Open or fold the tool, turn's work, or subagents under the cursor; `zR` and `zM` all turns and subagents |
 //! | `zl` `zh`, `zL` `zH` | Scroll the table the cursor's in sideways, a little or half the column; Shift and the wheel do too |
 //! | `u`, Ctrl+R | Undo what the turn changed in files, or redo it; with nothing there, the last turn's, or the first's undone |
 //! | `K` | Show how much context the chat fills, and its account's limits, or hide it again |
@@ -238,6 +238,7 @@ impl ChatView {
                     self.reveal = true;
                 }
             }
+            (_, Key::Named(NamedKey::Enter)) if self.fold_tool(None) => {}
             (_, Key::Named(NamedKey::Enter)) => {
                 let Some(cursor) = self.cursor.filter(|cursor| control(cursor.text.piece)) else {
                     self.leave_visual();
@@ -356,6 +357,11 @@ impl ChatView {
         if let Some(pixels) = sideways {
             return self.scroll_sideways(None, pixels);
         }
+        if matches!(character, Some('a' | 'o' | 'c'))
+            && self.fold_tool(character.filter(|&key| key != 'a').map(|key| key == 'o'))
+        {
+            return true;
+        }
         match (character, turn) {
             (Some(all @ ('R' | 'M')), _) => {
                 self.set_all_folds(all == 'R');
@@ -404,6 +410,43 @@ impl ChatView {
                 self.picked = None;
             }
         }
+        self.reveal = true;
+        true
+    }
+
+    /// Opens the tool under the reading cursor, keeping the cursor on its
+    /// header when its output disappears. Returns false outside a tool.
+    fn fold_tool(&mut self, open: Option<bool>) -> bool {
+        let Some(cursor) = self.cursor else {
+            return false;
+        };
+        let Some(item) = cursor.text.piece.checked_sub(ITEMS) else {
+            return false;
+        };
+        let Some(Item::Tool(tool)) = self
+            .node
+            .turns
+            .get(cursor.text.turn)
+            .and_then(|turn| turn.items.get(item))
+        else {
+            return false;
+        };
+        let id = tool.id.clone();
+        let open = open.unwrap_or_else(|| !self.open_cards.contains(&id));
+        if open {
+            self.open_cards.insert(id);
+        } else {
+            self.open_cards.remove(&id);
+        }
+        self.restyled(cursor.text.turn);
+        self.cursor = Some(Position {
+            text: TextKey {
+                part: 0,
+                ..cursor.text
+            },
+            byte: 0,
+        });
+        self.picked = None;
         self.reveal = true;
         true
     }

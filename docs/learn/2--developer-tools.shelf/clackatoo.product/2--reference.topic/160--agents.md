@@ -46,9 +46,9 @@ An agent runs in a process group of its own, so stopping it, or choosing Retry, 
 
 ## Pasting images
 
-Copy a screenshot or image to the clipboard, then press Ctrl+Shift+V in a chat. A thumbnail appears in the message box, and stays beside the sent message in the conversation. Add text if you like, then press Enter to send both; an image can go on its own too.
+Copy a screenshot or image to the clipboard, then press Ctrl+Shift+V in a chat. A thumbnail appears above the text in the message box, and above the sent message in the conversation. Add text if you like, then press Enter to send both; an image can go on its own too.
 
-Click the × below a thumbnail to remove it, or press Backspace while the message box is empty to remove the last one. You can prepare attachments while the agent answers; they stay in the draft until you send. Text on the clipboard still pastes as text.
+Click the × on a thumbnail to remove it, or press Backspace while the message box is empty to remove the last one. You can prepare attachments while the agent answers; they stay in the draft until you send. Text on the clipboard still pastes as text.
 
 A message holds up to four images, at most 16 million pixels each and 8 MiB of encoded image data in total. An agent that does not accept images reports that clearly. The full image is sent to the agent, whose session keeps it. Clackatoo keeps small previews (up to 256 pixels on a side) across window reconnects and daemon upgrades, including on remote connections. Each chat keeps up to 4 MiB of recent previews; older messages retain their image labels. Images sent before previews were supported, or history loaded anew from an agent session after a full daemon restart, show labels only. Switching to a different agent carries the labels with the conversation, so paste the image again if that agent needs to see it.
 
@@ -137,15 +137,15 @@ Below each message you send, what the agent did with it, in order:
 - its words
 - its thinking, if it shows any, quieter and slanted
 - each tool it uses, on a line of its own: `○` while it runs, then `✓` once it has finished, or `✗` if it failed
-- each command it runs and each change it makes to a file, on a card of its own
+- each command it runs and each change it makes to a file, in a compact expandable row
 
-A command's card has the command at its head, after `$`. While the command runs, the card says what it's for. Once it's done, it shows the last 8 lines of its output, which is where what went wrong usually is.
+Tool rows start collapsed, with a single-line summary and an expand arrow. Long titles end in an ellipsis, and file tools can show just the basename. Opening a row reveals the complete title. Commands start with `$` and show their output beneath; a failed command keeps its last 8 output lines visible even when collapsed.
 
 A change's card has what the agent did at its head, such as `Edit Cargo.toml`, and how many lines it adds and removes, such as `+3 −1`. Under that come the lines, with those added on green after `+` and those removed on red after `−`. A new file is all added. A card shows the part of the file changed, not the whole file. Once the change is made, Claude Code also gives 3 lines either side of it, and where in the file it is.
 
 Lines are numbered by where they are in the file: added and unchanged lines by where they are now, and removed lines by where they were. Before the change is made, as while the agent asks to make it, an edit's lines have no numbers yet. A new file is numbered from 1.
 
-Folded, a card shows its first 8 lines (for a command's output, its last 8), each cut off at the card's edge. Click a card's head or foot to open it: its lines wrap, to be read whole. Click again to fold it. Whether a card is open belongs to the window.
+Click a row's header to open or close it. In normal mode, Enter or `za` on a tool toggles it, `zo` opens it and `zc` closes it. Open output and diffs wrap, with up to 1,000 lines shown. Long open cards also have a Collapse button at the bottom. Whether a card is open belongs to the window. Copying the whole tool keeps the complete command and retained output.
 
 The daemon keeps the last 32 KB of a command's output, and the first 256 KB of each side of a change.
 

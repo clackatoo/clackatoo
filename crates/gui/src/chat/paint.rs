@@ -16,7 +16,6 @@ mod tables;
 mod usage;
 mod working;
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 use clackatoo_protocol::{
@@ -25,7 +24,6 @@ use clackatoo_protocol::{
 };
 use parley::Layout;
 
-use super::card::Card;
 use super::picker::{self, ChoiceRow, Row, SliderRow, Spot};
 use super::{Brush, ChatView, Hit, Menu, Tone};
 use crate::fonts::Fonts;
@@ -553,6 +551,13 @@ impl ChatView {
             height: 0.0,
         };
         let mut y = self.lay_out_head(fonts, (m, column), (index, turns), &mut laid);
+        if !turn.previews.is_empty() {
+            let side =
+                super::images::side(column * 0.78, turn.previews.len(), m.em(12.0), m.em(0.5));
+            let height = super::images::height(side, turn.previews.iter().map(Some));
+            laid.spans.push(Span::of(Piece::Previews, y, height));
+            y += height + m.em(1.0);
+        }
         if !turn.prompt.is_empty() {
             let width = (column * 0.78 - m.em(2.0)).max(m.em(4.0));
             let old = old_pieces.remove(&PROMPT);
@@ -560,13 +565,6 @@ impl ChatView {
             let height = piece.height + m.em(1.2);
             laid.spans.push(Span::of(Piece::Prompt, y, height));
             laid.pieces.insert(PROMPT, piece);
-            y += height + m.em(1.0);
-        }
-        if !turn.previews.is_empty() {
-            let side =
-                super::images::side(column * 0.78, turn.previews.len(), m.em(12.0), m.em(0.5));
-            let height = super::images::height(side, turn.previews.iter().map(Some));
-            laid.spans.push(Span::of(Piece::Previews, y, height));
             y += height + m.em(1.0);
         }
         if shape.fold {
@@ -582,11 +580,9 @@ impl ChatView {
             let key = ITEMS + item_index;
             let last = laid.spans.last().map(|span| span.piece);
             let follows = last.is_some_and(|piece| piece != Piece::Prompt);
-            if let Item::Tool(tool) = item
-                && Card::shows(tool)
-            {
+            if let Item::Tool(tool) = item {
                 if follows {
-                    y += m.em(0.6);
+                    y += m.em(0.15);
                 }
                 let card = self.card(fonts, m, old_cards.remove(&key), tool, column);
                 let height = card.height;
@@ -596,22 +592,17 @@ impl ChatView {
                 continue;
             }
             let (text, look) = match item {
-                Item::Words(words) | Item::Other(words) => {
-                    (Cow::Borrowed(words.as_str()), Look::Words)
-                }
-                Item::Thought(words) => (Cow::Borrowed(words.as_str()), Look::Thought),
-                Item::Tool(tool) => (
-                    Cow::Owned(tool_text(tool.status, &tool.title)),
-                    Look::Plain(tool_tone(tool.status)),
-                ),
+                Item::Words(words) | Item::Other(words) => (words.as_str(), Look::Words),
+                Item::Thought(words) => (words.as_str(), Look::Thought),
+                Item::Tool(_) => continue, // Laid out as a card above.
             };
             if text.trim().is_empty() {
                 continue;
             }
-            let piece = self.reuse(fonts, m, old_pieces.remove(&key), &text, look, column);
+            let piece = self.reuse(fonts, m, old_pieces.remove(&key), text, look, column);
             let gap = match item {
-                _ if matches!(last, Some(Piece::Card(_) | Piece::Fold)) => m.em(0.6),
-                Item::Tool(_) => m.em(0.35),
+                _ if matches!(last, Some(Piece::Card(_))) => m.em(1.0),
+                _ if matches!(last, Some(Piece::Fold)) => m.em(0.6),
                 _ => m.em(0.75),
             };
             if follows {
@@ -1030,7 +1021,7 @@ impl ChatView {
         let image_height = if attachments == 0 {
             0.0
         } else {
-            row_height + m.em(2.0)
+            row_height + m.em(0.7)
         };
         let height = pad + content_height + image_height + m.em(0.4) + m.em(2.0) + m.em(0.5);
         let frame = BoxFrame {
@@ -1040,6 +1031,7 @@ impl ChatView {
             height,
             inner,
             pad,
+            attachments_height: image_height,
         };
         let mut canvas = Canvas {
             paint,
@@ -1055,9 +1047,9 @@ impl ChatView {
         };
         let bounds = [frame.left, frame.top, place.column, height];
         let shadow = [bounds[0], bounds[1] + m.em(0.15), bounds[2], bounds[3]];
-        canvas.fill(Fill::rounded(shadow, Paint::Shadow, m.em(1.2)));
+        canvas.fill(Fill::rounded(shadow, Paint::Shadow, m.em(0.9)));
         canvas
-            .fill(Fill::rounded(bounds, Paint::Raised, m.em(1.2)).bordered(1.0, Paint::RaisedEdge));
+            .fill(Fill::rounded(bounds, Paint::Raised, m.em(0.9)).bordered(1.0, Paint::RaisedEdge));
         match question {
             Some(question) => self.draw_question(&mut canvas, m, &frame, question),
             None => self.draw_editor(&mut canvas, m, &frame, editor_height, caret),
@@ -1065,32 +1057,54 @@ impl ChatView {
         for index in 0..attachments {
             let x =
                 frame.left + pad + (side + m.em(0.5)) * f32::from(u8::try_from(index).unwrap_or(0));
-            let y = frame.top + pad + content_height + m.em(0.4);
+            let y = frame.top + pad;
             let rect = [x, y, side, row_height];
-            canvas.fill(Fill::rounded(rect, Paint::Hover, m.em(0.4)));
-            if let Some(preview) = &self.images[index].preview {
-                self.previews.draw(&mut canvas, preview, rect);
-            } else {
-                let laid = self.box_label(canvas.fonts, m, "Image", Tone::Muted, side);
-                draw_laid(&mut canvas, m, &laid, [x, y + row_height / 2.0], side);
-                self.keep_label(laid);
-            }
-            let remove = [x + side - m.em(1.5), y + row_height, m.em(1.5), m.em(1.6)];
-            let laid = self.box_label(canvas.fonts, m, "×", Tone::Muted, remove[2]);
-            draw_laid(
-                &mut canvas,
-                m,
-                &laid,
-                [remove[0] + m.em(0.4), remove[1]],
-                remove[2],
-            );
-            self.keep_label(laid);
-            self.hits
-                .push((Hit::RemoveImage(index), frame.place.in_pane(remove)));
+            self.draw_attachment(&mut canvas, m, &frame, index, rect);
         }
         self.draw_send(&mut canvas, m, &frame);
         self.draw_controls(&mut canvas, m, &frame);
         height + m.em(1.0)
+    }
+
+    /// One draft thumbnail and its remove button, above the image pass.
+    fn draw_attachment(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        frame: &BoxFrame,
+        index: usize,
+        rect: [f32; 4],
+    ) {
+        let [x, y, side, row_height] = rect;
+        canvas.fill(Fill::rounded(rect, Paint::Hover, m.em(0.4)));
+        if let Some(preview) = &self.images[index].preview {
+            self.previews.draw(canvas, preview, rect);
+        } else {
+            let laid = self.box_label(canvas.fonts, m, "Image", Tone::Muted, side);
+            draw_laid(canvas, m, &laid, [x, y + row_height / 2.0], side);
+            self.keep_label(laid);
+        }
+        let remove = [x + side - m.em(1.5), y, m.em(1.5), m.em(1.5)];
+        // The image pass is above ordinary fills and text.
+        canvas.over = true;
+        canvas.fill(
+            Fill::rounded(remove, Paint::Palette, m.em(0.75)).bordered(1.0, Paint::RaisedEdge),
+        );
+        let laid = self.box_label(canvas.fonts, m, "×", Tone::Plain, remove[2]);
+        draw_laid(
+            canvas,
+            m,
+            &laid,
+            [
+                remove[0] + (remove[2] - laid.width) / 2.0,
+                remove[1] + (remove[3] - laid.height) / 2.0,
+            ],
+            remove[2],
+        );
+        self.keep_label(laid);
+        canvas.over = false;
+        self.hits
+            .push((Hit::RemoveImage(index), frame.place.in_pane(remove)));
     }
 
     /// The agent's question, and its answers as buttons in rows, laid out
@@ -1337,7 +1351,7 @@ impl ChatView {
         // they leave: it gives way first, down to its bar, and then the
         // chips that would run under it go.
         let start = frame.left + frame.pad * 0.4;
-        let gap = m.em(0.6);
+        let gap = m.em(0.35);
         let chips = [
             mode.map(|mode| (format!("{}  ▾", chosen_name(&mode)), mode.id)),
             tools.map(|tools| (format!("Tools: {}  ▾", chosen_name(&tools)), tools.id)),
@@ -1385,8 +1399,12 @@ impl ChatView {
             .as_ref()
             .is_some_and(|menu| menu.settings == settings);
         // The menu opens above the box, lined up with the chip.
+        canvas.fill(Fill::rounded(
+            rect,
+            if open { Paint::Hover } else { Paint::Code },
+            m.em(0.5),
+        ));
         if open {
-            canvas.fill(Fill::rounded(rect, Paint::Hover, m.em(1.0)));
             self.menu_anchor = Some([rect[0], frame.top, rect[2], rect[3]]);
         }
         let at = [rect[0] + m.em(0.6), rect[1] + (rect[3] - laid.height) / 2.0];
@@ -1818,12 +1836,16 @@ struct BoxFrame {
     /// How wide its text is.
     inner: f32,
     pad: f32,
+    attachments_height: f32,
 }
 
 impl BoxFrame {
     /// Where its text starts.
     fn text_origin(&self) -> [f32; 2] {
-        [self.left + self.pad, self.top + self.pad]
+        [
+            self.left + self.pad,
+            self.top + self.pad + self.attachments_height,
+        ]
     }
 }
 
@@ -1877,7 +1899,7 @@ struct Span {
 enum Piece {
     /// Its message, as a bubble.
     Prompt,
-    /// The pasted image thumbnails, below the message.
+    /// The pasted image thumbnails, above the message.
     Previews,
     /// The line its work folds under.
     Fold,
@@ -2060,8 +2082,7 @@ fn guess(m: Measures, column: f32, turn: &Turn, open: bool, divided: bool) -> f3
             Item::Words(text) | Item::Thought(text) | Item::Other(text) => {
                 lines(text, column) * line + m.em(0.75)
             }
-            Item::Tool(tool) if Card::shows(tool) => 12.0 * line,
-            Item::Tool(_) => line + m.em(0.35),
+            Item::Tool(_) => line + m.em(0.85),
         };
     }
     // The line with the button that copies its answer, and what it
@@ -2155,13 +2176,6 @@ fn tool_text(status: ToolStatus, title: &str) -> String {
         ToolStatus::Failed => "✗",
     };
     format!("{mark}  {title}")
-}
-
-fn tool_tone(status: ToolStatus) -> Tone {
-    match status {
-        ToolStatus::Failed => Tone::Warning,
-        _ => Tone::Muted,
-    }
 }
 
 /// `question`, as it's shown, in Markdown: the daemon's own, as whether

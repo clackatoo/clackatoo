@@ -1,6 +1,5 @@
-//! Laying out and drawing tools as cards: a head saying what the tool
-//! does and how it went, and under it, what it shows, folded to its first
-//! lines, or for a command's output, its last, until it's clicked open.
+//! Tools start as quiet single-line summaries. Opening a row reveals its
+//! full title and output or diff; a failed tool keeps a short excerpt visible.
 
 use clackatoo_protocol::{Tool, ToolStatus};
 
@@ -28,6 +27,7 @@ pub(super) struct CardLaid {
     mark: Laid,
     /// What it does: a command, or a change's title.
     head: Laid,
+    chevron: Laid,
     /// How many lines a change adds and removes.
     counts: Option<(Laid, Laid)>,
     /// What goes before a change's lines.
@@ -35,7 +35,7 @@ pub(super) struct CardLaid {
     body: Vec<Section>,
     /// Where each of `body` starts, from the card's top.
     tops: Vec<f32>,
-    /// What clicking it does, if it has more to show, or less.
+    /// A second way to collapse a long open card without scrolling to its head.
     footer: Option<Laid>,
     head_height: f32,
     pub(super) height: f32,
@@ -171,13 +171,25 @@ impl ChatView {
             - (counts.as_ref()).map_or(0.0, |(added, removed)| {
                 added.width + removed.width + m.em(1.5)
             });
-        let head = match &card {
+        let chevron = w.text(
+            if open { "⌄" } else { "›" },
+            Look::Plain(Tone::Muted),
+            inner,
+        );
+        let head_wide = (head_wide - chevron.width - m.em(0.8)).max(m.em(2.0));
+        let (title, look) = match &card {
             Some(Card::Command { command, .. }) => {
-                w.text(&format!("$ {command}"), Look::Mono(Tone::Plain), head_wide)
+                (format!("$ {command}"), Look::Mono(Tone::Plain))
             }
-            _ => w.text(&tool.title, Look::Plain(Tone::Plain), head_wide),
+            _ => (tool.title.clone(), Look::Plain(Tone::Muted)),
         };
-        let (body, gutter, total) = match &card {
+        let head = if open {
+            w.text(&title, look, head_wide)
+        } else {
+            w.summary(&title, head_wide)
+        };
+        let (body, gutter, _) = match &card {
+            _ if !open && tool.status != ToolStatus::Failed => (Vec::new(), None, 0),
             Some(Card::Command {
                 purpose, output, ..
             }) => {
@@ -187,15 +199,9 @@ impl ChatView {
             Some(Card::Change(files)) => w.change(files),
             None => (Vec::new(), None, 0),
         };
-        let footer = (total > FOLDED).then(|| {
-            let says = if open {
-                "Show less".to_owned()
-            } else {
-                format!("Show all {total} lines")
-            };
-            w.text(&says, Look::Plain(Tone::Muted), inner)
-        });
-        let head_height = mark.height.max(head.height) + 2.0 * m.em(0.55);
+        let footer =
+            (open && !body.is_empty()).then(|| w.text("Collapse", Look::Plain(Tone::Muted), inner));
+        let head_height = mark.height.max(head.height) + 2.0 * m.em(0.35);
         let mut top = head_height + 1.0 + m.em(0.45);
         let tops = (body.iter())
             .map(|section| {
@@ -217,6 +223,7 @@ impl ChatView {
             open,
             mark,
             head,
+            chevron,
             counts,
             gutter,
             body,
@@ -240,8 +247,44 @@ struct Writer<'a> {
 }
 
 impl Writer<'_> {
+    /// A single readable line, with an ellipsis measured in the actual font.
+    /// The complete title remains available when the row is opened.
+    fn summary(&mut self, text: &str, wide: f32) -> Laid {
+        let text = summary_title(text);
+        let look = Look::Plain(Tone::Muted);
+        let full = self.text(&text, look, f32::INFINITY);
+        if full.width <= wide {
+            return full;
+        }
+        let boundaries: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+        let (mut low, mut high) = (0, boundaries.len());
+        let mut best = self.text("…", look, f32::INFINITY);
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let candidate = self.text(
+                &format!("{}…", &text[..boundaries[mid]]),
+                look,
+                f32::INFINITY,
+            );
+            if candidate.width <= wide {
+                best = candidate;
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        best
+    }
+
     fn text(&mut self, text: &str, look: Look, wide: f32) -> Laid {
-        lay_out(self.layout_cx, self.fonts, self.m, text, look, wide)
+        lay_out(
+            self.layout_cx,
+            self.fonts,
+            Measures::of(self.m.em * 0.9),
+            text,
+            look,
+            wide,
+        )
     }
 
     /// How wide the lines of what it shows are: folded, a line is a line,
@@ -349,6 +392,21 @@ impl Writer<'_> {
     }
 }
 
+/// File tools often repeat the entire workspace path. A basename identifies
+/// the file in the row; opening it shows the original, unabridged title.
+fn summary_title(text: &str) -> String {
+    for verb in ["Read ", "View Image ", "Edit ", "Write "] {
+        if let Some(path) = text.strip_prefix(verb)
+            && path.starts_with('/')
+            && !path.contains(char::is_whitespace)
+            && let Some(name) = path.rsplit('/').next().filter(|name| !name.is_empty())
+        {
+            return format!("{verb}{name}");
+        }
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Draws `card`, text `key`'s card, with its top left at `origin`,
 /// `width` wide, noting its text in `drawn`, and if it folds, where it
 /// can be clicked: its head and its foot, where they're in view. Its
@@ -363,7 +421,9 @@ pub(super) fn draw_card(
     drawn: &mut Drawn<'_>,
 ) {
     let rect = [origin[0], origin[1], width, card.height];
-    canvas.fill(Fill::rounded(rect, Paint::Code, m.em(0.6)).bordered(1.0, Paint::RaisedEdge));
+    if card.open || !card.body.is_empty() {
+        canvas.fill(Fill::rounded(rect, Paint::Code, m.em(0.6)).bordered(1.0, Paint::RaisedEdge));
+    }
     // What's drawn in it stays in it, and in view.
     let view = canvas.clip;
     canvas.clip = intersection(view, [rect[0] + 1.0, rect[1], rect[2] - 2.0, rect[3]]);
@@ -382,8 +442,16 @@ pub(super) fn draw_card(
     draw_laid(canvas, m, &card.mark, [x, middle(&card.mark)], inner);
     let head_x = x + card.mark.width + m.em(0.6);
     draw_laid(canvas, m, &card.head, [head_x, middle(&card.head)], inner);
+    let right = origin[0] + width - m.em(PAD);
+    draw_laid(
+        canvas,
+        m,
+        &card.chevron,
+        [right - card.chevron.width, middle(&card.chevron)],
+        inner,
+    );
     if let Some((added, removed)) = &card.counts {
-        let right = origin[0] + width - m.em(PAD);
+        let right = right - card.chevron.width - m.em(0.8);
         let removed_x = right - removed.width;
         let added_x = removed_x - m.em(0.5) - added.width;
         draw_laid(canvas, m, added, [added_x, middle(added)], inner);
@@ -432,19 +500,12 @@ pub(super) fn draw_card(
             [x, y + 1.0 + (row - footer.height) / 2.0],
             inner,
         );
-        // Only what's in view takes a click: the rest is under the box.
-        let pane = drawn.pane;
-        let head = [rect[0], rect[1], rect[2], card.head_height];
-        let foot = [rect[0], y, rect[2], rect[1] + rect[3] - y];
-        for part in [head, foot] {
-            let [left, top, wide, high] = intersection(view, part);
-            if wide > 0.0 && high > 0.0 {
-                drawn.hits.push((
-                    Hit::Card(key.turn, card.tool.id.clone()),
-                    [left - pane[0], top - pane[1], wide, high],
-                ));
-            }
-        }
+    }
+    // Every tool row opens, including a short command or a long file path.
+    let head = [rect[0], rect[1], rect[2], card.head_height];
+    let foot = [rect[0], y, rect[2], rect[1] + rect[3] - y];
+    for part in std::iter::once(head).chain(card.footer.as_ref().map(|_| foot)) {
+        drawn.hit(view, Hit::Card(key.turn, card.tool.id.clone()), part);
     }
     canvas.clip = view;
     let parts = std::iter::once(0).chain(first + 1..card.parts());
@@ -501,4 +562,80 @@ fn draw_line(
         draw_laid(canvas, m, mark, [x, at[1]], mark.width);
     }
     draw_laid(canvas, m, laid, [text_x, at[1]], width);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::fixtures::{fonts, paint, read, read_named, talk};
+    use crate::chat::paint::{ITEMS, Position};
+    use clackatoo_protocol::{Item, ToolContent, ToolKind};
+    use winit::keyboard::NamedKey;
+
+    #[test]
+    fn long_commands_fold_without_losing_output_or_keyboard_access() {
+        let mut fonts = fonts();
+        let mut node = talk(&[("Check this", "")]);
+        let title = "cargo test --manifest-path /a/long/路径/Cargo.toml ".repeat(12);
+        node.turns[0].items = vec![Item::Tool(Tool {
+            id: "test".into(),
+            title: title.clone(),
+            status: ToolStatus::Done,
+            kind: ToolKind::Execute,
+            content: vec![ToolContent::Output("All tests passed".into())],
+            locations: vec![],
+        })];
+        let mut chat = ChatView::new(String::new(), node);
+        chat.open_fold(0);
+        chat.reading = true;
+        paint(&mut chat, &mut fonts);
+        let key = TextKey {
+            turn: 0,
+            piece: ITEMS,
+            part: 0,
+        };
+        let card = &chat.cache.turns[0].laid.as_ref().unwrap().cards[&ITEMS];
+        assert!(card.height < 40.0);
+        assert!(card.head.source.ends_with('…'));
+        assert!(card.body.is_empty());
+        assert!(
+            chat.hits
+                .iter()
+                .any(|(hit, _)| *hit == Hit::Card(0, "test".into()))
+        );
+        chat.cursor = Some(Position { text: key, byte: 0 });
+        read_named(&mut chat, NamedKey::Enter);
+        assert!(chat.reading);
+        paint(&mut chat, &mut fonts);
+        let card = &chat.cache.turns[0].laid.as_ref().unwrap().cards[&ITEMS];
+        assert_eq!(card.head.source, format!("$ {title}"));
+        assert!(matches!(&card.body[0], Section::Text(text) if text.source == "All tests passed"));
+        read(&mut chat, "zc");
+        paint(&mut chat, &mut fonts);
+        assert!(
+            chat.cache.turns[0].laid.as_ref().unwrap().cards[&ITEMS]
+                .body
+                .is_empty()
+        );
+        assert_eq!(chat.cursor.unwrap().text, key);
+    }
+
+    #[test]
+    fn failed_commands_keep_the_end_of_their_output_visible() {
+        let mut fonts = fonts();
+        let mut chat = ChatView::new(String::new(), talk(&[]));
+        let tool = Tool {
+            id: "failed".into(),
+            title: "cargo test".into(),
+            status: ToolStatus::Failed,
+            kind: ToolKind::Execute,
+            content: vec![ToolContent::Output("Error: test failed".into())],
+            locations: vec![],
+        };
+        let card = chat.card(&mut fonts, Measures::of(16.0), None, &tool, 500.0);
+        assert!(!card.open);
+        assert!(
+            matches!(&card.body[0], Section::Text(text) if text.source == "Error: test failed")
+        );
+    }
 }

@@ -56,14 +56,7 @@ pub(super) enum Sign {
 }
 
 impl Card {
-    /// Whether `tool` is shown as a card: one that changes files, or runs
-    /// a command.
-    pub(super) fn shows(tool: &Tool) -> bool {
-        tool.kind == ToolKind::Execute
-            || (tool.content.iter()).any(|content| matches!(content, ToolContent::Diff(_)))
-    }
-
-    /// `tool` as a card, if it's [shown](Self::shows) as one.
+    /// A command or file change with structured detail.
     pub(super) fn of(tool: &Tool) -> Option<Self> {
         let diffs: Vec<&Diff> = (tool.content.iter())
             .filter_map(|content| match content {
@@ -287,8 +280,7 @@ mod tests {
             vec![ToolContent::Output("a ``` b\nc\n".into())],
         );
         assert_eq!(output(Card::of(&streamed)), ["a ``` b", "c"]);
-        // Reading a file is a line, not a card.
-        assert!(!Card::shows(&tool(ToolKind::Read, Vec::new())));
+        assert!(Card::of(&tool(ToolKind::Read, Vec::new())).is_none());
     }
 
     #[test]
