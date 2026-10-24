@@ -42,6 +42,7 @@
 //! | `open PATH` | Opens the project's file in an editor, from normal mode: `<C-;>:Editor PATH<CR>` |
 //! | `keys KEYS` | Presses keys, in Vim's notation: `:Explore<CR>`, `<Space>ff`, `<C-w>v` |
 //! | `type TEXT` | Types the text, a key a character |
+//! | `paste-image` | Pastes a 160 × 90 test image into the chat |
 //! | `shell COMMAND` | Types the command and Enter, as into a shell |
 //! | `move X Y` | Moves the mouse to X, Y, in points from the top left |
 //! | `click X Y [right\|middle]` | Clicks there, with the left button unless said |
@@ -244,6 +245,7 @@ enum Command {
     Open(String),
     Keys(String),
     Type(String),
+    PasteImage,
     Shell(String),
     Move([f32; 2]),
     Click([f32; 2], MouseButton),
@@ -345,6 +347,7 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
                 }
             }
             "open" => Command::Open(rest.to_owned()),
+            "paste-image" => Command::PasteImage,
             "keys" => Command::Keys(rest.to_owned()),
             // Spaces at the ends of text to type are kept.
             "type" => Command::Type(
@@ -836,6 +839,10 @@ impl Look {
             }
             Command::Keys(keys) => self.window()?.keys(keys).map_err(|err| anyhow!(err))?,
             Command::Type(text) => self.window()?.type_text(text),
+            Command::PasteImage => self
+                .window()?
+                .paste_image(160, 90, [40, 100, 210, 255].repeat(160 * 90))
+                .map_err(|err| anyhow!(err))?,
             Command::Shell(command) => {
                 let window = self.window()?;
                 window.type_text(command);

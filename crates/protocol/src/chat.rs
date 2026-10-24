@@ -914,6 +914,43 @@ pub enum ChatPatch {
     Subagents(Vec<Subagent>),
 }
 
+/// A pasted PNG, encoded once by the window, ready for ACP. Kept only
+/// until sent; the transcript records its dimensions, never the bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatImage {
+    /// PNG bytes as standard base64.
+    pub data: String,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+impl ChatImage {
+    /// At most four images in one message.
+    pub const MAX_COUNT: usize = 4;
+    /// Encoded images together fit comfortably within a protocol frame.
+    pub const MAX_DATA: usize = 8 * 1024 * 1024;
+    /// A decoded clipboard image is at most 64 MiB of RGBA pixels.
+    pub const MAX_PIXELS: u64 = 16 * 1024 * 1024;
+
+    /// Checks dimensions and the encoded size before processing data.
+    #[must_use]
+    pub fn valid(&self) -> bool {
+        self.width > 0
+            && self.height > 0
+            && u64::from(self.width) * u64::from(self.height) <= Self::MAX_PIXELS
+            && !self.data.is_empty()
+            && self.data.len() <= Self::MAX_DATA
+    }
+
+    /// What the draft and the transcript say about this attachment.
+    #[must_use]
+    pub fn label(&self) -> String {
+        format!("Image · {} × {}", self.width, self.height)
+    }
+}
+
 /// What a client asks of a chat.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChatAction {
@@ -974,6 +1011,13 @@ pub enum ChatAction {
     Open {
         /// The chat to show.
         chat: crate::TerminalId,
+    },
+    /// Send text and clipboard images together. Requires `wire::CHAT_IMAGES`.
+    SendImages {
+        /// The accompanying message, which may be empty.
+        text: String,
+        /// PNG attachments, bounded by `ChatImage`'s limits.
+        images: Vec<ChatImage>,
     },
 }
 

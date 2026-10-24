@@ -214,6 +214,7 @@ pub(crate) struct Agent {
     /// Whether the agent can open a session again telling the
     /// conversation so far as it goes (ACP's `session/load`).
     can_load: bool,
+    can_image: bool,
     /// Whether the agent can list the sessions it kept, once it has said
     /// what it can.
     can_list: Option<bool>,
@@ -237,6 +238,7 @@ impl Agent {
             held: None,
             can_close: false,
             can_load: false,
+            can_image: false,
             can_list: None,
         };
         agent.request(
@@ -349,13 +351,28 @@ impl Agent {
             .any(|pending| matches!(pending, Pending::Probe | Pending::Listing(_)))
     }
 
-    /// Sends the chat in `terminal` a message from its user, as `blocks`
-    /// of text, in order: the message is the last, after anything the
-    /// agent is to know first.
-    pub(crate) fn prompt(&mut self, terminal: TerminalId, session: &str, blocks: &[&str]) {
-        let prompt: Vec<Value> = (blocks.iter())
+    /// Whether initialization advertised image prompts.
+    pub(crate) fn can_image(&self) -> bool {
+        self.can_image
+    }
+
+    /// Sends text blocks in order, followed by the user's images. Any
+    /// context carried over or role instructions precede the user's text.
+    pub(crate) fn prompt(
+        &mut self,
+        terminal: TerminalId,
+        session: &str,
+        blocks: &[&str],
+        images: &[clackatoo_protocol::ChatImage],
+    ) {
+        let mut prompt: Vec<Value> = (blocks.iter())
             .map(|text| json!({ "type": "text", "text": text }))
             .collect();
+        prompt.extend(images.iter().map(|image| {
+            json!({
+                "type": "image", "mimeType": "image/png", "data": image.data,
+            })
+        }));
         self.request(
             Pending::Prompt(terminal),
             "session/prompt",
@@ -669,6 +686,12 @@ impl Agent {
                     result
                         .pointer("/agentCapabilities/sessionCapabilities/close")
                         .is_some()
+                });
+                self.can_image = result.as_ref().is_ok_and(|result| {
+                    result
+                        .pointer("/agentCapabilities/promptCapabilities/image")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
                 });
                 self.can_load = result.as_ref().is_ok_and(|result| {
                     (result.pointer("/agentCapabilities/loadSession"))

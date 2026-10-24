@@ -45,7 +45,7 @@ pub(super) struct Told {
     replayed: bool,
     /// A message sent while its session loaded, to go once it has, after
     /// the turns told again.
-    held: Option<String>,
+    held: Option<super::Prompt>,
 }
 
 /// What becomes of a message held while the session loaded, once the
@@ -141,10 +141,11 @@ impl HostedChat {
         self.told.replayed = true;
         match update {
             SessionUpdate::UserMessageChunk(chunk) => {
-                let ContentBlock::Text(text) = chunk.content else {
-                    return;
+                let text = match chunk.content {
+                    ContentBlock::Text(text) => clean_text(&text.text),
+                    ContentBlock::Image(_) => "[Image]".to_owned(),
+                    _ => return,
                 };
-                let text = clean_text(&text.text);
                 // A message of several blocks comes a block at a time,
                 // before the agent does anything with it.
                 if let Some(index) = self.answering_turn()
@@ -283,14 +284,33 @@ impl HostedChat {
     /// turn it starts must come after those told again, joining any held
     /// already; and asks for the session, if it isn't asked for. Returns
     /// whether it did, adding to `actions` what the server must do.
-    pub(super) fn hold_while_loading(&mut self, text: &str, actions: &mut Vec<Action>) -> bool {
+    pub(super) fn hold_while_loading(
+        &mut self,
+        text: &super::Prompt,
+        actions: &mut Vec<Action>,
+    ) -> bool {
         if !self.told.load {
             return false;
         }
         match &mut self.told.held {
             Some(held) => {
-                held.push_str("\n\n");
-                held.push_str(text);
+                if held.images.len() + text.images.len() > clackatoo_protocol::ChatImage::MAX_COUNT
+                    || held
+                        .images
+                        .iter()
+                        .chain(&text.images)
+                        .map(|image| image.data.len())
+                        .sum::<usize>()
+                        > clackatoo_protocol::ChatImage::MAX_DATA
+                {
+                    self.set_notice(Some(
+                        "The message waiting for this session already has too many images.".into(),
+                    ));
+                    return true;
+                }
+                held.text.push_str("\n\n");
+                held.text.push_str(&text.text);
+                held.images.extend(text.images.clone());
             }
             None => self.told.held = Some(text.to_owned()),
         }
@@ -315,7 +335,7 @@ impl HostedChat {
         match held {
             Held::Send => {
                 let mut actions = Vec::new();
-                self.send(text, &mut actions);
+                self.send_prompt(text, &mut actions);
                 // The session is being asked for whenever a message is
                 // released to go.
                 debug_assert!(actions.is_empty(), "nothing goes before the session opens");
@@ -323,7 +343,7 @@ impl HostedChat {
             Held::End(outcome) => {
                 self.set_notice(None);
                 self.push_turn(Turn {
-                    prompt: text,
+                    prompt: text.shown(),
                     sent: now(),
                     items: Vec::new(),
                     end: None,

@@ -228,6 +228,8 @@ gates! {
     /// `Workspaces`' `kept` (`Kept`), and marking them, `Request::Keep`
     /// (`Keeping`).
     BACKGROUND = 96,
+    /// Clipboard images sent with a chat message.
+    CHAT_IMAGES = 97,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -896,9 +898,25 @@ pub trait Downgrade: Sized {
     }
 }
 
-/// What clients send needs no downgrading: a window asks [`daemon_has`]
-/// before sending anything newer.
-impl Downgrade for ClientMessage {}
+/// Windows check capabilities before sending. A relay may reach an older
+/// daemon still: refuse image messages rather than dropping attachments.
+impl Downgrade for ClientMessage {
+    fn downgrade(&self, wire: u32) -> Downgraded<Self> {
+        if wire < CHAT_IMAGES
+            && matches!(
+                self,
+                Self::Request(crate::Request::Chat {
+                    action: crate::ChatAction::SendImages { .. },
+                    ..
+                })
+            )
+        {
+            Downgraded::Refused
+        } else {
+            Downgraded::AsIs
+        }
+    }
+}
 
 impl Downgrade for ServerMessage {
     /// A peer from before the fallbacks has nothing to read in place of
@@ -1122,6 +1140,26 @@ mod tests {
         let mut decoder = FrameDecoder::new();
         decoder.push(bytes);
         decoder.decode(wire).unwrap().unwrap()
+    }
+
+    #[test]
+    fn images_are_never_sent_to_an_older_daemon_as_text_alone() {
+        let message = ClientMessage::Request(crate::Request::Chat {
+            terminal: crate::TerminalId(1),
+            action: crate::ChatAction::SendImages {
+                text: "look".into(),
+                images: vec![crate::ChatImage {
+                    data: "cG5n".into(),
+                    width: 1,
+                    height: 1,
+                }],
+            },
+        });
+        assert!(frame::encode(CHAT_IMAGES, &message).is_ok());
+        assert!(matches!(
+            frame::encode(CHAT_IMAGES - 1, &message),
+            Err(crate::frame::FrameError::TooNew(_))
+        ));
     }
 
     #[test]

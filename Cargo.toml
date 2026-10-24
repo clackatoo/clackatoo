@@ -30,8 +30,8 @@ anyhow = "1.0"
 # RustCrypto implementation, pure Rust). Without its own random numbers:
 # the salt comes from ring.
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
-# Text only: images would pull in an image codec.
-arboard = { version = "3.6", default-features = false }
+# Clipboard screenshots, decoded only when a chat explicitly pastes.
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 # Decodes and encodes the clipboard text programs send with OSC 52. The
 # version the ACP types already build.
 base64 = "0.23"

@@ -2066,8 +2066,48 @@ impl Desk {
         None
     }
 
-    /// Pastes `text` into the command line, if it's open, or else the
-    /// focused pane.
+    /// The chat an explicit clipboard paste goes to, unless a prompt owns input.
+    pub(crate) fn image_paste_target(&self) -> Option<TerminalId> {
+        if self.input.is_some() || self.finding() {
+            return None;
+        }
+        let id = self.focused_terminal()?;
+        self.panes
+            .get(&id)
+            .filter(|pane| pane.is_chat())
+            .map(|_| id)
+    }
+
+    pub(crate) fn begin_image_paste(&mut self, id: TerminalId) -> bool {
+        let Some(chat) = self.panes.get_mut(&id).and_then(|pane| pane.chat_mut()) else {
+            return false;
+        };
+        if chat.pasting {
+            return false;
+        }
+        chat.begin_paste();
+        true
+    }
+
+    pub(crate) fn finish_image_paste(
+        &mut self,
+        id: TerminalId,
+        result: Result<crate::clipboard_image::Pasted, String>,
+    ) {
+        let supported = self.daemon_has(wire::CHAT_IMAGES);
+        let Some(chat) = self.panes.get_mut(&id).and_then(|pane| pane.chat_mut()) else {
+            return;
+        };
+        let result = if !supported && matches!(result, Ok(crate::clipboard_image::Pasted::Image(_)))
+        {
+            Err("Update the daemon to paste images into chats.".into())
+        } else {
+            result
+        };
+        chat.finish_paste(result);
+    }
+
+    /// Pastes `text` into the command line, if it's open, or else the focused pane.
     pub(crate) fn paste(&mut self, text: &str) {
         if self
             .hold_while_waiting(false, || editors::Held::Paste(text.to_owned()))
@@ -3485,6 +3525,80 @@ mod tests {
     fn paint_chat_two(desk: &mut Desk, fonts: &mut crate::fonts::Fonts) {
         let pane = desk.pane_mut(TerminalId(2)).expect("the chat's pane");
         pane.paint_chat(fonts, [0.0; 2], [900.0, 1000.0], true);
+    }
+
+    #[test]
+    fn clipboard_delivery_stays_with_its_chat_and_old_daemons_keep_text_paste() {
+        use crate::clipboard_image::Pasted;
+        let (mut desk, _) = working_chat_desk();
+        let chat = TerminalId(2);
+        desk.show_tab(TabId(2));
+        assert_eq!(desk.image_paste_target(), Some(chat));
+        assert!(desk.begin_image_paste(chat));
+        assert!(!desk.begin_image_paste(chat));
+        desk.show_tab(TabId(1));
+        desk.finish_image_paste(
+            chat,
+            Ok(Pasted::Image(clackatoo_protocol::ChatImage {
+                data: "cG5n".into(),
+                width: 2,
+                height: 3,
+            })),
+        );
+        let mut fonts =
+            crate::fonts::Fonts::load(&crate::fonts::FontOptions::default(), 1.0).unwrap();
+        desk.settle_chats(&mut fonts);
+        assert!(
+            !desk
+                .panes
+                .get_mut(&chat)
+                .unwrap()
+                .chat_mut()
+                .unwrap()
+                .pasting
+        );
+        // The worker delivers to its original pane, not the terminal now focused.
+        let send = |desk: &mut Desk, fonts: &mut crate::fonts::Fonts| {
+            let view = desk.panes.get_mut(&chat).unwrap().chat_mut().unwrap();
+            view.node.turns.clear();
+            view.key(&KeyPress {
+                key: &Key::Named(NamedKey::Enter),
+                text: Some("\r"),
+                location: winit::keyboard::KeyLocation::Standard,
+                code: None,
+                modifiers: Modifiers::default(),
+            });
+            view.settle(fonts).actions
+        };
+        assert!(
+            matches!(&send(&mut desk, &mut fonts)[..], [clackatoo_protocol::ChatAction::SendImages { images, .. }] if images.len() == 1 && images[0].width == 2)
+        );
+        desk.daemon_is(wire::CHAT_IMAGES - 1, None);
+        assert!(desk.begin_image_paste(chat));
+        desk.finish_image_paste(chat, Ok(Pasted::Text("still text".into())));
+        desk.settle_chats(&mut fonts);
+        assert!(desk.begin_image_paste(chat));
+        desk.finish_image_paste(
+            chat,
+            Ok(Pasted::Image(clackatoo_protocol::ChatImage {
+                data: "cG5n".into(),
+                width: 2,
+                height: 3,
+            })),
+        );
+        assert!(
+            !desk
+                .panes
+                .get_mut(&chat)
+                .unwrap()
+                .chat_mut()
+                .unwrap()
+                .pasting
+        );
+        assert_eq!(
+            send(&mut desk, &mut fonts),
+            [clackatoo_protocol::ChatAction::Send("still text".into())]
+        );
     }
 
     /// A desk with a terminal in one tab, and in another, a chat in

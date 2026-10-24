@@ -16,6 +16,14 @@ A chat works in the directory a new terminal would start in, and until its first
 
 If the agent hasn't opened the chat's session after 30 seconds, the chat says so, and what it may be waiting on: most often an MCP server in the agent's config that needs a login. It goes on waiting, and asks whether to keep waiting, which Esc picks, Retry, which starts the agent again, or Stop. Ctrl+C stops it too.
 
+## Pasting images
+
+Copy a screenshot or image to the clipboard, then press Ctrl+Shift+V in a chat. It appears below the message as an attachment showing its dimensions. Add text if you like, then press Enter to send both; an image can go on its own too.
+
+Click an attachment to remove it, or press Backspace while the message box is empty to remove the last one. You can prepare attachments while the agent answers; they stay in the draft until you send. Text on the clipboard still pastes as text.
+
+A message holds up to four images, at most 16 million pixels each and 8 MiB of encoded image data in total. An agent that does not accept images reports that clearly. The conversation shows image labels; the image content is sent to the agent, whose session keeps it. Switching to a different agent carries the labels with the conversation, so paste the image again if that agent needs to see it.
+
 ## The start page
 
 `:Agent` with no agent named, `:|Agent` beside the pane, or Ctrl+B and then `a`, opens the start page. Its first row is a new chat, with its agent, model and folder: Enter, or `n`, starts it, so a new chat is still one key away. Tab moves between those three, and `h` and `l` change the one picked. They start as the last new chat had them; the `agent` option says which agent to offer before that.

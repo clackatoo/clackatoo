@@ -689,6 +689,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "shell",
         what: "Another machine's terminals offer R after it restarts, in your bar too; an offer outlasts an upgrade",
     },
+    News {
+        id: "images",
+        date: "2026-10-24",
+        lesson: "agents",
+        what: "Paste screenshots into agent chats with Ctrl+Shift+V; remove attachments before sending",
+    },
 ];
 
 impl News {

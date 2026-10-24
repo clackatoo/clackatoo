@@ -128,6 +128,11 @@ pub(crate) enum SessionEvent {
     /// could be read, for the editors. Sent from a thread reading them, not
     /// the session's.
     Clipboard(Vec<(crate::pane::Copy, String)>),
+    /// An explicit paste into a particular chat, read and encoded off the UI thread.
+    ChatPaste {
+        chat: TerminalId,
+        result: Result<crate::clipboard_image::Pasted, String>,
+    },
     /// Time to look for a new release, if the options say to. Sent a while
     /// after the window opens (see [`crate::updates`]).
     UpdateDue,

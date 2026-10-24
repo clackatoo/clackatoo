@@ -946,6 +946,20 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
     samples.extend(chain().into_iter().map(|sample| (CHAIN, sample)));
     samples.extend(background().into_iter().map(|sample| (BACKGROUND, sample)));
     samples.extend(kept().into_iter().map(|sample| (BACKGROUND, sample)));
+    samples.push((
+        crate::wire::CHAT_IMAGES,
+        Client(ClientMessage::Request(Request::Chat {
+            terminal,
+            action: ChatAction::SendImages {
+                text: "Look at this".into(),
+                images: vec![crate::ChatImage {
+                    data: "cG5n".into(),
+                    width: 2,
+                    height: 3,
+                }],
+            },
+        })),
+    ));
     samples
 }
 

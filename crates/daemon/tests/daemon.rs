@@ -2253,6 +2253,87 @@ fn start_chat(client: &mut Client) -> TerminalId {
 }
 
 #[test]
+fn clipboard_images_reach_the_agent_as_images_with_their_text() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l1sAAAAASUVORK5CYII=";
+    for text in ["look at this", ""] {
+        client
+            .chat(
+                chat,
+                ChatAction::SendImages {
+                    text: text.into(),
+                    images: vec![clackatoo_protocol::ChatImage {
+                        data: data.into(),
+                        width: 1,
+                        height: 1,
+                    }],
+                },
+            )
+            .unwrap();
+        let node = wait_for_chat(&mut client, chat, |node| {
+            last_words(node) == format!("echo: {text}\n") && last_outcome(node).is_some()
+        });
+        assert_eq!(last_outcome(&node), Some(&Outcome::Done));
+        assert!(
+            node.turns
+                .last()
+                .unwrap()
+                .prompt
+                .contains("[Image · 1 × 1]")
+        );
+        assert!(!format!("{node:?}").contains(data));
+    }
+    let log = std::fs::read_to_string(daemon.dir.path().join("agent.log")).unwrap();
+    let images: Vec<serde_json::Value> = log
+        .lines()
+        .filter_map(|line| line.strip_prefix("image: "))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(images.len(), 2);
+    assert!(images.iter().all(|image| image["type"] == "image"
+        && image["mimeType"] == "image/png"
+        && image["data"] == data));
+}
+
+#[test]
+fn an_agent_without_image_support_fails_the_turn_without_sending_text_alone() {
+    let daemon = TestDaemon::start_with_agent(|dir| {
+        vec![
+            fake_agent().into(),
+            "--no-images".into(),
+            "--log".into(),
+            dir.join("agent.log").into(),
+        ]
+    });
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    client
+        .chat(
+            chat,
+            ChatAction::SendImages {
+                text: "look".into(),
+                images: vec![clackatoo_protocol::ChatImage {
+                    data: "cG5n".into(),
+                    width: 1,
+                    height: 1,
+                }],
+            },
+        )
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert!(
+        matches!(last_outcome(&node), Some(Outcome::Failed(why)) if why.contains("does not support image"))
+    );
+    assert!(last_words(&node).is_empty());
+    assert_eq!(
+        last_words(&ask(&mut client, chat, "hello")),
+        "echo: hello\n"
+    );
+}
+
+#[test]
 fn a_chat_answers_what_is_sent() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();

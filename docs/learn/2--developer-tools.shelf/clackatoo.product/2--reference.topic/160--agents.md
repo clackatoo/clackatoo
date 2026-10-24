@@ -44,6 +44,14 @@ Like any new pane, a chat opens in the window's mode, so after `:Agent` it's in 
 
 An agent runs in a process group of its own, so stopping it, or choosing Retry, also ends whatever it started, such as the node behind `npx`, and any background job it started without detaching. An upgrade or `clackatoo stop` ends them too: running agents get half a second to finish by themselves, then are asked to stop, and the daemon waits up to a second and a half for them before killing what's left. Before Linux 6.9, only the agent's own process is reached.
 
+## Pasting images
+
+Copy a screenshot or image to the clipboard, then press Ctrl+Shift+V in a chat. It appears below the message as an attachment showing its dimensions. Add text if you like, then press Enter to send both; an image can go on its own too.
+
+Click an attachment to remove it, or press Backspace while the message box is empty to remove the last one. You can prepare attachments while the agent answers; they stay in the draft until you send. Text on the clipboard still pastes as text.
+
+A message holds up to four images, at most 16 million pixels each and 8 MiB of encoded image data in total. An agent that does not accept images reports that clearly. The conversation shows image labels; the image content is sent to the agent, whose session keeps it. Switching to a different agent carries the labels with the conversation, so paste the image again if that agent needs to see it.
+
 ## Typing
 
 In insert mode, what you type goes in the box at the bottom.

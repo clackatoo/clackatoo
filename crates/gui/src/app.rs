@@ -1346,15 +1346,35 @@ impl App {
             self.request_redraw();
             return;
         }
-        let redraw = if is_paste(press.key, self.modifiers) {
-            match paste_text(&mut self.clipboard, Copy::Clipboard) {
-                Ok(text) => self.desk.paste(&text),
-                Err(err) => log::warn!("pasting failed: {err:#}"),
-            }
-            true
-        } else {
-            self.desk.key(press)
-        };
+        let redraw =
+            if is_paste(press.key, self.modifiers) && self.desk.image_paste_target().is_some() {
+                let chat = self.desk.image_paste_target().unwrap();
+                if self.desk.begin_image_paste(chat) {
+                    let proxy = self.session.proxy();
+                    if let Err(err) = std::thread::Builder::new()
+                        .name("paste-image".into())
+                        .spawn(move || {
+                            let result = crate::clipboard_image::read()
+                                .map_err(|err| format!("Could not paste: {err:#}"));
+                            let _ = proxy.send_event(SessionEvent::ChatPaste { chat, result });
+                        })
+                    {
+                        self.desk.finish_image_paste(
+                            chat,
+                            Err(format!("Could not read the clipboard: {err}")),
+                        );
+                    }
+                }
+                true
+            } else if is_paste(press.key, self.modifiers) {
+                match paste_text(&mut self.clipboard, Copy::Clipboard) {
+                    Ok(text) => self.desk.paste(&text),
+                    Err(err) => log::warn!("pasting failed: {err:#}"),
+                }
+                true
+            } else {
+                self.desk.key(press)
+            };
         self.open_links();
         self.update();
         self.forward_ports();
@@ -3449,6 +3469,10 @@ impl App {
             SessionEvent::Message(
                 ServerMessage::Hello { .. } | ServerMessage::NotUpgrading { .. },
             ) => {}
+            SessionEvent::ChatPaste { chat, result } => {
+                self.desk.finish_image_paste(chat, result);
+                self.request_redraw();
+            }
             SessionEvent::Clipboard(heard) => {
                 for (from, text) in heard {
                     self.desk.clipboard_heard(from, text);

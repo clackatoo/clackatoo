@@ -44,6 +44,9 @@ enum Input {
         modifiers: Modifiers,
     },
     Paste(String),
+    Clipboard,
+    PasteFailed(String),
+    Image(clackatoo_protocol::ChatImage),
     /// A mouse button went down at a point in the pane.
     Press {
         at: [f32; 2],
@@ -85,6 +88,7 @@ pub(crate) struct Settled {
 /// Something in the chat that does something when clicked.
 #[derive(Clone, Debug, PartialEq)]
 enum Hit {
+    RemoveImage(usize),
     Send,
     Stop,
     /// One of the answers to the agent's question, by its ID.
@@ -183,6 +187,9 @@ pub(crate) struct ChatView {
     folder: Option<String>,
     /// The message being typed.
     editor: PlainEditor<Brush>,
+    images: Vec<clackatoo_protocol::ChatImage>,
+    /// Enter waits until the clipboard worker has delivered its result.
+    pub(crate) pasting: bool,
     /// The size the editor's text was last styled at, and the fonts'
     /// generation it was styled in.
     editor_size: f32,
@@ -377,6 +384,8 @@ impl ChatView {
             title,
             folder: None,
             editor: PlainEditor::new(16.0),
+            images: Vec::new(),
+            pasting: false,
             editor_size: 0.0,
             editor_fonts: 0,
             editor_width: None,
@@ -601,17 +610,36 @@ impl ChatView {
     /// may be. A message typed while it starts goes instead, and waits.
     fn stoppable(&self) -> bool {
         self.busy()
-            || (self.node.state == ChatState::Starting && self.editor.raw_text().trim().is_empty())
+            || (self.node.state == ChatState::Starting
+                && self.editor.raw_text().trim().is_empty()
+                && self.images.is_empty())
     }
 
     // --- Input, queued until the fonts are at hand --------------------------
 
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) {
         self.said = None;
+        if self.pasting
+            && self.stoppable()
+            && press.modifiers.ctrl
+            && matches!(press.key, Key::Character(text) if text.eq_ignore_ascii_case("c"))
+            && self.editor.selected_text().is_none_or(str::is_empty)
+        {
+            self.queue_control(Input::Act(ChatAction::Stop));
+            return;
+        }
+        if self.pasting
+            && self.node.question.is_none()
+            && *press.key == Key::Named(NamedKey::Enter)
+            && !press.modifiers.shift
+        {
+            self.say("Reading the clipboard… press Enter once it appears.".into());
+            return;
+        }
         // An answer to the question asked waits as one, so if the question
         // has gone by the time it's settled, it's dropped, not typed.
         if let Some((question, pick)) = self.pick_of(press) {
-            self.queued.push(Input::Answer { question, pick });
+            self.queue_control(Input::Answer { question, pick });
             return;
         }
         self.queued.push(Input::Key {
@@ -619,6 +647,48 @@ impl ChatView {
             text: press.text.map(str::to_owned),
             modifiers: press.modifiers,
         });
+    }
+
+    /// Cancellation and permission answers never wait for clipboard I/O.
+    fn queue_control(&mut self, input: Input) {
+        let at = self
+            .queued
+            .iter()
+            .position(|input| matches!(input, Input::Clipboard))
+            .unwrap_or(self.queued.len());
+        self.queued.insert(at, input);
+    }
+
+    fn remove_image(&mut self, index: usize) {
+        if index < self.images.len() {
+            self.images.remove(index);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn paste_image(&mut self, image: clackatoo_protocol::ChatImage) {
+        self.queued.push(Input::Image(image));
+    }
+
+    pub(crate) fn begin_paste(&mut self) {
+        self.pasting = true;
+        self.queued.push(Input::Clipboard);
+    }
+
+    pub(crate) fn finish_paste(&mut self, result: Result<crate::clipboard_image::Pasted, String>) {
+        self.pasting = false;
+        let Some(input) = self
+            .queued
+            .iter_mut()
+            .find(|input| matches!(input, Input::Clipboard))
+        else {
+            return;
+        };
+        *input = match result {
+            Ok(crate::clipboard_image::Pasted::Image(image)) => Input::Image(image),
+            Ok(crate::clipboard_image::Pasted::Text(text)) => Input::Paste(text),
+            Err(why) => Input::PasteFailed(why),
+        };
     }
 
     pub(crate) fn paste(&mut self, text: &str) {
@@ -632,6 +702,24 @@ impl ChatView {
         // A held button isn't hovering: the turns a drag's scrolling
         // brings under it don't show their buttons in turn.
         self.mouse = None;
+        if self.pasting
+            && self
+                .hits
+                .iter()
+                .any(|(hit, rect)| *hit == Hit::Stop && contains(*rect, at))
+        {
+            self.queue_control(Input::Act(ChatAction::Stop));
+            return;
+        }
+        if self.pasting
+            && self
+                .hits
+                .iter()
+                .any(|(hit, rect)| *hit == Hit::Send && contains(*rect, at))
+        {
+            self.say("Reading the clipboard… click Send once it appears.".into());
+            return;
+        }
         self.queued.push(Input::Press { at, clicks, shift });
     }
 
@@ -822,7 +910,14 @@ impl ChatView {
             return settled;
         }
         self.style_editor(fonts);
-        for input in std::mem::take(&mut self.queued) {
+        let mut ready = std::mem::take(&mut self.queued);
+        if let Some(waiting) = ready
+            .iter()
+            .position(|input| matches!(input, Input::Clipboard))
+        {
+            self.queued = ready.split_off(waiting);
+        }
+        for input in ready {
             // A drag that started nothing changes nothing.
             settled.redraw |= !matches!(input, Input::Drag(_))
                 || self.selecting
@@ -834,6 +929,28 @@ impl ChatView {
                     text,
                     modifiers,
                 } => self.typed(fonts, &key, text.as_deref(), modifiers, &mut settled),
+                Input::Clipboard => unreachable!("only ready inputs are settled"),
+                Input::PasteFailed(why) => {
+                    self.say(why);
+                }
+                Input::Image(image) => {
+                    if self.node.question.is_some() {
+                        self.typed_while_asking();
+                    } else if !image.valid()
+                        || self.images.len() >= clackatoo_protocol::ChatImage::MAX_COUNT
+                        || self
+                            .images
+                            .iter()
+                            .map(|image| image.data.len())
+                            .sum::<usize>()
+                            + image.data.len()
+                            > clackatoo_protocol::ChatImage::MAX_DATA
+                    {
+                        self.say("Paste up to four images, 8 MiB encoded in total.".into());
+                    } else {
+                        self.images.push(image);
+                    }
+                }
                 Input::Paste(text) => {
                     if self.node.question.is_none() {
                         let text = text.replace("\r\n", "\n");
@@ -933,6 +1050,11 @@ impl ChatView {
                 self.drive(fonts, |driver| driver.insert_or_replace_selection("\n"));
             }
             (Key::Named(NamedKey::Enter), _) => self.send(settled),
+            (Key::Named(NamedKey::Backspace), _)
+                if self.editor.raw_text().is_empty() && !self.images.is_empty() =>
+            {
+                self.images.pop();
+            }
             (Key::Named(NamedKey::Backspace), _) => self.drive(fonts, |driver| {
                 if ctrl {
                     driver.backdelete_word();
@@ -1018,13 +1140,20 @@ impl ChatView {
     /// last.
     fn send(&mut self, settled: &mut Settled) {
         let text = self.editor.raw_text().trim().to_owned();
-        if text.is_empty() || self.busy() {
+        if (text.is_empty() && self.images.is_empty()) || self.busy() {
             return;
         }
         self.editor.set_text("");
         self.follow = true;
         self.picked = None;
-        settled.actions.push(ChatAction::Send(text));
+        settled.actions.push(if self.images.is_empty() {
+            ChatAction::Send(text)
+        } else {
+            ChatAction::SendImages {
+                text,
+                images: std::mem::take(&mut self.images),
+            }
+        });
     }
 
     /// A key typed while the agent waits for an answer to its question,
@@ -1355,6 +1484,10 @@ impl ChatView {
 
     /// A mouse button went down: on a button, it's pressed, and in the
     /// message, the cursor goes there.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one action for each kind of chat control"
+    )]
     fn pressed(
         &mut self,
         fonts: &mut Fonts,
@@ -1446,6 +1579,7 @@ impl ChatView {
                     self.copied_answer = Some(turn);
                 }
             }
+            Some(Hit::RemoveImage(index)) => self.remove_image(index),
             Some(Hit::Send) => self.send(settled),
             Some(Hit::Stop) => settled.actions.push(ChatAction::Stop),
             // Its detail, shown or hidden above.
@@ -1727,6 +1861,101 @@ mod tests {
 
     fn fonts() -> Fonts {
         Fonts::load(&crate::fonts::FontOptions::default(), 1.0).expect("a font")
+    }
+
+    fn pasted_image() -> clackatoo_protocol::ChatImage {
+        clackatoo_protocol::ChatImage {
+            data: "cG5n".into(),
+            width: 2,
+            height: 3,
+        }
+    }
+
+    #[test]
+    fn pasted_images_go_with_text_or_alone_and_can_be_removed() {
+        let mut fonts = fonts();
+        let mut view = ChatView::new(String::new(), ChatNode::default());
+        view.paste_image(pasted_image());
+        typed(&mut view, "look");
+        enter(&mut view, false);
+        assert_eq!(
+            view.settle(&mut fonts).actions,
+            [ChatAction::SendImages {
+                text: "look".into(),
+                images: vec![pasted_image()],
+            }]
+        );
+        assert!(view.images.is_empty());
+        view.paste_image(pasted_image());
+        enter(&mut view, false);
+        assert_eq!(
+            view.settle(&mut fonts).actions,
+            [ChatAction::SendImages {
+                text: String::new(),
+                images: vec![pasted_image()],
+            }]
+        );
+        view.paste_image(pasted_image());
+        press(
+            &mut view,
+            &Key::Named(NamedKey::Backspace),
+            None,
+            Modifiers::default(),
+        );
+        enter(&mut view, false);
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert!(view.images.is_empty());
+    }
+
+    #[test]
+    fn enter_waits_for_clipboard_and_busy_chat_keeps_draft_images() {
+        let mut fonts = fonts();
+        let mut view = ChatView::new(String::new(), ChatNode::default());
+        typed(&mut view, "look");
+        view.begin_paste();
+        typed(&mut view, " after");
+        enter(&mut view, false);
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert_eq!(view.editor.raw_text(), "look");
+        view.finish_paste(Ok(crate::clipboard_image::Pasted::Text(" pasted".into())));
+        view.settle(&mut fonts);
+        assert_eq!(view.editor.raw_text(), "look pasted after");
+        view.paste_image(pasted_image());
+        view.node.turns.push(Turn {
+            prompt: "previous".into(),
+            sent: 0,
+            items: vec![],
+            end: None,
+            files: None,
+            from: None,
+            switch: None,
+        });
+        enter(&mut view, false);
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert_eq!(view.images.len(), 1);
+        view.begin_paste();
+        press(
+            &mut view,
+            &Key::Character("c".into()),
+            None,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        );
+        assert_eq!(view.settle(&mut fonts).actions, [ChatAction::Stop]);
+    }
+
+    #[test]
+    fn excess_images_are_refused_without_losing_the_draft() {
+        let mut fonts = fonts();
+        let mut view = ChatView::new(String::new(), ChatNode::default());
+        for _ in 0..5 {
+            view.paste_image(pasted_image());
+        }
+        view.settle(&mut fonts);
+        assert_eq!(view.images.len(), 4);
+        assert!(view.said.as_ref().unwrap().contains("four images"));
     }
 
     #[test]

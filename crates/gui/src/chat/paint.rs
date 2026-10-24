@@ -988,7 +988,17 @@ impl ChatView {
             .map_or(editor_height.min(m.em(LINE * EDITOR_LINES)), |question| {
                 question.height
             });
-        let height = pad + content_height + m.em(0.4) + m.em(2.0) + m.em(0.5);
+        let attachments = if question.is_none() {
+            self.images.len()
+        } else {
+            0
+        };
+        let height = pad
+            + content_height
+            + m.em(2.0) * f32::from(u8::try_from(attachments).unwrap_or(u8::MAX))
+            + m.em(0.4)
+            + m.em(2.0)
+            + m.em(0.5);
         let frame = BoxFrame {
             place,
             left: place.origin[0] + place.left,
@@ -1017,6 +1027,30 @@ impl ChatView {
         match question {
             Some(question) => self.draw_question(&mut canvas, m, &frame, question),
             None => self.draw_editor(&mut canvas, m, &frame, editor_height, caret),
+        }
+        for index in 0..attachments {
+            let label = format!("{}   ×", self.images[index].label());
+            let laid = self.box_label(canvas.fonts, m, &label, Tone::Muted, inner);
+            let rect = [
+                frame.left + pad,
+                frame.top
+                    + pad
+                    + content_height
+                    + m.em(2.0) * f32::from(u8::try_from(index).unwrap_or(u8::MAX)),
+                inner,
+                m.em(1.8),
+            ];
+            canvas.fill(Fill::rounded(rect, Paint::Hover, m.em(0.4)));
+            draw_laid(
+                &mut canvas,
+                m,
+                &laid,
+                [rect[0] + m.em(0.4), rect[1] + (rect[3] - laid.height) / 2.0],
+                inner - m.em(0.8),
+            );
+            self.keep_label(laid);
+            self.hits
+                .push((Hit::RemoveImage(index), frame.place.in_pane(rect)));
         }
         self.draw_send(&mut canvas, m, &frame);
         self.draw_controls(&mut canvas, m, &frame);
@@ -1192,7 +1226,8 @@ impl ChatView {
     /// it answers.
     fn draw_send(&mut self, canvas: &mut Canvas<'_>, m: Measures, frame: &BoxFrame) {
         let busy = self.stoppable();
-        let ready = !self.editor.raw_text().trim().is_empty() && self.node.question.is_none();
+        let ready = (!self.editor.raw_text().trim().is_empty() || !self.images.is_empty())
+            && self.node.question.is_none();
         let (hit, label) = if busy {
             (Hit::Stop, "■")
         } else {

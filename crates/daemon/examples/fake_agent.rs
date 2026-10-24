@@ -525,6 +525,7 @@ impl Fake {
                 "protocolVersion": 1,
                 "agentCapabilities": {
                     "loadSession": self.load,
+                    "promptCapabilities": { "image": !std::env::args().any(|arg| arg == "--no-images") },
                     "sessionCapabilities": if self.list {
                         json!({ "close": {}, "resume": {}, "list": {} })
                     } else {
@@ -680,6 +681,11 @@ impl Fake {
             }
             Some("session/cancel") => self.cancel(&session),
             Some("session/prompt") => {
+                for block in params["prompt"].as_array().into_iter().flatten() {
+                    if block["type"] == "image" {
+                        self.note(&format!("image: {block}"));
+                    }
+                }
                 let blocks: Vec<&str> = (params["prompt"].as_array().into_iter().flatten())
                     .filter_map(|block| block["text"].as_str())
                     .collect();

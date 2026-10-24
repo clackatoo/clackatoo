@@ -203,19 +203,54 @@ pub(crate) enum Choices {
     Browser,
 }
 
+/// A message kept intact while the agent opens or reloads its session.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct Prompt {
+    pub(crate) text: String,
+    pub(crate) images: Vec<clackatoo_protocol::ChatImage>,
+}
+
+impl From<String> for Prompt {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            images: Vec::new(),
+        }
+    }
+}
+impl From<&str> for Prompt {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
+    }
+}
+impl Prompt {
+    pub(super) fn shown(&self) -> String {
+        let mut shown = self.text.clone();
+        for image in &self.images {
+            if !shown.is_empty() {
+                shown.push_str("\n\n");
+            }
+            shown.push('[');
+            shown.push_str(&image.label());
+            shown.push(']');
+        }
+        shown
+    }
+}
+
 /// What a chat asks the server to do.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Action {
     /// Send the agent this message.
-    Prompt(String),
+    Prompt(Prompt),
     /// Send the agent this message, after `role`, which says what it's
     /// started as: the first message of a chat started as a profile.
-    Briefed { role: String, text: String },
+    Briefed { role: String, text: Prompt },
     /// Send the agent this message, after a digest of the turns from
     /// `from` up to `to`, which its session hasn't seen, as the chat was
     /// with another agent then.
     Carry {
-        text: String,
+        text: Prompt,
         from: usize,
         to: usize,
     },
@@ -316,7 +351,7 @@ pub(crate) struct HostedChat {
     /// made, after an upgrade, or once the agent has gone.
     link: Link,
     /// A message sent while there's no session, to go once there is.
-    queued: Option<String>,
+    queued: Option<Prompt>,
     /// Whether the notice says the agent is slow to open the session: it
     /// goes once the session opens, or isn't waited for.
     slow: bool,
@@ -863,6 +898,9 @@ impl HostedChat {
         let mut actions = Vec::new();
         match action {
             ChatAction::Send(text) => self.send(text, &mut actions),
+            ChatAction::SendImages { text, images } => {
+                self.send_prompt(Prompt { text, images }, &mut actions);
+            }
             ChatAction::Stop => self.stop(&mut actions),
             // Only an answer to the question shown counts: one sent twice,
             // or as the question was taken back, isn't the next one's.
@@ -938,14 +976,37 @@ impl HostedChat {
     /// Sends a message, if there is one and the agent isn't still
     /// answering the last.
     fn send(&mut self, text: String, actions: &mut Vec<Action>) {
-        if text.trim().is_empty() || self.hold_while_loading(&text, actions) || self.answering() {
+        self.send_prompt(text.into(), actions);
+    }
+
+    fn send_prompt(&mut self, prompt: Prompt, actions: &mut Vec<Action>) {
+        if (prompt.text.trim().is_empty() && prompt.images.is_empty())
+            || self.answering() && !self.loading()
+        {
+            return;
+        }
+        if prompt.images.len() > clackatoo_protocol::ChatImage::MAX_COUNT
+            || prompt.images.iter().any(|image| !image.valid())
+            || prompt
+                .images
+                .iter()
+                .map(|image| image.data.len())
+                .sum::<usize>()
+                > clackatoo_protocol::ChatImage::MAX_DATA
+        {
+            self.set_notice(Some(
+                "Images are too large: paste up to four images, 8 MiB encoded in total.".into(),
+            ));
+            return;
+        }
+        if self.hold_while_loading(&prompt, actions) {
             return;
         }
         // The user's own: what agents do of it comes of this turn.
         self.relations.hops = 0;
         let turn = u32::try_from(self.node.turns.len()).unwrap_or(u32::MAX);
         self.relations.cause = Some((self.id, turn));
-        self.begin(text.clone(), text, None, actions);
+        self.begin(prompt.shown(), prompt, None, actions);
     }
 
     /// Starts a turn: shows `shown`, sent by `from` if another chat's
@@ -953,7 +1014,7 @@ impl HostedChat {
     fn begin(
         &mut self,
         shown: String,
-        prompt: String,
+        prompt: Prompt,
         from: Option<Sender>,
         actions: &mut Vec<Action>,
     ) {
@@ -1063,7 +1124,12 @@ impl HostedChat {
         self.relations.hops = message.hops;
         self.relations.cause = message.cause;
         let prompt = relations::prompt_for(&message);
-        self.begin(message.text, prompt, Some(message.from), &mut actions);
+        self.begin(
+            message.text,
+            prompt.into(),
+            Some(message.from),
+            &mut actions,
+        );
         actions
     }
 
@@ -1221,7 +1287,7 @@ impl HostedChat {
     /// there are any. The session has seen them all once that's answered,
     /// without failing; a message sent with nothing to carry is seen as
     /// it's sent.
-    fn prompt(&mut self, text: String) -> Action {
+    fn prompt(&mut self, text: Prompt) -> Action {
         if let Some(role) = self.role.take() {
             self.known = self.node.turns.len();
             return Action::Briefed { role, text };
@@ -3107,6 +3173,44 @@ mod tests {
         chat.update(notification.update)
     }
 
+    fn image_prompt() -> Prompt {
+        Prompt {
+            text: "look".into(),
+            images: vec![clackatoo_protocol::ChatImage {
+                data: "cG5n".into(),
+                width: 2,
+                height: 3,
+            }],
+        }
+    }
+
+    #[test]
+    fn images_survive_opening_and_loading_and_a_stop_drops_them() {
+        let prompt = image_prompt();
+        let mut chat = chat();
+        chat.send_prompt(prompt.clone(), &mut Vec::new());
+        assert_eq!(connect(&mut chat, "s"), [Action::Prompt(prompt.clone())]);
+        assert_eq!(chat.node.turns[0].prompt, "look\n\n[Image · 2 × 3]");
+        let mut loading = resuming();
+        replay_user(&mut loading, "before");
+        loading.send_prompt(prompt.clone(), &mut Vec::new());
+        send(&mut loading, "also this");
+        loading.opened_again(true);
+        let actions = connect(&mut loading, "past");
+        assert!(
+            matches!(&actions[..], [Action::Prompt(sent)] if sent.images == prompt.images && sent.text == "look\n\nalso this")
+        );
+        let mut stopped = resuming();
+        stopped.send_prompt(prompt, &mut Vec::new());
+        stopped.act(ChatAction::Stop);
+        assert!(stopped.queued.is_none());
+        assert!(
+            connect(&mut stopped, "past")
+                .iter()
+                .all(|action| !matches!(action, Action::Prompt(_)))
+        );
+    }
+
     #[test]
     fn a_finished_edit_says_what_it_wrote_and_whatever_is_running_is_known() {
         let mut chat = chat();
@@ -4203,12 +4307,16 @@ mod tests {
             panic!("{actions:?}");
         };
         assert!(
-            prompt.starts_with("[Message from chat 7 (Codex, \"fixes\"): another agent"),
-            "{prompt}"
+            prompt
+                .text
+                .starts_with("[Message from chat 7 (Codex, \"fixes\"): another agent"),
+            "{prompt:?}"
         );
         assert!(
-            prompt.contains(" from chat 7 ---\nhi\n--- end of message "),
-            "{prompt}"
+            prompt
+                .text
+                .contains(" from chat 7 ---\nhi\n--- end of message "),
+            "{prompt:?}"
         );
         let turn = &chat.node.turns[0];
         assert_eq!(turn.prompt, "hi");
@@ -4223,7 +4331,7 @@ mod tests {
         chat.answered(Ok(StopReason::EndTurn));
         let next = chat.deliver_next();
         assert!(
-            matches!(next.as_slice(), [Action::Prompt(prompt)] if prompt.contains(" ---\n0\n--- end"))
+            matches!(next.as_slice(), [Action::Prompt(prompt)] if prompt.text.contains(" ---\n0\n--- end"))
         );
         assert_eq!(chat.relations().inbox.len(), MAX_INBOX - 1);
         // The user's own message starts the chain again.
@@ -4709,7 +4817,7 @@ mod tests {
             .filter(|action| matches!(action, Action::Prompt(_)))
             .collect();
         assert!(
-            matches!(prompted[..], [Action::Prompt(text)] if text == "and now?\n\nalso this"),
+            matches!(prompted[..], [Action::Prompt(text)] if text.text == "and now?\n\nalso this"),
             "{actions:?}"
         );
         assert_eq!(

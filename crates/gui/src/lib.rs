@@ -21,6 +21,7 @@ mod boxdraw;
 mod browser;
 mod chat;
 mod chrome;
+mod clipboard_image;
 mod cmdline;
 mod colors;
 mod command;

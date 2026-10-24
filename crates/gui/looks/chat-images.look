@@ -1,0 +1,18 @@
+# Clipboard attachments in the real chat UI, using a stand-in clipboard.
+size 1100x800
+keys <C-;>:Agent claude<CR>
+keys i
+paste-image
+type What do you see?
+shot image-draft
+keys <CR>
+wait-for echo: What do you see?
+shot image-sent
+paste-image
+paste-image
+shot two-images
+keys <BS>
+shot removed-image
+keys <CR>
+wait-for echo:
+shot image-only

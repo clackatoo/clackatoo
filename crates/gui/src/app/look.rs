@@ -348,6 +348,36 @@ impl Window {
         Ok(())
     }
 
+    /// Pastes RGBA pixels into the focused chat, as a clipboard worker does.
+    ///
+    /// # Errors
+    /// If there is no chat or the image cannot be encoded.
+    pub fn paste_image(
+        &mut self,
+        width: usize,
+        height: usize,
+        rgba: Vec<u8>,
+    ) -> Result<(), String> {
+        let chat = self
+            .app
+            .desk
+            .image_paste_target()
+            .ok_or("no focused chat")?;
+        let image = crate::clipboard_image::encode(&arboard::ImageData {
+            width,
+            height,
+            bytes: rgba.into(),
+        })
+        .map_err(|err| err.to_string())?;
+        self.app.desk.begin_image_paste(chat);
+        self.app
+            .desk
+            .finish_image_paste(chat, Ok(crate::clipboard_image::Pasted::Image(image)));
+        self.app.request_redraw();
+        self.app.send_outbox();
+        Ok(())
+    }
+
     /// Types `text`, a key a character, as a keyboard does.
     pub fn type_text(&mut self, text: &str) {
         for ch in text.chars() {
