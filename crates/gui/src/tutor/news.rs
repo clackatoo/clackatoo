@@ -761,6 +761,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "mouse",
         what: "Smooth wheel scrolling across native panes, precise trackpads, and :set nosmoothscroll to turn it off.",
     },
+    News {
+        id: "agent-queue-steering",
+        date: "2026-10-24",
+        lesson: "agents",
+        what: "Enter queues while an agent works; Ctrl+Enter steers, with pending messages shared across windows.",
+    },
 ];
 
 impl News {

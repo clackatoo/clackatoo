@@ -791,7 +791,8 @@ fn mark(dirty: &mut Dirty, patch: &Patch) {
         ChatPatch::Question(_)
         | ChatPatch::Notice(_)
         | ChatPatch::Settings(_)
-        | ChatPatch::Providers(_) => dirty.footer = true,
+        | ChatPatch::Providers(_)
+        | ChatPatch::Delivery(_) => dirty.footer = true,
     }
 }
 

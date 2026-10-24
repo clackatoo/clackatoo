@@ -15,6 +15,7 @@ mod fold;
 mod handoff;
 mod image;
 mod models;
+mod queue;
 mod select;
 mod tables;
 mod usage;
@@ -584,6 +585,7 @@ impl ChatView {
         for (item_index, item) in turn.items.iter().enumerate() {
             // Folded, only the answer shows.
             if item_index < shape.answer
+                && !matches!(item, Item::Other(_))
                 && !shape.open
                 && !matches!(item, Item::Tool(tool) if tool.content.iter().any(|content| matches!(content, clackatoo_protocol::ToolContent::Image(_))))
             {
@@ -1082,7 +1084,8 @@ impl ChatView {
         }
         self.draw_send(&mut canvas, m, &frame);
         self.draw_controls(&mut canvas, m, &frame);
-        height + footer
+        let queued = self.draw_queue(&mut canvas, m, &frame);
+        height + footer + queued
     }
 
     /// One draft thumbnail and its remove button, above the image pass.
@@ -1302,7 +1305,8 @@ impl ChatView {
         let busy = self.stoppable();
         let ready = (!self.editor.raw_text().trim().is_empty() || !self.images.is_empty())
             && self.node.question.is_none();
-        let hit = if busy { Hit::Stop } else { Hit::Send };
+        let stopping = busy && !(self.queue_supported && ready);
+        let hit = if stopping { Hit::Stop } else { Hit::Send };
         let lit = busy || ready;
         let size = m.em(2.2);
         let rect = [
@@ -1316,7 +1320,7 @@ impl ChatView {
             if lit { Paint::Accent } else { Paint::Chosen },
             size / 2.0,
         ));
-        let extent = m.em(if busy { 0.7 } else { 1.25 });
+        let extent = m.em(if stopping { 0.7 } else { 1.25 });
         let at = [
             rect[0] + (size - extent) / 2.0,
             rect[1] + (size - extent) / 2.0,
@@ -1324,7 +1328,7 @@ impl ChatView {
             extent,
         ];
         let ink = if lit { Paint::Bar } else { Paint::Icon };
-        if busy {
+        if stopping {
             canvas.fill(Fill::rounded(at, ink, m.em(0.12)));
         } else {
             canvas.fill(Fill::icon(at, Icon::Send, ink));
@@ -3116,7 +3120,7 @@ mod tests {
     fn frame_time_with_chat_previews() {
         let mut fonts = crate::chat::fixtures::fonts();
         let node = crate::chat::fixtures::talk(&[("[Image]", "A screenshot."); 16]);
-        for kind in ["text", "prompt", "tool", "modal", "handoff"] {
+        for kind in ["text", "prompt", "tool", "modal", "handoff", "queue"] {
             let mut node = node.clone();
             if matches!(kind, "prompt" | "tool" | "modal") {
                 for turn in &mut node.turns {
@@ -3151,6 +3155,17 @@ mod tests {
                     title: "Codex".into(),
                     label: "6 Luna".into(),
                 });
+            }
+            if kind == "queue" {
+                chat.queue_supported = true;
+                chat.node.delivery.queued = (0..8)
+                    .map(|id| clackatoo_protocol::QueuedMessage {
+                        id,
+                        text: "x".repeat(65536),
+                        images: 4,
+                        target: None,
+                    })
+                    .collect();
             }
             let initial = crate::chat::fixtures::paint(&mut chat, &mut fonts);
             if kind == "modal" {

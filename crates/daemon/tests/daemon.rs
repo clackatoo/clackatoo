@@ -19047,3 +19047,111 @@ fn a_shell_that_starts_another_says_so_and_types_nothing() {
     let screen = screen_text(&client.capture(terminal).unwrap());
     assert!(!screen.contains("echo wrapped"), "{screen}");
 }
+
+#[test]
+fn user_queue_and_native_steering_deliver_once_across_clients() {
+    let daemon = TestDaemon::start_with_agent(|dir| {
+        vec![
+            fake_agent().into(),
+            "--steering".into(),
+            "--log".into(),
+            dir.join("agent.log").into(),
+        ]
+    });
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    client.chat(chat, ChatAction::Send("wait".into())).unwrap();
+    wait_for_chat(&mut client, chat, |n| {
+        n.delivery.native_steering && n.turns.len() == 1
+    });
+    client
+        .chat(
+            chat,
+            ChatAction::Submit {
+                text: "after".into(),
+                images: vec![],
+                target: None,
+                steer: false,
+            },
+        )
+        .unwrap();
+    let mut other = daemon.client();
+    let node = wait_for_chat(&mut other, chat, |n| n.delivery.queued.len() == 1);
+    assert_eq!(node.delivery.queued[0].text, "after");
+    client
+        .chat(
+            chat,
+            ChatAction::Submit {
+                text: "redirect".into(),
+                images: vec![],
+                target: None,
+                steer: true,
+            },
+        )
+        .unwrap();
+    let node = wait_for_chat(&mut other, chat, |n| {
+        n.turns.len() == 2 && last_outcome(n).is_some()
+    });
+    assert!(node.delivery.queued.is_empty());
+    assert_eq!(node.turns[0].prompt, "wait");
+    assert_eq!(node.turns[1].prompt, "after");
+    assert!(
+        node.turns[0]
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Words(t) if t.contains("steered: redirect")))
+    );
+}
+
+#[test]
+fn user_queue_stop_continue_and_remove_keep_payloads_and_order() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    client.chat(chat, ChatAction::Send("wait".into())).unwrap();
+    wait_for_chat(&mut client, chat, |n| n.turns.len() == 1);
+    for text in ["remove", "after"] {
+        client
+            .chat(
+                chat,
+                ChatAction::Submit {
+                    text: text.into(),
+                    images: vec![],
+                    target: None,
+                    steer: false,
+                },
+            )
+            .unwrap();
+    }
+    let node = wait_for_chat(&mut client, chat, |n| n.delivery.queued.len() == 2);
+    let remove = node.delivery.queued[0].id;
+    client
+        .chat(chat, ChatAction::RemoveQueued { id: remove })
+        .unwrap();
+    assert!(
+        client
+            .chat(chat, ChatAction::RemoveQueued { id: remove })
+            .is_err()
+    );
+    client
+        .chat(
+            chat,
+            ChatAction::Submit {
+                text: "redirect".into(),
+                images: vec![],
+                target: None,
+                steer: true,
+            },
+        )
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |n| {
+        n.turns.len() == 3 && last_outcome(n).is_some()
+    });
+    assert!(matches!(
+        node.turns[0].end.as_ref().unwrap().outcome,
+        Outcome::Stopped
+    ));
+    assert_eq!(node.turns[1].prompt, "redirect");
+    assert_eq!(node.turns[2].prompt, "after");
+    assert!(node.delivery.queued.is_empty());
+}

@@ -643,6 +643,7 @@ fn machine_config() -> anyhow::Result<DaemonConfig> {
         title: None,
         command: vec![
             agent.clone().into(),
+            "--steering".into(),
             "--log".into(),
             home.join("agent.log").into(),
         ],

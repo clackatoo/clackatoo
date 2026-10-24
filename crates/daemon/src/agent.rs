@@ -64,6 +64,7 @@ enum Pending {
     },
     /// A message from the chat in this terminal.
     Prompt(TerminalId),
+    Steer(TerminalId, u64),
     /// A change to a setting of the chat in this terminal.
     Setting(TerminalId),
     /// A session made only to learn the agent's settings.
@@ -86,6 +87,11 @@ enum Pending {
 /// Something the agent sent that a chat must act on.
 #[derive(Debug)]
 pub(crate) enum Incoming {
+    Steered {
+        terminal: TerminalId,
+        message: u64,
+        result: Result<String, String>,
+    },
     /// The chat in `terminal` has a session, or couldn't get one. One
     /// opened again was told again as it went, as updates before this, if
     /// `loaded`.
@@ -203,6 +209,10 @@ const MOST_PATH: usize = 4096;
 
 /// A running agent.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent capabilities negotiated with ACP"
+)]
 pub(crate) struct Agent {
     peer: Peer,
     next_id: u64,
@@ -215,6 +225,7 @@ pub(crate) struct Agent {
     /// conversation so far as it goes (ACP's `session/load`).
     can_load: bool,
     can_image: bool,
+    can_steer: bool,
     /// Whether the agent can list the sessions it kept, once it has said
     /// what it can.
     can_list: Option<bool>,
@@ -239,6 +250,7 @@ impl Agent {
             can_close: false,
             can_load: false,
             can_image: false,
+            can_steer: false,
             can_list: None,
         };
         agent.request(
@@ -354,6 +366,21 @@ impl Agent {
     /// Whether initialization advertised image prompts.
     pub(crate) fn can_image(&self) -> bool {
         self.can_image
+    }
+
+    pub(crate) fn can_steer(&self) -> bool {
+        self.can_steer
+    }
+
+    pub(crate) fn steer(&mut self, terminal: TerminalId, message: u64, session: &str, text: &str) {
+        self.request(
+            Pending::Steer(terminal, message),
+            "_session/steering",
+            &json!({
+                "sessionId": session, "prompt": [{"type": "text", "text": text}],
+                "_meta": {"steering": {"idleBehavior": "promptRequired"}}
+            }),
+        );
     }
 
     /// Sends text blocks in order, followed by the user's images. Any
@@ -634,6 +661,46 @@ impl Agent {
         }
     }
 
+    fn initialized(&mut self, result: &Result<Value, String>, incoming: &mut Vec<Incoming>) {
+        if let Err(err) = &result {
+            log::warn!("agent: initialize failed: {err}");
+        }
+        // Legacy adapters advertise steering but may silently start an untracked
+        // detached turn on an idle race. Only this pinned, verified adapter
+        // implements promptRequired and leaves completion with session/prompt.
+        self.can_steer = result.as_ref().is_ok_and(safe_steering);
+        self.can_close = result.as_ref().is_ok_and(|result| {
+            result
+                .pointer("/agentCapabilities/sessionCapabilities/close")
+                .is_some()
+        });
+        self.can_image = result.as_ref().is_ok_and(|result| {
+            result
+                .pointer("/agentCapabilities/promptCapabilities/image")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
+        self.can_load = result.as_ref().is_ok_and(|result| {
+            (result.pointer("/agentCapabilities/loadSession"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
+        let can_list = result.as_ref().is_ok_and(|result| {
+            (result.pointer("/agentCapabilities/sessionCapabilities/list")).is_some()
+        });
+        self.can_list = Some(can_list);
+        for mut message in self.held.take().unwrap_or_default() {
+            if !self.can_load && message["method"] == "session/load" {
+                self.cannot_load(&mut message);
+            }
+            if !can_list && message["method"] == "session/list" {
+                self.cannot_list(&message, incoming);
+                continue;
+            }
+            self.peer.send(&message);
+        }
+    }
+
     fn answered(
         &mut self,
         pending: Pending,
@@ -678,41 +745,7 @@ impl Agent {
         }
         let result = result.map_err(|error| error.message);
         match pending {
-            Pending::Initialize => {
-                if let Err(err) = &result {
-                    log::warn!("agent: initialize failed: {err}");
-                }
-                self.can_close = result.as_ref().is_ok_and(|result| {
-                    result
-                        .pointer("/agentCapabilities/sessionCapabilities/close")
-                        .is_some()
-                });
-                self.can_image = result.as_ref().is_ok_and(|result| {
-                    result
-                        .pointer("/agentCapabilities/promptCapabilities/image")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                });
-                self.can_load = result.as_ref().is_ok_and(|result| {
-                    (result.pointer("/agentCapabilities/loadSession"))
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                });
-                let can_list = result.as_ref().is_ok_and(|result| {
-                    (result.pointer("/agentCapabilities/sessionCapabilities/list")).is_some()
-                });
-                self.can_list = Some(can_list);
-                for mut message in self.held.take().unwrap_or_default() {
-                    if !self.can_load && message["method"] == "session/load" {
-                        self.cannot_load(&mut message);
-                    }
-                    if !can_list && message["method"] == "session/list" {
-                        self.cannot_list(&message, incoming);
-                        continue;
-                    }
-                    self.peer.send(&message);
-                }
-            }
+            Pending::Initialize => self.initialized(&result, incoming),
             Pending::Listing(listing) => incoming.push(Incoming::Listed {
                 listing,
                 result: result.map(|result| listed(&result)),
@@ -720,6 +753,16 @@ impl Agent {
             Pending::Setting(terminal) => incoming.push(Incoming::Settings {
                 terminal,
                 result: result.map(|result| settings(&result).unwrap_or_default()),
+            }),
+            Pending::Steer(terminal, message) => incoming.push(Incoming::Steered {
+                terminal,
+                message,
+                result: result.and_then(|v| {
+                    v.get("outcome")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| "Missing steering outcome".into())
+                }),
             }),
             Pending::Prompt(terminal) => incoming.push(Incoming::Answered {
                 terminal,
@@ -802,6 +845,7 @@ impl Agent {
         self.pending.values().filter_map(|pending| match pending {
             Pending::Session { terminal, .. }
             | Pending::Prompt(terminal)
+            | Pending::Steer(terminal, _)
             | Pending::Setting(terminal)
             | Pending::Closing(terminal) => Some(*terminal),
             Pending::Initialize
@@ -950,4 +994,30 @@ fn settings(result: &Value) -> Option<Vec<SessionConfigOption>> {
             .filter_map(|option| serde_json::from_value(option.clone()).ok())
             .collect(),
     )
+}
+
+fn safe_steering(result: &Value) -> bool {
+    result
+        .pointer("/_meta/steering/supported")
+        .and_then(Value::as_bool)
+        == Some(true)
+        && result.pointer("/agentInfo/name").and_then(Value::as_str)
+            == Some("@agentclientprotocol/claude-agent-acp")
+        && result.pointer("/agentInfo/version").and_then(Value::as_str) == Some("0.88.0")
+}
+
+#[cfg(test)]
+mod steering_tests {
+    use super::*;
+    #[test]
+    fn steering_requires_the_verified_idle_race_contract() {
+        let mut v = json!({"_meta": {"steering": {"supported": true}}, "agentInfo": {"name": "@agentclientprotocol/claude-agent-acp", "version": "0.88.0"}});
+        assert!(safe_steering(&v));
+        v["agentInfo"]["name"] = json!("@agentclientprotocol/codex-acp");
+        assert!(!safe_steering(&v));
+        v["agentInfo"]["name"] = json!("@agentclientprotocol/claude-agent-acp");
+        v["agentInfo"]["version"] = json!("0.87.0");
+        assert!(!safe_steering(&v));
+        assert!(!safe_steering(&json!({})));
+    }
 }

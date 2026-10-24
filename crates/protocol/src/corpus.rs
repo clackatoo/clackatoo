@@ -1048,6 +1048,47 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             },
         })),
     ));
+    for action in [
+        ChatAction::Submit {
+            text: "next".into(),
+            images: Vec::new(),
+            target: Some(crate::ChatTarget {
+                agent: "claude".into(),
+                model: Some("sonnet".into()),
+                budget: 4096,
+            }),
+            steer: true,
+        },
+        ChatAction::RemoveQueued { id: 8 },
+        ChatAction::SendQueued {
+            id: 9,
+            steer: false,
+        },
+    ] {
+        samples.push((
+            crate::wire::CHAT_QUEUE,
+            Client(ClientMessage::Request(Request::Chat { terminal, action })),
+        ));
+    }
+    samples.push((
+        crate::wire::CHAT_QUEUE,
+        Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Delivery(
+                crate::ChatDelivery {
+                    paused: true,
+                    sending: Some(9),
+                    native_steering: true,
+                    queued: vec![crate::QueuedMessage {
+                        id: 9,
+                        text: "next".into(),
+                        images: 1,
+                        target: None,
+                    }],
+                },
+            ))]),
+        })),
+    ));
     samples
 }
 
@@ -2602,6 +2643,7 @@ fn chat() -> ChatNode {
         usage: Some(usage()),
         providers: vec![provider()],
         subagents: vec![subagent()],
+        delivery: crate::ChatDelivery::default(),
     }
 }
 

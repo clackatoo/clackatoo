@@ -60,6 +60,7 @@ mod boards;
 mod browser;
 mod buffers;
 mod chain;
+mod chat_queue;
 mod chats;
 mod clipboard;
 mod disk;
@@ -1158,6 +1159,7 @@ impl Daemon {
                 .collect();
         let mut tool_previews = std::mem::take(&mut handover.state.tool_previews);
         let mut image_originals = std::mem::take(&mut handover.state.image_originals);
+        let mut chat_queues = std::mem::take(&mut handover.state.chat_queues);
         let chats = std::mem::take(&mut handover.state.chats);
         let buffers = std::mem::take(&mut handover.state.buffers);
         let explorers = std::mem::take(&mut handover.state.explorers);
@@ -1222,6 +1224,7 @@ impl Daemon {
             }
             chat.resume_tool_previews(&mut tool_previews);
             chat.resume_originals(&mut image_originals);
+            chat.resume_queue(&mut chat_queues);
             daemon.add_chat(chat);
         }
         daemon.next_buffer = state.next_buffer;
@@ -1353,6 +1356,7 @@ impl Daemon {
         let mut chat_previews = Vec::new();
         let mut tool_previews = Vec::new();
         let mut image_originals = Vec::new();
+        let mut chat_queues = Vec::new();
         self.abandon_clipboard_asks();
         self.put_back_fits();
         for slot in std::mem::take(&mut self.terminals).into_values() {
@@ -1381,6 +1385,7 @@ impl Daemon {
                     chat_previews.push(chat.hand_over_previews());
                     tool_previews.extend(chat.hand_over_tool_previews());
                     image_originals.push(chat.hand_over_originals());
+                    chat_queues.push(chat.hand_over_queue());
                     chats.push(chat.hand_over());
                 }
             }
@@ -1436,6 +1441,7 @@ impl Daemon {
                 chat_previews,
                 tool_previews,
                 image_originals,
+                chat_queues,
                 orphans,
                 workspaces,
                 next_buffer: self.next_buffer,
@@ -3376,6 +3382,22 @@ impl Daemon {
                 self.switch_chat(id, &agent, model, budget);
                 self.collect_damage(id);
                 return Ok(());
+            }
+            ChatAction::Submit {
+                text,
+                images,
+                target,
+                steer,
+            } => {
+                return self.submit_chat(id, text, images, target, steer);
+            }
+            ChatAction::RemoveQueued { id: message } => {
+                chat.take_queued_user(message).map_err(Error::Other)?;
+                self.collect_damage(id);
+                return Ok(());
+            }
+            ChatAction::SendQueued { id: message, steer } => {
+                return self.send_queued(id, message, steer);
             }
             ChatAction::SendTo {
                 agent,

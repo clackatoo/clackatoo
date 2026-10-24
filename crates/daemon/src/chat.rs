@@ -34,6 +34,7 @@ use crate::handover;
 
 mod limits;
 mod originals;
+pub(crate) mod queue;
 mod relations;
 mod resume;
 
@@ -425,6 +426,7 @@ pub(crate) struct HostedChat {
     /// handed over: after an upgrade they come again with the next that
     /// changes.
     limits: Limits,
+    user_queue: queue::Queue,
 }
 
 /// A session a chat had with another agent, which it can go back to.
@@ -588,6 +590,7 @@ impl HostedChat {
             told_parent: std::cell::Cell::new(0),
             own_tools: VecDeque::new(),
             limits: Limits::default(),
+            user_queue: queue::Queue::default(),
         }
     }
 
@@ -942,6 +945,9 @@ impl HostedChat {
             | ChatAction::Redo { .. }
             | ChatAction::Switch { .. }
             | ChatAction::SendTo { .. }
+            | ChatAction::Submit { .. }
+            | ChatAction::RemoveQueued { .. }
+            | ChatAction::SendQueued { .. }
             | ChatAction::LearnModels
             | ChatAction::Open { .. } => {}
             // Only a value the agent offers is kept, and asked for.
@@ -988,6 +994,7 @@ impl HostedChat {
 
     fn send_prompt(&mut self, prompt: Prompt, actions: &mut Vec<Action>) {
         if (prompt.text.trim().is_empty() && prompt.images.is_empty())
+            || self.user_queue.native.is_some()
             || self.answering() && !self.loading()
         {
             return;
@@ -1127,7 +1134,8 @@ impl HostedChat {
     /// Sends the first message waiting from another agent, if the agent
     /// has finished answering. Returns what the server must do to send it.
     pub(crate) fn deliver_next(&mut self) -> Vec<Action> {
-        if self.answering() {
+        if self.answering() || self.user_queue.native.is_some() || self.user_queue.restart.is_some()
+        {
             return Vec::new();
         }
         match self.relations.inbox.pop_front() {
@@ -1187,6 +1195,11 @@ impl HostedChat {
     /// message: one that comes after all is closed unseen, and the next
     /// message asks again.
     fn stop(&mut self, actions: &mut Vec<Action>) {
+        if let Some((id, _, _)) = self.user_queue.native {
+            self.steered(id, Err("Stopped before acknowledgment".into()));
+        }
+        self.user_queue.restart = None;
+        self.pause_queue(true);
         if !self.answering() && self.link != Link::Opening {
             return;
         }
@@ -1370,7 +1383,7 @@ impl HostedChat {
         settings: Option<&[Setting]>,
         budget: usize,
     ) -> Option<(String, Option<String>)> {
-        if self.answering() {
+        if self.answering() || self.user_queue.native.is_some() {
             self.set_notice(Some(format!(
                 "{} is still answering: stop it first, or switch once it's done.",
                 self.node.agent
@@ -1381,6 +1394,7 @@ impl HostedChat {
         if to.name == self.agent {
             return None;
         }
+        self.set_native_steering(false);
         // The chat's own settings go with it to every agent: what it may
         // do with clackatoo's tools, whether it keeps Claude Code's Task
         // tool, which a session with Claude Code opens with, and the
@@ -1833,6 +1847,7 @@ impl HostedChat {
 
     /// The session couldn't be made or opened, nor the agent installed.
     pub(crate) fn failed_to_connect(&mut self, reason: &str) {
+        self.pause_queue(true);
         self.clear_slow();
         self.set_notice(None);
         self.withdraw_install();
@@ -1878,6 +1893,7 @@ impl HostedChat {
     /// The agent has gone: it exited, or stopped answering. If it never
     /// started, `why` says why, as far as it said.
     pub(crate) fn disconnected(&mut self, why: Option<&str>) {
+        self.queue_disconnected();
         self.clear_slow();
         self.load_cut_off(Held::End(Outcome::Failed("the agent stopped".to_owned())));
         let was_opening = self.link == Link::Opening;
@@ -1919,6 +1935,12 @@ impl HostedChat {
             Ok(_) => Outcome::Done,
             Err(err) => Outcome::Failed(format!("the agent failed: {err}")),
         };
+        if matches!(outcome, Outcome::Failed(_)) {
+            self.user_queue.restart = None;
+        }
+        if !matches!(outcome, Outcome::Done) {
+            self.pause_queue(true);
+        }
         if self.answering() {
             self.end_turn(outcome);
         }
@@ -3014,6 +3036,7 @@ fn weight(patch: &ChatPatch) -> usize {
                     .map(|preview| preview.rgba.len())
                     .sum::<usize>()
         }
+        ChatPatch::Delivery(delivery) => delivery.queued.iter().map(|p| p.text.len() + 128).sum(),
         ChatPatch::Item { value, .. } => item(value),
         ChatPatch::Append { text, .. }
         | ChatPatch::Output { text, .. }
@@ -3457,6 +3480,155 @@ mod tests {
     use agent_client_protocol_schema::v1::{RequestPermissionRequest, SessionNotification};
 
     use super::*;
+
+    #[test]
+    fn user_queue_orders_bounds_and_removes_without_reusing_ids() {
+        let mut c = chat();
+        assert!(c.enqueue_user(" ".into(), vec![], None).is_err());
+        assert!(c.enqueue_user("x".repeat(65537), vec![], None).is_err());
+        let first = c.enqueue_user("first".into(), vec![], None).unwrap();
+        for n in 1..8 {
+            c.enqueue_user(format!("message {n}"), vec![], None)
+                .unwrap();
+        }
+        assert!(c.enqueue_user("overflow".into(), vec![], None).is_err());
+        assert_eq!(c.next_user(), Some(first));
+        assert_eq!(c.take_queued_user(first).unwrap().prompt.text, "first");
+        assert!(c.take_queued_user(first).is_err());
+        assert_eq!(c.enqueue_user("last".into(), vec![], None).unwrap(), 9);
+        assert_eq!(c.next_user(), Some(2));
+    }
+
+    #[test]
+    fn user_queue_waits_for_completion_and_pauses_on_stop_or_failure() {
+        let mut c = chat();
+        connect(&mut c, "s");
+        send(&mut c, "work");
+        let id = c.enqueue_user("next".into(), vec![], None).unwrap();
+        assert_eq!(c.next_user(), None);
+        c.answered(Ok(StopReason::EndTurn));
+        assert_eq!(c.next_user(), Some(id));
+        c.act(ChatAction::Stop);
+        assert_eq!(c.next_user(), None);
+        c.pause_queue(false);
+        send(&mut c, "more");
+        c.answered(Err("failed".into()));
+        assert_eq!(c.next_user(), None);
+        assert!(c.queued_user(id).is_some());
+    }
+
+    #[test]
+    fn steering_restart_waits_for_cancel_and_manual_stop_revokes_it() {
+        let mut c = chat();
+        connect(&mut c, "s");
+        send(&mut c, "work");
+        let id = c.enqueue_user("redirect".into(), vec![], None).unwrap();
+        assert_eq!(c.steer_restart(id), vec![Action::Cancel]);
+        assert_eq!(c.next_user(), None);
+        c.answered(Ok(StopReason::Cancelled));
+        assert_eq!(c.next_user(), Some(id));
+        c.fail_queue("Provider removed while cancellation was pending".into());
+        assert_eq!(c.next_user(), None);
+        c.act(ChatAction::Stop);
+        assert_eq!(c.next_user(), None);
+        send(&mut c, "again");
+        c.steer_restart(id);
+        c.answered(Err("connection failed".into()));
+        assert_eq!(c.next_user(), None);
+    }
+
+    #[test]
+    fn native_steering_tracks_the_original_turn_and_blocks_queue_until_ack() {
+        for early_completion in [false, true] {
+            let mut c = chat();
+            connect(&mut c, "s");
+            send(&mut c, "work");
+            let id = c.enqueue_user("redirect".into(), vec![], None).unwrap();
+            let next = c.enqueue_user("later".into(), vec![], None).unwrap();
+            assert_eq!(c.begin_steering(id).unwrap(), "redirect");
+            assert!(c.take_queued_user(id).is_err());
+            if early_completion {
+                c.answered(Ok(StopReason::EndTurn));
+            }
+            assert_eq!(c.next_user(), None);
+            c.steered(id, Ok("injected".into()));
+            assert!(c.queued_user(id).is_none());
+            if !early_completion {
+                c.answered(Ok(StopReason::EndTurn));
+            }
+            assert_eq!(c.next_user(), Some(next));
+            assert!(
+                matches!(&c.node.turns[0].items[0], Item::Other(t) if t.contains("You · Steering") && !t.contains("sending"))
+            );
+        }
+    }
+
+    #[test]
+    fn native_steering_idle_race_retries_only_when_definitely_unconsumed() {
+        for outcome in ["promptRequired", "startedNewTurn", "bad"] {
+            let mut c = chat();
+            connect(&mut c, "s");
+            send(&mut c, "work");
+            let id = c.enqueue_user("redirect".into(), vec![], None).unwrap();
+            c.begin_steering(id).unwrap();
+            c.answered(Ok(StopReason::EndTurn));
+            c.steered(id, Ok(outcome.into()));
+            assert_eq!(c.next_user(), (outcome == "promptRequired").then_some(id));
+            assert!(c.queued_user(id).is_some());
+        }
+    }
+
+    #[test]
+    fn native_steering_stop_and_disconnect_do_not_restart_work() {
+        let mut c = chat();
+        connect(&mut c, "s");
+        send(&mut c, "work");
+        let id = c.enqueue_user("redirect".into(), vec![], None).unwrap();
+        c.begin_steering(id).unwrap();
+        c.act(ChatAction::Stop);
+        c.steered(id, Ok("promptRequired".into()));
+        c.answered(Ok(StopReason::Cancelled));
+        assert_eq!(c.next_user(), None);
+        c.pause_queue(false);
+        send(&mut c, "again");
+        c.begin_steering(id).unwrap();
+        c.disconnected(None);
+        assert_eq!(c.next_user(), None);
+        assert_eq!(c.node.delivery.sending, None);
+        assert!(c.queued_user(id).is_some());
+    }
+
+    #[test]
+    fn queued_payloads_and_ids_survive_upgrade_but_never_auto_run() {
+        let mut c = chat();
+        let image = clackatoo_protocol::ChatImage {
+            data: "cG5n".into(),
+            width: 1,
+            height: 1,
+            preview: Some(clackatoo_protocol::ChatPreview {
+                width: 1,
+                height: 1,
+                rgba: vec![1, 2, 3, 255].into(),
+                original: 0,
+            }),
+        };
+        let target = clackatoo_protocol::ChatTarget {
+            agent: "codex".into(),
+            model: Some("model".into()),
+            budget: 12000,
+        };
+        let id = c
+            .enqueue_user("next".into(), vec![image.clone()], Some(target.clone()))
+            .unwrap();
+        let record = c.hand_over_queue();
+        let mut resumed = chat();
+        resumed.resume_queue(&mut [record]);
+        assert_eq!(resumed.next_user(), None);
+        let kept = resumed.queued_user(id).unwrap();
+        assert_eq!(kept.prompt.images, vec![image]);
+        assert_eq!(kept.target, Some(target));
+        assert!(resumed.enqueue_user("later".into(), vec![], None).unwrap() > id);
+    }
 
     fn chat() -> HostedChat {
         chat_with("claude")

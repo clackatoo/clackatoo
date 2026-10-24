@@ -20,6 +20,7 @@ mod handoff;
 mod images;
 mod paint;
 mod picker;
+mod queue;
 mod read;
 mod viewer;
 
@@ -102,6 +103,10 @@ enum Hit {
     CloseImage,
     CancelHandoff,
     Send,
+    Steer,
+    RemoveQueued(u64),
+    SendQueued(u64),
+    QueuePage(i8),
     Stop,
     /// One of the answers to the agent's question, by its ID.
     Choice(String),
@@ -211,6 +216,8 @@ pub(crate) struct ChatView {
     handoff: Option<handoff::Pending>,
     handoff_sent: Option<handoff::Draft>,
     pub(crate) handoff_supported: bool,
+    pub(crate) queue_supported: bool,
+    queue_page: usize,
     /// Enter waits until the clipboard worker has delivered its result.
     pub(crate) pasting: bool,
     /// The size the editor's text was last styled at, and the fonts'
@@ -413,6 +420,8 @@ impl ChatView {
             handoff: None,
             handoff_sent: None,
             handoff_supported: cfg!(test),
+            queue_supported: false,
+            queue_page: 0,
             pasting: false,
             editor_size: 0.0,
             editor_fonts: 0,
@@ -784,7 +793,7 @@ impl ChatView {
             && self
                 .hits
                 .iter()
-                .any(|(hit, rect)| *hit == Hit::Send && contains(*rect, at))
+                .any(|(hit, rect)| matches!(hit, Hit::Send | Hit::Steer) && contains(*rect, at))
         {
             self.say("Reading the clipboard… click Send once it appears.".into());
             return;
@@ -1137,6 +1146,10 @@ impl ChatView {
     }
 
     /// A key typed into the chat in insert mode.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "dispatches composer editing and control keys"
+    )]
     fn typed(
         &mut self,
         fonts: &mut Fonts,
@@ -1163,10 +1176,12 @@ impl ChatView {
             _ => None,
         };
         match (key, character) {
-            (Key::Named(NamedKey::Enter), _) if shift => {
+            (Key::Named(NamedKey::Enter), _) if !shift || ctrl && self.queue_supported => {
+                self.send_or_steer(ctrl, settled);
+            }
+            (Key::Named(NamedKey::Enter), _) => {
                 self.drive(fonts, |driver| driver.insert_or_replace_selection("\n"));
             }
-            (Key::Named(NamedKey::Enter), _) => self.send(settled),
             (Key::Named(NamedKey::Backspace), _)
                 if self.editor.raw_text().is_empty() && !self.images.is_empty() =>
             {
@@ -1255,7 +1270,19 @@ impl ChatView {
 
     /// Sends the message typed, unless the agent is still answering the
     /// last.
+    fn send_or_steer(&mut self, steer: bool, settled: &mut Settled) {
+        if steer && self.queue_supported {
+            self.submit_draft(true, settled);
+        } else {
+            self.send(settled);
+        }
+    }
+
     fn send(&mut self, settled: &mut Settled) {
+        if self.queue_supported {
+            self.submit_draft(false, settled);
+            return;
+        }
         let text = self.editor.raw_text().trim().to_owned();
         if (text.is_empty() && self.images.is_empty()) || self.busy() || self.handoff_sent.is_some()
         {
@@ -1845,6 +1872,15 @@ impl ChatView {
                 }
             }
             Some(Hit::Send) => self.send(settled),
+            Some(Hit::Steer) => self.submit_draft(true, settled),
+            Some(Hit::QueuePage(delta)) => {
+                self.queue_page = self.queue_page.saturating_add_signed(isize::from(delta));
+            }
+            Some(Hit::RemoveQueued(id)) => settled.actions.push(ChatAction::RemoveQueued { id }),
+            Some(Hit::SendQueued(id)) => settled.actions.push(ChatAction::SendQueued {
+                id,
+                steer: self.busy(),
+            }),
             Some(Hit::Stop) => settled.actions.push(ChatAction::Stop),
             Some(Hit::Choice(id)) => {
                 // The question the button was drawn for, which may have
@@ -2091,7 +2127,8 @@ fn touches(patch: &clackatoo_protocol::ChatPatch) -> Option<usize> {
         | ChatPatch::Usage(_)
         | ChatPatch::Agent(_)
         | ChatPatch::Providers(_)
-        | ChatPatch::Subagents(_) => None,
+        | ChatPatch::Subagents(_)
+        | ChatPatch::Delivery(_) => None,
     }
 }
 
@@ -2150,6 +2187,45 @@ mod tests {
             data: "cG5n".into(),
             width: 2,
             height: 3,
+        }
+    }
+
+    #[test]
+    fn busy_drafts_queue_or_steer_and_rejections_restore_attachments() {
+        let mut fonts = fonts();
+        for steer in [false, true] {
+            let mut node = fixtures::talk(&[("working", "")]);
+            node.turns[0].end = None;
+            let mut view = ChatView::new("chat".into(), node);
+            view.queue_supported = true;
+            view.paste_image(pasted_image());
+            typed(&mut view, "next");
+            press(
+                &mut view,
+                &Key::Named(NamedKey::Enter),
+                None,
+                Modifiers {
+                    ctrl: steer,
+                    ..Modifiers::default()
+                },
+            );
+            assert_eq!(
+                view.settle(&mut fonts).actions,
+                vec![ChatAction::Submit {
+                    text: "next".into(),
+                    images: vec![pasted_image()],
+                    target: None,
+                    steer
+                }]
+            );
+            assert!(view.editor.raw_text().is_empty());
+            enter(&mut view, false);
+            assert!(view.settle(&mut fonts).actions.is_empty());
+            view.handoff_answer(clackatoo_protocol::Response::Error(
+                clackatoo_protocol::Error::Other("queue full".into()),
+            ));
+            assert_eq!(view.editor.raw_text(), "next");
+            assert_eq!(view.images, vec![pasted_image()]);
         }
     }
 

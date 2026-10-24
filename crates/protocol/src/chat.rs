@@ -38,6 +38,50 @@ pub struct ChatNode {
     /// The chats its agent started, oldest first: clients show them as a
     /// card in the turn that started them, and open one as a pane.
     pub subagents: Vec<Subagent>,
+    /// User messages waiting to run, shared by every window.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CHAT_QUEUE }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAT_QUEUE }, _, _>"
+    )]
+    pub delivery: ChatDelivery,
+}
+
+/// The daemon's pending user messages. Image bytes stay in the daemon.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatDelivery {
+    /// Messages in delivery order.
+    pub queued: Vec<QueuedMessage>,
+    /// A stop, failure or upgrade paused automatic delivery.
+    pub paused: bool,
+    /// A native steering request awaiting acknowledgment.
+    pub sending: Option<u64>,
+    /// This session supports steering without cancelling the current turn.
+    pub native_steering: bool,
+}
+
+/// A pending message, addressed by a stable chat-local ID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedMessage {
+    /// Stable until sent or removed.
+    pub id: u64,
+    /// The user's text.
+    pub text: String,
+    /// Number of attached images.
+    pub images: u8,
+    /// Optional provider and model to use when this message runs.
+    pub target: Option<ChatTarget>,
+}
+
+/// A provider choice attached to a message, applied only at delivery.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatTarget {
+    /// Configured provider name.
+    pub agent: String,
+    /// Model identifier, or the provider's default.
+    pub model: Option<String>,
+    /// Context carry-over budget, in tokens.
+    pub budget: u32,
 }
 
 /// A chat another chat's agent started, as the chat that started it shows
@@ -921,6 +965,8 @@ pub enum ChatPatch {
     Providers(Vec<Provider>),
     /// The chats its agent started are now these.
     Subagents(Vec<Subagent>),
+    /// The user-message queue changed.
+    Delivery(ChatDelivery),
 }
 
 /// A small, decoded image for chat history. Shared by snapshots and paint
@@ -1088,6 +1134,29 @@ pub enum ChatAction {
         /// Optional bounded image attachments.
         images: Vec<ChatImage>,
     },
+    /// Accept a user message atomically; queue it while the agent is busy.
+    Submit {
+        /// Accompanying text; may be empty with images.
+        text: String,
+        /// Bounded PNG attachments.
+        images: Vec<ChatImage>,
+        /// A provider change to apply with this message.
+        target: Option<ChatTarget>,
+        /// Deliver to the active work now instead of waiting behind it.
+        steer: bool,
+    },
+    /// Remove a message that has not been delivered. Stale IDs are refused.
+    RemoveQueued {
+        /// The message's stable ID.
+        id: u64,
+    },
+    /// Deliver a queued message now, resuming a paused queue.
+    SendQueued {
+        /// The message's stable ID.
+        id: u64,
+        /// Steer the active work if it is still running.
+        steer: bool,
+    },
 }
 
 /// The number turn `index` of `turns` goes by, as people count them: from
@@ -1163,6 +1232,7 @@ impl ChatNode {
             ChatPatch::Agent(agent) => self.agent = agent,
             ChatPatch::Providers(providers) => self.providers = providers,
             ChatPatch::Subagents(subagents) => self.subagents = subagents,
+            ChatPatch::Delivery(delivery) => self.delivery = delivery,
         }
     }
 

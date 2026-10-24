@@ -130,7 +130,7 @@ impl Daemon {
         let waiting: Vec<TerminalId> = (self.terminals.iter())
             .filter_map(|(&id, slot)| {
                 let chat = slot.terminal.chat_ref()?;
-                (!chat.relations().inbox.is_empty()).then_some(id)
+                (chat.has_user_queue() || !chat.relations().inbox.is_empty()).then_some(id)
             })
             .collect();
         self.tools.talk.inboxes.extend(waiting);
@@ -759,12 +759,24 @@ impl Daemon {
     /// Sends each chat whose turn has ended the next message waiting for
     /// it, and answers the calls waiting for chats that have finished.
     /// Cheap when nothing waits.
+    pub(in crate::server) fn watch_chat_queue(&mut self, chat: TerminalId) {
+        self.tools.talk.inboxes.insert(chat);
+    }
+
     pub(in crate::server) fn relay_chats(&mut self) {
         if !self.tools.talk.inboxes.is_empty() {
             for id in std::mem::take(&mut self.tools.talk.inboxes) {
+                let next = self.chat_ref(id).and_then(HostedChat::next_user);
+                if let Some(message) = next
+                    && let Err(error) = self.dispatch_queued(id, message)
+                    && let Some(chat) = self.chat(id)
+                {
+                    chat.fail_queue(error.to_string());
+                    self.collect_damage(id);
+                }
                 let Some(chat) = self.chat(id) else { continue };
                 let actions = chat.deliver_next();
-                if !chat.relations().inbox.is_empty() {
+                if chat.has_user_queue() || !chat.relations().inbox.is_empty() {
                     self.tools.talk.inboxes.insert(id);
                 }
                 if !actions.is_empty() {

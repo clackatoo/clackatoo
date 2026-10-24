@@ -238,6 +238,8 @@ gates! {
     CHAT_ORIGINALS = 100,
     /// Atomic provider handoff with its first prompt.
     CHAT_HANDOFF = 101,
+    /// Daemon-owned pending user messages and explicit steering.
+    CHAT_QUEUE = 102,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -403,6 +405,7 @@ impl Since for ChatPatch {
             | Self::Agent(_)
             | Self::Providers(_)
             | Self::Subagents(_) => EARLIER,
+            Self::Delivery(_) => CHAT_QUEUE,
         }
     }
 }
@@ -911,6 +914,19 @@ pub trait Downgrade: Sized {
 /// daemon still: refuse image messages rather than dropping attachments.
 impl Downgrade for ClientMessage {
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
+        if wire < CHAT_QUEUE
+            && matches!(
+                self,
+                Self::Request(crate::Request::Chat {
+                    action: crate::ChatAction::Submit { .. }
+                        | crate::ChatAction::RemoveQueued { .. }
+                        | crate::ChatAction::SendQueued { .. },
+                    ..
+                })
+            )
+        {
+            return Downgraded::Refused;
+        }
         if wire < CHAT_HANDOFF
             && matches!(
                 self,
@@ -988,6 +1004,33 @@ fn without_tool_images(message: &ServerMessage) -> ServerMessage {
     message
 }
 
+/// Queue metadata is informative; omit it for clients without queue controls.
+fn without_delivery(message: &ServerMessage) -> Option<ServerMessage> {
+    let ServerMessage::Event(Event::View {
+        terminal,
+        update: ViewUpdate::Patch(patches),
+    }) = message
+    else {
+        return None;
+    };
+    if !patches
+        .iter()
+        .any(|p| matches!(p, Patch::Chat(ChatPatch::Delivery(_))))
+    {
+        return None;
+    }
+    Some(ServerMessage::Event(Event::View {
+        terminal: *terminal,
+        update: ViewUpdate::Patch(
+            patches
+                .iter()
+                .filter(|p| !matches!(p, Patch::Chat(ChatPatch::Delivery(_))))
+                .cloned()
+                .collect(),
+        ),
+    }))
+}
+
 impl Downgrade for ServerMessage {
     /// A peer from before the fallbacks has nothing to read in place of
     /// what's newer: an event holding it is dropped, and an answer refused.
@@ -1024,6 +1067,14 @@ impl Downgrade for ServerMessage {
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
         if newest(self) <= wire {
             return Downgraded::AsIs;
+        }
+        if wire < CHAT_QUEUE
+            && let Some(older) = without_delivery(self)
+        {
+            return match older.downgrade(wire) {
+                Downgraded::AsIs => Downgraded::To(older),
+                other => other,
+            };
         }
         if wire < TOOL_IMAGES && newest(self) == TOOL_IMAGES {
             let older = without_tool_images(self);

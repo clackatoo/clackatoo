@@ -572,7 +572,8 @@ impl Fake {
                         json!({ "close": {}, "resume": {} })
                     },
                 },
-                "agentInfo": { "name": "fake-agent", "version": "0" },
+                "agentInfo": if std::env::args().any(|a| a == "--steering") { json!({ "name": "@agentclientprotocol/claude-agent-acp", "version": "0.88.0" }) } else { json!({ "name": "fake-agent", "version": "0" }) },
+                "_meta": { "steering": { "supported": std::env::args().any(|a| a == "--steering") } },
                 "authMethods": [],
             }),
         );
@@ -718,6 +719,25 @@ impl Fake {
             Some("session/close") => {
                 self.note(&format!("closed {session}"));
                 reply(&id, &json!({}));
+            }
+            Some("_session/steering") => {
+                assert_eq!(
+                    params
+                        .pointer("/_meta/steering/idleBehavior")
+                        .and_then(Value::as_str),
+                    Some("promptRequired")
+                );
+                if let Some(at) = self.waits.iter().position(|(_, s)| s == &session) {
+                    let text = params["prompt"][0]["text"].as_str().unwrap_or("");
+                    say(&session, &format!("steered: {text}"));
+                    reply(&id, &json!({"outcome": "injected"}));
+                    if text != "keep-working" {
+                        let (prompt, _) = self.waits.remove(at);
+                        done(&prompt, "end_turn");
+                    }
+                } else {
+                    reply(&id, &json!({"outcome": "promptRequired"}));
+                }
             }
             Some("session/cancel") => self.cancel(&session),
             Some("session/prompt") => {

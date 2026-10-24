@@ -16,6 +16,15 @@ A chat works in the directory a new terminal would start in, and until its first
 
 If the agent hasn't opened the chat's session after 30 seconds, the chat says so, and what it may be waiting on: most often an MCP server in the agent's config that needs a login. It goes on waiting, and asks whether to keep waiting, which Esc picks, Retry, which starts the agent again, or Stop. Ctrl+C stops it too.
 
+## Queuing and steering
+
+While an agent works, Enter queues your draft; Shift+Enter still inserts a newline. The pending messages appear above the composer. They run in order after a successful turn. Each row has an ↑ control to send it now and × to remove it. Sending now during a turn steers that work; while idle it resumes delivery. Ctrl+Enter steers the current draft directly.
+
+For text sent to the installed Claude adapter, **Steer** adds the message to the running turn without cancelling it. Other adapters, image messages, and pending provider changes use **Stop & continue**: cancel the current turn, wait for it to finish, then send the new message. The label tells you which behavior will be used. An uncertain steering acknowledgment leaves the message paused so you can check the conversation before retrying.
+
+Stop, a failed turn, or a daemon upgrade pauses the queue. Use ↑ to resume, or × to discard a pending message. Queued text, images and provider choices belong to the daemon, so other windows and remote connections see the same queue. An upgrade preserves it, paused; a full daemon restart does not. The queue holds up to eight messages or 32 MiB, with text limited to 64 KiB per message and the usual image limits.
+
+
 ## Viewing images
 
 Click an image in the message box, a sent message, or a tool result to open the same image viewer over the chat. Escape, Ctrl+; (the normal-mode shortcut), or the × closes it and returns you to your draft and previous mode. While it is open, typing, pasting, scrolling and clicks on the chat behind it do nothing. The × on a draft thumbnail still removes that attachment.

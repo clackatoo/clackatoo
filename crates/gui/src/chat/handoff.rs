@@ -13,7 +13,7 @@ pub(super) struct Pending {
 
 #[derive(Debug)]
 pub(super) struct Draft {
-    text: String,
+    pub(super) text: String,
     pub(super) images: Vec<ChatImage>,
 }
 
@@ -103,7 +103,7 @@ impl ChatView {
             }
             Response::Error(error) => self.handoff_failed(&error.to_string()),
             _ => self.handoff_failed(
-                "The handoff was not confirmed. Check the history before retrying.",
+                "The message was not confirmed. Check the history before retrying.",
             ),
         }
     }

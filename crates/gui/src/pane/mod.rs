@@ -74,6 +74,7 @@ enum Pending {
     /// Original requested by one particular opening of the image viewer.
     Original(u64),
     Handoff,
+    ChatControl,
 }
 
 /// The guesses at the echo of what's typed, drawn over a line of the
@@ -401,8 +402,23 @@ impl Pane {
             {
                 *budget = self.carryover;
             }
-            let pending = if matches!(action, ChatAction::SendTo { .. }) {
+            if let ChatAction::Submit {
+                target: Some(target),
+                ..
+            } = &mut action
+            {
+                target.budget = self.carryover;
+            }
+            let pending = if matches!(
+                action,
+                ChatAction::SendTo { .. } | ChatAction::Submit { .. }
+            ) {
                 Pending::Handoff
+            } else if matches!(
+                action,
+                ChatAction::RemoveQueued { .. } | ChatAction::SendQueued { .. }
+            ) {
+                Pending::ChatControl
             } else {
                 Pending::Other
             };
@@ -721,6 +737,12 @@ impl Pane {
             return self.refresh_overlay();
         }
         match (pending, response) {
+            (Some(Pending::ChatControl), response) => {
+                if let Some(chat) = &mut self.chat {
+                    chat.queue_answer(response);
+                }
+                true
+            }
             (Some(Pending::Handoff), response) => {
                 if let Some(chat) = &mut self.chat {
                     chat.handoff_answer(response);

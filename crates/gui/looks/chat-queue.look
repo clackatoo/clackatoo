@@ -1,0 +1,36 @@
+# Pending messages, native steering, narrow layout, then cancellation fallback.
+size 1100x900
+keys <C-;>:Agent claude<CR>
+keys i
+type wait
+keys <CR>
+sleep 300
+type Review the tests after this turn.
+keys <CR>
+sleep 300
+type keep-working
+shot queue-steer
+keys <C-CR>
+wait-for steered: keep-working
+shot steered
+paste-image
+type Check this screenshot too.
+keys <CR>
+sleep 300
+shot queued-image
+size 480x640
+type Another instruction
+shot queue-narrow
+keys <C-c>
+sleep 300
+shot queue-paused
+keys <C-;>:Agent codex<CR>
+keys i
+type wait
+keys <CR>
+sleep 300
+type Please finish with a summary.
+shot stop-continue
+keys <C-CR>
+wait-for echo: Please finish with a summary.
+shot continued

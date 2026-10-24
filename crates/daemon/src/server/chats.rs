@@ -1033,6 +1033,10 @@ impl Daemon {
         true
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "dispatches ACP messages to their handlers"
+    )]
     fn receive_from_agent(&mut self, agent: AgentId, name: &str, message: Incoming) {
         // What one that has gone still says of a turn is taken only by
         // chats still connected to it: one it has been let go by may be
@@ -1100,6 +1104,17 @@ impl Daemon {
                 return;
             }
             Incoming::Closed { terminal } => return self.parked_session_ended(terminal, name),
+            Incoming::Steered {
+                terminal,
+                message,
+                result,
+            } => {
+                let Some(chat) = self.chat(terminal).filter(|c| c.agent() == name) else {
+                    return;
+                };
+                chat.steered(message, result);
+                terminal
+            }
             Incoming::Answered { terminal, result } => {
                 if !self.prompt_answered(terminal, result, gone) {
                     return;
@@ -1169,11 +1184,17 @@ impl Daemon {
             return false;
         }
         self.agents.opening.remove(&terminal);
+        let native = self
+            .agents
+            .running
+            .get(&agent)
+            .is_some_and(|s| s.agent.can_steer());
         let Some(chat) = self.chat(terminal) else {
             return false;
         };
         match result {
             Ok(opened) => {
+                chat.set_native_steering(native);
                 chat.opened_again(loaded);
                 let actions = chat.connected(opened);
                 self.act(terminal, actions);
@@ -2062,6 +2083,51 @@ fn model_choices(settings: &[Setting]) -> Option<&[clackatoo_protocol::SettingCh
         .find(|setting| setting.kind == SettingKind::Model)
         .map(|setting| setting.choices.as_slice())
         .filter(|choices| !choices.is_empty())
+}
+
+impl Daemon {
+    pub(super) fn steer_queued(&mut self, chat: TerminalId, id: u64) -> Result<(), Error> {
+        let state = self.chat_ref(chat).ok_or(Error::NotAChat(chat))?;
+        let pending = state
+            .queued_user(id)
+            .ok_or_else(|| Error::Other("The queued message is gone.".into()))?;
+        if state.node().delivery.sending.is_some() {
+            return Err(Error::Other(
+                "A steering message is already being delivered.".into(),
+            ));
+        }
+        let native = state.node().delivery.native_steering
+            && pending.target.is_none()
+            && pending.prompt.images.is_empty();
+        let session = state.session().map(str::to_owned);
+        if native {
+            let agent = self
+                .agent_of(chat)
+                .ok_or_else(|| Error::Other("The agent disconnected.".into()))?;
+            let session =
+                session.ok_or_else(|| Error::Other("The session disconnected.".into()))?;
+            let text = self
+                .chat(chat)
+                .ok_or(Error::NotAChat(chat))?
+                .begin_steering(id)
+                .map_err(Error::Other)?;
+            if let Some(slot) = self.agents.running.get_mut(&agent) {
+                slot.agent.steer(chat, id, &session, &text);
+            } else if let Some(state) = self.chat(chat) {
+                state.steered(id, Err("The agent disconnected.".into()));
+            }
+            self.flush_agent(agent);
+        } else {
+            let actions = self
+                .chat(chat)
+                .ok_or(Error::NotAChat(chat))?
+                .steer_restart(id);
+            self.act(chat, actions);
+        }
+        self.watch_chat_queue(chat);
+        self.collect_damage(chat);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
