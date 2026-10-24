@@ -44,6 +44,12 @@ Like any new pane, a chat opens in the window's mode, so after `:Agent` it's in 
 
 An agent runs in a process group of its own, so stopping it, or choosing Retry, also ends whatever it started, such as the node behind `npx`, and any background job it started without detaching. An upgrade or `clackatoo stop` ends them too: running agents get half a second to finish by themselves, then are asked to stop, and the daemon waits up to a second and a half for them before killing what's left. Before Linux 6.9, only the agent's own process is reached.
 
+## Viewing images
+
+Click an image in the message box, a sent message, or a tool result to open the same image viewer over the chat. Escape, Ctrl+; (the normal-mode shortcut), or the × closes it and returns you to your draft and previous mode. While it is open, typing, pasting, scrolling and clicks on the chat behind it do nothing. The × on a draft thumbnail still removes that attachment.
+
+The viewer enlarges the retained preview, which is at most 256 pixels on a side; it does not fetch the original file or restore detail lost when the thumbnail was made. It works locally and over remote connections without another download.
+
 ## Images returned by tools
 
 When a tool returns an image, a thumbnail appears beneath its entry in the conversation, even when the turn's work is folded. Open the entry to give the preview more room. This works with Codex's View Image and other agents, including Claude, when their adapter returns inline image data or a link to a local image file.

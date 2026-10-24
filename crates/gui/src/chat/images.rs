@@ -19,14 +19,31 @@ struct Cached {
 }
 
 #[derive(Default)]
-pub(super) struct Cache(RefCell<HashMap<(usize, u32, u32), Cached>>);
+pub(super) struct Cache {
+    entries: RefCell<HashMap<(usize, u32, u32), Cached>>,
+    hits: RefCell<Vec<(ChatPreview, [f32; 4])>>,
+    origin: [f32; 2],
+}
 
 impl Cache {
-    pub(super) fn begin(&mut self) {
-        self.0.get_mut().retain(|_, entry| entry.used);
-        for entry in self.0.get_mut().values_mut() {
+    pub(super) fn begin(&mut self, origin: [f32; 2]) {
+        self.origin = origin;
+        self.hits.get_mut().clear();
+        self.entries.get_mut().retain(|_, entry| entry.used);
+        for entry in self.entries.get_mut().values_mut() {
             entry.used = false;
         }
+    }
+
+    /// Every thumbnail source registers through draw, in actual clipped pixels.
+    pub(super) fn at(&self, at: [f32; 2]) -> Option<ChatPreview> {
+        let at = [at[0] + self.origin[0], at[1] + self.origin[1]];
+        self.hits
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(_, rect)| super::contains(*rect, at))
+            .map(|(image, _)| image.clone())
     }
 
     pub(super) fn draw(&self, canvas: &mut Canvas<'_>, preview: &ChatPreview, area: [f32; 4]) {
@@ -40,12 +57,15 @@ impl Cache {
         if clipped[2] <= 0.0 || clipped[3] <= 0.0 {
             return;
         }
+        if !canvas.over {
+            self.hits.borrow_mut().push((preview.clone(), clipped));
+        }
         let key = (
             preview.rgba.as_ptr() as usize,
             preview.width,
             preview.height,
         );
-        let mut cache = self.0.borrow_mut();
+        let mut cache = self.entries.borrow_mut();
         let entry = cache.entry(key).or_insert_with(|| {
             // Browser slots are pane IDs (u32); chat images use the upper
             // half, unique across all chat panes in this window.
@@ -64,6 +84,7 @@ impl Cache {
         debug_assert!(Arc::ptr_eq(&entry.source, &preview.rgba));
         entry.used = true;
         canvas.paint.images.push(PaintedImage {
+            over: canvas.over,
             image: entry.image.clone(),
             rect,
             clip: canvas.clip,

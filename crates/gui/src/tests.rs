@@ -2455,6 +2455,53 @@ fn a_turn_is_undone_by_its_number_which_skips_where_the_chat_moved() {
 }
 
 #[test]
+fn modal_images_are_drawn_above_the_backdrop_using_the_same_texture() {
+    use crate::render::{Fill, Image, Paint, PlacedImage};
+    let Some(gpu) = gpu() else {
+        return;
+    };
+    let mut fonts = fonts(1.0);
+    let mut renderer = Renderer::new(&gpu.0, FORMAT);
+    let image = Image {
+        id: 1,
+        width: 1,
+        height: 1,
+        rgba: vec![255, 0, 0, 255],
+    };
+    let images = [
+        PlacedImage {
+            over: false,
+            slot: 7,
+            rect: [0.0, 0.0, 20.0, 20.0],
+            image: &image,
+            clip: None,
+        },
+        PlacedImage {
+            over: true,
+            slot: 7,
+            rect: [20.0, 0.0, 20.0, 20.0],
+            image: &image,
+            clip: None,
+        },
+    ];
+    let backdrop = [Fill::solid([0.0, 0.0, 40.0, 20.0], Paint::ImageBackdrop)];
+    let picture = Picture {
+        scenes: &[],
+        fills: &[],
+        over: &backdrop,
+        texts: &[],
+        glyphs: &[],
+        over_glyphs: &[],
+        images: &images,
+        transparent: true,
+    };
+    let pixels = draw_with(&gpu, &mut renderer, [40, 20], &picture, &mut fonts);
+    let pixel = |x: usize| &pixels[(10 * 40 + x) * 4..(10 * 40 + x) * 4 + 4];
+    assert!(pixel(5)[0] < 80, "ordinary image is dimmed");
+    assert_eq!(pixel(25), [255, 0, 0, 255], "modal image stays bright");
+}
+
+#[test]
 fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
     use crate::render::{Image, PlacedImage};
     let Some(gpu) = gpu() else {
@@ -2477,6 +2524,7 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
     };
     let first = image(1, [255, 0, 0, 255], [0, 0, 255, 255]);
     let placed = [PlacedImage {
+        over: false,
         clip: None,
         slot: 7,
         rect: [0.0, 0.0, 20.0, 20.0],
@@ -2503,6 +2551,7 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
     // The next picture in the same slot replaces it.
     let second = image(2, [0, 255, 0, 255], [0, 255, 0, 255]);
     let placed = [PlacedImage {
+        over: false,
         clip: None,
         slot: 7,
         rect: [0.0, 0.0, 20.0, 20.0],
@@ -2513,6 +2562,7 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
     assert_eq!(pixel(&pixels, [2, 10]), [0, 255, 0, 255]);
     // A scrolled picture is clipped without squeezing its UV coordinates.
     let clipped = [PlacedImage {
+        over: false,
         slot: 7,
         rect: [0.0, 0.0, 20.0, 20.0],
         image: &first,
@@ -2524,6 +2574,7 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
     assert_eq!(pixel(&pixels, [17, 10]), [0, 0, 255, 255]);
     let translucent = image(4, [0, 255, 0, 128], [0, 255, 0, 128]);
     let placed = [PlacedImage {
+        over: false,
         slot: 7,
         rect: [0.0, 0.0, 20.0, 20.0],
         image: &translucent,
@@ -2540,6 +2591,7 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
         rgba: [255, 0, 0, 255].repeat(crate::render::MAX_IMAGE_SIDE as usize + 1),
     };
     let placed = [PlacedImage {
+        over: false,
         clip: None,
         slot: 8,
         rect: [0.0, 0.0, 20.0, 20.0],

@@ -454,6 +454,7 @@ impl Theme {
             Paint::Bar => self.bar,
             Paint::WindowEdge | Paint::ChatChosen => white(0.08),
             Paint::ChatHover => white(0.035),
+            Paint::ImageBackdrop => [0.0, 0.0, 0.0, 0.8],
             Paint::Shadow => [0.0, 0.0, 0.0, 0.25],
             Paint::Tile => self.background,
             Paint::Divider => self.divider,

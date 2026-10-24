@@ -1337,6 +1337,11 @@ impl App {
             self.notice_key(press, repeat);
             return;
         }
+        if self.desk.image_viewer_key(press) {
+            self.update();
+            self.request_redraw();
+            return;
+        }
         // A key held down answers a chat's question once at most.
         if repeat && self.desk.answers_question(press) {
             return;
@@ -2328,6 +2333,7 @@ fn browser_images<'a>(
         ];
         if let Some(rect) = crate::browser::fit([image.width, image.height], area) {
             images.push(PlacedImage {
+                over: false,
                 clip: None,
                 slot: u64::from(id.0),
                 rect,

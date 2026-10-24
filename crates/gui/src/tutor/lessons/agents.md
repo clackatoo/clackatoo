@@ -16,6 +16,12 @@ A chat works in the directory a new terminal would start in, and until its first
 
 If the agent hasn't opened the chat's session after 30 seconds, the chat says so, and what it may be waiting on: most often an MCP server in the agent's config that needs a login. It goes on waiting, and asks whether to keep waiting, which Esc picks, Retry, which starts the agent again, or Stop. Ctrl+C stops it too.
 
+## Viewing images
+
+Click an image in the message box, a sent message, or a tool result to open the same image viewer over the chat. Escape, Ctrl+; (the normal-mode shortcut), or the × closes it and returns you to your draft and previous mode. While it is open, typing, pasting, scrolling and clicks on the chat behind it do nothing. The × on a draft thumbnail still removes that attachment.
+
+The viewer enlarges the retained preview, which is at most 256 pixels on a side; it does not fetch the original file or restore detail lost when the thumbnail was made. It works locally and over remote connections without another download.
+
 ## Images returned by tools
 
 When a tool returns an image, a thumbnail appears beneath its entry in the conversation, even when the turn's work is folded. Open the entry to give the preview more room. This works with Codex's View Image and other agents, including Claude, when their adapter returns inline image data or a link to a local image file.

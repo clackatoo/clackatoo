@@ -1,0 +1,27 @@
+# One viewer for draft, sent, and tool images.
+size 1100x1000
+keys <C-;>:Agent claude<CR>
+keys i
+paste-image
+type tool-images
+shot draft
+click 240 780
+shot draft-modal
+type SHOULD-NOT-SEND
+keys <CR><Esc>
+shot draft-after-escape
+click 240 780
+keys <C-;>
+shot draft-after-normal-key
+keys <CR>
+wait-for Image tool results are ready
+shot all-images
+click 800 90
+shot history-modal
+keys <C-;>
+click 300 380
+shot tool-modal
+size 480x700
+shot narrow-modal
+keys <Esc>
+shot narrow-closed

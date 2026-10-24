@@ -72,6 +72,8 @@ pub(crate) struct PlacedImage<'a> {
     /// What it's kept on the GPU by from one frame to the next, as the
     /// pane showing it: one texture each.
     pub(crate) slot: u64,
+    /// Draw after overlay backgrounds, for modal image viewers.
+    pub(crate) over: bool,
     /// Where it goes, left, top, width and height, in pixels: it's
     /// stretched to fill it.
     pub(crate) rect: [f32; 4],
@@ -83,6 +85,7 @@ pub(crate) struct PlacedImage<'a> {
 /// A chat image kept alive between layout and the GPU pass.
 #[derive(Debug)]
 pub(crate) struct PaintedImage {
+    pub(crate) over: bool,
     pub(crate) image: std::sync::Arc<Image>,
     pub(crate) rect: [f32; 4],
     pub(crate) clip: [f32; 4],
@@ -92,6 +95,7 @@ impl PaintedImage {
     pub(crate) fn placed(&self) -> PlacedImage<'_> {
         PlacedImage {
             slot: self.image.id,
+            over: self.over,
             rect: self.rect,
             image: &self.image,
             clip: Some(self.clip),
@@ -190,6 +194,8 @@ pub(crate) enum Paint {
     WindowEdge,
     /// A soft shadow, under something raised.
     Shadow,
+    /// Dim the chat behind its image viewer.
+    ImageBackdrop,
     /// Behind a pane, the colour its terminal's background is.
     Tile,
     /// The lines between panes, and between them and the bars.
@@ -843,7 +849,7 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..4, 0..count(background_rects));
             }
-            self.draw_images(&mut pass, &images);
+            self.draw_images(&mut pass, &images, false);
             if let Some(buffer) = &self.glyph_buffer.buffer {
                 pass.set_pipeline(&self.glyph_pipeline);
                 pass.set_vertex_buffer(0, buffer.slice(..));
@@ -856,6 +862,7 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..4, count(background_rects)..count(self.rects.len()));
             }
+            self.draw_images(&mut pass, &images, true);
             if let Some(buffer) = &self.glyph_buffer.buffer
                 && self.glyph_instances.len() > grid_glyphs
             {
@@ -875,7 +882,7 @@ impl Renderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         placed: &[PlacedImage<'_>],
-    ) -> Vec<u64> {
+    ) -> Vec<(u64, bool)> {
         self.images
             .retain(|slot, _| placed.iter().any(|placed| placed.slot == *slot));
         let mut quads = Vec::with_capacity(placed.len());
@@ -935,7 +942,7 @@ impl Renderer {
                 uv_origin: [(x - left) / width, (y - top) / height],
                 uv_size: [w / width, h / height],
             });
-            slots.push(placed.slot);
+            slots.push((placed.slot, placed.over));
         }
         self.image_buffer
             .write(device, queue, bytemuck::cast_slice(&quads));
@@ -944,7 +951,10 @@ impl Renderer {
 
     /// Draws the pictures in `slots`, in the image buffer's order, each
     /// with its own texture bound, then binds the atlas again.
-    fn draw_images(&self, pass: &mut wgpu::RenderPass<'_>, slots: &[u64]) {
+    fn draw_images(&self, pass: &mut wgpu::RenderPass<'_>, slots: &[(u64, bool)], over: bool) {
+        if !slots.iter().any(|(_, above)| *above == over) {
+            return;
+        }
         let Some(buffer) = self
             .image_buffer
             .buffer
@@ -956,7 +966,10 @@ impl Renderer {
         let count = |n: usize| u32::try_from(n).expect("far fewer than 4 billion pictures");
         pass.set_pipeline(&self.image_pipeline);
         pass.set_vertex_buffer(0, buffer.slice(..));
-        for (index, slot) in slots.iter().enumerate() {
+        for (index, (slot, above)) in slots.iter().enumerate() {
+            if *above != over {
+                continue;
+            }
             if let Some(image) = self.images.get(slot) {
                 pass.set_bind_group(0, &image.bind_group, &[]);
                 pass.draw(0..4, count(index)..count(index + 1));

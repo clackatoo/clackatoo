@@ -731,6 +731,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Image tools show thumbnails in chat history; the fast-mode bolt fills in when enabled",
     },
+    News {
+        id: "chat-image-viewer",
+        date: "2026-10-24",
+        lesson: "agents",
+        what: "Click any chat image to enlarge it; Esc or Ctrl+; closes the shared viewer",
+    },
 ];
 
 impl News {

@@ -275,7 +275,11 @@ impl Pane {
         self.chat.is_some()
     }
 
-    /// Whether clipboard text should go into the model search.
+    /// Whether a local image modal owns the chat input.
+    pub(crate) fn chat_viewing_image(&self) -> bool {
+        self.chat.as_deref().is_some_and(ChatView::viewing_image)
+    }
+
     pub(crate) fn chat_searching_models(&self) -> bool {
         self.chat
             .as_ref()

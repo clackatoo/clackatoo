@@ -11,6 +11,7 @@ mod cards;
 mod divider;
 mod edge;
 mod fold;
+mod image;
 mod models;
 mod select;
 mod tables;
@@ -190,7 +191,7 @@ impl ChatView {
         size: [f32; 2],
         caret: bool,
     ) -> TextPaint {
-        self.previews.begin();
+        self.previews.begin(origin);
         self.style_editor(fonts);
         let em = text_size(fonts);
         let m = Measures::of(em);
@@ -300,6 +301,7 @@ impl ChatView {
         } else if let Some(anchor) = self.detail_anchor.take() {
             self.draw_detail(&mut paint, fonts, m, place, anchor);
         }
+        self.draw_image_viewer(&mut paint, fonts, m, place);
         paint
     }
 
@@ -3022,11 +3024,106 @@ mod tests {
     }
 
     #[test]
+    fn every_thumbnail_uses_the_modal_without_editing_or_sending_the_draft() {
+        use crate::chat::fixtures::{fonts, talk};
+        use crate::input::{KeyPress, Modifiers};
+        use winit::keyboard::{Key, KeyCode, KeyLocation, NamedKey};
+        let mut fonts = fonts();
+        let origin = [37.0, 23.0];
+        for source in ["draft", "history", "tool"] {
+            for ctrl in [false, true] {
+                let preview = clackatoo_protocol::ChatPreview {
+                    width: 128,
+                    height: 64,
+                    rgba: vec![255; 128 * 64 * 4].into(),
+                };
+                let mut node = talk(&[("image", "Here it is.")]);
+                if source == "history" {
+                    node.turns[0].previews.push(preview.clone());
+                }
+                if source == "tool" {
+                    node.turns[0].items.insert(
+                        0,
+                        clackatoo_protocol::Item::Tool(clackatoo_protocol::Tool {
+                            id: "image".into(),
+                            title: "View Image".into(),
+                            kind: clackatoo_protocol::ToolKind::Read,
+                            status: clackatoo_protocol::ToolStatus::Done,
+                            locations: Vec::new(),
+                            content: vec![clackatoo_protocol::ToolContent::Image(preview.clone())],
+                        }),
+                    );
+                }
+                let mut chat = ChatView::new("chat".into(), node);
+                if source == "draft" {
+                    chat.paste_image(clackatoo_protocol::ChatImage {
+                        data: "cG5n".into(),
+                        width: 128,
+                        height: 64,
+                        preview: Some(preview),
+                    });
+                }
+                chat.paste("keep my draft");
+                chat.settle(&mut fonts);
+                let first = chat.paint(&mut fonts, origin, [900.0, 700.0], true);
+                let rect = first.images[0].rect;
+                chat.press(
+                    [
+                        rect[0] - origin[0] + rect[2] / 2.0,
+                        rect[1] - origin[1] + rect[3] / 2.0,
+                    ],
+                    1,
+                    false,
+                );
+                // A rapid Enter already queued behind the click must not send.
+                chat.key(&KeyPress {
+                    key: &Key::Named(NamedKey::Enter),
+                    text: None,
+                    location: KeyLocation::Standard,
+                    code: None,
+                    modifiers: Modifiers::default(),
+                });
+                assert!(chat.settle(&mut fonts).actions.is_empty());
+                assert!(chat.viewing_image(), "{source}");
+                let modal = chat.paint(&mut fonts, origin, [900.0, 700.0], true);
+                let enlarged: Vec<_> = modal.images.iter().filter(|image| image.over).collect();
+                assert_eq!(enlarged.len(), 1);
+                assert!(enlarged[0].rect[2] > rect[2]);
+                assert!(std::sync::Arc::ptr_eq(
+                    &first.images[0].image,
+                    &enlarged[0].image
+                ));
+                assert!(modal.ime.is_none());
+                assert!(!chat.scroll_lines(4.0));
+                chat.paste("not inserted");
+                let key = if ctrl {
+                    Key::Character(";".into())
+                } else {
+                    Key::Named(NamedKey::Escape)
+                };
+                assert!(chat.image_viewer_key(&KeyPress {
+                    key: &key,
+                    text: None,
+                    location: KeyLocation::Standard,
+                    code: ctrl.then_some(KeyCode::Semicolon),
+                    modifiers: Modifiers {
+                        ctrl,
+                        ..Modifiers::default()
+                    }
+                }));
+                assert!(!chat.viewing_image());
+                assert_eq!(chat.editor.raw_text(), "keep my draft");
+                assert_eq!(chat.images.len(), usize::from(source == "draft"));
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "a measurement: run with --profile quick --ignored --nocapture"]
     fn frame_time_with_chat_previews() {
         let mut fonts = crate::chat::fixtures::fonts();
         let node = crate::chat::fixtures::talk(&[("[Image]", "A screenshot."); 16]);
-        for kind in ["text", "prompt", "tool"] {
+        for kind in ["text", "prompt", "tool", "modal"] {
             let mut node = node.clone();
             if kind != "text" {
                 for turn in &mut node.turns {
@@ -3053,7 +3150,14 @@ mod tests {
                 }
             }
             let mut chat = ChatView::new("chat".into(), node);
-            crate::chat::fixtures::paint(&mut chat, &mut fonts);
+            let initial = crate::chat::fixtures::paint(&mut chat, &mut fonts);
+            if kind == "modal" {
+                let rect = initial.images.last().unwrap().rect;
+                chat.press([rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0], 1, false);
+                chat.settle(&mut fonts);
+                assert!(chat.viewing_image());
+                crate::chat::fixtures::paint(&mut chat, &mut fonts);
+            }
             let start = std::time::Instant::now();
             for _ in 0..1000 {
                 std::hint::black_box(crate::chat::fixtures::paint(&mut chat, &mut fonts));

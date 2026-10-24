@@ -97,6 +97,7 @@ enum Hit {
     ModelFilter(picker::Filter),
     Favorite(String, String),
     RemoveImage(usize),
+    CloseImage,
     Send,
     Stop,
     /// One of the answers to the agent's question, by its ID.
@@ -203,6 +204,7 @@ pub(crate) struct ChatView {
     editor: PlainEditor<Brush>,
     images: Vec<clackatoo_protocol::ChatImage>,
     previews: images::Cache,
+    image_viewer: Option<clackatoo_protocol::ChatPreview>,
     /// Enter waits until the clipboard worker has delivered its result.
     pub(crate) pasting: bool,
     /// The size the editor's text was last styled at, and the fonts'
@@ -401,6 +403,7 @@ impl ChatView {
             editor: PlainEditor::new(16.0),
             images: Vec::new(),
             previews: images::Cache::default(),
+            image_viewer: None,
             pasting: false,
             editor_size: 0.0,
             editor_fonts: 0,
@@ -634,6 +637,9 @@ impl ChatView {
     // --- Input, queued until the fonts are at hand --------------------------
 
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) {
+        if self.image_viewer_key(press) {
+            return;
+        }
         self.said = None;
         if self.pasting
             && self.stoppable()
@@ -730,6 +736,9 @@ impl ChatView {
     }
 
     pub(crate) fn paste(&mut self, text: &str) {
+        if self.image_viewer.is_some() {
+            return;
+        }
         self.queued.push(Input::Paste(text.to_owned()));
     }
 
@@ -782,12 +791,18 @@ impl ChatView {
     /// The input method is composing `text`, with its cursor over that
     /// stretch of it, or has stopped, with `None`.
     pub(crate) fn compose(&mut self, composing: Option<(String, Option<(usize, usize)>)>) {
+        if self.image_viewer.is_some() {
+            return;
+        }
         self.queued.push(Input::Compose(composing));
     }
 
     /// How the mouse pointer looks at `at`, from the pane's top left, by
     /// what was drawn there last.
     pub(crate) fn pointer(&self, at: [f32; 2]) -> Pointer {
+        if self.image_viewer.is_none() && self.menu.is_none() && self.previews.at(at).is_some() {
+            return Pointer::Hand;
+        }
         let hit = (self.hits.iter().rev())
             .find(|(_, rect)| contains(*rect, at))
             .map(|(hit, _)| hit);
@@ -804,6 +819,9 @@ impl ChatView {
     /// choice or slider there lights up, and over a turn, the button that
     /// copies its answer shows. Returns whether the chat must be redrawn.
     pub(crate) fn hover(&mut self, at: [f32; 2]) -> bool {
+        if self.image_viewer.is_some() {
+            return false;
+        }
         // A block of code under the mouse shows a button to copy it.
         let code = self.code_at(at).filter(|_| self.menu.is_none());
         let mut redraw = code != self.hovered_code;
@@ -1063,6 +1081,9 @@ impl ChatView {
     }
 
     fn settle_paste(&mut self, fonts: &mut Fonts, text: &str) {
+        if self.viewing_image() {
+            return;
+        }
         if self.searching_models() {
             self.append_search(&text.replace(['\n', '\r'], " "));
             self.search_changed();
@@ -1083,7 +1104,7 @@ impl ChatView {
         modifiers: Modifiers,
         settled: &mut Settled,
     ) {
-        if self.menu.is_some() && self.menu_key(key, modifiers, settled) {
+        if self.modal_key(key, false) || self.menu_key(key, modifiers, settled) {
             return;
         }
         if self.node.question.is_some() {
@@ -1406,6 +1427,25 @@ impl ChatView {
     }
 
     /// An open popup owns its keys before pane-mode bindings see them.
+    pub(crate) fn viewing_image(&self) -> bool {
+        self.image_viewer.is_some()
+    }
+
+    /// The modal owns keys before bindings, permission answers, or either mode.
+    pub(crate) fn image_viewer_key(&mut self, press: &KeyPress<'_>) -> bool {
+        self.modal_key(press.key, crate::vim::enters_normal_mode(press))
+    }
+
+    fn modal_key(&mut self, key: &Key, normal: bool) -> bool {
+        if self.image_viewer.is_none() {
+            return false;
+        }
+        if *key == Key::Named(NamedKey::Escape) || normal {
+            self.image_viewer = None;
+        }
+        true
+    }
+
     pub(crate) fn menu_press(&mut self, press: &KeyPress<'_>) -> bool {
         let mut settled = Settled::default();
         let handled = self.menu_key(press.key, press.modifiers, &mut settled);
@@ -1590,6 +1630,22 @@ impl ChatView {
         let hit = (self.hits.iter().rev())
             .find(|(_, rect)| contains(*rect, at))
             .map(|(hit, _)| hit.clone());
+        if self.image_viewer.is_some() {
+            if hit == Some(Hit::CloseImage) {
+                self.image_viewer = None;
+            }
+            return;
+        }
+        if self.menu.is_none()
+            && !matches!(hit, Some(Hit::RemoveImage(_)))
+            && let Some(image) = self.previews.at(at)
+        {
+            self.image_viewer = Some(image);
+            self.hide_detail();
+            self.selecting = false;
+            self.picking = false;
+            return;
+        }
         // A click closes the meter's detail, if a click showed it, unless
         // it's on the meter, which shows it as long as the mouse is there.
         if self.hide_detail() && hit == Some(Hit::Usage) {
@@ -1617,7 +1673,9 @@ impl ChatView {
             self.menu = None;
         }
         match hit {
-            Some(Hit::ModelSearch | Hit::MenuSurface | Hit::ModelRail | Hit::Usage) => {}
+            Some(
+                Hit::ModelSearch | Hit::MenuSurface | Hit::ModelRail | Hit::Usage | Hit::CloseImage,
+            ) => {}
             Some(Hit::FastMode) => {
                 if let Some(setting) = picker::fast_mode(&self.node.settings).cloned() {
                     let value = self
@@ -1798,6 +1856,9 @@ impl ChatView {
     /// Scrolls `lines` lines up, or down if negative. Returns whether the
     /// view moved.
     pub(crate) fn scroll_lines(&mut self, lines: f32) -> bool {
+        if self.image_viewer.is_some() {
+            return false;
+        }
         let rail = self.mouse.is_some_and(|at| {
             self.hits
                 .iter()
@@ -1827,6 +1888,9 @@ impl ChatView {
     }
 
     fn scroll_by(&mut self, pixels: f32) -> bool {
+        if self.image_viewer.is_some() {
+            return false;
+        }
         let old = self.scroll;
         self.scroll = (self.scroll + pixels).clamp(0.0, self.max_scroll);
         self.follow = self.scroll >= self.max_scroll - 1.0;
