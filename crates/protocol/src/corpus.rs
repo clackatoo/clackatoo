@@ -953,11 +953,54 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             action: ChatAction::SendImages {
                 text: "Look at this".into(),
                 images: vec![crate::ChatImage {
+                    preview: None,
                     data: "cG5n".into(),
                     width: 2,
                     height: 3,
                 }],
             },
+        })),
+    ));
+    samples.push((
+        crate::wire::CHAT_PREVIEWS,
+        Client(ClientMessage::Request(Request::Chat {
+            terminal,
+            action: ChatAction::SendImages {
+                text: "Thumbnail".into(),
+                images: vec![crate::ChatImage {
+                    data: "cG5n".into(),
+                    width: 1,
+                    height: 1,
+                    preview: Some(crate::ChatPreview {
+                        width: 1,
+                        height: 1,
+                        rgba: vec![25, 50, 75, 255].into(),
+                    }),
+                }],
+            },
+        })),
+    ));
+    samples.push((
+        crate::wire::CHAT_PREVIEWS,
+        Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
+                index: 0,
+                turn: Turn {
+                    prompt: "[Image]".into(),
+                    sent: 1,
+                    items: Vec::new(),
+                    end: None,
+                    files: None,
+                    from: None,
+                    switch: None,
+                    previews: vec![crate::ChatPreview {
+                        width: 1,
+                        height: 1,
+                        rgba: vec![25, 50, 75, 255].into(),
+                    }],
+                },
+            })]),
         })),
     ));
     samples
@@ -2519,6 +2562,7 @@ fn chat() -> ChatNode {
 
 fn turn() -> Turn {
     Turn {
+        previews: Vec::new(),
         prompt: "fix it".into(),
         sent: 1_760_000_000,
         items: vec![

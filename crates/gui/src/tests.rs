@@ -822,6 +822,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
     ChatNode {
         turns: vec![
             Turn {
+                previews: Vec::new(),
                 prompt: "Why is the build failing?".into(),
                 sent: 0,
                 items: vec![
@@ -847,6 +848,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
                 switch: None,
             },
             Turn {
+                previews: Vec::new(),
                 prompt: "Turn on vendored and try again".into(),
                 sent: 2,
                 items: vec![edit],
@@ -1145,6 +1147,7 @@ fn moved_chat_node() -> clackatoo_protocol::ChatNode {
     node.turns.insert(
         1,
         Turn {
+            previews: Vec::new(),
             prompt: String::new(),
             sent: 1,
             items: Vec::new(),
@@ -1277,6 +1280,7 @@ fn u_in_a_chat_undoes_the_last_turn_or_says_theres_none() {
             root: Node::Chat(Box::new(ChatNode {
                 state: ChatState::Ready,
                 turns: vec![Turn {
+                    previews: Vec::new(),
                     from: None,
                     prompt: "change it".into(),
                     sent: 0,
@@ -2446,6 +2450,7 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
     };
     let first = image(1, [255, 0, 0, 255], [0, 0, 255, 255]);
     let placed = [PlacedImage {
+        clip: None,
         slot: 7,
         rect: [0.0, 0.0, 20.0, 20.0],
         image: &first,
@@ -2471,6 +2476,7 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
     // The next picture in the same slot replaces it.
     let second = image(2, [0, 255, 0, 255], [0, 255, 0, 255]);
     let placed = [PlacedImage {
+        clip: None,
         slot: 7,
         rect: [0.0, 0.0, 20.0, 20.0],
         image: &second,
@@ -2478,6 +2484,27 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
     picture.images = &placed;
     let pixels = draw_with(&gpu, &mut renderer, size, &picture, &mut fonts);
     assert_eq!(pixel(&pixels, [2, 10]), [0, 255, 0, 255]);
+    // A scrolled picture is clipped without squeezing its UV coordinates.
+    let clipped = [PlacedImage {
+        slot: 7,
+        rect: [0.0, 0.0, 20.0, 20.0],
+        image: &first,
+        clip: Some([10.0, 0.0, 10.0, 20.0]),
+    }];
+    picture.images = &clipped;
+    let pixels = draw_with(&gpu, &mut renderer, size, &picture, &mut fonts);
+    assert_eq!(pixel(&pixels, [2, 10])[3], 0);
+    assert_eq!(pixel(&pixels, [17, 10]), [0, 0, 255, 255]);
+    let translucent = image(4, [0, 255, 0, 128], [0, 255, 0, 128]);
+    let placed = [PlacedImage {
+        slot: 7,
+        rect: [0.0, 0.0, 20.0, 20.0],
+        image: &translucent,
+        clip: None,
+    }];
+    picture.images = &placed;
+    let pixels = draw_with(&gpu, &mut renderer, size, &picture, &mut fonts);
+    assert_eq!(pixel(&pixels, [2, 10]), [0, 128, 0, 128]);
     // One wider than any window draws isn't drawn.
     let wide = Image {
         id: 3,
@@ -2486,6 +2513,7 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
         rgba: [255, 0, 0, 255].repeat(crate::render::MAX_IMAGE_SIDE as usize + 1),
     };
     let placed = [PlacedImage {
+        clip: None,
         slot: 8,
         rect: [0.0, 0.0, 20.0, 20.0],
         image: &wide,

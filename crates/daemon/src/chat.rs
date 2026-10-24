@@ -1023,7 +1023,14 @@ impl HostedChat {
         if !self.slow {
             self.set_notice(None);
         }
+        let previews: Vec<_> = prompt
+            .images
+            .iter()
+            .filter_map(|image| image.preview.clone())
+            .collect();
+        self.make_preview_room(&previews);
         self.push_turn(Turn {
+            previews,
             prompt: shown,
             sent: now(),
             items: Vec::new(),
@@ -1341,6 +1348,10 @@ impl HostedChat {
     /// A session the chat had with `to` before is gone back to; else a
     /// new one starts. Either hears of the turns it hasn't seen with the
     /// next message.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "each part of moving an agent session"
+    )]
     pub(crate) fn switch(
         &mut self,
         to: &AgentSpec,
@@ -1429,6 +1440,7 @@ impl HostedChat {
         self.set_notice(None);
         self.withdraw_install();
         self.push_turn(Turn {
+            previews: Vec::new(),
             prompt: String::new(),
             sent: now(),
             items: Vec::new(),
@@ -2530,6 +2542,86 @@ impl HostedChat {
         self.show_question();
     }
 
+    pub(crate) fn hand_over_previews(&self) -> handover::ChatPreviews {
+        handover::ChatPreviews {
+            chat: self.id.0,
+            turns: self
+                .node
+                .turns
+                .iter()
+                .enumerate()
+                .filter(|(_, turn)| !turn.previews.is_empty())
+                .map(|(index, turn)| {
+                    (
+                        index_u32(index),
+                        turn.previews
+                            .iter()
+                            .map(|preview| handover::ChatPreview {
+                                width: preview.width,
+                                height: preview.height,
+                                rgba: preview.rgba.to_vec(),
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn resume_previews(&mut self, previews: handover::ChatPreviews) {
+        let mut bytes = 0;
+        for (index, images) in previews.turns.into_iter().rev() {
+            let Some(turn) = self.node.turns.get_mut(index as usize) else {
+                continue;
+            };
+            for image in images
+                .into_iter()
+                .take(clackatoo_protocol::ChatImage::MAX_COUNT)
+            {
+                let preview = clackatoo_protocol::ChatPreview {
+                    width: image.width,
+                    height: image.height,
+                    rgba: image.rgba.into(),
+                };
+                if preview.valid()
+                    && bytes + preview.rgba.len() <= clackatoo_protocol::ChatPreview::HISTORY_BYTES
+                {
+                    bytes += preview.rgba.len();
+                    turn.previews.push(preview);
+                }
+            }
+        }
+    }
+
+    /// Retain bounded recent thumbnails; keep older attachment labels.
+    fn make_preview_room(&mut self, incoming: &[clackatoo_protocol::ChatPreview]) {
+        if incoming.is_empty() {
+            return;
+        }
+        let mut bytes: usize = self
+            .node
+            .turns
+            .iter()
+            .flat_map(|turn| &turn.previews)
+            .chain(incoming)
+            .map(|preview| preview.rgba.len())
+            .sum();
+        for index in 0..self.node.turns.len() {
+            if bytes <= clackatoo_protocol::ChatPreview::HISTORY_BYTES {
+                break;
+            }
+            let previews = &mut self.node.turns[index].previews;
+            if !previews.is_empty() {
+                bytes -= previews
+                    .iter()
+                    .map(|preview| preview.rgba.len())
+                    .sum::<usize>();
+                previews.clear();
+                self.patch_turn(index);
+            }
+        }
+    }
+
     fn push_turn(&mut self, turn: Turn) {
         self.diffs.clear();
         self.node.turns.push(turn);
@@ -2705,7 +2797,13 @@ fn weight(patch: &ChatPatch) -> usize {
     };
     let size = match patch {
         ChatPatch::Turn { turn, .. } => {
-            turn.prompt.len() + turn.items.iter().map(item).sum::<usize>()
+            turn.prompt.len()
+                + turn.items.iter().map(item).sum::<usize>()
+                + turn
+                    .previews
+                    .iter()
+                    .map(|preview| preview.rgba.len())
+                    .sum::<usize>()
         }
         ChatPatch::Item { value, .. } => item(value),
         ChatPatch::Append { text, .. }
@@ -3071,6 +3169,7 @@ fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
 
 fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
     Turn {
+        previews: Vec::new(),
         prompt: turn.prompt,
         sent: turn.sent,
         items: (turn.items.into_iter())
@@ -3173,10 +3272,72 @@ mod tests {
         chat.update(notification.update)
     }
 
+    #[test]
+    fn previews_survive_handover_and_recent_images_have_a_bounded_budget() {
+        let mut chat = chat();
+        let preview = clackatoo_protocol::ChatPreview {
+            width: 256,
+            height: 256,
+            rgba: vec![42; 256 * 256 * 4].into(),
+        };
+        for index in 0..20 {
+            let prompt = Prompt {
+                text: format!("image {index}"),
+                images: vec![clackatoo_protocol::ChatImage {
+                    data: "cG5n".into(),
+                    width: 256,
+                    height: 256,
+                    preview: Some(preview.clone()),
+                }],
+            };
+            chat.begin(prompt.shown(), prompt, None, &mut Vec::new());
+        }
+        assert!(chat.node.turns[0].previews.is_empty());
+        assert!(chat.node.turns[0].prompt.contains("Image"));
+        assert_eq!(chat.node.turns[19].previews, vec![preview.clone()]);
+        let bytes: usize = chat
+            .node
+            .turns
+            .iter()
+            .flat_map(|turn| &turn.previews)
+            .map(|p| p.rgba.len())
+            .sum();
+        assert_eq!(bytes, clackatoo_protocol::ChatPreview::HISTORY_BYTES);
+        let previews = chat.hand_over_previews();
+        let agent = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        let mut resumed = HostedChat::resume(chat.hand_over(), &agent);
+        resumed.resume_previews(previews);
+        assert_eq!(resumed.node.turns[19].previews, vec![preview]);
+        assert!(resumed.node.turns[0].previews.is_empty());
+    }
+
+    #[test]
+    fn malformed_preview_is_refused_before_starting_a_turn() {
+        let mut chat = chat();
+        let mut prompt = image_prompt();
+        prompt.images[0].preview = Some(clackatoo_protocol::ChatPreview {
+            width: u32::MAX,
+            height: 1,
+            rgba: vec![0; 4].into(),
+        });
+        assert!(
+            chat.act(ChatAction::SendImages {
+                text: prompt.text,
+                images: prompt.images
+            })
+            .is_empty()
+        );
+        assert!(chat.node.turns.is_empty());
+        assert!(chat.node.notice.is_some());
+    }
+
     fn image_prompt() -> Prompt {
         Prompt {
             text: "look".into(),
             images: vec![clackatoo_protocol::ChatImage {
+                preview: None,
                 data: "cG5n".into(),
                 width: 2,
                 height: 3,

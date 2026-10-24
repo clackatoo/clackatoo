@@ -803,6 +803,7 @@ mod tests {
 
     fn turn(prompt: &str) -> Turn {
         Turn {
+            previews: Vec::new(),
             prompt: prompt.into(),
             sent: 0,
             items: vec![Item::Words(String::new())],

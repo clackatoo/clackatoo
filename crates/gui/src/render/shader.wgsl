@@ -146,16 +146,18 @@ fn image_vs(
     @builtin(vertex_index) vertex: u32,
     @location(0) origin: vec2<f32>,
     @location(1) size: vec2<f32>,
+    @location(2) uv_origin: vec2<f32>,
+    @location(3) uv_size: vec2<f32>,
 ) -> ImageOut {
     let at = corner(vertex);
     var out: ImageOut;
     out.position = to_clip(origin + at * size);
-    out.uv = at;
+    out.uv = uv_origin + at * uv_size;
     return out;
 }
 
 @fragment
 fn image_fs(in: ImageOut) -> @location(0) vec4<f32> {
     let texel = textureSample(atlas, atlas_sampler, in.uv);
-    return vec4<f32>(texel.rgb, 1.0);
+    return vec4<f32>(texel.rgb * texel.a, texel.a);
 }

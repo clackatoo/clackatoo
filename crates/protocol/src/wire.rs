@@ -230,6 +230,8 @@ gates! {
     BACKGROUND = 96,
     /// Clipboard images sent with a chat message.
     CHAT_IMAGES = 97,
+    /// Small image previews in drafts and retained turns.
+    CHAT_PREVIEWS = 98,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -1143,12 +1145,54 @@ mod tests {
     }
 
     #[test]
+    fn chat_previews_round_trip_and_are_omitted_for_older_peers() {
+        fn encode<T: serde::Serialize>(wire: u32, value: &T) -> Vec<u8> {
+            speaking(wire, || postcard::to_stdvec(value).unwrap())
+        }
+        fn read<T: serde::de::DeserializeOwned>(wire: u32, bytes: &[u8]) -> T {
+            speaking(wire, || postcard::from_bytes(bytes).unwrap())
+        }
+        let preview = crate::ChatPreview {
+            width: 1,
+            height: 1,
+            rgba: vec![10, 20, 30, 255].into(),
+        };
+        let mut image = crate::ChatImage {
+            data: "cG5n".into(),
+            width: 1,
+            height: 1,
+            preview: Some(preview.clone()),
+        };
+        let bytes = encode(CHAT_PREVIEWS, &image);
+        assert_eq!(read::<crate::ChatImage>(CHAT_PREVIEWS, &bytes), image);
+        let bytes = encode(CHAT_IMAGES, &image);
+        image.preview = None;
+        assert_eq!(read::<crate::ChatImage>(CHAT_IMAGES, &bytes), image);
+        let mut turn = crate::Turn {
+            prompt: "[Image]".into(),
+            sent: 0,
+            items: Vec::new(),
+            end: None,
+            files: None,
+            from: None,
+            switch: None,
+            previews: vec![preview],
+        };
+        let bytes = encode(CHAT_PREVIEWS, &turn);
+        assert_eq!(read::<crate::Turn>(CHAT_PREVIEWS, &bytes), turn);
+        let bytes = encode(CHAT_IMAGES, &turn);
+        turn.previews.clear();
+        assert_eq!(read::<crate::Turn>(CHAT_IMAGES, &bytes), turn);
+    }
+
+    #[test]
     fn images_are_never_sent_to_an_older_daemon_as_text_alone() {
         let message = ClientMessage::Request(crate::Request::Chat {
             terminal: crate::TerminalId(1),
             action: crate::ChatAction::SendImages {
                 text: "look".into(),
                 images: vec![crate::ChatImage {
+                    preview: None,
                     data: "cG5n".into(),
                     width: 1,
                     height: 1,

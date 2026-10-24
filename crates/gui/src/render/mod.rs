@@ -73,6 +73,27 @@ pub(crate) struct PlacedImage<'a> {
     /// stretched to fill it.
     pub(crate) rect: [f32; 4],
     pub(crate) image: &'a Image,
+    /// Clip in window coordinates, for scrolling chat images.
+    pub(crate) clip: Option<[f32; 4]>,
+}
+
+/// A chat image kept alive between layout and the GPU pass.
+#[derive(Debug)]
+pub(crate) struct PaintedImage {
+    pub(crate) image: std::sync::Arc<Image>,
+    pub(crate) rect: [f32; 4],
+    pub(crate) clip: [f32; 4],
+}
+
+impl PaintedImage {
+    pub(crate) fn placed(&self) -> PlacedImage<'_> {
+        PlacedImage {
+            slot: self.image.id,
+            rect: self.rect,
+            image: &self.image,
+            clip: Some(self.clip),
+        }
+    }
 }
 
 /// A glyph laid out already: which, at what size, and where.
@@ -497,6 +518,8 @@ struct Uniforms {
 struct ImageQuad {
     origin: [f32; 2],
     size: [f32; 2],
+    uv_origin: [f32; 2],
+    uv_size: [f32; 2],
 }
 
 /// A picture on the GPU, in a slot.
@@ -661,7 +684,7 @@ impl Renderer {
         let image_pipeline = pipeline(
             "images",
             ("image_vs", "image_fs"),
-            &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+            &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2],
             std::mem::size_of::<ImageQuad>() as u64,
         );
         Self {
@@ -877,9 +900,21 @@ impl Renderer {
                 gpu.id = image.id;
             }
             let [left, top, width, height] = placed.rect;
+            if width <= 0.0 || height <= 0.0 {
+                continue;
+            }
+            let clipped = placed.clip.map_or(placed.rect, |clip| {
+                crate::markdown::layout::intersection(placed.rect, clip)
+            });
+            let [x, y, w, h] = clipped;
+            if w <= 0.0 || h <= 0.0 {
+                continue;
+            }
             quads.push(ImageQuad {
-                origin: [left, top],
-                size: [width, height],
+                origin: [x, y],
+                size: [w, h],
+                uv_origin: [(x - left) / width, (y - top) / height],
+                uv_size: [w / width, h / height],
             });
             slots.push(placed.slot);
         }

@@ -521,6 +521,7 @@ mod tests {
 
     fn turn(prompt: &str, items: Vec<Item>) -> Turn {
         Turn {
+            previews: Vec::new(),
             prompt: prompt.to_owned(),
             sent: 1,
             items,

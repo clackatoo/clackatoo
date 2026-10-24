@@ -841,7 +841,24 @@ impl Look {
             Command::Type(text) => self.window()?.type_text(text),
             Command::PasteImage => self
                 .window()?
-                .paste_image(160, 90, [40, 100, 210, 255].repeat(160 * 90))
+                .paste_image(
+                    160,
+                    90,
+                    (0..160 * 90)
+                        .flat_map(|p| {
+                            let (x, y) = (p % 160, p / 160);
+                            if y < 18 {
+                                [40, 100, 210, 255]
+                            } else if x < 35 {
+                                [35, 42, 56, 255]
+                            } else if x > 45 && x < 145 && y % 14 < 3 {
+                                [90, 110, 135, 255]
+                            } else {
+                                [230, 235, 245, 255]
+                            }
+                        })
+                        .collect(),
+                )
                 .map_err(|err| anyhow!(err))?,
             Command::Shell(command) => {
                 let window = self.window()?;

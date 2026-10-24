@@ -61,6 +61,7 @@ pub(crate) const LINE: f32 = 1.45;
 /// Markdown.
 #[derive(Debug, Default)]
 pub(crate) struct TextPaint {
+    pub(crate) images: Vec<crate::render::PaintedImage>,
     pub(crate) fills: Vec<Fill>,
     pub(crate) glyphs: Vec<PlacedGlyph>,
     /// Fills over the text, as the cursor and a menu are.

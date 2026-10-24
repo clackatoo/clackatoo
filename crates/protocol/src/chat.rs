@@ -385,6 +385,13 @@ pub struct Turn {
     /// Where the chat moved to another agent: a turn of its own, with no
     /// message and nothing done, that's shown as a line across the chat.
     pub switch: Option<Switch>,
+    /// Small previews retained for this message, never sent to the agent.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CHAT_PREVIEWS }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAT_PREVIEWS }, _, _>"
+    )]
+    pub previews: Vec<ChatPreview>,
 }
 
 /// The chat whose agent sent a message to another chat, as it was when it
@@ -914,8 +921,38 @@ pub enum ChatPatch {
     Subagents(Vec<Subagent>),
 }
 
+/// A small, decoded image for chat history. Shared by snapshots and paint
+/// caches without copying pixels. Full-size attachments belong to the agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatPreview {
+    /// Width in pixels, at most `SIDE`.
+    pub width: u32,
+    /// Height in pixels, at most `SIDE`.
+    pub height: u32,
+    /// Straight-alpha RGBA pixels, row by row.
+    pub rgba: std::sync::Arc<[u8]>,
+}
+
+impl ChatPreview {
+    /// Maximum thumbnail dimension.
+    pub const SIDE: u32 = 256;
+    /// Keep recent thumbnails within four MiB per chat. Older messages
+    /// retain their attachment labels when their previews are evicted.
+    pub const HISTORY_BYTES: usize = 4 * 1024 * 1024;
+
+    /// Checks all dimensions before a renderer or daemon uses the pixels.
+    #[must_use]
+    pub fn valid(&self) -> bool {
+        self.width > 0
+            && self.height > 0
+            && self.width <= Self::SIDE
+            && self.height <= Self::SIDE
+            && self.rgba.len() == (self.width as usize) * (self.height as usize) * 4
+    }
+}
+
 /// A pasted PNG, encoded once by the window, ready for ACP. Kept only
-/// until sent; the transcript records its dimensions, never the bytes.
+/// until sent; the transcript retains only its small preview and dimensions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatImage {
     /// PNG bytes as standard base64.
@@ -924,6 +961,13 @@ pub struct ChatImage {
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
+    /// A bounded thumbnail made by the clipboard worker.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CHAT_PREVIEWS }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAT_PREVIEWS }, _, _>"
+    )]
+    pub preview: Option<ChatPreview>,
 }
 
 impl ChatImage {
@@ -942,6 +986,7 @@ impl ChatImage {
             && u64::from(self.width) * u64::from(self.height) <= Self::MAX_PIXELS
             && !self.data.is_empty()
             && self.data.len() <= Self::MAX_DATA
+            && self.preview.as_ref().is_none_or(ChatPreview::valid)
     }
 
     /// What the draft and the transcript say about this attachment.
@@ -1439,6 +1484,7 @@ mod tests {
 
     fn turn(prompt: &str, items: Vec<Item>) -> Turn {
         Turn {
+            previews: Vec::new(),
             prompt: prompt.into(),
             sent: 0,
             items,

@@ -189,6 +189,7 @@ impl ChatView {
         size: [f32; 2],
         caret: bool,
     ) -> TextPaint {
+        self.previews.begin();
         self.style_editor(fonts);
         let em = text_size(fonts);
         let m = Measures::of(em);
@@ -523,6 +524,10 @@ impl ChatView {
     /// Lays out turn `index` of `turns`, keeping what of it was laid out
     /// already and hasn't changed, as the words of an answer before more
     /// came.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "each piece of a turn in display order"
+    )]
     fn lay_out_turn(
         &mut self,
         fonts: &mut Fonts,
@@ -555,6 +560,13 @@ impl ChatView {
             let height = piece.height + m.em(1.2);
             laid.spans.push(Span::of(Piece::Prompt, y, height));
             laid.pieces.insert(PROMPT, piece);
+            y += height + m.em(1.0);
+        }
+        if !turn.previews.is_empty() {
+            let side =
+                super::images::side(column * 0.78, turn.previews.len(), m.em(12.0), m.em(0.5));
+            let height = super::images::height(side, turn.previews.iter().map(Some));
+            laid.spans.push(Span::of(Piece::Previews, y, height));
             y += height + m.em(1.0);
         }
         if shape.fold {
@@ -920,6 +932,20 @@ impl ChatView {
                     draw_laid(canvas, m, prompt, at, column);
                     drawn.note_laid(prompt, at, (index, PROMPT));
                 }
+                Piece::Previews => {
+                    let previews = &self.node.turns[index].previews;
+                    let height = span.bottom - span.top;
+                    let side =
+                        super::images::side(column * 0.78, previews.len(), m.em(12.0), m.em(0.5));
+                    let count = f32::from(u8::try_from(previews.len()).unwrap_or(4));
+                    let width = side * count + m.em(0.5) * (count - 1.0);
+                    for (image, preview) in previews.iter().enumerate().take(4) {
+                        let left = origin[0] + column - width
+                            + (side + m.em(0.5)) * f32::from(u8::try_from(image).unwrap_or(0));
+                        self.previews
+                            .draw(canvas, preview, [left, top, side, height]);
+                    }
+                }
                 Piece::Fold => self.draw_fold(canvas, m, index, [origin[0], top], drawn),
                 Piece::Agents => self.draw_agents(canvas, m, index, [origin[0], top], drawn),
                 Piece::Item(piece) => {
@@ -993,12 +1019,20 @@ impl ChatView {
         } else {
             0
         };
-        let height = pad
-            + content_height
-            + m.em(2.0) * f32::from(u8::try_from(attachments).unwrap_or(u8::MAX))
-            + m.em(0.4)
-            + m.em(2.0)
-            + m.em(0.5);
+        let side = super::images::side(inner, attachments, m.em(6.0), m.em(0.5));
+        let row_height = super::images::height(
+            side,
+            self.images
+                .iter()
+                .take(attachments)
+                .map(|image| image.preview.as_ref()),
+        );
+        let image_height = if attachments == 0 {
+            0.0
+        } else {
+            row_height + m.em(2.0)
+        };
+        let height = pad + content_height + image_height + m.em(0.4) + m.em(2.0) + m.em(0.5);
         let frame = BoxFrame {
             place,
             left: place.origin[0] + place.left,
@@ -1029,28 +1063,30 @@ impl ChatView {
             None => self.draw_editor(&mut canvas, m, &frame, editor_height, caret),
         }
         for index in 0..attachments {
-            let label = format!("{}   ×", self.images[index].label());
-            let laid = self.box_label(canvas.fonts, m, &label, Tone::Muted, inner);
-            let rect = [
-                frame.left + pad,
-                frame.top
-                    + pad
-                    + content_height
-                    + m.em(2.0) * f32::from(u8::try_from(index).unwrap_or(u8::MAX)),
-                inner,
-                m.em(1.8),
-            ];
+            let x =
+                frame.left + pad + (side + m.em(0.5)) * f32::from(u8::try_from(index).unwrap_or(0));
+            let y = frame.top + pad + content_height + m.em(0.4);
+            let rect = [x, y, side, row_height];
             canvas.fill(Fill::rounded(rect, Paint::Hover, m.em(0.4)));
+            if let Some(preview) = &self.images[index].preview {
+                self.previews.draw(&mut canvas, preview, rect);
+            } else {
+                let laid = self.box_label(canvas.fonts, m, "Image", Tone::Muted, side);
+                draw_laid(&mut canvas, m, &laid, [x, y + row_height / 2.0], side);
+                self.keep_label(laid);
+            }
+            let remove = [x + side - m.em(1.5), y + row_height, m.em(1.5), m.em(1.6)];
+            let laid = self.box_label(canvas.fonts, m, "×", Tone::Muted, remove[2]);
             draw_laid(
                 &mut canvas,
                 m,
                 &laid,
-                [rect[0] + m.em(0.4), rect[1] + (rect[3] - laid.height) / 2.0],
-                inner - m.em(0.8),
+                [remove[0] + m.em(0.4), remove[1]],
+                remove[2],
             );
             self.keep_label(laid);
             self.hits
-                .push((Hit::RemoveImage(index), frame.place.in_pane(rect)));
+                .push((Hit::RemoveImage(index), frame.place.in_pane(remove)));
         }
         self.draw_send(&mut canvas, m, &frame);
         self.draw_controls(&mut canvas, m, &frame);
@@ -1841,6 +1877,8 @@ struct Span {
 enum Piece {
     /// Its message, as a bubble.
     Prompt,
+    /// The pasted image thumbnails, below the message.
+    Previews,
     /// The line its work folds under.
     Fold,
     /// What the agent did, by piece.
@@ -2005,6 +2043,10 @@ fn guess(m: Measures, column: f32, turn: &Turn, open: bool, divided: bool) -> f3
     }
     if !turn.prompt.is_empty() {
         height += lines(&turn.prompt, column * 0.78) * line + m.em(2.2);
+    }
+    if !turn.previews.is_empty() {
+        let side = super::images::side(column * 0.78, turn.previews.len(), m.em(12.0), m.em(0.5));
+        height += super::images::height(side, turn.previews.iter().map(Some)) + m.em(1.0);
     }
     let answer = fold::answer_start(turn);
     if answer > 0 || turn.end.is_none() {
@@ -2597,6 +2639,7 @@ mod tests {
     #[test]
     fn a_turn_where_the_chat_moved_is_a_line_across_it_with_what_didnt_carry_over() {
         let turn = Turn {
+            previews: Vec::new(),
             prompt: String::new(),
             sent: 1,
             items: Vec::new(),
@@ -2743,6 +2786,66 @@ mod tests {
             .filter(|shown| shown.key.piece == ITEMS)
             .count();
         assert!(parts > 0 && parts < 60, "{parts}");
+    }
+
+    #[test]
+    fn previews_draw_from_a_fresh_snapshot_and_reuse_pixels_between_frames() {
+        use crate::chat::fixtures::{fonts, paint, talk};
+        let mut fonts = fonts();
+        let preview = clackatoo_protocol::ChatPreview {
+            width: 2,
+            height: 1,
+            rgba: vec![255; 8].into(),
+        };
+        let mut node = talk(&[("[Image]", "A screenshot.")]);
+        node.turns[0].previews.push(preview.clone());
+        let mut chat = ChatView::new("chat".into(), node);
+        let first = paint(&mut chat, &mut fonts);
+        assert_eq!(first.images.len(), 1);
+        let image = first.images[0].image.clone();
+        let second = paint(&mut chat, &mut fonts);
+        assert!(std::sync::Arc::ptr_eq(&image, &second.images[0].image));
+        chat.paste_image(clackatoo_protocol::ChatImage {
+            data: "cG5n".into(),
+            width: 2,
+            height: 1,
+            preview: Some(preview),
+        });
+        chat.settle(&mut fonts);
+        let draft = paint(&mut chat, &mut fonts);
+        assert_eq!(draft.images.len(), 2);
+        assert!(chat.hits.iter().any(|(hit, _)| *hit == Hit::RemoveImage(0)));
+        chat.remove_image(0);
+        assert_eq!(paint(&mut chat, &mut fonts).images.len(), 1);
+    }
+
+    #[test]
+    #[ignore = "a measurement: run with --profile quick --ignored --nocapture"]
+    fn frame_time_with_chat_previews() {
+        let mut fonts = crate::chat::fixtures::fonts();
+        let node = crate::chat::fixtures::talk(&[("[Image]", "A screenshot."); 16]);
+        for with_images in [false, true] {
+            let mut node = node.clone();
+            if with_images {
+                for turn in &mut node.turns {
+                    turn.previews.push(clackatoo_protocol::ChatPreview {
+                        width: 256,
+                        height: 160,
+                        rgba: vec![127; 256 * 160 * 4].into(),
+                    });
+                }
+            }
+            let mut chat = ChatView::new("chat".into(), node);
+            crate::chat::fixtures::paint(&mut chat, &mut fonts);
+            let start = std::time::Instant::now();
+            for _ in 0..1000 {
+                std::hint::black_box(crate::chat::fixtures::paint(&mut chat, &mut fonts));
+            }
+            println!(
+                "previews={with_images}: {:?} per cached frame",
+                start.elapsed() / 1000
+            );
+        }
     }
 
     /// What drawing a long chat costs a frame: the first, which lays it

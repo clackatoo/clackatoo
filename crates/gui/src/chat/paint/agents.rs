@@ -368,6 +368,7 @@ mod tests {
         ChatNode {
             state: ChatState::Answering,
             turns: vec![Turn {
+                previews: Vec::new(),
                 from: None,
                 prompt: "Look around".into(),
                 sent: 99_000,

@@ -258,6 +258,7 @@ mod tests {
             agent: "Claude Code".into(),
             state: ChatState::Answering,
             turns: vec![Turn {
+                previews: Vec::new(),
                 from: None,
                 prompt: "Why does CI fail?".into(),
                 sent: SENT,

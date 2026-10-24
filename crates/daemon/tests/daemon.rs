@@ -2258,6 +2258,11 @@ fn clipboard_images_reach_the_agent_as_images_with_their_text() {
     let mut client = daemon.client();
     let chat = start_chat(&mut client);
     let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l1sAAAAASUVORK5CYII=";
+    let preview = clackatoo_protocol::ChatPreview {
+        width: 1,
+        height: 1,
+        rgba: vec![255; 4].into(),
+    };
     for text in ["look at this", ""] {
         client
             .chat(
@@ -2265,6 +2270,7 @@ fn clipboard_images_reach_the_agent_as_images_with_their_text() {
                 ChatAction::SendImages {
                     text: text.into(),
                     images: vec![clackatoo_protocol::ChatImage {
+                        preview: Some(preview.clone()),
                         data: data.into(),
                         width: 1,
                         height: 1,
@@ -2282,6 +2288,13 @@ fn clipboard_images_reach_the_agent_as_images_with_their_text() {
                 .unwrap()
                 .prompt
                 .contains("[Image · 1 × 1]")
+        );
+        assert_eq!(node.turns.last().unwrap().previews, vec![preview.clone()]);
+        let mut reattached = daemon.client();
+        let snapshot = reattached.capture(chat).unwrap();
+        assert_eq!(
+            snapshot.chat().unwrap().turns.last().unwrap().previews,
+            vec![preview.clone()]
         );
         assert!(!format!("{node:?}").contains(data));
     }
@@ -2315,6 +2328,7 @@ fn an_agent_without_image_support_fails_the_turn_without_sending_text_alone() {
             ChatAction::SendImages {
                 text: "look".into(),
                 images: vec![clackatoo_protocol::ChatImage {
+                    preview: None,
                     data: "cG5n".into(),
                     width: 1,
                     height: 1,

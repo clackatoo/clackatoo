@@ -15,6 +15,7 @@
 mod card;
 #[cfg(test)]
 pub(crate) mod fixtures;
+mod images;
 mod paint;
 mod picker;
 mod read;
@@ -188,6 +189,7 @@ pub(crate) struct ChatView {
     /// The message being typed.
     editor: PlainEditor<Brush>,
     images: Vec<clackatoo_protocol::ChatImage>,
+    previews: images::Cache,
     /// Enter waits until the clipboard worker has delivered its result.
     pub(crate) pasting: bool,
     /// The size the editor's text was last styled at, and the fonts'
@@ -385,6 +387,7 @@ impl ChatView {
             folder: None,
             editor: PlainEditor::new(16.0),
             images: Vec::new(),
+            previews: images::Cache::default(),
             pasting: false,
             editor_size: 0.0,
             editor_fonts: 0,
@@ -1865,6 +1868,7 @@ mod tests {
 
     fn pasted_image() -> clackatoo_protocol::ChatImage {
         clackatoo_protocol::ChatImage {
+            preview: None,
             data: "cG5n".into(),
             width: 2,
             height: 3,
@@ -1922,6 +1926,7 @@ mod tests {
         assert_eq!(view.editor.raw_text(), "look pasted after");
         view.paste_image(pasted_image());
         view.node.turns.push(Turn {
+            previews: Vec::new(),
             prompt: "previous".into(),
             sent: 0,
             items: vec![],
@@ -1979,6 +1984,7 @@ mod tests {
         let mut fonts = fonts();
         let mut node = ChatNode::default();
         node.turns.push(Turn {
+            previews: Vec::new(),
             prompt: "hi".into(),
             sent: 0,
             items: Vec::new(),
@@ -2673,6 +2679,7 @@ mod tests {
         let mut node = ChatNode::default();
         for &state in states {
             node.turns.push(Turn {
+                previews: Vec::new(),
                 from: None,
                 prompt: "change it".into(),
                 sent: 0,

@@ -67,6 +67,7 @@
 //!     to show for it: the command each terminal was running, still
 //!     offered to run again, and where each editor was. Before, an upgrade
 //!     lost every offer still open.
+//! 28. Bounded image thumbnails retained in chat turns.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -79,12 +80,12 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 27;
+pub(crate) const VERSION: u32 = 28;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-    VERSION,
+    27, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -214,6 +215,23 @@ pub(crate) struct State {
     /// Since version 27: `None` from a build before, which couldn't hand
     /// them over, as distinct from one that had none to.
     pub(crate) restored: Option<Vec<Restored>>,
+    /// Small image previews retained by chat and turn, since version 28.
+    pub(crate) chat_previews: Vec<ChatPreviews>,
+}
+
+/// Frozen thumbnail data, independent of the live protocol.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatPreview {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) rgba: Vec<u8>,
+}
+
+/// Preview images by chat and turn. Old handovers have none.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatPreviews {
+    pub(crate) chat: u32,
+    pub(crate) turns: Vec<(u32, Vec<ChatPreview>)>,
 }
 
 /// What a pane made again as the daemon started still has to show for
@@ -994,8 +1012,88 @@ impl State {
             24 => Ok(postcard::from_bytes::<v24::State>(body)?.into()),
             25 => Ok(postcard::from_bytes::<v25::State>(body)?.into()),
             26 => Ok(postcard::from_bytes::<v26::State>(body)?.into()),
+            27 => Ok(postcard::from_bytes::<v27::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
+        }
+    }
+}
+
+/// Version 27, before retained chat previews.
+mod v27 {
+    use super::{
+        Applied, Background, Borrower, Buffer, Chat, Connection, EditLog, Exe, Files, Kept, Known,
+        Lender, Lent, Process, Restored, Reviews, Sharing, Shell, Terminal, Trusted, Workspaces,
+    };
+    use serde::Deserialize;
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+        edits: EditLog,
+        applied: Vec<Applied>,
+        daemon: u64,
+        reviews: Reviews,
+        recovery_lock: Option<u32>,
+        shells: Vec<Shell>,
+        machine: Option<[u8; 16]>,
+        connections: Vec<Connection>,
+        lent: Vec<Lent>,
+        borrowers: Vec<Borrower>,
+        lenders: Vec<Lender>,
+        sharing: Vec<Sharing>,
+        key: Option<[u8; 32]>,
+        keys: Vec<Known>,
+        background: Vec<Background>,
+        kept: Vec<Kept>,
+        trusted: Vec<Trusted>,
+        exes: Vec<Exe>,
+        restored: Option<Vec<Restored>>,
+    }
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: state.recovery_lock,
+                shells: state.shells,
+                machine: state.machine,
+                connections: state.connections,
+                lent: state.lent,
+                borrowers: state.borrowers,
+                lenders: state.lenders,
+                sharing: state.sharing,
+                key: state.key,
+                keys: state.keys,
+                background: state.background,
+                kept: state.kept,
+                trusted: state.trusted,
+                exes: state.exes,
+                restored: state.restored,
+                chat_previews: Vec::new(),
+            }
         }
     }
 }
@@ -1076,6 +1174,7 @@ mod v26 {
                 trusted: state.trusted,
                 exes: state.exes,
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -1154,6 +1253,7 @@ mod v25 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -1230,6 +1330,7 @@ mod v24 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -1304,6 +1405,7 @@ mod v23 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -1391,6 +1493,7 @@ mod v22 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -1461,6 +1564,7 @@ mod v21 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -1529,6 +1633,7 @@ mod v20 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -1593,6 +1698,7 @@ mod v19 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -1657,6 +1763,7 @@ mod v18 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -2186,6 +2293,7 @@ mod v7 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -2274,6 +2382,7 @@ mod v8 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -2332,6 +2441,7 @@ mod v9 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -2392,6 +2502,7 @@ mod v11 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -2501,6 +2612,7 @@ mod v15 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -2564,6 +2676,7 @@ mod v14 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -2625,6 +2738,7 @@ mod v13 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -2728,6 +2842,7 @@ mod v12 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -2829,6 +2944,7 @@ mod v10 {
                 trusted: Vec::new(),
                 exes: Vec::new(),
                 restored: None,
+                chat_previews: Vec::new(),
             }
         }
     }
@@ -3097,6 +3213,17 @@ mod tests {
                 dev: 0x803,
                 ino: 1_234_567,
             }],
+            chat_previews: vec![ChatPreviews {
+                chat: 2,
+                turns: vec![(
+                    0,
+                    vec![ChatPreview {
+                        width: 1,
+                        height: 1,
+                        rgba: vec![10, 20, 30, 255],
+                    }],
+                )],
+            }],
             restored: Some(vec![
                 Restored {
                     pane: 11,
@@ -3306,6 +3433,20 @@ mod tests {
         };
         assert!(matches!(parts[5], Layout::Review { id: 6, review: 1 }));
         assert_eq!(state.edits.chats[0].chat, 2);
+    }
+
+    #[test]
+    fn version_28_keeps_preview_pixels_without_changing_older_handovers() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v28.bin"))
+            .unwrap();
+        let read = State::read(&mut file).unwrap();
+        assert_eq!(read.chat_previews[0].chat, 2);
+        assert_eq!(read.chat_previews[0].turns[0].1[0].rgba, [10, 20, 30, 255]);
+        let mut old = tempfile::tempfile().unwrap();
+        old.write_all(include_bytes!("../tests/fixtures/handover-v27.bin"))
+            .unwrap();
+        assert!(State::read(&mut old).unwrap().chat_previews.is_empty());
     }
 
     #[test]
@@ -3600,11 +3741,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v27.bin"]
+    #[ignore = "writes tests/fixtures/handover-v28.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v27.bin"
+            "/tests/fixtures/handover-v28.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();

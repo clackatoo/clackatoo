@@ -31,6 +31,7 @@ pub(crate) fn talk(pairs: &[(&str, &str)]) -> ChatNode {
         state: ChatState::Ready,
         turns: (pairs.iter().enumerate())
             .map(|(index, (prompt, answer))| Turn {
+                previews: Vec::new(),
                 from: None,
                 prompt: (*prompt).to_owned(),
                 sent: 1000 * index as u64,
@@ -89,6 +90,7 @@ pub(crate) fn long_chat(turns: usize) -> ChatNode {
         let sent = 1_000_000 + 600_000 * index as u64;
         let last = index + 1 == turns;
         node.turns.push(Turn {
+            previews: Vec::new(),
             from: None,
             prompt: format!(
                 "Turn {index}: why does the build fail on CI but not here? It started \

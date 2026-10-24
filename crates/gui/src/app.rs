@@ -2027,7 +2027,13 @@ impl App {
             &layout_panes,
             shown.pane,
         );
-        let images = browser_images(desk, &placement, &layout_panes, geometry.area.cell);
+        let mut images = browser_images(desk, &placement, &layout_panes, geometry.area.cell);
+        images.extend(
+            chat_paint
+                .images
+                .iter()
+                .map(crate::render::PaintedImage::placed),
+        );
         let focused = drawings.iter().find(|drawing| drawing.focused);
         let cell = geometry.area.cell;
         let target = desk.text_goes_to();
@@ -2202,6 +2208,7 @@ impl App {
             let caret = focused && self.focused && !prompting;
             let size = tile.cells_size(cell);
             if let Some(paint) = pane.paint_chat(&mut frame.fonts, tile.origin, size, caret) {
+                all.images.extend(paint.images);
                 all.fills.extend(paint.fills);
                 all.glyphs.extend(paint.glyphs);
                 all.over.extend(paint.over);
@@ -2227,6 +2234,7 @@ impl App {
             if let Some(paint) =
                 (self.desk).paint_rendered(pane, &mut frame.fonts, tile.origin, size)
             {
+                all.images.extend(paint.images);
                 all.fills.extend(paint.fills);
                 all.glyphs.extend(paint.glyphs);
             }
@@ -2318,6 +2326,7 @@ fn browser_images<'a>(
         ];
         if let Some(rect) = crate::browser::fit([image.width, image.height], area) {
             images.push(PlacedImage {
+                clip: None,
                 slot: u64::from(id.0),
                 rect,
                 image,

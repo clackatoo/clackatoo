@@ -1151,6 +1151,11 @@ impl Daemon {
         mut handover: Handover,
         config: DaemonConfig,
     ) -> Result<Self, HandoverError> {
+        let mut previews: std::collections::HashMap<_, _> =
+            std::mem::take(&mut handover.state.chat_previews)
+                .into_iter()
+                .map(|previews| (previews.chat, previews))
+                .collect();
         let chats = std::mem::take(&mut handover.state.chats);
         let buffers = std::mem::take(&mut handover.state.buffers);
         let explorers = std::mem::take(&mut handover.state.explorers);
@@ -1208,7 +1213,12 @@ impl Daemon {
         daemon.refresh_kept();
         for chat in chats {
             let agent = daemon.agent_spec(&chat.agent);
-            daemon.add_chat(HostedChat::resume(chat, &agent));
+            let images = previews.remove(&chat.id);
+            let mut chat = HostedChat::resume(chat, &agent);
+            if let Some(images) = images {
+                chat.resume_previews(images);
+            }
+            daemon.add_chat(chat);
         }
         daemon.next_buffer = state.next_buffer;
         // Older builds had none, and keep the one just chosen.
@@ -1336,6 +1346,7 @@ impl Daemon {
         let mut trusted = Vec::new();
         let mut exes = Vec::new();
         let mut chats = Vec::new();
+        let mut chat_previews = Vec::new();
         self.abandon_clipboard_asks();
         self.put_back_fits();
         for slot in std::mem::take(&mut self.terminals).into_values() {
@@ -1360,7 +1371,10 @@ impl Daemon {
                     terminals.push(terminal);
                     shells.extend(shell);
                 }
-                Hosted::Chat(chat) => chats.push(chat.hand_over()),
+                Hosted::Chat(chat) => {
+                    chat_previews.push(chat.hand_over_previews());
+                    chats.push(chat.hand_over());
+                }
             }
         }
         // Renames under way are dropped, rather than leave their new files
@@ -1411,6 +1425,7 @@ impl Daemon {
                 next_terminal: self.next_id,
                 terminals,
                 chats,
+                chat_previews,
                 orphans,
                 workspaces,
                 next_buffer: self.next_buffer,

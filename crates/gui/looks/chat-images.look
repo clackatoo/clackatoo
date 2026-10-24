@@ -16,3 +16,16 @@ shot removed-image
 keys <CR>
 wait-for echo:
 shot image-only
+
+# Small panes, scrolled images, and multiple thumbnails in the draft.
+size 620x440
+shot narrow-history
+scroll 400 150 2
+shot clipped-history
+paste-image
+paste-image
+paste-image
+paste-image
+shot four-images
+keys <BS><BS><BS><BS>
+shot cleared-draft

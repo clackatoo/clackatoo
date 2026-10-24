@@ -1166,6 +1166,7 @@ mod tests {
 
     fn turn(items: Vec<Item>) -> Turn {
         Turn {
+            previews: Vec::new(),
             files: None,
             switch: None,
             prompt: "go".to_owned(),

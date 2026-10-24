@@ -1156,6 +1156,7 @@ mod tests {
         };
         let mut node = ChatNode::default();
         node.turns.push(Turn {
+            previews: Vec::new(),
             prompt: "look".into(),
             sent: 1_000,
             items: vec![
@@ -1522,6 +1523,7 @@ mod tests {
             ..ChatNode::default()
         };
         node.turns.push(Turn {
+            previews: Vec::new(),
             prompt: "test it".into(),
             sent: 1_000,
             items: vec![Item::Tool(tool)],

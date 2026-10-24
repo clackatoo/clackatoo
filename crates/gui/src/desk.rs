@@ -3540,6 +3540,7 @@ mod tests {
         desk.finish_image_paste(
             chat,
             Ok(Pasted::Image(clackatoo_protocol::ChatImage {
+                preview: None,
                 data: "cG5n".into(),
                 width: 2,
                 height: 3,
@@ -3581,6 +3582,7 @@ mod tests {
         desk.finish_image_paste(
             chat,
             Ok(Pasted::Image(clackatoo_protocol::ChatImage {
+                preview: None,
                 data: "cG5n".into(),
                 width: 2,
                 height: 3,
@@ -3619,6 +3621,7 @@ mod tests {
             snapshot(&mut desk, terminal);
         }
         let turn = Turn {
+            previews: Vec::new(),
             from: None,
             prompt: "Why does CI fail?".into(),
             sent: 1_000,
@@ -9107,6 +9110,7 @@ mod tests {
         let node = ChatNode {
             state: ChatState::Ready,
             turns: vec![Turn {
+                previews: Vec::new(),
                 from: None,
                 prompt: "how?".into(),
                 sent: 0,

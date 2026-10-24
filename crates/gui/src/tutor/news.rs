@@ -695,6 +695,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Paste screenshots into agent chats with Ctrl+Shift+V; remove attachments before sending",
     },
+    News {
+        id: "thumbnails",
+        date: "2026-10-24",
+        lesson: "agents",
+        what: "Pasted images show thumbnails in the message box and conversation, including after reconnecting",
+    },
 ];
 
 impl News {

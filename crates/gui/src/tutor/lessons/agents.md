@@ -18,11 +18,11 @@ If the agent hasn't opened the chat's session after 30 seconds, the chat says so
 
 ## Pasting images
 
-Copy a screenshot or image to the clipboard, then press Ctrl+Shift+V in a chat. It appears below the message as an attachment showing its dimensions. Add text if you like, then press Enter to send both; an image can go on its own too.
+Copy a screenshot or image to the clipboard, then press Ctrl+Shift+V in a chat. A thumbnail appears in the message box, and stays beside the sent message in the conversation. Add text if you like, then press Enter to send both; an image can go on its own too.
 
-Click an attachment to remove it, or press Backspace while the message box is empty to remove the last one. You can prepare attachments while the agent answers; they stay in the draft until you send. Text on the clipboard still pastes as text.
+Click the × below a thumbnail to remove it, or press Backspace while the message box is empty to remove the last one. You can prepare attachments while the agent answers; they stay in the draft until you send. Text on the clipboard still pastes as text.
 
-A message holds up to four images, at most 16 million pixels each and 8 MiB of encoded image data in total. An agent that does not accept images reports that clearly. The conversation shows image labels; the image content is sent to the agent, whose session keeps it. Switching to a different agent carries the labels with the conversation, so paste the image again if that agent needs to see it.
+A message holds up to four images, at most 16 million pixels each and 8 MiB of encoded image data in total. An agent that does not accept images reports that clearly. The full image is sent to the agent, whose session keeps it. Clackatoo keeps small previews (up to 256 pixels on a side) across window reconnects and daemon upgrades, including on remote connections. Each chat keeps up to 4 MiB of recent previews; older messages retain their image labels. Images sent before previews were supported, or history loaded anew from an agent session after a full daemon restart, show labels only. Switching to a different agent carries the labels with the conversation, so paste the image again if that agent needs to see it.
 
 ## The start page
 
