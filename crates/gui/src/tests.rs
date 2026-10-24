@@ -1114,6 +1114,33 @@ fn renders_a_chat_with_its_box_and_question() {
         use clackatoo_protocol::SettingKind;
         chat.open_menu(&[SettingKind::Model, SettingKind::Effort]);
     });
+    let mut fast = moved_chat_node();
+    fast.settings.push(clackatoo_protocol::Setting {
+        id: "fast".into(),
+        name: "Fast mode".into(),
+        kind: clackatoo_protocol::SettingKind::Other,
+        value: "on".into(),
+        choices: ["off", "on"]
+            .into_iter()
+            .map(|value| clackatoo_protocol::SettingChoice {
+                value: value.into(),
+                name: value.into(),
+                description: None,
+            })
+            .collect(),
+    });
+    render_chat_with(
+        "chat-menu-fast-tall",
+        fast,
+        &"A longer draft with several lines.\n".repeat(10),
+        1.0,
+        |chat| {
+            chat.open_menu(&[
+                clackatoo_protocol::SettingKind::Model,
+                clackatoo_protocol::SettingKind::Effort,
+            ]);
+        },
+    );
 }
 
 /// [`chat_node`], moved from Claude Code to Codex after its first turn,

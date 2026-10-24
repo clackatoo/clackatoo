@@ -15,9 +15,13 @@ type sonnet
 shot search
 keys <Esc>
 click 245 808
-click 626 456
-click 212 454
+click 626 480
+click 212 438
 shot favorites
+type sonnet
+shot favorites-search
+keys <BS><BS><BS><BS><BS><BS>
+shot favorites-restored
 keys <Esc>
 click 330 808
 shot permissions

@@ -206,6 +206,7 @@ pub(crate) enum Paint {
     Chosen,
     /// A quieter selection within the chat composer.
     ChatChosen,
+    ChatHover,
     Claude,
     Gemini,
     /// The dot by a workspace's name, by its place in the list.

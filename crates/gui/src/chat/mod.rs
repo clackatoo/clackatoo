@@ -92,6 +92,8 @@ pub(crate) struct Settled {
 enum Hit {
     ModelSearch,
     MenuSurface,
+    ModelRail,
+    FastMode,
     ModelFilter(picker::Filter),
     Favorite(String, String),
     RemoveImage(usize),
@@ -163,6 +165,7 @@ struct Menu {
     filter: picker::Filter,
     favorites: std::collections::BTreeSet<(String, String)>,
     offset: usize,
+    rail_offset: usize,
     reveal: bool,
     /// The settings it picks from, by their IDs: a section each.
     settings: Vec<String>,
@@ -790,7 +793,7 @@ impl ChatView {
             .map(|(hit, _)| hit);
         match hit {
             Some(Hit::Editor | Hit::ModelSearch) => Pointer::Text,
-            Some(Hit::MenuSurface) => Pointer::Arrow,
+            Some(Hit::MenuSurface | Hit::ModelRail) => Pointer::Arrow,
             Some(_) => Pointer::Hand,
             None if self.over_text(at) => Pointer::Text,
             None => Pointer::Arrow,
@@ -820,8 +823,14 @@ impl ChatView {
         // The button under an answer shows only while the mouse is over
         // its turn, so a long chat isn't a column of them.
         redraw |= self.hits.iter().any(|(hit, rect)| {
-            matches!(hit, Hit::Chip(_))
-                && contains(*rect, at) != self.mouse.is_some_and(|old| contains(*rect, old))
+            matches!(
+                hit,
+                Hit::Chip(_)
+                    | Hit::ModelFilter(_)
+                    | Hit::FastMode
+                    | Hit::Step { .. }
+                    | Hit::Reset { .. }
+            ) && contains(*rect, at) != self.mouse.is_some_and(|old| contains(*rect, old))
         });
         self.mouse = Some(at);
         let turn = self.turn_to_copy_at(at);
@@ -899,7 +908,7 @@ impl ChatView {
                 }
                 _ => None,
             });
-        if under.is_some() && under != menu.highlighted {
+        if under != menu.highlighted {
             menu.highlighted = under;
             return true;
         }
@@ -1509,6 +1518,7 @@ impl ChatView {
             reveal: true,
             ..Menu::default()
         };
+        menu.filter = picker::Filter::initial(self.agent(), &menu.favorites);
         menu.highlighted = (picker::rows(&self.offer(), &menu).iter())
             .find(|row| matches!(row, Row::Choice(choice) if choice.current))
             .and_then(Row::spot);
@@ -1528,7 +1538,7 @@ impl ChatView {
     fn offer(&self) -> picker::Offer<'_> {
         picker::Offer {
             settings: &self.node.settings,
-            agent: &self.node.agent,
+            agent: self.agent(),
             providers: &self.node.providers,
         }
     }
@@ -1597,6 +1607,8 @@ impl ChatView {
                     | Hit::Step { .. }
                     | Hit::Reset { .. }
                     | Hit::MenuSurface
+                    | Hit::ModelRail
+                    | Hit::FastMode
                     | Hit::ModelSearch
                     | Hit::ModelFilter(_)
                     | Hit::Favorite(..)
@@ -1605,10 +1617,24 @@ impl ChatView {
             self.menu = None;
         }
         match hit {
-            Some(Hit::ModelSearch | Hit::MenuSurface | Hit::Usage) => {}
+            Some(Hit::ModelSearch | Hit::MenuSurface | Hit::ModelRail | Hit::Usage) => {}
+            Some(Hit::FastMode) => {
+                if let Some(setting) = picker::fast_mode(&self.node.settings).cloned() {
+                    let value = self
+                        .menu
+                        .as_ref()
+                        .map_or(setting.value.as_str(), |m| m.value(&setting));
+                    self.slide_to(
+                        &setting.id,
+                        if value == "on" { "off" } else { "on" },
+                        settled,
+                    );
+                }
+            }
             Some(Hit::ModelFilter(filter)) => {
                 if let Some(menu) = &mut self.menu {
                     menu.filter = filter;
+                    menu.query.clear();
                     menu.offset = 0;
                     menu.highlighted = None;
                 }
@@ -1772,11 +1798,21 @@ impl ChatView {
     /// Scrolls `lines` lines up, or down if negative. Returns whether the
     /// view moved.
     pub(crate) fn scroll_lines(&mut self, lines: f32) -> bool {
+        let rail = self.mouse.is_some_and(|at| {
+            self.hits
+                .iter()
+                .any(|(hit, rect)| *hit == Hit::ModelRail && contains(*rect, at))
+        });
         if let Some(menu) = &mut self.menu {
+            let offset = if rail {
+                &mut menu.rail_offset
+            } else {
+                &mut menu.offset
+            };
             if lines > 0.0 {
-                menu.offset = menu.offset.saturating_sub(1);
+                *offset = offset.saturating_sub(1);
             } else if lines < 0.0 {
-                menu.offset = menu.offset.saturating_add(1);
+                *offset = offset.saturating_add(1);
             }
             menu.reveal = false;
             return true;
@@ -2564,15 +2600,8 @@ mod tests {
         ];
         // Every model known: nothing to ask the daemon.
         assert!(!view.open_menu(&[SettingKind::Model]));
-        // From Haiku, past Sonnet, to Codex's Luna.
-        for _ in 0..2 {
-            press(
-                &mut view,
-                &Key::Named(NamedKey::ArrowDown),
-                None,
-                Modifiers::default(),
-            );
-        }
+        // Search across providers from Claude's page.
+        typed(&mut view, "Luna");
         press(
             &mut view,
             &Key::Named(NamedKey::Enter),
@@ -2588,14 +2617,9 @@ mod tests {
             view.settle(&mut fonts).actions,
             [switch("codex", Some("gpt-6-luna"))]
         );
-        // Up from Haiku, round to the bottom: Gemini, to install.
+        // An uninstalled provider can also be found globally.
         view.open_menu(&[SettingKind::Model]);
-        press(
-            &mut view,
-            &Key::Named(NamedKey::ArrowUp),
-            None,
-            Modifiers::default(),
-        );
+        typed(&mut view, "Gemini");
         press(
             &mut view,
             &Key::Named(NamedKey::Enter),
@@ -2728,6 +2752,165 @@ mod tests {
             [set("model", "claude-opus-4-8")]
         );
         assert_eq!(view.editor.raw_text(), "keep this draft");
+    }
+
+    #[test]
+    fn model_search_is_global_favorites_first_and_restores_the_page() {
+        use clackatoo_protocol::{Provider, ProviderModels, SettingChoice};
+        let mut view = with_claude();
+        view.node.agent = "Claude Code".into();
+        view.node.providers.push(Provider {
+            agent: "codex".into(),
+            title: "Codex".into(),
+            models: ProviderModels::Known(vec![SettingChoice {
+                value: "codex-model".into(),
+                name: "Opus alternative".into(),
+                description: None,
+            }]),
+        });
+        view.open_menu(&[SettingKind::Model]);
+        let provider = picker::Filter::Provider("Claude Code".into());
+        assert_eq!(view.menu.as_ref().unwrap().filter, provider);
+        let favorite = ("Codex".into(), "codex-model".into());
+        view.menu.as_mut().unwrap().favorites.insert(favorite);
+        assert_eq!(
+            picker::Filter::initial(view.agent(), &view.menu.as_ref().unwrap().favorites),
+            picker::Filter::Favorites
+        );
+        view.append_search("opus");
+        view.search_changed();
+        let rows = picker::rows(&view.offer(), view.menu.as_ref().unwrap());
+        let choices: Vec<_> = rows
+            .iter()
+            .filter_map(|r| {
+                if let Row::Choice(c) = r {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(choices[0].value, "codex-model");
+        assert!(choices.iter().any(|c| c.value == "opus"));
+        assert_eq!(view.menu.as_ref().unwrap().filter, provider);
+        for _ in 0..4 {
+            key(&mut view, NamedKey::Backspace);
+        }
+        view.settle(&mut fonts());
+        assert!(view.menu.as_ref().unwrap().query.is_empty());
+        let rows = picker::rows(&view.offer(), view.menu.as_ref().unwrap());
+        assert!(
+            !rows
+                .iter()
+                .any(|r| matches!(r, Row::Choice(c) if c.value == "codex-model"))
+        );
+    }
+
+    #[test]
+    fn provider_pages_keep_the_same_bounds_and_scroll_separately() {
+        use clackatoo_protocol::{Provider, ProviderModels};
+        let mut view = with_claude();
+        view.node.providers = (0..20)
+            .map(|i| Provider {
+                agent: format!("agent-{i}"),
+                title: format!("Agent {i}"),
+                models: ProviderModels::Known(view.node.settings[0].choices.clone()),
+            })
+            .collect();
+        // More than the viewport on the current provider, two on another,
+        // and none in favorites: all three must keep identical bounds.
+        view.node.settings[0]
+            .choices
+            .extend((0..20).map(|i| clackatoo_protocol::SettingChoice {
+                value: format!("model-{i}"),
+                name: format!("Model {i}"),
+                description: None,
+            }));
+        let mut fonts = fonts();
+        view.paste(&"A tall draft\n".repeat(12));
+        view.settle(&mut fonts);
+        view.open_menu(&[SettingKind::Model, SettingKind::Effort]);
+        fixtures::paint(&mut view, &mut fonts);
+        let bounds =
+            |view: &ChatView, hit: &Hit| view.hits.iter().find(|(h, _)| h == hit).unwrap().1;
+        let popup = bounds(&view, &Hit::MenuSurface);
+        let chip = view
+            .hits
+            .iter()
+            .find(|(h, _)| matches!(h, Hit::Chip(ids) if ids.contains(&"model".to_owned())))
+            .unwrap()
+            .1;
+        assert!((4.0..12.0).contains(&(chip[1] - popup[1] - popup[3])));
+        view.menu.as_mut().unwrap().filter = picker::Filter::Provider("Agent 1".into());
+        fixtures::paint(&mut view, &mut fonts);
+        assert_eq!(
+            bounds(&view, &Hit::MenuSurface).map(f32::to_bits),
+            popup.map(f32::to_bits)
+        );
+        view.menu.as_mut().unwrap().filter = picker::Filter::Favorites;
+        fixtures::paint(&mut view, &mut fonts);
+        assert_eq!(
+            bounds(&view, &Hit::MenuSurface).map(f32::to_bits),
+            popup.map(f32::to_bits)
+        );
+        let rail = bounds(&view, &Hit::ModelRail);
+        view.hover([rail[0] + 2.0, rail[1] + 2.0]);
+        for _ in 0..10 {
+            view.scroll_lines(-1.0);
+        }
+        fixtures::paint(&mut view, &mut fonts);
+        assert_eq!(view.menu.as_ref().unwrap().rail_offset, 10);
+        assert_eq!(view.menu.as_ref().unwrap().offset, 0);
+        assert!(
+            view.hits
+                .iter()
+                .any(|(h, _)| *h == Hit::ModelFilter(picker::Filter::Provider("Agent 10".into())))
+        );
+        assert!(
+            view.hits
+                .iter()
+                .filter(|(h, _)| matches!(h, Hit::ModelFilter(_)))
+                .all(|(_, r)| r[1] >= rail[1] && r[1] + r[3] <= rail[1] + rail[3])
+        );
+    }
+
+    #[test]
+    fn fast_mode_uses_advertised_capability_and_keeps_the_picker_open() {
+        use clackatoo_protocol::SettingChoice;
+        let mut fonts = fonts();
+        for id in ["fast", "fast-mode"] {
+            let mut view = with_claude();
+            view.node.settings.push(Setting {
+                id: id.into(),
+                name: "Fast mode".into(),
+                kind: SettingKind::Other,
+                value: "off".into(),
+                choices: ["off", "on"]
+                    .into_iter()
+                    .map(|v| SettingChoice {
+                        name: v.into(),
+                        value: v.into(),
+                        description: None,
+                    })
+                    .collect(),
+            });
+            view.open_menu(&[SettingKind::Model, SettingKind::Effort]);
+            for expected in ["on", "off"] {
+                fixtures::paint(&mut view, &mut fonts);
+                let rect = view
+                    .hits
+                    .iter()
+                    .find(|(h, _)| *h == Hit::FastMode)
+                    .unwrap()
+                    .1;
+                view.press([rect[0] + 2.0, rect[1] + 2.0], 1, false);
+                assert_eq!(view.settle(&mut fonts).actions, [set(id, expected)]);
+                assert!(view.menu.is_some());
+            }
+            view.node.settings.pop();
+            fixtures::paint(&mut view, &mut fonts);
+            assert!(!view.hits.iter().any(|(h, _)| *h == Hit::FastMode));
+        }
     }
 
     #[test]

@@ -112,16 +112,11 @@ impl ChatView {
             .max(place.origin[1] + m.em(17.0))
             .min(place.origin[1] + place.size[1] - m.em(0.5));
         let search_height = m.em(3.2);
-        let footer = if slider.is_some() {
-            m.em(4.1)
-        } else {
-            m.em(0.6)
-        };
+        let footer = m.em(4.1);
         let row_height = m.em(3.2);
         let room = (bottom - place.origin[1] - m.em(0.5) - search_height - footer).max(row_height);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let visible = ((room / row_height) as usize).clamp(1, 7);
-        let count = choices.len().max(5).min(visible);
+        let count = ((room / row_height) as usize).clamp(1, 5);
         #[allow(clippy::cast_precision_loss)]
         let height = search_height + count as f32 * row_height + footer;
         let top = (bottom - height).max(place.origin[1] + m.em(0.5));
@@ -149,8 +144,8 @@ impl ChatView {
             &mut canvas,
             m,
             place,
-            [left, top, rail, bounds[3]],
-            &menu.filter,
+            [left, top, rail, bounds[3] - footer],
+            &menu,
         );
         self.model_search(
             &mut canvas,
@@ -176,6 +171,13 @@ impl ChatView {
                 &slider,
             );
         }
+        self.model_fast(
+            &mut canvas,
+            m,
+            place,
+            [left, bottom - footer, rail, footer],
+            &menu,
+        );
         for (_, hit) in &mut self.hits[hits_start..] {
             *hit = intersection(*hit, place.in_pane(bounds));
         }
@@ -190,11 +192,7 @@ impl ChatView {
         menu: &crate::chat::Menu,
     ) {
         let [content, top, content_width, search_height] = rect;
-        let placeholder = match &menu.filter {
-            Filter::All => "Search models…".to_owned(),
-            Filter::Favorites => "Search favorites…".to_owned(),
-            Filter::Provider(name) => format!("Search {name}…"),
-        };
+        let placeholder = "Search models…";
         icon(
             canvas,
             Icon::Search,
@@ -203,7 +201,7 @@ impl ChatView {
             Paint::Icon,
         );
         let query = if menu.query.is_empty() {
-            &placeholder
+            placeholder
         } else {
             &menu.query
         };
@@ -357,8 +355,20 @@ impl ChatView {
                 width - m.em(0.2),
                 m.em(1.8),
             ];
-            if selected {
-                canvas.fill(Fill::rounded(bounds, Paint::ChatChosen, m.em(0.4)));
+            if selected
+                || self
+                    .mouse
+                    .is_some_and(|at| crate::chat::contains(place.in_pane(bounds), at))
+            {
+                canvas.fill(Fill::rounded(
+                    bounds,
+                    if selected {
+                        Paint::ChatChosen
+                    } else {
+                        Paint::ChatHover
+                    },
+                    m.em(0.4),
+                ));
             }
             let laid = self.short_label(
                 canvas.fonts,
@@ -399,12 +409,9 @@ impl ChatView {
         m: Measures,
         place: Place,
         rect: [f32; 4],
-        selected: &Filter,
+        menu: &crate::chat::Menu,
     ) {
-        let mut entries = vec![
-            (Filter::All, Icon::Grid),
-            (Filter::Favorites, Icon::StarFilled),
-        ];
+        let mut entries = vec![(Filter::Favorites, Icon::StarFilled)];
         entries.push((
             Filter::Provider(self.agent().to_owned()),
             Icon::provider(self.agent()),
@@ -415,14 +422,27 @@ impl ChatView {
                 entries.push((entry, Icon::provider(&provider.title)));
             }
         }
-        for (index, (filter, mark)) in entries.into_iter().enumerate() {
+        self.hits.push((Hit::ModelRail, place.in_pane(rect)));
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let visible = ((rect[3] - m.em(0.5)).max(0.0) / m.em(2.8)) as usize;
+        let offset = menu.rail_offset.min(entries.len().saturating_sub(visible));
+        if let Some(menu) = &mut self.menu {
+            menu.rail_offset = offset;
+        }
+        for (index, (filter, mark)) in entries.into_iter().skip(offset).take(visible).enumerate() {
             #[allow(clippy::cast_precision_loss)]
             let y = rect[1] + m.em(0.5) + index as f32 * m.em(2.8);
             if y + m.em(2.5) > rect[1] + rect[3] {
                 break;
             }
             let bounds = [rect[0] + m.em(0.35), y, rect[2] - m.em(0.7), m.em(2.5)];
-            let active = filter == *selected;
+            let active = menu.query.is_empty() && filter == menu.filter;
+            if self
+                .mouse
+                .is_some_and(|at| crate::chat::contains(place.in_pane(bounds), at))
+            {
+                canvas.fill(Fill::rounded(bounds, Paint::ChatHover, m.em(0.4)));
+            }
             if active {
                 canvas.fill(Fill::rounded(
                     [
@@ -440,7 +460,7 @@ impl ChatView {
                 mark,
                 bounds,
                 m.em(1.45),
-                if active && matches!(mark, Icon::Grid | Icon::StarFilled) {
+                if active && mark == Icon::StarFilled {
                     Paint::Ink
                 } else {
                     icon_paint(mark)
@@ -448,6 +468,79 @@ impl ChatView {
             );
             self.hits
                 .push((Hit::ModelFilter(filter), place.in_pane(bounds)));
+        }
+    }
+
+    fn model_fast(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        place: Place,
+        rect: [f32; 4],
+        menu: &crate::chat::Menu,
+    ) {
+        let Some(setting) = picker::fast_mode(&self.node.settings) else {
+            return;
+        };
+        let enabled = menu.value(setting) == "on";
+        let bounds = [
+            rect[0] + m.em(0.35),
+            rect[1] + m.em(1.3),
+            rect[2] - m.em(0.7),
+            m.em(2.5),
+        ];
+        let hovered = self
+            .mouse
+            .is_some_and(|at| crate::chat::contains(place.in_pane(bounds), at));
+        if enabled || hovered {
+            canvas.fill(Fill::rounded(
+                bounds,
+                if enabled {
+                    Paint::ChatChosen
+                } else {
+                    Paint::ChatHover
+                },
+                m.em(0.4),
+            ));
+        }
+        icon(
+            canvas,
+            Icon::Bolt,
+            bounds,
+            m.em(1.45),
+            if enabled { Paint::Accent } else { Paint::Icon },
+        );
+        self.hits.push((Hit::FastMode, place.in_pane(bounds)));
+        if hovered {
+            let small = Measures::of(m.em * 0.8);
+            let label = self.box_label(
+                canvas.fonts,
+                small,
+                if enabled {
+                    "Fast mode on"
+                } else {
+                    "Fast mode off"
+                },
+                Tone::Plain,
+                f32::INFINITY,
+            );
+            let tip = [
+                rect[0] + m.em(0.3),
+                rect[1] - m.em(0.9),
+                label.width + m.em(1.0),
+                m.em(1.9),
+            ];
+            canvas.fill(
+                Fill::rounded(tip, Paint::Palette, m.em(0.4)).bordered(1.0, Paint::PaletteEdge),
+            );
+            draw_laid(
+                canvas,
+                small,
+                &label,
+                [tip[0] + m.em(0.5), tip[1] + m.em(0.35)],
+                tip[2],
+            );
+            self.keep_label(label);
         }
     }
 
@@ -502,7 +595,15 @@ impl ChatView {
             value: choice.value.clone(),
         };
         if menu.highlighted.as_ref() == Some(&spot) || choice.current {
-            canvas.fill(Fill::rounded(rect, Paint::ChatChosen, m.em(0.45)));
+            canvas.fill(Fill::rounded(
+                rect,
+                if choice.current {
+                    Paint::ChatChosen
+                } else {
+                    Paint::ChatHover
+                },
+                m.em(0.45),
+            ));
         }
         let star_width = m.em(2.1);
         let family_width = if choice.family.is_some() {

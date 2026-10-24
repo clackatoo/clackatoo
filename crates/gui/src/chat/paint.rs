@@ -1433,13 +1433,13 @@ impl ChatView {
             .as_ref()
             .is_some_and(|menu| menu.settings == settings);
         if open {
-            self.menu_anchor = Some([rect[0], frame.top, width, rect[3]]);
+            self.menu_anchor = Some(bounds);
         }
         let hovered = self
             .mouse
             .is_some_and(|at| super::contains(frame.place.in_pane(bounds), at));
         if open || hovered {
-            canvas.fill(Fill::rounded(bounds, Paint::Hover, m.em(0.45)));
+            canvas.fill(Fill::rounded(bounds, Paint::ChatHover, m.em(0.45)));
         }
         let side = m.em(1.15);
         let icon_rect = [
@@ -1686,7 +1686,7 @@ impl ChatView {
     }
 
     /// Draws the settings menu, opening upward from `anchor`: the left of
-    /// the chip that opened it, and the top of the box.
+    /// the chip that opened it, immediately above that chip.
     fn draw_menu(
         &mut self,
         paint: &mut TextPaint,

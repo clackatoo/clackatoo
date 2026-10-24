@@ -86,16 +86,17 @@ The circular gauge shows context used as a percentage in its centre. Its ring fi
 
 Hover over it, click it, or press `K` in normal mode for the detail: the tokens used of the context, and each limit, how much of it is used and when it resets, as `at 15:40` or `Tuesday 09:00`. The limits are the account's, so every Claude chat shows the latest, from whichever chat heard it; one past its reset time isn't shown. Codex doesn't share its limits, so a Codex chat shows its context alone; its own `/status` says them.
 
-Click a setting to open its menu, above the box. Up and Down move through it, Enter or a click picks, and Esc or a click elsewhere closes it. Shift+Tab steps through the modes without opening the menu.
+Click a setting to open its menu, immediately above that button. Up and Down move through it, Enter or a click picks, and Esc or a click elsewhere closes it. Shift+Tab steps through the modes without opening the menu.
 
 The model and effort share a searchable menu. Type to filter by model, provider or description, including pinned versions hidden inside families. Up and Down move through results, Enter picks, and Esc closes it without changing your draft. The mouse wheel scrolls the picker independently of the conversation.
 
-The left rail switches between all models, favorites and individual providers. Click a star beside a model to add or remove a favorite; favorites are saved on this machine and shared across its windows. Each row shows the provider below the model and a tick on the current model.
+The picker opens on favorites if you have any, otherwise the current provider. The left rail switches between favorites and individual providers. Search always covers every provider, placing matching favorites first; clearing the search returns to the previous page. The popup keeps a fixed height, with the provider rail and model list scrolling independently. Click a star beside a model to add or remove a favorite; favorites are saved on this machine and shared across its windows. Each row shows the provider below the model and a tick on the current model.
 
 The menu includes:
 
 - **Models by family:** Opus, Fable, Sonnet and Haiku, each with the version it picks. Picking a family picks its newest version, and keeps up as new ones come out.
 - **A family's versions:** the `▸` button at the end of its row, or Right, shows its other versions, to pin the chat to one. Left hides them. A chat on a pinned version opens the menu with that version shown and ticked.
+- **Fast mode:** the lightning bolt in the rail beside reasoning effort toggles fast mode. It appears only when the current model advertises support, and lights up while enabled. The adapter controls its availability and account restrictions.
 - **Named effort choices**, from Low to Max: click a choice, or with the effort row selected, press Left and Right. The menu stays open as you change it. Default leaves effort to Claude Code, which picks it for each model.
 
 Models from another agent are grouped only when one choice in a family always means its newest version, as Claude Code's `opus` does. Otherwise they're listed one per row.
@@ -379,7 +380,7 @@ An upgrade stops the browser; the next page starts it again.
 - The phone's chats don't colour code. Sideways swipes on a trackpad don't scroll tables: use Shift and the wheel.
 - Moving a file in the explorer forgets which of its lines agents changed. Rejecting every change of a file an agent made leaves it empty, rather than in the trash. Reviews of everything since the base stop past about 8 MB of changes: narrow them with `:Review turn` or `chat`.
 - A file the agent changed with a command, or that clackatoo couldn't read before the agent wrote it, can't be undone. The chat says which.
-- There's no menu of agents to pick from: name one after `:Agent`. Codex's Plan and Fast modes can't be changed from the box.
+- There's no menu of agents to pick from: name one after `:Agent`. Codex's Plan mode can't be changed from the box.
 - A file changed both by the agent and by something else at once isn't taken in, and the bar says so.
 - Agents can't yet see what you've selected in an editor. Commands run with the agent's own tool, rather than `run_in_terminal`, show their output once they're done.
 - Limits come only as Claude Code's adapter says them, when they change: after an upgrade they're blank until the next. Per-model weekly limits and extra usage aren't shown.

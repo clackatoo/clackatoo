@@ -719,6 +719,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Context percentage in a ring beside Send, clearer model icons and named reasoning-effort choices",
     },
+    News {
+        id: "modelnavigation",
+        date: "2026-10-24",
+        lesson: "agents",
+        what: "Favorites-first global model search, fixed-size picker, fast-mode bolt and popups above their buttons",
+    },
 ];
 
 impl News {

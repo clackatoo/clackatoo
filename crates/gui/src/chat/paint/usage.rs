@@ -110,12 +110,12 @@ impl ChatView {
         self.keep_label(laid);
         self.hits.push((Hit::Usage, frame.place.in_pane(rect)));
         if self.detail.is_some() {
-            self.detail_anchor = Some([rect[0] + rect[2], frame.top]);
+            self.detail_anchor = Some([rect[0] + rect[2], rect[1]]);
         }
     }
 
     /// Draws the detail, over everything, opening upward from `anchor`:
-    /// the meter's right, and the top of the box.
+    /// the meter's right and top.
     pub(super) fn draw_detail(
         &mut self,
         paint: &mut TextPaint,

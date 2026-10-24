@@ -743,6 +743,31 @@ pub(super) enum Filter {
     Provider(String),
 }
 
+impl Filter {
+    pub(super) fn initial(
+        agent: &str,
+        favorites: &std::collections::BTreeSet<(String, String)>,
+    ) -> Self {
+        if favorites.is_empty() {
+            Self::Provider(agent.to_owned())
+        } else {
+            Self::Favorites
+        }
+    }
+}
+
+/// Both installed ACP adapters advertise this select only for models supporting
+/// fast mode. Use their capability rather than guessing from a model's name.
+pub(super) fn fast_mode(settings: &[Setting]) -> Option<&Setting> {
+    settings.iter().find(|setting| {
+        setting.kind == SettingKind::Other
+            && matches!(setting.id.as_str(), "fast" | "fast-mode")
+            && ["on", "off"]
+                .iter()
+                .all(|value| setting.choices.iter().any(|c| c.value == *value))
+    })
+}
+
 pub(super) fn provider_name<'a>(offer: &'a Offer<'_>, choice: &ChoiceRow) -> &'a str {
     switch_to(&choice.setting)
         .and_then(|agent| offer.providers.iter().find(|p| p.agent == agent))
@@ -754,7 +779,8 @@ fn filter_rows(offer: &Offer<'_>, menu: &Menu, rows: Vec<Row>) -> Vec<Row> {
         return rows;
     }
     let query = menu.query.to_lowercase();
-    rows.into_iter()
+    let mut rows: Vec<_> = rows
+        .into_iter()
         .filter(|row| {
             let Row::Choice(choice) = row else {
                 return true;
@@ -767,7 +793,7 @@ fn filter_rows(offer: &Offer<'_>, menu: &Menu, rows: Vec<Row>) -> Vec<Row> {
                     .contains(&(provider.to_owned(), choice.value.clone())),
                 Filter::Provider(name) => name == provider,
             };
-            included
+            (included || !query.is_empty())
                 && (query.is_empty()
                     || format!(
                         "{} {} {} {}",
@@ -779,5 +805,21 @@ fn filter_rows(offer: &Offer<'_>, menu: &Menu, rows: Vec<Row>) -> Vec<Row> {
                     .to_lowercase()
                     .contains(&query))
         })
-        .collect()
+        .collect();
+    if !query.is_empty() {
+        // Stable within each group, so searching never scrambles provider order.
+        rows.sort_by_key(|row| match row {
+            Row::Choice(choice)
+                if menu.favorites.contains(&(
+                    provider_name(offer, choice).to_owned(),
+                    choice.value.clone(),
+                )) =>
+            {
+                0
+            }
+            Row::Choice(_) => 1,
+            _ => 2,
+        });
+    }
+    rows
 }
