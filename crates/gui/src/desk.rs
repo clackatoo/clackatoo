@@ -574,7 +574,7 @@ impl Desk {
         if pane.prompting() {
             Some(TextTarget::Bar)
         } else {
-            (pane.mode == Mode::Insert).then_some(TextTarget::Pane)
+            (pane.mode == Mode::Insert || pane.chat_searching_models()).then_some(TextTarget::Pane)
         }
     }
 
@@ -1908,6 +1908,12 @@ impl Desk {
                 return true;
             }
             self.close_finder();
+        } else if self
+            .focused_pane()
+            .and_then(Pane::chat_mut)
+            .is_some_and(|chat| chat.menu_press(press))
+        {
+            return true;
         } else if let Some(chord) = Chord::of(press) {
             // The config's keypress handlers come first, then the bindings.
             if handlers && !self.script.typing && self.keypress_handled(chord, press) {
@@ -2074,7 +2080,7 @@ impl Desk {
         let id = self.focused_terminal()?;
         self.panes
             .get(&id)
-            .filter(|pane| pane.is_chat())
+            .filter(|pane| pane.is_chat() && !pane.chat_searching_models())
             .map(|_| id)
     }
 

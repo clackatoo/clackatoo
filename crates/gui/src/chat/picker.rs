@@ -155,7 +155,16 @@ pub(super) fn rows(offer: &Offer<'_>, menu: &Menu) -> Vec<Row> {
         match slider {
             Some(slider) => rows.push(Row::Slider(slider)),
             None if setting.kind == SettingKind::Model => {
-                family_rows(setting, menu.expanded.as_deref(), &mut rows);
+                if menu.query.is_empty() && menu.filter != Filter::Favorites {
+                    family_rows(setting, menu.expanded.as_deref(), &mut rows);
+                } else {
+                    rows.extend(setting.choices.iter().map(|c| {
+                        Row::Choice(ChoiceRow {
+                            current: c.value == setting.value,
+                            ..plain(setting, c)
+                        })
+                    }));
+                }
             }
             None => rows.extend(setting.choices.iter().map(|choice| {
                 Row::Choice(ChoiceRow {
@@ -167,16 +176,26 @@ pub(super) fn rows(offer: &Offer<'_>, menu: &Menu) -> Vec<Row> {
     }
     if others {
         for provider in offer.providers {
-            provider_rows(provider, menu.expanded.as_deref(), &mut rows);
+            provider_rows(
+                provider,
+                menu.expanded.as_deref(),
+                !menu.query.is_empty() || menu.filter == Filter::Favorites,
+                &mut rows,
+            );
         }
     }
-    rows
+    filter_rows(offer, menu, rows)
 }
 
 /// The rows for another agent, `provider`: its name, and its models to
 /// move the chat to, or one row that moves it on the agent's own choice
 /// of model while they aren't known.
-fn provider_rows(provider: &Provider, expanded: Option<&str>, rows: &mut Vec<Row>) {
+fn provider_rows(
+    provider: &Provider,
+    expanded: Option<&str>,
+    searching: bool,
+    rows: &mut Vec<Row>,
+) {
     let aside = match &provider.models {
         ProviderModels::Known(_) => None,
         ProviderModels::Unknown | ProviderModels::Learning => Some("loading…"),
@@ -198,7 +217,16 @@ fn provider_rows(provider: &Provider, expanded: Option<&str>, rows: &mut Vec<Row
     let (name, description) = match &provider.models {
         ProviderModels::Known(choices) => {
             setting.choices.clone_from(choices);
-            family_rows(&setting, expanded, rows);
+            if searching {
+                rows.extend(
+                    setting
+                        .choices
+                        .iter()
+                        .map(|c| Row::Choice(plain(&setting, c))),
+                );
+            } else {
+                family_rows(&setting, expanded, rows);
+            }
             return;
         }
         ProviderModels::NotInstalled => ("Install and switch".to_owned(), None),
@@ -477,6 +505,7 @@ mod tests {
             highlighted: None,
             expanded: expanded.map(str::to_owned),
             held: None,
+            ..Menu::default()
         }
     }
 
@@ -565,6 +594,31 @@ mod tests {
         // The effort menu alone offers no other agents.
         let rows = super::rows(&offer, &menu(&["effort"], None));
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn search_finds_pinned_versions_and_favorites_are_scoped_to_provider() {
+        let mut menu = menu(&["model", "effort"], None);
+        menu.query = "oPuS 4.8".into();
+        let found = rows(&[models("opus"), effort("high")], &menu);
+        let choices: Vec<_> = found
+            .iter()
+            .filter_map(|row| match row {
+                Row::Choice(c) => Some(c.value.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(choices, ["claude-opus-4-8"]);
+        assert!(found.iter().any(|row| matches!(row, Row::Slider(_))));
+        menu.query.clear();
+        menu.filter = Filter::Favorites;
+        menu.favorites
+            .insert(("Claude Code".into(), "claude-opus-4-8".into()));
+        assert_eq!(shown(&rows(&[models("opus")], &menu)).len(), 1);
+        menu.favorites = [("Codex".into(), "claude-opus-4-8".into())].into();
+        assert!(shown(&rows(&[models("opus")], &menu)).is_empty());
+        menu.filter = Filter::Provider("Codex".into());
+        assert!(shown(&rows(&[models("opus")], &menu)).is_empty());
     }
 
     #[test]
@@ -678,4 +732,52 @@ mod tests {
         };
         assert_eq!((slider.at, slider.reset.as_ref()), (Some(0), None));
     }
+}
+
+/// Which models the rail shows. This is window UI state, not an agent setting.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) enum Filter {
+    #[default]
+    All,
+    Favorites,
+    Provider(String),
+}
+
+pub(super) fn provider_name<'a>(offer: &'a Offer<'_>, choice: &ChoiceRow) -> &'a str {
+    switch_to(&choice.setting)
+        .and_then(|agent| offer.providers.iter().find(|p| p.agent == agent))
+        .map_or(offer.agent, |provider| provider.title.as_str())
+}
+
+fn filter_rows(offer: &Offer<'_>, menu: &Menu, rows: Vec<Row>) -> Vec<Row> {
+    if !offers_models(offer, menu) {
+        return rows;
+    }
+    let query = menu.query.to_lowercase();
+    rows.into_iter()
+        .filter(|row| {
+            let Row::Choice(choice) = row else {
+                return true;
+            };
+            let provider = provider_name(offer, choice);
+            let included = match &menu.filter {
+                Filter::All => true,
+                Filter::Favorites => menu
+                    .favorites
+                    .contains(&(provider.to_owned(), choice.value.clone())),
+                Filter::Provider(name) => name == provider,
+            };
+            included
+                && (query.is_empty()
+                    || format!(
+                        "{} {} {} {}",
+                        provider,
+                        choice.name,
+                        choice.version.as_deref().unwrap_or(""),
+                        choice.description.as_deref().unwrap_or("")
+                    )
+                    .to_lowercase()
+                    .contains(&query))
+        })
+        .collect()
 }

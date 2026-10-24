@@ -11,6 +11,7 @@ mod cards;
 mod divider;
 mod edge;
 mod fold;
+mod models;
 mod select;
 mod tables;
 mod usage;
@@ -108,6 +109,8 @@ pub(super) struct Cache {
 struct Labels {
     last: HashMap<(String, Tone), Laid>,
     now: HashMap<(String, Tone), Laid>,
+    shortened: HashMap<(String, u32, Tone), String>,
+    previous_shortened: HashMap<(String, u32, Tone), String>,
 }
 
 /// What's kept of one turn between frames.
@@ -220,6 +223,7 @@ impl ChatView {
         // out; what it doesn't say again goes.
         let labels = &mut self.cache.labels;
         labels.last = std::mem::take(&mut labels.now);
+        labels.previous_shortened = std::mem::take(&mut labels.shortened);
 
         let mut paint = TextPaint::default();
         self.hits.clear();
@@ -275,7 +279,12 @@ impl ChatView {
         self.cursor_into_view();
         self.cursor_on_arrival();
         let label = self.copy_label(canvas.fonts, m);
-        self.draw_reading(&mut canvas, m, origin, (caret, label));
+        self.draw_reading(
+            &mut canvas,
+            m,
+            origin,
+            (caret && self.menu.is_none(), label),
+        );
         if self.node.turns.is_empty() && matches!(self.node.state, ChatState::Ready) {
             self.draw_empty(
                 &mut canvas,
@@ -990,7 +999,7 @@ impl ChatView {
         place: Place,
         caret: bool,
     ) -> f32 {
-        let pad = m.em(0.9);
+        let pad = m.em(1.1);
         let inner = (place.column - 2.0 * pad).max(m.em(4.0));
         let question = self.lay_out_question(fonts, m, inner);
         let editor_height = if question.is_none() {
@@ -1000,11 +1009,10 @@ impl ChatView {
         } else {
             0.0
         };
-        let content_height = question
-            .as_ref()
-            .map_or(editor_height.min(m.em(LINE * EDITOR_LINES)), |question| {
-                question.height
-            });
+        let content_height = question.as_ref().map_or(
+            editor_height.min(m.em(LINE * EDITOR_LINES)).max(m.em(3.6)),
+            |question| question.height,
+        );
         let attachments = if question.is_none() {
             self.images.len()
         } else {
@@ -1023,11 +1031,16 @@ impl ChatView {
         } else {
             row_height + m.em(0.7)
         };
-        let height = pad + content_height + image_height + m.em(0.4) + m.em(2.0) + m.em(0.5);
+        let height = pad + content_height + image_height + m.em(0.6) + m.em(2.2) + m.em(0.7);
+        let footer = if self.node.usage.is_some() {
+            m.em(2.4)
+        } else {
+            m.em(0.8)
+        };
         let frame = BoxFrame {
             place,
             left: place.origin[0] + place.left,
-            top: place.origin[1] + place.size[1] - m.em(1.0) - height,
+            top: place.origin[1] + place.size[1] - footer - height,
             height,
             inner,
             pad,
@@ -1047,12 +1060,18 @@ impl ChatView {
         };
         let bounds = [frame.left, frame.top, place.column, height];
         let shadow = [bounds[0], bounds[1] + m.em(0.15), bounds[2], bounds[3]];
-        canvas.fill(Fill::rounded(shadow, Paint::Shadow, m.em(0.9)));
+        canvas.fill(Fill::rounded(shadow, Paint::Shadow, m.em(1.5)));
         canvas
-            .fill(Fill::rounded(bounds, Paint::Raised, m.em(0.9)).bordered(1.0, Paint::RaisedEdge));
+            .fill(Fill::rounded(bounds, Paint::Raised, m.em(1.5)).bordered(1.0, Paint::RaisedEdge));
         match question {
             Some(question) => self.draw_question(&mut canvas, m, &frame, question),
-            None => self.draw_editor(&mut canvas, m, &frame, editor_height, caret),
+            None => self.draw_editor(
+                &mut canvas,
+                m,
+                &frame,
+                editor_height,
+                caret && self.menu.is_none(),
+            ),
         }
         for index in 0..attachments {
             let x =
@@ -1063,7 +1082,18 @@ impl ChatView {
         }
         self.draw_send(&mut canvas, m, &frame);
         self.draw_controls(&mut canvas, m, &frame);
-        height + m.em(1.0)
+        self.draw_meter(
+            &mut canvas,
+            m,
+            &frame,
+            (
+                frame.left + place.column - pad,
+                frame.left + pad,
+                frame.top + height + m.em(0.25),
+                m.em(1.6),
+            ),
+        );
+        height + footer
     }
 
     /// One draft thumbnail and its remove button, above the image pass.
@@ -1284,16 +1314,16 @@ impl ChatView {
             (Hit::Send, "↑")
         };
         let lit = busy || ready;
-        let size = m.em(2.0);
+        let size = m.em(2.2);
         let rect = [
-            frame.left + frame.place.column - frame.pad * 0.7 - size,
-            frame.top + frame.height - m.em(0.5) - size,
+            frame.left + frame.place.column - frame.pad - size,
+            frame.top + frame.height - m.em(0.7) - size,
             size,
             size,
         ];
         canvas.fill(Fill::rounded(
             rect,
-            if lit { Paint::Accent } else { Paint::Hover },
+            if lit { Paint::Accent } else { Paint::Chosen },
             size / 2.0,
         ));
         let tone = if lit { Tone::OnAccent } else { Tone::Muted };
@@ -1309,78 +1339,134 @@ impl ChatView {
 }
 
 impl ChatView {
-    /// Draws the box's controls along its bottom: the mode, what the agent
-    /// may do with clackatoo's tools, and whether it drives the browser,
-    /// on the left, and on the right,
-    /// by the send button, how much context the chat fills and the model
-    /// and effort.
+    /// Model and permissions at the left, clipboard attachment at the right.
     fn draw_controls(&mut self, canvas: &mut Canvas<'_>, m: Measures, frame: &BoxFrame) {
-        let size = m.em(2.0);
-        let top = frame.top + frame.height - m.em(0.5) - size;
-        let mut right = frame.left + frame.place.column - frame.pad * 0.7 - size - m.em(0.4);
+        let size = m.em(2.2);
+        let top = frame.top + frame.height - m.em(0.7) - size;
+        let right = frame.left + frame.place.column - frame.pad - 2.0 * size - m.em(0.5);
         let of = |kind| {
-            (self.node.settings.iter())
+            self.node
+                .settings
+                .iter()
                 .find(|setting| setting.kind == kind)
                 .cloned()
         };
-        let (mode, model, effort, tools, browser) = (
-            of(SettingKind::Mode),
-            of(SettingKind::Model),
-            of(SettingKind::Effort),
-            of(SettingKind::Tools),
-            of(SettingKind::Browser),
+        let models: Vec<Setting> = of(SettingKind::Model)
+            .into_iter()
+            .chain(of(SettingKind::Effort))
+            .collect();
+        let permissions: Vec<Setting> =
+            [SettingKind::Mode, SettingKind::Tools, SettingKind::Browser]
+                .into_iter()
+                .filter_map(of)
+                .collect();
+        let start = frame.left + frame.pad - m.em(0.6);
+        let room = (right - start).max(m.em(2.0));
+        let permissions_label = permissions
+            .iter()
+            .find(|s| s.kind == SettingKind::Mode)
+            .map_or_else(|| "Permissions".to_owned(), chosen_name);
+        let permission_text = format!("◇  {permissions_label}  ▾");
+        let permission = self.box_label(
+            canvas.fonts,
+            m,
+            &permission_text,
+            Tone::Muted,
+            f32::INFINITY,
         );
-
-        let picked: Vec<Setting> = model.into_iter().chain(effort).collect();
-        if !picked.is_empty() {
-            let label = picked
+        let permission_width = (permission.width + m.em(1.2)).min(room * 0.42);
+        self.keep_label(permission);
+        let model_room = (room - permission_width - m.em(0.8)).max(m.em(2.0));
+        if !models.is_empty() {
+            let label = models
                 .iter()
                 .map(chosen_name)
                 .collect::<Vec<_>>()
                 .join(" · ");
-            let label = format!("{label}  ▾");
-            let laid = self.box_label(canvas.fonts, m, &label, Tone::Muted, frame.inner);
-            let width = laid.width + m.em(1.2);
-            let rect = [right - width, top, width, size];
-            let ids = picked.into_iter().map(|setting| setting.id).collect();
-            self.draw_chip(canvas, m, frame, rect, &laid, ids);
+            let label = format!("{}  {label}  ▾", models::symbol(self.agent()));
+            let laid =
+                self.short_label(canvas.fonts, m, &label, model_room - m.em(1.2), Tone::Plain);
+            let width = (laid.width + m.em(1.2)).min(model_room);
+            self.draw_chip(
+                canvas,
+                m,
+                frame,
+                [start, top, width, size],
+                &laid,
+                models.into_iter().map(|s| s.id).collect(),
+            );
             self.keep_label(laid);
-            right = rect[0] - m.em(0.6);
-        }
-        // The chips on the left first, for the meter to have the room
-        // they leave: it gives way first, down to its bar, and then the
-        // chips that would run under it go.
-        let start = frame.left + frame.pad * 0.4;
-        let gap = m.em(0.35);
-        let chips = [
-            mode.map(|mode| (format!("{}  ▾", chosen_name(&mode)), mode.id)),
-            tools.map(|tools| (format!("Tools: {}  ▾", chosen_name(&tools)), tools.id)),
-            browser.map(|browser| {
-                let label = format!("Browser: {}  ▾", chosen_name(&browser));
-                (label, browser.id)
-            }),
-        ];
-        let chips: Vec<(Laid, String)> = (chips.into_iter().flatten())
-            .map(|(label, id)| {
-                let laid = self.box_label(canvas.fonts, m, &label, Tone::Muted, frame.inner);
-                (laid, id)
-            })
-            .collect();
-        let chips_end =
-            (chips.iter()).fold(start, |left, (laid, _)| left + laid.width + m.em(1.2) + gap);
-        let meter = self.draw_meter(canvas, m, frame, (right, chips_end, top, size));
-        let mut left = start;
-        let mut room = true;
-        for (laid, id) in chips {
-            let width = laid.width + m.em(1.2);
-            room &= left + width <= meter - gap;
-            if room {
-                let rect = [left, top, width, size];
-                self.draw_chip(canvas, m, frame, rect, &laid, vec![id]);
-                left += width + gap;
+            let left = start + width + m.em(0.45);
+            canvas.fill(Fill::solid(
+                [left, top + m.em(0.5), 1.0, size - m.em(1.0)],
+                Paint::RaisedEdge,
+            ));
+            if !permissions.is_empty() {
+                let label = self.short_label(
+                    canvas.fonts,
+                    m,
+                    &permission_text,
+                    permission_width - m.em(1.2),
+                    Tone::Muted,
+                );
+                self.draw_chip(
+                    canvas,
+                    m,
+                    frame,
+                    [left + m.em(0.35), top, permission_width, size],
+                    &label,
+                    permissions.into_iter().map(|s| s.id).collect(),
+                );
+                self.keep_label(label);
             }
-            self.keep_label(laid);
+        } else if !permissions.is_empty() {
+            let permission = self.short_label(
+                canvas.fonts,
+                m,
+                &permission_text,
+                room - m.em(1.2),
+                Tone::Muted,
+            );
+            self.draw_chip(
+                canvas,
+                m,
+                frame,
+                [start, top, room, size],
+                &permission,
+                permissions.into_iter().map(|s| s.id).collect(),
+            );
+            self.keep_label(permission);
         }
+        self.draw_attach_button(canvas, m, frame, top);
+    }
+
+    fn draw_attach_button(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        frame: &BoxFrame,
+        top: f32,
+    ) {
+        let size = m.em(2.2);
+        let rect = [
+            frame.left + frame.place.column - frame.pad - 2.0 * size - m.em(0.35),
+            top,
+            size,
+            size,
+        ];
+        let attach = self.box_label(canvas.fonts, m, "+", Tone::Muted, size);
+        draw_laid(
+            canvas,
+            m,
+            &attach,
+            [
+                rect[0] + (size - attach.width) / 2.0,
+                top + (size - attach.height) / 2.0,
+            ],
+            size,
+        );
+        self.keep_label(attach);
+        self.hits.push((Hit::Attach, frame.place.in_pane(rect)));
     }
 
     /// Draws a chip that opens the menu for `settings`, lit while it's
@@ -1399,11 +1485,9 @@ impl ChatView {
             .as_ref()
             .is_some_and(|menu| menu.settings == settings);
         // The menu opens above the box, lined up with the chip.
-        canvas.fill(Fill::rounded(
-            rect,
-            if open { Paint::Hover } else { Paint::Code },
-            m.em(0.5),
-        ));
+        if open {
+            canvas.fill(Fill::rounded(rect, Paint::Hover, m.em(0.5)));
+        }
         if open {
             self.menu_anchor = Some([rect[0], frame.top, rect[2], rect[3]]);
         }
@@ -1430,7 +1514,12 @@ impl ChatView {
         }
         let mark = m.em(1.6);
         let mut x = rect[0] + m.em(0.4);
-        let top = rect[1] + (rect[3] - choice.name.height) / 2.0;
+        let top = rect[1]
+            + if choice.description.is_some() {
+                m.em(0.3)
+            } else {
+                (rect[3] - choice.name.height) / 2.0
+            };
         if choice.row.current {
             let tick = lay_out(
                 &mut self.layout_cx,
@@ -1450,17 +1539,18 @@ impl ChatView {
         if let Some(version) = &choice.version {
             draw_laid(canvas, m, version, [x + m.em(0.35), top], rect[2]);
         }
-        // Descriptions line up, after the widest name.
-        x = names + column.max(choice.named(m));
-        for (gap, laid) in [
-            (m.em(1.2), choice.description.as_ref()),
-            (m.em(0.8), choice.recommended.as_ref()),
-        ] {
-            if let Some(laid) = laid {
-                x += gap;
-                draw_laid(canvas, m, laid, [x, top], rect[2]);
-                x += laid.width;
-            }
+        if let Some(description) = &choice.description {
+            draw_laid(
+                canvas,
+                m,
+                description,
+                [names, top + choice.name.height + m.em(0.1)],
+                rect[2],
+            );
+        }
+        if let Some(recommended) = &choice.recommended {
+            x = names + column.max(choice.named(m)) + m.em(0.8);
+            draw_laid(canvas, m, recommended, [x, top], rect[2]);
         }
         if let Some((family, open)) = &choice.row.family {
             let size = m.em(1.5);
@@ -1630,7 +1720,12 @@ impl ChatView {
         let Some(menu) = self.menu.clone() else {
             return;
         };
-        let rows = self.menu_rows(fonts, m, &menu, place.size[0]);
+        if picker::offers_models(&self.offer(), &menu) {
+            self.draw_models(paint, fonts, m, place, anchor);
+            return;
+        }
+        let menu_width = m.em(28.0).min(place.size[0] - m.em(1.0));
+        let rows = self.menu_rows(fonts, m, &menu, (menu_width - m.em(3.4)).max(m.em(2.0)));
         let pad = m.em(0.4);
         // The width of the widest name a description follows.
         let column = (rows.iter())
@@ -1644,12 +1739,14 @@ impl ChatView {
             .fold(0.0, f32::max)
             + m.em(1.4);
         let height = 2.0 * pad + rows.iter().map(|row| row.height(m)).sum::<f32>();
-        let width = width.min(place.size[0] - m.em(1.0));
+        let width = width.min(menu_width);
         let left = anchor[0].clamp(
             place.origin[0] + m.em(0.5),
             (place.origin[0] + place.size[0] - width - m.em(0.5)).max(place.origin[0]),
         );
-        let bottom = anchor[1] - m.em(0.4);
+        let bottom = (anchor[1] - m.em(0.4))
+            .max(place.origin[1] + m.em(17.0))
+            .min(place.origin[1] + place.size[1] - m.em(0.5));
         let top = (bottom - height).max(place.origin[1] + m.em(0.5));
         let bounds = [left, top, width, bottom - top];
         let mut canvas = Canvas {
@@ -1673,23 +1770,65 @@ impl ChatView {
             Fill::rounded(bounds, Paint::Palette, m.em(0.8)).bordered(1.0, Paint::PaletteEdge),
         );
         canvas.clip = bounds;
+        self.hits.push((Hit::MenuSurface, place.in_pane(bounds)));
+        let available = (bounds[3] - 2.0 * pad).max(0.0);
+        let mut offset = menu.offset.min(rows.len().saturating_sub(1));
+        if menu.reveal
+            && let Some(at) = rows
+                .iter()
+                .position(|row| row.spot() == menu.highlighted && menu.highlighted.is_some())
+        {
+            if at < offset {
+                offset = at;
+            }
+            while offset < at
+                && rows[offset..=at].iter().map(|r| r.height(m)).sum::<f32>() > available
+            {
+                offset += 1;
+            }
+        }
+        if let Some(menu) = &mut self.menu {
+            menu.offset = offset;
+            menu.reveal = false;
+        }
+        self.draw_menu_rows(
+            &mut canvas,
+            m,
+            place,
+            rows.into_iter().skip(offset),
+            menu.highlighted.as_ref(),
+            column,
+        );
+    }
+
+    fn draw_menu_rows(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        place: Place,
+        rows: impl Iterator<Item = MenuRow>,
+        highlighted: Option<&Spot>,
+        column: f32,
+    ) {
+        let bounds = canvas.clip;
+        let [left, top, width, height] = bounds;
+        let bottom = top + height;
+        let pad = m.em(0.4);
         let mut y = top + pad;
         for menu_row in rows {
+            if y >= bottom - pad {
+                break;
+            }
+            let hits_start = self.hits.len();
             let height = menu_row.height(m);
             let rect = [left + pad, y, width - 2.0 * pad, height];
             match menu_row {
                 MenuRow::Heading { name, aside } => {
                     let middle = |laid: &Laid| y + (height - laid.height) / 2.0;
-                    draw_laid(
-                        &mut canvas,
-                        m,
-                        &name,
-                        [left + m.em(0.8), middle(&name)],
-                        width,
-                    );
+                    draw_laid(canvas, m, &name, [left + m.em(0.8), middle(&name)], width);
                     if let Some(aside) = aside {
                         let x = left + width - m.em(0.8) - aside.width;
-                        draw_laid(&mut canvas, m, &aside, [x, middle(&aside)], width);
+                        draw_laid(canvas, m, &aside, [x, middle(&aside)], width);
                     }
                 }
                 MenuRow::Choice(choice) => {
@@ -1697,8 +1836,8 @@ impl ChatView {
                         setting: choice.row.setting.clone(),
                         value: choice.row.value.clone(),
                     };
-                    let lit = menu.highlighted.as_ref() == Some(&spot);
-                    self.draw_choice(&mut canvas, m, place, rect, &choice, (lit, column));
+                    let lit = highlighted == Some(&spot);
+                    self.draw_choice(canvas, m, place, rect, &choice, (lit, column));
                     // Under the versions button, which goes over it.
                     let pick = Hit::Pick {
                         setting: choice.row.setting,
@@ -1711,11 +1850,14 @@ impl ChatView {
                     self.hits.insert(at, (pick, place.in_pane(rect)));
                 }
                 MenuRow::Slider { row, reset } => {
-                    if menu.highlighted.as_ref() == Some(&Spot::Slider(row.setting.clone())) {
+                    if highlighted == Some(&Spot::Slider(row.setting.clone())) {
                         canvas.fill(Fill::rounded(rect, Paint::Chosen, m.em(0.5)));
                     }
-                    self.draw_slider(&mut canvas, m, place, rect, &row, reset.as_ref());
+                    self.draw_slider(canvas, m, place, rect, &row, reset.as_ref());
                 }
+            }
+            for (_, hit) in &mut self.hits[hits_start..] {
+                *hit = intersection(*hit, place.in_pane(bounds));
             }
             y += height;
         }
@@ -1757,11 +1899,27 @@ const NESTED: f32 = 1.2;
 
 impl MenuRow {
     fn height(&self, m: Measures) -> f32 {
+        if let Self::Choice(choice) = self
+            && let Some(description) = &choice.description
+        {
+            return choice.name.height + description.height + m.em(0.7);
+        }
         m.em(match self {
             Self::Heading { .. } => 1.6,
             Self::Choice(_) => 1.9,
             Self::Slider { .. } => 2.4,
         })
+    }
+
+    fn spot(&self) -> Option<Spot> {
+        match self {
+            Self::Choice(choice) => Some(Spot::Choice {
+                setting: choice.row.setting.clone(),
+                value: choice.row.value.clone(),
+            }),
+            Self::Slider { row, .. } => Some(Spot::Slider(row.setting.clone())),
+            Self::Heading { .. } => None,
+        }
     }
 
     /// The width it needs, with the menu's padding left out, and its
@@ -1773,12 +1931,12 @@ impl MenuRow {
             Self::Choice(choice) => {
                 m.em(1.6)
                     + if choice.row.nested { m.em(NESTED) } else { 0.0 }
-                    + if choice.row.nested {
+                    + (if choice.row.nested {
                         choice.named(m)
                     } else {
                         column
-                    }
-                    + width(choice.description.as_ref(), m.em(1.2))
+                    })
+                    .max(choice.description.as_ref().map_or(0.0, |d| d.width))
                     + width(choice.recommended.as_ref(), m.em(0.8))
                     + if choice.row.family.is_some() {
                         m.em(2.2)
@@ -2452,16 +2610,16 @@ mod tests {
             kept
         };
         crate::chat::fixtures::paint(&mut view, &mut fonts);
-        assert_eq!(kept(&view), ["Auto  ▾", "↑"]);
+        assert_eq!(kept(&view), ["+", "↑", "◇  Auto  ▾"]);
         crate::chat::fixtures::paint(&mut view, &mut fonts);
-        assert_eq!(kept(&view), ["Auto  ▾", "↑"]);
+        assert_eq!(kept(&view), ["+", "↑", "◇  Auto  ▾"]);
         // The mode's gone: its label goes with the frame after.
         view.node.settings.clear();
         crate::chat::fixtures::paint(&mut view, &mut fonts);
-        assert_eq!(kept(&view), ["↑"]);
+        assert_eq!(kept(&view), ["+", "↑", "◇  Permissions  ▾"]);
         crate::chat::fixtures::paint(&mut view, &mut fonts);
         assert!(
-            !(view.cache.labels.last.keys()).any(|(text, _)| text.starts_with("Auto")),
+            !(view.cache.labels.last.keys()).any(|(text, _)| text.contains("Auto")),
             "let go"
         );
     }

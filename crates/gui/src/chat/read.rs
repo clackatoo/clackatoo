@@ -107,6 +107,14 @@ impl ChatView {
         // What the window said of the chat lasts until the next key, as
         // does the meter's detail `K` showed, which `K` hides, and an
         // answer armed, which the key may give.
+        if self.menu.is_some() {
+            let mut settled = super::Settled::default();
+            if self.menu_key(press.key, press.modifiers, &mut settled) {
+                self.queued
+                    .extend(settled.actions.into_iter().map(Input::Act));
+                return (true, false);
+            }
+        }
         let unsaid = self.unsay();
         let detail = self.hide_detail();
         let disarmed = self.armed.is_some();

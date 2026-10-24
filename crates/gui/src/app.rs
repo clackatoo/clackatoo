@@ -1349,22 +1349,7 @@ impl App {
         let redraw =
             if is_paste(press.key, self.modifiers) && self.desk.image_paste_target().is_some() {
                 let chat = self.desk.image_paste_target().unwrap();
-                if self.desk.begin_image_paste(chat) {
-                    let proxy = self.session.proxy();
-                    if let Err(err) = std::thread::Builder::new()
-                        .name("paste-image".into())
-                        .spawn(move || {
-                            let result = crate::clipboard_image::read()
-                                .map_err(|err| format!("Could not paste: {err:#}"));
-                            let _ = proxy.send_event(SessionEvent::ChatPaste { chat, result });
-                        })
-                    {
-                        self.desk.finish_image_paste(
-                            chat,
-                            Err(format!("Could not read the clipboard: {err}")),
-                        );
-                    }
-                }
+                self.paste_into_chat(chat);
                 true
             } else if is_paste(press.key, self.modifiers) {
                 match paste_text(&mut self.clipboard, Copy::Clipboard) {
@@ -1384,6 +1369,23 @@ impl App {
         self.update_title();
         if redraw {
             self.request_redraw();
+        }
+    }
+
+    fn paste_into_chat(&mut self, chat: TerminalId) {
+        if self.desk.begin_image_paste(chat) {
+            let proxy = self.session.proxy();
+            if let Err(err) = std::thread::Builder::new()
+                .name("paste-image".into())
+                .spawn(move || {
+                    let result = crate::clipboard_image::read()
+                        .map_err(|err| format!("Could not paste: {err:#}"));
+                    let _ = proxy.send_event(SessionEvent::ChatPaste { chat, result });
+                })
+            {
+                self.desk
+                    .finish_image_paste(chat, Err(format!("Could not read the clipboard: {err}")));
+            }
         }
     }
 
@@ -2215,6 +2217,14 @@ impl App {
                 all.over_glyphs.extend(paint.over_glyphs);
                 if focused {
                     all.ime = paint.ime;
+                }
+                if let Some(chat) = pane.chat_mut()
+                    && chat.take_attachment_request()
+                {
+                    let _ = self
+                        .session
+                        .proxy()
+                        .send_event(SessionEvent::PasteChat(terminal));
                 }
                 chats.push(terminal);
             }
@@ -3478,6 +3488,10 @@ impl App {
             SessionEvent::Message(
                 ServerMessage::Hello { .. } | ServerMessage::NotUpgrading { .. },
             ) => {}
+            SessionEvent::PasteChat(chat) => {
+                self.paste_into_chat(chat);
+                self.request_redraw();
+            }
             SessionEvent::ChatPaste { chat, result } => {
                 self.desk.finish_image_paste(chat, result);
                 self.request_redraw();

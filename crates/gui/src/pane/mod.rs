@@ -275,8 +275,14 @@ impl Pane {
         self.chat.is_some()
     }
 
-    /// The text the chat the pane shows drew last, if it shows one (see
-    /// [`ChatView::shown_text`]).
+    /// Whether clipboard text should go into the model search.
+    pub(crate) fn chat_searching_models(&self) -> bool {
+        self.chat
+            .as_ref()
+            .is_some_and(|chat| chat.searching_models())
+    }
+
+    /// The text the chat drew last (see [`ChatView::shown_text`]).
     pub(crate) fn chat_text(&self) -> Option<String> {
         self.chat.as_ref().map(|chat| chat.shown_text())
     }

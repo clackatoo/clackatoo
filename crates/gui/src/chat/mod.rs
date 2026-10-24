@@ -13,6 +13,7 @@
 //! anything to the daemon and before drawing.
 
 mod card;
+mod favorites;
 #[cfg(test)]
 pub(crate) mod fixtures;
 mod images;
@@ -89,6 +90,11 @@ pub(crate) struct Settled {
 /// Something in the chat that does something when clicked.
 #[derive(Clone, Debug, PartialEq)]
 enum Hit {
+    Attach,
+    ModelSearch,
+    MenuSurface,
+    ModelFilter(picker::Filter),
+    Favorite(String, String),
     RemoveImage(usize),
     Send,
     Stop,
@@ -152,8 +158,13 @@ pub(crate) enum Pointer {
 }
 
 /// A menu open over the box, to pick the agent's settings.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Menu {
+    query: String,
+    filter: picker::Filter,
+    favorites: std::collections::BTreeSet<(String, String)>,
+    offset: usize,
+    reveal: bool,
     /// The settings it picks from, by their IDs: a section each.
     settings: Vec<String>,
     /// Where the keyboard or the mouse is.
@@ -225,6 +236,7 @@ pub(crate) struct ChatView {
     sliding: Option<String>,
     /// The settings menu, while it's open.
     menu: Option<Menu>,
+    attach_requested: bool,
     /// Where the chip that opened the menu was drawn, for the menu to open
     /// from, while drawing.
     menu_anchor: Option<[f32; 4]>,
@@ -405,6 +417,7 @@ impl ChatView {
             selecting: false,
             sliding: None,
             menu: None,
+            attach_requested: false,
             menu_anchor: None,
             open_cards: std::collections::HashSet::new(),
             said: None,
@@ -673,6 +686,32 @@ impl ChatView {
         self.queued.push(Input::Image(image));
     }
 
+    pub(crate) fn searching_models(&self) -> bool {
+        self.menu
+            .as_ref()
+            .is_some_and(|menu| picker::offers_models(&self.offer(), menu))
+    }
+
+    fn append_search(&mut self, text: &str) {
+        if let Some(menu) = &mut self.menu {
+            let room = 256_usize.saturating_sub(menu.query.chars().count());
+            menu.query
+                .extend(text.chars().filter(|c| !c.is_control()).take(room));
+        }
+    }
+
+    fn search_changed(&mut self) {
+        let rows = picker::rows(&self.offer(), self.menu.as_ref().unwrap());
+        let menu = self.menu.as_mut().unwrap();
+        menu.highlighted = rows.iter().find_map(Row::spot);
+        menu.offset = 0;
+        menu.reveal = true;
+    }
+
+    pub(crate) fn take_attachment_request(&mut self) -> bool {
+        std::mem::take(&mut self.attach_requested)
+    }
+
     pub(crate) fn begin_paste(&mut self) {
         self.pasting = true;
         self.queued.push(Input::Clipboard);
@@ -757,7 +796,8 @@ impl ChatView {
             .find(|(_, rect)| contains(*rect, at))
             .map(|(hit, _)| hit);
         match hit {
-            Some(Hit::Editor) => Pointer::Text,
+            Some(Hit::Editor | Hit::ModelSearch) => Pointer::Text,
+            Some(Hit::MenuSurface) => Pointer::Arrow,
             Some(_) => Pointer::Hand,
             None if self.over_text(at) => Pointer::Text,
             None => Pointer::Arrow,
@@ -954,14 +994,7 @@ impl ChatView {
                         self.images.push(image);
                     }
                 }
-                Input::Paste(text) => {
-                    if self.node.question.is_none() {
-                        let text = text.replace("\r\n", "\n");
-                        self.drive(fonts, |driver| driver.insert_or_replace_selection(&text));
-                    } else {
-                        self.typed_while_asking();
-                    }
-                }
+                Input::Paste(text) => self.settle_paste(fonts, &text),
                 Input::Press { at, clicks, shift } => {
                     self.pressed(fonts, at, clicks, shift, &mut settled);
                 }
@@ -1001,6 +1034,7 @@ impl ChatView {
                 Input::CopyText(text) => settled.copied.push((text, Copy::Clipboard)),
                 Input::Answer { question, pick } => self.pick(question, pick, &mut settled),
                 Input::Act(action) => settled.actions.push(action),
+                Input::Compose(_) if self.searching_models() => {}
                 Input::Compose(Some((text, cursor))) => {
                     self.drive(fonts, |driver| driver.set_compose(&text, cursor));
                 }
@@ -1022,6 +1056,18 @@ impl ChatView {
         edit(&mut driver);
     }
 
+    fn settle_paste(&mut self, fonts: &mut Fonts, text: &str) {
+        if self.searching_models() {
+            self.append_search(&text.replace(['\n', '\r'], " "));
+            self.search_changed();
+        } else if self.node.question.is_none() {
+            let text = text.replace("\r\n", "\n");
+            self.drive(fonts, |driver| driver.insert_or_replace_selection(&text));
+        } else {
+            self.typed_while_asking();
+        }
+    }
+
     /// A key typed into the chat in insert mode.
     fn typed(
         &mut self,
@@ -1031,7 +1077,7 @@ impl ChatView {
         modifiers: Modifiers,
         settled: &mut Settled,
     ) {
-        if self.menu.is_some() && self.menu_key(key, settled) {
+        if self.menu.is_some() && self.menu_key(key, modifiers, settled) {
             return;
         }
         if self.node.question.is_some() {
@@ -1280,10 +1326,28 @@ impl ChatView {
     /// versions, Enter picks a choice, and Esc closes it, as does any other
     /// key, which then does what it would have. Returns whether it took
     /// the key.
-    fn menu_key(&mut self, key: &Key, settled: &mut Settled) -> bool {
+    fn menu_key(&mut self, key: &Key, modifiers: Modifiers, settled: &mut Settled) -> bool {
         let Some(menu) = self.menu.clone() else {
             return false;
         };
+        if picker::offers_models(&self.offer(), &menu) {
+            let edited = match key {
+                Key::Character(_) if modifiers.ctrl || modifiers.alt => return true,
+                Key::Character(text) => {
+                    self.append_search(text);
+                    true
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    self.menu.as_mut().unwrap().query.pop();
+                    true
+                }
+                _ => false,
+            };
+            if edited {
+                self.search_changed();
+                return true;
+            }
+        }
         let rows = picker::rows(&self.offer(), &menu);
         let spots: Vec<Spot> = rows.iter().filter_map(Row::spot).collect();
         let at = (menu.highlighted.as_ref())
@@ -1308,6 +1372,7 @@ impl ChatView {
                 };
                 if let Some(menu) = &mut self.menu {
                     menu.highlighted = Some(spots[next].clone());
+                    menu.reveal = true;
                 }
                 true
             }
@@ -1332,6 +1397,15 @@ impl ChatView {
                 false
             }
         }
+    }
+
+    /// An open popup owns its keys before pane-mode bindings see them.
+    pub(crate) fn menu_press(&mut self, press: &KeyPress<'_>) -> bool {
+        let mut settled = Settled::default();
+        let handled = self.menu_key(press.key, press.modifiers, &mut settled);
+        self.queued
+            .extend(settled.actions.into_iter().map(Input::Act));
+        handled
     }
 
     /// Left or Right, on `row` of the menu's `rows`: along a slider, or
@@ -1434,6 +1508,9 @@ impl ChatView {
             highlighted: None,
             expanded,
             held: None,
+            favorites: favorites::load(),
+            reveal: true,
+            ..Menu::default()
         };
         menu.highlighted = (picker::rows(&self.offer(), &menu).iter())
             .find(|row| matches!(row, Row::Choice(choice) if choice.current))
@@ -1522,11 +1599,36 @@ impl ChatView {
                     | Hit::Expand(_)
                     | Hit::Step { .. }
                     | Hit::Reset { .. }
+                    | Hit::MenuSurface
+                    | Hit::ModelSearch
+                    | Hit::ModelFilter(_)
+                    | Hit::Favorite(..)
             )
         ) {
             self.menu = None;
         }
         match hit {
+            Some(Hit::Attach) => self.attach_requested = true,
+            Some(Hit::ModelSearch | Hit::MenuSurface | Hit::Usage) => {}
+            Some(Hit::ModelFilter(filter)) => {
+                if let Some(menu) = &mut self.menu {
+                    menu.filter = filter;
+                    menu.offset = 0;
+                    menu.highlighted = None;
+                }
+            }
+            Some(Hit::Favorite(provider, value)) => {
+                if let Some(menu) = &mut self.menu {
+                    let key = (provider, value);
+                    let selected = if menu.favorites.remove(&key) {
+                        false
+                    } else {
+                        menu.favorites.insert(key.clone());
+                        true
+                    };
+                    favorites::save(key, selected);
+                }
+            }
             Some(Hit::Chip(settings)) => {
                 if self.toggle_menu(settings) {
                     settled.actions.push(ChatAction::LearnModels);
@@ -1585,8 +1687,6 @@ impl ChatView {
             Some(Hit::RemoveImage(index)) => self.remove_image(index),
             Some(Hit::Send) => self.send(settled),
             Some(Hit::Stop) => settled.actions.push(ChatAction::Stop),
-            // Its detail, shown or hidden above.
-            Some(Hit::Usage) => {}
             Some(Hit::Choice(id)) => {
                 // The question the button was drawn for, which may have
                 // been answered since.
@@ -1676,6 +1776,15 @@ impl ChatView {
     /// Scrolls `lines` lines up, or down if negative. Returns whether the
     /// view moved.
     pub(crate) fn scroll_lines(&mut self, lines: f32) -> bool {
+        if let Some(menu) = &mut self.menu {
+            if lines > 0.0 {
+                menu.offset = menu.offset.saturating_sub(1);
+            } else if lines < 0.0 {
+                menu.offset = menu.offset.saturating_add(1);
+            }
+            menu.reveal = false;
+            return true;
+        }
         self.scroll_by(-lines * self.line_height)
     }
 
@@ -2596,6 +2705,111 @@ mod tests {
     }
 
     #[test]
+    fn searching_and_pasting_in_the_picker_preserve_the_message() {
+        let mut fonts = fonts();
+        let mut view = with_claude();
+        view.paste("keep this draft");
+        view.settle(&mut fonts);
+        view.open_menu(&[SettingKind::Model, SettingKind::Effort]);
+        typed(&mut view, "OP");
+        view.paste("US 4.8");
+        press(
+            &mut view,
+            &Key::Character("c".into()),
+            None,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        );
+        view.compose(Some(("composition".into(), None)));
+        view.settle(&mut fonts);
+        assert_eq!(view.menu.as_ref().unwrap().query, "OPUS 4.8");
+        assert_eq!(view.editor.raw_text(), "keep this draft");
+        enter(&mut view, false);
+        assert_eq!(
+            view.settle(&mut fonts).actions,
+            [set("model", "claude-opus-4-8")]
+        );
+        assert_eq!(view.editor.raw_text(), "keep this draft");
+    }
+
+    #[test]
+    fn unified_permissions_and_attachment_keep_their_individual_actions() {
+        let mut fonts = fonts();
+        let mut view = with_every_chip();
+        fixtures::paint(&mut view, &mut fonts);
+        let (hit, _) = view.hits.iter().find(|(hit, _)| matches!(hit, Hit::Chip(ids) if ids.contains(&"clackatoo.tools".to_owned()))).unwrap();
+        let Hit::Chip(ids) = hit else { unreachable!() };
+        assert_eq!(ids.len(), 3);
+        let ids = ids.clone();
+        view.toggle_menu(ids);
+        let rows = picker::rows(&view.offer(), view.menu.as_ref().unwrap());
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row, Row::Choice(c) if c.setting == "clackatoo.browser"))
+        );
+        view.menu = None;
+        view.paste("draft");
+        view.settle(&mut fonts);
+        fixtures::paint(&mut view, &mut fonts);
+        let at = drawn_at(&view, &Hit::Attach).unwrap();
+        view.press(at, 1, false);
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert!(view.take_attachment_request());
+        assert!(!view.take_attachment_request());
+        assert_eq!(view.editor.raw_text(), "draft");
+    }
+
+    #[test]
+    fn a_long_picker_scrolls_without_moving_history_and_reveals_keyboard_choices() {
+        let mut fonts = fonts();
+        let mut view = with_settings();
+        let model = view
+            .node
+            .settings
+            .iter_mut()
+            .find(|s| s.kind == SettingKind::Model)
+            .unwrap();
+        model.choices = (0..30)
+            .map(|i| clackatoo_protocol::SettingChoice {
+                name: format!("Model {i}"),
+                value: format!("model-{i}"),
+                description: None,
+            })
+            .collect();
+        model.value = "model-0".into();
+        view.open_menu(&[SettingKind::Model]);
+        fixtures::paint(&mut view, &mut fonts);
+        let scroll = view.scroll;
+        for _ in 0..10 {
+            view.scroll_lines(-1.0);
+        }
+        fixtures::paint(&mut view, &mut fonts);
+        assert_eq!(view.scroll.to_bits(), scroll.to_bits());
+        assert_eq!(view.menu.as_ref().unwrap().offset, 10);
+        key(&mut view, NamedKey::ArrowUp);
+        view.settle(&mut fonts);
+        fixtures::paint(&mut view, &mut fonts);
+        assert!(
+            view.hits
+                .iter()
+                .any(|(hit, _)| matches!(hit, Hit::Pick { value, .. } if value == "model-29"))
+        );
+        let popup = view
+            .hits
+            .iter()
+            .find(|(hit, _)| *hit == Hit::MenuSurface)
+            .unwrap()
+            .1;
+        for (hit, rect) in &view.hits {
+            if matches!(hit, Hit::Pick { .. } | Hit::Favorite(..)) {
+                assert!(rect[1] >= popup[1] && rect[1] + rect[3] <= popup[1] + popup[3] + 0.1);
+            }
+        }
+    }
+
+    #[test]
     fn right_shows_a_model_familys_versions_to_pick_from() {
         let mut fonts = fonts();
         let mut view = with_claude();
@@ -3019,7 +3233,7 @@ mod tests {
     }
 
     #[test]
-    fn the_meter_gives_way_to_the_chips_and_never_runs_under_one() {
+    fn usage_stays_below_both_controls_at_every_width() {
         let mut fonts = fonts();
         let mut view = with_every_chip();
         let overlaps = |a: [f32; 4], b: [f32; 4]| {
@@ -3047,20 +3261,12 @@ mod tests {
                 .count();
             widths.push((meter[2], chips));
         }
-        // Wide, the limit beside the context, and every chip; narrower,
-        // the context alone, then its bar; at the narrowest, chips go
-        // rather than run under it.
-        let (whole, bar) = (widths[0].0, widths.last().unwrap().0);
-        assert_eq!(widths[0].1, 4, "{widths:?}");
+        // Model and permissions stay available; usage has its own line.
+        assert!(widths.iter().all(|&(_, chips)| chips == 2), "{widths:?}");
         assert!(
             widths.windows(2).all(|pair| pair[1].0 <= pair[0].0),
             "{widths:?}"
         );
-        assert!(
-            (widths.iter()).any(|&(width, chips)| width < whole && width > bar && chips == 4),
-            "{widths:?}"
-        );
-        assert!(widths.last().unwrap().1 < 4, "{widths:?}");
     }
 
     #[test]

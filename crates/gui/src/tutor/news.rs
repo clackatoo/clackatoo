@@ -707,6 +707,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Quieter expandable tool rows, clearer chat controls, and image previews above your message",
     },
+    News {
+        id: "composer",
+        date: "2026-10-24",
+        lesson: "agents",
+        what: "Roomier chat composer, searchable model picker with favorites, unified permissions, and usage below",
+    },
 ];
 
 impl News {

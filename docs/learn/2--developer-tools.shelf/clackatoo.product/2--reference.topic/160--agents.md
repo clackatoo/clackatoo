@@ -78,19 +78,23 @@ What you've typed but not sent belongs to the window: another window, or this on
 
 ## The agent's settings
 
-Along the bottom of the box are the agent's settings for the chat, as the agent offers them. For Claude Code:
+The rounded message box has its model and reasoning effort at the lower left, followed by one permissions control showing the current approval mode. The `+` at the right pastes an image or text from the clipboard; beside it is Send, or Stop while the agent answers.
 
-- **On the left, its mode:** how much it does without asking. Manual asks before every change, Accept edits makes edits without asking, Plan plans before it acts, and Auto lets Claude decide what needs asking about. A new chat starts in Auto.
-- **On the right, its model and effort**, such as `Sonnet 5.5 · High`.
-- **Beside them, how much of the model's context the chat fills**, as `42% context` over a thin bar: quiet while there's room, amber past 80%, red past 95%. With a Claude subscription, the account's 5-hour or weekly limit shows before it once it's past 80%, as `5-hour 91%`. In a narrow box the limit goes first, then the words, leaving the bar.
+The permissions menu groups three separate settings: the agent's approval mode, access to clackatoo's tools, and browser access. Changing one leaves the others as they were. For Claude Code, Manual asks before every change, Accept edits makes edits without asking, Plan plans before it acts, and Auto lets Claude decide what needs asking about. A new Claude chat starts in Auto.
+
+Usage sits below the box, as `42% context` over a thin bar: quiet while there's room, amber past 80%, red past 95%. With a Claude subscription, the account's 5-hour or weekly limit shows before it once it's past 80%, as `5-hour 91%`. In a narrow pane the limit goes first, then the words, leaving the bar.
 
 Hover over it, click it, or press `K` in normal mode for the detail: the tokens used of the context, and each limit, how much of it is used and when it resets, as `at 15:40` or `Tuesday 09:00`. The limits are the account's, so every Claude chat shows the latest, from whichever chat heard it; one past its reset time isn't shown. Codex doesn't share its limits, so a Codex chat shows its context alone; its own `/status` says them.
 
 Click a setting to open its menu, above the box. Up and Down move through it, Enter or a click picks, and Esc or a click elsewhere closes it. Shift+Tab steps through the modes without opening the menu.
 
-The model and effort share a menu:
+The model and effort share a searchable menu. Type to filter by model, provider or description, including pinned versions hidden inside families. Up and Down move through results, Enter picks, and Esc closes it without changing your draft. The mouse wheel scrolls the picker independently of the conversation.
 
-- **Models by family:** Opus, Fable, Sonnet and Haiku, each with the version it picks and what it's for, and the one Claude Code recommends marked. Picking a family picks its newest version, and keeps up as new ones come out.
+The left rail switches between all models, favorites and individual providers. Click a star beside a model to add or remove a favorite; favorites are saved on this machine and shared across its windows. Each row shows the provider below the model and a tick on the current model.
+
+The menu includes:
+
+- **Models by family:** Opus, Fable, Sonnet and Haiku, each with the version it picks. Picking a family picks its newest version, and keeps up as new ones come out.
 - **A family's versions:** the `▸` button at the end of its row, or Right, shows its other versions, to pin the chat to one. Left hides them. A chat on a pinned version opens the menu with that version shown and ticked.
 - **Effort on a slider**, from Low to Max: click or drag along it, or with the slider picked out, press Left and Right. It stays open as you slide, so you can try a few. Default, beside it, leaves effort to Claude Code, which picks it for each model.
 
@@ -101,7 +105,7 @@ A chat keeps the settings you pick. If the agent stops, or the daemon is [upgrad
 
 ### Moving a chat to another agent
 
-The model menu lists every agent's models, each under its name, after the chat's own agent's. Picking another of the same agent's models changes it in the chat, as before. Picking another agent's moves the chat to that agent, in the same pane: "Switched to Codex · 6 Luna · context carried over" goes across the chat, and the box says "Message Codex". An agent clackatoo hasn't installed says "install to use", and picking it offers to install it. An agent whose models aren't known yet is asked for them as the menu opens, which takes a moment.
+The model menu lists every agent's models, with its provider below each model, after the chat's own agent's. Picking another of the same agent's models changes it in the chat, as before. Picking another agent's moves the chat to that agent, in the same pane: "Switched to Codex · 6 Luna · context carried over" goes across the chat, and the box says "Message Codex". An agent clackatoo hasn't installed says "install to use", and picking it offers to install it. An agent whose models aren't known yet is asked for them as the menu opens, which takes a moment.
 
 The new agent hears the conversation with your next message, before it, fenced off as context carried over rather than as something to do: the newest turns whole, older ones a line each (what you asked, what it ran and changed, how it ended), the files changed, and the previous agent's plan if it has steps left, to ask you about rather than carry on with. Messages other agents sent the chat are marked as theirs, not yours. The `carryover` option sets about the most it takes, in tokens: 20000 unless set, and never more than a quarter of the new agent's context. Moving back to an agent the chat had before opens its own session again, and it hears only what happened since.
 
@@ -332,7 +336,7 @@ An agent that stops listening, say because its input broke, is still read for a 
 
 A question clackatoo asks itself, such as this one or an offer to install, shows as it's worded; anything an agent asks is always shown as the agent's, "Allow the agent to …?", however it's worded.
 
-Codex offers its own settings in the box: its mode on the left, from Read-only, which asks before every change, through Workspace access and Auto review to Full access, and its model and reasoning effort on the right. A new Codex chat starts in the mode Codex's own config gives.
+Codex offers its own settings in the box: its mode in the permissions menu, from Read-only, which asks before every change, through Workspace access and Auto review to Full access, and its model and reasoning effort at the lower left. A new Codex chat starts in the mode Codex's own config gives.
 
 To add an agent that speaks ACP, or run a known one another way, list it in `~/.config/clackatoo/daemon/agents.toml`:
 
