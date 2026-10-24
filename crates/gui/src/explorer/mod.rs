@@ -215,6 +215,8 @@ pub(crate) struct Explorer {
     up: bool,
     /// The first row in view: `..`'s, if it shows, counts as the first.
     top: usize,
+    /// Extra rows drawn only while the view is between whole rows.
+    pub(crate) scroll_extra: usize,
     width: usize,
     height: usize,
     /// The rows drawn, as of the last settle, and where the cursor is in
@@ -292,6 +294,7 @@ impl Explorer {
             cursor: 0,
             up: false,
             top: 0,
+            scroll_extra: 0,
             width: 0,
             height: 0,
             rows: Vec::new(),
@@ -1503,7 +1506,7 @@ impl Explorer {
         self.flatten_if_stale();
         // Not the heading, nor the keys at the foot.
         let Some(row) = (row.checked_sub(1))
-            .filter(|&row| row < self.list_height())
+            .filter(|&row| row < self.list_height() + self.scroll_extra)
             .map(|row| self.top + row)
         else {
             return false;
@@ -1544,6 +1547,27 @@ impl Explorer {
         true
     }
 
+    pub(crate) fn scroll_region(&self) -> std::ops::Range<usize> {
+        1..self.height.saturating_sub(self.footer_height()).max(1)
+    }
+
+    pub(crate) fn native_scroll_room(&self, up: bool) -> bool {
+        if self.editing.is_some() {
+            return false;
+        }
+        if up {
+            self.top > 0
+        } else {
+            self.top < self.rows_len().saturating_sub(1)
+        }
+    }
+
+    pub(crate) fn scroll_native(&mut self, lines: i64) -> i64 {
+        let before = self.top;
+        self.scroll(-lines);
+        i64::try_from(before).unwrap_or(i64::MAX) - i64::try_from(self.top).unwrap_or(i64::MAX)
+    }
+
     // --- Drawing ------------------------------------------------------------
 
     /// Lays out the rows shown, for [`scene`](Self::scene).
@@ -1567,7 +1591,7 @@ impl Explorer {
         rows.push(header.finish(false));
         self.name_cols.clear();
         self.cursor_cell = None;
-        let end = (self.top + height).min(self.rows_len());
+        let end = (self.top + height + self.scroll_extra).min(self.rows_len());
         for at in self.top..end {
             let (row, name_col) = match self.line_at(at) {
                 Some(line) => self.draw_line(line),
@@ -1580,7 +1604,7 @@ impl Explorer {
             rows.push(row);
         }
         let footer = self.footer_height();
-        while rows.len() < self.height.saturating_sub(footer) {
+        while rows.len() < self.height.saturating_sub(footer) + self.scroll_extra {
             rows.push(RowBuilder::new(self.width).finish(false));
         }
         if footer > 0 {
@@ -1594,7 +1618,7 @@ impl Explorer {
             }
             rows.extend(keys);
         }
-        rows.truncate(self.height);
+        rows.truncate(self.height + self.scroll_extra);
         self.rows = rows;
     }
 

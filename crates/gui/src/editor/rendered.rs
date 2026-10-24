@@ -699,6 +699,21 @@ impl Editor {
 
     /// Scrolls the view of the text rendered by `rows` lines, up if more
     /// than none, as the wheel does. Returns whether it's rendered.
+    pub(crate) fn rendered_wheel_metrics(&self) -> Option<(f32, f32, f32)> {
+        self.rendered
+            .as_ref()
+            .map(|r| (r.scroll, r.most, r.line_height))
+    }
+
+    pub(crate) fn scroll_rendered_pixels(&mut self, pixels: f32) -> f32 {
+        let Some(rendered) = &mut self.rendered else {
+            return 0.0;
+        };
+        let old = rendered.scroll;
+        rendered.scroll_by(pixels);
+        rendered.scroll - old
+    }
+
     pub(crate) fn wheel_rendered(&mut self, rows: i64) -> bool {
         let Some(rendered) = &mut self.rendered else {
             return false;

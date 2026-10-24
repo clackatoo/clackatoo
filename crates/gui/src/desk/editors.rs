@@ -35,8 +35,8 @@ use crate::vim::Stroke;
 /// The editors, by the pane each is, and the buffers they show.
 #[derive(Debug, Default)]
 pub(super) struct Editors {
-    panes: HashMap<PaneId, Editor>,
-    buffers: HashMap<BufferId, BufferCopy>,
+    pub(super) panes: HashMap<PaneId, Editor>,
+    pub(super) buffers: HashMap<BufferId, BufferCopy>,
     /// What every editor shares, as Vim's registers and marks are.
     shared: Shared,
     /// The buffers attached to on this connection.

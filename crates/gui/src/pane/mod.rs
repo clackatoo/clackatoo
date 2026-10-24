@@ -549,6 +549,10 @@ impl Pane {
     }
 
     /// The chat it shows, if it shows one.
+    pub(crate) fn chat_wheel_metrics(&self) -> Option<(f32, f32, f32)> {
+        self.chat.as_ref()?.wheel_metrics()
+    }
+
     pub(crate) fn chat_mut(&mut self) -> Option<&mut ChatView> {
         self.chat.as_deref_mut()
     }
@@ -929,6 +933,27 @@ impl Pane {
         let scrolled = self.scroll_by(lines);
         self.keep_cursor_in_view();
         scrolled
+    }
+
+    /// Native scrollback only: application mouse reports and alternate screens
+    /// must receive their original events, never a delayed animation.
+    pub(crate) fn native_scroll_room(&self, up: bool, shift: bool) -> Option<bool> {
+        let screen = self.screen.as_ref()?;
+        if self.reports_mouse(shift) || screen.state.alternate {
+            return None;
+        }
+        Some(if up {
+            self.scroll < self.max_scroll()
+        } else {
+            self.scroll > 0
+        })
+    }
+
+    pub(crate) fn scroll_native(&mut self, lines: i64) -> i64 {
+        let before = self.scroll;
+        self.scroll_by(lines);
+        self.keep_cursor_in_view();
+        i64::try_from(i128::from(self.scroll) - i128::from(before)).unwrap_or(0)
     }
 
     /// The rows to show `height` lines tall, top first, and the cursor if

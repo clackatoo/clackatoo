@@ -61,7 +61,7 @@ const RECENT: usize = 32;
 /// The explorers, by the pane each is, and what they share.
 #[derive(Debug, Default)]
 pub(super) struct Explorers {
-    panes: HashMap<PaneId, Explorer>,
+    pub(super) panes: HashMap<PaneId, Explorer>,
     /// The explorers attached to on this connection.
     attached: HashSet<FilesId>,
     /// How explorers closed were shown, by their roots.

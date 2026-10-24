@@ -22,7 +22,7 @@ use crate::input::KeyPress;
 /// The board panes, and the boards attached.
 #[derive(Debug, Default)]
 pub(super) struct Boards {
-    panes: HashMap<PaneId, BoardPane>,
+    pub(super) panes: HashMap<PaneId, BoardPane>,
     attached: HashSet<BoardId>,
 }
 

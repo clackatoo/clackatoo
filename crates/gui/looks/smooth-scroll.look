@@ -1,0 +1,404 @@
+# Exact partial-row screenshots plus a completed animated wheel gesture.
+size 1000x750
+file item-000.txt
+file item-001.txt
+file item-002.txt
+file item-003.txt
+file item-004.txt
+file item-005.txt
+file item-006.txt
+file item-007.txt
+file item-008.txt
+file item-009.txt
+file item-010.txt
+file item-011.txt
+file item-012.txt
+file item-013.txt
+file item-014.txt
+file item-015.txt
+file item-016.txt
+file item-017.txt
+file item-018.txt
+file item-019.txt
+file item-020.txt
+file item-021.txt
+file item-022.txt
+file item-023.txt
+file item-024.txt
+file item-025.txt
+file item-026.txt
+file item-027.txt
+file item-028.txt
+file item-029.txt
+file item-030.txt
+file item-031.txt
+file item-032.txt
+file item-033.txt
+file item-034.txt
+file item-035.txt
+file item-036.txt
+file item-037.txt
+file item-038.txt
+file item-039.txt
+file item-040.txt
+file item-041.txt
+file item-042.txt
+file item-043.txt
+file item-044.txt
+file item-045.txt
+file item-046.txt
+file item-047.txt
+file item-048.txt
+file item-049.txt
+file item-050.txt
+file item-051.txt
+file item-052.txt
+file item-053.txt
+file item-054.txt
+file item-055.txt
+file item-056.txt
+file item-057.txt
+file item-058.txt
+file item-059.txt
+file item-060.txt
+file item-061.txt
+file item-062.txt
+file item-063.txt
+file item-064.txt
+file item-065.txt
+file item-066.txt
+file item-067.txt
+file item-068.txt
+file item-069.txt
+file item-070.txt
+file item-071.txt
+file item-072.txt
+file item-073.txt
+file item-074.txt
+file item-075.txt
+file item-076.txt
+file item-077.txt
+file item-078.txt
+file item-079.txt
+file rows.txt <<END
+Line 001: smooth scrolling keeps this row aligned with its text.
+Line 002: smooth scrolling keeps this row aligned with its text.
+Line 003: smooth scrolling keeps this row aligned with its text.
+Line 004: smooth scrolling keeps this row aligned with its text.
+Line 005: smooth scrolling keeps this row aligned with its text.
+Line 006: smooth scrolling keeps this row aligned with its text.
+Line 007: smooth scrolling keeps this row aligned with its text.
+Line 008: smooth scrolling keeps this row aligned with its text.
+Line 009: smooth scrolling keeps this row aligned with its text.
+Line 010: smooth scrolling keeps this row aligned with its text.
+Line 011: smooth scrolling keeps this row aligned with its text.
+Line 012: smooth scrolling keeps this row aligned with its text.
+Line 013: smooth scrolling keeps this row aligned with its text.
+Line 014: smooth scrolling keeps this row aligned with its text.
+Line 015: smooth scrolling keeps this row aligned with its text.
+Line 016: smooth scrolling keeps this row aligned with its text.
+Line 017: smooth scrolling keeps this row aligned with its text.
+Line 018: smooth scrolling keeps this row aligned with its text.
+Line 019: smooth scrolling keeps this row aligned with its text.
+Line 020: smooth scrolling keeps this row aligned with its text.
+Line 021: smooth scrolling keeps this row aligned with its text.
+Line 022: smooth scrolling keeps this row aligned with its text.
+Line 023: smooth scrolling keeps this row aligned with its text.
+Line 024: smooth scrolling keeps this row aligned with its text.
+Line 025: smooth scrolling keeps this row aligned with its text.
+Line 026: smooth scrolling keeps this row aligned with its text.
+Line 027: smooth scrolling keeps this row aligned with its text.
+Line 028: smooth scrolling keeps this row aligned with its text.
+Line 029: smooth scrolling keeps this row aligned with its text.
+Line 030: smooth scrolling keeps this row aligned with its text.
+Line 031: smooth scrolling keeps this row aligned with its text.
+Line 032: smooth scrolling keeps this row aligned with its text.
+Line 033: smooth scrolling keeps this row aligned with its text.
+Line 034: smooth scrolling keeps this row aligned with its text.
+Line 035: smooth scrolling keeps this row aligned with its text.
+Line 036: smooth scrolling keeps this row aligned with its text.
+Line 037: smooth scrolling keeps this row aligned with its text.
+Line 038: smooth scrolling keeps this row aligned with its text.
+Line 039: smooth scrolling keeps this row aligned with its text.
+Line 040: smooth scrolling keeps this row aligned with its text.
+Line 041: smooth scrolling keeps this row aligned with its text.
+Line 042: smooth scrolling keeps this row aligned with its text.
+Line 043: smooth scrolling keeps this row aligned with its text.
+Line 044: smooth scrolling keeps this row aligned with its text.
+Line 045: smooth scrolling keeps this row aligned with its text.
+Line 046: smooth scrolling keeps this row aligned with its text.
+Line 047: smooth scrolling keeps this row aligned with its text.
+Line 048: smooth scrolling keeps this row aligned with its text.
+Line 049: smooth scrolling keeps this row aligned with its text.
+Line 050: smooth scrolling keeps this row aligned with its text.
+Line 051: smooth scrolling keeps this row aligned with its text.
+Line 052: smooth scrolling keeps this row aligned with its text.
+Line 053: smooth scrolling keeps this row aligned with its text.
+Line 054: smooth scrolling keeps this row aligned with its text.
+Line 055: smooth scrolling keeps this row aligned with its text.
+Line 056: smooth scrolling keeps this row aligned with its text.
+Line 057: smooth scrolling keeps this row aligned with its text.
+Line 058: smooth scrolling keeps this row aligned with its text.
+Line 059: smooth scrolling keeps this row aligned with its text.
+Line 060: smooth scrolling keeps this row aligned with its text.
+Line 061: smooth scrolling keeps this row aligned with its text.
+Line 062: smooth scrolling keeps this row aligned with its text.
+Line 063: smooth scrolling keeps this row aligned with its text.
+Line 064: smooth scrolling keeps this row aligned with its text.
+Line 065: smooth scrolling keeps this row aligned with its text.
+Line 066: smooth scrolling keeps this row aligned with its text.
+Line 067: smooth scrolling keeps this row aligned with its text.
+Line 068: smooth scrolling keeps this row aligned with its text.
+Line 069: smooth scrolling keeps this row aligned with its text.
+Line 070: smooth scrolling keeps this row aligned with its text.
+Line 071: smooth scrolling keeps this row aligned with its text.
+Line 072: smooth scrolling keeps this row aligned with its text.
+Line 073: smooth scrolling keeps this row aligned with its text.
+Line 074: smooth scrolling keeps this row aligned with its text.
+Line 075: smooth scrolling keeps this row aligned with its text.
+Line 076: smooth scrolling keeps this row aligned with its text.
+Line 077: smooth scrolling keeps this row aligned with its text.
+Line 078: smooth scrolling keeps this row aligned with its text.
+Line 079: smooth scrolling keeps this row aligned with its text.
+Line 080: smooth scrolling keeps this row aligned with its text.
+Line 081: smooth scrolling keeps this row aligned with its text.
+Line 082: smooth scrolling keeps this row aligned with its text.
+Line 083: smooth scrolling keeps this row aligned with its text.
+Line 084: smooth scrolling keeps this row aligned with its text.
+Line 085: smooth scrolling keeps this row aligned with its text.
+Line 086: smooth scrolling keeps this row aligned with its text.
+Line 087: smooth scrolling keeps this row aligned with its text.
+Line 088: smooth scrolling keeps this row aligned with its text.
+Line 089: smooth scrolling keeps this row aligned with its text.
+Line 090: smooth scrolling keeps this row aligned with its text.
+Line 091: smooth scrolling keeps this row aligned with its text.
+Line 092: smooth scrolling keeps this row aligned with its text.
+Line 093: smooth scrolling keeps this row aligned with its text.
+Line 094: smooth scrolling keeps this row aligned with its text.
+Line 095: smooth scrolling keeps this row aligned with its text.
+Line 096: smooth scrolling keeps this row aligned with its text.
+Line 097: smooth scrolling keeps this row aligned with its text.
+Line 098: smooth scrolling keeps this row aligned with its text.
+Line 099: smooth scrolling keeps this row aligned with its text.
+Line 100: smooth scrolling keeps this row aligned with its text.
+END
+file readme.md <<END
+# Smooth scrolling
+
+## Heading 1
+Paragraph 1: smooth scrolling should keep text, code and links together.
+
+## Heading 2
+Paragraph 2: smooth scrolling should keep text, code and links together.
+
+## Heading 3
+Paragraph 3: smooth scrolling should keep text, code and links together.
+
+## Heading 4
+Paragraph 4: smooth scrolling should keep text, code and links together.
+
+## Heading 5
+Paragraph 5: smooth scrolling should keep text, code and links together.
+
+## Heading 6
+Paragraph 6: smooth scrolling should keep text, code and links together.
+
+## Heading 7
+Paragraph 7: smooth scrolling should keep text, code and links together.
+
+## Heading 8
+Paragraph 8: smooth scrolling should keep text, code and links together.
+
+## Heading 9
+Paragraph 9: smooth scrolling should keep text, code and links together.
+
+## Heading 10
+Paragraph 10: smooth scrolling should keep text, code and links together.
+
+## Heading 11
+Paragraph 11: smooth scrolling should keep text, code and links together.
+
+## Heading 12
+Paragraph 12: smooth scrolling should keep text, code and links together.
+
+## Heading 13
+Paragraph 13: smooth scrolling should keep text, code and links together.
+
+## Heading 14
+Paragraph 14: smooth scrolling should keep text, code and links together.
+
+## Heading 15
+Paragraph 15: smooth scrolling should keep text, code and links together.
+
+## Heading 16
+Paragraph 16: smooth scrolling should keep text, code and links together.
+
+## Heading 17
+Paragraph 17: smooth scrolling should keep text, code and links together.
+
+## Heading 18
+Paragraph 18: smooth scrolling should keep text, code and links together.
+
+## Heading 19
+Paragraph 19: smooth scrolling should keep text, code and links together.
+
+## Heading 20
+Paragraph 20: smooth scrolling should keep text, code and links together.
+
+## Heading 21
+Paragraph 21: smooth scrolling should keep text, code and links together.
+
+## Heading 22
+Paragraph 22: smooth scrolling should keep text, code and links together.
+
+## Heading 23
+Paragraph 23: smooth scrolling should keep text, code and links together.
+
+## Heading 24
+Paragraph 24: smooth scrolling should keep text, code and links together.
+
+## Heading 25
+Paragraph 25: smooth scrolling should keep text, code and links together.
+
+## Heading 26
+Paragraph 26: smooth scrolling should keep text, code and links together.
+
+## Heading 27
+Paragraph 27: smooth scrolling should keep text, code and links together.
+
+## Heading 28
+Paragraph 28: smooth scrolling should keep text, code and links together.
+
+## Heading 29
+Paragraph 29: smooth scrolling should keep text, code and links together.
+
+## Heading 30
+Paragraph 30: smooth scrolling should keep text, code and links together.
+
+## Heading 31
+Paragraph 31: smooth scrolling should keep text, code and links together.
+
+## Heading 32
+Paragraph 32: smooth scrolling should keep text, code and links together.
+
+## Heading 33
+Paragraph 33: smooth scrolling should keep text, code and links together.
+
+## Heading 34
+Paragraph 34: smooth scrolling should keep text, code and links together.
+
+## Heading 35
+Paragraph 35: smooth scrolling should keep text, code and links together.
+
+## Heading 36
+Paragraph 36: smooth scrolling should keep text, code and links together.
+
+## Heading 37
+Paragraph 37: smooth scrolling should keep text, code and links together.
+
+## Heading 38
+Paragraph 38: smooth scrolling should keep text, code and links together.
+
+## Heading 39
+Paragraph 39: smooth scrolling should keep text, code and links together.
+
+## Heading 40
+Paragraph 40: smooth scrolling should keep text, code and links together.
+
+## Heading 41
+Paragraph 41: smooth scrolling should keep text, code and links together.
+
+## Heading 42
+Paragraph 42: smooth scrolling should keep text, code and links together.
+
+## Heading 43
+Paragraph 43: smooth scrolling should keep text, code and links together.
+
+## Heading 44
+Paragraph 44: smooth scrolling should keep text, code and links together.
+
+## Heading 45
+Paragraph 45: smooth scrolling should keep text, code and links together.
+
+## Heading 46
+Paragraph 46: smooth scrolling should keep text, code and links together.
+
+## Heading 47
+Paragraph 47: smooth scrolling should keep text, code and links together.
+
+## Heading 48
+Paragraph 48: smooth scrolling should keep text, code and links together.
+
+## Heading 49
+Paragraph 49: smooth scrolling should keep text, code and links together.
+
+## Heading 50
+Paragraph 50: smooth scrolling should keep text, code and links together.
+
+## Heading 51
+Paragraph 51: smooth scrolling should keep text, code and links together.
+
+## Heading 52
+Paragraph 52: smooth scrolling should keep text, code and links together.
+
+## Heading 53
+Paragraph 53: smooth scrolling should keep text, code and links together.
+
+## Heading 54
+Paragraph 54: smooth scrolling should keep text, code and links together.
+
+## Heading 55
+Paragraph 55: smooth scrolling should keep text, code and links together.
+
+## Heading 56
+Paragraph 56: smooth scrolling should keep text, code and links together.
+
+## Heading 57
+Paragraph 57: smooth scrolling should keep text, code and links together.
+
+## Heading 58
+Paragraph 58: smooth scrolling should keep text, code and links together.
+
+## Heading 59
+Paragraph 59: smooth scrolling should keep text, code and links together.
+
+END
+open rows.txt
+shot editor-before
+scroll-pixels 400 250 -10
+shot editor-half-row
+scroll 400 250 -3
+shot editor-settled
+keys <C-;>:Explore<CR>
+shot explorer-before
+scroll-pixels 100 250 -10
+shot explorer-half-row
+open readme.md
+keys <C-;>:Markdown<CR>
+scroll-pixels 400 250 -10
+shot markdown-pixels
+keys <C-;>:Terminal<CR>
+keys i
+shell seq 1 100
+wait-for 100
+scroll 400 250 4
+shot terminal-history
+scroll-pixels 400 250 10
+shot terminal-half-row
+keys <C-;>:Agent claude<CR>
+keys i
+type polish
+keys <CR>
+wait-for Image previews are ready
+type polish
+keys <CR>
+type polish
+keys <CR>
+scroll 400 250 2
+shot chat-settled
+scroll-pixels 400 250 -10
+shot chat-pixels
+scale 2
+open rows.txt
+scroll-pixels 400 250 -10
+shot editor-hidpi

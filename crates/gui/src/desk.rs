@@ -179,6 +179,7 @@ mod messages;
 mod mode;
 mod offers;
 mod restored;
+mod scrolling;
 pub(crate) use restored::Offer;
 mod reviews;
 mod script;
@@ -269,6 +270,7 @@ const POINTED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 #[derive(Debug, Default)]
 #[allow(clippy::struct_excessive_bools, reason = "each is so or not")]
 pub(crate) struct Desk {
+    scrolling: HashMap<PaneId, scrolling::Gesture>,
     /// The daemon's workspaces, as last heard.
     workspaces: Workspaces,
     /// The background tab whose screen the list of them last asked for,
@@ -1118,6 +1120,7 @@ impl Desk {
     /// Sets the space the panes share, as the window opens or resizes, and
     /// sizes the terminals shown to fit.
     pub(crate) fn set_area(&mut self, area: Option<Area>) {
+        self.stop_scrolling();
         self.area = area;
         self.fit_panes();
     }
@@ -1836,6 +1839,7 @@ impl Desk {
         if input::is_modifier(press.key) {
             return false;
         }
+        self.stop_scrolling();
         self.user_active();
         self.key_coming();
         self.record_press(press);
@@ -2187,6 +2191,7 @@ impl Desk {
         // A click gives up waiting for an editor's text, as any key but
         // those insert mode types does.
         if let MouseAction::Press(_) = action {
+            self.freeze_scrolling();
             self.stop_waiting_to_insert(None);
         }
         // A drag that began in an editor is its, wherever it goes.
@@ -2534,7 +2539,21 @@ impl Desk {
         let pixel = [point[0] - tile.origin[0], point[1] - tile.origin[1]];
         Some((
             terminal,
-            [cell(pixel[1], area.cell[1]), cell(pixel[0], area.cell[0])],
+            [
+                cell(
+                    self.scrolled_y(
+                        placement
+                            .panes
+                            .iter()
+                            .find(|(_, candidate)| *candidate == tile)?
+                            .0,
+                        pixel[1],
+                        area.cell[1],
+                    ),
+                    area.cell[1],
+                ),
+                cell(pixel[0], area.cell[0]),
+            ],
             pixel,
         ))
     }
@@ -2573,7 +2592,10 @@ impl Desk {
         #[allow(clippy::cast_possible_truncation)]
         let cell = |offset: f32, size: f32| (offset / size).floor() as i64;
         Some([
-            cell(point[1] - tile.origin[1], area.cell[1]),
+            cell(
+                self.scrolled_y(pane, point[1] - tile.origin[1], area.cell[1]),
+                area.cell[1],
+            ),
             cell(point[0] - tile.origin[0], area.cell[0]),
         ])
     }
@@ -2849,6 +2871,7 @@ mod tests {
     mod mode;
     mod mouse;
     mod restored;
+    mod scrolling;
     mod typing;
 
     use clackatoo_protocol::{ChatState, ChatSummary, Layout, Pane as LayoutPane, View, Workspace};

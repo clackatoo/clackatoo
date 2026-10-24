@@ -48,6 +48,7 @@
 //! | `click X Y [right\|middle]` | Clicks there, with the left button unless said |
 //! | `drag X1 Y1 X2 Y2` | Drags with the left button |
 //! | `scroll X Y N` | Turns the wheel N notches there: up for more than none, down for fewer |
+//! | `scroll-pixels X Y N` | Scrolls by exact logical pixels, as a touchpad does |
 //! | `wait-for TEXT` | Waits until the window shows TEXT (see `look::Window::text`) |
 //! | `timeout MS` | How long `wait-for` and settling wait at most (10000 to start) |
 //! | `quiet MS` | How long nothing must change for the window to have settled (300 to start) |
@@ -251,6 +252,7 @@ enum Command {
     Click([f32; 2], MouseButton),
     Drag([f32; 2], [f32; 2]),
     Scroll([f32; 2], f32),
+    ScrollPixels([f32; 2], f32),
     WaitFor(String),
     Timeout(Duration),
     Quiet(Duration),
@@ -374,6 +376,10 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
             "drag" => {
                 let at = numbers(4)?;
                 Command::Drag([at[0], at[1]], [at[2], at[3]])
+            }
+            "scroll-pixels" => {
+                let at = numbers(3)?;
+                Command::ScrollPixels([at[0], at[1]], at[2])
             }
             "scroll" => {
                 let at = numbers(3)?;
@@ -882,6 +888,7 @@ impl Look {
             Command::Move(at) => self.window()?.move_to(*at),
             Command::Click(at, button) => self.window()?.click(*at, *button),
             Command::Drag(from, to) => self.window()?.drag(*from, *to),
+            Command::ScrollPixels(at, pixels) => self.window()?.scroll_pixels(*at, *pixels),
             Command::Scroll(at, notches) => self.window()?.scroll(*at, *notches),
             Command::WaitFor(text) => {
                 timed = false;

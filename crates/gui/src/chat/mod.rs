@@ -1966,7 +1966,15 @@ impl ChatView {
         self.scroll_by(if up { -half } else { half })
     }
 
-    fn scroll_by(&mut self, pixels: f32) -> bool {
+    pub(crate) fn wheel_metrics(&self) -> Option<(f32, f32, f32)> {
+        (self.menu.is_none() && self.image_viewer.is_none()).then_some((
+            self.scroll,
+            self.max_scroll,
+            self.line_height,
+        ))
+    }
+
+    pub(crate) fn scroll_by(&mut self, pixels: f32) -> bool {
         if self.image_viewer.is_some() {
             return false;
         }

@@ -322,6 +322,7 @@ pub(crate) fn mono_width(text: &str) -> usize {
 /// What one pane shows, and where.
 #[derive(Debug)]
 pub(crate) struct Scene<'a> {
+    pub(crate) scroll: Option<RowScroll>,
     /// Where the pane's top left corner is, in pixels.
     pub(crate) origin: [f32; 2],
     /// How big the pane is, in pixels. Rows and cells past it aren't drawn.
@@ -334,6 +335,45 @@ pub(crate) struct Scene<'a> {
     pub(crate) normal_mode: bool,
     /// Stretches of text to highlight.
     pub(crate) highlights: &'a [Highlight],
+}
+
+/// A grid's moving body. The body has one extra row at `end`; headers
+/// and footers retain their original screen positions.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RowScroll {
+    pub(crate) first: usize,
+    pub(crate) end: usize,
+    pub(crate) fraction: f32,
+}
+
+impl Scene<'_> {
+    #[allow(clippy::cast_precision_loss)]
+    fn row_position(&self, row: usize, height: f32) -> (f32, [f32; 4]) {
+        let mut top = self.origin[1] + row as f32 * height;
+        let Some(scroll) = self.scroll else {
+            return (top, NO_CLIP);
+        };
+        let clip = if row >= scroll.first && row <= scroll.end {
+            top -= scroll.fraction * height;
+            [
+                self.origin[0],
+                self.origin[1] + scroll.first as f32 * height,
+                self.origin[0] + self.size[0],
+                self.origin[1] + scroll.end as f32 * height,
+            ]
+        } else {
+            if row > scroll.end {
+                top -= height;
+            }
+            [
+                self.origin[0],
+                top,
+                self.origin[0] + self.size[0],
+                top + height,
+            ]
+        };
+        (top, clip)
+    }
 }
 
 /// A stretch of one line to highlight.
@@ -1144,20 +1184,30 @@ impl Renderer {
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "cells, cursor and decoration in one render pass"
+    )]
     fn push_scene(&mut self, scene: &Scene<'_>, fonts: &mut Fonts) {
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
-        let [origin_x, origin_y] = scene.origin;
+        let origin_x = scene.origin[0];
         // Whole cells only: a terminal wider or taller than its pane, as
         // while it's being resized, is cut off.
         let cols = (scene.size[0] / cell_width).round() as usize;
-        let lines = (scene.size[1] / cell_height).round() as usize;
+        let lines =
+            (scene.size[1] / cell_height).round() as usize + usize::from(scene.scroll.is_some());
         let cursor = scene.cursor;
         self.push_highlights(scene, true, [cols, lines], &cell);
         // Whether the row before wrapped halfway through a flag.
         let mut mid_flag = false;
         for (line, row) in scene.rows.iter().take(lines).enumerate() {
-            let top = origin_y + line as f32 * cell_height;
+            let (top, clip) = scene.row_position(line, cell_height);
+            let starts = (
+                self.rects.len(),
+                self.overlays.len(),
+                self.glyph_instances.len(),
+            );
             let baseline = top + cell.baseline;
             // Cells before `run_until` belong to a run that starts to their
             // left: drawn with it as one glyph if `run_drawn`, or else each
@@ -1250,6 +1300,17 @@ impl Renderer {
                     ));
                 }
             }
+            if scene.scroll.is_some() {
+                for rect in &mut self.rects[starts.0..] {
+                    rect.clip = clip;
+                }
+                for rect in &mut self.overlays[starts.1..] {
+                    rect.clip = clip;
+                }
+                for glyph in &mut self.glyph_instances[starts.2..] {
+                    glyph.clip = clip;
+                }
+            }
             mid_flag = ends_mid_flag(row, mid_flag);
         }
         self.push_highlights(scene, false, [cols, lines], &cell);
@@ -1266,7 +1327,7 @@ impl Renderer {
         cell: &CellMetrics,
     ) {
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
-        let [origin_x, origin_y] = scene.origin;
+        let origin_x = scene.origin[0];
         for highlight in scene.highlights {
             if highlight.line >= lines || highlight.kind.behind() != behind {
                 continue;
@@ -1274,19 +1335,23 @@ impl Renderer {
             let start = highlight.cols.start.min(cols);
             let end = highlight.cols.end.min(cols);
             let left = origin_x + start as f32 * cell_width;
-            let top = origin_y + highlight.line as f32 * cell_height;
+            let (top, clip) = scene.row_position(highlight.line, cell_height);
             let width = (end - start) as f32 * cell_width;
             let color = self.theme.highlight(highlight.kind);
             if highlight.kind == HighlightKind::Link {
                 // A line under the text, as where text is underlined.
                 let under = top + cell.baseline + cell.underline_offset;
                 let stroke = cell.stroke.max(1.0);
-                self.overlays
-                    .push(Rect::solid([left, under], [width, stroke], color));
+                self.overlays.push(Rect {
+                    clip,
+                    ..Rect::solid([left, under], [width, stroke], color)
+                });
                 continue;
             }
-            self.rects
-                .push(Rect::solid([left, top], [width, cell_height], color));
+            self.rects.push(Rect {
+                clip,
+                ..Rect::solid([left, top], [width, cell_height], color)
+            });
         }
     }
 
@@ -1859,6 +1924,7 @@ mod tests {
         let drawn = |renderer: &mut Renderer, fonts: &mut Fonts| {
             let picture = Picture {
                 scenes: &[Scene {
+                    scroll: None,
                     origin: [0.0; 2],
                     #[allow(clippy::cast_precision_loss)]
                     size: [20.0 * fonts.cell.width as f32, fonts.cell.height as f32],
@@ -1945,6 +2011,7 @@ mod tests {
             let cell = [fonts.cell.width as f32, fonts.cell.height as f32];
             let picture = Picture {
                 scenes: &[Scene {
+                    scroll: None,
                     origin: [0.0; 2],
                     #[allow(clippy::cast_precision_loss)]
                     size: [
@@ -1999,5 +2066,30 @@ mod tests {
             [(0, 2, false), (1, 0, false), (1, 1, true)],
             "{glyphs:?}"
         );
+    }
+    #[test]
+    fn fractional_rows_clip_the_body_and_leave_headers_and_footers_still() {
+        let scene = Scene {
+            scroll: Some(RowScroll {
+                first: 1,
+                end: 4,
+                fraction: 0.5,
+            }),
+            origin: [10.0, 20.0],
+            size: [100.0, 100.0],
+            rows: &[],
+            cursor: None,
+            normal_mode: false,
+            highlights: &[],
+        };
+        let (header, _) = scene.row_position(0, 20.0);
+        let (first, clip) = scene.row_position(1, 20.0);
+        let (extra, _) = scene.row_position(4, 20.0);
+        let (footer, _) = scene.row_position(5, 20.0);
+        assert!((header - 20.0).abs() < 0.01);
+        assert!((first - 30.0).abs() < 0.01);
+        assert!((extra - 90.0).abs() < 0.01);
+        assert!((footer - 100.0).abs() < 0.01);
+        assert!((clip[1] - 40.0).abs() < 0.01 && (clip[3] - 100.0).abs() < 0.01);
     }
 }

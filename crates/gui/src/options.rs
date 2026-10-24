@@ -466,6 +466,8 @@ options! {
     /// around it shows as it moves. Half the pane or more keeps the
     /// cursor's line in the middle.
     scrolloff("so"): u32 (0..=9999) = 5;
+    /// Ease mouse-wheel scrolling in native panes. Trackpad pixels stay direct.
+    smoothscroll("sms"): bool = true;
     /// A line too long for the pane goes on over as many rows as it needs,
     /// rather than off the pane's right edge. `j` and `k` still move by
     /// line, and `gj` and `gk` by row.

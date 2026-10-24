@@ -415,6 +415,8 @@ pub(crate) struct Editor {
     /// Where the view starts, and when lines don't wrap, the first column
     /// shown.
     top: Top,
+    /// Extra rows drawn only while the view is between whole rows.
+    pub(crate) scroll_extra: usize,
     left: usize,
     /// The pane has been resized since the view last followed the cursor,
     /// which the next settle does, as rows may have wrapped afresh.
@@ -733,6 +735,7 @@ impl Editor {
             cursor: Cursor::new(Point { line: 0, col: 0 }),
             anchor: None,
             top: Top { line: 0, cell: 0 },
+            scroll_extra: 0,
             left: 0,
             resized: false,
             view_placed: None,
@@ -5320,14 +5323,29 @@ impl Editor {
         }
     }
 
-    /// Scrolls the view by `rows` screen rows, up if negative, as the mouse
-    /// wheel does, keeping the cursor in it.
+    /// Whether the view can move in this direction.
+    pub(crate) fn native_scroll_room(&self, up: bool, copy: &BufferCopy) -> bool {
+        let text = self.text(copy);
+        let top = self.top.row(&text);
+        if up {
+            top > (RowAt { line: 0, row: 0 })
+        } else {
+            top < self.lowest_top(&text)
+        }
+    }
+
+    /// Scrolls by screen rows, positive upward, keeping the cursor in view.
     pub(crate) fn wheel(&mut self, rows: i64, copy: &BufferCopy) {
+        self.scroll_native(rows, copy);
+    }
+
+    pub(crate) fn scroll_native(&mut self, rows: i64, copy: &BufferCopy) -> i64 {
         self.view_placed = None;
         self.settle_want(copy);
         let text = self.text(copy);
         self.clamp_top(&text);
         let top = self.top.row(&text);
+        let before = top;
         let count = rows.unsigned_abs();
         let top = if rows > 0 {
             rows_up(top, count, 0, &text)
@@ -5335,6 +5353,9 @@ impl Editor {
             let down = rows_down(top, count, text.last_line(), &text);
             down.min(self.lowest_top(&text))
         };
+        let distance = i64::try_from(rows_between(before.min(top), before.max(top), &text))
+            .unwrap_or(i64::MAX);
+        let moved = if top < before { distance } else { -distance };
         self.top = Top::of(top, &text);
         let at = self.cursor.at;
         self.cursor_into_view(&text);
@@ -5348,6 +5369,7 @@ impl Editor {
                 self.moved_while_inserting(copy);
             }
         }
+        moved
     }
 
     /// The furthest down the view scrolls: as far as leaves `scrolloff`
@@ -5515,7 +5537,7 @@ impl Editor {
         let width = self.text_width();
         self.shown = wrap::view(
             &text,
-            (self.top.row(&text), self.height),
+            (self.top.row(&text), self.height + self.scroll_extra),
             self.view_end(&text),
             self.left,
             &mut self.placed,
@@ -5608,7 +5630,7 @@ impl Editor {
             .empty_note
             // Not once it's been emptied by hand: `:w` deletes all it had.
             .filter(|_| copy.loaded() && !copy.modified() && self.only_kept(&text));
-        while rows.len() < self.height {
+        while rows.len() < self.height + self.scroll_extra {
             let mut builder = RowBuilder::new(self.width);
             if copy.loaded() {
                 builder.push("~", &colors::end_of_buffer(), true);

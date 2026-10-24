@@ -34,7 +34,7 @@ use crate::review::{Ask, Review};
 /// The reviews, by the pane each is, and those attached.
 #[derive(Debug, Default)]
 pub(super) struct Reviews {
-    panes: HashMap<PaneId, Review>,
+    pub(super) panes: HashMap<PaneId, Review>,
     attached: HashSet<ReviewId>,
 }
 

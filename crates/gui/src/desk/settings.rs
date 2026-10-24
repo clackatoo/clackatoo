@@ -170,6 +170,7 @@ impl Desk {
 
     /// Passes the options on to the panes, as they've changed.
     fn options_changed(&mut self) {
+        self.stop_scrolling();
         self.editors.set_options(&self.options);
         self.explorer_options();
         self.board_options();

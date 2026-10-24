@@ -273,6 +273,22 @@ impl Window {
         })
     }
 
+    /// Scrolls by exact logical pixels, as a touchpad does.
+    pub fn scroll_pixels(&mut self, point: [f32; 2], pixels: f32) {
+        self.move_to(point);
+        self.input();
+        let scale = self
+            .app
+            .frame
+            .as_ref()
+            .map_or(1.0, super::Frame::scale_factor);
+        self.app.wheel(MouseScrollDelta::PixelDelta(
+            winit::dpi::PhysicalPosition::new(0.0, f64::from(pixels) * scale),
+        ));
+        self.app.send_outbox();
+        self.turn(Instant::now());
+    }
+
     /// Lets the window carry on by itself until it shows the daemon's
     /// workspaces, rather than a notice that it's connecting, or `time`
     /// has passed. Returns whether it did.

@@ -755,6 +755,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "File changes, Undo and Redo share a compact summary beneath each answer.",
     },
+    News {
+        id: "smoothscroll",
+        date: "2026-10-24",
+        lesson: "mouse",
+        what: "Smooth wheel scrolling across native panes, precise trackpads, and :set nosmoothscroll to turn it off.",
+    },
 ];
 
 impl News {

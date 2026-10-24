@@ -64,6 +64,7 @@ fn render_rows(
     ];
     #[allow(clippy::cast_precision_loss)]
     let scene = Scene {
+        scroll: None,
         origin: [padding as f32; 2],
         size: [
             (size[0] - 2 * padding) as f32,
@@ -366,6 +367,7 @@ fn a_review_draws_old_lines_on_red_and_new_on_green() {
     ];
     #[allow(clippy::cast_precision_loss)]
     let scene = Scene {
+        scroll: None,
         origin: [padding as f32; 2],
         size: [
             (size[0] - 2 * padding) as f32,
@@ -505,6 +507,7 @@ fn draw_window_shaped(
         .zip(&rows)
         .enumerate()
         .map(|(index, ((_, tile), rows))| Scene {
+            scroll: None,
             origin: tile.origin,
             size: tile.cells_size(geometry.area.cell),
             rows,
@@ -1428,6 +1431,7 @@ fn renders_an_editor_pane() {
     ];
     #[allow(clippy::cast_precision_loss)]
     let scene = Scene {
+        scroll: None,
         origin: [padding as f32; 2],
         size: [
             (size[0] - 2 * padding) as f32,
@@ -1549,6 +1553,7 @@ fn renders_an_editor_pane_with_a_wrapped_line() {
     ];
     #[allow(clippy::cast_precision_loss)]
     let scene = Scene {
+        scroll: None,
         origin: [padding as f32; 2],
         size: [
             (size[0] - 2 * padding) as f32,
@@ -1633,6 +1638,10 @@ fn renders_an_editor_pane_with_a_wrapped_line() {
 /// frame_times -- --ignored --nocapture`.
 #[test]
 #[ignore = "a timing, run by hand"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "shared GPU setup and timing for static and moving frames"
+)]
 fn frame_times() {
     let Some(gpu) = gpu() else {
         eprintln!("no GPU available; skipping");
@@ -1662,13 +1671,27 @@ fn frame_times() {
         emoji_screen.extend((0..32).map(|col| emoji[(line + col) % emoji.len()]));
         emoji_screen.push_str("\r\n");
     }
-    for (name, output) in [("ascii", ascii), ("emoji", emoji_screen)] {
+    for (name, output, moving) in [
+        ("ascii", ascii.clone(), false),
+        ("emoji", emoji_screen.clone(), false),
+        ("ascii scrolling", ascii, true),
+        ("emoji scrolling", emoji_screen, true),
+    ] {
         let screen = screen(160, 50, &output);
         let mut fonts = fonts(2.0);
         let size = [160 * fonts.cell.width, 50 * fonts.cell.height];
-        let rows: Vec<_> = screen.rows.iter().collect();
+        let rows: Vec<_> = screen
+            .rows
+            .iter()
+            .chain(screen.rows.iter().take(usize::from(moving)))
+            .collect();
         #[allow(clippy::cast_precision_loss)]
         let scene = Scene {
+            scroll: moving.then_some(crate::render::RowScroll {
+                first: 0,
+                end: 50,
+                fraction: 0.5,
+            }),
             origin: [0.0; 2],
             size: [size[0] as f32, size[1] as f32],
             rows: &rows,
@@ -1911,6 +1934,7 @@ fn an_editors_completion_menu_and_signature_are_drawn_by_its_cursor() {
     }
     let (lines, cursor) = editor.scene();
     let scene = Scene {
+        scroll: None,
         origin,
         size: [
             (size[0] - 2 * padding) as f32,
@@ -2020,6 +2044,7 @@ fn an_editors_panel_is_drawn_over_its_text() {
     chrome::paint_panel(&geometry, origin, &view, &mut over, &mut texts);
     let (lines, cursor) = editor.scene();
     let scene = Scene {
+        scroll: None,
         origin,
         size: [
             (size[0] - 2 * padding) as f32,
@@ -2061,6 +2086,7 @@ fn an_editors_panel_is_drawn_over_its_text() {
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
+#[allow(clippy::too_many_lines, reason = "one rendered finder fixture")]
 fn the_finder_is_drawn_over_the_panes_with_a_preview() {
     use crate::finder::view::Layout as FinderLayout;
 
@@ -2122,6 +2148,7 @@ fn the_finder_is_drawn_over_the_panes_with_a_preview() {
     let screen = screen(150, 36, "$ ls\r\nCargo.toml  crates\r\n$ ");
     let rows: Vec<_> = screen.rows.iter().collect();
     let scenes = [Scene {
+        scroll: None,
         origin: placement.panes[0].1.origin,
         size: placement.panes[0].1.cells_size(geometry.area.cell),
         rows: &rows,
@@ -2273,6 +2300,7 @@ fn renders_an_explorer_pane() {
     ];
     #[allow(clippy::cast_precision_loss)]
     let scene = Scene {
+        scroll: None,
         origin: [padding as f32; 2],
         size: [
             (size[0] - 2 * padding) as f32,
@@ -2934,6 +2962,7 @@ fn crowded_bars_at(
     );
     let rows: Vec<_> = screen.rows.iter().collect();
     let scenes = [Scene {
+        scroll: None,
         origin: placement.panes[0].1.origin,
         size: placement.panes[0].1.cells_size(geometry.area.cell),
         rows: &rows,

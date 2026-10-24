@@ -496,6 +496,8 @@ A click puts the cursor where it's clicked, or at the line's start if it's on th
 
 With Alt held, or Ctrl and Alt, dragging selects a block of columns. Dragging selects, as in Neovim: from where the button went down to where the mouse is, in visual mode, ready for `d`, `y`, `c`, `>` and the rest once you let go. A double click selects a word, by the file's own word characters, and dragging after it selects whole words; a triple click selects the line, and dragging after it whole lines. A long line wrapped over several rows is selected row by row, and an inlay hint is never selected: the mouse on one takes the character it's drawn before. A click ends the selection, and `gv` selects it again. An editor showing a folder selects the same way, but a double click there opens what's clicked, as Enter does.
 
+Mouse-wheel scrolling is smooth across native panes, including editors, terminal history, chats, rendered Markdown, explorers, boards and reviews. Trackpads retain pixel precision, and keyboard navigation remains immediate. Use `:set nosmoothscroll` to disable wheel animation, or save `client.opt.smoothscroll = false` in `client/init.lua`. Programs that handle their own mouse input receive wheel events directly.
+
 Past the pane's top or bottom, the view scrolls while the button is held, faster the further past the mouse goes. While you drag, the view keeps still under the mouse; once you let go, `scrolloff` keeps rows around the cursor again. If the text changes under a drag, say by an agent's edit, where it started moves with the text.
 
 Letting go puts what's selected on the primary selection, which a middle click pastes, as selecting in a terminal does; not with `clipboard=unnamed`, where `p` over the selection would put the selection itself.

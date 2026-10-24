@@ -75,6 +75,8 @@ pub(crate) struct BoardPane {
     at_end: bool,
     /// The first line in view.
     top: usize,
+    /// Extra rows drawn only while the view is between whole rows.
+    pub(crate) scroll_extra: usize,
     width: usize,
     height: usize,
     /// The lines laid out, as of the last settle, and the rows in view.
@@ -112,6 +114,7 @@ impl BoardPane {
             cursor: 0,
             at_end: true,
             top: 0,
+            scroll_extra: 0,
             width: 0,
             height: 0,
             lines: Vec::new(),
@@ -461,6 +464,24 @@ impl BoardPane {
         self.height.saturating_sub(1).max(1)
     }
 
+    pub(crate) fn scroll_region(&self) -> std::ops::Range<usize> {
+        1..self.height.max(1)
+    }
+
+    pub(crate) fn native_scroll_room(&self, up: bool) -> bool {
+        if up {
+            self.top > 0
+        } else {
+            self.top < self.lines.len().saturating_sub(self.list_height())
+        }
+    }
+
+    pub(crate) fn scroll_native(&mut self, lines: i64) -> i64 {
+        let before = self.top;
+        self.scroll(-lines);
+        i64::try_from(before).unwrap_or(i64::MAX) - i64::try_from(self.top).unwrap_or(i64::MAX)
+    }
+
     // --- Drawing ------------------------------------------------------------
 
     /// Lays out the rows shown, for [`scene`](Self::scene).
@@ -490,7 +511,7 @@ impl BoardPane {
         self.top = self.top.min(self.lines.len().saturating_sub(1));
         let mut rows = Vec::with_capacity(self.height);
         rows.push(self.heading());
-        let end = (self.top + height).min(self.lines.len());
+        let end = (self.top + height + self.scroll_extra).min(self.lines.len());
         self.cursor_cell = None;
         self.cursor_rows = 0..0;
         for (index, line) in self.lines[self.top..end].iter().enumerate() {
@@ -503,10 +524,10 @@ impl BoardPane {
             }
             rows.push(line.row.clone());
         }
-        while rows.len() < self.height {
+        while rows.len() < self.height + self.scroll_extra {
             rows.push(RowBuilder::new(self.width).finish(false));
         }
-        rows.truncate(self.height);
+        rows.truncate(self.height + self.scroll_extra);
         self.rows = rows;
     }
 

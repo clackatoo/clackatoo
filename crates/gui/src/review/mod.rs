@@ -148,6 +148,8 @@ pub(crate) struct Review {
     /// The line the cursor's on, and the first in view.
     cursor: usize,
     top: usize,
+    /// Extra rows drawn only while the view is between whole rows.
+    pub(crate) scroll_extra: usize,
     width: usize,
     height: usize,
     tabstop: usize,
@@ -175,6 +177,7 @@ impl Review {
             lines: Vec::new(),
             cursor: 0,
             top: 0,
+            scroll_extra: 0,
             width: 0,
             height: 0,
             tabstop: options.tabstop as usize,
@@ -643,6 +646,24 @@ impl Review {
         true
     }
 
+    pub(crate) fn scroll_region(&self) -> std::ops::Range<usize> {
+        0..self.height
+    }
+
+    pub(crate) fn native_scroll_room(&self, up: bool) -> bool {
+        if up {
+            self.top > 0
+        } else {
+            self.top < self.lines.len().saturating_sub(1)
+        }
+    }
+
+    pub(crate) fn scroll_native(&mut self, lines: i64) -> i64 {
+        let before = self.top;
+        self.scroll(-lines);
+        i64::try_from(before).unwrap_or(i64::MAX) - i64::try_from(self.top).unwrap_or(i64::MAX)
+    }
+
     // --- Drawing ------------------------------------------------------------
 
     /// Lays out the rows shown, for [`scene`](Self::scene).
@@ -654,7 +675,7 @@ impl Review {
             self.top = self.cursor + 1 - height;
         }
         self.top = self.top.min(self.lines.len().saturating_sub(1));
-        let end = (self.top + height).min(self.lines.len());
+        let end = (self.top + height + self.scroll_extra).min(self.lines.len());
         let mut rows = Vec::with_capacity(height);
         let mut lit = Vec::with_capacity(height);
         self.cursor_cell = None;
@@ -666,7 +687,7 @@ impl Review {
             rows.push(row);
             lit.push(kind);
         }
-        while rows.len() < self.height {
+        while rows.len() < self.height + self.scroll_extra {
             rows.push(RowBuilder::new(self.width).finish(false));
             lit.push(None);
         }

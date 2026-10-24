@@ -151,6 +151,7 @@ Several can go after one `:set`, such as `:set nu rnu`. Each option has a short 
 | `breakindent` | `bri` | Wrapped rows start as far in as their line is indented. | on |
 | `showbreak` | `sbr` | Text drawn at the start of each wrapped row. | none |
 | `scrolloff` | `so` | The fewest lines kept in view above and below an editor's cursor. Half the pane or more keeps the cursor's line in the middle. | 5 |
+| `smoothscroll` | `sms` | Ease mouse-wheel scrolling in native panes. Trackpad pixels stay direct; keyboard motions and jumps stay immediate. | on |
 | `tabstop` | `ts` | How wide a tab is drawn: to the next column that's a multiple of it, from 1 to 32. | 4 |
 | `shiftwidth` | `sw` | The columns `>>` and `<<` [indent](~clackatoo/reference/editor#tabs-and-indenting) by, as does Tab where it indents with spaces, up to 32. 0 means `tabstop`'s, so the two can't drift apart. | 0 |
 | `expandtab` | `et` | Indents with spaces, not tabs, where no line nearby is indented yet. A file keeps the kind of indent it has. | on |

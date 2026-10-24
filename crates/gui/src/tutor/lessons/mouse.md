@@ -9,6 +9,12 @@ grape honeydew kiwi
 lemon mango nectarine
 ```
 
+## Smooth scrolling
+
+The wheel moves smoothly through terminal history, chats, editors, rendered Markdown, file explorers, boards and reviews. Trackpads follow your fingers by pixels. Headers stay still, and clicks select the text where it appears during scrolling. Keyboard motions and jumps remain immediate.
+
+`:set nosmoothscroll` makes wheel scrolling immediate too; `:set smoothscroll` restores it. Save the preference with `client.opt.smoothscroll = false` in `client/init.lua`. Programs that handle their own mouse input keep control of their scrolling.
+
 ## Drag across some text
 
 Press the mouse button on the `b` of `banana`, and hold it down while you move to the `r` of `elder`. What's between lights up as you go, and the bar says `VISUAL`: it's visual mode's selection, as `v` makes.

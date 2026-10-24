@@ -1799,18 +1799,35 @@ impl App {
         let lines = match delta {
             MouseScrollDelta::LineDelta(_, y) => f64::from(y) * WHEEL_LINES,
             MouseScrollDelta::PixelDelta(position) => position.y / f64::from(cell_height),
-        } + self.wheel_remainder;
-        let whole = lines.trunc();
-        self.wheel_remainder = lines - whole;
+        };
         let Some(point) = self.pointer else {
             return;
         };
+        let over_finder = matches!(self.hit(point), Hit::Finder(_));
+        if self.picker.is_none()
+            && !over_finder
+            && let Some(redraw) = self.desk.smooth_wheel(
+                point,
+                lines,
+                matches!(delta, MouseScrollDelta::PixelDelta(_)),
+                self.modifiers,
+            )
+        {
+            self.wheel_remainder = 0.0;
+            if redraw {
+                self.request_redraw();
+            }
+            self.send_outbox();
+            return;
+        }
+        let lines = lines + self.wheel_remainder;
+        let whole = lines.trunc();
+        self.wheel_remainder = lines - whole;
         #[allow(clippy::cast_possible_truncation)]
         let whole = whole as i64;
         if whole == 0 {
             return;
         }
-        let over_finder = matches!(self.hit(point), Hit::Finder(_));
         // The picker of a machine has the wheel over it, and nothing under
         // it does.
         if let Some(picker) = &mut self.picker {
@@ -1969,6 +1986,7 @@ impl App {
         let screen = Screen::message(&lines, size);
         let rows: Vec<_> = screen.rows.iter().collect();
         let scenes = [Scene {
+            scroll: None,
             origin: tile.origin,
             size: tile.cells_size(area.cell),
             rows: &rows,
@@ -2082,6 +2100,7 @@ impl App {
             .map(|(drawing, replaced)| {
                 let composing = composed.as_ref().filter(|_| drawing.focused);
                 Scene {
+                    scroll: drawing.scroll,
                     origin: drawing.tile.origin,
                     size: drawing.tile.cells_size(cell),
                     rows: replaced.as_deref().unwrap_or(&drawing.rows),
@@ -2293,6 +2312,7 @@ fn list_drawing(
         cursor.style = CursorStyle::Hollow;
     }
     Drawing {
+        scroll: None,
         terminal: None,
         tile,
         rows,
@@ -2386,6 +2406,7 @@ fn drawings<'a>(
                     cursor.style = CursorStyle::Hollow;
                 }
                 drawings.push(Drawing {
+                    scroll: None,
                     terminal: None,
                     tile,
                     rows,
@@ -2409,6 +2430,7 @@ fn drawings<'a>(
                     cursor.style = CursorStyle::Hollow;
                 }
                 drawings.push(Drawing {
+                    scroll: None,
                     terminal: None,
                     tile,
                     rows,
@@ -2454,7 +2476,7 @@ fn drawings<'a>(
         let Some(state) = state.filter(|state| state.screen().is_some()) else {
             continue;
         };
-        let height = usize::from(tile.rows);
+        let height = usize::from(tile.rows) + usize::from(desk.row_scroll(id).is_some());
         let (rows, mut cursor) = state.scene(height);
         // Hollow, too, on another machine's terminal while that machine
         // isn't connected, which takes no keys: its pill says so.
@@ -2464,6 +2486,7 @@ fn drawings<'a>(
             cursor.style = CursorStyle::Hollow;
         }
         drawings.push(Drawing {
+            scroll: None,
             terminal: Some(terminal),
             tile,
             rows,
@@ -2473,6 +2496,15 @@ fn drawings<'a>(
             normal_mode: has_focus && normal,
             focused: has_focus,
         });
+    }
+    for drawing in &mut drawings {
+        if let Some((id, _)) = placement
+            .panes
+            .iter()
+            .find(|(_, tile)| *tile == drawing.tile)
+        {
+            drawing.scroll = desk.row_scroll(*id);
+        }
     }
     drawings
 }
@@ -2612,6 +2644,7 @@ fn compose_in_bar(
 
 /// One pane, ready to draw.
 struct Drawing<'a> {
+    scroll: Option<render::RowScroll>,
     /// The terminal drawn, or `None` for a file.
     terminal: Option<TerminalId>,
     tile: Tile,
@@ -3113,7 +3146,7 @@ impl App {
         }
         // A terminal's guess at the echo of a key may have waited long
         // enough to be taken as wrong.
-        if self.desk.tick_panes(Instant::now()) {
+        if self.desk.tick_scrolling(Instant::now()) | self.desk.tick_panes(Instant::now()) {
             self.request_redraw();
         }
         // While the daemon is out of contact, the top bar counts the
@@ -3144,6 +3177,7 @@ impl App {
             .chain(self.desk.places_to_tell())
             .chain(self.desk.chat_wakes())
             .chain(self.desk.pane_wakes())
+            .chain(self.desk.scroll_wakes())
             .chain(self.desk.config_ends())
             .min()
     }
