@@ -743,6 +743,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Image viewers load original detail on demand, including over remote connections.",
     },
+    News {
+        id: "pendinghandoff",
+        date: "2026-10-24",
+        lesson: "agents",
+        what: "Provider choices stay pending until Send, with a clear handoff divider and one-click cancellation.",
+    },
 ];
 
 impl News {

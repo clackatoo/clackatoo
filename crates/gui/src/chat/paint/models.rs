@@ -91,7 +91,7 @@ impl ChatView {
         let Some(menu) = self.menu.clone() else {
             return;
         };
-        let rows = picker::rows(&self.offer(), &menu);
+        let rows = self.choice_rows(&menu);
         let choices: Vec<ChoiceRow> = rows
             .iter()
             .filter_map(|row| match row {
@@ -479,6 +479,9 @@ impl ChatView {
         rect: [f32; 4],
         menu: &crate::chat::Menu,
     ) {
+        if self.handoff.is_some() {
+            return;
+        }
         let Some(setting) = picker::fast_mode(&self.node.settings) else {
             return;
         };

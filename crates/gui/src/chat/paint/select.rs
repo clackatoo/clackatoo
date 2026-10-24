@@ -211,7 +211,12 @@ impl ChatView {
             Piece::Fold => key.piece == FOLD,
             Piece::Agents => key.piece == AGENTS,
             Piece::Item(piece) | Piece::Card(piece) => key.piece == piece,
-            Piece::Previews | Piece::Note | Piece::Footer | Piece::Badge | Piece::Divider => false,
+            Piece::Handoff
+            | Piece::Previews
+            | Piece::Note
+            | Piece::Footer
+            | Piece::Badge
+            | Piece::Divider => false,
         })?;
         if key.piece == AGENTS {
             let card = slot.agents.as_ref()?;
@@ -306,7 +311,12 @@ impl ChatView {
                 Piece::Card(piece) => {
                     add(piece, laid.cards.get(&piece).map_or(0, CardLaid::parts));
                 }
-                Piece::Previews | Piece::Note | Piece::Footer | Piece::Badge | Piece::Divider => {}
+                Piece::Handoff
+                | Piece::Previews
+                | Piece::Note
+                | Piece::Footer
+                | Piece::Badge
+                | Piece::Divider => {}
             }
         }
         keys

@@ -13778,6 +13778,65 @@ fn the_model_menu_offers_other_agents_models_once_asked() {
 }
 
 #[test]
+fn sending_a_handoff_carries_context_and_submits_only_to_the_destination() {
+    let daemon = with_two_agents();
+    let mut client = daemon.client();
+    let (chat, _) = start_chat_with(&mut client, "claude");
+    ask(&mut client, chat, "hello");
+    client
+        .chat(
+            chat,
+            ChatAction::SendTo {
+                agent: "codex".into(),
+                model: Some("gpt-6-luna".into()),
+                budget: 20000,
+                text: "settings".into(),
+                images: Vec::new(),
+            },
+        )
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.agent == "Codex" && node.turns.len() == 3 && last_outcome(node).is_some()
+    });
+    assert!(node.turns[1].switch.is_some());
+    assert_eq!(node.turns[2].prompt, "settings");
+    assert_eq!(last_words(&node), "agent gpt-6-luna\n");
+    let digests = carried(&daemon, "codex.log", "s1");
+    assert_eq!(digests.len(), 1);
+    assert!(digests[0].contains("hello"));
+}
+
+#[test]
+fn a_refused_handoff_does_not_switch_or_send() {
+    let daemon = with_two_agents();
+    let mut client = daemon.client();
+    let (chat, _) = start_chat_with(&mut client, "claude");
+    let handoff = |text: &str, agent: &str| ChatAction::SendTo {
+        agent: agent.into(),
+        model: None,
+        budget: 20000,
+        text: text.into(),
+        images: Vec::new(),
+    };
+    assert!(client.chat(chat, handoff("", "codex")).is_err());
+    assert!(
+        client
+            .chat(chat, handoff("hello", "missing-provider"))
+            .is_err()
+    );
+    let node = chat_now(&mut client, chat);
+    assert_eq!(node.agent, "Claude Code");
+    assert!(node.turns.is_empty());
+    client.chat(chat, ChatAction::Send("ask".into())).unwrap();
+    wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    assert!(client.chat(chat, handoff("do not send", "codex")).is_err());
+    let node = chat_now(&mut client, chat);
+    assert_eq!(node.agent, "Claude Code");
+    assert_eq!(node.turns.len(), 1);
+    assert!(node.question.is_some());
+}
+
+#[test]
 fn a_chat_moves_to_another_agent_with_the_conversation_so_far_and_back() {
     let daemon = with_two_agents();
     let mut client = daemon.client();

@@ -73,6 +73,7 @@ enum Pending {
     Other,
     /// Original requested by one particular opening of the image viewer.
     Original(u64),
+    Handoff,
 }
 
 /// The guesses at the echo of what's typed, drawn over a line of the
@@ -395,15 +396,22 @@ impl Pane {
         let settled = chat.settle(fonts);
         let original = chat.take_original_request();
         for mut action in settled.actions {
-            if let ChatAction::Switch { budget, .. } = &mut action {
+            if let ChatAction::Switch { budget, .. } | ChatAction::SendTo { budget, .. } =
+                &mut action
+            {
                 *budget = self.carryover;
             }
+            let pending = if matches!(action, ChatAction::SendTo { .. }) {
+                Pending::Handoff
+            } else {
+                Pending::Other
+            };
             self.request(
                 Request::Chat {
                     terminal: self.terminal,
                     action,
                 },
-                Pending::Other,
+                pending,
             );
         }
         if let Some((serial, original)) = original {
@@ -709,6 +717,12 @@ impl Pane {
             return self.refresh_overlay();
         }
         match (pending, response) {
+            (Some(Pending::Handoff), response) => {
+                if let Some(chat) = &mut self.chat {
+                    chat.handoff_answer(response);
+                }
+                true
+            }
             (Some(Pending::Original(serial)), response) => {
                 if let Some(chat) = &mut self.chat {
                     chat.original_answer(serial, response);

@@ -16,6 +16,7 @@ mod card;
 mod favorites;
 #[cfg(test)]
 pub(crate) mod fixtures;
+mod handoff;
 mod images;
 mod paint;
 mod picker;
@@ -99,6 +100,7 @@ enum Hit {
     Favorite(String, String),
     RemoveImage(usize),
     CloseImage,
+    CancelHandoff,
     Send,
     Stop,
     /// One of the answers to the agent's question, by its ID.
@@ -206,6 +208,9 @@ pub(crate) struct ChatView {
     images: Vec<clackatoo_protocol::ChatImage>,
     previews: images::Cache,
     image_viewer: Option<viewer::Viewer>,
+    handoff: Option<handoff::Pending>,
+    handoff_sent: Option<handoff::Draft>,
+    pub(crate) handoff_supported: bool,
     /// Enter waits until the clipboard worker has delivered its result.
     pub(crate) pasting: bool,
     /// The size the editor's text was last styled at, and the fonts'
@@ -405,6 +410,9 @@ impl ChatView {
             images: Vec::new(),
             previews: images::Cache::default(),
             image_viewer: None,
+            handoff: None,
+            handoff_sent: None,
+            handoff_supported: cfg!(test),
             pasting: false,
             editor_size: 0.0,
             editor_fonts: 0,
@@ -582,6 +590,9 @@ impl ChatView {
         self.offline = offline;
         if offline {
             self.live = None;
+            self.handoff_failed(
+                "Disconnected before send was confirmed. Check the history before retrying.",
+            );
             if let Some(viewer) = &mut self.image_viewer {
                 viewer.offline();
             }
@@ -718,7 +729,7 @@ impl ChatView {
     }
 
     fn search_changed(&mut self) {
-        let rows = picker::rows(&self.offer(), self.menu.as_ref().unwrap());
+        let rows = self.choice_rows(self.menu.as_ref().unwrap());
         let menu = self.menu.as_mut().unwrap();
         menu.highlighted = rows.iter().find_map(Row::spot);
         menu.offset = 0;
@@ -1022,10 +1033,16 @@ impl ChatView {
                     if self.node.question.is_some() {
                         self.typed_while_asking();
                     } else if !image.valid()
-                        || self.images.len() >= clackatoo_protocol::ChatImage::MAX_COUNT
+                        || self.images.len()
+                            + self
+                                .handoff_sent
+                                .as_ref()
+                                .map_or(0, |draft| draft.images.len())
+                            >= clackatoo_protocol::ChatImage::MAX_COUNT
                         || self
                             .images
                             .iter()
+                            .chain(self.handoff_sent.iter().flat_map(|draft| &draft.images))
                             .map(|image| image.data.len())
                             .sum::<usize>()
                             + image.data.len()
@@ -1094,6 +1111,10 @@ impl ChatView {
         fonts: &mut Fonts,
         edit: impl FnOnce(&mut parley::PlainEditorDriver<'_, Brush>),
     ) {
+        // set_text (send or restored draft) leaves parley's selection tied
+        // to its previous layout until refreshed, even if keys arrive before paint.
+        self.editor
+            .refresh_layout(&mut fonts.font_cx, &mut self.layout_cx);
         let mut driver = self.editor.driver(&mut fonts.font_cx, &mut self.layout_cx);
         edit(&mut driver);
     }
@@ -1234,7 +1255,12 @@ impl ChatView {
     /// last.
     fn send(&mut self, settled: &mut Settled) {
         let text = self.editor.raw_text().trim().to_owned();
-        if (text.is_empty() && self.images.is_empty()) || self.busy() {
+        if (text.is_empty() && self.images.is_empty()) || self.busy() || self.handoff_sent.is_some()
+        {
+            return;
+        }
+        if self.handoff.is_some() {
+            self.send_handoff(text, settled);
             return;
         }
         self.editor.set_text("");
@@ -1393,7 +1419,7 @@ impl ChatView {
                 return true;
             }
         }
-        let rows = picker::rows(&self.offer(), &menu);
+        let rows = self.choice_rows(&menu);
         let spots: Vec<Spot> = rows.iter().filter_map(Row::spot).collect();
         let at = (menu.highlighted.as_ref())
             .and_then(|highlighted| spots.iter().position(|spot| spot == highlighted));
@@ -1428,7 +1454,7 @@ impl ChatView {
             }
             Key::Named(NamedKey::Enter) => {
                 if let Some(Spot::Choice { setting, value }) = menu.highlighted {
-                    settled.actions.push(choose(setting, value));
+                    self.choose(setting, value, settled);
                 }
                 self.menu = None;
                 true
@@ -1586,8 +1612,13 @@ impl ChatView {
             reveal: true,
             ..Menu::default()
         };
-        menu.filter = picker::Filter::initial(self.agent(), &menu.favorites);
-        menu.highlighted = (picker::rows(&self.offer(), &menu).iter())
+        menu.filter = picker::Filter::initial(
+            self.handoff
+                .as_ref()
+                .map_or_else(|| self.agent(), |pending| pending.title.as_str()),
+            &menu.favorites,
+        );
+        menu.highlighted = (self.choice_rows(&menu).iter())
             .find(|row| matches!(row, Row::Choice(choice) if choice.current))
             .and_then(Row::spot);
         let learn = picker::offers_models(&self.offer(), &menu)
@@ -1767,7 +1798,7 @@ impl ChatView {
             Some(Hit::Reset { setting, value }) => self.slide_to(&setting, &value, settled),
             Some(Hit::Pick { setting, value }) => {
                 self.menu = None;
-                settled.actions.push(choose(setting, value));
+                self.choose(setting, value, settled);
             }
             Some(Hit::Card(turn, tool)) => {
                 self.restyled(turn);
@@ -1806,6 +1837,11 @@ impl ChatView {
                 }
             }
             Some(Hit::RemoveImage(index)) => self.remove_image(index),
+            Some(Hit::CancelHandoff) => {
+                if self.handoff_sent.is_none() {
+                    self.handoff = None;
+                }
+            }
             Some(Hit::Send) => self.send(settled),
             Some(Hit::Stop) => settled.actions.push(ChatAction::Stop),
             Some(Hit::Choice(id)) => {
@@ -2046,20 +2082,6 @@ fn touches(patch: &clackatoo_protocol::ChatPatch) -> Option<usize> {
         | ChatPatch::Agent(_)
         | ChatPatch::Providers(_)
         | ChatPatch::Subagents(_) => None,
-    }
-}
-
-/// What picking `value` of `setting` in a menu asks: to set it, or for a
-/// row of another agent's, to move the chat to that agent, on that model,
-/// or the agent's own choice if none. The pane fills in the budget.
-fn choose(setting: String, value: String) -> ChatAction {
-    match picker::switch_to(&setting) {
-        Some(agent) => ChatAction::Switch {
-            agent: agent.to_owned(),
-            model: (!value.is_empty()).then_some(value),
-            budget: 0,
-        },
-        None => ChatAction::Set { setting, value },
     }
 }
 
@@ -2681,7 +2703,7 @@ mod tests {
     }
 
     #[test]
-    fn picking_another_agents_model_moves_the_chat_to_it() {
+    fn picking_another_agents_model_stages_a_handoff() {
         use clackatoo_protocol::{Provider, SettingChoice};
         let mut fonts = fonts();
         let mut view = with_settings();
@@ -2713,15 +2735,9 @@ mod tests {
             Some("\r"),
             Modifiers::default(),
         );
-        let switch = |agent: &str, model: Option<&str>| ChatAction::Switch {
-            agent: agent.into(),
-            model: model.map(str::to_owned),
-            budget: 0,
-        };
-        assert_eq!(
-            view.settle(&mut fonts).actions,
-            [switch("codex", Some("gpt-6-luna"))]
-        );
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert_eq!(view.handoff.as_ref().unwrap().agent, "codex");
+        assert_eq!(view.node.agent, "Claude Code");
         // An uninstalled provider can also be found globally.
         view.open_menu(&[SettingKind::Model]);
         typed(&mut view, "Gemini");
@@ -2731,13 +2747,77 @@ mod tests {
             Some("\r"),
             Modifiers::default(),
         );
-        assert_eq!(view.settle(&mut fonts).actions, [switch("gemini", None)]);
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert_eq!(view.handoff.as_ref().unwrap().agent, "gemini");
         // An agent whose models aren't known is asked for them as the
         // model menu opens, but not as the mode menu does.
         view.node.providers[0].models = ProviderModels::Unknown;
         assert!(view.open_menu(&[SettingKind::Model]));
         view.menu = None;
         assert!(!view.open_menu(&[SettingKind::Mode]));
+    }
+
+    #[test]
+    fn a_pending_handoff_sends_once_and_restores_a_refused_draft() {
+        let mut fonts = fonts();
+        let mut view = with_settings();
+        view.handoff = Some(handoff::Pending {
+            agent: "codex".into(),
+            model: Some("gpt-6-luna".into()),
+            title: "Codex".into(),
+            label: "6 Luna".into(),
+        });
+        view.paste_image(pasted_image());
+        typed(&mut view, "continue");
+        enter(&mut view, false);
+        let actions = view.settle(&mut fonts).actions;
+        assert!(
+            matches!(&actions[..], [ChatAction::SendTo { agent, text, .. }] if agent == "codex" && text == "continue")
+        );
+        assert!(view.editor.raw_text().is_empty());
+        assert!(
+            matches!(&actions[0], ChatAction::SendTo { images, .. } if images == &[pasted_image()])
+        );
+        // A second Enter before the response cannot submit twice.
+        typed(&mut view, "more");
+        enter(&mut view, false);
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        view.handoff_answer(clackatoo_protocol::Response::Error(
+            clackatoo_protocol::Error::Other("busy".into()),
+        ));
+        assert_eq!(view.editor.raw_text(), "continue\nmore");
+        assert_eq!(view.images, [pasted_image()]);
+        assert!(view.handoff.is_some());
+        // An old daemon refuses locally without clearing the recovered draft.
+        view.handoff_supported = false;
+        enter(&mut view, false);
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert_eq!(view.editor.raw_text(), "continue\nmore");
+        view.handoff_supported = true;
+        enter(&mut view, false);
+        assert_eq!(view.settle(&mut fonts).actions.len(), 1);
+        view.handoff_answer(clackatoo_protocol::Response::Done);
+        assert!(view.handoff.is_none());
+        assert!(view.handoff_sent.is_none());
+    }
+
+    #[test]
+    fn pending_handoff_can_be_cancelled_without_touching_the_draft() {
+        let mut fonts = fonts();
+        let mut view = with_settings();
+        view.handoff = Some(handoff::Pending {
+            agent: "codex".into(),
+            model: None,
+            title: "Codex".into(),
+            label: "Codex".into(),
+        });
+        typed(&mut view, "my draft");
+        view.settle(&mut fonts);
+        let mut settled = Settled::default();
+        view.choose("model".into(), "haiku".into(), &mut settled);
+        assert!(view.handoff.is_none());
+        assert_eq!(view.editor.raw_text(), "my draft");
+        assert_eq!(settled.actions, [set("model", "haiku")]);
     }
 
     #[test]

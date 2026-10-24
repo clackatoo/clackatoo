@@ -1035,6 +1035,19 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         crate::wire::CHAT_ORIGINALS,
         Server(ServerMessage::Response(Response::Text("cG5n".into()))),
     ));
+    samples.push((
+        crate::wire::CHAT_HANDOFF,
+        Client(ClientMessage::Request(Request::Chat {
+            terminal,
+            action: ChatAction::SendTo {
+                agent: "codex".into(),
+                model: Some("gpt-6-luna".into()),
+                budget: 12000,
+                text: "Continue here".into(),
+                images: Vec::new(),
+            },
+        })),
+    ));
     samples
 }
 

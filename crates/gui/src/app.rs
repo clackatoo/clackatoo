@@ -2202,6 +2202,7 @@ impl App {
             })
             .collect();
         let quoted = self.desk.daemon_has(clackatoo_protocol::wire::COLOURS);
+        let handoff = self.desk.daemon_has(clackatoo_protocol::wire::CHAT_HANDOFF);
         let prompting = self.desk.prompt_has_keys() || self.picker.is_some();
         for (terminal, tile, focused) in tiles {
             let Some(pane) = self.desk.pane_mut(terminal).filter(|pane| pane.is_chat()) else {
@@ -2209,6 +2210,7 @@ impl App {
             };
             if let Some(chat) = pane.chat_mut() {
                 chat.set_quoted(quoted);
+                chat.handoff_supported = handoff;
             }
             // In insert mode, the cursor is in the box; in normal mode, in
             // the conversation; and while a prompt has the keys, nowhere.

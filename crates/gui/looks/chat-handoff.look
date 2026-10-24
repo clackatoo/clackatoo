@@ -1,0 +1,28 @@
+# Provider selection is local until the next prompt is sent.
+size 1100x900
+keys <C-;>:Agent claude<CR>
+keys i
+type hello
+keys <CR>
+wait-for echo: hello
+click 245 808
+sleep 500
+type Luna
+keys <CR>
+shot pending
+click 900 667
+shot cancelled
+click 245 808
+type Luna
+keys <CR>
+click 245 808
+shot pending-picker
+keys <Esc>
+type settings
+shot pending-draft
+size 480x640
+shot pending-narrow
+size 1100x900
+keys <CR>
+wait-for agent gpt-6-luna
+shot completed

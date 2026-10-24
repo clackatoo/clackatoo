@@ -11,6 +11,7 @@ mod cards;
 mod divider;
 mod edge;
 mod fold;
+mod handoff;
 mod image;
 mod models;
 mod select;
@@ -151,6 +152,7 @@ struct TurnLaid {
     copy: bool,
     /// Which chat sent its message, if another agent did.
     badge: Option<Laid>,
+    handoff: Option<handoff::LaidHandoff>,
     height: f32,
 }
 
@@ -246,9 +248,12 @@ impl ChatView {
         let now = self.now();
         let working = self.label_working(fonts, m, now);
         let rows = u8::from(status.is_some()) + u8::from(working);
-        let status_height = m.em(1.8) * f32::from(rows);
+        let pending_laid = self.pending_handoff(fonts, m, column);
+        let handoff_height = pending_laid.as_ref().map_or(0.0, |laid| laid.height);
+        let status_height = m.em(1.8) * f32::from(rows) + handoff_height;
         let view_height = (size[1] - box_height - status_height - m.em(1.0)).max(0.0);
-        let row = [left, view_height, column, m.em(1.8)];
+        self.draw_pending_handoff((&mut paint, fonts), m, place, view_height, pending_laid);
+        let row = [left, view_height + handoff_height, column, m.em(1.8)];
         self.draw_above_box((&mut paint, fonts), m, (origin, size), row, (status, now));
 
         // The conversation: the turns in view are laid out, and drawn.
@@ -559,6 +564,7 @@ impl ChatView {
             files: None,
             copy: false,
             badge: None,
+            handoff: None,
             height: 0.0,
         };
         let mut y = self.lay_out_head(fonts, (m, column), (index, turns), &mut laid);
@@ -688,6 +694,24 @@ impl ChatView {
         laid: &mut TurnLaid,
         mut y: f32,
     ) -> f32 {
+        if let Some(switch) = &turn.switch {
+            let transition = self.lay_handoff(
+                fonts,
+                m,
+                column,
+                &handoff::Transition {
+                    from: switch.from.clone(),
+                    source: switch.from.clone(),
+                    to: switch.to.clone(),
+                    destination: switch.model.clone().unwrap_or_else(|| switch.to.clone()),
+                    pending: false,
+                },
+            );
+            laid.spans
+                .push(Span::of(Piece::Handoff, y, transition.height));
+            y += transition.height;
+            laid.handoff = Some(transition);
+        }
         if let Some((text, tone)) = turn_note(turn) {
             y += m.em(0.75);
             let note = lay_out(
@@ -966,6 +990,11 @@ impl ChatView {
                         let scrolled = |table| self.table_scroll(index, piece, table);
                         draw_scrolled(canvas, m, item, [origin[0], top], column, &scrolled);
                         drawn.note_scrolled(item, [origin[0], top], (index, piece), &scrolled);
+                    }
+                }
+                Piece::Handoff => {
+                    if let Some(handoff) = &laid.handoff {
+                        handoff::draw(canvas, m, handoff, [origin[0], top], column);
                     }
                 }
                 Piece::Note => {
@@ -1278,7 +1307,12 @@ impl ChatView {
             canvas.fill(Fill::solid(rect_at(bounds, shown), Paint::Picked));
         }
         if self.editor.raw_text().is_empty() {
-            let placeholder = format!("Message {}", self.agent());
+            let placeholder = format!(
+                "Message {}",
+                self.handoff
+                    .as_ref()
+                    .map_or_else(|| self.agent(), |pending| pending.title.as_str())
+            );
             let laid = self.note(canvas.fonts, m, &placeholder, Tone::Muted, frame.inner);
             for block in &laid.blocks {
                 canvas.text(&block.layout, [shown[0], shown[1] + block.top]);
@@ -1391,17 +1425,27 @@ impl ChatView {
         let model_room = (room - permission_width - m.em(0.65)).max(0.0);
         let mut left = start;
         if !models.is_empty() && model_room > m.em(2.0) {
-            let label = models
-                .iter()
-                .map(chosen_name)
-                .collect::<Vec<_>>()
-                .join(" · ");
+            let label = self.handoff.as_ref().map_or_else(
+                || {
+                    models
+                        .iter()
+                        .map(chosen_name)
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                },
+                |pending| pending.label.clone(),
+            );
+            let provider = self
+                .handoff
+                .as_ref()
+                .map_or_else(|| self.agent(), |pending| pending.title.as_str());
+            let mark = Icon::provider(provider);
             left += self.draw_control(
                 canvas,
                 m,
                 frame,
                 [left, top, model_room, size],
-                (&label, Icon::provider(self.agent()), Tone::Plain),
+                (&label, mark, Tone::Plain),
                 models.into_iter().map(|s| s.id).collect(),
             );
             if !permissions.is_empty() {
@@ -2056,6 +2100,8 @@ enum Piece {
     Item(usize),
     /// A tool it used, as a card, by piece.
     Card(usize),
+    /// A provider transition with logos and ruled edges.
+    Handoff,
     /// How it ended, if not well.
     Note,
     /// The line under it, once it's done: the button that copies its
@@ -2250,12 +2296,7 @@ fn guess(m: Measures, column: f32, turn: &Turn, open: bool, divided: bool) -> f3
 /// didn't carry over.
 fn turn_note(turn: &Turn) -> Option<(String, Tone)> {
     if let Some(switch) = &turn.switch {
-        let mut note = format!("── {} ──", switch.label());
-        for line in &switch.notes {
-            note.push_str("\n\n");
-            note.push_str(line);
-        }
-        return Some((note, Tone::Muted));
+        return (!switch.notes.is_empty()).then(|| (switch.notes.join("\n\n"), Tone::Muted));
     }
     match &turn.end.as_ref()?.outcome {
         Outcome::Done => None,
@@ -2823,9 +2864,7 @@ mod tests {
         assert_eq!(
             turn_note(&turn),
             Some((
-                "── Switched to Codex · 6 Luna · context carried over ──\n\n\
-                 Mode Auto doesn't carry over: Codex uses Auto review"
-                    .to_owned(),
+                "Mode Auto doesn't carry over: Codex uses Auto review".to_owned(),
                 Tone::Muted
             ))
         );
@@ -3154,9 +3193,9 @@ mod tests {
     fn frame_time_with_chat_previews() {
         let mut fonts = crate::chat::fixtures::fonts();
         let node = crate::chat::fixtures::talk(&[("[Image]", "A screenshot."); 16]);
-        for kind in ["text", "prompt", "tool", "modal"] {
+        for kind in ["text", "prompt", "tool", "modal", "handoff"] {
             let mut node = node.clone();
-            if kind != "text" {
+            if matches!(kind, "prompt" | "tool" | "modal") {
                 for turn in &mut node.turns {
                     let preview = clackatoo_protocol::ChatPreview {
                         original: 0,
@@ -3182,6 +3221,14 @@ mod tests {
                 }
             }
             let mut chat = ChatView::new("chat".into(), node);
+            if kind == "handoff" {
+                chat.handoff = Some(crate::chat::handoff::Pending {
+                    agent: "codex".into(),
+                    model: None,
+                    title: "Codex".into(),
+                    label: "6 Luna".into(),
+                });
+            }
             let initial = crate::chat::fixtures::paint(&mut chat, &mut fonts);
             if kind == "modal" {
                 let rect = initial.images.last().unwrap().rect;

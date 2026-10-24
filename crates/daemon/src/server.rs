@@ -3377,6 +3377,46 @@ impl Daemon {
                 self.collect_damage(id);
                 return Ok(());
             }
+            ChatAction::SendTo {
+                agent,
+                model,
+                budget,
+                text,
+                images,
+            } => {
+                // Validate before touching the old session. Another client may
+                // have started a turn since this window last saw the chat.
+                if chat.answering() {
+                    return Err(Error::Other(
+                        "The agent is still answering; send the handoff once it finishes.".into(),
+                    ));
+                }
+                if text.trim().is_empty() && images.is_empty() {
+                    return Err(Error::Other("A handoff needs a message or image.".into()));
+                }
+                if images.len() > clackatoo_protocol::ChatImage::MAX_COUNT
+                    || images.iter().any(|image| !image.valid())
+                    || images.iter().map(|image| image.data.len()).sum::<usize>()
+                        > clackatoo_protocol::ChatImage::MAX_DATA
+                {
+                    return Err(Error::Other("Images are too large or invalid.".into()));
+                }
+                self.config.agents.find(&agent).map_err(Error::Other)?;
+                self.switch_chat(
+                    id,
+                    &agent,
+                    model,
+                    usize::try_from(budget).unwrap_or(usize::MAX),
+                );
+                let chat = self.chat(id).ok_or(Error::NotAChat(id))?;
+                if chat.agent() != agent {
+                    return Err(Error::Other("The provider handoff was refused.".into()));
+                }
+                let actions = chat.act(ChatAction::SendImages { text, images });
+                self.act(id, actions);
+                self.collect_damage(id);
+                return Ok(());
+            }
             ChatAction::LearnModels => {
                 self.learn_models(id);
                 return Ok(());

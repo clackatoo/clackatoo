@@ -12,7 +12,7 @@
 //! Effort, whose choices go from least to most, is a slider.
 //!
 //! Beside the chat's own agent's models, the model menu offers the other
-//! agents', each under its name: picking one moves the chat to that agent,
+//! agents', each under its name: picking one stages a handoff to that agent,
 //! rather than setting a setting. Those rows go by a setting ID of the
 //! window's own, which names the agent, so the menu moves through them as
 //! through any other.
@@ -229,10 +229,10 @@ fn provider_rows(
             }
             return;
         }
-        ProviderModels::NotInstalled => ("Install and switch".to_owned(), None),
-        ProviderModels::Failed(why) => ("Switch anyway".to_owned(), Some(why.clone())),
+        ProviderModels::NotInstalled => ("Install on send".to_owned(), None),
+        ProviderModels::Failed(why) => ("Try on next message".to_owned(), Some(why.clone())),
         ProviderModels::Unknown | ProviderModels::Learning => {
-            (format!("Switch to {}", provider.title), None)
+            (format!("Use {} on next message", provider.title), None)
         }
     };
     rows.push(Row::Choice(ChoiceRow {
@@ -587,8 +587,8 @@ mod tests {
             [
                 ("6 Astra", "gpt-6-astra", false),
                 ("6 Luna", "gpt-6-luna", false),
-                ("Install and switch", "", false),
-                ("Switch to Mine", "", false)
+                ("Install on send", "", false),
+                ("Use Mine on next message", "", false)
             ]
         );
         // The effort menu alone offers no other agents.

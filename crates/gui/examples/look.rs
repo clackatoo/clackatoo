@@ -642,6 +642,17 @@ fn machine_config() -> anyhow::Result<DaemonConfig> {
         ],
         starting_mode: None,
     }];
+    config.agents.custom.push(CustomAgent {
+        name: "codex".into(),
+        title: None,
+        command: vec![
+            agent.clone().into(),
+            "--codex".into(),
+            "--log".into(),
+            home.join("codex.log").into(),
+        ],
+        starting_mode: None,
+    });
     config.mcp = Some(vec![agent.into(), "mcp".into()]);
     Ok(config)
 }

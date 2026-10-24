@@ -941,6 +941,7 @@ impl HostedChat {
             ChatAction::Undo { .. }
             | ChatAction::Redo { .. }
             | ChatAction::Switch { .. }
+            | ChatAction::SendTo { .. }
             | ChatAction::LearnModels
             | ChatAction::Open { .. } => {}
             // Only a value the agent offers is kept, and asked for.

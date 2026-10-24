@@ -236,6 +236,8 @@ gates! {
     TOOL_IMAGES = 99,
     /// Original chat images fetched on demand by opaque handle.
     CHAT_ORIGINALS = 100,
+    /// Atomic provider handoff with its first prompt.
+    CHAT_HANDOFF = 101,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -909,6 +911,17 @@ pub trait Downgrade: Sized {
 /// daemon still: refuse image messages rather than dropping attachments.
 impl Downgrade for ClientMessage {
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
+        if wire < CHAT_HANDOFF
+            && matches!(
+                self,
+                Self::Request(crate::Request::Chat {
+                    action: crate::ChatAction::SendTo { .. },
+                    ..
+                })
+            )
+        {
+            return Downgraded::Refused;
+        }
         if wire < CHAT_ORIGINALS
             && matches!(self, Self::Request(crate::Request::ChatOriginal { .. }))
         {
@@ -1258,6 +1271,26 @@ mod tests {
         let mut decoder = FrameDecoder::new();
         decoder.push(bytes);
         decoder.decode(wire).unwrap().unwrap()
+    }
+
+    #[test]
+    fn pending_handoff_is_never_split_or_downgraded_to_an_old_daemon() {
+        let message = crate::ClientMessage::Request(crate::Request::Chat {
+            terminal: crate::TerminalId(1),
+            action: crate::ChatAction::SendTo {
+                agent: "codex".into(),
+                model: None,
+                budget: 20000,
+                text: "continue".into(),
+                images: Vec::new(),
+            },
+        });
+        let encoded = frame::encode(CHAT_HANDOFF, &message).unwrap();
+        assert_eq!(
+            decode::<crate::ClientMessage>(CHAT_HANDOFF, &encoded),
+            message
+        );
+        assert!(frame::encode(CHAT_HANDOFF - 1, &message).is_err());
     }
 
     #[test]

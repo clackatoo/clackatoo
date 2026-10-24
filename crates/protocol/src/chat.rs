@@ -1074,6 +1074,20 @@ pub enum ChatAction {
         /// PNG attachments, bounded by `ChatImage`'s limits.
         images: Vec<ChatImage>,
     },
+    /// Switch provider and send one prompt as a single accepted operation.
+    /// Requires `wire::CHAT_HANDOFF`. A refused switch never sends the prompt.
+    SendTo {
+        /// Destination agent's configured name.
+        agent: String,
+        /// Destination model, or its default.
+        model: Option<String>,
+        /// Maximum context carry-over in tokens.
+        budget: u32,
+        /// Message accompanying the handoff.
+        text: String,
+        /// Optional bounded image attachments.
+        images: Vec<ChatImage>,
+    },
 }
 
 /// The number turn `index` of `turns` goes by, as people count them: from
