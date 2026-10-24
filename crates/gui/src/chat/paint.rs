@@ -1037,7 +1037,18 @@ impl ChatView {
         } else {
             row_height + m.em(0.7)
         };
-        let height = pad + content_height + image_height + m.em(0.6) + m.em(2.2) + m.em(0.7);
+        let steering_height = if self.steering_controls() {
+            m.em(2.2)
+        } else {
+            0.0
+        };
+        let height = pad
+            + content_height
+            + image_height
+            + m.em(0.6)
+            + m.em(2.2)
+            + m.em(0.7)
+            + steering_height;
         let footer = m.em(0.8);
         let frame = BoxFrame {
             place,
@@ -1082,6 +1093,7 @@ impl ChatView {
             let rect = [x, y, side, row_height];
             self.draw_attachment(&mut canvas, m, &frame, index, rect);
         }
+        self.draw_steering(&mut canvas, m, &frame);
         self.draw_send(&mut canvas, m, &frame);
         self.draw_controls(&mut canvas, m, &frame);
         let queued = self.draw_queue(&mut canvas, m, &frame);

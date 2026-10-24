@@ -24,9 +24,7 @@ impl ChatView {
             .take(3)
             .map(|message| (message.id, excerpt(message)))
             .collect();
-        let writing = !self.editor.raw_text().trim().is_empty() || !self.images.is_empty();
-        let steering = self.busy() && writing && self.node.question.is_none();
-        if messages.is_empty() && !steering {
+        if messages.is_empty() {
             return 0.0;
         }
         let row = m.em(2.15);
@@ -38,7 +36,7 @@ impl ChatView {
         } else {
             header + row * f32::from(u8::try_from(messages.len()).unwrap_or(3)) + pad * 2.0
         };
-        let height = panel + if steering { row + gap } else { 0.0 } + gap;
+        let height = panel + gap;
         let mut top = frame.top - height;
         let left = frame.left + m.em(0.65);
         let width = frame.place.column - m.em(1.3);
@@ -101,10 +99,6 @@ impl ChatView {
                 );
                 top += row;
             }
-            top += pad + gap;
-        }
-        if steering {
-            self.draw_steering(canvas, m, frame, [left, top, width, row]);
         }
         height
     }
@@ -154,54 +148,90 @@ impl ChatView {
         }
     }
 
-    fn draw_steering(
-        &mut self,
-        canvas: &mut Canvas<'_>,
-        m: Measures,
-        frame: &BoxFrame,
-        rect: [f32; 4],
-    ) {
-        let [left, top, width, row] = rect;
+    pub(super) fn steering_controls(&self) -> bool {
+        self.queue_supported
+            && self.busy()
+            && self.node.question.is_none()
+            && (!self.editor.raw_text().trim().is_empty() || !self.images.is_empty())
+    }
 
-        if width >= m.em(30.0) {
+    pub(super) fn draw_steering(&mut self, canvas: &mut Canvas<'_>, m: Measures, frame: &BoxFrame) {
+        if !self.steering_controls() {
+            return;
+        }
+        let small = Measures::of(m.em(0.8));
+        let row = m.em(1.8);
+        let top = frame.top + frame.height - m.em(5.1);
+        let left = frame.left + frame.pad;
+        let right = frame.left + frame.place.column - frame.pad;
+        let native =
+            self.node.delivery.native_steering && self.images.is_empty() && self.handoff.is_none();
+        let label = if native { "Steer" } else { "Stop & continue" };
+        let wide = frame.inner >= m.em(26.0);
+        let text = if wide {
+            format!("{label}  ·  Ctrl+Enter")
+        } else {
+            label.to_owned()
+        };
+        let laid = self.short_label(
+            canvas.fonts,
+            small,
+            &text,
+            frame.inner - row - m.em(0.5),
+            Tone::Plain,
+        );
+        let width = (laid.width + m.em(1.2)).min(frame.inner - row - m.em(0.5));
+        let rect = [right - row - m.em(0.45) - width, top, width, row];
+        canvas.fill(
+            Fill::rounded(rect, Paint::ChatHover, row / 2.0).bordered(1.0, Paint::RaisedEdge),
+        );
+        if self
+            .mouse
+            .is_some_and(|p| super::super::contains(frame.place.in_pane(rect), p))
+        {
+            canvas.fill(Fill::rounded(rect, Paint::ChatHover, row / 2.0));
+        }
+        draw_laid(
+            canvas,
+            small,
+            &laid,
+            [
+                rect[0] + (width - laid.width) / 2.0,
+                top + (row - laid.height) / 2.0,
+            ],
+            width,
+        );
+        self.keep_label(laid);
+        self.hits.push((Hit::Steer, frame.place.in_pane(rect)));
+        let hint_width = rect[0] - left - m.em(0.8);
+        if hint_width >= m.em(7.0) {
             self.queue_text(
                 canvas,
-                m,
-                "Enter queues",
-                [left, top, (width - m.em(20.0)).max(0.0), row],
+                small,
+                "Enter to queue",
+                [left, top, hint_width, row],
                 Tone::Muted,
             );
         }
-        let native =
-            self.node.delivery.native_steering && self.images.is_empty() && self.handoff.is_none();
-        let narrow = width < m.em(24.0);
-        self.queue_button(
-            canvas,
-            m,
-            frame,
-            if narrow {
-                if native { "Steer" } else { "Stop & continue" }
-            } else if native {
-                "Steer · Ctrl+Enter"
-            } else {
-                "Stop & continue · Ctrl+Enter"
-            },
-            Hit::Steer,
+        let stop = [right - row, top, row, row];
+        if self
+            .mouse
+            .is_some_and(|p| super::super::contains(frame.place.in_pane(stop), p))
+        {
+            canvas.fill(Fill::rounded(stop, Paint::ChatHover, row / 2.0));
+        }
+        let extent = m.em(0.55);
+        canvas.fill(Fill::rounded(
             [
-                left + (width - m.em(19.5)).max(0.0),
-                top,
-                m.em(16.0).min((width - m.em(3.5)).max(0.0)),
-                row,
+                stop[0] + (row - extent) / 2.0,
+                top + (row - extent) / 2.0,
+                extent,
+                extent,
             ],
-        );
-        self.queue_button(
-            canvas,
-            m,
-            frame,
-            "Stop",
-            Hit::Stop,
-            [left + width - m.em(3.0), top, m.em(3.0), row],
-        );
+            Paint::Icon,
+            m.em(0.1),
+        ));
+        self.hits.push((Hit::Stop, frame.place.in_pane(stop)));
     }
 
     fn queue_text(
