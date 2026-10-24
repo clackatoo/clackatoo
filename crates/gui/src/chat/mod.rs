@@ -865,7 +865,9 @@ impl ChatView {
         redraw |= self.hits.iter().any(|(hit, rect)| {
             matches!(
                 hit,
-                Hit::Chip(_)
+                Hit::Undo(_)
+                    | Hit::Redo(_)
+                    | Hit::Chip(_)
                     | Hit::ModelFilter(_)
                     | Hit::FastMode
                     | Hit::Step { .. }
@@ -3482,22 +3484,17 @@ mod tests {
         alone.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
         let copy = drawn_at(&view, &Hit::CopyAnswer(0)).expect("the button");
         let undo = drawn_at(&view, &Hit::Undo(0)).expect("Undo");
-        assert!((copy[1] - undo[1]).abs() < 1.0 && copy[0] < undo[0]);
-        // No answer, no button, and Undo goes to the left.
+        assert!((copy[1] - undo[1]).abs() < 1.0);
+        assert!(copy[0] > undo[0]);
+        // Hidden or absent Copy never leaves a gap before the summary.
         assert_eq!(drawn_at(&alone, &Hit::CopyAnswer(0)), None);
-        let moved = undo[0] - drawn_at(&alone, &Hit::Undo(0)).unwrap()[0];
-        // The files line, moved along that far, starts after the button
-        // ends, which is at the column's left.
-        let (_, button) = (view.hits.iter())
-            .find(|(hit, _)| *hit == Hit::CopyAnswer(0))
-            .unwrap();
-        assert!(button[2] < moved, "{button:?} {moved}");
+        assert!((undo[0] - drawn_at(&alone, &Hit::Undo(0)).unwrap()[0]).abs() < 0.01);
         // Narrow, the line is laid out in what's left of the column.
         view.paint(&mut fonts, [0.0, 0.0], [220.0, 800.0], false);
         let undo = (view.hits.iter()).find(|(hit, _)| *hit == Hit::Undo(0));
         let (_, undo) = undo.expect("Undo, narrow");
         assert!(
-            undo[0] < view.column_right,
+            undo[0] + undo[2] <= view.column_right + 1.0,
             "{undo:?} {}",
             view.column_right
         );

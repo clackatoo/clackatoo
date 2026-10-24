@@ -18,6 +18,9 @@ pub(crate) enum Icon {
     ChevronRight,
     Check,
     Send,
+    File,
+    Undo,
+    Redo,
     Shield,
     Ring,
     Progress(u8),
@@ -64,6 +67,9 @@ impl Icon {
             Self::ChevronDown => "M6 9L12 15L18 9".into(),
             Self::ChevronRight => "M9 6L15 12L9 18".into(),
             Self::Check => "M5 12L10 17L20 7".into(),
+            Self::File => "M14 3H6V21H18V7Z M14 3V7H18 M9 12H15 M9 16H15".into(),
+            Self::Undo => "M8 4L3 9L8 14 M3 9H14A6 6 0 0 1 14 21".into(),
+            Self::Redo => "M16 4L21 9L16 14 M21 9H10A6 6 0 0 0 10 21".into(),
             Self::Send => "M12 20V4 M5 11L12 4L19 11".into(),
             Self::Shield => {
                 "M12 3L20 6V11C20 16 17 19 12 22C7 19 4 16 4 11V6Z M8 12L11 15L16 10".into()

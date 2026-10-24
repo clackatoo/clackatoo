@@ -749,6 +749,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Provider choices stay pending until Send, with a clear handoff divider and one-click cancellation.",
     },
+    News {
+        id: "filechangefooter",
+        date: "2026-10-24",
+        lesson: "agents",
+        what: "File changes, Undo and Redo share a compact summary beneath each answer.",
+    },
 ];
 
 impl News {

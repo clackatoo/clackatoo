@@ -10,6 +10,7 @@ mod agents;
 mod cards;
 mod divider;
 mod edge;
+mod files;
 mod fold;
 mod handoff;
 mod image;
@@ -23,7 +24,7 @@ use std::collections::HashMap;
 
 use clackatoo_protocol::{
     ChatState, ChoiceKind, Item, Outcome, Said, Setting, SettingKind, ToolStatus, Turn, TurnFiles,
-    TurnFilesState, code_span,
+    code_span,
 };
 use parley::Layout;
 
@@ -147,24 +148,14 @@ struct TurnLaid {
     /// What's said under it, as how it ended.
     note: Option<Laid>,
     /// What it changed in files, and the buttons that undo and redo it.
-    files: Option<FilesLaid>,
+    files: Option<files::FilesLaid>,
     /// Whether the button that copies its answer is under it.
     copy: bool,
+    copy_origin: [f32; 2],
     /// Which chat sent its message, if another agent did.
     badge: Option<Laid>,
     handoff: Option<handoff::LaidHandoff>,
     height: f32,
-}
-
-/// What a turn changed in files, laid out: "2 files changed", and its
-/// buttons, "Undo" or "Redo", each with what clicking it does.
-struct FilesLaid {
-    label: Laid,
-    buttons: Vec<(Hit, Laid)>,
-    height: f32,
-    /// Where it starts, from the column's left: after the button that
-    /// copies the answer, if that's there.
-    left: f32,
 }
 
 impl ChatView {
@@ -563,6 +554,7 @@ impl ChatView {
             note: None,
             files: None,
             copy: false,
+            copy_origin: [0.0; 2],
             badge: None,
             handoff: None,
             height: 0.0,
@@ -733,21 +725,24 @@ impl ChatView {
         let files = turn.files.filter(|_| turn.end.is_some());
         if laid.copy || files.is_some() {
             y += m.em(0.75);
-            // After the button, if it's there, and no wider than what's
-            // left of the column.
-            let left = if laid.copy {
-                self.copy_width(fonts, m) + m.em(1.2)
+            let copy_width = if laid.copy {
+                self.copy_width(fonts, m)
             } else {
                 0.0
             };
-            let files = files.map(|files| {
-                let wide = (column - left).max(m.em(4.0));
-                let mut files = self.lay_out_files(fonts, m, wide, (index, files));
-                files.left = left;
-                files
-            });
-            let height = (files.as_ref()).map_or(0.0, |files| files.height);
-            let height = height.max(fold::height(m));
+            let files = files.map(|files| self.lay_out_files(fonts, m, column, (index, files)));
+            let mut height = files.as_ref().map_or(fold::height(m), |files| files.height);
+            if laid.copy
+                && let Some(files) = &files
+            {
+                let left = files.width + m.em(0.8);
+                if left + copy_width <= column {
+                    laid.copy_origin = [left, (height - fold::height(m)).max(0.0) / 2.0];
+                } else {
+                    laid.copy_origin = [0.0, height + m.em(0.4)];
+                    height += m.em(0.4) + fold::height(m);
+                }
+            }
             laid.spans.push(Span::of(Piece::Footer, y, height));
             y += height;
             laid.files = files;
@@ -766,39 +761,6 @@ impl ChatView {
                 .insert((label.to_owned(), Tone::Muted), laid);
         }
         widest
-    }
-
-    /// Lays out what turn `turn` changed in files, `files`, and the
-    /// buttons beside it.
-    fn lay_out_files(
-        &mut self,
-        fonts: &mut Fonts,
-        m: Measures,
-        column: f32,
-        (turn, files): (usize, TurnFiles),
-    ) -> FilesLaid {
-        let (label, buttons) = files_line(turn, files);
-        let mut text = |text: &str, tone| {
-            lay_out(
-                &mut self.layout_cx,
-                fonts,
-                m,
-                text,
-                Look::Plain(tone),
-                column,
-            )
-        };
-        let label = text(&label, Tone::Muted);
-        let buttons: Vec<(Hit, Laid)> = (buttons.into_iter())
-            .map(|(hit, name)| (hit, text(name, Tone::Accent)))
-            .collect();
-        let height = (buttons.iter().map(|(_, laid)| laid.height)).fold(label.height, f32::max);
-        FilesLaid {
-            label,
-            buttons,
-            height,
-            left: 0.0,
-        }
     }
 
     /// `old`, if it was laid out from `text`, or else `text` laid out
@@ -1016,14 +978,14 @@ impl ChatView {
                     let copied = self.copied_answer == Some(index);
                     if laid.copy && (copied || self.hovered_turn == Some(index)) {
                         let label = &drawn.copy[usize::from(copied)];
-                        draw_laid(canvas, m, label, [origin[0], top], label.width);
-                        let rect = [origin[0], top, label.width, span.bottom - span.top];
+                        let at = [origin[0] + laid.copy_origin[0], top + laid.copy_origin[1]];
+                        draw_laid(canvas, m, label, at, label.width);
+                        let rect = [at[0], at[1], label.width, fold::height(m)];
                         drawn.hit(canvas.clip, Hit::CopyAnswer(index), rect);
                     }
-                    // Laid out after the wider label, so it stays put as
-                    // the button says "Copied".
+                    // The summary stays aligned even when Copy is hidden.
                     if let Some(files) = &laid.files {
-                        draw_files(canvas, m, files, [origin[0] + files.left, top], drawn);
+                        files::draw(canvas, m, files, [origin[0], top], self.mouse, drawn);
                     }
                 }
             }
@@ -2305,26 +2267,6 @@ fn turn_note(turn: &Turn) -> Option<(String, Tone)> {
     }
 }
 
-/// Draws what a turn changed in files, `files`, with the column's left
-/// and its top at `origin`, and notes where its buttons can be clicked,
-/// where they're in view.
-fn draw_files(
-    canvas: &mut Canvas<'_>,
-    m: Measures,
-    files: &FilesLaid,
-    origin: [f32; 2],
-    drawn: &mut Drawn<'_>,
-) {
-    draw_laid(canvas, m, &files.label, origin, files.label.width);
-    let mut x = origin[0] + files.label.width + m.em(0.8);
-    for (hit, laid) in &files.buttons {
-        draw_laid(canvas, m, laid, [x, origin[1]], laid.width);
-        let rect = [x, origin[1], laid.width, laid.height];
-        drawn.hit(canvas.clip, hit.clone(), rect);
-        x += laid.width + m.em(0.8);
-    }
-}
-
 /// What the button under each answer says: before it's clicked, and after.
 const COPY: [&str; 2] = ["Copy", "Copied"];
 
@@ -2337,25 +2279,6 @@ pub(super) fn answer_to_copy(turn: &Turn) -> Option<usize> {
         Item::Words(words) if !words.trim().is_empty() => Some(last),
         _ => None,
     }
-}
-
-/// What's said of what a turn changed in files, as `files` says, and the
-/// buttons beside it: "2 files changed", then "Undo".
-fn files_line(turn: usize, files: TurnFiles) -> (String, Vec<(Hit, &'static str)>) {
-    let count = match files.count {
-        1 => "1 file changed".to_owned(),
-        count => format!("{count} files changed"),
-    };
-    let (label, buttons) = match files.state {
-        TurnFilesState::Made => (count, vec![(Hit::Undo(turn), "Undo")]),
-        TurnFilesState::Undone => (format!("{count}, undone"), vec![(Hit::Redo(turn), "Redo")]),
-        TurnFilesState::Partly => (
-            format!("{count}, partly undone"),
-            vec![(Hit::Undo(turn), "Undo"), (Hit::Redo(turn), "Redo")],
-        ),
-        TurnFilesState::TooOld => (format!("{count}, too long ago to undo"), Vec::new()),
-    };
-    (label, buttons)
 }
 
 /// A tool call's line: a mark for how it's going, and its title.

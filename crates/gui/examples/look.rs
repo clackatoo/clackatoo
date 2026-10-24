@@ -41,7 +41,7 @@
 //! | `kept <<END`, lines, `END` | The workspaces a daemon kept (see `clackatoo_daemon`'s `saved`), with `$PROJECT` for the project's folder: the daemon makes them again as it starts, in place of a shell in the project |
 //! | `open PATH` | Opens the project's file in an editor, from normal mode: `<C-;>:Editor PATH<CR>` |
 //! | `keys KEYS` | Presses keys, in Vim's notation: `:Explore<CR>`, `<Space>ff`, `<C-w>v` |
-//! | `type TEXT` | Types the text, a key a character |
+//! | `type TEXT` | Types the text, a key a character, replacing `$PROJECT` with the isolated project path |
 //! | `paste-image` | Pastes a 1280 × 720 test image into the chat |
 //! | `shell COMMAND` | Types the command and Enter, as into a shell |
 //! | `move X Y` | Moves the mouse to X, Y, in points from the top left |
@@ -849,7 +849,10 @@ impl Look {
                 self.window()?.keys(&notation).map_err(|err| anyhow!(err))?;
             }
             Command::Keys(keys) => self.window()?.keys(keys).map_err(|err| anyhow!(err))?,
-            Command::Type(text) => self.window()?.type_text(text),
+            Command::Type(text) => {
+                let text = text.replace("$PROJECT", &self.project.display().to_string());
+                self.window()?.type_text(&text);
+            }
             Command::PasteImage => self
                 .window()?
                 .paste_image(

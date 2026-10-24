@@ -1,0 +1,25 @@
+# File summary aligned with the answer, hovered, undone and narrow.
+size 1000x750
+file note.txt <<END
+before
+END
+keys <C-;>:Agent claude<CR>
+keys i
+type write $PROJECT/note.txt
+keys <S-CR>
+type after
+keys <CR>
+wait-for wrote
+shot changed
+move 285 242
+shot hovered
+keys <C-;>u
+shot undone
+keys <C-r>
+shot redone
+size 360x750
+shot narrow
+keys u
+shot narrow-undone
+size 220x750
+shot stacked

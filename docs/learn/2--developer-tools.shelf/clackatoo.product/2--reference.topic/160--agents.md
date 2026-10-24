@@ -204,7 +204,7 @@ Claude Code and Codex read files from disk, so they don't see what you haven't s
 
 ### Undoing a turn
 
-Under each turn that changed files, the chat says how many, with Undo. Undo takes the turn's changes out of every file it changed, and keeps what you or later turns changed since. If something since changed the same lines, nothing is undone, and the chat says which lines: `:AgentUndo! 3` undoes the turn's other files anyway. A file the turn made goes to the trash, and a file that changes while the undo is being written is left as it is, and the chat says so. Once a turn is undone, Redo puts it back. `:AgentUndo` and `:AgentRedo` take a turn's number, from 1, or else take the last turn there is to undo or the first to redo. In an open file, an undo is one edit of the agent's, beside your unsaved changes. Undoing waits for the agent to finish answering.
+Under each turn that changed files, a compact summary shows how many, with Undo or Redo beside the count. Hover over the answer to show Copy alongside it. Undo takes the turn's changes out of every file it changed, and keeps what you or later turns changed since. If something since changed the same lines, nothing is undone, and the chat says which lines: `:AgentUndo! 3` undoes the turn's other files anyway. A file the turn made goes to the trash, and a file that changes while the undo is being written is left as it is, and the chat says so. Once a turn is undone, Redo puts it back. `:AgentUndo` and `:AgentRedo` take a turn's number, from 1, or else take the last turn there is to undo or the first to redo. In an open file, an undo is one edit of the agent's, beside your unsaved changes. Undoing waits for the agent to finish answering.
 
 ### Reviewing its changes
 
