@@ -972,6 +972,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     width: 1,
                     height: 1,
                     preview: Some(crate::ChatPreview {
+                        original: 0,
                         width: 1,
                         height: 1,
                         rgba: vec![25, 50, 75, 255].into(),
@@ -995,6 +996,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     from: None,
                     switch: None,
                     previews: vec![crate::ChatPreview {
+                        original: 0,
                         width: 1,
                         height: 1,
                         rgba: vec![25, 50, 75, 255].into(),
@@ -1012,6 +1014,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 item: 0,
                 value: Item::Tool(Tool {
                     content: vec![ToolContent::Image(crate::ChatPreview {
+                        original: 0,
                         width: 1,
                         height: 1,
                         rgba: vec![25, 50, 75, 255].into(),
@@ -1020,6 +1023,17 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 }),
             })]),
         })),
+    ));
+    samples.push((
+        crate::wire::CHAT_ORIGINALS,
+        Client(ClientMessage::Request(Request::ChatOriginal {
+            terminal,
+            original: 42,
+        })),
+    ));
+    samples.push((
+        crate::wire::CHAT_ORIGINALS,
+        Server(ServerMessage::Response(Response::Text("cG5n".into()))),
     ));
     samples
 }

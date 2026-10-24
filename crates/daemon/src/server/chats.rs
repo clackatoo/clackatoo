@@ -1590,7 +1590,7 @@ impl Daemon {
         for done in self.agents.images.take() {
             let id = done.target.terminal;
             if let Some(chat) = self.chat(id)
-                && chat.tool_images(&done.target, done.images)
+                && chat.tool_originals(&done.target, done.images)
             {
                 self.collect_damage(id);
             }

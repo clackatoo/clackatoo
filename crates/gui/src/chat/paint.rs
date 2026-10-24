@@ -2956,6 +2956,7 @@ mod tests {
         use crate::chat::fixtures::{fonts, paint, talk};
         let mut fonts = fonts();
         let preview = clackatoo_protocol::ChatPreview {
+            original: 0,
             width: 2,
             height: 1,
             rgba: vec![255; 8].into(),
@@ -2988,6 +2989,7 @@ mod tests {
         let mut fonts = fonts();
         let mut node = talk(&[("look", "The image is ready.")]);
         let preview = clackatoo_protocol::ChatPreview {
+            original: 0,
             width: 2,
             height: 1,
             rgba: vec![255; 8].into(),
@@ -3024,6 +3026,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "shared interaction scenario across all image sources"
+    )]
     fn every_thumbnail_uses_the_modal_without_editing_or_sending_the_draft() {
         use crate::chat::fixtures::{fonts, talk};
         use crate::input::{KeyPress, Modifiers};
@@ -3032,11 +3038,14 @@ mod tests {
         let origin = [37.0, 23.0];
         for source in ["draft", "history", "tool"] {
             for ctrl in [false, true] {
-                let preview = clackatoo_protocol::ChatPreview {
-                    width: 128,
-                    height: 64,
-                    rgba: vec![255; 128 * 64 * 4].into(),
-                };
+                let attachment = crate::clipboard_image::encode(&arboard::ImageData {
+                    width: 1024,
+                    height: 512,
+                    bytes: vec![255; 1024 * 512 * 4].into(),
+                })
+                .unwrap();
+                let mut preview = attachment.preview.clone().unwrap();
+                preview.original = 7;
                 let mut node = talk(&[("image", "Here it is.")]);
                 if source == "history" {
                     node.turns[0].previews.push(preview.clone());
@@ -3057,9 +3066,9 @@ mod tests {
                 let mut chat = ChatView::new("chat".into(), node);
                 if source == "draft" {
                     chat.paste_image(clackatoo_protocol::ChatImage {
-                        data: "cG5n".into(),
-                        width: 128,
-                        height: 64,
+                        data: attachment.data.clone(),
+                        width: 1024,
+                        height: 512,
                         preview: Some(preview),
                     });
                 }
@@ -3093,6 +3102,28 @@ mod tests {
                     &first.images[0].image,
                     &enlarged[0].image
                 ));
+                if source == "draft" {
+                    assert!(chat.take_original_request().is_none());
+                } else {
+                    let (serial, id) = chat.take_original_request().unwrap();
+                    assert_eq!(id, 7);
+                    chat.original_answer(
+                        serial,
+                        clackatoo_protocol::Response::Text(attachment.data),
+                    );
+                }
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while chat.image_viewer.as_ref().unwrap().picture.is_none() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "original never decoded"
+                    );
+                    chat.settle(&mut fonts);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let loaded = chat.paint(&mut fonts, origin, [900.0, 700.0], true);
+                let full = &loaded.images.iter().find(|image| image.over).unwrap().image;
+                assert_eq!((full.width, full.height), (1024, 512));
                 assert!(modal.ime.is_none());
                 assert!(!chat.scroll_lines(4.0));
                 chat.paste("not inserted");
@@ -3128,6 +3159,7 @@ mod tests {
             if kind != "text" {
                 for turn in &mut node.turns {
                     let preview = clackatoo_protocol::ChatPreview {
+                        original: 0,
                         width: 256,
                         height: 160,
                         rgba: vec![127; 256 * 160 * 4].into(),

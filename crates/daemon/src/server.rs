@@ -1157,6 +1157,7 @@ impl Daemon {
                 .map(|previews| (previews.chat, previews))
                 .collect();
         let mut tool_previews = std::mem::take(&mut handover.state.tool_previews);
+        let mut image_originals = std::mem::take(&mut handover.state.image_originals);
         let chats = std::mem::take(&mut handover.state.chats);
         let buffers = std::mem::take(&mut handover.state.buffers);
         let explorers = std::mem::take(&mut handover.state.explorers);
@@ -1220,6 +1221,7 @@ impl Daemon {
                 chat.resume_previews(images);
             }
             chat.resume_tool_previews(&mut tool_previews);
+            chat.resume_originals(&mut image_originals);
             daemon.add_chat(chat);
         }
         daemon.next_buffer = state.next_buffer;
@@ -1350,6 +1352,7 @@ impl Daemon {
         let mut chats = Vec::new();
         let mut chat_previews = Vec::new();
         let mut tool_previews = Vec::new();
+        let mut image_originals = Vec::new();
         self.abandon_clipboard_asks();
         self.put_back_fits();
         for slot in std::mem::take(&mut self.terminals).into_values() {
@@ -1377,6 +1380,7 @@ impl Daemon {
                 Hosted::Chat(chat) => {
                     chat_previews.push(chat.hand_over_previews());
                     tool_previews.extend(chat.hand_over_tool_previews());
+                    image_originals.push(chat.hand_over_originals());
                     chats.push(chat.hand_over());
                 }
             }
@@ -1431,6 +1435,7 @@ impl Daemon {
                 chats,
                 chat_previews,
                 tool_previews,
+                image_originals,
                 orphans,
                 workspaces,
                 next_buffer: self.next_buffer,
@@ -3027,6 +3032,11 @@ impl Daemon {
             } => self
                 .grid(terminal)
                 .map(|grid| Response::Block(grid.block(line, which))),
+            Request::ChatOriginal { terminal, original } => self
+                .chat(terminal)
+                .and_then(|chat| chat.originals.get(original))
+                .map(Response::Text)
+                .ok_or_else(|| Error::Other("Original image is no longer available".into())),
             Request::Chat { terminal, action } => {
                 self.note_device_action(token, terminal, &action);
                 self.chat_action(terminal, action).map(|()| Response::Done)

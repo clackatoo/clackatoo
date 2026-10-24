@@ -910,6 +910,15 @@ impl Daemon {
                 };
                 (at, Ok((block, Then::Pass)))
             }),
+            &Request::ChatOriginal {
+                terminal: local,
+                original,
+            } => terminal(self, local).map(|(at, terminal)| {
+                (
+                    at,
+                    Ok((Request::ChatOriginal { terminal, original }, Then::Pass)),
+                )
+            }),
             &Request::Capture { terminal: local } => terminal(self, local)
                 .map(|(at, terminal)| (at, Ok((Request::Capture { terminal }, Then::Pass)))),
             &Request::CloseTerminal { terminal: local } => terminal(self, local)

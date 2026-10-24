@@ -320,6 +320,7 @@ impl Daemon {
         match *request {
             Request::SendInput { terminal: id, .. }
             | Request::Resize { terminal: id, .. }
+            | Request::ChatOriginal { terminal: id, .. }
             | Request::Capture { terminal: id }
             | Request::Attach { terminal: id }
             | Request::History { terminal: id, .. }

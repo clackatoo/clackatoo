@@ -539,12 +539,9 @@ impl Desk {
     }
 
     /// When a chat must be drawn again by itself, as for its agent's
-    /// seconds to count: the soonest. Never while the daemon is out of
-    /// reach, however long that is.
+    /// seconds to count or an image to finish decoding: the soonest.
+    /// Chats suppress agent timers while offline; local image work can finish.
     pub(crate) fn chat_wakes(&self) -> Option<std::time::Instant> {
-        if !self.connected {
-            return None;
-        }
         self.panes.values().filter_map(Pane::chat_live).min()
     }
 

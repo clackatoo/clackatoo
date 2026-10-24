@@ -924,7 +924,7 @@ pub enum ChatPatch {
 }
 
 /// A small, decoded image for chat history. Shared by snapshots and paint
-/// caches without copying pixels. Full-size attachments belong to the agent.
+/// caches without copying pixels. Originals are fetched separately by handle.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatPreview {
     /// Width in pixels, at most `SIDE`.
@@ -933,6 +933,13 @@ pub struct ChatPreview {
     pub height: u32,
     /// Straight-alpha RGBA pixels, row by row.
     pub rgba: std::sync::Arc<[u8]>,
+    /// Opaque original-image handle, scoped to this chat. Zero if unavailable.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CHAT_ORIGINALS }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAT_ORIGINALS }, _, _>"
+    )]
+    pub original: u64,
 }
 
 impl ChatPreview {
@@ -954,7 +961,8 @@ impl ChatPreview {
 }
 
 /// A pasted PNG, encoded once by the window, ready for ACP. Kept only
-/// until sent; the transcript retains only its small preview and dimensions.
+/// until sent; the transcript retains only its small preview and dimensions,
+/// with an opaque handle for fetching the separately retained original.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatImage {
     /// PNG bytes as standard base64.

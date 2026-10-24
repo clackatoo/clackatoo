@@ -23,6 +23,7 @@ anyhow.workspace = true
 arboard.workspace = true
 base64.workspace = true
 png.workspace = true
+image.workspace = true
 bytemuck.workspace = true
 clackatoo-daemon.workspace = true
 clackatoo-protocol.workspace = true

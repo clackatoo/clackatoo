@@ -71,6 +71,8 @@ enum Pending {
     Input(u64),
     /// Anything answered with just "done" or an error.
     Other,
+    /// Original requested by one particular opening of the image viewer.
+    Original(u64),
 }
 
 /// The guesses at the echo of what's typed, drawn over a line of the
@@ -391,6 +393,7 @@ impl Pane {
             return false;
         };
         let settled = chat.settle(fonts);
+        let original = chat.take_original_request();
         for mut action in settled.actions {
             if let ChatAction::Switch { budget, .. } = &mut action {
                 *budget = self.carryover;
@@ -401,6 +404,15 @@ impl Pane {
                     action,
                 },
                 Pending::Other,
+            );
+        }
+        if let Some((serial, original)) = original {
+            self.request(
+                Request::ChatOriginal {
+                    terminal: self.terminal,
+                    original,
+                },
+                Pending::Original(serial),
             );
         }
         self.chat_copies.extend(settled.copied);
@@ -697,6 +709,12 @@ impl Pane {
             return self.refresh_overlay();
         }
         match (pending, response) {
+            (Some(Pending::Original(serial)), response) => {
+                if let Some(chat) = &mut self.chat {
+                    chat.original_answer(serial, response);
+                }
+                true
+            }
             (_, Response::Error(err)) => {
                 log::warn!("the daemon refused a request: {err}");
                 false

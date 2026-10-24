@@ -11,9 +11,17 @@ impl ChatView {
         m: Measures,
         place: Place,
     ) {
-        let Some(image) = self.image_viewer.clone() else {
+        let Some(viewer) = &self.image_viewer else {
             return;
         };
+        let image = viewer.preview.clone();
+        let original = viewer.picture.clone();
+        let status = viewer.status.clone();
+        let dimensions = original
+            .as_ref()
+            .map_or([image.width, image.height], |image| {
+                [image.width, image.height]
+            });
         self.hits.clear();
         self.shown.clear();
         // Composer remove buttons and other overlay text belong behind the modal.
@@ -28,7 +36,7 @@ impl ChatView {
             (width - 4.0 * pad).max(1.0),
             (height - 8.0 * pad).max(1.0),
         ];
-        let Some(mut picture) = crate::browser::fit([image.width, image.height], area) else {
+        let Some(mut picture) = crate::browser::fit(dimensions, area) else {
             return;
         };
         picture[1] = top + (height - picture[3]) / 2.0;
@@ -50,7 +58,16 @@ impl ChatView {
         canvas.fill(
             Fill::rounded(bounds, Paint::Palette, m.em(0.8)).bordered(1.0, Paint::RaisedEdge),
         );
-        self.previews.draw(&mut canvas, &image, picture);
+        if let Some(original) = original {
+            canvas.paint.images.push(crate::render::PaintedImage {
+                over: true,
+                image: original,
+                rect: picture,
+                clip: canvas.clip,
+            });
+        } else {
+            self.previews.draw(&mut canvas, &image, picture);
+        }
         let close = [
             bounds[0] + bounds[2] - 3.0 * pad,
             bounds[1] + pad * 0.5,
@@ -73,7 +90,7 @@ impl ChatView {
         let hint = self.box_label(
             canvas.fonts,
             m,
-            "Esc or Ctrl+; to close",
+            &format!("{status} · Esc / Ctrl+; closes"),
             Tone::Muted,
             bounds[2] - 2.0 * pad,
         );

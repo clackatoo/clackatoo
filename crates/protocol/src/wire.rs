@@ -234,6 +234,8 @@ gates! {
     CHAT_PREVIEWS = 98,
     /// Image thumbnails returned by tools, inside tool content.
     TOOL_IMAGES = 99,
+    /// Original chat images fetched on demand by opaque handle.
+    CHAT_ORIGINALS = 100,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -907,6 +909,11 @@ pub trait Downgrade: Sized {
 /// daemon still: refuse image messages rather than dropping attachments.
 impl Downgrade for ClientMessage {
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
+        if wire < CHAT_ORIGINALS
+            && matches!(self, Self::Request(crate::Request::ChatOriginal { .. }))
+        {
+            return Downgraded::Refused;
+        }
         if wire < CHAT_IMAGES
             && matches!(
                 self,
@@ -1112,6 +1119,7 @@ mod tests {
             content: vec![
                 ToolContent::Text("caption".into()),
                 ToolContent::Image(crate::ChatPreview {
+                    original: 0,
                     width: 1,
                     height: 1,
                     rgba: vec![1, 2, 3, 255].into(),
@@ -1261,6 +1269,7 @@ mod tests {
             speaking(wire, || postcard::from_bytes(bytes).unwrap())
         }
         let preview = crate::ChatPreview {
+            original: 0,
             width: 1,
             height: 1,
             rgba: vec![10, 20, 30, 255].into(),
@@ -1816,6 +1825,44 @@ mod tests {
             gates.is_empty() && fixtures.is_empty(),
             "every peer is protocol {OLDEST} or newer now: delete the gates {gates:?} \
              (and what they gate), and the fixtures {fixtures:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod original_tests {
+    use super::*;
+    #[test]
+    fn original_handles_are_gated_without_changing_older_thumbnail_bytes() {
+        let mut preview = crate::ChatPreview {
+            width: 1,
+            height: 1,
+            rgba: vec![1, 2, 3, 255].into(),
+            original: 42,
+        };
+        let bytes = speaking(CHAT_ORIGINALS, || postcard::to_allocvec(&preview).unwrap());
+        assert_eq!(
+            speaking(CHAT_ORIGINALS, || {
+                postcard::from_bytes::<crate::ChatPreview>(&bytes).unwrap()
+            }),
+            preview
+        );
+        let bytes = speaking(TOOL_IMAGES, || postcard::to_allocvec(&preview).unwrap());
+        preview.original = 0;
+        assert_eq!(
+            speaking(TOOL_IMAGES, || postcard::from_bytes::<crate::ChatPreview>(
+                &bytes
+            )
+            .unwrap()),
+            preview
+        );
+        assert_eq!(
+            crate::ClientMessage::Request(crate::Request::ChatOriginal {
+                terminal: crate::TerminalId(1),
+                original: 42
+            })
+            .downgrade(TOOL_IMAGES),
+            Downgraded::Refused
         );
     }
 }

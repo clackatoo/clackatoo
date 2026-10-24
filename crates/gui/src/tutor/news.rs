@@ -737,6 +737,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Click any chat image to enlarge it; Esc or Ctrl+; closes the shared viewer",
     },
+    News {
+        id: "originalimages",
+        date: "2026-10-24",
+        lesson: "agents",
+        what: "Image viewers load original detail on demand, including over remote connections.",
+    },
 ];
 
 impl News {

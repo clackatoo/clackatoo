@@ -42,7 +42,7 @@
 //! | `open PATH` | Opens the project's file in an editor, from normal mode: `<C-;>:Editor PATH<CR>` |
 //! | `keys KEYS` | Presses keys, in Vim's notation: `:Explore<CR>`, `<Space>ff`, `<C-w>v` |
 //! | `type TEXT` | Types the text, a key a character |
-//! | `paste-image` | Pastes a 160 × 90 test image into the chat |
+//! | `paste-image` | Pastes a 1280 × 720 test image into the chat |
 //! | `shell COMMAND` | Types the command and Enter, as into a shell |
 //! | `move X Y` | Moves the mouse to X, Y, in points from the top left |
 //! | `click X Y [right\|middle]` | Clicks there, with the left button unless said |
@@ -842,11 +842,11 @@ impl Look {
             Command::PasteImage => self
                 .window()?
                 .paste_image(
-                    160,
-                    90,
-                    (0..160 * 90)
+                    1280,
+                    720,
+                    (0..1280 * 720)
                         .flat_map(|p| {
-                            let (x, y) = (p % 160, p / 160);
+                            let (x, y) = ((p % 1280) / 8, (p / 1280) / 8);
                             if y < 18 {
                                 [40, 100, 210, 255]
                             } else if x < 35 {

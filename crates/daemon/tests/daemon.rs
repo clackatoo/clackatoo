@@ -2259,6 +2259,7 @@ fn clipboard_images_reach_the_agent_as_images_with_their_text() {
     let chat = start_chat(&mut client);
     let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l1sAAAAASUVORK5CYII=";
     let preview = clackatoo_protocol::ChatPreview {
+        original: 0,
         width: 1,
         height: 1,
         rgba: vec![255; 4].into(),
@@ -2289,12 +2290,32 @@ fn clipboard_images_reach_the_agent_as_images_with_their_text() {
                 .prompt
                 .contains("[Image · 1 × 1]")
         );
-        assert_eq!(node.turns.last().unwrap().previews, vec![preview.clone()]);
+        let retained = node.turns.last().unwrap().previews[0].clone();
+        assert_eq!(retained.rgba, preview.rgba);
+        assert_ne!(retained.original, 0);
+        assert_eq!(
+            client
+                .request(&Request::ChatOriginal {
+                    terminal: chat,
+                    original: retained.original
+                })
+                .unwrap(),
+            Response::Text(data.into())
+        );
+        assert!(matches!(
+            client
+                .request(&Request::ChatOriginal {
+                    terminal: chat,
+                    original: u64::MAX
+                })
+                .unwrap(),
+            Response::Error(_)
+        ));
         let mut reattached = daemon.client();
         let snapshot = reattached.capture(chat).unwrap();
         assert_eq!(
             snapshot.chat().unwrap().turns.last().unwrap().previews,
-            vec![preview.clone()]
+            vec![retained]
         );
         assert!(!format!("{node:?}").contains(data));
     }

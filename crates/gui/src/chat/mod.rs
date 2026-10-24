@@ -20,6 +20,7 @@ mod images;
 mod paint;
 mod picker;
 mod read;
+mod viewer;
 
 use clackatoo_protocol::{
     ChatAction, ChatNode, ChatState, ChoiceKind, ProviderModels, Setting, SettingKind,
@@ -204,7 +205,7 @@ pub(crate) struct ChatView {
     editor: PlainEditor<Brush>,
     images: Vec<clackatoo_protocol::ChatImage>,
     previews: images::Cache,
-    image_viewer: Option<clackatoo_protocol::ChatPreview>,
+    image_viewer: Option<viewer::Viewer>,
     /// Enter waits until the clipboard worker has delivered its result.
     pub(crate) pasting: bool,
     /// The size the editor's text was last styled at, and the fonts'
@@ -558,7 +559,14 @@ impl ChatView {
     /// When the chat must be drawn again by itself, if what it showed
     /// when last drawn changes with time: `None` once nothing does.
     pub(crate) fn live(&self) -> Option<std::time::Instant> {
-        self.live
+        if self
+            .image_viewer
+            .as_ref()
+            .is_some_and(viewer::Viewer::loading)
+        {
+            return Some(std::time::Instant::now() + std::time::Duration::from_millis(16));
+        }
+        if self.offline { None } else { self.live }
     }
 
     /// Whether its agent is at work, for its tab to say so, as far as the
@@ -574,6 +582,9 @@ impl ChatView {
         self.offline = offline;
         if offline {
             self.live = None;
+            if let Some(viewer) = &mut self.image_viewer {
+                viewer.offline();
+            }
             // What was asked won't be answered: it's asked again once the
             // daemon's back, as what's waiting for it is laid out again.
             self.colours.forget_asked();
@@ -967,12 +978,19 @@ impl ChatView {
     /// Whether input waits to be settled.
     pub(crate) fn unsettled(&self) -> bool {
         !self.queued.is_empty()
+            || self
+                .image_viewer
+                .as_ref()
+                .is_some_and(viewer::Viewer::loading)
     }
 
     /// Carries out what's waiting in the queue, now that the fonts are at
     /// hand.
     pub(crate) fn settle(&mut self, fonts: &mut Fonts) -> Settled {
-        let mut settled = Settled::default();
+        let mut settled = Settled {
+            redraw: self.image_viewer.as_mut().is_some_and(viewer::Viewer::poll),
+            ..Settled::default()
+        };
         if self.queued.is_empty() {
             return settled;
         }
@@ -1427,6 +1445,16 @@ impl ChatView {
     }
 
     /// An open popup owns its keys before pane-mode bindings see them.
+    pub(crate) fn take_original_request(&mut self) -> Option<(u64, u64)> {
+        self.image_viewer.as_mut()?.take_request()
+    }
+
+    pub(crate) fn original_answer(&mut self, serial: u64, response: clackatoo_protocol::Response) {
+        if let Some(viewer) = &mut self.image_viewer {
+            viewer.answer(serial, response);
+        }
+    }
+
     pub(crate) fn viewing_image(&self) -> bool {
         self.image_viewer.is_some()
     }
@@ -1640,7 +1668,20 @@ impl ChatView {
             && !matches!(hit, Some(Hit::RemoveImage(_)))
             && let Some(image) = self.previews.at(at)
         {
-            self.image_viewer = Some(image);
+            let local =
+                self.images
+                    .iter()
+                    .find(|candidate| {
+                        candidate.preview.as_ref().is_some_and(|preview| {
+                            std::sync::Arc::ptr_eq(&preview.rgba, &image.rgba)
+                        })
+                    })
+                    .map(|image| image.data.clone());
+            let mut viewer = viewer::Viewer::new(image, local);
+            if self.offline {
+                viewer.offline();
+            }
+            self.image_viewer = Some(viewer);
             self.hide_detail();
             self.selecting = false;
             self.picking = false;

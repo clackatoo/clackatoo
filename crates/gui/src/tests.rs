@@ -2464,9 +2464,9 @@ fn modal_images_are_drawn_above_the_backdrop_using_the_same_texture() {
     let mut renderer = Renderer::new(&gpu.0, FORMAT);
     let image = Image {
         id: 1,
-        width: 1,
+        width: 5000,
         height: 1,
-        rgba: vec![255, 0, 0, 255],
+        rgba: [255, 0, 0, 255].repeat(5000),
     };
     let images = [
         PlacedImage {

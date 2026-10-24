@@ -33,6 +33,7 @@ use crate::handoff::{self, Changed, Digest, Step, StepState};
 use crate::handover;
 
 mod limits;
+mod originals;
 mod relations;
 mod resume;
 
@@ -335,6 +336,7 @@ enum Link {
 pub(crate) struct HostedChat {
     /// Only outstanding workers hold strong receipts. Replaced results revoke them.
     image_receipts: Vec<(String, std::sync::Weak<()>)>,
+    pub(crate) originals: crate::tool_images::Originals,
     id: TerminalId,
     /// The size of the pane it's in, for listing.
     size: Size,
@@ -540,6 +542,7 @@ impl HostedChat {
     ) -> Self {
         Self {
             image_receipts: Vec::new(),
+            originals: crate::tool_images::Originals::default(),
             id,
             size,
             title: agent.title.clone(),
@@ -1029,7 +1032,11 @@ impl HostedChat {
         let previews: Vec<_> = prompt
             .images
             .iter()
-            .filter_map(|image| image.preview.clone())
+            .filter_map(|image| {
+                let mut preview = image.preview.clone()?;
+                preview.original = self.originals.insert(image.data.clone());
+                Some(preview)
+            })
             .collect();
         self.make_preview_room(&previews);
         self.push_turn(Turn {
@@ -2663,6 +2670,7 @@ impl HostedChat {
                 .into_iter()
                 .take(4)
                 .map(|image| clackatoo_protocol::ChatPreview {
+                    original: 0,
                     width: image.width,
                     height: image.height,
                     rgba: image.rgba.into(),
@@ -2670,6 +2678,33 @@ impl HostedChat {
                 .collect();
             self.tool_images(&target, images);
         }
+    }
+
+    pub(crate) fn tool_originals(
+        &mut self,
+        target: &crate::tool_images::Target,
+        images: Vec<(clackatoo_protocol::ChatPreview, String)>,
+    ) -> bool {
+        // Validate the receipt and destination before retaining any original data.
+        if images.is_empty() || images.len() > 4 || images.iter().any(|(image, _)| !image.valid())
+            || !self.node.turns.get(target.turn).is_some_and(|turn| turn.sent == target.sent && turn.items.iter().any(|item| matches!(item, Item::Tool(tool) if tool.id == target.tool && tool.content == target.content))) {
+            return false;
+        }
+        if !self
+            .image_receipts
+            .iter()
+            .any(|(_, receipt)| receipt.ptr_eq(&std::sync::Arc::downgrade(&target.receipt)))
+        {
+            return false;
+        }
+        let images = images
+            .into_iter()
+            .map(|(mut preview, data)| {
+                preview.original = self.originals.insert(data);
+                preview
+            })
+            .collect();
+        self.tool_images(target, images)
     }
 
     pub(crate) fn tool_images(
@@ -2719,6 +2754,7 @@ impl HostedChat {
                 .take(clackatoo_protocol::ChatImage::MAX_COUNT)
             {
                 let preview = clackatoo_protocol::ChatPreview {
+                    original: 0,
                     width: image.width,
                     height: image.height,
                     rgba: image.rgba.into(),
@@ -3456,6 +3492,7 @@ mod tests {
     fn previews_survive_handover_and_recent_images_have_a_bounded_budget() {
         let mut chat = chat();
         let preview = clackatoo_protocol::ChatPreview {
+            original: 0,
             width: 256,
             height: 256,
             rgba: vec![42; 256 * 256 * 4].into(),
@@ -3474,7 +3511,8 @@ mod tests {
         }
         assert!(chat.node.turns[0].previews.is_empty());
         assert!(chat.node.turns[0].prompt.contains("Image"));
-        assert_eq!(chat.node.turns[19].previews, vec![preview.clone()]);
+        assert_eq!(chat.node.turns[19].previews[0].rgba, preview.rgba);
+        assert_eq!(chat.node.turns[19].previews[0].original, 20);
         let bytes: usize = chat
             .node
             .turns
@@ -3484,12 +3522,20 @@ mod tests {
             .sum();
         assert_eq!(bytes, clackatoo_protocol::ChatPreview::HISTORY_BYTES);
         let previews = chat.hand_over_previews();
+        let mut originals = vec![chat.hand_over_originals()];
         let agent = crate::agents::AgentConfig::default()
             .find("claude")
             .unwrap();
         let mut resumed = HostedChat::resume(chat.hand_over(), &agent);
         resumed.resume_previews(previews);
-        assert_eq!(resumed.node.turns[19].previews, vec![preview]);
+        resumed.resume_originals(&mut originals);
+        assert_eq!(resumed.node.turns[19].previews[0].rgba, preview.rgba);
+        assert_eq!(
+            resumed
+                .originals
+                .get(resumed.node.turns[19].previews[0].original),
+            Some("cG5n".into())
+        );
         assert!(resumed.node.turns[0].previews.is_empty());
     }
 
@@ -3525,19 +3571,28 @@ mod tests {
             r#"{"sessionUpdate":"tool_call_update","toolCallId":"image","content":[{"type":"content","content":{"type":"text","text":"replaced"}}]}"#,
         );
         let preview = clackatoo_protocol::ChatPreview {
+            original: 0,
             width: 1,
             height: 1,
             rgba: vec![20, 40, 60, 255].into(),
         };
-        assert!(!chat.tool_images(&stale, vec![preview.clone()]));
+        assert!(!chat.tool_originals(&stale, vec![(preview.clone(), "cG5n".into())]));
+        assert!(chat.originals.get(1).is_none());
         let target = chat.image_target("image").unwrap();
-        assert!(chat.tool_images(&target, vec![preview.clone()]));
+        assert!(chat.tool_originals(&target, vec![(preview.clone(), "cG5n".into())]));
+        let mut originals = vec![chat.hand_over_originals()];
         let mut images = chat.hand_over_tool_previews();
         let agent = crate::agents::AgentConfig::default()
             .find("claude")
             .unwrap();
         let mut resumed = HostedChat::resume(chat.hand_over(), &agent);
         resumed.resume_tool_previews(&mut images);
+        resumed.resume_originals(&mut originals);
+        let preview = clackatoo_protocol::ChatPreview {
+            original: 1,
+            ..preview
+        };
+        assert_eq!(resumed.originals.get(1), Some("cG5n".into()));
         assert!(resumed.node.turns[0].items.iter().any(|item| matches!(item, Item::Tool(tool) if tool.content.contains(&ToolContent::Image(preview.clone())))));
     }
 
@@ -3545,6 +3600,7 @@ mod tests {
     fn prompt_and_tool_previews_share_the_history_budget() {
         let mut chat = chat();
         let preview = clackatoo_protocol::ChatPreview {
+            original: 0,
             width: 256,
             height: 256,
             rgba: vec![42; 256 * 256 * 4].into(),
@@ -3580,7 +3636,8 @@ mod tests {
         );
         assert_eq!(prompts, tools);
         assert!(chat.node.turns[0].previews.is_empty());
-        assert_eq!(chat.node.turns[19].previews, vec![preview]);
+        assert_eq!(chat.node.turns[19].previews[0].rgba, preview.rgba);
+        assert_eq!(chat.node.turns[19].previews[0].original, 20);
         assert_eq!(chat.hand_over_tool_previews()[0].turn, 12);
     }
 
@@ -3589,6 +3646,7 @@ mod tests {
         let mut chat = chat();
         let mut prompt = image_prompt();
         prompt.images[0].preview = Some(clackatoo_protocol::ChatPreview {
+            original: 0,
             width: u32::MAX,
             height: 1,
             rgba: vec![0; 4].into(),

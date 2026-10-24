@@ -122,7 +122,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 99;
+pub const PROTOCOL_VERSION: u32 = 100;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1346,6 +1346,16 @@ pub enum Request {
         pane: PaneId,
         /// How it's kept.
         how: Keeping,
+    },
+    /// Fetches a retained original image, on demand. Answers with standard
+    /// base64 encoded image bytes in `Response::Text`, or an error if expired.
+    /// Handles belong to one chat; this never reads a caller-supplied path.
+    /// Available since `wire::CHAT_ORIGINALS`.
+    ChatOriginal {
+        /// The chat that owns the image.
+        terminal: TerminalId,
+        /// The handle carried by its thumbnail.
+        original: u64,
     },
 }
 

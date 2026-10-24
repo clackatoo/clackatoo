@@ -28,8 +28,9 @@ use crate::vim::Stroke;
 pub(crate) const STATUS_ROWS: u16 = 2;
 
 /// The most a picture may be, in pixels each way: bigger isn't decoded,
-/// as the renderer wouldn't draw it (see `render::MAX_IMAGE_SIDE`).
-const MAX_SIDE: usize = crate::render::MAX_IMAGE_SIDE as usize;
+/// so continuously streamed browser frames stay bounded independently of
+/// on-demand original images.
+const MAX_SIDE: usize = 4096;
 
 /// What the pane asks of the desk, which it can't do itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

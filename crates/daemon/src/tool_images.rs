@@ -41,7 +41,7 @@ pub(crate) struct Job {
 #[derive(Debug)]
 pub(crate) struct Done {
     pub target: Target,
-    pub images: Vec<ChatPreview>,
+    pub images: Vec<(ChatPreview, String)>,
 }
 
 #[derive(Debug, Default)]
@@ -188,7 +188,7 @@ fn local_path(uri: &str) -> Option<PathBuf> {
     Some(std::ffi::OsString::from_vec(decoded).into())
 }
 
-fn decode(source: Source, cwd: &Path) -> Option<ChatPreview> {
+fn decode(source: Source, cwd: &Path) -> Option<(ChatPreview, String)> {
     use std::os::unix::fs::OpenOptionsExt;
     let bytes = match source {
         Source::Inline(data) => STANDARD.decode(data).ok()?,
@@ -233,11 +233,15 @@ fn decode(source: Source, cwd: &Path) -> Option<ChatPreview> {
         .ok()?
         .thumbnail(ChatPreview::SIDE, ChatPreview::SIDE)
         .to_rgba8();
-    Some(ChatPreview {
-        width: image.width(),
-        height: image.height(),
-        rgba: image.into_raw().into(),
-    })
+    Some((
+        ChatPreview {
+            original: 0,
+            width: image.width(),
+            height: image.height(),
+            rgba: image.into_raw().into(),
+        },
+        STANDARD.encode(bytes),
+    ))
 }
 
 #[cfg(test)]
@@ -261,8 +265,8 @@ mod tests {
         let inline = decode(Source::Inline(STANDARD.encode(&bytes)), dir.path()).unwrap();
         let linked = decode(Source::File(PathBuf::from("picture.png")), dir.path()).unwrap();
         assert_eq!(inline, linked);
-        assert_eq!((inline.width, inline.height), (256, 128));
-        assert!(inline.valid());
+        assert_eq!((inline.0.width, inline.0.height), (256, 128));
+        assert!(inline.0.valid());
         assert!(decode(Source::Inline("not base64".into()), dir.path()).is_none());
         assert!(decode(Source::File(dir.path().to_owned()), dir.path()).is_none());
         assert!(decode(Source::File(PathBuf::from("/dev/zero")), dir.path()).is_none());
@@ -291,6 +295,7 @@ mod tests {
         assert!(
             decode(sources.into_iter().next().unwrap(), Path::new("/"))
                 .unwrap()
+                .0
                 .valid()
         );
         assert!(
@@ -301,5 +306,99 @@ mod tests {
             "sessionUpdate":"tool_call", "toolCallId":"other", "title":"View Image /secret.png", "kind":"read", "status":"completed", "rawInput":{"path":"/secret.png"}
         })).unwrap();
         assert!(extract(&mut input_only).is_none());
+    }
+}
+
+/// Compressed originals are separate from snapshots. A chat retains at most
+/// 32 MiB / 128 originals; fetching never touches the filesystem or decodes.
+#[derive(Debug, Default)]
+pub(crate) struct Originals {
+    next: u64,
+    bytes: usize,
+    images: std::collections::VecDeque<(u64, String)>,
+}
+
+impl Originals {
+    pub(crate) fn insert(&mut self, data: String) -> u64 {
+        if data.is_empty() || data.len() > BYTES * 4 / 3 + 4 {
+            return 0;
+        }
+        let Some(next) = self.next.checked_add(1) else {
+            return 0;
+        };
+        self.next = next;
+        while self.bytes + data.len() > 32 * 1024 * 1024 || self.images.len() >= 128 {
+            let Some((_, old)) = self.images.pop_front() else {
+                break;
+            };
+            self.bytes -= old.len();
+        }
+        self.bytes += data.len();
+        self.images.push_back((next, data));
+        next
+    }
+
+    pub(crate) fn get(&self, id: u64) -> Option<String> {
+        self.images
+            .iter()
+            .find(|(key, _)| *key == id)
+            .map(|(_, data)| data.clone())
+    }
+
+    pub(crate) fn hand_over(
+        &self,
+        chat: u32,
+        references: Vec<(u32, Option<String>, u32, u64)>,
+    ) -> crate::handover::ImageOriginals {
+        crate::handover::ImageOriginals {
+            chat,
+            next: self.next,
+            images: self.images.iter().cloned().collect(),
+            references,
+        }
+    }
+
+    pub(crate) fn resume(record: &mut crate::handover::ImageOriginals) -> Self {
+        let mut store = Self {
+            next: record.next,
+            ..Self::default()
+        };
+        for (id, data) in std::mem::take(&mut record.images)
+            .into_iter()
+            .rev()
+            .take(128)
+        {
+            if id == 0
+                || id > store.next
+                || data.len() > BYTES * 4 / 3 + 4
+                || store.bytes + data.len() > 32 * 1024 * 1024
+            {
+                continue;
+            }
+            store.bytes += data.len();
+            store.images.push_front((id, data));
+        }
+        store
+    }
+}
+
+#[cfg(test)]
+mod original_tests {
+    use super::*;
+    #[test]
+    fn retained_originals_are_bounded_and_ids_never_alias_evicted_images() {
+        let mut originals = Originals::default();
+        let first = originals.insert("a".repeat(8 * 1024 * 1024));
+        for _ in 0..4 {
+            originals.insert("b".repeat(8 * 1024 * 1024));
+        }
+        assert!(originals.get(first).is_none());
+        assert_eq!(originals.bytes, 32 * 1024 * 1024);
+        let mut saved = originals.hand_over(1, Vec::new());
+        let mut resumed = Originals::resume(&mut saved);
+        assert_eq!(resumed.bytes, originals.bytes);
+        assert_eq!(resumed.get(5), originals.get(5));
+        assert_eq!(resumed.insert("c".into()), 6);
+        assert!(resumed.get(0).is_none());
     }
 }

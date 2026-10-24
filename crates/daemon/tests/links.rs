@@ -5124,3 +5124,113 @@ fn a_machine_passed_ons_offer_is_shown_once_and_dismissed_from_anywhere() {
     wait_for_workspaces(&mut at_desk, |shown| shown.restored.is_empty());
     wait_for_workspaces(&mut window, |shown| shown.restored.is_empty());
 }
+
+#[test]
+#[allow(clippy::too_many_lines, reason = "one end-to-end federation scenario")]
+fn original_images_are_fetched_on_demand_through_the_federated_chat() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let mut pair = Pair::new();
+    let pane = pair.window.new_tab(pair.work.id, chat()).unwrap();
+    let shown = pair.window.watch_workspaces().unwrap();
+    let Content::Terminal(terminal) = shown.find_pane(pane).unwrap().2.content else {
+        panic!("not a chat");
+    };
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(1024, 512, image::Rgb([20, 40, 60]))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let data = STANDARD.encode(png.get_ref());
+    pair.window
+        .chat(
+            terminal,
+            ChatAction::SendImages {
+                text: "tool-images".into(),
+                images: vec![clackatoo_protocol::ChatImage {
+                    data: data.clone(),
+                    width: 1024,
+                    height: 512,
+                    preview: Some(clackatoo_protocol::ChatPreview {
+                        width: 1,
+                        height: 1,
+                        rgba: vec![20, 40, 60, 255].into(),
+                        original: 0,
+                    }),
+                }],
+            },
+        )
+        .unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    let node = loop {
+        let node = pair
+            .window
+            .capture(terminal)
+            .unwrap()
+            .chat()
+            .cloned()
+            .unwrap();
+        let images = node
+            .turns
+            .iter()
+            .flat_map(|turn| &turn.items)
+            .filter_map(|item| match item {
+                Item::Tool(tool) => Some(&tool.content),
+                _ => None,
+            })
+            .flatten()
+            .filter(|content| matches!(content, clackatoo_protocol::ToolContent::Image(_)))
+            .count();
+        if images == 2 {
+            break node;
+        }
+        assert!(Instant::now() < deadline, "tool images never arrived");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let prompt = &node.turns[0].previews[0];
+    assert_eq!(
+        pair.window
+            .request(&Request::ChatOriginal {
+                terminal,
+                original: prompt.original
+            })
+            .unwrap(),
+        Response::Text(data.clone())
+    );
+    assert!(!format!("{node:?}").contains(&data));
+    let mut originals = Vec::new();
+    for item in &node.turns[0].items {
+        if let Item::Tool(tool) = item {
+            for content in &tool.content {
+                if let clackatoo_protocol::ToolContent::Image(preview) = content {
+                    let Response::Text(data) = pair
+                        .window
+                        .request(&Request::ChatOriginal {
+                            terminal,
+                            original: preview.original,
+                        })
+                        .unwrap()
+                    else {
+                        panic!("no original");
+                    };
+                    let bytes = STANDARD.decode(data).unwrap();
+                    let original = image::load_from_memory(&bytes).unwrap();
+                    assert_eq!((original.width(), original.height()), (400, 240));
+                    assert!(preview.width <= 256);
+                    originals.push(bytes);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        originals[0], originals[1],
+        "linked and inline tools use the same originals path"
+    );
+    assert!(matches!(
+        pair.window
+            .request(&Request::ChatOriginal {
+                terminal,
+                original: u64::MAX
+            })
+            .unwrap(),
+        Response::Error(_)
+    ));
+}

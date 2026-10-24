@@ -49,9 +49,9 @@ pub(crate) struct Picture<'a> {
     pub(crate) images: &'a [PlacedImage<'a>],
 }
 
-/// The most a picture is drawn, in pixels each way: a page's picture is
-/// no bigger than the screen it's drawn on, and a bigger one isn't drawn.
-pub(crate) const MAX_IMAGE_SIDE: u32 = 4096;
+/// Maximum texture side, including original chat images. Decoders also
+/// bound pixel counts before allocating; browser frames retain their own cap.
+pub(crate) const MAX_IMAGE_SIDE: u32 = 8192;
 
 /// A picture, decoded, as the GPU takes it.
 #[derive(Debug, PartialEq, Eq)]
