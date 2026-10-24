@@ -18,7 +18,7 @@ If the agent hasn't opened the chat's session after 30 seconds, the chat says so
 
 ## Queuing and steering
 
-While an agent works, Enter queues your draft; Shift+Enter still inserts a newline. The pending messages appear above the composer. They run in order after a successful turn. Each row has an ↑ control to send it now and × to remove it. Sending now during a turn steers that work; while idle it resumes delivery. Ctrl+Enter steers the current draft directly.
+While an agent works, Enter queues your draft; Shift+Enter still inserts a newline. Pending messages share a compact Queued panel above the composer; its heading shows the count, or Queue paused when delivery is paused. They run in order after a successful turn. Each row has an ↑ control to send it now and × to remove it. Sending now during a turn steers that work; while idle it resumes delivery. Ctrl+Enter steers the current draft directly.
 
 For text sent to the installed Claude adapter, **Steer** adds the message to the running turn without cancelling it. Other adapters, image messages, and pending provider changes use **Stop & continue**: cancel the current turn, wait for it to finish, then send the new message. The label tells you which behavior will be used. An uncertain steering acknowledgment leaves the message paused so you can check the conversation before retrying.
 

@@ -1,5 +1,5 @@
 //! A compact pending-message shelf immediately above the composer.
-use super::{BoxFrame, Canvas, ChatView, Fill, Hit, Measures, Paint, Tone, draw_laid};
+use super::{BoxFrame, Canvas, ChatView, Fill, Hit, Icon, Measures, Paint, Tone, draw_laid};
 
 impl ChatView {
     pub(super) fn draw_queue(
@@ -29,86 +29,129 @@ impl ChatView {
         if messages.is_empty() && !steering {
             return 0.0;
         }
-        let row = m.em(2.1);
-        let count = total.min(3);
-        let height = row
-            * (f32::from(u8::try_from(count).unwrap_or(3))
-                + f32::from(u8::from(!messages.is_empty()))
-                + f32::from(u8::from(steering)))
-            + m.em(0.5);
+        let row = m.em(2.15);
+        let header = m.em(1.65);
+        let pad = m.em(0.45);
+        let gap = m.em(0.45);
+        let panel = if messages.is_empty() {
+            0.0
+        } else {
+            header + row * f32::from(u8::try_from(messages.len()).unwrap_or(3)) + pad * 2.0
+        };
+        let height = panel + if steering { row + gap } else { 0.0 } + gap;
         let mut top = frame.top - height;
-        let left = frame.left + m.em(0.5);
-        let width = frame.place.column - m.em(1.0);
+        let left = frame.left + m.em(0.65);
+        let width = frame.place.column - m.em(1.3);
+        let small = Measures::of(m.em(0.85));
         if !messages.is_empty() {
+            canvas.fill(
+                Fill::rounded([left, top, width, panel], Paint::Raised, m.em(0.9))
+                    .bordered(1.0, Paint::RaisedEdge),
+            );
+            let inner_left = left + m.em(0.8);
+            let inner_width = width - m.em(1.6);
+            top += pad;
             let heading = format!(
-                "{} · {}",
+                "{}  ·  {}",
                 if self.node.delivery.paused {
                     "Queue paused"
                 } else {
-                    "Up next"
+                    "Queued"
                 },
                 total
             );
             self.queue_text(
                 canvas,
-                m,
+                small,
                 &heading,
-                [left, top, width - m.em(5.0), row],
+                [inner_left, top, inner_width - m.em(4.0), header],
                 Tone::Muted,
             );
             if total > 3 {
-                for (text, page, offset) in [("‹", -1, 4.0), ("›", 1, 2.0)] {
+                for (text, page, offset) in [("‹", -1, 3.6), ("›", 1, 1.8)] {
                     self.queue_button(
                         canvas,
                         m,
                         frame,
                         text,
                         Hit::QueuePage(page),
-                        [left + width - m.em(offset), top, m.em(2.0), row],
+                        [
+                            inner_left + inner_width - m.em(offset),
+                            top,
+                            m.em(1.8),
+                            header,
+                        ],
                     );
                 }
             }
-            top += row;
-            for (id, text) in &messages {
-                canvas.fill(Fill::rounded(
-                    [left, top, width, row - m.em(0.15)],
-                    Paint::Raised,
-                    m.em(0.45),
-                ));
-                self.queue_text(
-                    canvas,
-                    m,
-                    text,
-                    [left + m.em(0.65), top, (width - m.em(5.0)).max(0.0), row],
-                    Tone::Muted,
-                );
-                if self.node.delivery.sending == Some(*id) {
-                    top += row;
-                    continue;
+            top += header;
+            for (index, (id, text)) in messages.iter().enumerate() {
+                if index > 0 {
+                    canvas.fill(Fill::solid(
+                        [inner_left, top, inner_width, 1.0],
+                        Paint::RaisedEdge,
+                    ));
                 }
-                self.queue_button(
+                self.draw_queue_message(
                     canvas,
                     m,
                     frame,
-                    "↑",
-                    Hit::SendQueued(*id),
-                    [left + width - m.em(4.0), top, m.em(2.0), row],
-                );
-                self.queue_button(
-                    canvas,
-                    m,
-                    frame,
-                    "×",
-                    Hit::RemoveQueued(*id),
-                    [left + width - m.em(2.0), top, m.em(2.0), row],
+                    (*id, text),
+                    [inner_left, top, inner_width, row],
                 );
                 top += row;
             }
+            top += pad + gap;
         }
         if steering {
             self.draw_steering(canvas, m, frame, [left, top, width, row]);
         }
         height
+    }
+
+    fn draw_queue_message(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        frame: &BoxFrame,
+        (id, text): (u64, &str),
+        [left, top, width, row]: [f32; 4],
+    ) {
+        self.queue_text(
+            canvas,
+            m,
+            text,
+            [left, top, (width - m.em(4.5)).max(0.0), row],
+            Tone::Plain,
+        );
+        if self.node.delivery.sending == Some(id) {
+            self.queue_text(
+                canvas,
+                Measures::of(m.em(0.85)),
+                "Sending…",
+                [left + width - m.em(4.5), top, m.em(4.5), row],
+                Tone::Muted,
+            );
+        } else {
+            for (icon, hit, offset) in [
+                (Icon::Send, Hit::SendQueued(id), 3.8),
+                (Icon::Close, Hit::RemoveQueued(id), 1.8),
+            ] {
+                self.queue_icon(
+                    canvas,
+                    m,
+                    frame,
+                    icon,
+                    hit,
+                    [
+                        left + width - m.em(offset),
+                        top + (row - m.em(1.8)) / 2.0,
+                        m.em(1.8),
+                        m.em(1.8),
+                    ],
+                );
+            }
+        }
     }
 
     fn draw_steering(
@@ -180,6 +223,35 @@ impl ChatView {
         self.keep_label(laid);
     }
 
+    fn queue_icon(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        frame: &BoxFrame,
+        icon: Icon,
+        hit: Hit,
+        rect: [f32; 4],
+    ) {
+        let hovered = self
+            .mouse
+            .is_some_and(|p| super::super::contains(frame.place.in_pane(rect), p));
+        if hovered {
+            canvas.fill(Fill::rounded(rect, Paint::ChatHover, m.em(0.5)));
+        }
+        let side = m.em(0.95);
+        canvas.fill(Fill::icon(
+            [
+                rect[0] + (rect[2] - side) / 2.0,
+                rect[1] + (rect[3] - side) / 2.0,
+                side,
+                side,
+            ],
+            icon,
+            if hovered { Paint::Ink } else { Paint::Icon },
+        ));
+        self.hits.push((hit, frame.place.in_pane(rect)));
+    }
+
     fn queue_button(
         &mut self,
         canvas: &mut Canvas<'_>,
@@ -195,7 +267,19 @@ impl ChatView {
         {
             canvas.fill(Fill::rounded(rect, Paint::ChatHover, m.em(0.35)));
         }
-        self.queue_text(canvas, m, text, rect, Tone::Plain);
+        let small = Measures::of(m.em(0.85));
+        let laid = self.short_label(canvas.fonts, small, text, rect[2], Tone::Muted);
+        draw_laid(
+            canvas,
+            small,
+            &laid,
+            [
+                rect[0] + (rect[2] - laid.width) / 2.0,
+                rect[1] + (rect[3] - laid.height) / 2.0,
+            ],
+            rect[2],
+        );
+        self.keep_label(laid);
         self.hits.push((hit, frame.place.in_pane(rect)));
     }
 }
