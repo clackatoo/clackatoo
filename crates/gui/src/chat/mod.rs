@@ -90,7 +90,6 @@ pub(crate) struct Settled {
 /// Something in the chat that does something when clicked.
 #[derive(Clone, Debug, PartialEq)]
 enum Hit {
-    Attach,
     ModelSearch,
     MenuSurface,
     ModelFilter(picker::Filter),
@@ -236,7 +235,6 @@ pub(crate) struct ChatView {
     sliding: Option<String>,
     /// The settings menu, while it's open.
     menu: Option<Menu>,
-    attach_requested: bool,
     /// Where the chip that opened the menu was drawn, for the menu to open
     /// from, while drawing.
     menu_anchor: Option<[f32; 4]>,
@@ -417,7 +415,6 @@ impl ChatView {
             selecting: false,
             sliding: None,
             menu: None,
-            attach_requested: false,
             menu_anchor: None,
             open_cards: std::collections::HashSet::new(),
             said: None,
@@ -708,10 +705,6 @@ impl ChatView {
         menu.reveal = true;
     }
 
-    pub(crate) fn take_attachment_request(&mut self) -> bool {
-        std::mem::take(&mut self.attach_requested)
-    }
-
     pub(crate) fn begin_paste(&mut self) {
         self.pasting = true;
         self.queued.push(Input::Clipboard);
@@ -826,6 +819,10 @@ impl ChatView {
         }
         // The button under an answer shows only while the mouse is over
         // its turn, so a long chat isn't a column of them.
+        redraw |= self.hits.iter().any(|(hit, rect)| {
+            matches!(hit, Hit::Chip(_))
+                && contains(*rect, at) != self.mouse.is_some_and(|old| contains(*rect, old))
+        });
         self.mouse = Some(at);
         let turn = self.turn_to_copy_at(at);
         if turn != self.hovered_turn {
@@ -1608,7 +1605,6 @@ impl ChatView {
             self.menu = None;
         }
         match hit {
-            Some(Hit::Attach) => self.attach_requested = true,
             Some(Hit::ModelSearch | Hit::MenuSurface | Hit::Usage) => {}
             Some(Hit::ModelFilter(filter)) => {
                 if let Some(menu) = &mut self.menu {
@@ -2735,7 +2731,7 @@ mod tests {
     }
 
     #[test]
-    fn unified_permissions_and_attachment_keep_their_individual_actions() {
+    fn unified_permissions_keep_their_individual_actions() {
         let mut fonts = fonts();
         let mut view = with_every_chip();
         fixtures::paint(&mut view, &mut fonts);
@@ -2749,16 +2745,6 @@ mod tests {
             rows.iter()
                 .any(|row| matches!(row, Row::Choice(c) if c.setting == "clackatoo.browser"))
         );
-        view.menu = None;
-        view.paste("draft");
-        view.settle(&mut fonts);
-        fixtures::paint(&mut view, &mut fonts);
-        let at = drawn_at(&view, &Hit::Attach).unwrap();
-        view.press(at, 1, false);
-        assert!(view.settle(&mut fonts).actions.is_empty());
-        assert!(view.take_attachment_request());
-        assert!(!view.take_attachment_request());
-        assert_eq!(view.editor.raw_text(), "draft");
     }
 
     #[test]
@@ -3233,7 +3219,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_stays_below_both_controls_at_every_width() {
+    fn context_gauge_fits_beside_send_at_every_width() {
         let mut fonts = fonts();
         let mut view = with_every_chip();
         let overlaps = |a: [f32; 4], b: [f32; 4]| {
@@ -3261,7 +3247,7 @@ mod tests {
                 .count();
             widths.push((meter[2], chips));
         }
-        // Model and permissions stay available; usage has its own line.
+        // Model and permissions stay available without overlapping the gauge.
         assert!(widths.iter().all(|&(_, chips)| chips == 2), "{widths:?}");
         assert!(
             widths.windows(2).all(|pair| pair[1].0 <= pair[0].0),

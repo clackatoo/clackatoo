@@ -137,6 +137,7 @@ pub(crate) fn body_style(fonts: &Fonts, size: f32) -> Vec<StyleProperty<'static,
 
 /// Something laid out: the text it was laid out from, and its blocks.
 pub(crate) struct Laid {
+    pub(crate) em: f32,
     pub(crate) source: String,
     /// The tone plain text was laid out in, which [`ChatView::box_label`]
     /// keeps it by: plain, for Markdown.
@@ -530,6 +531,7 @@ pub(crate) fn lay_out_blocks(
         Look::Words | Look::Thought | Look::Page => Tone::Plain,
     };
     let mut laid = Laid {
+        em: m.em,
         source,
         tone,
         blocks: Vec::new(),

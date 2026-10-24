@@ -128,8 +128,6 @@ pub(crate) enum SessionEvent {
     /// could be read, for the editors. Sent from a thread reading them, not
     /// the session's.
     Clipboard(Vec<(crate::pane::Copy, String)>),
-    /// The composer requested a clipboard attachment.
-    PasteChat(TerminalId),
     /// Clipboard data read and encoded off the UI thread.
     ChatPaste {
         chat: TerminalId,

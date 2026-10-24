@@ -713,6 +713,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Roomier chat composer, searchable model picker with favorites, unified permissions, and usage below",
     },
+    News {
+        id: "contextgauge",
+        date: "2026-10-24",
+        lesson: "agents",
+        what: "Context percentage in a ring beside Send, clearer model icons and named reasoning-effort choices",
+    },
 ];
 
 impl News {

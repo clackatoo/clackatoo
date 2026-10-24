@@ -2218,14 +2218,6 @@ impl App {
                 if focused {
                     all.ime = paint.ime;
                 }
-                if let Some(chat) = pane.chat_mut()
-                    && chat.take_attachment_request()
-                {
-                    let _ = self
-                        .session
-                        .proxy()
-                        .send_event(SessionEvent::PasteChat(terminal));
-                }
                 chats.push(terminal);
             }
         }
@@ -3488,10 +3480,6 @@ impl App {
             SessionEvent::Message(
                 ServerMessage::Hello { .. } | ServerMessage::NotUpgrading { .. },
             ) => {}
-            SessionEvent::PasteChat(chat) => {
-                self.paste_into_chat(chat);
-                self.request_redraw();
-            }
             SessionEvent::ChatPaste { chat, result } => {
                 self.desk.finish_image_paste(chat, result);
                 self.request_redraw();

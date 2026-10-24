@@ -18,7 +18,7 @@ If the agent hasn't opened the chat's session after 30 seconds, the chat says so
 
 ## Pasting images
 
-Copy a screenshot or image to the clipboard, then press Ctrl+Shift+V in a chat or click the + beside Send. A thumbnail appears above the text in the message box, and above the sent message in the conversation. Add text if you like, then press Enter to send both; an image can go on its own too.
+Copy a screenshot or image to the clipboard, then press Ctrl+Shift+V in a chat. A thumbnail appears above the text in the message box, and above the sent message in the conversation. Add text if you like, then press Enter to send both; an image can go on its own too.
 
 Click the × on a thumbnail to remove it, or press Backspace while the message box is empty to remove the last one. You can prepare attachments while the agent answers; they stay in the draft until you send. Text on the clipboard still pastes as text.
 
@@ -44,11 +44,11 @@ Its words are Markdown: headings, lists, quotes, links, code, and tables. Code i
 
 While it works, a line just above the box says so, wherever the chat is scrolled to: three dots pulsing in clackatoo's colour, what the agent is doing, such as `Thinking`, `Running: cargo test` or `Writing`, and how long the turn has been going, as `· 12s`. The dots move only while the chat has the keyboard; elsewhere they step once a second, and once the agent stops, nothing moves. Ctrl+C asks it to stop.
 
-Along the box's bottom, click the model and effort at the left to open the model picker. Type to search, use the rail to show all models, favorites or one provider, and click a star to save a favorite on this machine. Up and Down move through the results, Enter picks, and Esc closes it; your draft stays intact. The wheel scrolls the picker. Reasoning effort has its slider below the results.
+Along the box's bottom, click the model and effort at the left to open the model picker. Type to search, use the rail to show all models, favorites or one provider, and click a star to save a favorite on this machine. Up and Down move through the results, Enter picks, and Esc closes it; your draft stays intact. The wheel scrolls the picker. Named reasoning-effort choices sit below the results.
 
 Beside the model is one permissions control, showing the approval mode. Its menu groups approval mode, clackatoo tools and browser access; each remains a separate setting. Shift+Tab still steps through the modes.
 
-Below the box is how full the chat's context is, as `42% context` over a thin bar: quiet while there's room, amber past 80% and red past 95%. With a Claude subscription, the account's 5-hour or weekly limit shows before it once it's past 80%. Hover over it, click it, or press `K` in the chat's normal mode for the detail: the tokens, and each limit, how much is used and when it resets. Codex keeps its limits to its own `/status`.
+Beside Send is a small circular context gauge, with the percentage in its centre. The ring fills clockwise, turning amber past 80% and red past 95%; a Claude account limit near full also raises its warning colour. Hover over the gauge, click it, or press `K` in normal mode for token counts, account limits and reset times. Codex keeps its account limits to its own `/status`.
 
 ## Which chats need you
 

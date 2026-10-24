@@ -6,23 +6,26 @@ type polish
 keys <CR>
 wait-for Image previews are ready
 shot composer
-click 245 782
+move 833 808
+shot context-detail
+move 600 700
+click 245 808
 shot models
 type sonnet
 shot search
 keys <Esc>
-click 245 782
-click 626 430
-click 212 428
+click 245 808
+click 626 456
+click 212 454
 shot favorites
 keys <Esc>
-click 330 782
+click 330 808
 shot permissions
 keys <Esc>
 size 480x640
 shot narrow
-click 80 522
+click 80 548
 shot narrow-models
 keys <Esc>
-click 170 522
+click 170 548
 shot narrow-permissions

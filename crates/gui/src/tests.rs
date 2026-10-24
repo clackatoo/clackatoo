@@ -2631,8 +2631,8 @@ fn drawn_in_wide(
 
 #[test]
 fn the_context_meter_is_quiet_with_room_amber_as_it_fills_and_red_when_all_but_full() {
-    // The box's row of controls, from the middle to the model's menu.
-    let meter = (560..640, 200..600);
+    // The circular context gauge immediately left of Send.
+    let meter = (580..640, 590..638);
     let amber = 0xe8_9a_3c;
     let red = 0xe0_6c_75;
     let with = |used, five_hour: u8| {

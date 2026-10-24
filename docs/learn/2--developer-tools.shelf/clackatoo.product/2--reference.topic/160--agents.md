@@ -78,11 +78,11 @@ What you've typed but not sent belongs to the window: another window, or this on
 
 ## The agent's settings
 
-The rounded message box has its model and reasoning effort at the lower left, followed by one permissions control showing the current approval mode. The `+` at the right pastes an image or text from the clipboard; beside it is Send, or Stop while the agent answers.
+The rounded message box has its model and reasoning effort at the lower left, followed by one permissions control showing the current approval mode. At the right, a small context gauge sits beside Send, or Stop while the agent answers. Paste images with Ctrl+Shift+V.
 
 The permissions menu groups three separate settings: the agent's approval mode, access to clackatoo's tools, and browser access. Changing one leaves the others as they were. For Claude Code, Manual asks before every change, Accept edits makes edits without asking, Plan plans before it acts, and Auto lets Claude decide what needs asking about. A new Claude chat starts in Auto.
 
-Usage sits below the box, as `42% context` over a thin bar: quiet while there's room, amber past 80%, red past 95%. With a Claude subscription, the account's 5-hour or weekly limit shows before it once it's past 80%, as `5-hour 91%`. In a narrow pane the limit goes first, then the words, leaving the bar.
+The circular gauge shows context used as a percentage in its centre. Its ring fills clockwise: quiet while there is room, amber past 80%, red past 95%. A Claude account limit above those thresholds also raises its warning colour; the details identify which limit needs attention. When the context capacity is unknown, the gauge shows a dash.
 
 Hover over it, click it, or press `K` in normal mode for the detail: the tokens used of the context, and each limit, how much of it is used and when it resets, as `at 15:40` or `Tuesday 09:00`. The limits are the account's, so every Claude chat shows the latest, from whichever chat heard it; one past its reset time isn't shown. Codex doesn't share its limits, so a Codex chat shows its context alone; its own `/status` says them.
 
@@ -96,7 +96,7 @@ The menu includes:
 
 - **Models by family:** Opus, Fable, Sonnet and Haiku, each with the version it picks. Picking a family picks its newest version, and keeps up as new ones come out.
 - **A family's versions:** the `▸` button at the end of its row, or Right, shows its other versions, to pin the chat to one. Left hides them. A chat on a pinned version opens the menu with that version shown and ticked.
-- **Effort on a slider**, from Low to Max: click or drag along it, or with the slider picked out, press Left and Right. It stays open as you slide, so you can try a few. Default, beside it, leaves effort to Claude Code, which picks it for each model.
+- **Named effort choices**, from Low to Max: click a choice, or with the effort row selected, press Left and Right. The menu stays open as you change it. Default leaves effort to Claude Code, which picks it for each model.
 
 Models from another agent are grouped only when one choice in a family always means its newest version, as Claude Code's `opus` does. Otherwise they're listed one per row.
 

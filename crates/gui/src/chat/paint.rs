@@ -34,7 +34,7 @@ use crate::markdown::layout::{
 };
 pub(super) use crate::markdown::layout::{body_style, text_size};
 use crate::markdown::tables::TableLaid;
-use crate::render::{Fill, Paint};
+use crate::render::{Fill, Paint, icons::Icon};
 // What the tests below use of what was moved to `markdown`.
 #[cfg(test)]
 use crate::markdown::{
@@ -107,10 +107,10 @@ pub(super) struct Cache {
 /// meter's do, don't pile up.
 #[derive(Default)]
 struct Labels {
-    last: HashMap<(String, Tone), Laid>,
-    now: HashMap<(String, Tone), Laid>,
-    shortened: HashMap<(String, u32, Tone), String>,
-    previous_shortened: HashMap<(String, u32, Tone), String>,
+    last: HashMap<(String, Tone, u32), Laid>,
+    now: HashMap<(String, Tone, u32), Laid>,
+    shortened: HashMap<(String, u32, u32, Tone), String>,
+    previous_shortened: HashMap<(String, u32, u32, Tone), String>,
 }
 
 /// What's kept of one turn between frames.
@@ -806,7 +806,7 @@ impl ChatView {
         tone: Tone,
         width: f32,
     ) -> Laid {
-        let key = (text.to_owned(), tone);
+        let key = (text.to_owned(), tone, m.em.to_bits());
         let labels = &mut self.cache.labels;
         match labels.now.remove(&key).or_else(|| labels.last.remove(&key)) {
             Some(laid) => laid,
@@ -823,7 +823,7 @@ impl ChatView {
 
     /// Keeps `laid`, from [`box_label`](Self::box_label), for the next frame.
     fn keep_label(&mut self, laid: Laid) {
-        let key = (laid.source.clone(), laid.tone);
+        let key = (laid.source.clone(), laid.tone, laid.em.to_bits());
         self.cache.labels.now.insert(key, laid);
     }
 
@@ -1032,11 +1032,7 @@ impl ChatView {
             row_height + m.em(0.7)
         };
         let height = pad + content_height + image_height + m.em(0.6) + m.em(2.2) + m.em(0.7);
-        let footer = if self.node.usage.is_some() {
-            m.em(2.4)
-        } else {
-            m.em(0.8)
-        };
+        let footer = m.em(0.8);
         let frame = BoxFrame {
             place,
             left: place.origin[0] + place.left,
@@ -1082,17 +1078,6 @@ impl ChatView {
         }
         self.draw_send(&mut canvas, m, &frame);
         self.draw_controls(&mut canvas, m, &frame);
-        self.draw_meter(
-            &mut canvas,
-            m,
-            &frame,
-            (
-                frame.left + place.column - pad,
-                frame.left + pad,
-                frame.top + height + m.em(0.25),
-                m.em(1.6),
-            ),
-        );
         height + footer
     }
 
@@ -1308,11 +1293,7 @@ impl ChatView {
         let busy = self.stoppable();
         let ready = (!self.editor.raw_text().trim().is_empty() || !self.images.is_empty())
             && self.node.question.is_none();
-        let (hit, label) = if busy {
-            (Hit::Stop, "■")
-        } else {
-            (Hit::Send, "↑")
-        };
+        let hit = if busy { Hit::Stop } else { Hit::Send };
         let lit = busy || ready;
         let size = m.em(2.2);
         let rect = [
@@ -1326,31 +1307,43 @@ impl ChatView {
             if lit { Paint::Accent } else { Paint::Chosen },
             size / 2.0,
         ));
-        let tone = if lit { Tone::OnAccent } else { Tone::Muted };
-        let laid = self.box_label(canvas.fonts, m, label, tone, size);
-        let text = [
-            rect[0] + (size - laid.width) / 2.0,
-            rect[1] + (size - laid.height) / 2.0,
+        let extent = m.em(if busy { 0.7 } else { 1.25 });
+        let at = [
+            rect[0] + (size - extent) / 2.0,
+            rect[1] + (size - extent) / 2.0,
+            extent,
+            extent,
         ];
-        draw_laid(canvas, m, &laid, text, size);
-        self.keep_label(laid);
+        let ink = if lit { Paint::Bar } else { Paint::Icon };
+        if busy {
+            canvas.fill(Fill::rounded(at, ink, m.em(0.12)));
+        } else {
+            canvas.fill(Fill::icon(at, Icon::Send, ink));
+        }
         self.hits.push((hit, frame.place.in_pane(rect)));
     }
 }
 
 impl ChatView {
-    /// Model and permissions at the left, clipboard attachment at the right.
+    /// Flat model and permissions controls, with context beside Send.
     fn draw_controls(&mut self, canvas: &mut Canvas<'_>, m: Measures, frame: &BoxFrame) {
         let size = m.em(2.2);
         let top = frame.top + frame.height - m.em(0.7) - size;
-        let right = frame.left + frame.place.column - frame.pad - 2.0 * size - m.em(0.5);
-        let of = |kind| {
-            self.node
-                .settings
-                .iter()
-                .find(|setting| setting.kind == kind)
-                .cloned()
-        };
+        let send_left = frame.left + frame.place.column - frame.pad - size;
+        let diameter = m.em(2.45);
+        let gauge = [
+            send_left - m.em(0.55) - diameter,
+            top + (size - diameter) / 2.0,
+            diameter,
+            diameter,
+        ];
+        self.draw_meter(canvas, m, frame, gauge);
+        let right = if self.node.usage.is_some() {
+            gauge[0]
+        } else {
+            send_left
+        } - m.em(0.55);
+        let of = |kind| self.node.settings.iter().find(|s| s.kind == kind).cloned();
         let models: Vec<Setting> = of(SettingKind::Model)
             .into_iter()
             .chain(of(SettingKind::Effort))
@@ -1360,141 +1353,126 @@ impl ChatView {
                 .into_iter()
                 .filter_map(of)
                 .collect();
-        let start = frame.left + frame.pad - m.em(0.6);
-        let room = (right - start).max(m.em(2.0));
-        let permissions_label = permissions
+        if models.is_empty() && permissions.is_empty() {
+            return;
+        }
+        let start = frame.left + frame.pad - m.em(0.4);
+        let room = (right - start).max(0.0);
+        let permission_name = permissions
             .iter()
             .find(|s| s.kind == SettingKind::Mode)
             .map_or_else(|| "Permissions".to_owned(), chosen_name);
-        let permission_text = format!("◇  {permissions_label}  ▾");
-        let permission = self.box_label(
+        let natural = self.box_label(
             canvas.fonts,
             m,
-            &permission_text,
+            &permission_name,
             Tone::Muted,
             f32::INFINITY,
         );
-        let permission_width = (permission.width + m.em(1.2)).min(room * 0.42);
-        self.keep_label(permission);
-        let model_room = (room - permission_width - m.em(0.8)).max(m.em(2.0));
-        if !models.is_empty() {
+        let permission_width = if permissions.is_empty() {
+            0.0
+        } else {
+            (natural.width + m.em(3.0)).min(room * 0.43)
+        };
+        self.keep_label(natural);
+        let model_room = (room - permission_width - m.em(0.65)).max(0.0);
+        let mut left = start;
+        if !models.is_empty() && model_room > m.em(2.0) {
             let label = models
                 .iter()
                 .map(chosen_name)
                 .collect::<Vec<_>>()
                 .join(" · ");
-            let label = format!("{}  {label}  ▾", models::symbol(self.agent()));
-            let laid =
-                self.short_label(canvas.fonts, m, &label, model_room - m.em(1.2), Tone::Plain);
-            let width = (laid.width + m.em(1.2)).min(model_room);
-            self.draw_chip(
+            left += self.draw_control(
                 canvas,
                 m,
                 frame,
-                [start, top, width, size],
-                &laid,
+                [left, top, model_room, size],
+                (&label, Icon::provider(self.agent()), Tone::Plain),
                 models.into_iter().map(|s| s.id).collect(),
             );
-            self.keep_label(laid);
-            let left = start + width + m.em(0.45);
-            canvas.fill(Fill::solid(
-                [left, top + m.em(0.5), 1.0, size - m.em(1.0)],
-                Paint::RaisedEdge,
-            ));
             if !permissions.is_empty() {
-                let label = self.short_label(
-                    canvas.fonts,
-                    m,
-                    &permission_text,
-                    permission_width - m.em(1.2),
-                    Tone::Muted,
-                );
-                self.draw_chip(
-                    canvas,
-                    m,
-                    frame,
-                    [left + m.em(0.35), top, permission_width, size],
-                    &label,
-                    permissions.into_iter().map(|s| s.id).collect(),
-                );
-                self.keep_label(label);
+                canvas.fill(Fill::solid(
+                    [left + m.em(0.3), top + m.em(0.55), 1.0, size - m.em(1.1)],
+                    Paint::RaisedEdge,
+                ));
+                left += m.em(0.65);
             }
-        } else if !permissions.is_empty() {
-            let permission = self.short_label(
-                canvas.fonts,
-                m,
-                &permission_text,
-                room - m.em(1.2),
-                Tone::Muted,
-            );
-            self.draw_chip(
+        }
+        if !permissions.is_empty() && right - left > m.em(2.0) {
+            self.draw_control(
                 canvas,
                 m,
                 frame,
-                [start, top, room, size],
-                &permission,
+                [left, top, right - left, size],
+                (&permission_name, Icon::Shield, Tone::Muted),
                 permissions.into_iter().map(|s| s.id).collect(),
             );
-            self.keep_label(permission);
         }
-        self.draw_attach_button(canvas, m, frame, top);
     }
 
-    fn draw_attach_button(
-        &mut self,
-        canvas: &mut Canvas<'_>,
-        m: Measures,
-        frame: &BoxFrame,
-        top: f32,
-    ) {
-        let size = m.em(2.2);
-        let rect = [
-            frame.left + frame.place.column - frame.pad - 2.0 * size - m.em(0.35),
-            top,
-            size,
-            size,
-        ];
-        let attach = self.box_label(canvas.fonts, m, "+", Tone::Muted, size);
-        draw_laid(
-            canvas,
-            m,
-            &attach,
-            [
-                rect[0] + (size - attach.width) / 2.0,
-                top + (size - attach.height) / 2.0,
-            ],
-            size,
-        );
-        self.keep_label(attach);
-        self.hits.push((Hit::Attach, frame.place.in_pane(rect)));
-    }
-
-    /// Draws a chip that opens the menu for `settings`, lit while it's
-    /// open, which then opens from it.
-    fn draw_chip(
+    fn draw_control(
         &mut self,
         canvas: &mut Canvas<'_>,
         m: Measures,
         frame: &BoxFrame,
         rect: [f32; 4],
-        laid: &Laid,
+        (label, icon, tone): (&str, Icon, Tone),
         settings: Vec<String>,
-    ) {
+    ) -> f32 {
+        let compact = rect[2] < m.em(5.0);
+        let laid = self.short_label(canvas.fonts, m, label, (rect[2] - m.em(3.0)).max(0.0), tone);
+        let width = if compact {
+            m.em(2.0).min(rect[2])
+        } else {
+            (laid.width + m.em(3.0)).min(rect[2])
+        };
+        let bounds = [rect[0], rect[1], width, rect[3]];
         let open = self
             .menu
             .as_ref()
             .is_some_and(|menu| menu.settings == settings);
-        // The menu opens above the box, lined up with the chip.
         if open {
-            canvas.fill(Fill::rounded(rect, Paint::Hover, m.em(0.5)));
+            self.menu_anchor = Some([rect[0], frame.top, width, rect[3]]);
         }
-        if open {
-            self.menu_anchor = Some([rect[0], frame.top, rect[2], rect[3]]);
+        let hovered = self
+            .mouse
+            .is_some_and(|at| super::contains(frame.place.in_pane(bounds), at));
+        if open || hovered {
+            canvas.fill(Fill::rounded(bounds, Paint::Hover, m.em(0.45)));
         }
-        let at = [rect[0] + m.em(0.6), rect[1] + (rect[3] - laid.height) / 2.0];
-        draw_laid(canvas, m, laid, at, rect[2]);
+        let side = m.em(1.15);
+        let icon_rect = [
+            rect[0] + m.em(0.35),
+            rect[1] + (rect[3] - side) / 2.0,
+            side,
+            side,
+        ];
+        canvas.fill(Fill::icon(icon_rect, icon, models::icon_paint(icon)));
+        if !compact {
+            draw_laid(
+                canvas,
+                m,
+                &laid,
+                [rect[0] + m.em(1.9), rect[1] + (rect[3] - laid.height) / 2.0],
+                width,
+            );
+            let side = m.em(0.8);
+            canvas.fill(Fill::icon(
+                [
+                    rect[0] + width - m.em(1.0),
+                    rect[1] + (rect[3] - side) / 2.0,
+                    side,
+                    side,
+                ],
+                Icon::ChevronDown,
+                Paint::Icon,
+            ));
+        }
+        self.keep_label(laid);
         self.hits
-            .push((Hit::Chip(settings), frame.place.in_pane(rect)));
+            .push((Hit::Chip(settings), frame.place.in_pane(bounds)));
+        width
     }
 
     /// Draws one of a menu's choices in `rect`: lit if the keyboard or the
@@ -2604,22 +2582,22 @@ mod tests {
         let mut view = ChatView::new(String::new(), node);
         let kept = |view: &ChatView| {
             let mut kept: Vec<String> = (view.cache.labels.now.keys())
-                .map(|(text, _)| text.clone())
+                .map(|(text, _, _)| text.clone())
                 .collect();
             kept.sort();
             kept
         };
         crate::chat::fixtures::paint(&mut view, &mut fonts);
-        assert_eq!(kept(&view), ["+", "↑", "◇  Auto  ▾"]);
+        assert_eq!(kept(&view), ["Auto"]);
         crate::chat::fixtures::paint(&mut view, &mut fonts);
-        assert_eq!(kept(&view), ["+", "↑", "◇  Auto  ▾"]);
+        assert_eq!(kept(&view), ["Auto"]);
         // The mode's gone: its label goes with the frame after.
         view.node.settings.clear();
         crate::chat::fixtures::paint(&mut view, &mut fonts);
-        assert_eq!(kept(&view), ["+", "↑", "◇  Permissions  ▾"]);
+        assert!(kept(&view).is_empty());
         crate::chat::fixtures::paint(&mut view, &mut fonts);
         assert!(
-            !(view.cache.labels.last.keys()).any(|(text, _)| text.contains("Auto")),
+            !(view.cache.labels.last.keys()).any(|(text, _, _)| text.contains("Auto")),
             "let go"
         );
     }

@@ -17,6 +17,7 @@ enum GlyphKey {
     Font(FaceId, GlyphId, u32),
     /// A box-drawing or block character, drawn to fill its cell.
     Drawn(char),
+    Icon(crate::render::icons::Icon, u16),
 }
 
 /// The atlas texture's width and height, in pixels. Room for thousands of
@@ -127,6 +128,35 @@ impl GlyphCache {
         });
         self.glyphs.insert(key, drawn);
         drawn
+    }
+
+    pub(crate) fn icon(
+        &mut self,
+        icon: crate::render::icons::Icon,
+        size: u16,
+    ) -> Option<AtlasGlyph> {
+        let key = GlyphKey::Icon(icon, size);
+        if let Some(&cached) = self.glyphs.get(&key) {
+            return cached;
+        }
+        let extent = u32::from(size);
+        let glyph = self.shelves.allocate(extent, extent).map(|[x, y]| {
+            let rect = [x, y, extent, extent];
+            let pixels = icon
+                .rasterize(size)
+                .into_iter()
+                .flat_map(|a| [a, a, a, a])
+                .collect();
+            self.uploads.push(Upload { rect, pixels });
+            AtlasGlyph {
+                rect,
+                left: 0,
+                top: 0,
+                color: false,
+            }
+        });
+        self.glyphs.insert(key, glyph);
+        glyph
     }
 
     fn rasterise(
@@ -266,5 +296,20 @@ mod tests {
             placed.push([x, y, w, h]);
         }
         assert!(placed.len() > 1000);
+    }
+}
+
+#[cfg(test)]
+mod icon_tests {
+    #[test]
+    fn an_icon_is_rasterised_only_once_at_each_size() {
+        let mut cache = super::GlyphCache::new();
+        let icon = crate::render::icons::Icon::OpenAi;
+        let first = cache.icon(icon, 24).unwrap().rect;
+        cache.uploads.clear();
+        assert_eq!(cache.icon(icon, 24).unwrap().rect, first);
+        assert!(cache.uploads.is_empty());
+        cache.icon(icon, 48).unwrap();
+        assert_eq!(cache.uploads.len(), 1);
     }
 }

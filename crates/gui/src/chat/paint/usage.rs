@@ -1,13 +1,5 @@
-//! How much of the agent's context the chat fills, along the box's
-//! bottom, by the model menu: "42% context" over a thin bar, quiet while
-//! there's room, amber past 80% and red past 95%. Beside it, the
-//! account's limit over five hours or a week, once it's as full as that:
-//! "5-hour 91%". As the box narrows, the chips on its left keep their
-//! room: the limit goes first, its colour carried by the context, then
-//! the words, leaving the bar. What it says is the protocol's
-//! ([`Usage::label`](clackatoo_protocol::Usage::label) and the rest), as
-//! the phone says the same.
-//!
+//! A compact context ring beside Send, with the percentage inside.
+//! The ring takes the fuller warning colour of context and account limits.
 //! Hovering over it, clicking it, or `K` in the chat's normal mode shows
 //! the detail above the box: the tokens, and each limit the agent has
 //! said, how much of it is used and when it resets.
@@ -17,7 +9,8 @@
 //! that time has passed, the limit isn't shown, as how much of it is used
 //! isn't known until the agent says again, next time anything is drawn.
 
-use clackatoo_protocol::{Fullness, Usage};
+use crate::render::icons::Icon;
+use clackatoo_protocol::Fullness;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
@@ -80,139 +73,45 @@ pub(in crate::chat) fn resets(at: u64, now: u64, zone: &TimeZone) -> String {
     }
 }
 
-/// How wide the meter is as its bar alone, in ems.
-const BAR_ALONE: f32 = 3.0;
-
-/// The meter, laid out, as wide as the room it has allows.
-enum MeterLaid {
-    /// The context and its bar, and before it, the fullest limit if it's
-    /// full enough to say so.
-    Whole {
-        context: Laid,
-        pressing: Option<Laid>,
-    },
-    /// The context and its bar alone, in the colour of the fuller of it
-    /// and the fullest limit.
-    Context(Laid),
-    /// The bar alone, likewise.
-    Bar,
-}
-
 impl ChatView {
-    /// Draws the meter, if the agent has said how much context the chat
-    /// fills, with its right edge at `right` and starting no further left
-    /// than `room`, in the row of controls at `top`, `size` tall: whole,
-    /// or without the limit beside it, or as its bar alone, whichever is
-    /// the most that fits, the bar even if it doesn't. Returns where it
-    /// starts, or `right` if there's none.
     pub(super) fn draw_meter(
         &mut self,
         canvas: &mut Canvas<'_>,
         m: Measures,
         frame: &BoxFrame,
-        (right, room, top, size): (f32, f32, f32, f32),
-    ) -> f32 {
+        rect: [f32; 4],
+    ) {
         let Some(usage) = self.node.usage else {
-            return right;
+            return;
         };
-        let gap = m.em(0.6);
-        let laid = self.lay_out_meter(canvas.fonts, m, &usage, right - room);
         let percent = usage.percent();
         let fullness = percent.map_or(Fullness::Room, Fullness::of);
-        let worst =
-            (usage.pressing(self.now())).map_or(fullness, |(_, pressing)| pressing.max(fullness));
-        let bar = (m.em * 0.15).round().max(2.0);
-        let below = m.em(0.25);
-        let (context, pressing, fill) = match &laid {
-            MeterLaid::Whole { context, pressing } => (Some(context), pressing.as_ref(), fullness),
-            MeterLaid::Context(context) => (Some(context), None, worst),
-            MeterLaid::Bar => (None, None, worst),
-        };
-        let width = context.map_or(m.em(BAR_ALONE), |context| context.width);
-        let left = right - width;
-        // The text in the row's middle, on the chips' line, with the bar
-        // under it; or the bar alone there.
-        let text_top = top + (size - context.map_or(bar, |context| context.height)) / 2.0;
-        if let Some(context) = context {
-            draw_laid(canvas, m, context, [left, text_top], width);
-        }
+        let worst = usage
+            .pressing(self.now())
+            .map_or(fullness, |(_, limit)| limit.max(fullness));
+        canvas.fill(Fill::icon(rect, Icon::Ring, Paint::RaisedEdge));
         if let Some(percent) = percent {
-            let under = context.map_or(0.0, |context| context.height + below);
-            let y = (text_top + under).round();
-            let track = [left, y, width, bar];
-            canvas.fill(Fill::rounded(track, Paint::Divider, bar / 2.0));
-            let filled = (width * f32::from(percent) / 100.0).round();
-            if filled > 0.0 {
-                let rect = [left, y, filled, bar];
-                canvas.fill(Fill::rounded(rect, paint(fill), bar / 2.0));
-            }
+            canvas.fill(Fill::icon(rect, Icon::Progress(percent), paint(worst)));
         }
-        let mut start = left;
-        if let Some(pressing) = pressing {
-            start = left - gap - pressing.width;
-            let at = [start, top + (size - pressing.height) / 2.0];
-            draw_laid(canvas, m, pressing, at, pressing.width);
-        }
-        let rect = [start, top, right - start, size];
+        let text = percent.map_or_else(|| "—".to_owned(), |percent| format!("{percent}%"));
+        let small = Measures::of(m.em * 0.72);
+        let laid = self.box_label(
+            canvas.fonts,
+            small,
+            &text,
+            tone(worst, Tone::Muted),
+            f32::INFINITY,
+        );
+        let at = [
+            rect[0] + (rect[2] - laid.width) / 2.0,
+            rect[1] + (rect[3] - laid.height) / 2.0,
+        ];
+        draw_laid(canvas, small, &laid, at, rect[2]);
+        self.keep_label(laid);
         self.hits.push((Hit::Usage, frame.place.in_pane(rect)));
-        match laid {
-            MeterLaid::Whole { context, pressing } => {
-                self.keep_label(context);
-                if let Some(pressing) = pressing {
-                    self.keep_label(pressing);
-                }
-            }
-            MeterLaid::Context(context) => self.keep_label(context),
-            MeterLaid::Bar => {}
-        }
-        // The detail opens above the box, lined up with the meter's right.
         if self.detail.is_some() {
-            self.detail_anchor = Some([right, frame.top]);
+            self.detail_anchor = Some([rect[0] + rect[2], frame.top]);
         }
-        start
-    }
-
-    /// Lays out what the meter says of `usage`, as much as fits in `room`:
-    /// see [`MeterLaid`].
-    fn lay_out_meter(
-        &mut self,
-        fonts: &mut Fonts,
-        m: Measures,
-        usage: &Usage,
-        room: f32,
-    ) -> MeterLaid {
-        let now = self.now();
-        let percent = usage.percent();
-        let fullness = percent.map_or(Fullness::Room, Fullness::of);
-        let pressing = usage.pressing(now);
-        let mut lay = |text: &str, fullness| {
-            self.box_label(fonts, m, text, tone(fullness, Tone::Muted), f32::INFINITY)
-        };
-        let context = lay(&usage.label(), fullness);
-        let pressing_laid = pressing.as_ref().map(|(text, full)| lay(text, *full));
-        let whole = context.width
-            + pressing_laid
-                .as_ref()
-                .map_or(0.0, |pressing| pressing.width + m.em(0.6));
-        if whole <= room {
-            return MeterLaid::Whole {
-                context,
-                pressing: pressing_laid,
-            };
-        }
-        let laid = if context.width > room {
-            MeterLaid::Bar
-        } else if let Some((_, full)) = pressing.filter(|(_, full)| *full > fullness) {
-            MeterLaid::Context(lay(&usage.label(), full))
-        } else {
-            return MeterLaid::Context(context);
-        };
-        // What isn't shown is kept, for when there's room again.
-        self.keep_label(context);
-        if let Some(pressing) = pressing_laid {
-            self.keep_label(pressing);
-        }
-        laid
     }
 
     /// Draws the detail, over everything, opening upward from `anchor`:

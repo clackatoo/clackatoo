@@ -9,6 +9,9 @@
 //! renderer draws into any texture, so the same code serves the window and
 //! offscreen tests.
 
+pub(crate) mod icons;
+use icons::Icon;
+
 use bytemuck::{Pod, Zeroable};
 use clackatoo_protocol::{Attributes, Underline};
 use clackatoo_term::Cell;
@@ -113,6 +116,8 @@ pub(crate) struct PlacedGlyph {
 /// A rectangle of the window's own: perhaps rounded, perhaps bordered.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Fill {
+    /// A vector icon in this rectangle, drawn from the glyph atlas.
+    pub(crate) icon: Option<Icon>,
     /// Left, top, width and height, in pixels.
     pub(crate) rect: [f32; 4],
     pub(crate) paint: Paint,
@@ -131,6 +136,7 @@ impl Fill {
         Self {
             rect,
             paint,
+            icon: None,
             radius: 0.0,
             border: None,
             clip: None,
@@ -142,9 +148,17 @@ impl Fill {
         Self {
             rect,
             paint,
+            icon: None,
             radius,
             border: None,
             clip: None,
+        }
+    }
+
+    pub(crate) fn icon(rect: [f32; 4], icon: Icon, paint: Paint) -> Self {
+        Self {
+            icon: Some(icon),
+            ..Self::solid(rect, paint)
         }
     }
 
@@ -190,6 +204,10 @@ pub(crate) enum Paint {
     /// finder's, and the line its preview is of, a menu's, a chat's
     /// settings', the command line's or a completion menu's.
     Chosen,
+    /// A quieter selection within the chat composer.
+    ChatChosen,
+    Claude,
+    Gemini,
     /// The dot by a workspace's name, by its place in the list.
     Workspace(u8),
     /// clackatoo's own colour, for what it shows over the panes.
@@ -1014,12 +1032,35 @@ impl Renderer {
             }
         };
         let (under, over): (Vec<Rect>, Vec<Rect>) = (
-            picture.fills.iter().map(rect).collect(),
-            picture.over.iter().map(rect).collect(),
+            picture
+                .fills
+                .iter()
+                .filter(|fill| fill.icon.is_none())
+                .map(rect)
+                .collect(),
+            picture
+                .over
+                .iter()
+                .filter(|fill| fill.icon.is_none())
+                .map(rect)
+                .collect(),
         );
         // The tiles go under the panes' cells, and the palette over them.
         self.rects.splice(0..0, under);
         self.overlays.extend(over);
+        for (fills, over) in [(picture.fills, false), (picture.over, true)] {
+            for fill in fills {
+                if let Some(icon) = fill.icon
+                    && let Some(glyph) = self.icon(icon, fill)
+                {
+                    if over {
+                        self.text_glyphs.push(glyph);
+                    } else {
+                        self.glyph_instances.push(glyph);
+                    }
+                }
+            }
+        }
         for text in picture.texts {
             self.push_text(text, fonts);
         }
@@ -1033,6 +1074,23 @@ impl Renderer {
                 self.text_glyphs.push(glyph);
             }
         }
+    }
+
+    fn icon(&mut self, icon: Icon, fill: &Fill) -> Option<Glyph> {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let size = fill.rect[2].min(fill.rect[3]).round().clamp(1.0, 256.0) as u16;
+        let atlas = self.glyphs.icon(icon, size)?;
+        #[allow(clippy::cast_precision_loss)]
+        let uv = [atlas.rect[0] as f32, atlas.rect[1] as f32];
+        Some(Glyph {
+            origin: [fill.rect[0].round(), fill.rect[1].round()],
+            size: [f32::from(size); 2],
+            uv_origin: uv,
+            uv_size: [f32::from(size); 2],
+            color: self.theme.paint(fill.paint),
+            colored: 0,
+            clip: fill.clip.map_or(NO_CLIP, clip_box),
+        })
     }
 
     /// A glyph laid out already, ready to draw.

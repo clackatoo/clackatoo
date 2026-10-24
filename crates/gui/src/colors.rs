@@ -452,7 +452,7 @@ impl Theme {
         match paint {
             Paint::Clear => [0.0; 4],
             Paint::Bar => self.bar,
-            Paint::WindowEdge => white(0.08),
+            Paint::WindowEdge | Paint::ChatChosen => white(0.08),
             Paint::Shadow => [0.0, 0.0, 0.0, 0.25],
             Paint::Tile => self.background,
             Paint::Divider => self.divider,
@@ -465,6 +465,8 @@ impl Theme {
             Paint::Picked => self.picked,
             Paint::PickedEdge => self.picked_edge,
             Paint::Chosen => self.chosen,
+            Paint::Claude => hex_rgba(0xd9_77_57),
+            Paint::Gemini => hex_rgba(0x8a_ab_ee),
             Paint::Workspace(index) => self.workspaces[usize::from(index) % self.workspaces.len()],
             Paint::Mode(mode) => self.modes[mode.colour()],
             Paint::Hover => self.hover,
