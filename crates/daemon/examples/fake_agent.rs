@@ -153,6 +153,7 @@ fn main() {
         waits: Vec::new(),
         asked: None,
         editing: None,
+        images: Vec::new(),
     };
     if let Some(file) = value("--grandchild") {
         grandchild(&file);
@@ -193,6 +194,7 @@ fn main() {
     reason = "each a flag it was started with"
 )]
 struct Fake {
+    images: Vec<tempfile::TempPath>,
     log: Option<String>,
     /// Sends what Codex's adapter sends.
     codex: bool,
@@ -253,6 +255,44 @@ fn grandchild(file: &str) {
     let new = format!("{file}.new");
     std::fs::write(&new, sleeping.id().to_string()).unwrap();
     std::fs::rename(&new, file).unwrap();
+}
+
+/// The native Codex resource-link shape and Claude/MCP inline-image shape.
+fn image_results(session: &str) -> tempfile::TempPath {
+    use base64::Engine;
+    let image = image::RgbImage::from_fn(400, 240, |x, y| {
+        image::Rgb([
+            u8::try_from(x * 200 / 400 + 30).unwrap(),
+            u8::try_from(y * 180 / 240 + 40).unwrap(),
+            130,
+        ])
+    });
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    let path = tempfile::Builder::new()
+        .suffix(".png")
+        .tempfile()
+        .unwrap()
+        .into_temp_path();
+    std::fs::write(&path, bytes.get_ref()).unwrap();
+    for (id, title, content) in [
+        (
+            "linked-image",
+            "View Image linked.png",
+            json!({"type":"resource_link", "name":"linked.png", "uri":path.to_str().unwrap()}),
+        ),
+        (
+            "inline-image",
+            "Read inline.png",
+            json!({"type":"image", "mimeType":"image/png", "data":base64::engine::general_purpose::STANDARD.encode(bytes.get_ref())}),
+        ),
+    ] {
+        update(
+            session,
+            &json!({"sessionUpdate":"tool_call", "toolCallId":id, "title":title, "kind":"read", "status":"completed", "content":[{"type":"content", "content":content}]}),
+        );
+    }
+    path
 }
 
 fn send(message: &Value) {
@@ -852,6 +892,14 @@ impl Fake {
             return true;
         }
         match text {
+            "tool-images" => {
+                self.images.push(image_results(&session));
+                say(
+                    &session,
+                    "Image tool results are ready. Both linked and inline pictures should be visible.\n",
+                );
+                done(&id, "end_turn");
+            }
             "polish" => {
                 say(
                     &session,

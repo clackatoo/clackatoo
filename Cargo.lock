@@ -617,6 +617,7 @@ dependencies = [
  "globset",
  "httparse",
  "ignore",
+ "image",
  "libc",
  "log",
  "memchr",
@@ -2059,6 +2060,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

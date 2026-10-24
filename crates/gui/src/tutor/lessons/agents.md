@@ -16,6 +16,12 @@ A chat works in the directory a new terminal would start in, and until its first
 
 If the agent hasn't opened the chat's session after 30 seconds, the chat says so, and what it may be waiting on: most often an MCP server in the agent's config that needs a login. It goes on waiting, and asks whether to keep waiting, which Esc picks, Retry, which starts the agent again, or Stop. Ctrl+C stops it too.
 
+## Images returned by tools
+
+When a tool returns an image, a thumbnail appears beneath its entry in the conversation, even when the turn's work is folded. Open the entry to give the preview more room. This works with Codex's View Image and other agents, including Claude, when their adapter returns inline image data or a link to a local image file.
+
+PNG, JPEG and BMP results are supported, up to four per result, with files limited to 8 MiB and images to 16 million pixels. The daemon reads local files on its own machine and sends small previews to the window, so remote chats work too. Web URLs are not fetched. Previews share the chat's 4 MiB history allowance with pasted images; older results keep their labels. Newly received previews survive reconnects and daemon upgrades, but history replayed after a full restart shows labels only. The web client shows a label for tool images.
+
 ## Pasting images
 
 Copy a screenshot or image to the clipboard, then press Ctrl+Shift+V in a chat. A thumbnail appears above the text in the message box, and above the sent message in the conversation. Add text if you like, then press Enter to send both; an image can go on its own too.
@@ -44,7 +50,7 @@ Its words are Markdown: headings, lists, quotes, links, code, and tables. Code i
 
 While it works, a line just above the box says so, wherever the chat is scrolled to: three dots pulsing in clackatoo's colour, what the agent is doing, such as `Thinking`, `Running: cargo test` or `Writing`, and how long the turn has been going, as `· 12s`. The dots move only while the chat has the keyboard; elsewhere they step once a second, and once the agent stops, nothing moves. Ctrl+C asks it to stop.
 
-Along the box's bottom, click the model and effort at the left to open the model picker. It opens on favorites if you have any, otherwise the current provider. The rail switches between favorites and providers. Search always covers all providers, with matching favorites first; clearing it returns to your previous page. Click a star to save a favorite on this machine. Up and Down move through the results, Enter picks, and Esc closes it; your draft stays intact. The picker keeps its height; the wheel scrolls the model list or provider rail under the pointer. Named reasoning-effort choices sit below the results. A lightning bolt beside them toggles fast mode, appearing only when the current model supports it. Menus open immediately above their buttons.
+Along the box's bottom, click the model and effort at the left to open the model picker. It opens on favorites if you have any, otherwise the current provider. The rail switches between favorites and providers. Search always covers all providers, with matching favorites first; clearing it returns to your previous page. Click a star to save a favorite on this machine. Up and Down move through the results, Enter picks, and Esc closes it; your draft stays intact. The picker keeps its height; the wheel scrolls the model list or provider rail under the pointer. Named reasoning-effort choices sit below the results. A lightning bolt beside them toggles fast mode, appearing only when the current model supports it and filling in while enabled. Menus open immediately above their buttons.
 
 Beside the model is one permissions control, showing the approval mode. Its menu groups approval mode, clackatoo tools and browser access; each remains a separate setting. Shift+Tab still steps through the modes.
 

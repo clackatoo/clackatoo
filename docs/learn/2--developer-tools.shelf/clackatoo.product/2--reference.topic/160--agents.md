@@ -44,6 +44,12 @@ Like any new pane, a chat opens in the window's mode, so after `:Agent` it's in 
 
 An agent runs in a process group of its own, so stopping it, or choosing Retry, also ends whatever it started, such as the node behind `npx`, and any background job it started without detaching. An upgrade or `clackatoo stop` ends them too: running agents get half a second to finish by themselves, then are asked to stop, and the daemon waits up to a second and a half for them before killing what's left. Before Linux 6.9, only the agent's own process is reached.
 
+## Images returned by tools
+
+When a tool returns an image, a thumbnail appears beneath its entry in the conversation, even when the turn's work is folded. Open the entry to give the preview more room. This works with Codex's View Image and other agents, including Claude, when their adapter returns inline image data or a link to a local image file.
+
+PNG, JPEG and BMP results are supported, up to four per result, with files limited to 8 MiB and images to 16 million pixels. The daemon reads local files on its own machine and sends small previews to the window, so remote chats work too. Web URLs are not fetched. Previews share the chat's 4 MiB history allowance with pasted images; older results keep their labels. Newly received previews survive reconnects and daemon upgrades, but history replayed after a full restart shows labels only. The web client shows a label for tool images.
+
 ## Pasting images
 
 Copy a screenshot or image to the clipboard, then press Ctrl+Shift+V in a chat. A thumbnail appears above the text in the message box, and above the sent message in the conversation. Add text if you like, then press Enter to send both; an image can go on its own too.
@@ -96,7 +102,7 @@ The menu includes:
 
 - **Models by family:** Opus, Fable, Sonnet and Haiku, each with the version it picks. Picking a family picks its newest version, and keeps up as new ones come out.
 - **A family's versions:** the `▸` button at the end of its row, or Right, shows its other versions, to pin the chat to one. Left hides them. A chat on a pinned version opens the menu with that version shown and ticked.
-- **Fast mode:** the lightning bolt in the rail beside reasoning effort toggles fast mode. It appears only when the current model advertises support, and lights up while enabled. The adapter controls its availability and account restrictions.
+- **Fast mode:** the lightning bolt in the rail beside reasoning effort toggles fast mode. It appears only when the current model advertises support, and fills in while enabled. The adapter controls its availability and account restrictions.
 - **Named effort choices**, from Low to Max: click a choice, or with the effort row selected, press Left and Right. The menu stays open as you change it. Default leaves effort to Claude Code, which picks it for each model.
 
 Models from another agent are grouped only when one choice in a family always means its newest version, as Claude Code's `opus` does. Otherwise they're listed one per row.

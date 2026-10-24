@@ -10,6 +10,7 @@ pub(crate) enum Icon {
     Gemini,
     Agent,
     Bolt,
+    BoltFilled,
     Search,
     Star,
     StarFilled,
@@ -54,7 +55,7 @@ impl Icon {
                 .into();
         }
         match self {
-            Self::Bolt => "M13 2L4 14H11L10 22L20 9H13Z".into(),
+            Self::Bolt | Self::BoltFilled => "M13 2L4 14H11L10 22L20 9H13Z".into(),
             Self::Search => "M17 10A7 7 0 1 1 3 10A7 7 0 1 1 17 10 M15 15L21 21".into(),
             Self::Star | Self::StarFilled => {
                 "M12 3L14.8 8.7L21 9.6L16.5 14L17.6 20.2L12 17.3L6.4 20.2L7.5 14L3 9.6L9.2 8.7Z"
@@ -99,7 +100,7 @@ impl Icon {
         stroke.cap(Cap::Round).join(Join::Round);
         if !matches!(
             self,
-            Self::OpenAi | Self::Claude | Self::Gemini | Self::StarFilled
+            Self::OpenAi | Self::Claude | Self::Gemini | Self::StarFilled | Self::BoltFilled
         ) {
             mask.style(stroke);
         }
@@ -136,6 +137,7 @@ mod tests {
                 Icon::Star,
                 Icon::Search,
                 Icon::Bolt,
+                Icon::BoltFilled,
                 Icon::Progress(42),
             ] {
                 assert_eq!(swash::zeno::validate_svg(&icon.path()), Ok(()), "{icon:?}");

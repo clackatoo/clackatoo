@@ -505,7 +505,11 @@ impl ChatView {
         }
         icon(
             canvas,
-            Icon::Bolt,
+            if enabled {
+                Icon::BoltFilled
+            } else {
+                Icon::Bolt
+            },
             bounds,
             m.em(1.45),
             if enabled { Paint::Accent } else { Paint::Icon },

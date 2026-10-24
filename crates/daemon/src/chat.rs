@@ -333,6 +333,8 @@ enum Link {
 /// A chat with an agent.
 #[derive(Debug)]
 pub(crate) struct HostedChat {
+    /// Only outstanding workers hold strong receipts. Replaced results revoke them.
+    image_receipts: Vec<(String, std::sync::Weak<()>)>,
     id: TerminalId,
     /// The size of the pane it's in, for listing.
     size: Size,
@@ -537,6 +539,7 @@ impl HostedChat {
         browser: bool,
     ) -> Self {
         Self {
+            image_receipts: Vec::new(),
             id,
             size,
             title: agent.title.clone(),
@@ -2131,6 +2134,7 @@ impl HostedChat {
             SessionUpdate::AgentMessageChunk(chunk) => self.write(&chunk.content, false),
             SessionUpdate::AgentThoughtChunk(chunk) => self.write(&chunk.content, true),
             SessionUpdate::ToolCall(call) => {
+                self.revoke_image(&call.tool_call_id.0);
                 self.note_diffs(&call.tool_call_id.0, &call.content);
                 self.note_own_tool(&call.tool_call_id.0, call.raw_input.as_ref());
                 let tool = Tool {
@@ -2148,6 +2152,7 @@ impl HostedChat {
             }
             SessionUpdate::ToolCallUpdate(update) => {
                 if let Some(content) = &update.fields.content {
+                    self.revoke_image(&update.tool_call_id.0);
                     self.note_diffs(&update.tool_call_id.0, content);
                 }
                 self.note_own_tool(&update.tool_call_id.0, update.fields.raw_input.as_ref());
@@ -2268,7 +2273,10 @@ impl HostedChat {
     fn wrote(&self, tool: &Tool) -> Option<Wrote> {
         let diffs = (tool.content.iter()).filter_map(|content| match content {
             ToolContent::Diff(diff) => Some(&diff.path),
-            ToolContent::Text(_) | ToolContent::Output(_) | ToolContent::Other(_) => None,
+            ToolContent::Text(_)
+            | ToolContent::Output(_)
+            | ToolContent::Other(_)
+            | ToolContent::Image(_) => None,
         });
         let edits = matches!(tool.kind, ToolKind::Edit | ToolKind::Delete)
             || diffs.clone().next().is_some();
@@ -2568,6 +2576,138 @@ impl HostedChat {
         }
     }
 
+    fn revoke_image(&mut self, id: &str) {
+        self.image_receipts
+            .retain(|(tool, receipt)| tool != id && receipt.strong_count() > 0);
+    }
+
+    fn image_receipt(&mut self, id: &str) -> std::sync::Arc<()> {
+        self.revoke_image(id);
+        let receipt = std::sync::Arc::new(());
+        self.image_receipts
+            .push((id.to_owned(), std::sync::Arc::downgrade(&receipt)));
+        receipt
+    }
+
+    pub(crate) fn image_target(&mut self, id: &str) -> Option<crate::tool_images::Target> {
+        let turn = self.node.turns.len().checked_sub(1)?;
+        let current = &self.node.turns[turn];
+        let tool = current.items.iter().find_map(|item| match item {
+            Item::Tool(tool) if tool.id == id => Some(tool),
+            _ => None,
+        })?;
+        Some(crate::tool_images::Target {
+            terminal: self.id,
+            turn,
+            sent: current.sent,
+            tool: id.to_owned(),
+            content: tool.content.clone(),
+            receipt: self.image_receipt(id),
+        })
+    }
+
+    pub(crate) fn hand_over_tool_previews(&self) -> Vec<handover::ToolPreviews> {
+        self.node
+            .turns
+            .iter()
+            .enumerate()
+            .flat_map(|(turn, value)| {
+                value.items.iter().filter_map(move |item| {
+                    let Item::Tool(tool) = item else {
+                        return None;
+                    };
+                    let images: Vec<_> = tool
+                        .content
+                        .iter()
+                        .filter_map(|content| match content {
+                            ToolContent::Image(image) => Some(handover::ChatPreview {
+                                width: image.width,
+                                height: image.height,
+                                rgba: image.rgba.to_vec(),
+                            }),
+                            _ => None,
+                        })
+                        .collect();
+                    (!images.is_empty()).then(|| handover::ToolPreviews {
+                        chat: self.id.0,
+                        turn: index_u32(turn),
+                        tool: tool.id.clone(),
+                        images,
+                    })
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn resume_tool_previews(&mut self, records: &mut [handover::ToolPreviews]) {
+        let id = self.id.0;
+        for record in records.iter_mut().filter(|record| record.chat == id) {
+            let Some(turn) = self.node.turns.get(record.turn as usize) else {
+                continue;
+            };
+            let Some(content) = turn.items.iter().find_map(|item| match item {
+                Item::Tool(tool) if tool.id == record.tool => Some(tool.content.clone()),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let target = crate::tool_images::Target {
+                terminal: self.id,
+                turn: record.turn as usize,
+                sent: turn.sent,
+                tool: record.tool.clone(),
+                content,
+                receipt: self.image_receipt(&record.tool),
+            };
+            let images = std::mem::take(&mut record.images)
+                .into_iter()
+                .take(4)
+                .map(|image| clackatoo_protocol::ChatPreview {
+                    width: image.width,
+                    height: image.height,
+                    rgba: image.rgba.into(),
+                })
+                .collect();
+            self.tool_images(&target, images);
+        }
+    }
+
+    pub(crate) fn tool_images(
+        &mut self,
+        target: &crate::tool_images::Target,
+        images: Vec<clackatoo_protocol::ChatPreview>,
+    ) -> bool {
+        if !self
+            .image_receipts
+            .iter()
+            .any(|(_, receipt)| receipt.ptr_eq(&std::sync::Arc::downgrade(&target.receipt)))
+            || images.is_empty()
+            || images.len() > 4
+            || images.iter().any(|image| !image.valid())
+        {
+            return false;
+        }
+        let Some(turn) = self
+            .node
+            .turns
+            .get(target.turn)
+            .filter(|turn| turn.sent == target.sent)
+        else {
+            return false;
+        };
+        let Some(at) = turn.items.iter().position(|item| matches!(item, Item::Tool(tool) if tool.id == target.tool && tool.content == target.content)) else { return false; };
+        self.revoke_image(&target.tool);
+        self.make_preview_room(&images);
+        let Item::Tool(tool) = &mut self.node.turns[target.turn].items[at] else {
+            return false;
+        };
+        tool.content
+            .extend(images.into_iter().map(ToolContent::Image));
+        let item = Item::Tool(tool.clone());
+        self.patch_item(target.turn, at, item);
+        true
+    }
+
     pub(crate) fn resume_previews(&mut self, previews: handover::ChatPreviews) {
         let mut bytes = 0;
         for (index, images) in previews.turns.into_iter().rev() {
@@ -2602,7 +2742,20 @@ impl HostedChat {
             .node
             .turns
             .iter()
-            .flat_map(|turn| &turn.previews)
+            .flat_map(|turn| {
+                turn.previews.iter().chain(
+                    turn.items
+                        .iter()
+                        .flat_map(|item| match item {
+                            Item::Tool(tool) => tool.content.as_slice(),
+                            _ => &[],
+                        })
+                        .filter_map(|content| match content {
+                            ToolContent::Image(image) => Some(image),
+                            _ => None,
+                        }),
+                )
+            })
             .chain(incoming)
             .map(|preview| preview.rgba.len())
             .sum();
@@ -2610,13 +2763,31 @@ impl HostedChat {
             if bytes <= clackatoo_protocol::ChatPreview::HISTORY_BYTES {
                 break;
             }
-            let previews = &mut self.node.turns[index].previews;
+            let turn = &mut self.node.turns[index];
+            let mut changed = false;
+            for item in &mut turn.items {
+                if let Item::Tool(tool) = item {
+                    tool.content.retain(|content| {
+                        if let ToolContent::Image(image) = content {
+                            bytes -= image.rgba.len();
+                            changed = true;
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                }
+            }
+            let previews = &mut turn.previews;
             if !previews.is_empty() {
                 bytes -= previews
                     .iter()
                     .map(|preview| preview.rgba.len())
                     .sum::<usize>();
                 previews.clear();
+                changed = true;
+            }
+            if changed {
                 self.patch_turn(index);
             }
         }
@@ -2782,6 +2953,7 @@ fn weight(patch: &ChatPatch) -> usize {
                     ToolContent::Text(text)
                     | ToolContent::Output(text)
                     | ToolContent::Other(text) => text.len(),
+                    ToolContent::Image(image) => image.rgba.len(),
                     ToolContent::Diff(diff) => {
                         diff.path.len() + diff.old.as_ref().map_or(0, String::len) + diff.new.len()
                     }
@@ -2976,8 +3148,8 @@ fn tool_kind(kind: agent_client_protocol_schema::v1::ToolKind) -> ToolKind {
 }
 
 /// What a tool shows, as the agent gives it: its text and its changes to
-/// files, cut down to what a chat keeps. Terminals, which the daemon says
-/// it doesn't run, and anything but text, are left out.
+/// files, cut down to what a chat keeps. Image labels arrive here first;
+/// the bounded worker attaches their pixels separately.
 fn tool_content(content: &[ToolCallContent]) -> Vec<ToolContent> {
     (content.iter())
         .filter_map(|content| match content {
@@ -2985,6 +3157,11 @@ fn tool_content(content: &[ToolCallContent]) -> Vec<ToolContent> {
                 ContentBlock::Text(text) => {
                     Some(ToolContent::Text(tail(&clean_text(&text.text), TOOL_TEXT)))
                 }
+                ContentBlock::Image(_)
+                | ContentBlock::Resource(_)
+                | ContentBlock::ResourceLink(_) => Some(ToolContent::Other(
+                    "Image or resource returned by tool".into(),
+                )),
                 _ => None,
             },
             ToolCallContent::Diff(diff) => Some(ToolContent::Diff(Diff {
@@ -3140,6 +3317,9 @@ fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
                                 handover::ToolContent::Text(text)
                             }
                             ToolContent::Output(text) => handover::ToolContent::Output(text),
+                            ToolContent::Image(_) => {
+                                handover::ToolContent::Text("Image preview".into())
+                            }
                             ToolContent::Diff(diff) => handover::ToolContent::Diff {
                                 path: diff.path,
                                 old: diff.old,
@@ -3311,6 +3491,97 @@ mod tests {
         resumed.resume_previews(previews);
         assert_eq!(resumed.node.turns[19].previews, vec![preview]);
         assert!(resumed.node.turns[0].previews.is_empty());
+    }
+
+    #[test]
+    fn tool_previews_reject_stale_results_and_survive_handover() {
+        let mut chat = chat();
+        chat.begin(
+            "look".into(),
+            Prompt {
+                text: "look".into(),
+                images: Vec::new(),
+            },
+            None,
+            &mut Vec::new(),
+        );
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"image","title":"View Image","kind":"read","status":"completed"}"#,
+        );
+        let stale = chat.image_target("image").unwrap();
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call_update","toolCallId":"image","content":[]}"#,
+        );
+        assert!(
+            !chat
+                .image_receipts
+                .iter()
+                .any(|(_, receipt)| receipt.ptr_eq(&std::sync::Arc::downgrade(&stale.receipt)))
+        );
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call_update","toolCallId":"image","content":[{"type":"content","content":{"type":"text","text":"replaced"}}]}"#,
+        );
+        let preview = clackatoo_protocol::ChatPreview {
+            width: 1,
+            height: 1,
+            rgba: vec![20, 40, 60, 255].into(),
+        };
+        assert!(!chat.tool_images(&stale, vec![preview.clone()]));
+        let target = chat.image_target("image").unwrap();
+        assert!(chat.tool_images(&target, vec![preview.clone()]));
+        let mut images = chat.hand_over_tool_previews();
+        let agent = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        let mut resumed = HostedChat::resume(chat.hand_over(), &agent);
+        resumed.resume_tool_previews(&mut images);
+        assert!(resumed.node.turns[0].items.iter().any(|item| matches!(item, Item::Tool(tool) if tool.content.contains(&ToolContent::Image(preview.clone())))));
+    }
+
+    #[test]
+    fn prompt_and_tool_previews_share_the_history_budget() {
+        let mut chat = chat();
+        let preview = clackatoo_protocol::ChatPreview {
+            width: 256,
+            height: 256,
+            rgba: vec![42; 256 * 256 * 4].into(),
+        };
+        for index in 0..20 {
+            let mut prompt = image_prompt();
+            prompt.text = format!("image {index}");
+            prompt.images[0].preview = Some(preview.clone());
+            chat.begin(prompt.shown(), prompt, None, &mut Vec::new());
+            update(
+                &mut chat,
+                r#"{"sessionUpdate":"tool_call","toolCallId":"image","title":"View Image","kind":"read","status":"completed"}"#,
+            );
+            let target = chat.image_target("image").unwrap();
+            assert!(chat.tool_images(&target, vec![preview.clone()]));
+        }
+        let prompts: usize = chat
+            .node
+            .turns
+            .iter()
+            .flat_map(|turn| &turn.previews)
+            .map(|image| image.rgba.len())
+            .sum();
+        let tools: usize = chat
+            .hand_over_tool_previews()
+            .iter()
+            .flat_map(|record| &record.images)
+            .map(|image| image.rgba.len())
+            .sum();
+        assert_eq!(
+            prompts + tools,
+            clackatoo_protocol::ChatPreview::HISTORY_BYTES
+        );
+        assert_eq!(prompts, tools);
+        assert!(chat.node.turns[0].previews.is_empty());
+        assert_eq!(chat.node.turns[19].previews, vec![preview]);
+        assert_eq!(chat.hand_over_tool_previews()[0].turn, 12);
     }
 
     #[test]

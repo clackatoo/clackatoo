@@ -1003,6 +1003,24 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             })]),
         })),
     ));
+    samples.push((
+        crate::wire::TOOL_IMAGES,
+        Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Item {
+                turn: 0,
+                item: 0,
+                value: Item::Tool(Tool {
+                    content: vec![ToolContent::Image(crate::ChatPreview {
+                        width: 1,
+                        height: 1,
+                        rgba: vec![25, 50, 75, 255].into(),
+                    })],
+                    ..tool()
+                }),
+            })]),
+        })),
+    ));
     samples
 }
 

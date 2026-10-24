@@ -583,7 +583,10 @@ impl ChatView {
         }
         for (item_index, item) in turn.items.iter().enumerate() {
             // Folded, only the answer shows.
-            if item_index < shape.answer && !shape.open {
+            if item_index < shape.answer
+                && !shape.open
+                && !matches!(item, Item::Tool(tool) if tool.content.iter().any(|content| matches!(content, clackatoo_protocol::ToolContent::Image(_))))
+            {
                 continue;
             }
             let key = ITEMS + item_index;
@@ -915,7 +918,15 @@ impl ChatView {
                             piece,
                             part: 0,
                         };
-                        cards::draw_card(canvas, m, card, key, [origin[0], top], column, drawn);
+                        cards::draw_card(
+                            canvas,
+                            m,
+                            card,
+                            key,
+                            [origin[0], top],
+                            column,
+                            (drawn, &self.previews),
+                        );
                     }
                 }
                 Piece::Prompt => {
@@ -2970,19 +2981,75 @@ mod tests {
     }
 
     #[test]
+    fn image_tools_stay_visible_when_work_is_folded_and_reuse_the_texture() {
+        use crate::chat::fixtures::{fonts, paint, talk};
+        let mut fonts = fonts();
+        let mut node = talk(&[("look", "The image is ready.")]);
+        let preview = clackatoo_protocol::ChatPreview {
+            width: 2,
+            height: 1,
+            rgba: vec![255; 8].into(),
+        };
+        node.turns[0].items.insert(
+            0,
+            clackatoo_protocol::Item::Tool(clackatoo_protocol::Tool {
+                id: "image".into(),
+                title: "View Image".into(),
+                kind: clackatoo_protocol::ToolKind::Read,
+                status: clackatoo_protocol::ToolStatus::Done,
+                locations: Vec::new(),
+                content: vec![clackatoo_protocol::ToolContent::Image(preview)],
+            }),
+        );
+        let mut chat = ChatView::new("chat".into(), node);
+        let first = paint(&mut chat, &mut fonts);
+        assert_eq!(first.images.len(), 1);
+        let second = paint(&mut chat, &mut fonts);
+        assert!(std::sync::Arc::ptr_eq(
+            &first.images[0].image,
+            &second.images[0].image
+        ));
+        let (_, rect) = chat
+            .hits
+            .iter()
+            .find(|(hit, _)| matches!(hit, Hit::Card(0, id) if id == "image"))
+            .unwrap();
+        chat.press([rect[0] + 10.0, rect[1] + rect[3] / 2.0], 1, false);
+        chat.settle(&mut fonts);
+        let expanded = paint(&mut chat, &mut fonts);
+        assert_eq!(expanded.images.len(), 1);
+        assert!(expanded.images[0].rect[2] > first.images[0].rect[2]);
+    }
+
+    #[test]
     #[ignore = "a measurement: run with --profile quick --ignored --nocapture"]
     fn frame_time_with_chat_previews() {
         let mut fonts = crate::chat::fixtures::fonts();
         let node = crate::chat::fixtures::talk(&[("[Image]", "A screenshot."); 16]);
-        for with_images in [false, true] {
+        for kind in ["text", "prompt", "tool"] {
             let mut node = node.clone();
-            if with_images {
+            if kind != "text" {
                 for turn in &mut node.turns {
-                    turn.previews.push(clackatoo_protocol::ChatPreview {
+                    let preview = clackatoo_protocol::ChatPreview {
                         width: 256,
                         height: 160,
                         rgba: vec![127; 256 * 160 * 4].into(),
-                    });
+                    };
+                    if kind == "prompt" {
+                        turn.previews.push(preview);
+                    } else {
+                        turn.items.insert(
+                            0,
+                            clackatoo_protocol::Item::Tool(clackatoo_protocol::Tool {
+                                id: "image".into(),
+                                title: "View Image".into(),
+                                kind: clackatoo_protocol::ToolKind::Read,
+                                status: clackatoo_protocol::ToolStatus::Done,
+                                locations: Vec::new(),
+                                content: vec![clackatoo_protocol::ToolContent::Image(preview)],
+                            }),
+                        );
+                    }
                 }
             }
             let mut chat = ChatView::new("chat".into(), node);
@@ -2992,7 +3059,7 @@ mod tests {
                 std::hint::black_box(crate::chat::fixtures::paint(&mut chat, &mut fonts));
             }
             println!(
-                "previews={with_images}: {:?} per cached frame",
+                "previews={kind}: {:?} per cached frame",
                 start.elapsed() / 1000
             );
         }

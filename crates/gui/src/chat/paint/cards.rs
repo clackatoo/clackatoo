@@ -38,6 +38,8 @@ pub(super) struct CardLaid {
     /// A second way to collapse a long open card without scrolling to its head.
     footer: Option<Laid>,
     head_height: f32,
+    image_height: f32,
+    image_side: f32,
     pub(super) height: f32,
 }
 
@@ -218,6 +220,8 @@ impl ChatView {
         if footer.is_some() {
             height += 1.0 + m.em(1.8);
         }
+        let (image_side, image_height) = image_geometry(tool, m, inner, open);
+        height += image_height;
         CardLaid {
             tool: tool.clone(),
             open,
@@ -230,6 +234,8 @@ impl ChatView {
             tops,
             footer,
             head_height,
+            image_height,
+            image_side,
             height,
         }
     }
@@ -418,10 +424,10 @@ pub(super) fn draw_card(
     key: TextKey,
     origin: [f32; 2],
     width: f32,
-    drawn: &mut Drawn<'_>,
+    (drawn, previews): (&mut Drawn<'_>, &crate::chat::images::Cache),
 ) {
     let rect = [origin[0], origin[1], width, card.height];
-    if card.open || !card.body.is_empty() {
+    if card.open || !card.body.is_empty() || card.image_height > 0.0 {
         canvas.fill(Fill::rounded(rect, Paint::Code, m.em(0.6)).bordered(1.0, Paint::RaisedEdge));
     }
     // What's drawn in it stays in it, and in view.
@@ -501,6 +507,7 @@ pub(super) fn draw_card(
             inner,
         );
     }
+    draw_images(canvas, m, card, origin, previews);
     // Every tool row opens, including a short command or a long file path.
     let head = [rect[0], rect[1], rect[2], card.head_height];
     let foot = [rect[0], y, rect[2], rect[1] + rect[3] - y];
@@ -522,6 +529,60 @@ pub(super) fn draw_card(
             let at = [origin[0] + x + block.left, origin[1] + y + block.top];
             drawn.note_text(TextKey { part, ..key }, at, &block.layout, false);
         }
+    }
+}
+
+fn tool_previews(tool: &Tool) -> impl Iterator<Item = &clackatoo_protocol::ChatPreview> + Clone {
+    tool.content
+        .iter()
+        .filter_map(|content| match content {
+            clackatoo_protocol::ToolContent::Image(image) if image.valid() => Some(image),
+            _ => None,
+        })
+        .take(4)
+}
+
+fn image_geometry(tool: &Tool, m: Measures, inner: f32, open: bool) -> (f32, f32) {
+    let images = tool_previews(tool);
+    let count = images.clone().count();
+    if count == 0 {
+        return (0.0, 0.0);
+    }
+    let side = crate::chat::images::side(
+        inner,
+        count,
+        m.em(if open { 24.0 } else { 16.0 }),
+        m.em(0.5),
+    );
+    (
+        side,
+        crate::chat::images::height(side, images.map(Some)) + m.em(0.8),
+    )
+}
+
+fn draw_images(
+    canvas: &mut Canvas<'_>,
+    m: Measures,
+    card: &CardLaid,
+    origin: [f32; 2],
+    previews: &crate::chat::images::Cache,
+) {
+    if card.image_height == 0.0 {
+        return;
+    }
+    let top = origin[1] + card.height - card.image_height + m.em(0.4);
+    for (index, image) in tool_previews(&card.tool).enumerate() {
+        let offset = f32::from(u8::try_from(index).unwrap_or(3));
+        previews.draw(
+            canvas,
+            image,
+            [
+                origin[0] + m.em(PAD) + offset * (card.image_side + m.em(0.5)),
+                top,
+                card.image_side,
+                card.image_height - m.em(0.8),
+            ],
+        );
     }
 }
 

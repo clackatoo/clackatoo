@@ -48,6 +48,7 @@ mod saved;
 mod server;
 mod shell;
 mod signals;
+mod tool_images;
 pub mod upgrade;
 pub mod web;
 mod workspaces;

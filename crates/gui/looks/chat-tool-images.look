@@ -1,0 +1,12 @@
+# Native linked image results and generic inline ACP image results.
+size 1100x1000
+keys <C-;>:Agent claude<CR>
+keys i
+type tool-images
+keys <CR>
+wait-for Image tool results are ready
+shot images
+click 350 174
+shot expanded-image
+size 480x900
+shot narrow-images

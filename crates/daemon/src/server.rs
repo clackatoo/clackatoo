@@ -1156,6 +1156,7 @@ impl Daemon {
                 .into_iter()
                 .map(|previews| (previews.chat, previews))
                 .collect();
+        let mut tool_previews = std::mem::take(&mut handover.state.tool_previews);
         let chats = std::mem::take(&mut handover.state.chats);
         let buffers = std::mem::take(&mut handover.state.buffers);
         let explorers = std::mem::take(&mut handover.state.explorers);
@@ -1218,6 +1219,7 @@ impl Daemon {
             if let Some(images) = images {
                 chat.resume_previews(images);
             }
+            chat.resume_tool_previews(&mut tool_previews);
             daemon.add_chat(chat);
         }
         daemon.next_buffer = state.next_buffer;
@@ -1347,6 +1349,7 @@ impl Daemon {
         let mut exes = Vec::new();
         let mut chats = Vec::new();
         let mut chat_previews = Vec::new();
+        let mut tool_previews = Vec::new();
         self.abandon_clipboard_asks();
         self.put_back_fits();
         for slot in std::mem::take(&mut self.terminals).into_values() {
@@ -1373,6 +1376,7 @@ impl Daemon {
                 }
                 Hosted::Chat(chat) => {
                     chat_previews.push(chat.hand_over_previews());
+                    tool_previews.extend(chat.hand_over_tool_previews());
                     chats.push(chat.hand_over());
                 }
             }
@@ -1426,6 +1430,7 @@ impl Daemon {
                 terminals,
                 chats,
                 chat_previews,
+                tool_previews,
                 orphans,
                 workspaces,
                 next_buffer: self.next_buffer,

@@ -232,6 +232,8 @@ gates! {
     CHAT_IMAGES = 97,
     /// Small image previews in drafts and retained turns.
     CHAT_PREVIEWS = 98,
+    /// Image thumbnails returned by tools, inside tool content.
+    TOOL_IMAGES = 99,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -376,6 +378,7 @@ impl Since for ToolContent {
         match self {
             Self::Text(_) | Self::Diff(_) | Self::Output(_) => EARLIER,
             Self::Other(_) => FALLBACKS,
+            Self::Image(_) => TOOL_IMAGES,
         }
     }
 }
@@ -920,6 +923,51 @@ impl Downgrade for ClientMessage {
     }
 }
 
+/// Replace image pixels with a readable label for older clients, in both
+/// snapshots and incremental tool/turn updates.
+fn without_tool_images(message: &ServerMessage) -> ServerMessage {
+    fn item(item: &mut Item) {
+        if let Item::Tool(tool) = item {
+            for content in &mut tool.content {
+                if matches!(content, ToolContent::Image(_)) {
+                    *content =
+                        ToolContent::Text("Image preview (update the client to view)".into());
+                }
+            }
+        }
+    }
+    fn turn(turn: &mut Turn) {
+        for value in &mut turn.items {
+            item(value);
+        }
+    }
+    fn node(node: &mut Node) {
+        if let Node::Chat(chat) = node {
+            for value in &mut chat.turns {
+                turn(value);
+            }
+        }
+    }
+    let mut message = message.clone();
+    match &mut message {
+        ServerMessage::Response(Response::View(view)) => node(&mut view.root),
+        ServerMessage::Event(Event::View { update, .. }) => match update {
+            ViewUpdate::Snapshot(view) => node(&mut view.root),
+            ViewUpdate::Patch(patches) => {
+                for patch in patches {
+                    match patch {
+                        Patch::Chat(ChatPatch::Turn { turn: value, .. }) => turn(value),
+                        Patch::Chat(ChatPatch::Item { value, .. }) => item(value),
+                        _ => {}
+                    }
+                }
+            }
+        },
+        _ => {}
+    }
+    message
+}
+
 impl Downgrade for ServerMessage {
     /// A peer from before the fallbacks has nothing to read in place of
     /// what's newer: an event holding it is dropped, and an answer refused.
@@ -956,6 +1004,13 @@ impl Downgrade for ServerMessage {
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
         if newest(self) <= wire {
             return Downgraded::AsIs;
+        }
+        if wire < TOOL_IMAGES && newest(self) == TOOL_IMAGES {
+            let older = without_tool_images(self);
+            return match older.downgrade(wire) {
+                Downgraded::AsIs => Downgraded::To(older),
+                other => other,
+            };
         }
         if wire < MIXED
             && let Some(shown) = with_own_homes_unsaid(self)
@@ -1045,6 +1100,59 @@ mod tests {
     /// as a change made in it does: a peer a version older hasn't it.
     const NEW: u32 = PROTOCOL_VERSION;
     const OLD: u32 = PROTOCOL_VERSION - 1;
+
+    #[test]
+    fn tool_images_downgrade_without_losing_the_tool_or_text() {
+        let tool = crate::Tool {
+            id: "image".into(),
+            title: "View Image".into(),
+            status: crate::ToolStatus::Done,
+            kind: crate::ToolKind::Read,
+            locations: Vec::new(),
+            content: vec![
+                ToolContent::Text("caption".into()),
+                ToolContent::Image(crate::ChatPreview {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![1, 2, 3, 255].into(),
+                }),
+            ],
+        };
+        let message = ServerMessage::Event(Event::View {
+            terminal: crate::TerminalId(1),
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Item {
+                turn: 0,
+                item: 0,
+                value: Item::Tool(tool),
+            })]),
+        });
+        let current: ServerMessage =
+            decode(TOOL_IMAGES, &frame::encode(TOOL_IMAGES, &message).unwrap());
+        assert_eq!(current, message);
+        let older: ServerMessage = decode(
+            CHAT_PREVIEWS,
+            &frame::encode(CHAT_PREVIEWS, &message).unwrap(),
+        );
+        let ServerMessage::Event(Event::View {
+            update: ViewUpdate::Patch(patches),
+            ..
+        }) = older
+        else {
+            panic!()
+        };
+        let Patch::Chat(ChatPatch::Item {
+            value: Item::Tool(tool),
+            ..
+        }) = &patches[0]
+        else {
+            panic!()
+        };
+        assert_eq!(tool.id, "image");
+        assert_eq!(tool.content[0], ToolContent::Text("caption".into()));
+        assert!(
+            matches!(&tool.content[1], ToolContent::Text(label) if label.contains("Image preview"))
+        );
+    }
 
     /// A message as this build has it.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

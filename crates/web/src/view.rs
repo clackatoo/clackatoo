@@ -549,6 +549,9 @@ fn tool_view(tool: &Tool, open: &OpenChat, key: String) -> Element {
             }
             ToolContent::Diff(diff) => diff_view(diff),
             ToolContent::Output(output) => el("pre").class("output").text(last_lines(output)),
+            ToolContent::Image(_) => el("p")
+                .class("muted")
+                .text("Image preview available in the desktop client"),
         });
     }
     if tool.content.is_empty() && !tool.locations.is_empty() {

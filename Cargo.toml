@@ -140,6 +140,7 @@ insta = "1.49"
 # Signs fake releases in the update tests, as CI's minisign signs real ones.
 minisign = "0.10"
 png = "0.18"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp"] }
 proptest = "1.11"
 tempfile = "3.27"
 # A WebSocket client for the web app's tests, so the daemon's own framing

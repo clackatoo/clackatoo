@@ -61,6 +61,7 @@ pub(super) struct AgentSlot {
 /// The agents chats talk to, and the ones being installed.
 #[derive(Debug, Default)]
 pub(super) struct Agents {
+    images: crate::tool_images::Queue,
     running: BTreeMap<AgentId, AgentSlot>,
     next: u32,
     /// What the agents sent last, for the chats to act on.
@@ -951,7 +952,7 @@ impl Daemon {
         &mut self,
         name: &str,
         session: &str,
-        update: SessionUpdate,
+        mut update: SessionUpdate,
     ) -> Option<TerminalId> {
         let (id, chat) = self.chat_in(name, session)?;
         // The conversation so far, written long ago. A load that goes on
@@ -983,6 +984,7 @@ impl Daemon {
             self.agents.context.insert(name.to_owned(), usage.size);
             self.limits_heard(name, session, usage.meta.as_ref());
         }
+        let images = crate::tool_images::extract(&mut update);
         let chat = self.chat(id)?;
         let settings = matches!(update, SessionUpdate::ConfigOptionUpdate(_));
         if let Some(wrote) = chat.update(update) {
@@ -990,6 +992,17 @@ impl Daemon {
         }
         if settings {
             self.note_settings(id);
+        }
+        if let Some((tool, sources)) = images
+            && let Some(chat) = self.chat(id)
+            && let Some(target) = chat.image_target(&tool)
+        {
+            let job = crate::tool_images::Job {
+                target,
+                sources,
+                cwd: PathBuf::from(chat.working_directory()),
+            };
+            self.agents.images.submit(job, self.waker.clone());
         }
         Some(id)
     }
@@ -1574,6 +1587,14 @@ impl Daemon {
     /// asked for their models that haven't said in time, tells chats whose
     /// sessions are slow to open, and lets idle sessions go.
     pub(super) fn agent_chores(&mut self) {
+        for done in self.agents.images.take() {
+            let id = done.target.terminal;
+            if let Some(chat) = self.chat(id)
+                && chat.tool_images(&done.target, done.images)
+            {
+                self.collect_damage(id);
+            }
+        }
         self.take_agent_installs();
         self.time_out_probes();
         self.time_out_sessions();

@@ -725,6 +725,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Favorites-first global model search, fixed-size picker, fast-mode bolt and popups above their buttons",
     },
+    News {
+        id: "agent-tool-images",
+        date: "2026-10-24",
+        lesson: "agents",
+        what: "Image tools show thumbnails in chat history; the fast-mode bolt fills in when enabled",
+    },
 ];
 
 impl News {

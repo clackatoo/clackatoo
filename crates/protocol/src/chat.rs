@@ -568,6 +568,8 @@ pub enum ToolContent {
     /// Something newer than the client, which a newer daemon sent in place
     /// of it, as text to show, in Markdown.
     Other(String),
+    /// A bounded thumbnail of an image returned by a tool.
+    Image(ChatPreview),
 }
 
 impl Tool {
