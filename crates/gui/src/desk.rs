@@ -201,6 +201,8 @@ struct Input {
     /// The word Tab is completing, and what it could be, until another
     /// key.
     completing: Option<cmdline::complete::Completion>,
+    /// Live suggestions, which never replace text until explicitly picked.
+    suggesting: Option<cmdline::complete::Completion>,
 }
 
 impl Input {
@@ -211,6 +213,7 @@ impl Input {
             line: cmdline::Line::new(text),
             selected: 0,
             completing: None,
+            suggesting: None,
         }
     }
 
@@ -2142,6 +2145,7 @@ impl Desk {
         if let Some(input) = &mut self.input {
             input.line.put(text);
             input.completing = None;
+            self.suggest_completion();
         } else if self.finding() {
             self.paste_into_finder(text);
         } else if !self.paste_into_editor(text)

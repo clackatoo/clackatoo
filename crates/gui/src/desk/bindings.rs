@@ -520,6 +520,7 @@ impl Desk {
             _ => String::new(),
         };
         self.input = Some(Input::new(purpose, text));
+        self.suggest_completion();
     }
 
     /// Which kind of pane with keys the focused one is.

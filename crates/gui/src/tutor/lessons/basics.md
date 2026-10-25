@@ -99,7 +99,9 @@ panes 2
 
 ## Complete with Tab
 
-On the command line, Tab completes the word before the caret, as in Vim: a command's name, an option after `:set`, a file or folder after `:e`, a lesson after `:Tutor`. With more than one choice, they're listed under the line, and Tab and Shift+Tab go through them. Tab is where the names are listed: a name that isn't one only says so, in red, and offers the nearest if a letter or two is off, so `:set norelativenumbr` asks "did you mean ‘:set norelativenumber’?".
+The command line suggests matches as you type: a command's name, an option after `:set`, a file or folder after `:e`, a lesson after `:Tutor`. Suggestions leave your text alone. Tab fills the word before the caret; with more than one match, Tab and Shift+Tab cycle through them, and then back to what you typed. Once cycling, Down and Up move through the matches too. Enter runs the text in the prompt; Escape closes it.
+
+Files are looked up in the background, only when the pane's files are on this machine. Typing and pasting update the suggestions without waiting for disk.
 
 Type `:set norel`, press Tab to make it `:set norelativenumber`, and press Enter: editors number their lines from the top now, not from the cursor.
 

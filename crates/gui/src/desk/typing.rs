@@ -104,17 +104,24 @@ impl Desk {
                 && self.listing_for(input, &asked)
         });
         if !unchanged {
+            self.suggest_completion();
             return false;
         }
         let completion = match listed.completion() {
             Ok(completion) => completion,
             Err(why) => {
-                self.say(why);
+                if !asked.steps.is_empty() {
+                    self.say(why);
+                }
                 return true;
             }
         };
         let mut steps = asked.steps.into_iter();
-        self.completed(completion, steps.next().unwrap_or(true));
+        if let Some(forward) = steps.next() {
+            self.completed(completion, forward);
+        } else if let Some(input) = &mut self.input {
+            input.suggesting = completion;
+        }
         for forward in steps {
             self.step_completion(forward);
         }
@@ -140,17 +147,23 @@ impl Desk {
     /// went `forward` or back; or while one is being listed for this line
     /// already, notes the way, for when it comes.
     /// One listed for another pane is let go, as it's for another folder.
-    fn ask_listing(&mut self, mut listing: Listing, forward: bool) {
+    fn ask_listing(&mut self, mut listing: Listing, forward: Option<bool>) {
         let Some(input) = &self.input else { return };
         let pane = self.shown.map(|shown| shown.pane);
         let same =
             (self.listings.asked.as_ref()).is_some_and(|asked| self.listing_for(input, asked));
+        // Coalesce keystrokes before the window starts the worker. Once
+        // started, let it finish before asking for the latest text.
+        if !same && !self.listings.outbox.is_empty() {
+            self.listings.outbox.clear();
+            self.listings.asked = None;
+        }
         if let Some(asked) = &mut self.listings.asked
             && asked.at.elapsed() < LISTING_PATIENCE
             && asked.pane == pane
         {
             if same {
-                asked.steps.push(forward);
+                asked.steps.extend(forward);
             }
             return;
         }
@@ -162,7 +175,7 @@ impl Desk {
             text: input.line.text().to_owned(),
             caret: input.line.before_caret().len(),
             at: Instant::now(),
-            steps: vec![forward],
+            steps: forward.into_iter().collect(),
         });
         listing.id = id;
         self.listings.outbox.push(listing);
@@ -193,6 +206,7 @@ impl Desk {
                     None => input.line.forget_register(),
                 }
             }
+            self.suggest_completion();
             return;
         }
         let named = match press.key {
@@ -242,6 +256,9 @@ impl Desk {
                 Keyed::Emptied | Keyed::Other => {}
             },
         }
+        if !goes_on {
+            self.suggest_completion();
+        }
     }
 
     /// Enter in the palette: does what was typed.
@@ -279,14 +296,47 @@ impl Desk {
         }
     }
 
+    /// Refresh live choices without changing the user's text. Disk lookups
+    /// stay off the UI thread; host files are only read on explicit Tab.
+    pub(super) fn suggest_completion(&mut self) {
+        let Some(input) = &mut self.input else { return };
+        input.suggesting = None;
+        if input.purpose != Purpose::Command
+            || input.completing.is_some()
+            || input.line.wants_register()
+        {
+            return;
+        }
+        let input = self.input.as_ref().unwrap();
+        match Completion::of(input.line.before_caret(), &self.completion_sources(false)) {
+            Ok(Found::Done(completion)) => {
+                self.input.as_mut().unwrap().suggesting = completion;
+            }
+            Ok(Found::List(listing)) => self.ask_listing(listing, None),
+            Err(_) => {} // Automatic suggestions never interrupt typing with errors.
+        }
+    }
+
     /// Tab, or if not `forward`, Shift+Tab, on the command line: the next
     /// choice for the word before the caret, or the one before.
     fn complete(&mut self, forward: bool) {
-        let Some(input) = &self.input else { return };
+        let Some(input) = &mut self.input else { return };
         if input.completing.is_none() {
-            match Completion::of(input.line.before_caret(), &self.completion_sources()) {
+            // Host Tab also includes SSH config and recent connections.
+            let host = input
+                .line
+                .text()
+                .split_whitespace()
+                .next()
+                .is_some_and(|word| command::takes(word) == command::Takes::Host);
+            if !host && let Some(completion) = input.suggesting.take() {
+                self.completed(Some(completion), forward);
+                return;
+            }
+            let input = self.input.as_ref().unwrap();
+            match Completion::of(input.line.before_caret(), &self.completion_sources(true)) {
                 Err(why) => self.say(why),
-                Ok(Found::List(listing)) => self.ask_listing(listing, forward),
+                Ok(Found::List(listing)) => self.ask_listing(listing, Some(forward)),
                 Ok(Found::Done(completion)) => self.completed(completion, forward),
             }
             return;
@@ -311,6 +361,7 @@ impl Desk {
         let (Some(input), Some(mut completion)) = (&mut self.input, completion) else {
             return;
         };
+        input.suggesting = None;
         let start = completion.start;
         if let [only] = &completion.choices[..] {
             input.line.replace_before(start, only);
@@ -323,7 +374,7 @@ impl Desk {
     /// What Tab completes with: the workspaces, the focused pane's folder,
     /// which paths are from, and, after a command that takes one, the
     /// machines it may name.
-    fn completion_sources(&self) -> Sources {
+    fn completion_sources(&self, explicit: bool) -> Sources {
         let first = (self.input.as_ref()).and_then(|input| {
             input
                 .line
@@ -349,8 +400,13 @@ impl Desk {
             workspaces: (self.workspaces.list.iter())
                 .map(|workspace| self.shown_name(workspace))
                 .collect(),
-            hosts: if takes_host {
+            hosts: if takes_host && explicit {
                 self.known_hosts()
+            } else if takes_host {
+                self.connections
+                    .iter()
+                    .map(|connection| connection.host.clone())
+                    .collect()
             } else {
                 Vec::new()
             },
@@ -456,7 +512,10 @@ impl Desk {
     /// complete the word with.
     pub(super) fn typing_status(&self, input: &Input) -> Status {
         let (label, prefix) = input.purpose.label();
-        let choices = match (&input.purpose, &input.completing) {
+        let choices = match (
+            &input.purpose,
+            input.completing.as_ref().or(input.suggesting.as_ref()),
+        ) {
             (Purpose::Workspace, _) => {
                 let mut choices: Vec<(String, bool)> = self
                     .workspace_choices(input.line.text())

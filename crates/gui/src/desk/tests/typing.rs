@@ -58,7 +58,11 @@ fn tab_completes_the_word_and_goes_through_the_choices() {
     assert_eq!(self::text(&desk), ":set nu▏");
     // Any other key ends it, and it's typed.
     type_keys(&mut desk, "m");
-    assert_eq!(typed(&desk), (":set num▏".into(), Vec::new()));
+    assert_eq!(text_of(&desk), ":set num▏");
+    assert_eq!(
+        typed(&desk).1,
+        [("number".into(), false), ("numberwidth".into(), false)]
+    );
     // One choice goes in at once, with nothing listed.
     type_keys(&mut desk, " wr");
     key(&mut desk, NamedKey::Tab);
@@ -427,4 +431,77 @@ fn the_bar_keeps_the_mode_and_the_tabs_while_something_is_typed() {
             ..
         }
     ));
+}
+
+#[test]
+fn suggestions_follow_typing_without_changing_or_running_the_command() {
+    let mut desk = terminal_desk();
+    type_keys(&mut desk, ":");
+    assert!(!typed(&desk).1.is_empty());
+    assert!(typed(&desk).1.iter().all(|(_, picked)| !picked));
+    type_keys(&mut desk, "Ex");
+    assert_eq!(
+        typed(&desk),
+        (":Ex▏".into(), vec![("Explore".into(), false)])
+    );
+    key(&mut desk, NamedKey::Backspace);
+    assert_eq!(text(&desk), ":E▏");
+    assert!(typed(&desk).1.len() > 1);
+    key(&mut desk, NamedKey::Escape);
+    type_keys(&mut desk, ":set nu");
+    assert_eq!(
+        typed(&desk).1,
+        [("number".into(), false), ("numberwidth".into(), false)]
+    );
+    key(&mut desk, NamedKey::Tab);
+    assert_eq!(text(&desk), ":set number▏");
+    assert!(desk.input.is_some(), "completion never executes a command");
+    key(&mut desk, NamedKey::Escape);
+    type_keys(&mut desk, ":");
+    desk.paste("Tutor bas");
+    assert_eq!(
+        typed(&desk),
+        (":Tutor bas▏".into(), vec![("basics".into(), false)])
+    );
+}
+
+#[test]
+fn automatic_file_suggestions_never_insert_and_refresh_after_a_stale_worker() {
+    let scratch = tempfile::tempdir().unwrap();
+    std::fs::write(scratch.path().join("alpha"), "").unwrap();
+    std::fs::write(scratch.path().join("beta"), "").unwrap();
+    let mut desk = editing(scratch.path().join("x.rs").to_str().unwrap(), "\n");
+    type_keys(&mut desk, ":e a");
+    let first = desk.take_listings();
+    assert_eq!(first.len(), 1, "coalesces keys before starting the worker");
+    key(&mut desk, NamedKey::Backspace);
+    type_keys(&mut desk, "b");
+    assert!(desk.take_listings().is_empty(), "one worker at a time");
+    assert!(!desk.listed(first[0].run()));
+    assert!(
+        list(&mut desk),
+        "starts the latest lookup when stale work finishes"
+    );
+    assert_eq!(typed(&desk), (":e b▏".into(), vec![("beta".into(), false)]));
+    key(&mut desk, NamedKey::Tab);
+    assert_eq!(text(&desk), ":e beta▏");
+    assert!(
+        desk.take_listings().is_empty(),
+        "uses the result already shown"
+    );
+}
+
+#[test]
+fn completion_at_a_moved_caret_preserves_the_text_after_it() {
+    let mut desk = terminal_desk();
+    type_keys(&mut desk, ":set nu wrap");
+    for _ in 0..5 {
+        key(&mut desk, NamedKey::ArrowLeft);
+    }
+    assert_eq!(
+        typed(&desk).1,
+        [("number".into(), false), ("numberwidth".into(), false)]
+    );
+    key(&mut desk, NamedKey::Tab);
+    assert_eq!(text(&desk), ":set number▏ wrap");
 }

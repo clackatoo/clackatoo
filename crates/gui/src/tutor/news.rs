@@ -815,6 +815,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Long chats open on recent turns; scroll up for more in the window or web app, without losing your place",
     },
+    News {
+        id: "command-autocomplete",
+        date: "2026-10-25",
+        lesson: "basics",
+        what: "The : prompt suggests commands and arguments as you type; Tab fills a match without running it",
+    },
 ];
 
 impl News {

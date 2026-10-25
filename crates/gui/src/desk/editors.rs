@@ -1925,6 +1925,7 @@ impl Desk {
             (true, true) => "wq!",
         };
         self.input = Some(super::Input::new(Purpose::Command, format!("{word} ")));
+        self.suggest_completion();
         self.say("[No Name] has no file yet: type its name".into());
     }
 

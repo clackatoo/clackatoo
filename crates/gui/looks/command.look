@@ -8,6 +8,7 @@ keys <Tab>
 shot command-tab
 keys <C-u>
 type set nu
+shot command-options-live
 keys <Tab>
 shot command-choices
 keys <Esc>
@@ -16,3 +17,16 @@ keys :se
 keys <Up>
 shot command-history
 keys <Esc>
+
+keys <Esc>
+file src/main.rs <<END
+fn main() {}
+END
+open src/main.rs
+keys :e
+type  ../s
+shot command-files-live
+keys <Esc>
+size 640x480
+keys :set nu
+shot command-narrow
