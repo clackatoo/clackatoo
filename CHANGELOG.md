@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026.10.79 (2026-10-25)
+
+### Features
+
+- **agents:** continue active turns after daemon upgrades (47423b3)
+- **web:** refine mobile agent control with compact sessions and settings (e36643a)
+- **chat:** load history incrementally in native and web clients (dfc6313)
+- **gui:** suggest command completions as you type (785f6e7)
+- **gui:** describe command autocomplete suggestions (7611dd7)
+- **gui:** navigate command completions with Ctrl-N and Ctrl-P (b42f11f)
+- **gui:** make command names case-insensitive with semantic casing (6e05f99)
+- **gui:** show contextual shortcut help with Ctrl+? (855271e)
+
+### Fixes
+
+- **agents:** steer Codex without cancelling active work (dc58159)
+- **web:** let large chat snapshots drain before disconnecting (e669f20)
+
 ## 2026.10.78 (2026-10-25)
 
 ### Fixes
