@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.75 (2026-10-25)
+
+### Fixes
+
+- **chat:** keep replayed image data out of message bubbles (5a1830e)
+
 ## 2026.10.74 (2026-10-25)
 
 This release brings image attachments and full-resolution image viewing to agent
