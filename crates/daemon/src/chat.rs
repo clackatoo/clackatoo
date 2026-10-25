@@ -3432,7 +3432,7 @@ fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
 fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
     Turn {
         previews: Vec::new(),
-        prompt: turn.prompt,
+        prompt: resume::without_inline_images(turn.prompt),
         sent: turn.sent,
         items: (turn.items.into_iter())
             .map(|item| match item {
@@ -5481,6 +5481,26 @@ mod tests {
         (chat.node.turns.iter())
             .map(|turn| turn.prompt.as_str())
             .collect()
+    }
+
+    #[test]
+    fn replayed_inline_image_links_never_become_prompt_text() {
+        let image = format!("[@image](data:image/png;base64,{})", "A".repeat(200_000));
+        let mut chat = resuming();
+        replay_user(&mut chat, "Look at this screenshot.");
+        replay_user(&mut chat, &image);
+        replay_user(&mut chat, "And this one.");
+        replay_user(&mut chat, &image);
+        assert_eq!(
+            prompts(&chat),
+            ["Look at this screenshot.\n\n[Image]\n\nAnd this one.\n\n[Image]"]
+        );
+
+        // A daemon upgraded from the affected version may already have the
+        // adapter's links in its history. Fix that history during handover too.
+        chat.node.turns[0].prompt = format!("Before\n\n{image}\n\nAfter\n");
+        let turn = turn_from_handover(turn_to_handover(chat.node.turns.remove(0)));
+        assert_eq!(turn.prompt, "Before\n\n[Image]\n\nAfter\n");
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::borrow::Cow;
 
 use parley::{
     Alignment, AlignmentOptions, FontFamily, FontFamilyName, FontStyle, FontWeight, GenericFamily,
-    Layout, LineHeight, PositionedLayoutItem, StyleProperty,
+    Layout, LineHeight, OverflowWrap, PositionedLayoutItem, StyleProperty,
 };
 
 use super::colours::{Colouring, Colours};
@@ -830,6 +830,11 @@ pub(crate) fn lay_out_block(
     let mut builder = layout_cx.ranged_builder(&mut fonts.font_cx, &block.text, 1.0, true);
     for property in body {
         builder.push_default(property);
+    }
+    // Plain messages can contain long URLs, identifiers or adapter text.
+    // Break an otherwise unbreakable word rather than widening its bubble.
+    if matches!(look, Look::Plain(_)) {
+        builder.push_default(StyleProperty::OverflowWrap(OverflowWrap::Anywhere));
     }
     builder.push_default(StyleProperty::Brush(Brush {
         tone,

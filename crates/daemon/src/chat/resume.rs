@@ -142,7 +142,7 @@ impl HostedChat {
         match update {
             SessionUpdate::UserMessageChunk(chunk) => {
                 let text = match chunk.content {
-                    ContentBlock::Text(text) => clean_text(&text.text),
+                    ContentBlock::Text(text) => without_inline_images(clean_text(&text.text)),
                     ContentBlock::Image(_) => "[Image]".to_owned(),
                     _ => return,
                 };
@@ -368,5 +368,62 @@ impl HostedChat {
         self.release_held(Held::End(Outcome::Failed(
             "cut off by an upgrade".to_owned(),
         )));
+    }
+}
+
+/// Some adapters replay image inputs as standalone Markdown links containing
+/// their data URI rather than ACP image blocks. Keep the same label we use for
+/// replayed image blocks; binary payloads must never enter the visible history.
+/// Also used when accepting history handed over by an older daemon.
+pub(super) fn without_inline_images(text: String) -> String {
+    const PREFIX: &str = "[@image](data:image/";
+    if !text.contains(PREFIX) {
+        return text;
+    }
+    let mut shown = String::with_capacity(text.len().min(4096));
+    for line in text.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let inline = body
+            .strip_prefix(PREFIX)
+            .and_then(|uri| uri.strip_suffix(')'))
+            .and_then(|uri| uri.split_once(";base64,"))
+            .is_some_and(|(mime, data)| {
+                !mime.is_empty()
+                    && !data.is_empty()
+                    && data.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')
+                    })
+            });
+        if inline {
+            shown.push_str("[Image]");
+            if line.ends_with('\n') {
+                shown.push('\n');
+            }
+        } else {
+            shown.push_str(line);
+        }
+    }
+    shown
+}
+
+#[cfg(test)]
+mod tests {
+    use super::without_inline_images;
+
+    #[test]
+    fn inline_image_labels_preserve_surrounding_text_and_ordinary_links() {
+        for text in [
+            "Text with accents: café\n\n",
+            "[@image](https://example.com/picture.png)",
+            "Use [@image](data:image/png;base64,AAAA) in this example.",
+            "[@image](data:image/png;base64,not base64)",
+            "[@image](data:image/png;base64,)",
+        ] {
+            assert_eq!(without_inline_images(text.into()), text);
+        }
+        assert_eq!(
+            without_inline_images("Before\n[@image](data:image/jpeg;base64,a+/=)\nAfter".into()),
+            "Before\n[Image]\nAfter"
+        );
     }
 }

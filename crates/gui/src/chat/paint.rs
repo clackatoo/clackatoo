@@ -926,11 +926,9 @@ impl ChatView {
                         continue;
                     };
                     let left = origin[0] + bubble_left(m, prompt, column);
-                    canvas.fill(Fill::rounded(
-                        [left, top, bubble_width(m, prompt), span.bottom - span.top],
-                        Paint::Raised,
-                        m.em(1.1),
-                    ));
+                    let width = bubble_width(m, prompt, column);
+                    let bounds = [left, top, width, span.bottom - span.top];
+                    canvas.fill(Fill::rounded(bounds, Paint::Raised, m.em(1.1)));
                     let at = [left + m.em(1.0), top + m.em(0.6)];
                     draw_laid(canvas, m, prompt, at, column);
                     drawn.note_laid(prompt, at, (index, PROMPT));
@@ -2191,14 +2189,14 @@ impl Drawn<'_> {
 }
 
 /// A message's bubble's width, for `laid`, its text.
-fn bubble_width(m: Measures, laid: &Laid) -> f32 {
-    laid.width + 2.0 * m.em(1.0)
+fn bubble_width(m: Measures, laid: &Laid, column: f32) -> f32 {
+    (laid.width + 2.0 * m.em(1.0)).min(column)
 }
 
 /// Where a message's bubble starts, from the column's left: it's on the
 /// right.
 fn bubble_left(m: Measures, laid: &Laid, column: f32) -> f32 {
-    column - bubble_width(m, laid)
+    column - bubble_width(m, laid, column)
 }
 
 /// Where a message's text starts, from the column's left and the turn's
@@ -2362,6 +2360,32 @@ fn escape(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::fonts::FontOptions;
+
+    #[test]
+    fn long_words_in_prompts_stay_inside_the_chat_column() {
+        let mut fonts = Fonts::load(&FontOptions::default(), 1.0).expect("a font");
+        let prompt = format!(
+            "A long identifier:\n{}\nStill visible.",
+            "abcdefgh".repeat(256)
+        );
+        let mut chat = ChatView::new(
+            "chat".into(),
+            crate::chat::fixtures::talk(&[(&prompt, "Done.")]),
+        );
+        for width in [900.0, 420.0] {
+            chat.paint(&mut fonts, [0.0; 2], [width, 1000.0], true);
+            let laid = &chat.cache.turns[0].laid.as_ref().unwrap().pieces[&PROMPT];
+            assert!(
+                laid.width <= chat.cache.width * 0.78,
+                "{} > {}",
+                laid.width,
+                chat.cache.width
+            );
+            let m = Measures::of(chat.cache.size);
+            assert!(bubble_left(m, laid, chat.cache.width) >= 0.0);
+            assert!(laid.blocks[0].layout.lines().count() > 3);
+        }
+    }
 
     #[test]
     fn an_empty_chat_says_who_and_where_and_how_to_start_in_either_mode() {

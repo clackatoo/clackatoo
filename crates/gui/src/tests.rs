@@ -1083,6 +1083,24 @@ fn render_chat_sized(
 }
 
 #[test]
+fn renders_wrapped_user_identifiers_without_an_oversized_bubble() {
+    let prompt = format!(
+        "Long identifier:\n{}\nStill visible.",
+        "abcdefgh".repeat(24)
+    );
+    for width in [720.0, 420.0] {
+        let node = crate::chat::fixtures::talk(&[(&prompt, "The message stays in its column.")]);
+        render_chat_wide(
+            &format!("chat-long-word-{width}"),
+            node,
+            "",
+            (1.0, None, width),
+            |_, _| {},
+        );
+    }
+}
+
+#[test]
 fn renders_a_chat_with_its_box_and_question() {
     let Some(pixels) = render_chat("chat", chat_node(false), "Also run the tests", 1.0) else {
         return;
