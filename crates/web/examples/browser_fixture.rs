@@ -177,15 +177,15 @@ fn setting(id: &str, name: &str, kind: SettingKind, choices: &[&str]) -> Setting
 fn node(id: TerminalId) -> ChatNode {
     let turn = |i| {
         Turn {
-        prompt: if i == 7 { "Make the remote experience feel as good as the desktop, especially on my phone.".into() } else { format!("Check the behavior in case {i}.") },
+        prompt: if i == 39 { "Make the remote experience feel as good as the desktop, especially on my phone.".into() } else { format!("Check the behavior in case {i}.") },
         sent: now().saturating_sub(30_000), items: vec![Item::Words("The layout now keeps the conversation readable and the controls within reach.\n\n- Review changes without losing your place\n- Keep drafts when you switch chats\n- Respond to an approval from your phone\n\n```rust\nlet message = queue.submit(draft);\n```".into())],
-        end: Some(TurnEnd { at: now().saturating_sub(8_000), outcome: Outcome::Done }), files: None, from: None, switch: None, previews: if i == 7 { vec![ChatPreview { width: 64, height: 40, rgba: [35, 90, 65, 255].repeat(64 * 40).into(), original: 0 }] } else { vec![] },
+        end: Some(TurnEnd { at: now().saturating_sub(8_000), outcome: Outcome::Done }), files: None, from: None, switch: None, previews: if i == 39 { vec![ChatPreview { width: 64, height: 40, rgba: [35, 90, 65, 255].repeat(64 * 40).into(), original: 0 }] } else { vec![] },
     }
     };
     let mut node = ChatNode {
         agent: "Codex".into(),
         state: ChatState::Answering,
-        turns: (0..8).map(turn).collect(),
+        turns: (0..40).map(turn).collect(),
         settings: vec![
             setting(
                 "model",
@@ -283,9 +283,14 @@ fn snapshot(id: TerminalId, node: &ChatNode) {
     }));
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "isolated protocol fixture with one branch per browser action"
+)]
 fn main() {
     let mut decoder = FrameDecoder::new();
     let mut nodes = std::collections::BTreeMap::new();
+    let mut starts = std::collections::BTreeMap::new();
     for line in io::stdin().lock().lines() {
         let line = line.unwrap();
         let bytes: Vec<_> = line
@@ -320,6 +325,28 @@ fn main() {
                     Request::Fit { size, .. } => {
                         reply(&ServerMessage::Response(Response::Done));
                         terminal_snapshot(size.unwrap_or_else(|| terminal_info().size));
+                    }
+                    Request::AttachRecent { terminal, first } => {
+                        reply(&ServerMessage::Response(Response::Done));
+                        let node = nodes.entry(terminal).or_insert_with(|| node(terminal));
+                        let recent = node.since_turn(first);
+                        eprintln!("Recent {} {}", recent.first_turn, recent.turns.len());
+                        starts.insert(terminal, recent.first_turn);
+                        snapshot(terminal, &recent);
+                    }
+                    Request::ChatHistory { terminal, before } => {
+                        reply(&ServerMessage::Response(Response::Done));
+                        let node = nodes.entry(terminal).or_insert_with(|| node(terminal));
+                        let page = node.history_page(before).unwrap();
+                        if let clackatoo_protocol::ChatPatch::History { first, .. } = &page {
+                            starts.insert(terminal, *first);
+                            eprintln!("History {first} {before}");
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(80));
+                        reply(&ServerMessage::Event(Event::View {
+                            terminal,
+                            update: ViewUpdate::Patch(vec![clackatoo_protocol::Patch::Chat(page)]),
+                        }));
                     }
                     Request::Attach { terminal } => {
                         reply(&ServerMessage::Response(Response::Done));
@@ -362,7 +389,10 @@ fn main() {
                             _ => {}
                         }
                         reply(&ServerMessage::Response(Response::Done));
-                        snapshot(terminal, node);
+                        snapshot(
+                            terminal,
+                            &node.since_turn(starts.get(&terminal).copied().or(Some(0))),
+                        );
                     }
                     _ => reply(&ServerMessage::Response(Response::Done)),
                 },

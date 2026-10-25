@@ -52,6 +52,20 @@ pub struct ChatNode {
         deserialize_with = "wire::since::<{ wire::PROVIDER_USAGE }, _, _>"
     )]
     pub provider_usage: Vec<ProviderUsage>,
+    /// Absolute index of the first loaded turn. Zero for a complete history.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CHAT_HISTORY }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAT_HISTORY }, _, _>"
+    )]
+    pub first_turn: u32,
+    /// User-message turns before this range (handoff dividers do not count).
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CHAT_HISTORY }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAT_HISTORY }, _, _>"
+    )]
+    pub first_message: u32,
 }
 
 /// One provider account's quota readings. Context belongs to the chat, not here.
@@ -1006,6 +1020,18 @@ pub enum ChatPatch {
     Delivery(ChatDelivery),
     /// Account quotas across the daemon's providers.
     ProviderUsage(Vec<ProviderUsage>),
+    /// A contiguous page preceding already loaded turns. Absolute indices
+    /// keep live patches and file actions stable while history is prepended.
+    History {
+        /// First absolute turn in this page.
+        first: u32,
+        /// Exclusive end, equal to the receiver's first loaded turn.
+        before: u32,
+        /// User-message turns preceding this page.
+        messages_before: u32,
+        /// Older turns, oldest first.
+        turns: Vec<Turn>,
+    },
 }
 
 /// A small, decoded image for chat history. Shared by snapshots and paint
@@ -1223,12 +1249,95 @@ pub fn turn_numbered(turns: &[Turn], number: usize) -> Option<usize> {
 }
 
 impl ChatNode {
+    /// The start of a page ending at local index `before`: at most eight
+    /// whole turns and about 512 KiB. A single larger turn remains intact.
+    #[must_use]
+    pub fn history_start(&self, before: usize) -> usize {
+        let before = before.min(self.turns.len());
+        let mut first = before;
+        let mut bytes = 0usize;
+        for index in (before.saturating_sub(8)..before).rev() {
+            let size =
+                postcard::experimental::serialized_size(&self.turns[index]).unwrap_or(usize::MAX);
+            if first < before && bytes.saturating_add(size) > 512 * 1024 {
+                break;
+            }
+            bytes = bytes.saturating_add(size);
+            first = index;
+        }
+        first
+    }
+
+    /// A page before an absolute boundary, or none if it is outside this node.
+    #[must_use]
+    pub fn history_page(&self, before: u32) -> Option<ChatPatch> {
+        let end = before.checked_sub(self.first_turn)? as usize;
+        if end == 0 || end > self.turns.len() {
+            return None;
+        }
+        let start = self.history_start(end);
+        let first = self.first_turn.checked_add(u32::try_from(start).ok()?)?;
+        let messages_before = self.first_message.checked_add(
+            u32::try_from(
+                self.turns[..start]
+                    .iter()
+                    .filter(|turn| turn.switch.is_none())
+                    .count(),
+            )
+            .ok()?,
+        )?;
+        Some(ChatPatch::History {
+            first,
+            before,
+            messages_before,
+            turns: self.turns[start..end].to_vec(),
+        })
+    }
+
+    /// Copy metadata and a suffix without cloning the unloaded history.
+    #[must_use]
+    pub fn since_turn(&self, first: Option<u32>) -> Self {
+        let start = first
+            .map_or_else(
+                || self.history_start(self.turns.len()),
+                |first| first.saturating_sub(self.first_turn) as usize,
+            )
+            .min(self.turns.len());
+        Self {
+            agent: self.agent.clone(),
+            turns: self.turns[start..].to_vec(),
+            state: self.state.clone(),
+            question: self.question.clone(),
+            notice: self.notice.clone(),
+            settings: self.settings.clone(),
+            usage: self.usage,
+            providers: self.providers.clone(),
+            subagents: self.subagents.clone(),
+            delivery: self.delivery.clone(),
+            provider_usage: self.provider_usage.clone(),
+            first_turn: self
+                .first_turn
+                .saturating_add(u32::try_from(start).unwrap_or(u32::MAX)),
+            first_message: self.first_message.saturating_add(
+                u32::try_from(
+                    self.turns[..start]
+                        .iter()
+                        .filter(|t| t.switch.is_none())
+                        .count(),
+                )
+                .unwrap_or(u32::MAX),
+            ),
+        }
+    }
+
     /// Applies `patch`. Changes to turns or items the chat doesn't have
     /// are ignored, so a confused daemon can't crash a client.
     pub fn apply(&mut self, patch: ChatPatch) {
         match patch {
             ChatPatch::Turn { index, turn } => {
-                let index = index as usize;
+                let Some(index) = index.checked_sub(self.first_turn).map(|i| i as usize) else {
+                    return;
+                };
                 match index.cmp(&self.turns.len()) {
                     std::cmp::Ordering::Less => self.turns[index] = turn,
                     std::cmp::Ordering::Equal => self.turns.push(turn),
@@ -1236,7 +1345,10 @@ impl ChatNode {
                 }
             }
             ChatPatch::Item { turn, item, value } => {
-                if let Some(turn) = self.turns.get_mut(turn as usize) {
+                if let Some(turn) = self
+                    .turns
+                    .get_mut(turn.wrapping_sub(self.first_turn) as usize)
+                {
                     let item = item as usize;
                     match item.cmp(&turn.items.len()) {
                         std::cmp::Ordering::Less => turn.items[item] = value,
@@ -1248,7 +1360,7 @@ impl ChatNode {
             ChatPatch::Append { turn, item, text } => {
                 if let Some(Item::Words(words) | Item::Thought(words)) = self
                     .turns
-                    .get_mut(turn as usize)
+                    .get_mut(turn.wrapping_sub(self.first_turn) as usize)
                     .and_then(|turn| turn.items.get_mut(item as usize))
                 {
                     words.push_str(&text);
@@ -1257,7 +1369,7 @@ impl ChatNode {
             ChatPatch::Output { turn, item, text } => {
                 if let Some(Item::Tool(tool)) = self
                     .turns
-                    .get_mut(turn as usize)
+                    .get_mut(turn.wrapping_sub(self.first_turn) as usize)
                     .and_then(|turn| turn.items.get_mut(item as usize))
                 {
                     tool.append_output(&text);
@@ -1269,7 +1381,10 @@ impl ChatNode {
             ChatPatch::Settings(settings) => self.settings = settings,
             ChatPatch::Usage(usage) => self.usage = usage,
             ChatPatch::Files { turn, files } => {
-                if let Some(turn) = self.turns.get_mut(turn as usize) {
+                if let Some(turn) = self
+                    .turns
+                    .get_mut(turn.wrapping_sub(self.first_turn) as usize)
+                {
                     turn.files = files;
                 }
             }
@@ -1278,6 +1393,22 @@ impl ChatNode {
             ChatPatch::Subagents(subagents) => self.subagents = subagents,
             ChatPatch::Delivery(delivery) => self.delivery = delivery,
             ChatPatch::ProviderUsage(usage) => self.provider_usage = usage,
+            ChatPatch::History {
+                first,
+                before,
+                messages_before,
+                mut turns,
+            } => {
+                if before == self.first_turn
+                    && first < before
+                    && turns.len() == (before - first) as usize
+                {
+                    turns.append(&mut self.turns);
+                    self.turns = turns;
+                    self.first_turn = first;
+                    self.first_message = messages_before;
+                }
+            }
         }
     }
 
@@ -1501,6 +1632,73 @@ impl Tool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_pages_keep_absolute_patches_and_reject_gaps_or_duplicates() {
+        let full = ChatNode {
+            turns: (0..24)
+                .map(|i| turn(&i.to_string(), vec![Item::Words("answer".into())]))
+                .collect(),
+            ..ChatNode::default()
+        };
+        let mut recent = full.since_turn(None);
+        assert_eq!(
+            (recent.first_turn, recent.turns.len(), recent.first_message),
+            (16, 8, 16)
+        );
+        recent.apply(ChatPatch::Append {
+            turn: 23,
+            item: 0,
+            text: " live".into(),
+        });
+        recent.apply(ChatPatch::Append {
+            turn: 1,
+            item: 0,
+            text: "unloaded".into(),
+        });
+        let page = ChatPatch::History {
+            first: 8,
+            before: 16,
+            messages_before: 8,
+            turns: full.turns[8..16].to_vec(),
+        };
+        recent.apply(page.clone());
+        let once = recent.clone();
+        recent.apply(page);
+        recent.apply(ChatPatch::History {
+            first: 0,
+            before: 7,
+            messages_before: 0,
+            turns: full.turns[..7].to_vec(),
+        });
+        assert_eq!(recent, once);
+        assert_eq!(
+            recent.turns.last().unwrap().items,
+            [Item::Words("answer live".into())]
+        );
+        recent.apply(ChatPatch::Turn {
+            index: 24,
+            turn: turn("next", vec![]),
+        });
+        assert_eq!(recent.turns.last().unwrap().prompt, "next");
+    }
+
+    #[test]
+    fn history_pages_are_byte_bounded_and_keep_large_turns_whole() {
+        let mut full = ChatNode {
+            turns: (0..100)
+                .map(|_| turn("prompt", vec![Item::Words("x".repeat(160_000))]))
+                .collect(),
+            ..ChatNode::default()
+        };
+        let recent = full.since_turn(None);
+        assert_eq!(recent.turns.len(), 3);
+        assert!(postcard::experimental::serialized_size(&recent).unwrap() < 512 * 1024);
+        full.turns.last_mut().unwrap().items = vec![Item::Words("x".repeat(700_000))];
+        let recent = full.since_turn(None);
+        assert_eq!(recent.turns.len(), 1);
+        assert_eq!(recent.turns[0], full.turns[99]);
+    }
 
     #[test]
     fn the_context_used_is_a_percentage_only_of_a_size_said_and_never_past_100() {

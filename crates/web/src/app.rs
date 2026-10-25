@@ -113,6 +113,7 @@ struct ChatPage {
     main: HtmlElement,
     scroller: DomElement,
     latest: HtmlElement,
+    history: HtmlElement,
     send_button: HtmlElement,
     steer_button: HtmlElement,
     intent: HtmlElement,
@@ -227,7 +228,16 @@ impl ChatPage {
                     let _ = self.turns.append_child(&dom::element_of(document, &turn));
                 }
             } else {
-                for &index in &dirty.turns {
+                for index in (0..dirty.prepended.min(node.turns.len())).rev() {
+                    let turn = dom::element_of(document, &view::turn(node, open, index, now));
+                    let _ = self
+                        .turns
+                        .insert_before(&turn, self.turns.first_child().as_ref());
+                }
+                for &absolute in &dirty.turns {
+                    let Some(index) = absolute.checked_sub(node.first_turn as usize) else {
+                        continue;
+                    };
                     if index >= node.turns.len() {
                         continue;
                     }
@@ -237,7 +247,7 @@ impl ChatPage {
                         .children()
                         .item(u32::try_from(index).unwrap_or(u32::MAX))
                     {
-                        Some(old) if index < drawn => {
+                        Some(old) if index < drawn + dirty.prepended => {
                             let _ = self.turns.replace_child(&turn, &old);
                         }
                         _ => {
@@ -303,6 +313,18 @@ impl Drop for Socket {
         self.ws.set_onclose(None);
         let _ = self.ws.close();
     }
+}
+
+fn history_button(document: &Document) -> HtmlElement {
+    dom::element_of(
+        document,
+        &el("button")
+            .class("history-more")
+            .action(&Action::OlderChat)
+            .attr("hidden", "")
+            .text("Load earlier messages"),
+    )
+    .unchecked_into()
 }
 
 fn near_bottom(scroller: &DomElement) -> bool {
@@ -1467,6 +1489,10 @@ impl App {
     fn scrolled(&mut self) {
         if let Some(page) = &self.page {
             page.latest.set_hidden(near_bottom(&page.scroller));
+            if page.scroller.scroll_top() < 240 {
+                self.state.older_chat();
+                self.send();
+            }
         }
         if self.term_page.as_ref().is_some_and(TermPage::near_top) {
             self.state.older_history();
@@ -1484,18 +1510,37 @@ impl App {
                     .main
                     .style()
                     .set_property("--viewport-top", &format!("{}px", viewport.offset_top()));
-                let _ = page
-                    .main
-                    .style()
-                    .set_property("--viewport-height", &format!("{}px", viewport.height()));
+                let layout_height = self
+                    .window
+                    .inner_height()
+                    .ok()
+                    .and_then(|h| h.as_f64())
+                    .unwrap_or(viewport.height());
+                let obscured = viewport.height() + viewport.offset_top() < layout_height - 1.0;
+                page.main.set_class_name(if obscured {
+                    "chat-page keyboard-open"
+                } else {
+                    "chat-page"
+                });
+                if obscured {
+                    let _ = page
+                        .main
+                        .style()
+                        .set_property("--viewport-height", &format!("{}px", viewport.height()));
+                    let _ = page
+                        .main
+                        .style()
+                        .set_property("height", &format!("{}px", viewport.height()));
+                } else {
+                    // Let dynamic viewport units follow browser chrome. A pixel
+                    // height captured while the keyboard was open must not stick.
+                    let _ = page.main.style().remove_property("height");
+                    let _ = page.main.style().remove_property("--viewport-height");
+                }
                 let _ = page
                     .main
                     .style()
                     .set_property("top", &format!("{}px", viewport.offset_top()));
-                let _ = page
-                    .main
-                    .style()
-                    .set_property("height", &format!("{}px", viewport.height()));
             }
             if bottom {
                 page.scroller.set_scroll_top(page.scroller.scroll_height());
@@ -1613,6 +1658,9 @@ impl App {
             return;
         };
         let at_bottom = near_bottom(&page.scroller);
+        let old_height = page.scroller.scroll_height();
+        let old_top = page.scroller.scroll_top();
+        let prepended = self.state.dirty.prepended > 0;
         let header = view::chat_header(&self.state, open);
         if fresh || header != page.shown_header {
             dom::replace_children(
@@ -1623,6 +1671,19 @@ impl App {
             page.shown_header = header;
         }
         let node = open.view.as_ref().and_then(|view| view.chat());
+        page.history
+            .set_hidden(node.is_none_or(|n| n.first_turn == 0));
+        if open.history_pending.is_some() {
+            let _ = page.history.set_attribute("disabled", "");
+        } else {
+            let _ = page.history.remove_attribute("disabled");
+        }
+        page.history
+            .set_text_content(Some(if open.history_pending.is_some() {
+                "Loading earlier messages…"
+            } else {
+                "Load earlier messages"
+            }));
         page.draw_turns(&self.document, open, &self.state.dirty, fresh, now);
         let online = self.state.online;
         let working = node.and_then(|node| view::working(node, online, now));
@@ -1653,11 +1714,19 @@ impl App {
             page.shown_menus = menus;
         }
         let draft_changed = page.draw_controls(&self.document, &self.state, open);
-        if at_bottom || fresh {
+        if prepended && !fresh {
+            page.scroller
+                .set_scroll_top(old_top + page.scroller.scroll_height() - old_height);
+        } else if at_bottom || fresh {
             page.scroller.set_scroll_top(page.scroller.scroll_height());
         }
         page.latest.set_hidden(near_bottom(&page.scroller));
+        let needs_history = page.scroller.scroll_height() <= page.scroller.client_height() + 1;
         let id = open.id;
+        if needs_history {
+            self.state.older_chat();
+            self.send();
+        }
         if draft_changed {
             self.save_draft(id);
         }
@@ -1765,6 +1834,8 @@ impl App {
         let _ = composer.append_child(&intent);
         let _ = composer.append_child(&textarea);
         let _ = composer.append_child(&row);
+        let history = history_button(document);
+        let _ = scroller.append_child(&history);
         let _ = scroller.append_child(&turns);
 
         let _ = dock.append_child(&composer);
@@ -1779,6 +1850,7 @@ impl App {
             main,
             scroller,
             latest,
+            history,
             send_button,
             steer_button,
             intent,
@@ -1858,6 +1930,9 @@ impl App {
             Action::Filter(filter) => {
                 self.state.home_filter = filter;
                 self.state.dirty.home = true;
+            }
+            Action::OlderChat => {
+                self.state.older_chat();
             }
             Action::Latest => {
                 if let Some(page) = &self.page {

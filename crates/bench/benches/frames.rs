@@ -116,5 +116,58 @@ fn frames(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, frames);
+/// Compare the former whole-history opening path with the paged path on
+/// the same 12 MiB conversation, including projection, cloning and encoding.
+fn chat_history(c: &mut Criterion) {
+    use clackatoo_protocol::{ChatNode, Item, Node, Turn};
+    let node = ChatNode {
+        turns: (0..96)
+            .map(|i| Turn {
+                prompt: format!("Turn {i}"),
+                sent: 0,
+                items: vec![Item::Words("answer ".repeat(18_000))],
+                end: None,
+                files: None,
+                from: None,
+                switch: None,
+                previews: vec![],
+            })
+            .collect(),
+        ..ChatNode::default()
+    };
+    let snapshot = |node| {
+        ServerMessage::Event(Event::View {
+            terminal: TerminalId(1),
+            update: ViewUpdate::Snapshot(View {
+                title: "history".into(),
+                cwd: None,
+                root: Node::Chat(Box::new(node)),
+            }),
+        })
+    };
+    eprintln!(
+        "chat full={} bytes, recent={} bytes",
+        encode(&snapshot(node.clone())).len(),
+        encode(&snapshot(node.since_turn(None))).len()
+    );
+    let mut group = c.benchmark_group("chat-history");
+    group.bench_function("full snapshot", |b| {
+        b.iter(|| encode(&snapshot(black_box(&node).clone())));
+    });
+    group.bench_function("recent snapshot", |b| {
+        b.iter(|| encode(&snapshot(black_box(&node).since_turn(None))));
+    });
+    group.bench_function("older page", |b| {
+        b.iter(|| {
+            let page = black_box(&node).history_page(92).unwrap();
+            encode(&ServerMessage::Event(Event::View {
+                terminal: TerminalId(1),
+                update: ViewUpdate::Patch(vec![Patch::Chat(page)]),
+            }))
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(benches, frames, chat_history);
 criterion_main!(benches);

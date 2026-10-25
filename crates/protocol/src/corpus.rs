@@ -1105,6 +1105,49 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             ))]),
         })),
     ));
+    samples.extend([
+        (
+            crate::wire::CHAT_HISTORY,
+            Client(ClientMessage::Request(Request::AttachRecent {
+                terminal,
+                first: Some(12),
+            })),
+        ),
+        (
+            crate::wire::CHAT_HISTORY,
+            Client(ClientMessage::Request(Request::ChatHistory {
+                terminal,
+                before: 12,
+            })),
+        ),
+        (
+            crate::wire::CHAT_HISTORY,
+            Server(ServerMessage::Event(Event::View {
+                terminal,
+                update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::History {
+                    first: 11,
+                    before: 12,
+                    messages_before: 10,
+                    turns: vec![turn()],
+                })]),
+            })),
+        ),
+        (
+            crate::wire::CHAT_HISTORY,
+            Server(ServerMessage::Event(Event::View {
+                terminal,
+                update: ViewUpdate::Snapshot(View {
+                    title: "recent".into(),
+                    cwd: None,
+                    root: Node::Chat(Box::new(ChatNode {
+                        first_turn: 12,
+                        first_message: 10,
+                        ..chat()
+                    })),
+                }),
+            })),
+        ),
+    ]);
     samples
 }
 
@@ -2673,6 +2716,8 @@ fn chat() -> ChatNode {
             notice: None,
         }],
         delivery: crate::ChatDelivery::default(),
+        first_turn: 0,
+        first_message: 0,
     }
 }
 

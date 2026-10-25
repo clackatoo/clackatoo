@@ -769,7 +769,11 @@ impl Subscription {
     /// Forgets what the client was sent, so the next update is a snapshot,
     /// as after a re-attach.
     fn forget_sent(&mut self) {
+        let recent = self.chat.recent;
+        let first = self.chat.first;
         *self = Self::new();
+        self.chat.recent = recent;
+        self.chat.first = first;
     }
 
     /// The update that brings the client, which speaks `wire`, from what
@@ -3029,6 +3033,43 @@ impl Daemon {
                 self.resize_asked(terminal, size).map(|()| Response::Done)
             }
             Request::Attach { terminal } => self.attach(token, terminal).map(|()| Response::Done),
+            Request::AttachRecent { terminal, first } => (|| {
+                self.attach(token, terminal)?;
+                if let Some(Source::Client(client)) = self.sources.get_mut(token.0)
+                    && let Some(sub) = client.views.get_mut(&terminal)
+                {
+                    sub.chat.recent = true;
+                    sub.chat.first = first;
+                }
+                Ok(Response::Done)
+            })(),
+            Request::ChatHistory { terminal, before } => (|| {
+                let slot = self
+                    .terminals
+                    .get(&terminal)
+                    .ok_or(Error::NoSuchTerminal(terminal))?;
+                let Hosted::Chat(chat) = &slot.terminal else {
+                    return Err(Error::Other("Not a chat".into()));
+                };
+                if before == 0 || before as usize > chat.node().turns.len() {
+                    return Err(Error::Other("History boundary is outside this chat".into()));
+                }
+                let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
+                    return Err(Error::NoSuchTerminal(terminal));
+                };
+                let sub = client
+                    .views
+                    .get_mut(&terminal)
+                    .ok_or(Error::NoSuchTerminal(terminal))?;
+                if !sub.chat.older.contains(&before) {
+                    if sub.chat.older.len() >= 64 {
+                        return Err(Error::Other("Too many history pages pending".into()));
+                    }
+                    sub.chat.older.push_back(before);
+                    self.views_pending = true;
+                }
+                Ok(Response::Done)
+            })(),
             Request::Detach { terminal } => {
                 self.detach(token, terminal);
                 Ok(Response::Done)

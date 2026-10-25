@@ -48,7 +48,12 @@ impl ChatView {
         let turns = self.node.turns.len().max(self.cache.turns.len());
         let last = turns.saturating_sub(1);
         (self.node.subagents.iter())
-            .filter(|entry| (entry.turn as usize).min(last) == index)
+            .filter(|entry| {
+                entry
+                    .turn
+                    .checked_sub(self.node.first_turn)
+                    .is_some_and(|i| (i as usize).min(last) == index)
+            })
             .collect()
     }
 

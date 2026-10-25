@@ -809,6 +809,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "A mobile-first web app: compact sessions, searchable models, saved drafts, queues and approvals",
     },
+    News {
+        id: "incremental-chat-history",
+        date: "2026-10-25",
+        lesson: "agents",
+        what: "Long chats open on recent turns; scroll up for more in the window or web app, without losing your place",
+    },
 ];
 
 impl News {

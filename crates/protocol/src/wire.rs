@@ -242,6 +242,8 @@ gates! {
     CHAT_QUEUE = 102,
     /// Cross-provider subscription usage snapshots and read-only refresh.
     PROVIDER_USAGE = 103,
+    /// Opt-in recent chat snapshots and older history pages.
+    CHAT_HISTORY = 104,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -409,6 +411,7 @@ impl Since for ChatPatch {
             | Self::Subagents(_) => EARLIER,
             Self::Delivery(_) => CHAT_QUEUE,
             Self::ProviderUsage(_) => PROVIDER_USAGE,
+            Self::History { .. } => CHAT_HISTORY,
         }
     }
 }
@@ -874,6 +877,9 @@ fn newest_in_patch(patch: &ChatPatch) -> u32 {
         ChatPatch::Turn { turn, .. } => newest_in_turn(turn),
         ChatPatch::Item { value, .. } => newest_in_item(value),
         ChatPatch::Settings(settings) => newest_in_settings(settings),
+        ChatPatch::History { turns, .. } => {
+            turns.iter().map(newest_in_turn).max().unwrap_or(EARLIER)
+        }
         _ => EARLIER,
     };
     patch.since().max(inside)
@@ -917,6 +923,17 @@ pub trait Downgrade: Sized {
 /// daemon still: refuse image messages rather than dropping attachments.
 impl Downgrade for ClientMessage {
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
+        if wire < CHAT_HISTORY {
+            match self {
+                Self::Request(crate::Request::AttachRecent { terminal, .. }) => {
+                    return Downgraded::To(Self::Request(crate::Request::Attach {
+                        terminal: *terminal,
+                    }));
+                }
+                Self::Request(crate::Request::ChatHistory { .. }) => return Downgraded::Refused,
+                _ => {}
+            }
+        }
         if wire < PROVIDER_USAGE
             && matches!(
                 self,
@@ -1028,7 +1045,8 @@ fn without_optional_chat_updates(message: &ServerMessage, wire: u32) -> Option<S
         return None;
     };
     let unsupported = |patch: &Patch| {
-        matches!(patch, Patch::Chat(ChatPatch::Delivery(_)) if wire < CHAT_QUEUE)
+        matches!(patch, Patch::Chat(ChatPatch::History { .. }) if wire < CHAT_HISTORY)
+            || matches!(patch, Patch::Chat(ChatPatch::Delivery(_)) if wire < CHAT_QUEUE)
             || matches!(patch, Patch::Chat(ChatPatch::ProviderUsage(_)) if wire < PROVIDER_USAGE)
     };
     if !patches.iter().any(unsupported) {
@@ -1083,7 +1101,7 @@ impl Downgrade for ServerMessage {
         if newest(self) <= wire {
             return Downgraded::AsIs;
         }
-        if wire < PROVIDER_USAGE
+        if wire < CHAT_HISTORY
             && let Some(older) = without_optional_chat_updates(self, wire)
         {
             return match older.downgrade(wire) {
@@ -1931,6 +1949,54 @@ mod tests {
 #[cfg(test)]
 mod original_tests {
     use super::*;
+    #[test]
+    fn history_requests_fall_back_and_old_clients_keep_known_patches() {
+        use crate::{Request, TerminalId};
+        let terminal = TerminalId(1);
+        let attach = ClientMessage::Request(Request::AttachRecent {
+            terminal,
+            first: Some(8),
+        });
+        assert_eq!(
+            attach.downgrade(CHAT_HISTORY - 1),
+            Downgraded::To(ClientMessage::Request(Request::Attach { terminal }))
+        );
+        let older = ClientMessage::Request(Request::ChatHistory {
+            terminal,
+            before: 8,
+        });
+        assert_eq!(older.downgrade(CHAT_HISTORY - 1), Downgraded::Refused);
+        let message = ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![
+                Patch::Chat(ChatPatch::History {
+                    first: 0,
+                    before: 0,
+                    messages_before: 0,
+                    turns: vec![],
+                }),
+                Patch::Title("current".into()),
+            ]),
+        });
+        let Downgraded::To(ServerMessage::Event(Event::View {
+            update: ViewUpdate::Patch(patches),
+            ..
+        })) = message.downgrade(CHAT_HISTORY - 1)
+        else {
+            panic!("compatible update");
+        };
+        assert_eq!(patches, [Patch::Title("current".into())]);
+        let node = crate::ChatNode {
+            first_turn: 8,
+            first_message: 7,
+            ..crate::ChatNode::default()
+        };
+        let bytes = speaking(CHAT_HISTORY - 1, || postcard::to_allocvec(&node).unwrap());
+        let old: crate::ChatNode =
+            speaking(CHAT_HISTORY - 1, || postcard::from_bytes(&bytes).unwrap());
+        assert_eq!((old.first_turn, old.first_message), (0, 0));
+    }
+
     #[test]
     fn original_handles_are_gated_without_changing_older_thumbnail_bytes() {
         let mut preview = crate::ChatPreview {

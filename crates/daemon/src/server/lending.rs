@@ -323,6 +323,8 @@ impl Daemon {
             | Request::ChatOriginal { terminal: id, .. }
             | Request::Capture { terminal: id }
             | Request::Attach { terminal: id }
+            | Request::AttachRecent { terminal: id, .. }
+            | Request::ChatHistory { terminal: id, .. }
             | Request::History { terminal: id, .. }
             | Request::Text { terminal: id, .. }
             | Request::BlockText { terminal: id, .. }

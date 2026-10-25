@@ -75,6 +75,7 @@ enum Pending {
     Original(u64),
     Handoff,
     ChatControl,
+    ChatHistory(u32),
 }
 
 /// The guesses at the echo of what's typed, drawn over a line of the
@@ -263,6 +264,10 @@ impl Pane {
         changed
     }
 
+    pub(crate) fn first_chat_turn(&self) -> Option<u32> {
+        self.chat.as_ref().map(|chat| chat.first_turn())
+    }
+
     pub(crate) fn screen(&self) -> Option<&Screen> {
         self.screen.as_ref()
     }
@@ -327,11 +332,18 @@ impl Pane {
         // Asked for by its number, which doesn't count where the chat
         // moved to another agent.
         let turn = match turn {
-            Some(turn) => clackatoo_protocol::turn_numbered(&chat.node.turns, turn + 1)
-                .ok_or(format!("there's no turn {}", turn + 1))?,
+            Some(turn) => {
+                let local = turn
+                    .checked_sub(chat.node.first_message as usize)
+                    .ok_or("Scroll up to load that turn before undoing it")?;
+                clackatoo_protocol::turn_numbered(&chat.node.turns, local + 1)
+                    .ok_or(format!("there's no turn {}", turn + 1))?
+            }
             None => (chat.turn_to_undo(redo)).ok_or(format!("no turn has files to {undo}"))?,
         };
-        let turn = u32::try_from(turn).unwrap_or(u32::MAX);
+        let turn = u32::try_from(turn)
+            .unwrap_or(u32::MAX)
+            .saturating_add(chat.first_turn());
         let action = if redo {
             ChatAction::Redo { turn, force }
         } else {
@@ -384,7 +396,17 @@ impl Pane {
         let reading = self.mode != Mode::Insert;
         let chat = self.chat.as_mut()?;
         chat.reading = reading;
-        Some(chat.paint(fonts, origin, size, caret))
+        let paint = chat.paint(fonts, origin, size, caret);
+        if let Some(before) = chat.older_request() {
+            self.request(
+                Request::ChatHistory {
+                    terminal: self.terminal,
+                    before,
+                },
+                Pending::ChatHistory(before),
+            );
+        }
+        Some(paint)
     }
 
     /// Carries out what was typed or clicked in the chat it shows, if it
@@ -396,7 +418,11 @@ impl Pane {
         };
         let settled = chat.settle(fonts);
         let original = chat.take_original_request();
+        let first_turn = chat.first_turn();
         for mut action in settled.actions {
+            if let ChatAction::Undo { turn, .. } | ChatAction::Redo { turn, .. } = &mut action {
+                *turn += first_turn;
+            }
             if let ChatAction::Switch { budget, .. } | ChatAction::SendTo { budget, .. } =
                 &mut action
             {
@@ -737,6 +763,12 @@ impl Pane {
             return self.refresh_overlay();
         }
         match (pending, response) {
+            (Some(Pending::ChatHistory(before)), response) => {
+                if let Some(chat) = &mut self.chat {
+                    chat.history_answer(before, response);
+                }
+                true
+            }
             (Some(Pending::ChatControl), response) => {
                 if let Some(chat) = &mut self.chat {
                     chat.queue_answer(response);
@@ -1623,6 +1655,37 @@ mod tests {
         pane.take_outbox()
             .iter()
             .any(|message| matches!(message, ClientMessage::Request(Request::Resize { .. })))
+    }
+
+    #[test]
+    fn paged_chat_undo_targets_the_absolute_turn_and_rejects_unloaded_numbers() {
+        use clackatoo_protocol::{Node, TurnFiles, TurnFilesState, View};
+        let mut node = crate::chat::fixtures::talk(&[("visible", "answer")]);
+        node.first_turn = 10;
+        node.first_message = 8;
+        node.turns[0].files = Some(TurnFiles {
+            count: 1,
+            state: TurnFilesState::Made,
+        });
+        let mut pane = Pane::new(TerminalId(1));
+        pane.view_changed(&ViewUpdate::Snapshot(View {
+            title: "paged".into(),
+            cwd: None,
+            root: Node::Chat(Box::new(node)),
+        }));
+        pane.take_outbox();
+        assert!(pane.undo_turn(Some(0), false, false).is_err());
+        pane.undo_turn(Some(8), false, false).unwrap();
+        assert!(
+            pane.take_outbox()
+                .contains(&ClientMessage::Request(Request::Chat {
+                    terminal: TerminalId(1),
+                    action: ChatAction::Undo {
+                        turn: 10,
+                        force: false
+                    }
+                }))
+        );
     }
 
     #[test]

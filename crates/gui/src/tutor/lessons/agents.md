@@ -8,6 +8,10 @@ Most of this lesson is to read: a chat uses your agent's own login, and with a s
 Notes for the agents lesson.
 ```
 
+## Loading older messages
+
+Long chats open on recent turns in the window and web app. Scroll near the top to load earlier messages without losing your place. In the web app, **Load earlier messages** also fetches a page. Each device keeps its own range, including through reconnects. The daemon retains the whole conversation. Load an older turn before asking to undo it by number.
+
 ## Opening a chat
 
 `:Agent codex` or `:Agent antigravity` opens a chat with that agent in a new tab, at once; `:|Agent codex` opens it beside the focused pane.

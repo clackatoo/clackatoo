@@ -530,6 +530,9 @@ pub(crate) struct ChatSent {
     /// chat whole.
     next: Option<u64>,
     title: String,
+    pub(crate) recent: bool,
+    pub(crate) first: Option<u32>,
+    pub(crate) older: VecDeque<u32>,
 }
 
 impl HostedChat {
@@ -858,7 +861,20 @@ impl HostedChat {
         let Some(next) = sent.next.filter(|&next| next >= self.journal.first) else {
             sent.next = Some(end);
             self.title.clone_into(&mut sent.title);
-            return Some(ViewUpdate::Snapshot(self.view()));
+            let view = if sent.recent {
+                let node = self.node.since_turn(sent.first);
+                sent.first = Some(node.first_turn);
+                View {
+                    title: self.title.clone(),
+                    cwd: Some(self.shown_cwd.clone().unwrap_or_else(|| self.cwd.clone())),
+                    root: Node::Chat(Box::new(node)),
+                }
+            } else {
+                self.view()
+            };
+            // A snapshot also satisfies older requests within its range.
+            sent.older.clear();
+            return Some(ViewUpdate::Snapshot(view));
         };
         let mut patches = Vec::new();
         if self.title != sent.title {
@@ -900,6 +916,16 @@ impl HostedChat {
             chat.push(Some(patch.clone()));
         }
         patches.extend(chat.into_iter().flatten().map(Patch::Chat));
+        if let Some(before) = sent.older.pop_front()
+            && let Some(page) = self.node.history_page(before)
+        {
+            if sent.recent
+                && let ChatPatch::History { first, .. } = &page
+            {
+                sent.first = Some(sent.first.unwrap_or(before).min(*first));
+            }
+            patches.push(Patch::Chat(page));
+        }
         sent.next = Some(end);
         (!patches.is_empty()).then_some(ViewUpdate::Patch(patches))
     }
@@ -4237,6 +4263,66 @@ mod tests {
         // Never in the middle of a character.
         assert_eq!(tail("ééééé\nab", 3), "…\nab");
         assert_eq!(head("ééé", 3), "é");
+    }
+
+    #[test]
+    fn recent_viewers_page_without_losing_live_changes_or_other_viewers() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        for i in 0..24 {
+            send(&mut chat, &format!("message {i}"));
+            words(&mut chat, &"answer ".repeat(24_000));
+            chat.answered(Ok(StopReason::EndTurn));
+        }
+        let mut recent = Viewer::new();
+        recent.sent.recent = true;
+        recent.catch_up(&chat);
+        let node = recent.view.as_ref().unwrap().chat().unwrap();
+        let before = node.first_turn;
+        assert!(before >= 21);
+        let full_bytes = clackatoo_protocol::frame::encode(
+            clackatoo_protocol::PROTOCOL_VERSION,
+            &clackatoo_protocol::ServerMessage::Response(clackatoo_protocol::Response::View(
+                chat.view(),
+            )),
+        )
+        .unwrap()
+        .len();
+        let recent_bytes = clackatoo_protocol::frame::encode(
+            clackatoo_protocol::PROTOCOL_VERSION,
+            &clackatoo_protocol::ServerMessage::Response(clackatoo_protocol::Response::View(
+                recent.view.clone().unwrap(),
+            )),
+        )
+        .unwrap()
+        .len();
+        assert!(
+            recent_bytes < 512 * 1024 && full_bytes > 7 * recent_bytes,
+            "full={full_bytes}, recent={recent_bytes}"
+        );
+        let mut legacy = Viewer::new();
+        legacy.catch_up(&chat);
+        assert_eq!(
+            legacy.view.as_ref().unwrap().chat().unwrap().turns.len(),
+            24
+        );
+        recent.sent.older.push_back(before);
+        send(&mut chat, "new work");
+        words(&mut chat, "still streaming");
+        recent.catch_up(&chat);
+        legacy.catch_up(&chat);
+        let node = recent.view.as_ref().unwrap().chat().unwrap();
+        assert!(node.first_turn < before);
+        assert_eq!(node.turns.last(), chat.node.turns.last());
+        assert_eq!(legacy.view.as_ref().unwrap().chat(), Some(&chat.node));
+        let first = node.first_turn;
+        // Falling behind preserves the range already loaded.
+        recent.sent.next = None;
+        recent.catch_up(&chat);
+        assert_eq!(
+            recent.view.as_ref().unwrap().chat().unwrap().first_turn,
+            first
+        );
     }
 
     #[test]

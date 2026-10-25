@@ -122,7 +122,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 103;
+pub const PROTOCOL_VERSION: u32 = 104;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1356,6 +1356,22 @@ pub enum Request {
         terminal: TerminalId,
         /// The handle carried by its thumbnail.
         original: u64,
+    },
+    /// Subscribe to a chat's recent history, or resume a loaded range.
+    /// PTYs behave like `Attach`. Requires `wire::CHAT_HISTORY`.
+    AttachRecent {
+        /// The terminal to follow.
+        terminal: TerminalId,
+        /// First absolute turn to retain; `None` starts with a recent page.
+        first: Option<u32>,
+    },
+    /// Fetch a page immediately before an absolute turn. The page arrives
+    /// on the acknowledged view stream, ordered with live changes.
+    ChatHistory {
+        /// An attached chat.
+        terminal: TerminalId,
+        /// Exclusive end of the page.
+        before: u32,
     },
 }
 

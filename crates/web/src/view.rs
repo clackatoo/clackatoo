@@ -374,10 +374,11 @@ fn answer_start(turn: &Turn) -> usize {
 pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element {
     let section = el("section")
         .class("turn")
-        .attr("data-turn", index.to_string());
+        .attr("data-turn", (node.first_turn as usize + index).to_string());
     let Some(turn) = node.turns.get(index) else {
         return section;
     };
+    let index = node.first_turn as usize + index;
     if let Some(switch) = &turn.switch {
         return section
             .class("switch")

@@ -245,6 +245,53 @@ struct Viewer {
     /// It took too long to draw one, and holds no one up: it's sent nothing
     /// until it says it has, and then followed afresh.
     stalled: bool,
+    /// Each client retains its own loaded range, even though the upstream
+    /// subscription carries their union.
+    recent: bool,
+    first: Option<u32>,
+    before: Option<u32>,
+}
+
+impl Viewer {
+    fn history_update(
+        &mut self,
+        update: &clackatoo_protocol::ViewUpdate,
+    ) -> clackatoo_protocol::ViewUpdate {
+        use clackatoo_protocol::{ChatPatch, Node, Patch, ViewUpdate};
+        match update {
+            ViewUpdate::Snapshot(view) if self.recent => {
+                let Node::Chat(node) = &view.root else {
+                    self.recent = false;
+                    return update.clone();
+                };
+                let first = self.before.or(self.first);
+                let node = node.since_turn(first);
+                self.first = Some(node.first_turn);
+                self.before = None;
+                ViewUpdate::Snapshot(clackatoo_protocol::View {
+                    title: view.title.clone(),
+                    cwd: view.cwd.clone(),
+                    root: Node::Chat(Box::new(node)),
+                })
+            }
+            ViewUpdate::Patch(patches) => ViewUpdate::Patch(
+                patches
+                    .iter()
+                    .filter_map(|patch| {
+                        if let Patch::Chat(ChatPatch::History { first, before, .. }) = patch {
+                            if !self.recent || self.before != Some(*before) {
+                                return None;
+                            }
+                            self.first = Some(*first);
+                            self.before = None;
+                        }
+                        Some(patch.clone())
+                    })
+                    .collect(),
+            ),
+            ViewUpdate::Snapshot(_) => update.clone(),
+        }
+    }
 }
 
 /// What this daemon's end of a connection to another daemon keeps, for
@@ -763,11 +810,26 @@ impl Daemon {
                 let _ = self.send_upstream(at, &ClientMessage::Request(resize), Expect::Nothing);
                 Routed::Answered(Response::Done)
             }
-            Request::Attach { terminal } => {
-                let Some((at, remote)) = self.relayed_terminal(terminal) else {
-                    return Routed::Here(Request::Attach { terminal });
+            request @ (Request::Attach { .. } | Request::AttachRecent { .. }) => {
+                let (terminal, recent, first) = match request {
+                    Request::Attach { terminal } => (terminal, false, None),
+                    Request::AttachRecent { terminal, first } => (terminal, true, first),
+                    _ => unreachable!(),
                 };
+                let Some((at, remote)) = self.relayed_terminal(terminal) else {
+                    return Routed::Here(request);
+                };
+                let recent = recent && self.link_wire(at) >= wire::CHAT_HISTORY;
                 self.follow(token, at, terminal);
+                let viewer = self.links.list[at]
+                    .relayed
+                    .followed
+                    .get_mut(&terminal)
+                    .and_then(|f| f.viewers.iter_mut().find(|v| v.token == token))
+                    .expect("followed");
+                viewer.recent = recent;
+                viewer.first = first;
+                viewer.before = None;
                 if !self.is_linked(at) {
                     // Followed there once the connection's made again.
                     return Routed::Answered(Response::Done);
@@ -778,7 +840,33 @@ impl Daemon {
                     .entry(terminal)
                     .or_default()
                     .upstream = true;
-                self.wait_for(token, at, Request::Attach { terminal: remote }, Then::Pass)
+                let request = self.follow_request(at, terminal, remote);
+                self.wait_for(token, at, request, Then::Pass)
+            }
+            Request::ChatHistory { terminal, before } => {
+                let Some((at, remote)) = self.relayed_terminal(terminal) else {
+                    return Routed::Here(Request::ChatHistory { terminal, before });
+                };
+                let viewer = self.links.list[at]
+                    .relayed
+                    .followed
+                    .get_mut(&terminal)
+                    .and_then(|f| f.viewers.iter_mut().find(|v| v.token == token));
+                let Some(viewer) = viewer.filter(|v| v.recent && v.first == Some(before)) else {
+                    return Routed::Answered(Response::Error(Error::Other(
+                        "Chat history is not attached at that turn".into(),
+                    )));
+                };
+                viewer.before = Some(before);
+                self.wait_for(
+                    token,
+                    at,
+                    Request::ChatHistory {
+                        terminal: remote,
+                        before,
+                    },
+                    Then::Pass,
+                )
             }
             Request::Detach { terminal } => {
                 let Some((at, _)) = self.relayed_terminal(terminal) else {
@@ -1610,6 +1698,20 @@ impl Daemon {
         }
     }
 
+    fn follow_request(&self, at: usize, local: TerminalId, remote: TerminalId) -> Request {
+        let Some(followed) = self.links.list[at].relayed.followed.get(&local) else {
+            return Request::Attach { terminal: remote };
+        };
+        if followed.viewers.iter().any(|v| !v.recent) {
+            Request::Attach { terminal: remote }
+        } else {
+            Request::AttachRecent {
+                terminal: remote,
+                first: followed.viewers.iter().filter_map(|v| v.first).min(),
+            }
+        }
+    }
+
     /// Has the client at `token` follow this daemon's terminal `local`, of
     /// the connection at `at`, from its next snapshot.
     fn follow(&mut self, token: Token, at: usize, local: TerminalId) {
@@ -1632,6 +1734,9 @@ impl Daemon {
                 snapshot_due: true,
                 sent: None,
                 stalled: false,
+                recent: false,
+                first: None,
+                before: None,
             }),
         }
     }
@@ -1689,7 +1794,7 @@ impl Daemon {
             }
         }
         if again {
-            let attach = ClientMessage::Request(Request::Attach { terminal: remote });
+            let attach = ClientMessage::Request(self.follow_request(at, terminal, remote));
             let _ = self.send_upstream(at, &attach, Expect::Nothing);
         }
         self.ack_if_drawn(at, terminal);
@@ -1863,14 +1968,19 @@ impl Daemon {
                 Some((local, TerminalId(remote)))
             })
             .collect();
+        let history_supported = self.link_wire(at) >= wire::CHAT_HISTORY;
         for (local, remote) in followed {
             if let Some(followed) = self.links.list[at].relayed.followed.get_mut(&local) {
                 followed.upstream = true;
                 for viewer in &mut followed.viewers {
                     viewer.snapshot_due = true;
+                    if !history_supported {
+                        viewer.recent = false;
+                        viewer.before = None;
+                    }
                 }
             }
-            let attach = ClientMessage::Request(Request::Attach { terminal: remote });
+            let attach = ClientMessage::Request(self.follow_request(at, local, remote));
             let _ = self.send_upstream(at, &attach, Expect::Nothing);
         }
         if relays {
@@ -2091,9 +2201,18 @@ impl Daemon {
                     continue;
                 };
                 let snapshot = head.is_view_snapshot();
-                let need = Need::PassOn {
-                    terminal: Some(local),
-                    wires,
+                let paged = self
+                    .links
+                    .find(&host)
+                    .and_then(|at| self.links.list[at].relayed.followed.get(&local))
+                    .is_some_and(|f| f.viewers.iter().any(|v| v.recent));
+                let need = if paged {
+                    Need::Decode
+                } else {
+                    Need::PassOn {
+                        terminal: Some(local),
+                        wires,
+                    }
                 };
                 (Route::View { local, snapshot }, need)
             } else if let Some((route, need)) = self.event_route(token, &head, &payload) {
@@ -2305,7 +2424,21 @@ impl Daemon {
             // One it couldn't be encoded for, as at a version it came too
             // late to unpack for, has missed it: it waits for a snapshot,
             // which following it again brings.
-            let Some(frame) = unpacked.for_wire(wire) else {
+            let frame = match unpacked {
+                Unpacked::Decoded(Ok(ServerMessage::Event(Event::View { update, .. }))) => {
+                    let update = viewer.history_update(update);
+                    frame::encode(
+                        wire,
+                        &ServerMessage::Event(Event::View {
+                            terminal: local,
+                            update,
+                        }),
+                    )
+                    .ok()
+                }
+                _ => unpacked.for_wire(wire).map(<[u8]>::to_vec),
+            };
+            let Some(frame) = frame else {
                 viewer.snapshot_due = true;
                 again = true;
                 continue;
@@ -2319,13 +2452,11 @@ impl Daemon {
             && let Some(remote) =
                 (self.links.list[at].relayed.mirror.terminal_numbers).remote(local.0)
         {
-            let attach = ClientMessage::Request(Request::Attach {
-                terminal: TerminalId(remote),
-            });
+            let attach = ClientMessage::Request(self.follow_request(at, local, TerminalId(remote)));
             let _ = self.send_upstream(at, &attach, Expect::Nothing);
         }
         for (token, frame) in sends {
-            self.queue_relayed_view(token, local, frame);
+            self.queue_relayed_view(token, local, &frame);
         }
         self.ack_if_drawn(at, local);
     }
@@ -3147,6 +3278,163 @@ mod tests {
         assert_eq!(
             answers(&mut from_daemon),
             [Response::Text("its own".into())]
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one two-client relay scenario through paging and a legacy attach"
+    )]
+    fn relayed_chat_history_keeps_each_viewers_range_and_legacy_attach() {
+        use clackatoo_protocol::{ChatNode, ChatPatch, Item, Node, Turn, View};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there) = linked(dir.path());
+        let (phone, mut to_phone) = client(&mut daemon);
+        let (desktop, mut to_desktop) = client(&mut daemon);
+        let local = terminal(&daemon);
+        let remote = TerminalId(7);
+        let full = ChatNode {
+            turns: (0..24)
+                .map(|i| Turn {
+                    prompt: i.to_string(),
+                    sent: 0,
+                    items: vec![Item::Words("answer".into())],
+                    end: None,
+                    files: None,
+                    from: None,
+                    switch: None,
+                    previews: vec![],
+                })
+                .collect(),
+            ..ChatNode::default()
+        };
+        let snapshot = |node| {
+            ServerMessage::Event(Event::View {
+                terminal: remote,
+                update: ViewUpdate::Snapshot(View {
+                    title: "chat".into(),
+                    cwd: None,
+                    root: Node::Chat(Box::new(node)),
+                }),
+            })
+        };
+        let views = |stream: &mut UnixStream| {
+            read::<ServerMessage>(stream)
+                .into_iter()
+                .filter_map(|m| match m {
+                    ServerMessage::Event(Event::View { update, .. }) => Some(update),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        daemon.route_request(
+            phone,
+            Request::AttachRecent {
+                terminal: local,
+                first: None,
+            },
+        );
+        assert_eq!(
+            heard(&mut there),
+            [ClientMessage::Request(Request::AttachRecent {
+                terminal: remote,
+                first: None
+            })]
+        );
+        say(&mut there, &ServerMessage::Response(Response::Done));
+        say(&mut there, &snapshot(full.since_turn(None)));
+        daemon.read_reached(link, Reading::Look);
+        let first = views(&mut to_phone);
+        assert!(
+            matches!(&first[..], [ViewUpdate::Snapshot(v)] if v.chat().unwrap().first_turn == 16)
+        );
+        daemon.relayed_frame_done(phone, local);
+        heard(&mut there);
+        // Another recent viewer gets a small snapshot without losing the first viewer's range.
+        daemon.route_request(
+            desktop,
+            Request::AttachRecent {
+                terminal: local,
+                first: None,
+            },
+        );
+        assert_eq!(
+            heard(&mut there),
+            [ClientMessage::Request(Request::AttachRecent {
+                terminal: remote,
+                first: Some(16)
+            })]
+        );
+        say(&mut there, &ServerMessage::Response(Response::Done));
+        say(&mut there, &snapshot(full.since_turn(Some(16))));
+        daemon.read_reached(link, Reading::Look);
+        views(&mut to_phone);
+        views(&mut to_desktop);
+        daemon.relayed_frame_done(phone, local);
+        daemon.relayed_frame_done(desktop, local);
+        heard(&mut there);
+        daemon.route_request(
+            phone,
+            Request::ChatHistory {
+                terminal: local,
+                before: 16,
+            },
+        );
+        assert_eq!(
+            heard(&mut there),
+            [ClientMessage::Request(Request::ChatHistory {
+                terminal: remote,
+                before: 16
+            })]
+        );
+        say(&mut there, &ServerMessage::Response(Response::Done));
+        say(
+            &mut there,
+            &ServerMessage::Event(Event::View {
+                terminal: remote,
+                update: ViewUpdate::Patch(vec![
+                    Patch::Chat(ChatPatch::History {
+                        first: 8,
+                        before: 16,
+                        messages_before: 8,
+                        turns: full.turns[8..16].to_vec(),
+                    }),
+                    Patch::Chat(ChatPatch::Append {
+                        turn: 23,
+                        item: 0,
+                        text: " live".into(),
+                    }),
+                ]),
+            }),
+        );
+        daemon.read_reached(link, Reading::Look);
+        assert!(matches!(&views(&mut to_phone)[..], [ViewUpdate::Patch(p)] if p.len() == 2));
+        assert!(matches!(&views(&mut to_desktop)[..], [ViewUpdate::Patch(p)] if p.len() == 1));
+        assert_eq!(
+            daemon.follow_request(0, local, remote),
+            Request::AttachRecent {
+                terminal: remote,
+                first: Some(8)
+            }
+        );
+        daemon.relayed_frame_done(phone, local);
+        daemon.relayed_frame_done(desktop, local);
+        heard(&mut there);
+        // A legacy attach gets the whole history; the phone keeps only its loaded range.
+        daemon.route_request(desktop, Request::Attach { terminal: local });
+        assert_eq!(
+            heard(&mut there),
+            [ClientMessage::Request(Request::Attach { terminal: remote })]
+        );
+        say(&mut there, &ServerMessage::Response(Response::Done));
+        say(&mut there, &snapshot(full));
+        daemon.read_reached(link, Reading::Look);
+        assert!(
+            matches!(&views(&mut to_phone)[..], [ViewUpdate::Snapshot(v)] if v.chat().unwrap().first_turn == 8)
+        );
+        assert!(
+            matches!(&views(&mut to_desktop)[..], [ViewUpdate::Snapshot(v)] if v.chat().unwrap().first_turn == 0)
         );
     }
 

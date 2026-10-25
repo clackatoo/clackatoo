@@ -93,6 +93,7 @@ pub(super) struct Cache {
     /// asked for, as a turn's height has changed.
     bounds: Vec<[f32; 2]>,
     bounded: usize,
+    anchor: Option<(usize, f32)>,
     /// The turns laid out, to drop again once far from the view.
     laid: Vec<usize>,
     /// Text of the chat's own, such as that the agent couldn't start, by
@@ -103,6 +104,27 @@ pub(super) struct Cache {
     working: Option<working::WorkingLaid>,
     /// The box's own short lines, as its chips say, laid out.
     labels: Labels,
+}
+
+impl Cache {
+    pub(super) fn prepend(&mut self, count: usize, scroll: f32, follow: bool) {
+        if let Some((index, _)) = &mut self.anchor {
+            *index += count;
+        } else if !follow {
+            let index = in_view(&self.bounds, scroll, scroll).start;
+            let top = self.bounds.get(index).map_or(0.0, |b| b[0]);
+            self.anchor = Some((index + count, scroll - top));
+        }
+        self.turns
+            .splice(0..0, (0..count).map(|_| TurnSlot::default()));
+        for slot in &mut self.turns {
+            slot.stale = true;
+        }
+        for index in &mut self.laid {
+            *index += count;
+        }
+        self.bounded = 0;
+    }
 }
 
 /// Short lines of the box's own, such as its chips' labels and the
@@ -420,17 +442,24 @@ impl ChatView {
         // Out while they're laid out, which changes the cache, and back
         // after: not copied, as a long chat is a lot to copy every frame.
         let turns = std::mem::take(&mut self.node.turns);
-        let had = self.cache.turns.len();
         self.cache.turns.resize_with(turns.len(), TurnSlot::default);
         self.cache.bounded = self.cache.bounded.min(turns.len());
         // New turns, guessed at until they're laid out.
-        for (index, turn) in turns.iter().enumerate().skip(had) {
+        for (index, turn) in turns.iter().enumerate() {
+            if self.cache.turns[index].height.is_some() {
+                continue;
+            }
             let open = self.shape(index, turn).open;
             let divided = divider::divided(&turns, index).is_some();
             self.set_height(index, guess(m, column, turn, open, divided));
         }
         loop {
             self.update_bounds(m);
+            if let Some((index, offset)) = self.cache.anchor.take()
+                && let Some(bound) = self.cache.bounds.get(index)
+            {
+                self.scroll = bound[0] + offset;
+            }
             let content = (self.cache.bounds.last()).map_or(0.0, |bound| bound[1]) + m.em(1.5);
             self.max_scroll = (content - self.view_height).max(0.0);
             if self.follow {
@@ -2864,6 +2893,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn older_chat_pages_preserve_the_reading_anchor_and_fold_state() {
+        use clackatoo_protocol::{ChatPatch, Patch, ViewUpdate};
+        let mut fonts = crate::chat::fixtures::fonts();
+        let full = crate::chat::fixtures::long_chat(40);
+        let node = full.since_turn(Some(32));
+        let mut chat = ChatView::new("paged".into(), node);
+        crate::chat::fixtures::paint(&mut chat, &mut fonts);
+        assert_eq!(
+            chat.older_request(),
+            None,
+            "following live output does not fetch old turns"
+        );
+        chat.scroll_lines(f32::INFINITY);
+        crate::chat::fixtures::paint(&mut chat, &mut fonts);
+        chat.folds.insert(1, true);
+        let index = in_view(&chat.cache.bounds, chat.scroll, chat.scroll).start;
+        let offset = chat.cache.bounds[index][0] - chat.scroll;
+        assert_eq!(chat.older_request(), Some(32));
+        assert_eq!(chat.older_request(), None);
+        chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::History {
+            first: 24,
+            before: 32,
+            messages_before: 24,
+            turns: full.turns[24..32].to_vec(),
+        })]));
+        crate::chat::fixtures::paint(&mut chat, &mut fonts);
+        assert!((chat.cache.bounds[index + 8][0] - chat.scroll - offset).abs() < 1.0);
+        assert_eq!(chat.folds.get(&9), Some(&true));
+        assert_eq!(chat.first_turn(), 24);
+        assert!(!chat.follow);
     }
 
     #[test]

@@ -11,6 +11,8 @@ A pane can hold a chat with an agent, such as Claude Code, instead of a shell. Y
 
 Your messages are bubbles on the right. The agent's answers run the width of a column down the middle of the pane, with Markdown laid out as it's meant to look: headings in bold, lists, quotes, links in blue, code in the terminal's font on a background of its own, coloured as an editor colours it when its language is installed, and tables as a grid. Code, quotes and cards all start at the column's left edge.
 
+Long conversations open on recent turns. Scroll toward the top to fetch earlier turns a page at a time, keeping the message you're reading in place. This works in the window and web app, including chats on connected machines. Reconnecting retains the range you've loaded. Live output and file actions keep their original turn identities; to undo a specific older turn by number, load that turn first. Older daemons continue to send the full conversation.
+
 ## Opening a chat
 
 | | Does |

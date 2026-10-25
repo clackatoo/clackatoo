@@ -239,6 +239,8 @@ pub(crate) struct ChatView {
     scroll: f32,
     /// Whether the view stays at the end as the conversation grows.
     follow: bool,
+    history_pending: Option<u32>,
+    history_retry: Option<std::time::Instant>,
     /// The most the view can scroll, when last drawn.
     max_scroll: f32,
     /// The view's height, when last drawn.
@@ -438,6 +440,8 @@ impl ChatView {
             cache: paint::Cache::default(),
             scroll: 0.0,
             follow: true,
+            history_pending: None,
+            history_retry: None,
             max_scroll: 0.0,
             view_height: 0.0,
             line_height: 16.0,
@@ -493,6 +497,95 @@ impl ChatView {
         view
     }
 
+    pub(crate) fn first_turn(&self) -> u32 {
+        self.node.first_turn
+    }
+
+    pub(crate) fn older_request(&mut self) -> Option<u32> {
+        if self.offline
+            || self.node.first_turn == 0
+            || self.history_pending.is_some()
+            || (self.follow && self.max_scroll > 0.0)
+            || self.scroll > self.view_height.max(240.0)
+            || self
+                .history_retry
+                .is_some_and(|at| std::time::Instant::now() < at)
+        {
+            return None;
+        }
+        let before = self.node.first_turn;
+        self.history_pending = Some(before);
+        Some(before)
+    }
+
+    pub(crate) fn history_answer(&mut self, before: u32, response: clackatoo_protocol::Response) {
+        if let clackatoo_protocol::Response::Error(error) = response
+            && self.history_pending == Some(before)
+        {
+            self.history_pending = None;
+            self.history_retry =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
+            self.said = Some(format!("Could not load earlier messages: {error}"));
+        }
+    }
+
+    fn prepend_history(&mut self, count: usize) {
+        self.cache.prepend(count, self.scroll, self.follow);
+        self.folds = self.folds.drain().map(|(i, v)| (i + count, v)).collect();
+        self.open_agents = self.open_agents.drain().map(|i| i + count).collect();
+        self.table_scrolls = self
+            .table_scrolls
+            .drain()
+            .map(|((t, p, n), v)| ((t + count, p, n), v))
+            .collect();
+        if let Some(cursor) = &mut self.cursor {
+            cursor.text.turn += count;
+        }
+        if let Some(picked) = &mut self.picked {
+            picked.anchor.text.turn += count;
+            picked.head.text.turn += count;
+        }
+        for key in [&mut self.hovered_code, &mut self.copied_code]
+            .into_iter()
+            .flatten()
+        {
+            key.turn += count;
+        }
+        for turn in [&mut self.hovered_turn, &mut self.copied_answer]
+            .into_iter()
+            .flatten()
+        {
+            *turn += count;
+        }
+        for shown in &mut self.shown {
+            shown.key.turn += count;
+        }
+        for (hit, _) in &mut self.hits {
+            match hit {
+                Hit::Card(turn, _)
+                | Hit::Undo(turn)
+                | Hit::Redo(turn)
+                | Hit::Fold(turn)
+                | Hit::Agents(turn)
+                | Hit::CopyAnswer(turn) => *turn += count,
+                Hit::CopyCode(key) => key.turn += count,
+                _ => {}
+            }
+        }
+        for input in &mut self.queued {
+            match input {
+                Input::CopyRange(a, b, _) => {
+                    a.text.turn += count;
+                    b.text.turn += count;
+                }
+                Input::Act(ChatAction::Undo { turn, .. } | ChatAction::Redo { turn, .. }) => {
+                    *turn = turn.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Applies an update from the daemon.
     pub(crate) fn apply(&mut self, update: &ViewUpdate) {
         self.heard = Some(self.now());
@@ -500,6 +593,10 @@ impl ChatView {
         match update {
             ViewUpdate::Snapshot(view) => {
                 if let Some(chat) = view.chat() {
+                    if chat.first_turn < self.node.first_turn {
+                        self.prepend_history((self.node.first_turn - chat.first_turn) as usize);
+                    }
+                    self.history_pending = None;
                     chat.clone_into(&mut self.node);
                 }
                 view.title.clone_into(&mut self.title);
@@ -518,14 +615,34 @@ impl ChatView {
                             title.clone_into(&mut self.title);
                         }
                         clackatoo_protocol::Patch::Chat(patch) => {
-                            if let Some(turn) = touches(patch) {
+                            if let Some(turn) = touches(patch)
+                                .and_then(|t| t.checked_sub(self.node.first_turn as usize))
+                            {
                                 self.restyled(turn);
+                            }
+                            if let clackatoo_protocol::ChatPatch::History {
+                                first,
+                                before,
+                                turns,
+                                ..
+                            } = patch
+                            {
+                                if self.history_pending == Some(*before) {
+                                    self.history_pending = None;
+                                }
+                                if *before == self.node.first_turn
+                                    && first < before
+                                    && turns.len() == (before - first) as usize
+                                {
+                                    self.prepend_history(turns.len());
+                                }
                             }
                             // When a turn ended says whether the time
                             // shows over the next turn the chat didn't
                             // move to another agent in.
                             if let clackatoo_protocol::ChatPatch::Turn { index, .. } = patch
-                                && let Ok(index) = usize::try_from(*index)
+                                && let Some(index) =
+                                    index.checked_sub(self.node.first_turn).map(|i| i as usize)
                             {
                                 for next in index + 1..self.node.turns.len() {
                                     self.restyled(next);
@@ -538,7 +655,12 @@ impl ChatView {
                             if let clackatoo_protocol::ChatPatch::Subagents(new) = patch {
                                 let last = self.node.turns.len().saturating_sub(1);
                                 let turns: Vec<usize> = (self.node.subagents.iter().chain(new))
-                                    .map(|entry| (entry.turn as usize).min(last))
+                                    .filter_map(|entry| {
+                                        entry
+                                            .turn
+                                            .checked_sub(self.node.first_turn)
+                                            .map(|i| (i as usize).min(last))
+                                    })
                                     .collect();
                                 for turn in turns {
                                     self.restyled(turn);
@@ -607,6 +729,9 @@ impl ChatView {
     /// meanwhile, the chat says nothing of its agent working, and nothing
     /// it shows wakes the window to count.
     pub(crate) fn set_offline(&mut self, offline: bool) {
+        if offline {
+            self.history_pending = None;
+        }
         if self.offline && !offline && self.usage_modal {
             self.queued
                 .push(Input::Act(ChatAction::RefreshUsage { force: true }));
@@ -2219,7 +2344,8 @@ fn touches(patch: &clackatoo_protocol::ChatPatch) -> Option<usize> {
         | ChatPatch::Providers(_)
         | ChatPatch::Subagents(_)
         | ChatPatch::Delivery(_)
-        | ChatPatch::ProviderUsage(_) => None,
+        | ChatPatch::ProviderUsage(_)
+        | ChatPatch::History { .. } => None,
     }
 }
 

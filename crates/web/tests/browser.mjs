@@ -57,6 +57,14 @@ try {
   assert.deepEqual(await page.locator('canvas.image-preview').first().evaluate(c=>Array.from(c.getContext('2d').getImageData(0,0,1,1).data)),[35,90,65,255]);
   await noOverflow();
   await page.screenshot({path:`${output}/phone-chat.png`});
+  assert.equal(await page.locator('.turn').count(),8,'opening should only render the recent page');
+  assert.equal(await page.locator('.turn').first().getAttribute('data-turn'),'32');
+  const tightComposer=async()=>{
+    const gap=await page.locator('.composer').evaluate(e=>visualViewport.offsetTop+visualViewport.height-e.getBoundingClientRect().bottom);
+    assert(gap>=-1 && gap<=7,`composer bottom gap ${gap}px`);
+  };
+  await tightComposer();
+
   await page.locator('#message').fill('Draft survives navigation');
   await page.getByRole('button',{name:'All agents',exact:true}).click();
   await page.locator('.home .chat .title').filter({hasText:'Polish the mobile experience'}).click();
@@ -103,13 +111,22 @@ try {
   await page.screenshot({path:`${output}/phone-usage.png`});
   await page.keyboard.press('Escape');
   await page.locator('.conversation').evaluate(el=>el.scrollTop=0);
+  const anchor=page.locator('[data-turn="32"]');
+  const topBefore=await anchor.evaluate(e=>{e.dataset.retained='yes';return e.getBoundingClientRect().top;});
+  await page.waitForFunction(()=>document.querySelector('.turn')?.dataset.turn==='24');
+  assert.equal(await anchor.getAttribute('data-retained'),'yes','prepending recreated an existing turn');
+  assert(Math.abs((await anchor.boundingBox()).y-topBefore)<2,'history page moved the reading anchor');
+  assert.equal(await page.locator('.turn').count(),16);
+  assert(actions.includes('History 24 32'));
   await page.getByRole('button',{name:'↓ Latest',exact:true}).waitFor();
   await page.getByRole('button',{name:'↓ Latest',exact:true}).click();
   await page.waitForFunction(()=>{const e=document.querySelector('.conversation');return e.scrollTop+e.clientHeight>=e.scrollHeight-80;});
   await page.locator('.conversation').evaluate(el=>el.scrollTop=0);
+  await page.waitForFunction(()=>document.querySelector('.turn')?.dataset.turn==='16');
+  const scrollBeforeQueue=await page.locator('.conversation').evaluate(el=>el.scrollTop);
   await page.getByRole('button',{name:'Remove queued message',exact:true}).first().click();
   await page.getByText('Also check landscape mode',{exact:true}).waitFor({state:'hidden'});
-  assert(await page.locator('.conversation').evaluate(el=>el.scrollTop<100),'queue update moved the reading position');
+  assert(Math.abs(await page.locator('.conversation').evaluate(el=>el.scrollTop)-scrollBeforeQueue)<2,'queue update moved the reading position');
   await page.locator('#message').fill('Kept across reconnect');
   const sentBefore=actions.filter(a=>a.startsWith('Submit')).length;
   sockets.at(-1).close({code:1001,reason:'test disconnect'});
@@ -119,6 +136,23 @@ try {
   assert.equal(await page.locator('#message').inputValue(),'Kept across reconnect');
   assert.equal(actions.filter(a=>a.startsWith('Submit')).length,sentBefore,'reconnect resubmitted a message');
   await page.locator('#message').fill('');
+  assert.equal(await page.locator('.turn').first().getAttribute('data-turn'),'16','reconnect lost loaded history');
+  for (const expected of [8,0]) {
+    await page.locator('.conversation').evaluate(el=>el.scrollTop=0);
+    await page.waitForFunction(first=>document.querySelector('.turn')?.dataset.turn===String(first),expected);
+  }
+  assert.equal(await page.locator('.turn').count(),40);
+  await page.locator('.history-more').waitFor({state:'hidden'});
+  await page.evaluate(()=>{
+    Object.defineProperty(visualViewport,'height',{value:420,configurable:true});
+    Object.defineProperty(visualViewport,'offsetTop',{value:18,configurable:true});
+    visualViewport.dispatchEvent(new Event('resize'));
+  });
+  await tightComposer();
+  assert(await page.locator('.chat-page').evaluate(e=>e.classList.contains('keyboard-open')));
+  await page.evaluate(()=>{delete visualViewport.height;delete visualViewport.offsetTop;visualViewport.dispatchEvent(new Event('resize'));});
+  await tightComposer();
+  assert.equal(await page.locator('.chat-page').evaluate(e=>e.style.height),'','stale keyboard height survived');
   await page.setViewportSize({width:390,height:420});
   await page.locator('#message').focus();
   await page.waitForFunction(()=>{const r=document.querySelector('.send')?.getBoundingClientRect();return r && r.bottom<=420;});
@@ -160,6 +194,6 @@ try {
   await page.screenshot({path:`${output}/phone-terminal.png`});
   await noOverflow();
   assert.deepEqual(errors,[]);
-  console.log('PASS: dashboard filters/search; navigation and reload drafts; rejected delivery; native steering; global models/favorites/permissions/usage; scroll/latest; delayed acknowledgments; 320px/390px/keyboard/landscape/desktop layout; approvals; image pixels; terminal Fit.');
+  console.log('PASS: dashboard filters/search; navigation and reload drafts; rejected delivery; native steering; global models/favorites/permissions/usage; paged history/anchors/reconnect; scroll/latest; delayed acknowledgments; 320px/390px/keyboard/landscape/desktop layout; approvals; image pixels; terminal Fit.');
   await context.close();
 } finally { await browser.close(); server.close(); }

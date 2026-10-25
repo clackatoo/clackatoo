@@ -1268,7 +1268,8 @@ impl Desk {
         let new: Vec<TerminalId> = shown.difference(&self.attached).copied().collect();
         for terminal in new {
             self.attached.insert(terminal);
-            self.request(Request::Attach { terminal }, Asked::Quiet);
+            let first = self.panes.get(&terminal).and_then(Pane::first_chat_turn);
+            self.request(Request::AttachRecent { terminal, first }, Asked::Quiet);
         }
     }
 
@@ -1506,7 +1507,11 @@ impl Desk {
             self.reattaching.remove(&terminal);
         }
         if self.ask_again(Missed::View(terminal)) && self.reattaching.insert(terminal) {
-            self.request(Request::Attach { terminal }, Asked::Reattached(terminal));
+            let first = self.panes.get(&terminal).and_then(Pane::first_chat_turn);
+            self.request(
+                Request::AttachRecent { terminal, first },
+                Asked::Reattached(terminal),
+            );
         }
     }
 
@@ -4158,7 +4163,8 @@ mod tests {
         assert!(requests.contains(&Request::Detach {
             terminal: TerminalId(1)
         }));
-        assert!(requests.contains(&Request::Attach {
+        assert!(requests.contains(&Request::AttachRecent {
+            first: None,
             terminal: TerminalId(2)
         }));
 
@@ -5442,7 +5448,8 @@ mod tests {
         desk.missed_view(TerminalId(3), false);
         assert_eq!(
             answer_all(&mut desk),
-            [Request::Attach {
+            [Request::AttachRecent {
+                first: None,
                 terminal: TerminalId(3)
             }]
         );
@@ -5461,7 +5468,10 @@ mod tests {
         desk.connected(list(), false);
         answer_all(&mut desk);
         let terminal = TerminalId(3);
-        let attach = Request::Attach { terminal };
+        let attach = Request::AttachRecent {
+            first: None,
+            terminal,
+        };
         let snapshot = ViewUpdate::Snapshot(View::capture(&Terminal::new(
             Size::new(10, 2).unwrap(),
             &Config::default(),
@@ -5559,7 +5569,7 @@ mod tests {
             let sent = desk.take_outbox();
             requests(&sent)
                 .into_iter()
-                .filter(|request| matches!(request, Request::Attach { .. }))
+                .filter(|request| matches!(request, Request::AttachRecent { first: None, .. }))
                 .count()
         };
         // Refused: the next miss attaches again.

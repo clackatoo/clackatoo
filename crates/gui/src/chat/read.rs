@@ -336,7 +336,8 @@ impl ChatView {
             count => format!("{count} files"),
         };
         let doing = if redo { "Redoing" } else { "Undoing" };
-        let number = clackatoo_protocol::turn_number(&self.node.turns, turn).unwrap_or(turn + 1);
+        let number = clackatoo_protocol::turn_number(&self.node.turns, turn).unwrap_or(turn + 1)
+            + self.node.first_message as usize;
         self.say(format!("{doing} turn {number} ({files})"));
         let turn = u32::try_from(turn).unwrap_or(u32::MAX);
         self.queued.push(Input::Act(if redo {

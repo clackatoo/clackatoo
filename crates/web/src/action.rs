@@ -51,6 +51,7 @@ pub enum Action {
     Settings,
     Permissions,
     Latest,
+    OlderChat,
     Filter(HomeFilter),
     Steer,
     RemoveQueued(u64),
@@ -191,6 +192,7 @@ impl Action {
             Self::Settings => "settings".to_owned(),
             Self::Permissions => "permissions".to_owned(),
             Self::Latest => "latest".to_owned(),
+            Self::OlderChat => "older-chat".to_owned(),
             Self::Filter(filter) => format!("filter:{}", filter.name()),
             Self::Steer => "steer".to_owned(),
             Self::RemoveQueued(id) => format!("remove-queued:{id}"),
@@ -229,6 +231,7 @@ impl Action {
             ("settings", "") => Self::Settings,
             ("permissions", "") => Self::Permissions,
             ("latest", "") => Self::Latest,
+            ("older-chat", "") => Self::OlderChat,
             ("filter", name) => Self::Filter(
                 HomeFilter::ALL
                     .into_iter()

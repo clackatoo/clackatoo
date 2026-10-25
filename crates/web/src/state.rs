@@ -103,6 +103,8 @@ pub struct Dirty {
     pub turns: BTreeSet<usize>,
     /// Every turn: the chat is new, or came whole.
     pub all_turns: bool,
+    /// Older turns inserted before existing DOM nodes.
+    pub prepended: usize,
 }
 
 /// The chat shown.
@@ -117,6 +119,7 @@ pub struct OpenChat {
     /// A view update came that hasn't been acknowledged: once it's drawn,
     /// the daemon is told, and sends the next.
     unacknowledged: bool,
+    pub history_pending: Option<u32>,
 }
 
 /// What a request was for, to take in its answer, or say what went wrong
@@ -125,15 +128,24 @@ pub struct OpenChat {
 enum Asked {
     /// Nothing to say: its failure is only logged.
     Quiet,
+    ChatHistory {
+        terminal: TerminalId,
+        before: u32,
+    },
     /// Keep a draft until this exact submission is acknowledged.
-    Submitted { chat: TerminalId, text: String },
+    Submitted {
+        chat: TerminalId,
+        text: String,
+    },
     /// Something the user did, as "sending the message".
     Doing(&'static str),
     /// The list of terminals.
     Terminals,
     /// History of the terminal shown, while what it held was of this
     /// generation.
-    History { generation: u64 },
+    History {
+        generation: u64,
+    },
     /// Keys typed into the terminal shown.
     Typing,
     /// Fitting the terminal shown to this size, or putting it back.
@@ -223,11 +235,16 @@ impl State {
         self.list_terminals();
         self.outbox.push(ClientMessage::Present { here: self.here });
         if let Some(open) = &mut self.open {
-            open.view = None;
+            let first = open
+                .view
+                .as_ref()
+                .and_then(View::chat)
+                .map(|n| n.first_turn);
+            open.history_pending = None;
             open.unacknowledged = false;
             let terminal = open.id;
             self.request(
-                Request::Attach { terminal },
+                Request::AttachRecent { terminal, first },
                 Asked::Doing("opening the chat"),
             );
         }
@@ -331,6 +348,16 @@ impl State {
     fn failed(&mut self, err: &clackatoo_protocol::Error, asked: &Asked) {
         let note = match asked {
             Asked::Quiet => None,
+            Asked::ChatHistory { terminal, before } => {
+                if let Some(open) = self
+                    .open
+                    .as_mut()
+                    .filter(|o| o.id == *terminal && o.history_pending == Some(*before))
+                {
+                    open.history_pending = None;
+                }
+                Some(format!("Could not load earlier messages: {err}"))
+            }
             Asked::Doing(what) => Some(format!("Failed {what}: {err}")),
             Asked::Submitted { .. } => {
                 Some(format!("Message not sent: {err}. Your draft is kept."))
@@ -418,22 +445,42 @@ impl State {
         open.unacknowledged = true;
         match (&mut open.view, update) {
             (view, ViewUpdate::Snapshot(snapshot)) => {
+                let before = view
+                    .as_ref()
+                    .and_then(View::chat)
+                    .map_or(0, |n| n.first_turn);
+                let after = snapshot.chat().map_or(before, |n| n.first_turn);
+                self.dirty.prepended += before.saturating_sub(after) as usize;
                 *view = Some(snapshot);
+                open.history_pending = None;
                 self.dirty.all_turns = true;
                 self.dirty.header = true;
                 self.dirty.footer = true;
             }
             (Some(view), ViewUpdate::Patch(patches)) => {
-                for patch in &patches {
-                    mark(&mut self.dirty, patch);
-                }
                 let asking = |view: &View| view.chat().is_some_and(ChatNode::asking);
                 let was_asking = asking(view);
-                view.apply(ViewUpdate::Patch(patches));
+                for patch in patches {
+                    mark(&mut self.dirty, &patch);
+                    let first = view.chat().map_or(0, |n| n.first_turn);
+                    if let Patch::Chat(ChatPatch::History { before, .. }) = &patch
+                        && open.history_pending == Some(*before)
+                    {
+                        open.history_pending = None;
+                    }
+                    view.apply(ViewUpdate::Patch(vec![patch]));
+                    let after = view.chat().map_or(first, |n| n.first_turn);
+                    self.dirty.prepended += first.saturating_sub(after) as usize;
+                }
                 // The line the turn going folds its work under says
                 // whether the agent waits for you.
                 if asking(view) != was_asking {
-                    let going = view.chat().and_then(|chat| chat.turns.len().checked_sub(1));
+                    let going = view.chat().and_then(|chat| {
+                        chat.turns
+                            .len()
+                            .checked_sub(1)
+                            .map(|i| i + chat.first_turn as usize)
+                    });
                     self.dirty.turns.extend(going);
                 }
             }
@@ -454,10 +501,14 @@ impl State {
             view: None,
             folds: BTreeMap::new(),
             unacknowledged: false,
+            history_pending: None,
         });
         if self.online == Online::Open {
             self.request(
-                Request::Attach { terminal: id },
+                Request::AttachRecent {
+                    terminal: id,
+                    first: None,
+                },
                 Asked::Doing("opening the chat"),
             );
         }
@@ -762,6 +813,29 @@ impl State {
         }
     }
 
+    /// Fetch older chat turns once, on approaching the top of the transcript.
+    pub fn older_chat(&mut self) {
+        if self.online != Online::Open {
+            return;
+        }
+        let Some(open) = &mut self.open else {
+            return;
+        };
+        let Some(node) = open.view.as_ref().and_then(View::chat) else {
+            return;
+        };
+        if node.first_turn == 0 || open.history_pending.is_some() {
+            return;
+        }
+        let before = node.first_turn;
+        let terminal = open.id;
+        open.history_pending = Some(before);
+        self.request(
+            Request::ChatHistory { terminal, before },
+            Asked::ChatHistory { terminal, before },
+        );
+    }
+
     /// Asks the chat shown to do `action`, saying what failed as `doing`.
     pub fn chat(&mut self, action: ChatAction, doing: &'static str) {
         let Some(open) = &self.open else {
@@ -880,6 +954,7 @@ fn mark(dirty: &mut Dirty, patch: &Patch) {
         return;
     };
     match patch {
+        ChatPatch::History { .. } => {}
         ChatPatch::Turn { index, .. } => {
             dirty.turns.insert(*index as usize);
         }
@@ -948,6 +1023,78 @@ mod tests {
     }
 
     #[test]
+    fn chat_pages_are_requested_once_and_reconnect_retains_the_range() {
+        let mut state = State::default();
+        state.connected();
+        state.open_chat(TerminalId(4));
+        let full = ChatNode {
+            turns: (0..24).map(|i| turn(&i.to_string())).collect(),
+            ..ChatNode::default()
+        };
+        state.receive(ServerMessage::Event(Event::View {
+            terminal: TerminalId(4),
+            update: ViewUpdate::Snapshot(View {
+                title: "paged".into(),
+                cwd: None,
+                root: Node::Chat(Box::new(full.since_turn(None))),
+            }),
+        }));
+        state.take_outbox();
+        state.drawn();
+        state.take_outbox();
+        state.older_chat();
+        state.older_chat();
+        assert_eq!(
+            state.take_outbox(),
+            [ClientMessage::Request(Request::ChatHistory {
+                terminal: TerminalId(4),
+                before: 16
+            })]
+        );
+        state.receive(ServerMessage::Event(Event::View {
+            terminal: TerminalId(4),
+            update: ViewUpdate::Patch(vec![
+                Patch::Chat(ChatPatch::Append {
+                    turn: 23,
+                    item: 0,
+                    text: "live".into(),
+                }),
+                Patch::Chat(ChatPatch::History {
+                    first: 8,
+                    before: 16,
+                    messages_before: 8,
+                    turns: full.turns[8..16].to_vec(),
+                }),
+            ]),
+        }));
+        assert_eq!(state.dirty.prepended, 8);
+        assert!(state.dirty.turns.contains(&23));
+        let node = state
+            .open
+            .as_ref()
+            .unwrap()
+            .view
+            .as_ref()
+            .unwrap()
+            .chat()
+            .unwrap();
+        assert_eq!(
+            node.turns.last().unwrap().items,
+            [Item::Words("live".into())]
+        );
+        assert_eq!(node.first_turn, 8);
+        state.connected();
+        assert!(
+            state
+                .take_outbox()
+                .contains(&ClientMessage::Request(Request::AttachRecent {
+                    terminal: TerminalId(4),
+                    first: Some(8)
+                }))
+        );
+    }
+
+    #[test]
     fn connecting_says_hello_and_watches() {
         let mut state = State::default();
         state.open_chat(TerminalId(4));
@@ -967,7 +1114,8 @@ mod tests {
                 ClientMessage::Request(Request::WatchChats),
                 ClientMessage::Request(Request::ListTerminals),
                 ClientMessage::Present { here: true },
-                ClientMessage::Request(Request::Attach {
+                ClientMessage::Request(Request::AttachRecent {
+                    first: None,
                     terminal: TerminalId(4)
                 }),
             ]
@@ -1056,8 +1204,9 @@ mod tests {
                 ClientMessage::Request(Request::Detach {
                     terminal: TerminalId(4)
                 }),
-                ClientMessage::Request(Request::Attach {
-                    terminal: TerminalId(5)
+                ClientMessage::Request(Request::AttachRecent {
+                    terminal: TerminalId(5),
+                    first: None,
                 }),
             ]
         );
