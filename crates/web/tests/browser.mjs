@@ -275,10 +275,9 @@ try {
     await tightComposer();
     assert(!await page.locator('.chat-page').evaluate(e=>e.classList.contains('keyboard-open')),'keyboard inset survived dismissal');
   }
-  // Home Screen WebKit can exclude status-bar space from visualViewport even
-  // without a keyboard. Simulate that independently of the CSS viewport.
+  // Home Screen CSS vh can extend beyond the drawable web view. Never expand
+  // into that clipped area, even if the difference matches safe-area padding.
   await page.evaluate(()=>{
-    document.styleSheets[0].insertRule('.viewport-probe { padding-top:62px !important; padding-bottom:34px !important; }',0);
     document.querySelector('.chat-page').style.paddingTop='62px';
   });
   await page.evaluate(()=>{
@@ -287,8 +286,7 @@ try {
     visualViewport.dispatchEvent(new Event('resize'));
   });
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
-  await page.waitForFunction(()=>Math.abs(document.querySelector('.composer').getBoundingClientRect().bottom-(innerHeight-6))<2);
-  assert(!await page.locator('.chat-page').evaluate(e=>e.classList.contains('keyboard-open')),'status-bar inset mistaken for keyboard');
+  await tightComposer();
   await page.screenshot({path:`${output}/home-screen-composer.png`});
   await page.evaluate(()=>{
     Object.defineProperty(visualViewport,'height',{value:420,configurable:true});
@@ -300,7 +298,7 @@ try {
     Object.defineProperty(visualViewport,'height',{value:innerHeight-62,configurable:true});
     visualViewport.dispatchEvent(new Event('resize'));
   });
-  await page.waitForFunction(()=>Math.abs(document.querySelector('.composer').getBoundingClientRect().bottom-(innerHeight-6))<2);
+  await tightComposer();
   // Pinch zoom must still fit the visual viewport, even for a small reduction.
   await page.evaluate(()=>{
     Object.defineProperty(visualViewport,'scale',{value:1.1,configurable:true});
@@ -308,7 +306,6 @@ try {
   });
   await tightComposer();
   await page.evaluate(()=>{
-    document.styleSheets[0].deleteRule(0);
     document.querySelector('.chat-page').style.removeProperty('padding-top');
     delete navigator.standalone;delete visualViewport.height;delete visualViewport.scale;
     visualViewport.dispatchEvent(new Event('resize'));
