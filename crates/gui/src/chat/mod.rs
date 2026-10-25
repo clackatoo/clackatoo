@@ -25,6 +25,8 @@ mod read;
 mod shortcuts;
 mod viewer;
 
+use crate::shortcuts::bindings::Hint;
+
 use clackatoo_protocol::{
     ChatAction, ChatNode, ChatState, ChoiceKind, ProviderModels, Setting, SettingKind,
     TurnFilesState, ViewUpdate,
@@ -1310,10 +1312,6 @@ impl ChatView {
     }
 
     /// A key typed into the chat in insert mode.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "dispatches composer editing and control keys"
-    )]
     fn typed(
         &mut self,
         fonts: &mut Fonts,
@@ -1329,107 +1327,178 @@ impl ChatView {
             self.answer_key(key, text, modifiers, settled);
             return;
         }
-        let (shift, ctrl) = (modifiers.shift, modifiers.ctrl);
-        // Shift+Tab steps through the agent's modes, as in Claude Code.
-        if shift && *key == Key::Named(NamedKey::Tab) {
-            self.next_mode(settled);
-            return;
+        self.composer_key(key, modifiers, fonts, text, settled);
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        fn composer_key / describe_composer_key(&mut self, key: &Key, modifiers: Modifiers) -> ();
+        execute(fonts: &mut Fonts, text: Option<&str>, settled: &mut Settled);
+        prepare {
+            let (shift, ctrl) = (modifiers.shift, modifiers.ctrl);
+            let character = match key {
+                Key::Character(character) => Some(character.as_str()),
+                _ => None,
+            };
         }
-        let character = match key {
-            Key::Character(character) => Some(character.as_str()),
-            _ => None,
-        };
-        match (key, character) {
-            (Key::Named(NamedKey::Enter), _) if !shift || ctrl && self.queue_supported => {
-                self.send_or_steer(ctrl, settled);
-            }
-            (Key::Named(NamedKey::Enter), _) => {
-                self.drive(fonts, |driver| driver.insert_or_replace_selection("\n"));
-            }
+        match (key, character) => {
+            (Key::Named(NamedKey::Tab), _) if shift =>
+                Hint::Action("Cycle agent modes"),
+                {
+                    self.next_mode(settled);
+                };
+            (Key::Named(NamedKey::Enter), _) if !shift || ctrl && self.queue_supported =>
+                Hint::Action(if ctrl && self.queue_supported && self.busy() {
+                    "Steer current turn"
+                } else if self.busy() && self.queue_supported {
+                    "Queue message"
+                } else {
+                    "Send message"
+                }),
+                {
+                    self.send_or_steer(ctrl, settled);
+                };
+            (Key::Named(NamedKey::Enter), _) =>
+                Hint::Action("New line"),
+                {
+                    self.drive(fonts, |driver| driver.insert_or_replace_selection("\n"));
+                };
             (Key::Named(NamedKey::Backspace), _)
                 if self.editor.raw_text().is_empty() && !self.images.is_empty() =>
-            {
-                self.images.pop();
-            }
-            (Key::Named(NamedKey::Backspace), _) => self.drive(fonts, |driver| {
-                if ctrl {
-                    driver.backdelete_word();
+                Hint::Action("Remove last attached image"),
+                {
+                    self.images.pop();
+                };
+            (Key::Named(NamedKey::Backspace), _) =>
+                Hint::Action(if ctrl {
+                    "Delete previous word"
                 } else {
-                    driver.backdelete();
-                }
-            }),
-            (Key::Named(NamedKey::Delete), _) => self.drive(fonts, |driver| {
-                if ctrl {
-                    driver.delete_word();
-                } else {
-                    driver.delete();
-                }
-            }),
-            (Key::Named(named @ (NamedKey::ArrowLeft | NamedKey::ArrowRight)), _) => {
-                let left = *named == NamedKey::ArrowLeft;
-                self.drive(fonts, |driver| match (left, ctrl, shift) {
-                    (true, true, true) => driver.select_word_left(),
-                    (true, true, false) => driver.move_word_left(),
-                    (true, false, true) => driver.select_left(),
-                    (true, false, false) => driver.move_left(),
-                    (false, true, true) => driver.select_word_right(),
-                    (false, true, false) => driver.move_word_right(),
-                    (false, false, true) => driver.select_right(),
-                    (false, false, false) => driver.move_right(),
-                });
-            }
-            (Key::Named(named @ (NamedKey::ArrowUp | NamedKey::ArrowDown)), _) => {
-                let up = *named == NamedKey::ArrowUp;
-                self.drive(fonts, |driver| match (up, shift) {
-                    (true, true) => driver.select_up(),
-                    (true, false) => driver.move_up(),
-                    (false, true) => driver.select_down(),
-                    (false, false) => driver.move_down(),
-                });
-            }
-            (Key::Named(NamedKey::Home), _) => self.drive(fonts, |driver| {
-                if shift {
-                    driver.select_to_line_start();
-                } else {
-                    driver.move_to_line_start();
-                }
-            }),
-            (Key::Named(NamedKey::End), _) => self.drive(fonts, |driver| {
-                if shift {
-                    driver.select_to_line_end();
-                } else {
-                    driver.move_to_line_end();
-                }
-            }),
-            (_, Some("a" | "A")) if ctrl => self.drive(fonts, |driver| {
-                driver.select_all();
-            }),
-            // Ctrl+C copies what's selected, or else stops the agent, as
-            // in a terminal.
-            // Ctrl+C copies what's selected in the message, or else stops
-            // the agent, as in a terminal; with the agent idle, it copies
-            // what's selected in the conversation. Text left selected
-            // there never keeps Ctrl+C from stopping it.
-            (_, Some("c" | "C")) if ctrl => match self.editor.selected_text() {
-                Some(selected) if !selected.is_empty() => {
-                    settled.copied.push((selected.to_owned(), Copy::Clipboard));
-                }
-                _ if self.stoppable() => settled.actions.push(ChatAction::Stop),
-                _ => {
-                    if let Some((start, end)) = self.picked_range() {
-                        let text = self.text_between(fonts, start, end);
-                        settled.copied.push((text, Copy::Clipboard));
-                        self.picked = None;
+                    "Delete previous character"
+                }),
+                self.drive(fonts, |driver| {
+                    if ctrl {
+                        driver.backdelete_word();
+                    } else {
+                        driver.backdelete();
                     }
-                }
-            },
-            _ if ctrl || modifiers.alt => {}
-            _ => {
-                if let Some(text) = text.filter(|text| !text.chars().any(char::is_control)) {
-                    self.drive(fonts, |driver| driver.insert_or_replace_selection(text));
-                }
-            }
+                });
+            (Key::Named(NamedKey::Delete), _) =>
+                Hint::Action(if ctrl {
+                    "Delete next word"
+                } else {
+                    "Delete next character"
+                }),
+                self.drive(fonts, |driver| {
+                    if ctrl {
+                        driver.delete_word();
+                    } else {
+                        driver.delete();
+                    }
+                });
+            (Key::Named(named @ (NamedKey::ArrowLeft | NamedKey::ArrowRight)), _) =>
+                Hint::Action(match (ctrl, shift) {
+                    (true, true) => "Extend selection by word",
+                    (true, false) => "Move by words",
+                    (false, true) => "Extend selection by character",
+                    (false, false) => "Move caret horizontally",
+                }),
+                {
+                    let left = *named == NamedKey::ArrowLeft;
+                    self.drive(fonts, |driver| match (left, ctrl, shift) {
+                        (true, true, true) => driver.select_word_left(),
+                        (true, true, false) => driver.move_word_left(),
+                        (true, false, true) => driver.select_left(),
+                        (true, false, false) => driver.move_left(),
+                        (false, true, true) => driver.select_word_right(),
+                        (false, true, false) => driver.move_word_right(),
+                        (false, false, true) => driver.select_right(),
+                        (false, false, false) => driver.move_right(),
+                    });
+                };
+            (Key::Named(named @ (NamedKey::ArrowUp | NamedKey::ArrowDown)), _) =>
+                Hint::Action(if shift {
+                    "Extend selection vertically"
+                } else {
+                    "Move caret vertically"
+                }),
+                {
+                    let up = *named == NamedKey::ArrowUp;
+                    self.drive(fonts, |driver| match (up, shift) {
+                        (true, true) => driver.select_up(),
+                        (true, false) => driver.move_up(),
+                        (false, true) => driver.select_down(),
+                        (false, false) => driver.move_down(),
+                    });
+                };
+            (Key::Named(NamedKey::Home), _) =>
+                Hint::Action(if shift {
+                    "Select to line start"
+                } else {
+                    "Start of line"
+                }),
+                self.drive(fonts, |driver| {
+                    if shift {
+                        driver.select_to_line_start();
+                    } else {
+                        driver.move_to_line_start();
+                    }
+                });
+            (Key::Named(NamedKey::End), _) =>
+                Hint::Action(if shift {
+                    "Select to line end"
+                } else {
+                    "End of line"
+                }),
+                self.drive(fonts, |driver| {
+                    if shift {
+                        driver.select_to_line_end();
+                    } else {
+                        driver.move_to_line_end();
+                    }
+                });
+            (_, Some("a" | "A")) if ctrl =>
+                Hint::Action("Select draft"),
+                self.drive(fonts, |driver| {
+                    driver.select_all();
+                });
+            (_, Some("c" | "C")) if ctrl =>
+                Hint::Action(
+                    if self
+                        .editor
+                        .selected_text()
+                        .is_some_and(|text| !text.is_empty())
+                    {
+                        "Copy draft selection"
+                    } else if self.stoppable() {
+                        "Stop agent"
+                    } else {
+                        "Copy conversation selection"
+                    },
+                ),
+                match self.editor.selected_text() {
+                    Some(selected) if !selected.is_empty() => {
+                        settled.copied.push((selected.to_owned(), Copy::Clipboard));
+                    }
+                    _ if self.stoppable() => settled.actions.push(ChatAction::Stop),
+                    _ => {
+                        if let Some((start, end)) = self.picked_range() {
+                            let text = self.text_between(fonts, start, end);
+                            settled.copied.push((text, Copy::Clipboard));
+                            self.picked = None;
+                        }
+                    }
+                };
+            _ if ctrl || modifiers.alt =>
+                Hint::None,
+                {};
+            _ =>
+                Hint::Text("Compose message"),
+                {
+                    if let Some(text) = text.filter(|text| !text.chars().any(char::is_control)) {
+                        self.drive(fonts, |driver| driver.insert_or_replace_selection(text));
+                    }
+                };
         }
+        then ()
     }
 
     /// Sends the message typed, unless the agent is still answering the
@@ -1591,76 +1660,112 @@ impl ChatView {
     /// key, which then does what it would have. Returns whether it took
     /// the key.
     fn menu_key(&mut self, key: &Key, modifiers: Modifiers, settled: &mut Settled) -> bool {
-        let Some(menu) = self.menu.clone() else {
+        if self.menu.is_none() {
             return false;
-        };
-        if picker::offers_models(&self.offer(), &menu) {
-            let edited = match key {
-                Key::Character(_) if modifiers.ctrl || modifiers.alt => return true,
-                Key::Character(text) => {
-                    self.append_search(text);
-                    true
-                }
-                Key::Named(NamedKey::Backspace) => {
-                    self.menu.as_mut().unwrap().query.pop();
-                    true
-                }
-                _ => false,
-            };
-            if edited {
-                self.search_changed();
-                return true;
-            }
         }
+        if self.model_search_key(key, modifiers) {
+            return true;
+        }
+        let menu = self.menu.clone().expect("menu checked above");
         let rows = self.choice_rows(&menu);
         let spots: Vec<Spot> = rows.iter().filter_map(Row::spot).collect();
-        let at = (menu.highlighted.as_ref())
+        let at = menu
+            .highlighted
+            .as_ref()
             .and_then(|highlighted| spots.iter().position(|spot| spot == highlighted));
-        match key {
-            Key::Named(direction @ (NamedKey::ArrowUp | NamedKey::ArrowDown)) => {
-                if spots.is_empty() {
-                    return true;
-                }
-                let last = spots.len() - 1;
-                let next = match (at, *direction == NamedKey::ArrowUp) {
-                    (None, true) => last,
-                    (None, false) => 0,
-                    (Some(at), true) => at.checked_sub(1).unwrap_or(last),
-                    (Some(at), false) => {
-                        if at == last {
-                            0
-                        } else {
-                            at + 1
-                        }
-                    }
+        self.menu_choice_key(key, menu, rows, spots, at, settled)
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        fn model_search_key / describe_model_search_key(&mut self, key: &Key, modifiers: Modifiers) -> bool;
+        match key => {
+            _ if !self.searching_models() =>
+                Hint::None,
+                return false;
+            Key::Character(_) if modifiers.ctrl || modifiers.alt =>
+                Hint::None,
+                return true;
+            Key::Character(text) =>
+                Hint::Text("Search all models, favourites first"),
+                self.append_search(text);
+            Key::Named(NamedKey::Backspace) =>
+                Hint::Action("Delete last search character"),
+                {
+                    self.menu.as_mut().unwrap().query.pop();
                 };
-                if let Some(menu) = &mut self.menu {
-                    menu.highlighted = Some(spots[next].clone());
-                    menu.reveal = true;
-                }
-                true
-            }
-            Key::Named(direction @ (NamedKey::ArrowLeft | NamedKey::ArrowRight)) => {
-                let row = (rows.iter()).find(|row| row.spot() == menu.highlighted);
-                self.sideways(&rows, row, *direction == NamedKey::ArrowRight, settled);
-                true
-            }
-            Key::Named(NamedKey::Enter) => {
-                if let Some(Spot::Choice { setting, value }) = menu.highlighted {
-                    self.choose(setting, value, settled);
-                }
-                self.menu = None;
-                true
-            }
-            Key::Named(NamedKey::Escape) => {
-                self.menu = None;
-                true
-            }
-            _ => {
-                self.menu = None;
-                false
-            }
+            _ =>
+                Hint::None,
+                return false;
         }
+        then {
+            self.search_changed();
+            true
+        }
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        fn menu_choice_key / describe_menu_choice_key(&mut self, key: &Key) -> bool;
+        execute(menu: Menu, rows: Vec<Row>, spots: Vec<Spot>, at: Option<usize>, settled: &mut Settled);
+        match key => {
+            Key::Named(direction @ (NamedKey::ArrowUp | NamedKey::ArrowDown)) =>
+                Hint::Action(if *direction == NamedKey::ArrowUp {
+                    "Previous choice"
+                } else {
+                    "Next choice"
+                }),
+                {
+                    if spots.is_empty() {
+                        return true;
+                    }
+                    let last = spots.len() - 1;
+                    let next = match (at, *direction == NamedKey::ArrowUp) {
+                        (None, true) => last,
+                        (None, false) => 0,
+                        (Some(at), true) => at.checked_sub(1).unwrap_or(last),
+                        (Some(at), false) => {
+                            if at == last {
+                                0
+                            } else {
+                                at + 1
+                            }
+                        }
+                    };
+                    if let Some(menu) = &mut self.menu {
+                        menu.highlighted = Some(spots[next].clone());
+                        menu.reveal = true;
+                    }
+                    true
+                };
+            Key::Named(direction @ (NamedKey::ArrowLeft | NamedKey::ArrowRight)) =>
+                Hint::Action("Adjust value or expand model family"),
+                {
+                    let row = (rows.iter()).find(|row| row.spot() == menu.highlighted);
+                    self.sideways(&rows, row, *direction == NamedKey::ArrowRight, settled);
+                    true
+                };
+            Key::Named(NamedKey::Enter) =>
+                Hint::Action("Choose highlighted item"),
+                {
+                    if let Some(Spot::Choice { setting, value }) = menu.highlighted {
+                        self.choose(setting, value, settled);
+                    }
+                    self.menu = None;
+                    true
+                };
+            Key::Named(NamedKey::Escape) =>
+                Hint::Action("Close popup"),
+                {
+                    self.menu = None;
+                    true
+                };
+            _ =>
+                Hint::None,
+                {
+                    self.menu = None;
+                    false
+                };
+        }
+        result
     }
 
     /// An open popup owns its keys before pane-mode bindings see them.
@@ -1683,31 +1788,43 @@ impl ChatView {
         self.modal_key(press.key, crate::vim::enters_normal_mode(press))
     }
 
-    fn modal_key(&mut self, key: &Key, normal: bool) -> bool {
-        if !self.viewing_modal() {
-            return false;
-        }
-        if *key == Key::Named(NamedKey::Escape) || normal {
-            self.image_viewer = None;
-            self.usage_modal = false;
-        } else if self.usage_modal {
-            match key {
-                Key::Named(NamedKey::ArrowDown) => {
+    crate::shortcuts::bindings::described_keys! {
+        fn modal_key / describe_modal_key(&mut self, key: &Key, normal: bool) -> bool;
+        match (key, normal) => {
+            _ if !self.viewing_modal() =>
+                Hint::None,
+                return false;
+            (Key::Named(NamedKey::Escape), _) | (_, true) =>
+                Hint::Action("Close modal"),
+                {
+                    self.image_viewer = None;
+                    self.usage_modal = false;
+                };
+            (Key::Named(NamedKey::ArrowDown), _) if self.usage_modal =>
+                Hint::Action("Scroll limits down"),
+                {
                     self.scroll_by(40.0);
-                }
-                Key::Named(NamedKey::ArrowUp) => {
+                };
+            (Key::Named(NamedKey::ArrowUp), _) if self.usage_modal =>
+                Hint::Action("Scroll limits up"),
+                {
                     self.scroll_by(-40.0);
-                }
-                Key::Named(NamedKey::PageDown) => {
+                };
+            (Key::Named(NamedKey::PageDown), _) if self.usage_modal =>
+                Hint::Action("Page down"),
+                {
                     self.scroll_by(240.0);
-                }
-                Key::Named(NamedKey::PageUp) => {
+                };
+            (Key::Named(NamedKey::PageUp), _) if self.usage_modal =>
+                Hint::Action("Page up"),
+                {
                     self.scroll_by(-240.0);
-                }
-                _ => {}
-            }
+                };
+            _ =>
+                Hint::None,
+                {};
         }
-        true
+        then true
     }
 
     pub(crate) fn menu_press(&mut self, press: &KeyPress<'_>) -> bool {

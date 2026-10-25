@@ -20,6 +20,8 @@
 //! `:normal` over a range, which types its keys on each line, as Vim's
 //! does.
 
+use crate::shortcuts::bindings::Hint;
+
 use clackatoo_text::Edit;
 
 use super::marked::Marked;
@@ -908,35 +910,47 @@ impl Editor {
         }
     }
 
-    /// A key typed while `:s///c` asks about a match: `y` replaces it, `l`
-    /// replaces it and stops, `n` leaves it, `a` replaces it and all the
-    /// rest, `q` and Esc stop, and Ctrl+E and Ctrl+Y scroll.
-    pub(super) fn confirm_stroke(&mut self, stroke: crate::vim::Stroke, copy: &mut BufferCopy) {
-        use crate::vim::Stroke;
-        match stroke {
+    // A key typed while `:s//c` asks about a match: `y` replaces it, `l`
+    // replaces it and stops, `n` leaves it, `a` replaces it and all the
+    // rest, `q` and Esc stop, and Ctrl+E and Ctrl+Y scroll.
+    crate::shortcuts::bindings::described_keys! {
+        pub(super) fn confirm_stroke / describe_confirm_stroke(&mut self, stroke: crate::vim::Stroke) -> ();
+        execute(copy: &mut BufferCopy);
+        prepare {
+            use crate::vim::Stroke;
+        }
+        match stroke => {
             Stroke::Char {
                 ch: 'y',
                 ctrl: false,
-            } => self.replace_asked(1, copy),
+            } =>
+                Hint::Action("Replace this match"),
+                self.replace_asked(1, copy);
             Stroke::Char {
                 ch: 'l',
                 ctrl: false,
-            } => {
-                self.replace_asked(1, copy);
-                return self.finish_confirming(copy);
-            }
+            } =>
+                Hint::Action("Replace this match and stop"),
+                {
+                    self.replace_asked(1, copy);
+                    return self.finish_confirming(copy);
+                };
             Stroke::Char {
                 ch: 'a',
                 ctrl: false,
-            } => self.replace_asked(usize::MAX, copy),
+            } =>
+                Hint::Action("Replace all remaining matches"),
+                self.replace_asked(usize::MAX, copy);
             Stroke::Char {
                 ch: 'n',
                 ctrl: false,
-            } => {
-                if let Some(Prompt::Confirm(confirming)) = &mut self.prompt {
-                    confirming.asked.pop_front();
-                }
-            }
+            } =>
+                Hint::Action("Skip this match"),
+                {
+                    if let Some(Prompt::Confirm(confirming)) = &mut self.prompt {
+                        confirming.asked.pop_front();
+                    }
+                };
             Stroke::Char {
                 ch: 'q',
                 ctrl: false,
@@ -945,18 +959,26 @@ impl Editor {
             | Stroke::Char {
                 ch: 'c',
                 ctrl: true,
-            } => return self.finish_confirming(copy),
+            } =>
+                Hint::Action("Stop replacing"),
+                return self.finish_confirming(copy);
             Stroke::Char {
                 ch: 'e',
                 ctrl: true,
-            } => return self.wheel(1, copy),
+            } =>
+                Hint::Action("Scroll down"),
+                return self.wheel(1, copy);
             Stroke::Char {
                 ch: 'y',
                 ctrl: true,
-            } => return self.wheel(-1, copy),
-            _ => return,
+            } =>
+                Hint::Action("Scroll up"),
+                return self.wheel(-1, copy);
+            _ =>
+                Hint::None,
+                return;
         }
-        self.show_asked(copy);
+        then self.show_asked(copy)
     }
 
     /// Replaces the next `times` matches `:s///c` asks about, as one edit,

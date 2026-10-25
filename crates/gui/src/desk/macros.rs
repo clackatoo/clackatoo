@@ -483,7 +483,7 @@ impl Desk {
     /// `q` in a terminal's normal mode stops the macro being recorded, as
     /// it does in an editor's. Returns whether it did.
     pub(super) fn stop_recording_in_terminal(&mut self, press: &KeyPress<'_>) -> bool {
-        if self.recording().is_none() || Chord::of(press) != Some(Chord::typed('q')) {
+        if self.recording().is_none() || Chord::of(press) != Some(crate::vim::RECORD_STOP.chord()) {
             return false;
         }
         let terminal = (self.focused_terminal())

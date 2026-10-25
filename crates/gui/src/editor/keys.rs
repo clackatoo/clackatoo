@@ -71,6 +71,48 @@ pub(crate) struct EditorKeys {
 impl Dialect for EditorKeys {
     type Own = EditorAction;
 
+    fn describe(&self, action: EditorAction) -> String {
+        let text = match action {
+            EditorAction::Diagnostic { backward: false } => "Next diagnostic",
+            EditorAction::Diagnostic { backward: true } => "Previous diagnostic",
+            EditorAction::Hunk { backward: false } => "Next change hunk",
+            EditorAction::Hunk { backward: true } => "Previous change hunk",
+            EditorAction::Piece {
+                construct,
+                backward,
+            } => {
+                return format!(
+                    "{} {}",
+                    if backward { "Previous" } else { "Next" },
+                    match construct {
+                        Construct::Function => "function",
+                        Construct::Class => "class",
+                        Construct::Argument => "argument",
+                    }
+                );
+            }
+            EditorAction::Ask(query) => match query {
+                Query::Definition => "Go to definition",
+                Query::Declaration => "Go to declaration",
+                Query::TypeDefinition => "Go to type definition",
+                Query::Implementation => "Find implementations",
+                Query::References => "Find references",
+                _ => "Ask language server",
+            },
+            EditorAction::Hover => "Show hover information",
+            EditorAction::ShowDiagnostics => "Show diagnostics at cursor",
+            EditorAction::Rename => "Rename symbol",
+            EditorAction::CodeActions => "Show code actions",
+            EditorAction::FormatSelection => "Format selection",
+            EditorAction::Record(_) => "Record macro in register",
+            EditorAction::Replay(_) => "Replay register",
+            EditorAction::RepeatSubstitute { all: false } => "Repeat substitution on line",
+            EditorAction::RepeatSubstitute { all: true } => "Repeat substitution throughout file",
+            EditorAction::Escape => "Cancel command or selection",
+        };
+        text.into()
+    }
+
     fn tildeop(&self) -> bool {
         self.tildeop
     }
@@ -95,8 +137,13 @@ impl Dialect for EditorKeys {
             Stroke::Char { ch, ctrl: false } => match ch {
                 'K' => Read::Yes(EditorAction::Hover),
                 '&' => Read::Yes(EditorAction::RepeatSubstitute { all: false }),
-                'q' => keys.then(|name| name.is_ascii_alphanumeric(), EditorAction::Record),
+                'q' => keys.then(
+                    "register",
+                    |name| name.is_ascii_alphanumeric(),
+                    EditorAction::Record,
+                ),
                 '@' => keys.then(
+                    "register",
                     |name| (is_register(name) && name != '_') || name == '@',
                     EditorAction::Replay,
                 ),

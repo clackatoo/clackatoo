@@ -31,6 +31,8 @@
 pub(crate) mod rank;
 pub(crate) mod view;
 
+use crate::shortcuts::bindings::Hint;
+
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -654,52 +656,106 @@ impl Finder {
             }
             _ => None,
         };
-        let background = self.kind == Kind::Background;
-        match (press.key, ctrl(press)) {
-            (Key::Named(NamedKey::Escape), _) | (_, Some('c')) => Outcome::Close,
-            (Key::Named(NamedKey::Enter), _) => self.open(Place::Here),
-            // A background tab comes back as a tab, however it's opened.
-            (_, Some('v' | 'x' | 't')) if background => self.open(Place::Here),
-            (_, Some('d')) if background => match self.picked() {
-                Some(entry) => Outcome::Dismiss(entry.path.clone()),
-                None => Outcome::NothingPicked,
-            },
-            (_, Some('f')) if background => match self.picked() {
-                Some(entry) => Outcome::Forward(entry.path.clone()),
-                None => Outcome::NothingPicked,
-            },
-            (_, Some('v')) => self.open(Place::Beside(Side::Right)),
-            (_, Some('x')) => self.open(Place::Beside(Side::Below)),
-            (_, Some('t')) => self.open(Place::Tab),
-            (Key::Named(NamedKey::ArrowDown), _) | (_, Some('n')) => self.go(1),
-            (Key::Named(NamedKey::ArrowUp), _) | (_, Some('p')) => self.go(-1),
-            (Key::Named(NamedKey::PageDown), _) => self.go(self.page()),
-            (Key::Named(NamedKey::PageUp), _) => self.go(-self.page()),
-            (Key::Named(NamedKey::Backspace), _) => {
-                if self.query.pop().is_none() {
-                    return Outcome::Nothing;
-                }
-                self.typed()
-            }
-            (_, Some('u')) => {
-                self.query.clear();
-                self.typed()
-            }
-            (_, Some('w')) => {
-                let kept = self
-                    .query
-                    .trim_end()
-                    .rfind(' ')
-                    .map_or(0, |space| space + 1);
-                self.query.truncate(kept);
-                self.typed()
-            }
-            _ if modifiers.ctrl || modifiers.alt => Outcome::Nothing,
-            _ => match press.text {
-                Some(text) => self.paste(text),
-                None => Outcome::Nothing,
-            },
+        self.bound_key(press, ctrl(press))
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        fn bound_key / describe_bound_key(&mut self, press: &KeyPress<'_>, ctrl: Option<char>) -> Outcome;
+        prepare {
+            let modifiers = press.modifiers;
+            let background = self.kind == Kind::Background;
         }
+        match (press.key, ctrl) => {
+            (Key::Named(NamedKey::Escape), _) | (_, Some('c')) =>
+                Hint::Action("Close picker"),
+                Outcome::Close;
+            (Key::Named(NamedKey::Enter), _) =>
+                Hint::Action("Open selected item"),
+                self.open(Place::Here);
+            // A background tab comes back as a tab, however it's opened.
+            (_, Some('v' | 'x' | 't')) if background =>
+                Hint::Action("Bring back background tab"),
+                self.open(Place::Here);
+            (_, Some('d')) if background =>
+                Hint::Action("Dismiss background tab"),
+                match self.picked() {
+                    Some(entry) => Outcome::Dismiss(entry.path.clone()),
+                    None => Outcome::NothingPicked,
+                };
+            (_, Some('f')) if background =>
+                Hint::Action("Forward background tab ports"),
+                match self.picked() {
+                    Some(entry) => Outcome::Forward(entry.path.clone()),
+                    None => Outcome::NothingPicked,
+                };
+            (_, Some('v')) =>
+                Hint::Action("Open in right split"),
+                self.open(Place::Beside(Side::Right));
+            (_, Some('x')) =>
+                Hint::Action("Open in split below"),
+                self.open(Place::Beside(Side::Below));
+            (_, Some('t')) =>
+                Hint::Action("Open in new tab"),
+                self.open(Place::Tab);
+            (Key::Named(NamedKey::ArrowDown), _) | (_, Some('n')) =>
+                Hint::Action("Next result"),
+                self.go(1);
+            (Key::Named(NamedKey::ArrowUp), _) | (_, Some('p')) =>
+                Hint::Action("Previous result"),
+                self.go(-1);
+            (Key::Named(NamedKey::PageDown), _) =>
+                Hint::Action("Next page"),
+                self.go(self.page());
+            (Key::Named(NamedKey::PageUp), _) =>
+                Hint::Action("Previous page"),
+                self.go(-self.page());
+            (Key::Named(NamedKey::Backspace), _) =>
+                Hint::Action("Delete last query character"),
+                {
+                    if self.query.pop().is_none() {
+                        return Outcome::Nothing;
+                    }
+                    self.typed()
+                };
+            (_, Some('u')) =>
+                Hint::Action("Clear query"),
+                {
+                    self.query.clear();
+                    self.typed()
+                };
+            (_, Some('w')) =>
+                Hint::Action("Delete last query word"),
+                {
+                    let kept = self
+                        .query
+                        .trim_end()
+                        .rfind(' ')
+                        .map_or(0, |space| space + 1);
+                    self.query.truncate(kept);
+                    self.typed()
+                };
+            _ if modifiers.ctrl || modifiers.alt =>
+                Hint::None,
+                Outcome::Nothing;
+            _ =>
+                Hint::Text("Search items"),
+                match press.text {
+                    Some(text) => self.paste(text),
+                    None => Outcome::Nothing,
+                };
+        }
+        result
+    }
+
+    pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
+        crate::shortcuts::bindings::list("Picker", None, |stroke, _| {
+            let key = stroke.chord().kept();
+            let ctrl = match stroke {
+                crate::vim::Stroke::Char { ch, ctrl: true } => Some(ch),
+                _ => None,
+            };
+            self.describe_bound_key(&key.press(), ctrl)
+        })
     }
 
     /// Types `text`.

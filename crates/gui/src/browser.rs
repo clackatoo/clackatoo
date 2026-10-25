@@ -160,18 +160,30 @@ impl BrowserPane {
         self.rows.iter().collect()
     }
 
-    /// Takes `stroke`. Returns whether the pane must be drawn again.
-    pub(crate) fn stroke(&mut self, stroke: Stroke) -> bool {
-        if stroke
-            == (Stroke::Char {
+    // Takes `stroke`. Returns whether the pane must be drawn again.
+    crate::shortcuts::bindings::described_keys! {
+        pub(crate) fn stroke / describe_stroke(&mut self, stroke: Stroke) -> bool;
+        match stroke => {
+            Stroke::Char {
                 ch: 'q',
                 ctrl: false,
-            })
-        {
-            self.asks.push(Ask::Close);
-            return true;
+            } =>
+                crate::shortcuts::bindings::Hint::Action("Close pane, keeping browser session"),
+                {
+                    self.asks.push(Ask::Close);
+                    true
+                };
+            _ =>
+                crate::shortcuts::bindings::Hint::None,
+                false;
         }
-        false
+        result
+    }
+
+    pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
+        crate::shortcuts::bindings::list("Browser pane", None, |stroke, _| {
+            self.describe_stroke(stroke)
+        })
     }
 
     /// What the pane asks of the desk, oldest first.

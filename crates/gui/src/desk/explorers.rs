@@ -795,36 +795,102 @@ impl Desk {
         let Some(pane) = self.shown.map(|shown| shown.pane) else {
             return false;
         };
+        let strokes = crate::vim::strokes(press, false);
+        let [stroke] = strokes.as_slice() else {
+            return false;
+        };
         let Some((editor, _)) = self.focused_editor() else {
             return false;
         };
-        let normal = editor.mode == Mode::Normal && !editor.prompting();
-        let after_g = editor.typed_so_far()
-            == [Stroke::Char {
+        let after_g = editor.typed_so_far() == [Stroke::char('g')];
+        match self.listing_binding(*stroke, editor.pending(), after_g).0 {
+            ListingKey::Hidden => {
+                self.with_editor(pane, |editor, _| editor.forget_typed());
+                self.toggle_listed_hidden(pane);
+                true
+            }
+            ListingKey::FileUp => self.file_up_key(pane, &strokes),
+            ListingKey::Up => self.listing_go(pane, false),
+            ListingKey::Enter => self.listing_go(pane, true),
+            ListingKey::Other => false,
+        }
+    }
+
+    fn listing_binding(
+        &self,
+        stroke: Stroke,
+        pending: bool,
+        after_g: bool,
+    ) -> (ListingKey, crate::shortcuts::bindings::Hint) {
+        use crate::shortcuts::bindings::Hint;
+        let none = (ListingKey::Other, Hint::None);
+        let Some(pane) = self.shown.map(|shown| shown.pane) else {
+            return none;
+        };
+        let Some((editor, _)) = self.focused_editor() else {
+            return none;
+        };
+        if editor.mode != Mode::Normal || editor.prompting() {
+            return none;
+        }
+        let listing = self.is_explorer(pane);
+        match stroke {
+            Stroke::Char {
+                ch: '.',
+                ctrl: false,
+            } if listing && after_g => (
+                ListingKey::Hidden,
+                Hint::Action("Toggle hidden directory entries"),
+            ),
+            _ if pending => none,
+            Stroke::Char {
                 ch: 'g',
                 ctrl: false,
-            }];
-        let pending = editor.pending();
-        if !normal {
-            return false;
+            } if listing => (ListingKey::Other, Hint::Prefix),
+            Stroke::Enter if listing => {
+                (ListingKey::Enter, Hint::Action("Open the entry at cursor"))
+            }
+            Stroke::Char {
+                ch: '-',
+                ctrl: false,
+            } if listing => (ListingKey::Up, Hint::Action("Open parent directory")),
+            Stroke::Char {
+                ch: '-',
+                ctrl: false,
+            } if !self.is_lesson_pane(pane)
+                && self.file_in(pane).is_some_and(|path| path.contains('/')) =>
+            {
+                (ListingKey::FileUp, Hint::Action("Open parent directory"))
+            }
+            _ => none,
         }
-        let strokes = crate::vim::strokes(press, false);
-        let char = |ch| [Stroke::Char { ch, ctrl: false }];
-        if self.is_explorer(pane) && after_g && strokes == char('.') {
-            self.with_editor(pane, |editor, _| editor.forget_typed());
-            self.toggle_listed_hidden(pane);
-            return true;
+    }
+
+    pub(super) fn listing_shortcuts(&self, context: &mut crate::shortcuts::Context) {
+        let Some((editor, _)) = self.focused_editor() else {
+            return;
+        };
+        let after_g = editor.typed_so_far() == [Stroke::char('g')];
+        let pending = after_g.then_some('g');
+        let generated = crate::shortcuts::bindings::list("", pending, |stroke, prefix| {
+            self.listing_binding(
+                stroke,
+                editor.pending() || prefix.is_some(),
+                prefix == Some('g'),
+            )
+            .1
+        });
+        for (key, description) in generated.rows {
+            for (keys, _) in &mut context.rows {
+                *keys = keys
+                    .split(" / ")
+                    .filter(|old| *old != key)
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+            }
+            context.rows.retain(|(keys, _)| !keys.is_empty());
+            context.rows.push((key, description));
         }
-        if pending {
-            return false;
-        }
-        if !self.is_explorer(pane) {
-            return self.file_up_key(pane, &strokes);
-        }
-        if strokes != [Stroke::Enter] && strokes != char('-') {
-            return false;
-        }
-        self.listing_go(pane, strokes == [Stroke::Enter])
     }
 
     /// Opens what the line under the cursor of the explorer or folder
@@ -1430,4 +1496,13 @@ fn folder_path(dir: &str) -> String {
     } else {
         format!("{dir}/")
     }
+}
+
+#[derive(Clone, Copy)]
+enum ListingKey {
+    Hidden,
+    FileUp,
+    Up,
+    Enter,
+    Other,
 }

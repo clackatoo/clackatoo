@@ -9,6 +9,8 @@ use crate::finder::view::{FinderView, fit};
 use crate::input::KeyPress;
 use crate::render::Ink;
 
+pub(crate) mod bindings;
+
 pub(crate) type Rows = Vec<(String, String)>;
 
 #[derive(Clone, Debug, Default)]
@@ -179,56 +181,41 @@ impl Help {
     }
 }
 
-pub(crate) const PROMPT: &[(&str, &str)] = &[
-    ("Enter", "Accept the text"),
-    ("Esc / Ctrl+;", "Cancel the prompt"),
-    ("Left / Right", "Move the caret"),
-    ("Home / End", "Start / end of the line"),
-    ("Ctrl+Left / Ctrl+Right", "Move by words"),
-    ("Shift+Left / Shift+Right", "Move by words"),
-    ("Backspace / Delete", "Delete before / under the caret"),
-    ("Ctrl+W / Ctrl+Backspace", "Delete the previous word"),
-    ("Ctrl+U", "Delete before the caret"),
-    ("Ctrl+R, register", "Insert a register"),
-    ("Ctrl+Shift+V", "Paste clipboard text"),
-];
-
-pub(crate) const FINDER: &[(&str, &str)] = &[
-    ("Enter", "Open the selected item"),
-    ("Esc / Ctrl+C / Ctrl+;", "Close the picker"),
-    ("Down / Ctrl+N", "Next result"),
-    ("Up / Ctrl+P", "Previous result"),
-    ("PageDown / PageUp", "Next / previous page"),
-    ("Backspace", "Delete the last query character"),
-    ("Ctrl+W", "Delete the last query word"),
-    ("Ctrl+U", "Clear the query"),
-    ("Ctrl+Shift+V", "Paste into the query"),
-];
-
-pub(crate) const LIST: &[(&str, &str)] = &[
-    ("j / Down / Ctrl+N", "Next item"),
-    ("k / Up / Ctrl+P", "Previous item"),
-    ("gg / Home", "First item"),
-    ("G / End", "Last item"),
-    ("Ctrl+D / Ctrl+U", "Half page down / up"),
-    (
-        "PageDown / PageUp / Ctrl+F / Ctrl+B",
-        "Page through the list",
-    ),
-    (
-        "1–9, then digits",
-        "Repeat the next movement that many times",
-    ),
-];
+pub(crate) fn prompt_editing(title: &str, line: &Line) -> Context {
+    let mut context = line.shortcuts(title);
+    for stroke in bindings::strokes() {
+        bindings::add(
+            &mut context,
+            bindings::label(stroke),
+            crate::cmdline::controls::Control::read(stroke).1,
+        );
+    }
+    bindings::normal(&mut context, "Cancel prompt");
+    bindings::paste(&mut context, "Paste clipboard text");
+    context
+}
 
 /// Convert the compact labels used by built-in help to mapping notation.
 /// Parameterised rows are deliberately left as labels, not guessed bindings.
 pub(crate) fn notation(key: &str) -> String {
+    if key == "<" {
+        return "<lt>".into();
+    }
+    if key.chars().count() == 1 {
+        return key.into();
+    }
+    if key.contains(" → ") {
+        return key.split(" → ").map(notation).collect();
+    }
     let key = key.split(" + ").next().unwrap_or(key);
     let key = key.strip_suffix(", register").unwrap_or(key);
     if key.contains('+') {
         let mut parts: Vec<_> = key.split('+').collect();
-        let last = parts.pop().unwrap_or_default();
+        let last = match parts.pop().unwrap_or_default() {
+            "Backspace" => "BS",
+            "Delete" => "Del",
+            last => last,
+        };
         let modifiers = parts
             .iter()
             .map(|part| match *part {
@@ -250,6 +237,9 @@ pub(crate) fn notation(key: &str) -> String {
         "Enter"
             | "Esc"
             | "Backspace"
+            | "BS"
+            | "Del"
+            | "Space"
             | "Delete"
             | "Tab"
             | "Home"
@@ -261,64 +251,15 @@ pub(crate) fn notation(key: &str) -> String {
             | "PageUp"
             | "PageDown"
     ) {
+        let key = match key {
+            "Backspace" => "BS",
+            "Delete" => "Del",
+            key => key,
+        };
         format!("<{key}>")
     } else {
         key.to_owned()
     }
-}
-
-pub(crate) const SIMPLE_PROMPT: &[(&str, &str)] = &[
-    ("Enter", "Accept"),
-    ("Esc / Ctrl+;", "Cancel"),
-    ("Backspace", "Delete the last character; cancel if empty"),
-    ("Ctrl+W", "Delete the last word"),
-    ("Ctrl+U", "Clear the text"),
-    ("Ctrl+Shift+V", "Paste clipboard text"),
-];
-
-pub(crate) fn list_context(
-    title: &str,
-    typed: &crate::vim::HalfTyped,
-    rows: &[(&str, &str)],
-) -> Context {
-    let mut context = Context::new(title, LIST);
-    context.add(rows);
-    if let Some(prefix) = typed.key {
-        context.title = format!("{title} · after {prefix}");
-        context.rows = context
-            .rows
-            .into_iter()
-            .filter_map(|(keys, description)| {
-                let keys = keys
-                    .split(" / ")
-                    .filter_map(|key| {
-                        if key.starts_with("Ctrl+")
-                            || matches!(
-                                key,
-                                "Up" | "Down"
-                                    | "Left"
-                                    | "Right"
-                                    | "Home"
-                                    | "End"
-                                    | "Enter"
-                                    | "PageDown"
-                                    | "PageUp"
-                            )
-                        {
-                            Some(key)
-                        } else {
-                            key.strip_prefix(prefix)
-                        }
-                    })
-                    .filter(|key| !key.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" / ");
-                (!keys.is_empty()).then_some((keys, description))
-            })
-            .collect();
-        context.add(&[("Esc / Ctrl+;", "Cancel the pending command")]);
-    }
-    context
 }
 
 /// Mapping notation is for config; the help panel spells chords out.
@@ -342,19 +283,20 @@ pub(crate) fn sequence(keys: &[crate::keymap::Chord]) -> String {
 /// Register insertion is a transient prompt state of its own.
 pub(crate) fn prompt(title: &str, line: &Line, history: bool) -> Context {
     if line.wants_register() {
-        return Context::new(
-            format!("{title} · insert register"),
-            &[
-                ("Register name", "Insert the register's contents"),
-                (": / /", "Insert last command / search"),
-                ("Ctrl+W", "Insert word under the editor cursor"),
-                ("Esc / Ctrl+;", "Cancel register insertion or prompt"),
-            ],
-        );
+        return crate::cmdline::controls::register_help(&format!("{title} · insert register"));
     }
-    let mut context = Context::new(title, PROMPT);
+    let mut context = prompt_editing(title, line);
     if history {
-        context.add(&[("Up / Down", "Previous / next search in history")]);
+        context.rows.extend(
+            bindings::from_presses("", |press| {
+                match crate::cmdline::controls::history(press.key) {
+                    Some(true) => bindings::Hint::Action("Previous search in history"),
+                    Some(false) => bindings::Hint::Action("Next search in history"),
+                    None => bindings::Hint::None,
+                }
+            })
+            .rows,
+        );
     }
     context
 }
@@ -363,6 +305,18 @@ pub(crate) fn prompt(title: &str, line: &Line, history: bool) -> Context {
 mod tests {
     use super::*;
     use crate::keymap::parse_keys;
+
+    #[test]
+    fn shortcut_labels_preserve_named_and_multistroke_mapping_precedence() {
+        for encoded in ["<BS>", "<Del>", "<C-BS>", "<S-Del>", "<C-w>d", "+", "<lt>"] {
+            let keys = parse_keys(encoded).unwrap();
+            assert_eq!(
+                parse_keys(&notation(&sequence(&keys))).unwrap(),
+                keys,
+                "{encoded}"
+            );
+        }
+    }
 
     #[test]
     fn shortcut_help_uses_the_question_mark_not_plain_slash() {

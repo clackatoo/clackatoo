@@ -88,26 +88,39 @@ impl Desk {
         let Some(offer) = self.offer.take() else {
             return false;
         };
-        let yes = matches!(press.key, Key::Named(NamedKey::Enter))
-            || matches!(press.text, Some("y" | "Y"));
-        if yes {
-            self.install(offer);
-            return true;
+        self.answer_offer(press, offer)
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        pub(super) fn answer_offer / describe_answer_offer(&mut self, press: &KeyPress<'_>) -> bool;
+        execute(offer: Offer);
+        match (press.key, press.text) => {
+            (Key::Named(NamedKey::Enter), _) | (_, Some("y" | "Y")) =>
+                crate::shortcuts::bindings::Hint::Action("Install offered language features"),
+                {
+                    self.install(offer);
+                    true
+                };
+            (_, Some("n" | "N")) =>
+                crate::shortcuts::bindings::Hint::Action("Decline future offers for this language"),
+                {
+                    self.say(format!(
+                        "{} won't be offered again; `clackatoo language install {}` installs it",
+                        offer.what(),
+                        offer.language
+                    ));
+                    let decline = Request::Decline {
+                        language: offer.language,
+                        buffer: self.daemon_has(wire::RELAY).then_some(offer.buffer),
+                    };
+                    self.request(decline, Asked::Quiet);
+                    true
+                };
+            _ =>
+                crate::shortcuts::bindings::Hint::Text("Dismiss offer and use the key in the editor"),
+                false;
         }
-        if matches!(press.text, Some("n" | "N")) {
-            self.say(format!(
-                "{} won't be offered again; `clackatoo language install {}` installs it",
-                offer.what(),
-                offer.language
-            ));
-            let decline = Request::Decline {
-                language: offer.language,
-                buffer: self.daemon_has(wire::RELAY).then_some(offer.buffer),
-            };
-            self.request(decline, Asked::Quiet);
-            return true;
-        }
-        false
+        result
     }
 
     /// Whether an offer is being asked about: there's one, an editor has

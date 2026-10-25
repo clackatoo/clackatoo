@@ -191,17 +191,30 @@ impl Desk {
         if !normal || press.modifiers.ctrl || press.modifiers.alt {
             return false;
         }
-        match press.key {
-            Key::Character(text) if text == "R" => {
-                self.put_at_prompt(pane, terminal);
-                true
-            }
-            Key::Named(NamedKey::Escape) => {
-                self.dismiss_ran(pane);
-                false
-            }
-            _ => false,
+        self.ran_bound(press, pane, terminal)
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        fn ran_bound / describe_ran_bound(&mut self, press: &KeyPress<'_>) -> bool;
+        execute(pane: PaneId, terminal: TerminalId);
+        match press.key => {
+            Key::Character(text) if text == "R" =>
+                crate::shortcuts::bindings::Hint::Action("Put previous command at shell prompt"),
+                {
+                    self.put_at_prompt(pane, terminal);
+                    true
+                };
+            Key::Named(NamedKey::Escape) =>
+                crate::shortcuts::bindings::Hint::Action("Dismiss previous-command offer"),
+                {
+                    self.dismiss_ran(pane);
+                    false
+                };
+            _ =>
+                crate::shortcuts::bindings::Hint::None,
+                false;
         }
+        result
     }
 
     /// A left click on `cell` of `terminal`: on its offer, it puts the
@@ -265,10 +278,14 @@ impl Desk {
             .and_then(|id| self.drawn_offer(id))
             .is_some()
         {
-            context.add(&[
-                ("R", "Put the previous command at the shell prompt"),
-                ("Esc", "Dismiss the previous-command offer"),
-            ]);
+            let generated = crate::shortcuts::bindings::from_presses("", |press| {
+                if press.modifiers.ctrl || press.modifiers.alt {
+                    crate::shortcuts::bindings::Hint::None
+                } else {
+                    self.describe_ran_bound(press)
+                }
+            });
+            context.rows.extend(generated.rows);
         }
     }
 }

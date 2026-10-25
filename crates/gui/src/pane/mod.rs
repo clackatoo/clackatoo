@@ -514,9 +514,8 @@ impl Pane {
         let Some(chat) = self.chat.as_mut() else {
             return false;
         };
-        let escape = *press.key == Key::Named(NamedKey::Escape);
         if self.mode == Mode::Insert {
-            if enters_normal_mode(press) || (escape && chat.node.question.is_none()) {
+            if chat.leaves_composer(press) {
                 self.mode = Mode::Normal;
                 return true;
             }
@@ -3752,22 +3751,23 @@ impl Pane {
         let mut context = if self.mode == Mode::Insert {
             Context::new(
                 "Terminal · insert mode",
-                &[
-                    ("Ctrl+;", "Enter normal mode"),
-                    (
-                        "Other keys",
-                        "Sent to the terminal program; its own bindings are managed by that program",
-                    ),
-                ],
+                &[(
+                    "Other keys",
+                    "Sent to the terminal program; its own bindings are managed by that program",
+                )],
             )
         } else {
             crate::vim::shortcuts::context("Terminal", &self.keys, self.mode, &normal::TerminalKeys)
         };
-        context.add(&[
-            ("Ctrl+C", "Send interrupt to terminal program"),
-            ("Ctrl+Shift+C", "Copy selection"),
-            ("Ctrl+Shift+V", "Paste clipboard text"),
-        ]);
+        context.rows.extend(
+            crate::shortcuts::bindings::from_presses("", |press| {
+                normal::terminal_control(press)
+                    .map_or(crate::shortcuts::bindings::Hint::None, |(_, hint)| hint)
+            })
+            .rows,
+        );
+        crate::shortcuts::bindings::normal(&mut context, "Enter normal mode");
+        crate::shortcuts::bindings::paste(&mut context, "Paste clipboard text");
         context
     }
 }

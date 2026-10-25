@@ -28,6 +28,11 @@ pub(crate) trait Dialect {
     /// The commands of the pane's own.
     type Own: Copy + Debug + Eq;
 
+    /// Human description of a pane-specific command. Shared actions describe themselves.
+    fn describe(&self, action: Self::Own) -> String {
+        format!("{action:?}")
+    }
+
     /// Whether `~` is an operator, as Vim's `tildeop` makes it.
     fn tildeop(&self) -> bool {
         false
@@ -107,16 +112,37 @@ impl<T> Read<T> {
 /// operators act on the selection and `i` and `a` start an object, as
 /// `dialect` reads them.
 pub(crate) fn parse<D: Dialect>(keys: &[Stroke], visual: bool, dialect: &D) -> Parsed<D::Own> {
+    inspect(keys, visual, dialect).0
+}
+
+/// Where an incomplete command needs input. These are parser states, used
+/// both to read input and to discover continuations without guessing keys.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum Expectation {
+    #[default]
+    Key,
+    Operand(&'static str),
+    Register,
+    Target(Operator),
+}
+
+pub(crate) fn inspect<D: Dialect>(
+    keys: &[Stroke],
+    visual: bool,
+    dialect: &D,
+) -> (Parsed<D::Own>, Expectation) {
     let mut reader = Reader {
         keys,
         at: 0,
         register: None,
         tildeop: dialect.tildeop(),
+        expectation: Expectation::Key,
     };
-    match reader.command(visual, dialect) {
+    let parsed = match reader.command(visual, dialect) {
         Parsed::Command(command) if !dialect.takes(&command) => Parsed::Nothing,
         parsed => parsed,
-    }
+    };
+    (parsed, reader.expectation)
 }
 
 /// The keys of a command typed so far in normal or visual mode.
@@ -153,6 +179,7 @@ impl Keys {
             at: 0,
             register: None,
             tildeop: false,
+            expectation: Expectation::Key,
         };
         let count = reader.count();
         count.filter(|_| reader.at == self.0.len())
@@ -193,6 +220,7 @@ pub(crate) struct Reader<'a> {
     register: Option<char>,
     /// `~` is an operator.
     tildeop: bool,
+    expectation: Expectation,
 }
 
 impl Reader<'_> {
@@ -212,11 +240,15 @@ impl Reader<'_> {
     /// into what `make` makes of it.
     pub(crate) fn then<T>(
         &mut self,
+        label: &'static str,
         wanted: impl Fn(char) -> bool,
         make: impl FnOnce(char) -> T,
     ) -> Read<T> {
         match self.next() {
-            None => Read::More,
+            None => {
+                self.expectation = Expectation::Operand(label);
+                Read::More
+            }
             Some(next) => match next.typed().filter(|&ch| wanted(ch)) {
                 Some(ch) => Read::Yes(make(ch)),
                 None => Read::No,
@@ -231,7 +263,10 @@ impl Reader<'_> {
         let first = if self.peek() == Some(Stroke::char('"')) {
             self.at += 1;
             match self.next().map(Stroke::plain) {
-                None => return Parsed::Incomplete,
+                None => {
+                    self.expectation = Expectation::Register;
+                    return Parsed::Incomplete;
+                }
                 Some(Some(name)) if is_register(name) => self.register = Some(name),
                 Some(_) => return Parsed::Nothing,
             }
@@ -344,6 +379,10 @@ impl Reader<'_> {
 
     /// The action of the plain key `ch`, which may read keys after it, or
     /// what the keys make if not an action: an operator reads its target.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one grammar dispatch for normal and visual keys"
+    )]
     fn key<D: Dialect>(
         &mut self,
         ch: char,
@@ -385,11 +424,11 @@ impl Reader<'_> {
             'o' if visual => Action::OtherEnd,
             'O' if visual => Action::OtherCorner,
             'm' => {
-                let mark = self.then(is_settable_mark, Action::SetMark);
+                let mark = self.then("mark", is_settable_mark, Action::SetMark);
                 return self.made(first, mark);
             }
             '\'' | '`' => {
-                let mark = self.then(is_mark, |mark| Action::Mark {
+                let mark = self.then("mark", is_mark, |mark| Action::Mark {
                     mark,
                     exact: ch == '`',
                 });
@@ -406,7 +445,7 @@ impl Reader<'_> {
             'P' => Action::Put { before: true },
             'J' => Action::Join,
             'r' => {
-                let replace = self.then(|_| true, Action::Replace);
+                let replace = self.then("character", |_| true, Action::Replace);
                 return self.made(first, replace);
             }
             'i' => Action::Insert(Entry::Before),
@@ -433,7 +472,13 @@ impl Reader<'_> {
                     'z' => ViewAt::Middle,
                     _ => ViewAt::Bottom,
                 };
-                let view = self.then(|key| matches!(key, 't' | 'z' | 'b'), at);
+                let view = match self.next() {
+                    None => Read::More,
+                    Some(key) => key
+                        .plain()
+                        .filter(|key| matches!(key, 't' | 'z' | 'b'))
+                        .map_or(Read::No, |key| Read::Yes(at(key))),
+                };
                 return self.made(first, view.map(Action::View));
             }
             ']' | '[' => {
@@ -529,6 +574,7 @@ impl Reader<'_> {
                 }
                 'f' | 't' | 'F' | 'T' => {
                     return Some(self.then(
+                        "character",
                         |_| true,
                         |target| Motion::Find {
                             ch: target,
@@ -551,6 +597,7 @@ impl Reader<'_> {
         let count = multiplied(first, self.count());
         let operate = |target| Read::Yes(Action::Operate(operator, target));
         let Some(stroke) = self.next() else {
+            self.expectation = Expectation::Target(operator);
             return Parsed::Incomplete;
         };
         if stroke == Stroke::char(key) {
@@ -565,7 +612,7 @@ impl Reader<'_> {
             return self.made(count, operate(Target::Lines));
         }
         if let Some(kind @ ('\'' | '`')) = stroke.plain() {
-            let mark = self.then(is_mark, |mark| Target::Mark {
+            let mark = self.then("mark", is_mark, |mark| Target::Mark {
                 mark,
                 exact: kind == '`',
             });
@@ -976,7 +1023,7 @@ mod tests {
             // `gx`, and `gzz`, which reads on.
             match stroke.plain()? {
                 'x' => Some(Read::Yes('x')),
-                'z' => Some(keys.then(|key| key == 'z', |key| key)),
+                'z' => Some(keys.then("test operand", |key| key == 'z', |key| key)),
                 _ => None,
             }
         }

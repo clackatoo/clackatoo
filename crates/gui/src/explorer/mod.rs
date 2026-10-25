@@ -49,6 +49,8 @@
 //! root follows the folder shown, so the finder, and a relative path
 //! opened, are from there.
 
+use crate::shortcuts::bindings::Hint;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -983,105 +985,218 @@ impl Explorer {
         if ctrl {
             return self.ctrl(ch, count);
         }
-        match (pending, ch) {
-            (None, '0'..='9') if ch != '0' || count.is_some() => {
-                let digit = ch.to_digit(10).expect("a digit") as usize;
-                let count = count.unwrap_or(0).saturating_mul(10).saturating_add(digit);
-                self.typed.count = Some(count.min(1_000_000));
-                return false;
-            }
-            (Some('g'), 'g') => self.go_to(count.map_or(0, |count| count - 1)),
-            (Some('g') | None, '.') => self.toggle_hidden(),
-            (Some('z'), 'o') => {
-                if let Some(path) = self.dir_at_cursor() {
-                    self.expand(path);
-                }
-            }
-            (Some('z'), 'c') => self.close_fold(),
-            (Some('z'), 'a') => self.toggle_at_cursor(),
-            (Some('z'), 'R') => self.expand_all_shown(),
-            (Some('z'), 'M') => self.collapse_all(),
-            (Some('g'), '?') => self.help = !self.help,
-            (Some(_), _) => {}
-            (None, 'g' | 'z') => {
-                self.typed.count = count;
-                self.typed.key = Some(ch);
-                return false;
-            }
-            (None, 'j') => self.move_by(count.unwrap_or(1), true),
-            (None, 'k') => self.move_by(count.unwrap_or(1), false),
-            (None, 'G') => self.go_to(count.map_or(usize::MAX, |count| count - 1)),
-            (None, 'l') => self.open_or_enter(),
-            (None, 'h') => self.close_or_leave(),
-            (None, '-') => self.go_up(),
-            (None, '/' | '?') => {
-                self.prompt = Some(Prompt::Search {
-                    query: String::new(),
-                    backward: ch == '?',
-                });
-            }
-            (None, 'n' | 'N') => self.search_again(ch == 'N', count.unwrap_or(1)),
-            (None, 'R') => self.refresh(),
-            (None, 'q') => self.asks.push(Ask::Close),
-            (None, 'a') => self.ask_add(),
-            (None, 'r') => self.ask_rename(),
-            (None, 'd') => self.ask_delete(),
-            (None, 'e') => self.edit_here(),
-            (None, 'x' | 'y') => self.keep(ch == 'x'),
-            (None, 'p') => {
-                if let Some(dir) = self.dir_here() {
-                    self.asks.push(Ask::Paste { dir });
-                }
-            }
-            _ => return false,
-        }
-        true
+        self.plain(ch, count, pending)
     }
 
-    /// Does what a key that types no character does.
-    fn named(&mut self, stroke: Stroke, count: Option<usize>) -> bool {
-        match stroke {
-            Stroke::Down => self.move_by(count.unwrap_or(1), true),
-            Stroke::Up => self.move_by(count.unwrap_or(1), false),
-            Stroke::Enter => match self.line() {
-                Some(line) if line.entry().kind.expands() => self.toggle_at_cursor(),
-                Some(_) => self.open(Opening::Here),
-                None if self.on_up() => self.go_up(),
-                None => {}
-            },
-            Stroke::Right => self.open_or_enter(),
-            Stroke::Left => self.close_or_leave(),
-            Stroke::Home => self.go_to(0),
-            Stroke::End => self.go_to(usize::MAX),
-            Stroke::PageDown => self.page(count.unwrap_or(1), true, false),
-            Stroke::PageUp => self.page(count.unwrap_or(1), false, false),
-            Stroke::Escape => {}
-            _ => return false,
+    crate::shortcuts::bindings::described_keys! {
+        fn plain / describe_plain(&mut self, ch: char, count: Option<usize>, pending: Option<char>) -> bool;
+        match (pending, ch) => {
+            (None, '0'..='9') if ch != '0' || count.is_some() =>
+                Hint::Count,
+                {
+                    let digit = ch.to_digit(10).expect("a digit") as usize;
+                    let count = count.unwrap_or(0).saturating_mul(10).saturating_add(digit);
+                    self.typed.count = Some(count.min(1_000_000));
+                    return false;
+                };
+            (Some('g'), 'g') =>
+                Hint::Action("First item or item given by count"),
+                self.go_to(count.map_or(0, |count| count - 1));
+            (Some('g') | None, '.') =>
+                Hint::Action("Show or hide hidden files"),
+                self.toggle_hidden();
+            (Some('z'), 'o') =>
+                Hint::Action("Expand directory"),
+                {
+                    if let Some(path) = self.dir_at_cursor() {
+                        self.expand(path);
+                    }
+                };
+            (Some('z'), 'c') =>
+                Hint::Action("Collapse directory"),
+                self.close_fold();
+            (Some('z'), 'a') =>
+                Hint::Action("Toggle directory"),
+                self.toggle_at_cursor();
+            (Some('z'), 'R') =>
+                Hint::Action("Expand all shown directories"),
+                self.expand_all_shown();
+            (Some('z'), 'M') =>
+                Hint::Action("Collapse all directories"),
+                self.collapse_all();
+            (Some('g'), '?') =>
+                Hint::Action("Toggle inline help"),
+                self.help = !self.help;
+            (Some(_), _) =>
+                Hint::None,
+                {};
+            (None, 'g' | 'z') =>
+                Hint::Prefix,
+                {
+                    self.typed.count = count;
+                    self.typed.key = Some(ch);
+                    return false;
+                };
+            (None, 'j') =>
+                Hint::Action("Next item"),
+                self.move_by(count.unwrap_or(1), true);
+            (None, 'k') =>
+                Hint::Action("Previous item"),
+                self.move_by(count.unwrap_or(1), false);
+            (None, 'G') =>
+                Hint::Action("Last item or item given by count"),
+                self.go_to(count.map_or(usize::MAX, |count| count - 1));
+            (None, 'l') =>
+                Hint::Action("Open or enter"),
+                self.open_or_enter();
+            (None, 'h') =>
+                Hint::Action("Close or leave directory"),
+                self.close_or_leave();
+            (None, '-') =>
+                Hint::Action("Parent directory"),
+                self.go_up();
+            (None, '/' | '?') =>
+                Hint::Action(if ch == '/' {
+                    "Search forward"
+                } else {
+                    "Search backward"
+                }),
+                {
+                    self.prompt = Some(Prompt::Search {
+                        query: String::new(),
+                        backward: ch == '?',
+                    });
+                };
+            (None, 'n' | 'N') =>
+                Hint::Action(if ch == 'n' {
+                    "Repeat search"
+                } else {
+                    "Reverse search"
+                }),
+                self.search_again(ch == 'N', count.unwrap_or(1));
+            (None, 'R') =>
+                Hint::Action("Refresh"),
+                self.refresh();
+            (None, 'q') =>
+                Hint::Action("Close pane"),
+                self.asks.push(Ask::Close);
+            (None, 'a') =>
+                Hint::Action("Create file or directory"),
+                self.ask_add();
+            (None, 'r') =>
+                Hint::Action("Rename"),
+                self.ask_rename();
+            (None, 'd') =>
+                Hint::Action("Delete"),
+                self.ask_delete();
+            (None, 'e') =>
+                Hint::Action("Edit directory"),
+                self.edit_here();
+            (None, 'x' | 'y') =>
+                Hint::Action(if ch == 'x' { "Cut" } else { "Copy" }),
+                self.keep(ch == 'x');
+            (None, 'p') =>
+                Hint::Action("Paste"),
+                {
+                    if let Some(dir) = self.dir_here() {
+                        self.asks.push(Ask::Paste { dir });
+                    }
+                };
+            _ =>
+                Hint::None,
+                return false;
         }
-        true
+        then true
     }
 
-    /// Does what a key with Ctrl does.
-    fn ctrl(&mut self, ch: char, count: Option<usize>) -> bool {
-        match ch {
-            'd' => self.page(count.unwrap_or(1), true, true),
-            'u' => self.page(count.unwrap_or(1), false, true),
-            'f' => self.page(count.unwrap_or(1), true, false),
-            'b' => self.page(count.unwrap_or(1), false, false),
-            'n' => self.move_by(count.unwrap_or(1), true),
-            'p' => self.move_by(count.unwrap_or(1), false),
-            'v' => self.open(Opening::Split(Side::Right)),
-            's' => self.open(Opening::Split(Side::Below)),
-            't' => self.open(Opening::Tab),
-            _ => return false,
+    // Does what a key that types no character does.
+    crate::shortcuts::bindings::described_keys! {
+        fn named / describe_named(&mut self, stroke: Stroke, count: Option<usize>) -> bool;
+        match stroke => {
+            Stroke::Down =>
+                Hint::Action("Next item"),
+                self.move_by(count.unwrap_or(1), true);
+            Stroke::Up =>
+                Hint::Action("Previous item"),
+                self.move_by(count.unwrap_or(1), false);
+            Stroke::Enter =>
+                Hint::Action("Open the file or toggle the directory"),
+                match self.line() {
+                    Some(line) if line.entry().kind.expands() => self.toggle_at_cursor(),
+                    Some(_) => self.open(Opening::Here),
+                    None if self.on_up() => self.go_up(),
+                    None => {}
+                };
+            Stroke::Right =>
+                Hint::Action("Open or enter"),
+                self.open_or_enter();
+            Stroke::Left =>
+                Hint::Action("Close or leave directory"),
+                self.close_or_leave();
+            Stroke::Home =>
+                Hint::Action("First item"),
+                self.go_to(0);
+            Stroke::End =>
+                Hint::Action("Last item"),
+                self.go_to(usize::MAX);
+            Stroke::PageDown =>
+                Hint::Action("Page down"),
+                self.page(count.unwrap_or(1), true, false);
+            Stroke::PageUp =>
+                Hint::Action("Page up"),
+                self.page(count.unwrap_or(1), false, false);
+            Stroke::Escape =>
+                Hint::Action("Cancel pending command"),
+                {};
+            _ =>
+                Hint::None,
+                return false;
         }
-        true
+        then true
+    }
+
+    // Does what a key with Ctrl does.
+    crate::shortcuts::bindings::described_keys! {
+        fn ctrl / describe_ctrl(&mut self, ch: char, count: Option<usize>) -> bool;
+        match ch => {
+            'd' =>
+                Hint::Action("Half page down"),
+                self.page(count.unwrap_or(1), true, true);
+            'u' =>
+                Hint::Action("Half page up"),
+                self.page(count.unwrap_or(1), false, true);
+            'f' =>
+                Hint::Action("Page down"),
+                self.page(count.unwrap_or(1), true, false);
+            'b' =>
+                Hint::Action("Page up"),
+                self.page(count.unwrap_or(1), false, false);
+            'n' =>
+                Hint::Action("Next item"),
+                self.move_by(count.unwrap_or(1), true);
+            'p' =>
+                Hint::Action("Previous item"),
+                self.move_by(count.unwrap_or(1), false);
+            'v' =>
+                Hint::Action("Open in right split"),
+                self.open(Opening::Split(Side::Right));
+            's' =>
+                Hint::Action("Open in split below"),
+                self.open(Opening::Split(Side::Below));
+            't' =>
+                Hint::Action("Open in new tab"),
+                self.open(Opening::Tab);
+            _ =>
+                Hint::None,
+                return false;
+        }
+        then true
     }
 
     /// Takes `stroke` for what's being typed in the bar.
     fn prompt_stroke(&mut self, stroke: Stroke) {
         if let Some(Prompt::Confirm { op, .. }) = &self.prompt {
-            let yes = stroke == Stroke::char('y') || stroke == Stroke::char('Y');
+            let yes = confirmation(stroke).0;
             if yes {
                 self.asks.push(Ask::Op(op.clone()));
             } else {
@@ -1098,29 +1213,12 @@ impl Explorer {
             Prompt::Add { name, .. } | Prompt::Rename { name, .. } => name,
             Prompt::Confirm { .. } => unreachable!("answered above"),
         };
-        match stroke {
-            Stroke::Escape => self.prompt = None,
-            Stroke::Backspace if text.is_empty() => self.prompt = None,
-            Stroke::Backspace => {
-                text.pop();
-            }
-            Stroke::Char {
-                ch: 'u',
-                ctrl: true,
-            } => text.clear(),
-            Stroke::Char {
-                ch: 'w',
-                ctrl: true,
-            } => {
-                let kept = text.trim_end_matches(|ch: char| !ch.is_alphanumeric());
-                let kept = kept.trim_end_matches(char::is_alphanumeric).len();
-                text.truncate(kept);
-            }
-            Stroke::Char { ch, ctrl: false } => text.push(ch),
-            Stroke::Enter => {
+        match crate::cmdline::simple::key(text, stroke) {
+            crate::cmdline::simple::Outcome::Accept => {
                 let prompt = self.prompt.take().expect("a prompt");
                 self.prompted(prompt);
             }
+            crate::cmdline::simple::Outcome::Cancel => self.prompt = None,
             _ => {}
         }
     }
@@ -1925,47 +2023,40 @@ impl crate::vim::ListPane for Explorer {
 
 impl Explorer {
     pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
-        use crate::shortcuts::{Context, SIMPLE_PROMPT, list_context};
+        if let Some(context) = self.plan_shortcuts() {
+            return context;
+        }
         if let Some(prompt) = &self.prompt {
             return if matches!(prompt, Prompt::Confirm { .. }) {
-                Context::new(
-                    "Confirm file operation",
-                    &[("y / Y", "Confirm"), ("Any other key", "Cancel")],
-                )
+                crate::shortcuts::bindings::list("Confirm file operation", None, |stroke, _| {
+                    confirmation(stroke).1
+                })
             } else {
-                Context::new("File explorer prompt", SIMPLE_PROMPT)
+                crate::cmdline::simple::help(
+                    "File explorer prompt",
+                    match prompt {
+                        Prompt::Search { query, .. } => query,
+                        Prompt::Add { name, .. } | Prompt::Rename { name, .. } => name,
+                        Prompt::Confirm { .. } => unreachable!(),
+                    },
+                )
             };
         }
-        list_context(
-            "File explorer",
-            &self.typed,
-            &[
-                ("Enter", "Open the file or toggle the directory"),
-                ("l / Right", "Open or enter"),
-                ("h / Left", "Close or leave directory"),
-                ("-", "Parent directory"),
-                (". / g.", "Show or hide hidden files"),
-                ("g?", "Toggle the explorer's inline help"),
-                ("zo", "Expand directory"),
-                ("zc", "Collapse directory"),
-                ("za", "Toggle directory"),
-                ("zR", "Expand all shown directories"),
-                ("zM", "Collapse all directories"),
-                ("/ / ?", "Search forward / backward"),
-                ("n / N", "Repeat / reverse search"),
-                ("R", "Refresh"),
-                ("q", "Close explorer"),
-                ("a", "Create file or directory"),
-                ("r", "Rename"),
-                ("d", "Delete"),
-                ("e", "Edit directory"),
-                ("x", "Cut"),
-                ("y", "Copy"),
-                ("p", "Paste"),
-                ("Ctrl+V", "Open in right split"),
-                ("Ctrl+S", "Open in split below"),
-                ("Ctrl+T", "Open in new tab"),
-            ],
-        )
+        crate::shortcuts::bindings::list("Explorer", self.typed.key, |stroke, pending| match stroke
+        {
+            Stroke::Char { ch, ctrl: false } => self.describe_plain(ch, self.typed.count, pending),
+            Stroke::Char { ch, ctrl: true } => self.describe_ctrl(ch, self.typed.count),
+            stroke => self.describe_named(stroke, self.typed.count),
+        })
+    }
+}
+
+fn confirmation(stroke: Stroke) -> (bool, Hint) {
+    match stroke {
+        Stroke::Char {
+            ch: 'y' | 'Y',
+            ctrl: false,
+        } => (true, Hint::Action("Confirm")),
+        _ => (false, Hint::Text("Cancel")),
     }
 }

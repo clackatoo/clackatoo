@@ -153,41 +153,34 @@ impl Rendered {
             .collect::<String>()
             .parse()
             .ok();
-        // `0` goes on a count, but doesn't start one.
         let counting = digit(stroke).is_some_and(|digit| digit != '0' || count.is_some());
-        if !after_g && (counting || stroke == g) {
+        let command = reading(stroke, after_g, counting).0;
+        if matches!(command, Reading::Prefix) {
             typed.push(stroke);
             return Keyed::Took;
         }
         let before = typed.take();
-        // `gj` and `gk` go by screen rows, which here are lines, as `j`
-        // and `k` do: a config may map `j` to `gj`.
-        let rows = after_g
-            && matches!(
-                stroke,
-                Stroke::Char {
-                    ch: 'j' | 'k',
-                    ctrl: false
+        match command {
+            Reading::Top | Reading::End => match count {
+                Some(count) => {
+                    self.go_to =
+                        Some(text.line_to_byte(count.saturating_sub(1).min(text.len_lines() - 1)));
                 }
-            );
-        let line =
-            |count: usize| text.line_to_byte(count.saturating_sub(1).min(text.len_lines() - 1));
-        if after_g && stroke != g && !rows {
-            return Keyed::Text(before);
-        } else if (after_g && !rows) || stroke == Stroke::char('G') {
-            // To the block holding line `count`, or to the top or the end.
-            match (count, after_g) {
-                (Some(count), _) => self.go_to = Some(line(count)),
-                (None, true) => self.scroll_to_top(),
-                (None, false) => {
+                None if matches!(command, Reading::Top) => self.scroll_to_top(),
+                None => {
                     self.go_to = None;
                     self.scroll = self.most;
                 }
+            },
+            Reading::Scroll => {
+                let lines = self
+                    .lines_for(stroke, count)
+                    .expect("reading accepted a scroll key");
+                self.scroll_by(lines * self.line_height);
             }
-        } else if let Some(lines) = self.lines_for(stroke, count) {
-            self.scroll_by(lines * self.line_height);
-        } else if stroke != Stroke::Escape {
-            return Keyed::Text(before);
+            Reading::Escape => {}
+            Reading::Text => return Keyed::Text(before),
+            Reading::Prefix => unreachable!("handled above"),
         }
         Keyed::Took
     }
@@ -197,24 +190,7 @@ impl Rendered {
     /// and `k` a line a time, and the scrolling keys as far as they go in
     /// any pane (see [`vim::Paging`]).
     fn lines_for(&mut self, stroke: Stroke, count: Option<usize>) -> Option<f32> {
-        let plain = |ch| Stroke::Char { ch, ctrl: false };
-        let ctrl = |ch| Stroke::Char { ch, ctrl: true };
-        let keys = [
-            (Stroke::Down, vim::Scroll::Line { down: true }),
-            (plain('j'), vim::Scroll::Line { down: true }),
-            (ctrl('e'), vim::Scroll::Line { down: true }),
-            (Stroke::Up, vim::Scroll::Line { down: false }),
-            (plain('k'), vim::Scroll::Line { down: false }),
-            (ctrl('y'), vim::Scroll::Line { down: false }),
-            (ctrl('d'), vim::Scroll::HalfPage { down: true }),
-            (ctrl('u'), vim::Scroll::HalfPage { down: false }),
-            (ctrl('f'), vim::Scroll::Page { down: true }),
-            (Stroke::PageDown, vim::Scroll::Page { down: true }),
-            (Stroke::ShiftDown, vim::Scroll::Page { down: true }),
-            (Stroke::PageUp, vim::Scroll::Page { down: false }),
-            (Stroke::ShiftUp, vim::Scroll::Page { down: false }),
-        ];
-        let &(_, scroll) = keys.iter().find(|(key, _)| *key == stroke)?;
+        let scroll = scroll_key(stroke)?;
         let (vim::Scroll::Line { down }
         | vim::Scroll::HalfPage { down }
         | vim::Scroll::Page { down }) = scroll;
@@ -784,4 +760,97 @@ impl Editor {
             rendered.forget_colour_asks();
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum Reading {
+    Prefix,
+    Top,
+    End,
+    Scroll,
+    Escape,
+    Text,
+}
+
+fn scroll_key(stroke: Stroke) -> Option<vim::Scroll> {
+    const KEYS: &[(Stroke, vim::Scroll)] = &[
+        (Stroke::Down, vim::Scroll::Line { down: true }),
+        (Stroke::char('j'), vim::Scroll::Line { down: true }),
+        (Stroke::ctrl('e'), vim::Scroll::Line { down: true }),
+        (Stroke::Up, vim::Scroll::Line { down: false }),
+        (Stroke::char('k'), vim::Scroll::Line { down: false }),
+        (Stroke::ctrl('y'), vim::Scroll::Line { down: false }),
+        (Stroke::ctrl('d'), vim::Scroll::HalfPage { down: true }),
+        (Stroke::ctrl('u'), vim::Scroll::HalfPage { down: false }),
+        (Stroke::ctrl('f'), vim::Scroll::Page { down: true }),
+        (Stroke::PageDown, vim::Scroll::Page { down: true }),
+        (Stroke::ShiftDown, vim::Scroll::Page { down: true }),
+        (Stroke::PageUp, vim::Scroll::Page { down: false }),
+        (Stroke::ShiftUp, vim::Scroll::Page { down: false }),
+    ];
+    KEYS.iter()
+        .find(|(key, _)| *key == stroke)
+        .map(|(_, scroll)| *scroll)
+}
+
+fn reading(
+    stroke: Stroke,
+    after_g: bool,
+    counting: bool,
+) -> (Reading, crate::shortcuts::bindings::Hint) {
+    use crate::shortcuts::bindings::Hint;
+    if !after_g && counting {
+        return (Reading::Prefix, Hint::Count);
+    }
+    if !after_g && stroke == Stroke::char('g') {
+        return (Reading::Prefix, Hint::Prefix);
+    }
+    let rows = matches!(
+        stroke,
+        Stroke::Char {
+            ch: 'j' | 'k',
+            ctrl: false
+        }
+    );
+    if after_g && stroke != Stroke::char('g') && !rows {
+        return (Reading::Text, Hint::None);
+    }
+    if after_g && !rows {
+        return (
+            Reading::Top,
+            Hint::Action("Start of document or counted line"),
+        );
+    }
+    if stroke == Stroke::char('G') {
+        return (
+            Reading::End,
+            Hint::Action("End of document or counted line"),
+        );
+    }
+    if let Some(scroll) = scroll_key(stroke) {
+        return (Reading::Scroll, Hint::Action(scroll.description()));
+    }
+    if stroke == Stroke::Escape {
+        return (Reading::Escape, Hint::Action("Cancel pending command"));
+    }
+    (Reading::Text, Hint::None)
+}
+
+pub(super) fn shortcuts(keys: &vim::Keys) -> crate::shortcuts::Context {
+    let pending = keys
+        .so_far()
+        .last()
+        .filter(|s| **s == Stroke::char('g'))
+        .map(|_| 'g');
+    let mut context =
+        crate::shortcuts::bindings::list("Rendered Markdown", pending, |stroke, prefix| {
+            let counting =
+                digit(stroke).is_some_and(|digit| digit != '0' || keys.counting().is_some());
+            reading(stroke, prefix.is_some(), counting).1
+        });
+    context.add(&[(
+        "Other editor keys",
+        "Show the source and apply the key there",
+    )]);
+    context
 }

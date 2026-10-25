@@ -33,6 +33,8 @@
 //! undoing the turn leaves their changes: rejecting them here takes them
 //! out.
 
+use crate::shortcuts::bindings::Hint;
+
 use clackatoo_protocol::{
     Attributes, Hunks, ReviewAction, ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
     Size, Style, TerminalId,
@@ -403,81 +405,163 @@ impl Review {
         if ctrl {
             return self.ctrl(ch, count);
         }
-        let times = count.unwrap_or(1);
-        match (pending, ch) {
-            (None, '0'..='9') if ch != '0' || count.is_some() => {
-                let digit = ch.to_digit(10).expect("a digit") as usize;
-                let count = count.unwrap_or(0).saturating_mul(10).saturating_add(digit);
-                self.typed.count = Some(count.min(1_000_000));
-                return false;
-            }
-            (Some('g'), 'g') => self.go_to(count.map_or(0, |count| count - 1)),
-            (Some('g'), 'c') => self.comment_here(),
-            (Some(bracket @ (']' | '[')), 'h') => {
-                for _ in 0..times {
-                    self.next_of(bracket == ']', |line| matches!(line, Line::Hunk { .. }));
-                }
-            }
-            (Some(bracket @ (']' | '[')), 'f') => {
-                for _ in 0..times {
-                    self.next_of(bracket == ']', |line| matches!(line, Line::File { .. }));
-                }
-            }
-            (Some(_), _) => {}
-            (None, 'g' | ']' | '[') => {
-                self.typed.count = count;
-                self.typed.key = Some(ch);
-                return false;
-            }
-            (None, 'j') => self.move_by(times, true),
-            (None, 'k') => self.move_by(times, false),
-            (None, 'G') => self.go_to(count.map_or(usize::MAX, |count| count - 1)),
-            (None, 'a') => self.act_on(false, true),
-            (None, 'A') => self.act_on(true, true),
-            (None, 'x') => self.reject_or_uncomment(),
-            (None, 'X') => self.act_on(true, false),
-            (None, 'S') => match self.list.chat {
-                Some(chat) => self.asks.push(Ask::Act(ReviewAction::Send(chat))),
-                None => self.message = Some("this review is of no chat".to_owned()),
-            },
-            (None, 'R') => {
-                let review = self.id;
-                self.asks.push(Ask::Act(ReviewAction::Refresh(review)));
-            }
-            (None, 'q') => self.asks.push(Ask::Close),
-            _ => return false,
-        }
-        true
+        self.plain(ch, count, pending)
     }
 
-    /// Does what a key that types no character does.
-    fn named(&mut self, stroke: Stroke, count: Option<usize>) -> bool {
-        match stroke {
-            Stroke::Down => self.move_by(count.unwrap_or(1), true),
-            Stroke::Up => self.move_by(count.unwrap_or(1), false),
-            Stroke::Enter => self.open_here(),
-            Stroke::Home => self.go_to(0),
-            Stroke::End => self.go_to(usize::MAX),
-            Stroke::PageDown => self.page(count.unwrap_or(1), true, false),
-            Stroke::PageUp => self.page(count.unwrap_or(1), false, false),
-            Stroke::Escape => {}
-            _ => return false,
+    crate::shortcuts::bindings::described_keys! {
+        fn plain / describe_plain(&mut self, ch: char, count: Option<usize>, pending: Option<char>) -> bool;
+        match (pending, ch) => {
+            (None, '0'..='9') if ch != '0' || count.is_some() =>
+                Hint::Count,
+                {
+                    let digit = ch.to_digit(10).expect("a digit") as usize;
+                    let count = count.unwrap_or(0).saturating_mul(10).saturating_add(digit);
+                    self.typed.count = Some(count.min(1_000_000));
+                    return false;
+                };
+            (Some('g'), 'g') =>
+                Hint::Action("First item or item given by count"),
+                self.go_to(count.map_or(0, |count| count - 1));
+            (Some('g'), 'c') =>
+                Hint::Action("Comment on this line"),
+                self.comment_here();
+            (Some(bracket @ (']' | '[')), 'h') =>
+                Hint::Action(if bracket == ']' {
+                    "Next hunk"
+                } else {
+                    "Previous hunk"
+                }),
+                {
+                    for _ in 0..count.unwrap_or(1) {
+                        self.next_of(bracket == ']', |line| matches!(line, Line::Hunk { .. }));
+                    }
+                };
+            (Some(bracket @ (']' | '[')), 'f') =>
+                Hint::Action(if bracket == ']' {
+                    "Next file"
+                } else {
+                    "Previous file"
+                }),
+                {
+                    for _ in 0..count.unwrap_or(1) {
+                        self.next_of(bracket == ']', |line| matches!(line, Line::File { .. }));
+                    }
+                };
+            (Some(_), _) =>
+                Hint::None,
+                {};
+            (None, 'g' | ']' | '[') =>
+                Hint::Prefix,
+                {
+                    self.typed.count = count;
+                    self.typed.key = Some(ch);
+                    return false;
+                };
+            (None, 'j') =>
+                Hint::Action("Next item"),
+                self.move_by(count.unwrap_or(1), true);
+            (None, 'k') =>
+                Hint::Action("Previous item"),
+                self.move_by(count.unwrap_or(1), false);
+            (None, 'G') =>
+                Hint::Action("Last item or item given by count"),
+                self.go_to(count.map_or(usize::MAX, |count| count - 1));
+            (None, 'a') =>
+                Hint::Action("Keep hunk"),
+                self.act_on(false, true);
+            (None, 'A') =>
+                Hint::Action("Keep file"),
+                self.act_on(true, true);
+            (None, 'x') =>
+                Hint::Action("Reject hunk or remove comment"),
+                self.reject_or_uncomment();
+            (None, 'X') =>
+                Hint::Action("Reject file"),
+                self.act_on(true, false);
+            (None, 'S') =>
+                Hint::Action("Send review to agent"),
+                match self.list.chat {
+                    Some(chat) => self.asks.push(Ask::Act(ReviewAction::Send(chat))),
+                    None => self.message = Some("this review is of no chat".to_owned()),
+                };
+            (None, 'R') =>
+                Hint::Action("Refresh review"),
+                {
+                    let review = self.id;
+                    self.asks.push(Ask::Act(ReviewAction::Refresh(review)));
+                };
+            (None, 'q') =>
+                Hint::Action("Close pane"),
+                self.asks.push(Ask::Close);
+            _ =>
+                Hint::None,
+                return false;
         }
-        true
+        then true
     }
 
-    /// Does what a key with Ctrl does.
-    fn ctrl(&mut self, ch: char, count: Option<usize>) -> bool {
-        match ch {
-            'd' => self.page(count.unwrap_or(1), true, true),
-            'u' => self.page(count.unwrap_or(1), false, true),
-            'f' => self.page(count.unwrap_or(1), true, false),
-            'b' => self.page(count.unwrap_or(1), false, false),
-            'n' => self.move_by(count.unwrap_or(1), true),
-            'p' => self.move_by(count.unwrap_or(1), false),
-            _ => return false,
+    // Does what a key that types no character does.
+    crate::shortcuts::bindings::described_keys! {
+        fn named / describe_named(&mut self, stroke: Stroke, count: Option<usize>) -> bool;
+        match stroke => {
+            Stroke::Down =>
+                Hint::Action("Next item"),
+                self.move_by(count.unwrap_or(1), true);
+            Stroke::Up =>
+                Hint::Action("Previous item"),
+                self.move_by(count.unwrap_or(1), false);
+            Stroke::Enter =>
+                Hint::Action("Open file at this line"),
+                self.open_here();
+            Stroke::Home =>
+                Hint::Action("First item"),
+                self.go_to(0);
+            Stroke::End =>
+                Hint::Action("Last item"),
+                self.go_to(usize::MAX);
+            Stroke::PageDown =>
+                Hint::Action("Page down"),
+                self.page(count.unwrap_or(1), true, false);
+            Stroke::PageUp =>
+                Hint::Action("Page up"),
+                self.page(count.unwrap_or(1), false, false);
+            Stroke::Escape =>
+                Hint::Action("Cancel pending command"),
+                {};
+            _ =>
+                Hint::None,
+                return false;
         }
-        true
+        then true
+    }
+
+    // Does what a key with Ctrl does.
+    crate::shortcuts::bindings::described_keys! {
+        fn ctrl / describe_ctrl(&mut self, ch: char, count: Option<usize>) -> bool;
+        match ch => {
+            'd' =>
+                Hint::Action("Half page down"),
+                self.page(count.unwrap_or(1), true, true);
+            'u' =>
+                Hint::Action("Half page up"),
+                self.page(count.unwrap_or(1), false, true);
+            'f' =>
+                Hint::Action("Page down"),
+                self.page(count.unwrap_or(1), true, false);
+            'b' =>
+                Hint::Action("Page up"),
+                self.page(count.unwrap_or(1), false, false);
+            'n' =>
+                Hint::Action("Next item"),
+                self.move_by(count.unwrap_or(1), true);
+            'p' =>
+                Hint::Action("Previous item"),
+                self.move_by(count.unwrap_or(1), false);
+            _ =>
+                Hint::None,
+                return false;
+        }
+        then true
     }
 
     fn move_by(&mut self, by: usize, down: bool) {
@@ -988,22 +1072,10 @@ impl crate::vim::ListPane for Review {
 
 impl Review {
     pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
-        crate::shortcuts::list_context(
-            "Review",
-            &self.typed,
-            &[
-                ("Enter", "Open location"),
-                ("gc", "Comment at cursor"),
-                ("]h / [h", "Next / previous hunk"),
-                ("]f / [f", "Next / previous file"),
-                ("a", "Keep hunk"),
-                ("A", "Keep file"),
-                ("x", "Reject hunk or remove comment"),
-                ("X", "Reject file"),
-                ("S", "Send comments"),
-                ("R", "Refresh review"),
-                ("q", "Close review"),
-            ],
-        )
+        crate::shortcuts::bindings::list("Review", self.typed.key, |stroke, pending| match stroke {
+            Stroke::Char { ch, ctrl: false } => self.describe_plain(ch, self.typed.count, pending),
+            Stroke::Char { ch, ctrl: true } => self.describe_ctrl(ch, self.typed.count),
+            stroke => self.describe_named(stroke, self.typed.count),
+        })
     }
 }

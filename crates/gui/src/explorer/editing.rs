@@ -662,57 +662,22 @@ impl Explorer {
             return;
         };
         let last = plan.steps.len().saturating_sub(1);
-        let scrolled = match stroke {
-            Stroke::Char {
-                ch: 'j',
-                ctrl: false,
-            }
-            | Stroke::Down => Some(plan.top.saturating_add(1)),
-            Stroke::Char {
-                ch: 'k',
-                ctrl: false,
-            }
-            | Stroke::Up => Some(plan.top.saturating_sub(1)),
-            Stroke::Char {
-                ch: 'd',
-                ctrl: true,
-            }
-            | Stroke::PageDown => Some(plan.top.saturating_add(height / 2)),
-            Stroke::Char {
-                ch: 'u',
-                ctrl: true,
-            }
-            | Stroke::PageUp => Some(plan.top.saturating_sub(height / 2)),
-            Stroke::Char {
-                ch: 'G',
-                ctrl: false,
-            }
-            | Stroke::End => Some(last),
-            Stroke::Char {
-                ch: 'g',
-                ctrl: false,
-            }
-            | Stroke::Home => Some(0),
+        let action = plan_key(stroke, &plan.stage).0;
+        let scrolled = match action {
+            PlanKey::Down => Some(plan.top.saturating_add(1)),
+            PlanKey::Up => Some(plan.top.saturating_sub(1)),
+            PlanKey::HalfDown => Some(plan.top.saturating_add(height / 2)),
+            PlanKey::HalfUp => Some(plan.top.saturating_sub(height / 2)),
+            PlanKey::End => Some(last),
+            PlanKey::Home => Some(0),
             _ => None,
         };
         if let Some(top) = scrolled {
             plan.top = top.min(last);
             return;
         }
-        let yes = matches!(
-            stroke,
-            Stroke::Char {
-                ch: 'y' | 'Y',
-                ctrl: false
-            }
-        );
-        let no = matches!(
-            stroke,
-            Stroke::Char {
-                ch: 'n' | 'N' | 'q',
-                ctrl: false
-            } | Stroke::Escape
-        );
+        let yes = action == PlanKey::Accept;
+        let no = action == PlanKey::Cancel;
         match plan.stage {
             // Nothing's done to a folder changed since its listing was
             // made: what the steps say may not be what's there.
@@ -736,7 +701,7 @@ impl Explorer {
                 self.message = Some("nothing was done: back to the listing".to_owned());
                 self.asks.push(Ask::BackToText);
             }
-            Stage::Doing { .. } if stroke == Stroke::Escape => {
+            Stage::Doing { .. } if action == PlanKey::Stop => {
                 plan.stage = Stage::Doing { stopping: true };
             }
             Stage::Stopped(_) => self.finish_editing(),
@@ -1116,5 +1081,91 @@ fn left_out_said(count: usize) -> String {
         count => {
             format!("{count} names with line breaks or stray marks are left out, untouched")
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlanKey {
+    Down,
+    Up,
+    HalfDown,
+    HalfUp,
+    Home,
+    End,
+    Accept,
+    Cancel,
+    Stop,
+    Finish,
+    None,
+}
+
+fn plan_key(stroke: Stroke, stage: &Stage) -> (PlanKey, crate::shortcuts::bindings::Hint) {
+    use crate::shortcuts::bindings::Hint;
+    match stroke {
+        Stroke::Char {
+            ch: 'j',
+            ctrl: false,
+        }
+        | Stroke::Down => (PlanKey::Down, Hint::Action("Scroll down")),
+        Stroke::Char {
+            ch: 'k',
+            ctrl: false,
+        }
+        | Stroke::Up => (PlanKey::Up, Hint::Action("Scroll up")),
+        Stroke::Char {
+            ch: 'd',
+            ctrl: true,
+        }
+        | Stroke::PageDown => (PlanKey::HalfDown, Hint::Action("Scroll half a page down")),
+        Stroke::Char {
+            ch: 'u',
+            ctrl: true,
+        }
+        | Stroke::PageUp => (PlanKey::HalfUp, Hint::Action("Scroll half a page up")),
+        Stroke::Char {
+            ch: 'g',
+            ctrl: false,
+        }
+        | Stroke::Home => (PlanKey::Home, Hint::Action("First operation")),
+        Stroke::Char {
+            ch: 'G',
+            ctrl: false,
+        }
+        | Stroke::End => (PlanKey::End, Hint::Action("Last operation")),
+        Stroke::Char {
+            ch: 'y' | 'Y',
+            ctrl: false,
+        } if *stage == Stage::Asking => (PlanKey::Accept, Hint::Action("Apply file operations")),
+        Stroke::Char {
+            ch: 'n' | 'N' | 'q',
+            ctrl: false,
+        }
+        | Stroke::Escape
+            if *stage == Stage::Asking =>
+        {
+            (
+                PlanKey::Cancel,
+                Hint::Action("Cancel and return to listing"),
+            )
+        }
+        Stroke::Escape if matches!(stage, Stage::Doing { .. }) => (
+            PlanKey::Stop,
+            Hint::Action("Stop after the current operation"),
+        ),
+        _ if matches!(stage, Stage::Stopped(_)) => {
+            (PlanKey::Finish, Hint::Text("Return to the tree"))
+        }
+        _ => (PlanKey::None, Hint::None),
+    }
+}
+
+impl Explorer {
+    pub(super) fn plan_shortcuts(&self) -> Option<crate::shortcuts::Context> {
+        let stage = &self.editing.as_ref()?.plan.as_ref()?.stage;
+        Some(crate::shortcuts::bindings::list(
+            "File operations",
+            None,
+            |stroke, _| plan_key(stroke, stage).1,
+        ))
     }
 }

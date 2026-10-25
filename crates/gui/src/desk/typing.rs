@@ -210,22 +210,15 @@ impl Desk {
             self.suggest_completion();
             return;
         }
-        if input.purpose == Purpose::Command
-            && let [
-                Stroke::Char {
-                    ch: ch @ ('n' | 'p'),
-                    ctrl: true,
-                },
-            ] = prompt_strokes(press).as_slice()
-        {
-            self.complete(*ch == 'n');
+        let action = input.key_action(press).0;
+        if let InputKey::CompleteControl(forward) = action {
+            self.complete(forward);
             return;
         }
         let named = match press.key {
             Key::Named(named) => Some(*named),
             _ => None,
         };
-        let back = press.modifiers.shift;
         let completing = input.completing.is_some();
         // Any key but Tab, and Up and Down going through the choices, ends
         // a completion.
@@ -234,12 +227,9 @@ impl Desk {
         if !goes_on {
             input.completing = None;
         }
-        match named {
-            Some(NamedKey::Escape) => self.input = None,
-            Some(NamedKey::ArrowDown | NamedKey::ArrowUp | NamedKey::Tab)
-                if input.purpose == Purpose::Workspace =>
-            {
-                let up = named == Some(NamedKey::ArrowUp) || (named == Some(NamedKey::Tab) && back);
+        match action {
+            InputKey::Cancel => self.input = None,
+            InputKey::Workspace(up) => {
                 let count = (self.input.as_ref())
                     .map_or(0, |input| self.workspace_choices(input.line.text()).len());
                 let Some(input) = &mut self.input else { return };
@@ -249,18 +239,16 @@ impl Desk {
                     (input.selected + 1).min(count.saturating_sub(1))
                 };
             }
-            Some(NamedKey::Tab) if input.purpose == Purpose::Command => self.complete(!back),
-            Some(NamedKey::ArrowDown | NamedKey::ArrowUp) if completing => {
-                self.complete(named == Some(NamedKey::ArrowDown));
+            InputKey::Complete(forward) | InputKey::CompleteControl(forward) => {
+                self.complete(forward);
             }
-            Some(NamedKey::ArrowDown | NamedKey::ArrowUp) if input.purpose == Purpose::Command => {
-                let older = named == Some(NamedKey::ArrowUp);
+            InputKey::History(older) => {
                 input
                     .line
                     .recall(self.recall.recalled.of(Kind::Command), older);
             }
-            Some(NamedKey::Enter) => self.enter_input(),
-            _ => match input.line.key(press) {
+            InputKey::Accept => self.enter_input(),
+            InputKey::Edit | InputKey::Register => match input.line.key(press) {
                 // Deleting past a command's colon closes the palette, as in
                 // Vim.
                 Keyed::Emptied if input.purpose == Purpose::Command => self.input = None,
@@ -448,23 +436,20 @@ impl Desk {
     /// holds; with Ctrl+W, the word under the focused editor's cursor; with
     /// `:`, the last command; with `/`, the last search.
     fn register_text(&self, press: &KeyPress<'_>) -> Option<String> {
-        let Key::Character(text) = press.key else {
-            return None;
-        };
-        let name = text.chars().next()?;
-        if press.modifiers.ctrl {
-            return match name {
-                'w' => {
-                    let (editor, copy) = self.focused_editor()?;
-                    editor.word_under_cursor(copy)
-                }
-                _ => None,
-            };
-        }
-        match name {
-            ':' => self.recall.recalled.commands.last().map(str::to_owned),
-            '/' => self.recall.recalled.searches.last().map(str::to_owned),
-            name => (self.shared().registers.get(Some(name))).map(|register| register.text.clone()),
+        use crate::cmdline::controls::Register;
+        match Register::read(press).0 {
+            Register::Word => {
+                let (editor, copy) = self.focused_editor()?;
+                editor.word_under_cursor(copy)
+            }
+            Register::Command => self.recall.recalled.commands.last().map(str::to_owned),
+            Register::Search => self.recall.recalled.searches.last().map(str::to_owned),
+            Register::Named(name) => self
+                .shared()
+                .registers
+                .get(Some(name))
+                .map(|register| register.text.clone()),
+            Register::None => None,
         }
     }
 
@@ -489,10 +474,10 @@ impl Desk {
         }
         let kind = kind?;
         match press.key {
-            Key::Named(key @ (NamedKey::ArrowUp | NamedKey::ArrowDown)) => {
+            key if crate::cmdline::controls::history(key).is_some() => {
                 // Lent to the line, which is the pane's, for a moment.
                 let recalled = std::mem::take(&mut self.recall.recalled);
-                let older = *key == NamedKey::ArrowUp;
+                let older = crate::cmdline::controls::history(key).expect("history key");
                 let moved = (self.focused_prompt_line())
                     .map(|(line, _)| line.recall(recalled.of(kind), older));
                 self.recall.recalled = recalled;
@@ -581,5 +566,107 @@ impl Desk {
             selected,
             under: None,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum InputKey {
+    Register,
+    Cancel,
+    Workspace(bool),
+    Complete(bool),
+    CompleteControl(bool),
+    History(bool),
+    Accept,
+    Edit,
+}
+
+impl Input {
+    fn key_action(&self, press: &KeyPress<'_>) -> (InputKey, crate::shortcuts::bindings::Hint) {
+        use crate::shortcuts::bindings::Hint;
+        if self.line.wants_register() {
+            return (InputKey::Register, Hint::Text("Insert register contents"));
+        }
+        if self.purpose == Purpose::Command
+            && let [
+                Stroke::Char {
+                    ch: ch @ ('n' | 'p'),
+                    ctrl: true,
+                },
+            ] = prompt_strokes(press).as_slice()
+        {
+            return (
+                InputKey::CompleteControl(*ch == 'n'),
+                Hint::Action(if *ch == 'n' {
+                    "Next suggestion"
+                } else {
+                    "Previous suggestion"
+                }),
+            );
+        }
+        let named = match press.key {
+            Key::Named(named) => Some(*named),
+            _ => None,
+        };
+        match named {
+            Some(NamedKey::Escape) => (InputKey::Cancel, Hint::Action("Cancel prompt")),
+            Some(NamedKey::ArrowDown | NamedKey::ArrowUp | NamedKey::Tab)
+                if self.purpose == Purpose::Workspace =>
+            {
+                let up = named == Some(NamedKey::ArrowUp)
+                    || (named == Some(NamedKey::Tab) && press.modifiers.shift);
+                (
+                    InputKey::Workspace(up),
+                    Hint::Action(if up {
+                        "Previous workspace"
+                    } else {
+                        "Next workspace"
+                    }),
+                )
+            }
+            Some(NamedKey::Tab) if self.purpose == Purpose::Command => (
+                InputKey::Complete(!press.modifiers.shift),
+                Hint::Action(if press.modifiers.shift {
+                    "Complete backward"
+                } else {
+                    "Complete forward"
+                }),
+            ),
+            Some(NamedKey::ArrowDown | NamedKey::ArrowUp) if self.completing.is_some() => (
+                InputKey::CompleteControl(named == Some(NamedKey::ArrowDown)),
+                Hint::Action(if named == Some(NamedKey::ArrowUp) {
+                    "Previous suggestion"
+                } else {
+                    "Next suggestion"
+                }),
+            ),
+            Some(NamedKey::ArrowDown | NamedKey::ArrowUp) if self.purpose == Purpose::Command => (
+                InputKey::History(named == Some(NamedKey::ArrowUp)),
+                Hint::Action(if named == Some(NamedKey::ArrowUp) {
+                    "Previous command in history"
+                } else {
+                    "Next command in history"
+                }),
+            ),
+            Some(NamedKey::Enter) => (InputKey::Accept, Hint::Action("Accept the text")),
+            _ => (
+                InputKey::Edit,
+                prompt_strokes(press)
+                    .first()
+                    .map_or(Hint::None, |stroke| self.line.describe_stroke(*stroke)),
+            ),
+        }
+    }
+
+    pub(super) fn shortcut_context(&self) -> crate::shortcuts::Context {
+        let title = self
+            .purpose
+            .label()
+            .0
+            .unwrap_or_else(|| "Command prompt".into());
+        if self.line.wants_register() {
+            return crate::cmdline::controls::register_help(&title);
+        }
+        crate::shortcuts::bindings::from_presses(&title, |press| self.key_action(press).1)
     }
 }

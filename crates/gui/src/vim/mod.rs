@@ -122,3 +122,10 @@ pub(crate) enum Selection {
     /// (see [`crate::motion::Block`]).
     Block,
 }
+
+mod describe;
+
+pub(crate) const RECORD_STOP: Stroke = Stroke::char('q');
+pub(crate) fn stops_recording(stroke: Stroke) -> bool {
+    stroke == RECORD_STOP
+}

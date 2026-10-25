@@ -26,6 +26,8 @@
 //! | Enter | Connects to it |
 //! | Esc, Ctrl+C | Closes the picker |
 
+use crate::shortcuts::bindings::Hint;
+
 use std::time::Duration;
 
 use winit::keyboard::{Key, NamedKey};
@@ -244,44 +246,76 @@ impl HostPicker {
         }
     }
 
-    /// Handles a key.
-    pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> Outcome {
-        let modifiers = press.modifiers;
-        // Not with Shift: Ctrl+Shift+C and the like are the terminal's.
-        let ctrl = match press.key {
-            Key::Character(text) if modifiers.ctrl && !modifiers.alt && !modifiers.shift => {
-                text.chars().next().map(|ch| ch.to_ascii_lowercase())
-            }
-            _ => None,
-        };
-        match (press.key, ctrl) {
-            (Key::Named(NamedKey::Escape), _) | (_, Some('c')) => Outcome::Close,
-            (Key::Named(NamedKey::Enter), _) => self.connect(),
-            (Key::Named(NamedKey::ArrowDown), _) | (_, Some('n')) => self.go(1),
-            (Key::Named(NamedKey::ArrowUp), _) | (_, Some('p')) => self.go(-1),
-            (Key::Named(NamedKey::PageDown), _) => self.go(self.page()),
-            (Key::Named(NamedKey::PageUp), _) => self.go(-self.page()),
-            (Key::Named(NamedKey::Backspace), _) => {
-                if self.query.pop().is_none() {
-                    return Outcome::Nothing;
+    // Handles a key.
+    crate::shortcuts::bindings::described_keys! {
+        pub(crate) fn key / describe_key(&mut self, press: &KeyPress<'_>) -> Outcome;
+        prepare {
+            let modifiers = press.modifiers;
+            // Not with Shift: Ctrl+Shift+C and the like are the terminal's.
+            let ctrl = match press.key {
+                Key::Character(text) if modifiers.ctrl && !modifiers.alt && !modifiers.shift => {
+                    text.chars().next().map(|ch| ch.to_ascii_lowercase())
                 }
-                self.typed_changed()
-            }
-            (_, Some('u')) => {
-                self.query.clear();
-                self.typed_changed()
-            }
-            (_, Some('w')) => {
-                let kept = (self.query.trim_end().rfind(' ')).map_or(0, |space| space + 1);
-                self.query.truncate(kept);
-                self.typed_changed()
-            }
-            _ if modifiers.ctrl || modifiers.alt => Outcome::Nothing,
-            _ => match press.text {
-                Some(text) => self.paste(text),
-                None => Outcome::Nothing,
-            },
+                _ => None,
+            };
         }
+        match (press.key, ctrl) => {
+            (Key::Named(NamedKey::Escape), _) | (_, Some('c')) =>
+                Hint::Action("Close picker"),
+                Outcome::Close;
+            (Key::Named(NamedKey::Enter), _) =>
+                Hint::Action("Connect to selected machine"),
+                self.connect();
+            (Key::Named(NamedKey::ArrowDown), _) | (_, Some('n')) =>
+                Hint::Action("Next result"),
+                self.go(1);
+            (Key::Named(NamedKey::ArrowUp), _) | (_, Some('p')) =>
+                Hint::Action("Previous result"),
+                self.go(-1);
+            (Key::Named(NamedKey::PageDown), _) =>
+                Hint::Action("Next page"),
+                self.go(self.page());
+            (Key::Named(NamedKey::PageUp), _) =>
+                Hint::Action("Previous page"),
+                self.go(-self.page());
+            (Key::Named(NamedKey::Backspace), _) =>
+                Hint::Action("Delete last query character"),
+                {
+                    if self.query.pop().is_none() {
+                        return Outcome::Nothing;
+                    }
+                    self.typed_changed()
+                };
+            (_, Some('u')) =>
+                Hint::Action("Clear query"),
+                {
+                    self.query.clear();
+                    self.typed_changed()
+                };
+            (_, Some('w')) =>
+                Hint::Action("Delete last query word"),
+                {
+                    let kept = (self.query.trim_end().rfind(' ')).map_or(0, |space| space + 1);
+                    self.query.truncate(kept);
+                    self.typed_changed()
+                };
+            _ if modifiers.ctrl || modifiers.alt =>
+                Hint::None,
+                Outcome::Nothing;
+            _ =>
+                Hint::Text("Search machines"),
+                match press.text {
+                    Some(text) => self.paste(text),
+                    None => Outcome::Nothing,
+                };
+        }
+        result
+    }
+
+    pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
+        crate::shortcuts::bindings::from_presses("Connect to a machine", |press| {
+            self.describe_key(press)
+        })
     }
 
     /// Types `text`.

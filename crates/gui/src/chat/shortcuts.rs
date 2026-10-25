@@ -1,168 +1,140 @@
 use super::{ChatView, read::Prefix};
-use crate::shortcuts::Context;
+use crate::shortcuts::{
+    Context,
+    bindings::{self, Hint},
+};
 use crate::vim::Mode;
 
 impl ChatView {
+    pub(crate) fn leaves_composer(&self, press: &crate::input::KeyPress<'_>) -> bool {
+        crate::vim::enters_normal_mode(press)
+            || (*press.key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+                && self.node.question.is_none())
+    }
+
     pub(crate) fn exclusive_shortcuts(&self) -> Option<Context> {
         if self.viewing_modal() {
-            let mut context = Context::new(
+            return Some(bindings::from_presses(
                 if self.usage_modal {
                     "Usage limits"
                 } else {
                     "Image viewer"
                 },
-                &[("Esc / Ctrl+;", "Close the modal")],
-            );
-            if self.usage_modal {
-                context.add(&[
-                    ("Up / Down", "Scroll limits"),
-                    ("PageUp / PageDown", "Scroll a page"),
-                ]);
-            }
-            return Some(context);
+                |press| self.describe_modal_key(press.key, crate::vim::enters_normal_mode(press)),
+            ));
         }
         self.menu.as_ref().map(|_| {
-            let mut context = Context::new(
+            let mut context = bindings::from_presses(
                 if self.searching_models() {
                     "Model picker"
                 } else {
                     "Agent settings"
                 },
-                &[
-                    ("Up / Down", "Previous / next choice"),
-                    ("Left / Right", "Adjust value or expand model family"),
-                    ("Enter", "Choose the highlighted item"),
-                    ("Esc / Ctrl+;", "Close the popup"),
-                ],
+                |press| {
+                    let search = self.describe_model_search_key(press.key, press.modifiers);
+                    if search == Hint::None {
+                        self.describe_menu_choice_key(press.key)
+                    } else {
+                        search
+                    }
+                },
             );
+            bindings::normal(&mut context, "Close popup");
             if self.searching_models() {
-                context.add(&[
-                    ("Type", "Search all models, with matching favourites first"),
-                    ("Backspace", "Delete the last search character"),
-                    ("Ctrl+Shift+V", "Paste into model search"),
-                ]);
+                bindings::paste(&mut context, "Paste into model search");
             }
             context
         })
+    }
+
+    fn describe_conversation(
+        &self,
+        press: &crate::input::KeyPress<'_>,
+        prefix: Option<Prefix>,
+    ) -> Hint {
+        let character = match press.key {
+            winit::keyboard::Key::Character(text) => text.chars().next(),
+            _ => None,
+        };
+        if press.modifiers.ctrl {
+            return self.describe_read_control(
+                character.map(|ch| ch.to_ascii_lowercase()),
+                press.modifiers.shift,
+            );
+        }
+        if prefix == Some(Prefix::Z) {
+            let table = self.describe_table_scroll_key(character);
+            if table != Hint::None {
+                return table;
+            }
+            return self.describe_fold_bound(
+                character,
+                self.cursor.map(|cursor| cursor.text.turn),
+                self.cursor
+                    .is_some_and(|cursor| cursor.text.piece == super::paint::AGENTS),
+            );
+        }
+        self.describe_read_character(press, character, prefix, self.visual())
     }
 
     #[allow(clippy::too_many_lines, reason = "context-specific key descriptions")]
     pub(crate) fn shortcut_context(&self, mode: Mode) -> Context {
         let mut context = if mode == Mode::Insert {
             if self.node.question.is_some() {
-                Context::new(
-                    "Agent question",
-                    &[
-                        ("Esc", "Decline the request"),
-                        ("Ctrl+;", "Enter normal mode"),
-                    ],
-                )
+                let mut context = bindings::from_presses("Agent question", |press| {
+                    if matches!(self.pick_of(press), Some((_, super::Pick::Refuse))) {
+                        Hint::Action("Decline request")
+                    } else {
+                        Hint::None
+                    }
+                });
+                bindings::normal(&mut context, "Enter normal mode");
+                context
             } else {
-                let mut context = Context::new(
-                    "Agent composer",
-                    &[
-                        (
-                            "Enter",
-                            if self.busy() && self.queue_supported {
-                                "Queue the message"
-                            } else {
-                                "Send the message"
-                            },
-                        ),
-                        ("Shift+Enter", "New line"),
-                        ("Shift+Tab", "Cycle agent modes"),
-                        ("Esc / Ctrl+;", "Enter normal mode"),
-                        ("Left / Right / Up / Down", "Move the caret"),
-                        ("Ctrl+Left / Ctrl+Right", "Move by words"),
-                        ("Home / End", "Start / end of line"),
-                        ("Shift + movement", "Extend the selection"),
-                        ("Ctrl+A", "Select the draft"),
-                        ("Ctrl+C", "Copy selection; otherwise stop the working agent"),
-                        (
-                            "Backspace / Delete",
-                            "Delete text; Backspace removes the last image when the draft is empty",
-                        ),
-                        ("Ctrl+Backspace / Ctrl+Delete", "Delete a word"),
-                        ("Ctrl+Shift+V", "Paste text or attach an image"),
-                    ],
-                );
-                if self.busy() && self.queue_supported {
-                    context.add(&[("Ctrl+Enter", "Steer the current turn")]);
-                }
+                let mut context = bindings::from_presses("Agent composer", |press| {
+                    if self.leaves_composer(press) {
+                        Hint::Action("Enter normal mode")
+                    } else {
+                        self.describe_composer_key(press.key, press.modifiers)
+                    }
+                });
+                bindings::normal(&mut context, "Enter normal mode");
+                bindings::paste(&mut context, "Paste text or attach an image");
                 context
             }
         } else {
-            let mut context = Context::new(
-                "Agent conversation",
-                &[
-                    (
-                        "h / j / k / l / Left / Down / Up / Right",
-                        "Move through conversation text",
-                    ),
-                    ("w / b / e", "Move by words"),
-                    ("0 / ^ / $", "Line start / first word / end"),
-                    ("{ / }", "Previous / next block"),
-                    ("gg / G", "Start / end of conversation"),
-                    ("Ctrl+D / Ctrl+U", "Scroll half a view"),
-                    ("Ctrl+E / Ctrl+Y", "Scroll one line"),
-                    ("v / V", "Select characters / lines"),
-                    ("y", "Copy selection or the code, message or card at cursor"),
-                    (
-                        "za / zo / zc / Enter",
-                        "Toggle / open / fold work at cursor",
-                    ),
-                    ("zR / zM", "Expand / fold all work"),
-                    (
-                        "zl / zh / zL / zH",
-                        "Scroll table horizontally, a little / half a view",
-                    ),
-                    ("u / Ctrl+R", "Undo / redo the turn's file changes"),
-                    ("K", "Open context and usage limits"),
-                    ("i / a / I / A", "Compose a message"),
-                    ("Esc / Ctrl+;", "Clear selection and pending command"),
-                ],
-            );
-            if mode == Mode::Normal {
-                context.add(&[("o", "Compose a message")]);
-            } else {
-                context.rows.retain(|(key, _)| key != "K");
-                context.add(&[("o", "Move to other end of selection")]);
-            }
-            context.add(&[
-                ("PageDown / PageUp", "Scroll half a view"),
-                ("Ctrl+Shift+C", "Copy conversation selection"),
-                ("Ctrl+C", "Stop the working agent, or copy selection"),
-            ]);
-            if let Some(prefix) = self.read_prefix {
-                context.title = format!(
-                    "Agent conversation · after {}",
-                    if prefix == Prefix::G { "g" } else { "z" }
-                );
-                if prefix == Prefix::Z {
-                    context.rows = context
-                        .rows
-                        .into_iter()
-                        .filter_map(|(key, description)| {
-                            let key = key
-                                .split(" / ")
-                                .filter_map(|key| {
-                                    if key.starts_with("Ctrl+") {
-                                        Some(key)
-                                    } else {
-                                        key.strip_prefix('z')
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join(" / ");
-                            (!key.is_empty()).then_some((key, description))
-                        })
-                        .collect();
-                    context.add(&[("Esc / Ctrl+;", "Cancel the fold command")]);
+            let mut context = Context::new("Agent conversation", &[]);
+            for key in bindings::presses() {
+                let kept = key.kept();
+                let press = kept.press();
+                let hint = self.describe_conversation(&press, self.read_prefix);
+                if hint == Hint::Prefix {
+                    let prefix = match press.key {
+                        winit::keyboard::Key::Character(text) if text == "g" => Prefix::G,
+                        _ => Prefix::Z,
+                    };
+                    for next in bindings::presses().filter(|key| {
+                        !key.ctrl && !key.alt && matches!(key.base, crate::keymap::Base::Char(_))
+                    }) {
+                        let tail = next.kept();
+                        let hint = self.describe_conversation(&tail.press(), Some(prefix));
+                        if hint != self.describe_conversation(&tail.press(), None) {
+                            bindings::add(
+                                &mut context,
+                                format!(
+                                    "{}{}",
+                                    crate::shortcuts::sequence(&[key]),
+                                    crate::shortcuts::sequence(&[next])
+                                ),
+                                hint,
+                            );
+                        }
+                    }
                 } else {
-                    context.rows.retain(|(key, _)| key != "gg / G");
-                    context.add(&[("g", "Start of conversation"), ("G", "End of conversation")]);
+                    bindings::add(&mut context, crate::shortcuts::sequence(&[key]), hint);
                 }
             }
+            bindings::normal(&mut context, "Clear selection and pending command");
             context
         };
         if self.read_prefix.is_none()

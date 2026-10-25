@@ -49,11 +49,11 @@ pub(crate) enum Stroke {
 }
 
 impl Stroke {
-    pub(crate) fn char(ch: char) -> Self {
+    pub(crate) const fn char(ch: char) -> Self {
         Self::Char { ch, ctrl: false }
     }
 
-    pub(crate) fn ctrl(ch: char) -> Self {
+    pub(crate) const fn ctrl(ch: char) -> Self {
         Self::Char { ch, ctrl: true }
     }
 

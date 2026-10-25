@@ -68,6 +68,8 @@ mod uses;
 mod visual;
 mod wrap;
 
+use crate::shortcuts::bindings::Hint;
+
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{Answer, BufferId, Edit, FileLocation, Query, Size, Trigger};
@@ -1433,7 +1435,19 @@ impl Editor {
     /// Ctrl+C close it. `None` for any other key, which closes it and goes
     /// on to do what it does.
     fn actions_stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy) -> Option<Done> {
-        let menu_stroke = match stroke {
+        let menu_stroke = self.action_menu_key(stroke)?;
+        let menu = self.actions.as_mut()?;
+        match menu.key(menu_stroke) {
+            Some(MenuKey::Moved) | None => {}
+            Some(MenuKey::Picked(item)) => self.act(item, copy),
+            Some(MenuKey::Closed) => self.actions = None,
+        }
+        Some(Done::REDRAW)
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        fn action_menu_key / describe_action_menu_key(&mut self, stroke: Stroke) -> Option<MenuStroke>;
+        match stroke => {
             Stroke::Char {
                 ch: 'j',
                 ctrl: false,
@@ -1444,7 +1458,9 @@ impl Editor {
             }
             | Stroke::Down
             | Stroke::ShiftDown
-            | Stroke::Tab => MenuStroke::Down,
+            | Stroke::Tab =>
+                Hint::Action("Next code action"),
+                Some(MenuStroke::Down);
             Stroke::Char {
                 ch: 'k',
                 ctrl: false,
@@ -1454,12 +1470,18 @@ impl Editor {
                 ctrl: true,
             }
             | Stroke::Up
-            | Stroke::ShiftUp => MenuStroke::Up,
-            Stroke::Enter => MenuStroke::Pick,
+            | Stroke::ShiftUp =>
+                Hint::Action("Previous code action"),
+                Some(MenuStroke::Up);
+            Stroke::Enter =>
+                Hint::Action("Apply code action"),
+                Some(MenuStroke::Pick);
             Stroke::Char {
                 ch: digit @ '1'..='9',
                 ctrl: false,
-            } => MenuStroke::Number(u8::try_from(digit.to_digit(10)?).ok()?),
+            } =>
+                Hint::Action("Apply numbered code action"),
+                Some(MenuStroke::Number(u8::try_from(digit.to_digit(10)?).ok()?));
             Stroke::Escape
             | Stroke::Char {
                 ch: 'q',
@@ -1468,19 +1490,17 @@ impl Editor {
             | Stroke::Char {
                 ch: 'c',
                 ctrl: true,
-            } => MenuStroke::Close,
-            _ => {
-                self.actions = None;
-                return None;
-            }
-        };
-        let menu = self.actions.as_mut()?;
-        match menu.key(menu_stroke) {
-            Some(MenuKey::Moved) | None => {}
-            Some(MenuKey::Picked(item)) => self.act(item, copy),
-            Some(MenuKey::Closed) => self.actions = None,
+            } =>
+                Hint::Action("Close code actions"),
+                Some(MenuStroke::Close);
+            _ =>
+                Hint::None,
+                {
+                    self.actions = None;
+                    return None;
+                };
         }
-        Some(Done::REDRAW)
+        result
     }
 
     /// Does action `item` of the menu, closing it: the daemon makes its
@@ -1504,37 +1524,47 @@ impl Editor {
         self.acting = Some(copy.ask(query, 0));
     }
 
-    /// The keys a panel by the cursor takes while it's shown: `K` again
-    /// pages through it, and Ctrl+E and Ctrl+Y scroll it a line. `None`
-    /// for any other key, which closes it if it moves the cursor. Esc
-    /// closes it, and goes on to do what it does, such as leaving visual
-    /// mode.
-    fn panel_stroke(&mut self, stroke: Stroke) -> Option<Done> {
-        let panel = self.panel.as_mut()?;
-        match stroke {
+    // The keys a panel by the cursor takes while it's shown: `K` again
+    // pages through it, and Ctrl+E and Ctrl+Y scroll it a line. `None`
+    // for any other key, which closes it if it moves the cursor. Esc
+    // closes it, and goes on to do what it does, such as leaving visual
+    // mode.
+    crate::shortcuts::bindings::described_keys! {
+        fn panel_stroke / describe_panel_stroke(&mut self, stroke: Stroke) -> Option<Done>;
+        match stroke => {
             Stroke::Char {
                 ch: 'K',
                 ctrl: false,
-            } => panel.page(),
+            } =>
+                Hint::Action("Next page of hover information"),
+                self.panel.as_mut()?.page();
             Stroke::Char {
                 ch: 'e',
                 ctrl: true,
-            } => {
-                panel.scroll(1);
-            }
+            } =>
+                Hint::Action("Scroll hover down"),
+                {
+                    self.panel.as_mut()?.scroll(1);
+                };
             Stroke::Char {
                 ch: 'y',
                 ctrl: true,
-            } => {
-                panel.scroll(-1);
-            }
-            Stroke::Escape => {
-                self.panel = None;
+            } =>
+                Hint::Action("Scroll hover up"),
+                {
+                    self.panel.as_mut()?.scroll(-1);
+                };
+            Stroke::Escape =>
+                Hint::Action("Close hover information"),
+                {
+                    self.panel = None;
+                    return None;
+                };
+            _ =>
+                Hint::None,
                 return None;
-            }
-            _ => return None,
         }
-        Some(Done::REDRAW)
+        then Some(Done::REDRAW)
     }
 
     fn read_stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy, shared: &mut Shared) -> Done {
@@ -1563,7 +1593,7 @@ impl Editor {
             return Done::REDRAW;
         }
         // `q` stops a macro being recorded, whatever comes after.
-        if stroke == Stroke::char('q')
+        if crate::vim::stops_recording(stroke)
             && !self.keys.pending()
             && shared.registers.recording().is_some()
         {
@@ -3088,61 +3118,85 @@ impl Editor {
         // The word characters typed in a row before this key, which any
         // key but another of them ends.
         let run = std::mem::take(&mut self.word_run);
-        match stroke {
-            Stroke::Escape => {
-                self.word_run = run;
-                self.leave_insert(copy);
-            }
-            Stroke::Char { ch, ctrl: false } => {
-                self.insert_text(at, ch.encode_utf8(&mut [0; 4]), copy);
-                if indent::is_word(ch) {
-                    self.word_run = run.saturating_add(1);
-                } else {
-                    self.typed_indent_key(ch, at + ch.len_utf8(), run, copy);
-                }
-            }
-            Stroke::Enter => self.insert_line_break(at, run, copy),
-            Stroke::Tab | Stroke::BackTab => self.insert_tab(at, run, copy),
+        self.insert_bound(stroke, copy, at, run);
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        fn insert_bound / describe_insert_bound(&mut self, stroke: Stroke) -> ();
+        execute(copy: &mut BufferCopy, at: usize, run: usize);
+        match stroke => {
+            Stroke::Escape =>
+                Hint::Action("Enter normal mode"),
+                {
+                    self.word_run = run;
+                    self.leave_insert(copy);
+                };
+            Stroke::Char { ch, ctrl: false } =>
+                Hint::Text("Insert text"),
+                {
+                    self.insert_text(at, ch.encode_utf8(&mut [0; 4]), copy);
+                    if indent::is_word(ch) {
+                        self.word_run = run.saturating_add(1);
+                    } else {
+                        self.typed_indent_key(ch, at + ch.len_utf8(), run, copy);
+                    }
+                };
+            Stroke::Enter =>
+                Hint::Action("New line"),
+                self.insert_line_break(at, run, copy);
+            Stroke::Tab | Stroke::BackTab =>
+                Hint::Action("Insert indentation"),
+                self.insert_tab(at, run, copy);
             Stroke::Backspace
             | Stroke::Char {
                 ch: 'h',
                 ctrl: true,
-            } => {
-                let text = self.text(copy);
-                let line = text.point_of(at).line;
-                let (start, end) = if line > 0 && at == text.shown_start(line) {
-                    // At the start of what's shown, it joins the line to
-                    // the one before, taking only the line break: what's
-                    // hidden of the line goes with it.
-                    let start = text.line_start(line);
-                    (start - 1, start)
-                } else {
-                    (previous_char(&text, at), at)
+            } =>
+                Hint::Action("Delete previous character"),
+                {
+                    let text = self.text(copy);
+                    let line = text.point_of(at).line;
+                    let (start, end) = if line > 0 && at == text.shown_start(line) {
+                        // At the start of what's shown, it joins the line to
+                        // the one before, taking only the line break: what's
+                        // hidden of the line goes with it.
+                        let start = text.line_start(line);
+                        (start - 1, start)
+                    } else {
+                        (previous_char(&text, at), at)
+                    };
+                    drop(text);
+                    self.delete_text(start, end, copy);
                 };
-                drop(text);
-                self.delete_text(start, end, copy);
-            }
-            Stroke::Delete => {
-                let text = self.text(copy);
-                let end = next_char(&text, at);
-                drop(text);
-                self.delete_text(at, end, copy);
-            }
+            Stroke::Delete =>
+                Hint::Action("Delete next character"),
+                {
+                    let text = self.text(copy);
+                    let end = next_char(&text, at);
+                    drop(text);
+                    self.delete_text(at, end, copy);
+                };
             Stroke::Char {
                 ch: 'w',
                 ctrl: true,
-            } => {
-                let start = word_before(&self.text(copy), at);
-                self.delete_text(start, at, copy);
-            }
+            } =>
+                Hint::Action("Delete previous word"),
+                {
+                    let start = word_before(&self.text(copy), at);
+                    self.delete_text(start, at, copy);
+                };
             Stroke::Char {
                 ch: 'u',
                 ctrl: true,
-            } => {
-                let start = indent_before(&self.text(copy), at);
-                self.delete_text(start, at, copy);
-            }
-            Stroke::Char { ctrl: true, .. } => {}
+            } =>
+                Hint::Action("Delete to start of inserted text or indentation"),
+                {
+                    let start = indent_before(&self.text(copy), at);
+                    self.delete_text(start, at, copy);
+                };
+            Stroke::Char { ctrl: true, .. } =>
+                Hint::None,
+                {};
             Stroke::Left
             | Stroke::Right
             | Stroke::Up
@@ -3158,8 +3212,11 @@ impl Editor {
             | Stroke::CtrlHome
             | Stroke::CtrlEnd
             | Stroke::ShiftUp
-            | Stroke::ShiftDown => self.move_inserting(stroke, at, copy),
+            | Stroke::ShiftDown =>
+                Hint::Action("Move caret"),
+                self.move_inserting(stroke, at, copy);
         }
+        then ()
     }
 
     /// An arrow, Home, End or Page Up or Down, in insert mode, from byte
@@ -3357,37 +3414,43 @@ impl Editor {
 
     // --- Completion and help with calls -------------------------------------
 
-    /// The keys completion takes in insert mode: Ctrl+Space asks for it,
-    /// as do Ctrl+N and Ctrl+P when the menu isn't shown; while it is,
-    /// they and the arrows move through it, Ctrl+Y accepts, as Enter and
-    /// Tab can, and Ctrl+E closes it. Esc closes it and goes on to leave
-    /// insert mode. `None` for any other key.
-    fn completion_stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy) -> Option<Done> {
-        let showing = self.completion.as_ref().is_some_and(Completion::showing);
-        let moved = self
-            .completion
-            .as_ref()
-            .is_some_and(|completion| completion.moved);
-        let accepts = match stroke {
-            Stroke::Char {
-                ch: 'y',
-                ctrl: true,
-            } => true,
-            Stroke::Enter => match self.as_you_type.accept {
-                CompleteAccept::Enter => true,
-                CompleteAccept::Picked => moved,
-                CompleteAccept::CtrlY => false,
-            },
-            // A snippet's choices are picked with Ctrl+Y or Enter, as Tab
-            // goes to its next place.
-            Stroke::Tab => {
-                self.as_you_type.tab
-                    && !(self.completion.as_ref()).is_some_and(|completion| completion.choices)
-            }
-            _ => false,
-        };
-        match stroke {
-            _ if showing && accepts => self.accept(copy),
+    // The keys completion takes in insert mode: Ctrl+Space asks for it,
+    // as do Ctrl+N and Ctrl+P when the menu isn't shown; while it is,
+    // they and the arrows move through it, Ctrl+Y accepts, as Enter and
+    // Tab can, and Ctrl+E closes it. Esc closes it and goes on to leave
+    // insert mode. `None` for any other key.
+    crate::shortcuts::bindings::described_keys! {
+        fn completion_stroke / describe_completion_stroke(&mut self, stroke: Stroke) -> Option<Done>;
+        execute(copy: &mut BufferCopy);
+        prepare {
+            let showing = self.completion.as_ref().is_some_and(Completion::showing);
+            let moved = self
+                .completion
+                .as_ref()
+                .is_some_and(|completion| completion.moved);
+            let accepts = match stroke {
+                Stroke::Char {
+                    ch: 'y',
+                    ctrl: true,
+                } => true,
+                Stroke::Enter => match self.as_you_type.accept {
+                    CompleteAccept::Enter => true,
+                    CompleteAccept::Picked => moved,
+                    CompleteAccept::CtrlY => false,
+                },
+                // A snippet's choices are picked with Ctrl+Y or Enter, as Tab
+                // goes to its next place.
+                Stroke::Tab => {
+                    self.as_you_type.tab
+                        && !(self.completion.as_ref()).is_some_and(|completion| completion.choices)
+                }
+                _ => false,
+            };
+        }
+        match stroke => {
+            _ if showing && accepts =>
+                Hint::Action("Accept completion"),
+                self.accept(copy);
             Stroke::Char {
                 ch: 'n' | 'p',
                 ctrl: true,
@@ -3395,33 +3458,48 @@ impl Editor {
             | Stroke::Down
             | Stroke::Up
                 if showing =>
-            {
-                let down = matches!(stroke, Stroke::Down | Stroke::Char { ch: 'n', .. });
-                if let Some(completion) = &mut self.completion {
-                    completion.pick(down);
-                }
-                // A list asked for again mustn't come and lose the pick.
-                self.completion_due = None;
-                if self.completing.is_some_and(|completing| completing.again) {
-                    self.completing = None;
-                }
-                self.document(copy);
-            }
+                Hint::Action(
+                    if matches!(stroke, Stroke::Down | Stroke::Char { ch: 'n', .. }) {
+                        "Next completion"
+                    } else {
+                        "Previous completion"
+                    },
+                ),
+                {
+                    let down = matches!(stroke, Stroke::Down | Stroke::Char { ch: 'n', .. });
+                    if let Some(completion) = &mut self.completion {
+                        completion.pick(down);
+                    }
+                    // A list asked for again mustn't come and lose the pick.
+                    self.completion_due = None;
+                    if self.completing.is_some_and(|completing| completing.again) {
+                        self.completing = None;
+                    }
+                    self.document(copy);
+                };
             Stroke::Char {
                 ch: ' ' | 'n' | 'p',
                 ctrl: true,
-            } => self.ask_completion(Trigger::Invoked, true, copy),
+            } =>
+                Hint::Action("Request completions"),
+                self.ask_completion(Trigger::Invoked, true, copy);
             Stroke::Char {
                 ch: 'e',
                 ctrl: true,
-            } if self.completion.is_some() || self.completing.is_some() => self.close_completion(),
-            Stroke::Escape => {
+            } if self.completion.is_some() || self.completing.is_some() =>
+                Hint::Action("Close completions"),
                 self.close_completion();
+            Stroke::Escape =>
+                Hint::None,
+                {
+                    self.close_completion();
+                    return None;
+                };
+            _ =>
+                Hint::None,
                 return None;
-            }
-            _ => return None,
         }
-        Some(Done::REDRAW)
+        then Some(Done::REDRAW)
     }
 
     /// What a key typed in insert mode asks of the language server, after
@@ -3883,9 +3961,9 @@ impl Editor {
         let Some((typed, _)) = self.prompt_line() else {
             return Done::default();
         };
-        match stroke {
-            Stroke::Escape => self.prompt = None,
-            Stroke::Enter => match self.prompt.take() {
+        match crate::cmdline::controls::Control::read(stroke).0 {
+            crate::cmdline::controls::Control::Cancel => self.prompt = None,
+            crate::cmdline::controls::Control::Accept => match self.prompt.take() {
                 Some(Prompt::Search { mut line, backward }) => {
                     let query = line.take();
                     // Empty, it's the last search again, this way.
@@ -3907,7 +3985,7 @@ impl Editor {
                 Some(Prompt::Rename { mut name, was }) => self.rename(name.take(), &was, copy),
                 Some(Prompt::Confirm(_)) | None => {}
             },
-            stroke => {
+            crate::cmdline::controls::Control::Other => {
                 if typed.stroke(stroke) == Keyed::Emptied {
                     self.prompt = None;
                 }

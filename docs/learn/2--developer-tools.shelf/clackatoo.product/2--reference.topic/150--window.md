@@ -56,7 +56,7 @@ Press **Ctrl+?** in the native window to see shortcuts for the current pane, mod
 
 Type to filter by key or description. Up/Down or Ctrl+P/Ctrl+N scroll through matches, PageUp/PageDown move a page, and the mouse wheel scrolls too. Esc, Ctrl+;, Ctrl+? again, or a click outside closes help. The draft, selection, open popup and unfinished command underneath are kept: after Ctrl+B, for example, help lists bindings starting with that prefix, and closing help lets you finish it.
 
-The list uses the current Lua-configured mappings and their `desc` labels, so replacements, unbindings and mode restrictions appear immediately. Built-in keys are specific to the current pane and temporary state. Keys handled inside terminal programs, and arbitrary Lua `keypress` callback logic, cannot be enumerated; terminal help identifies which keys pass through to the program. Ctrl+? is reserved for this window-level help.
+The list uses the current Lua-configured mappings and their `desc` labels, so replacements, unbindings and mode restrictions appear immediately. Built-in entries are generated from the same key definitions that dispatch commands, and Vim continuations come from its parser. They follow the current pane and temporary state, including completion, pending operators and file-operation confirmations; there is no separate built-in shortcut catalog to keep in sync. Keys handled inside terminal programs, and arbitrary Lua `keypress` callback logic, cannot be enumerated; terminal help identifies which keys pass through to the program. Ctrl+? is reserved for this window-level help.
 
 ## Settings
 

@@ -509,11 +509,7 @@ impl Editor {
     pub(super) fn snippet_stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy) -> Option<Done> {
         let session = self.snippet.as_mut()?;
         if matches!(stroke, Stroke::Tab | Stroke::BackTab) {
-            // With no place to go to, the text stays selected.
-            self.menu_keys = Some(Vec::new());
-            self.word_run = 0;
-            self.go_to_place(stroke == Stroke::Tab, copy);
-            return Some(Done::REDRAW);
+            return self.snippet_jump(stroke, copy);
         }
         let selected = session.selected();
         session.selected = false;
@@ -537,6 +533,28 @@ impl Editor {
             }
             _ => None,
         }
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        pub(super) fn snippet_jump / describe_snippet_jump(&mut self, stroke: Stroke) -> Option<Done>;
+        execute(copy: &mut BufferCopy);
+        match stroke => {
+            Stroke::Tab | Stroke::BackTab if self.snippet.is_some() =>
+                crate::shortcuts::bindings::Hint::Action(if stroke == Stroke::Tab {
+                    "Next snippet field"
+                } else {
+                    "Previous snippet field"
+                }),
+                {
+                    self.menu_keys = Some(Vec::new());
+                    self.word_run = 0;
+                    self.go_to_place(stroke == Stroke::Tab, copy);
+                };
+            _ =>
+                crate::shortcuts::bindings::Hint::None,
+                return None;
+        }
+        then Some(Done::REDRAW)
     }
 
     /// Goes to the snippet's next place, or the one before if not

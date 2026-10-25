@@ -13,7 +13,7 @@
 
 use clackatoo_protocol::{Match, Position, Request};
 use clackatoo_term::{MOST_LINES, MOST_TEXT};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::Key;
 
 use super::{Copy, Document, Lines, Mode, Pane, Pending, Selection};
 use crate::cmdline::{Keyed, Line};
@@ -85,6 +85,16 @@ pub(super) struct TerminalKeys;
 
 impl Dialect for TerminalKeys {
     type Own = TerminalAction;
+
+    fn describe(&self, action: TerminalAction) -> String {
+        match action {
+            TerminalAction::Escape => "Cancel command or selection",
+            TerminalAction::OpenLink => "Open link under cursor",
+            TerminalAction::Block { forward: true } => "Next shell block",
+            TerminalAction::Block { forward: false } => "Previous shell block",
+        }
+        .into()
+    }
 
     fn own(
         &self,
@@ -179,13 +189,9 @@ impl Pane {
         self.status = None;
         // Ctrl+C always reaches the program, and Ctrl+Shift+C copies what's
         // selected, as in other terminals, whatever's half typed.
-        let character = match press.key {
-            Key::Character(text) => text.chars().next(),
-            _ => None,
-        };
-        if press.modifiers.ctrl && matches!(character, Some('c' | 'C')) {
+        if let Some((copy, _)) = terminal_control(press) {
             self.keys.clear();
-            if character == Some('C') {
+            if copy {
                 return self.yank_selection();
             }
             self.send_keyed(vec![0x03]);
@@ -368,15 +374,18 @@ impl Pane {
         let Some(prompt) = &mut self.prompt else {
             return false;
         };
-        match press.key {
-            Key::Named(NamedKey::Enter) => {
+        match crate::vim::prompt_strokes(press)
+            .first()
+            .map(|stroke| crate::cmdline::controls::Control::read(*stroke).0)
+        {
+            Some(crate::cmdline::controls::Control::Accept) => {
                 let mut prompt = self.prompt.take().expect("a prompt is open");
                 if !prompt.line.is_empty() {
                     self.search = Some((prompt.line.take(), prompt.backward));
                     self.search_again(false);
                 }
             }
-            Key::Named(NamedKey::Escape) => self.prompt = None,
+            Some(crate::cmdline::controls::Control::Cancel) => self.prompt = None,
             _ => {
                 if prompt.line.key(press) == Keyed::Emptied {
                     self.prompt = None;
@@ -834,4 +843,25 @@ pub(super) fn position(point: Point) -> Position {
         line: point.line,
         col: point.col,
     }
+}
+
+pub(super) fn terminal_control(
+    press: &KeyPress<'_>,
+) -> Option<(bool, crate::shortcuts::bindings::Hint)> {
+    let character = match press.key {
+        Key::Character(text) => text.chars().next(),
+        _ => None,
+    };
+    if !press.modifiers.ctrl || !matches!(character, Some('c' | 'C')) {
+        return None;
+    }
+    let copy = character == Some('C');
+    Some((
+        copy,
+        crate::shortcuts::bindings::Hint::Action(if copy {
+            "Copy selection"
+        } else {
+            "Send interrupt to terminal program"
+        }),
+    ))
 }

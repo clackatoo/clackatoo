@@ -587,7 +587,7 @@ impl Desk {
                 // The focus moved meanwhile, as with a click: it's dropped.
                 return None;
             }
-            if plain == Some('s') {
+            if lesson_key(plain, true).is_some() {
                 self.step_lesson(forward);
                 return Some(true);
             }
@@ -597,11 +597,7 @@ impl Desk {
             self.tutor.passing = false;
             return None;
         }
-        let forward = match plain {
-            Some(']') => true,
-            Some('[') => false,
-            _ => return None,
-        };
+        let forward = lesson_key(plain, false)?.0;
         let waits = !self.tutor.passing
             && self.lesson_tab_shown()
             && self.key_mode() == KeyMode::Normal
@@ -1339,11 +1335,31 @@ impl Facts for DeskFacts<'_> {
 impl Desk {
     pub(super) fn lesson_shortcuts(&self, context: &mut crate::shortcuts::Context) {
         if self.lesson_tab_shown() && self.key_mode() == KeyMode::Normal {
-            if self.tutor.bracket.is_some() {
-                context.add(&[("s", "Go to the adjacent lesson step")]);
-            } else {
-                context.add(&[("]s / [s", "Next / previous lesson step")]);
-            }
+            let pending = self
+                .tutor
+                .bracket
+                .as_ref()
+                .map(|(_, forward, _)| if *forward { ']' } else { '[' });
+            context.rows.extend(
+                crate::shortcuts::bindings::list("", pending, |stroke, prefix| {
+                    lesson_key(stroke.plain(), prefix.is_some())
+                        .map_or(crate::shortcuts::bindings::Hint::None, |(_, hint)| hint)
+                })
+                .rows,
+            );
         }
+    }
+}
+
+fn lesson_key(
+    plain: Option<char>,
+    pending: bool,
+) -> Option<(bool, crate::shortcuts::bindings::Hint)> {
+    use crate::shortcuts::bindings::Hint;
+    match (pending, plain) {
+        (true, Some('s')) => Some((true, Hint::Action("Go to the adjacent lesson step"))),
+        (false, Some(']')) => Some((true, Hint::Prefix)),
+        (false, Some('[')) => Some((false, Hint::Prefix)),
+        _ => None,
     }
 }

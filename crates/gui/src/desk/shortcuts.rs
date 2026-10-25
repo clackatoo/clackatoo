@@ -1,78 +1,28 @@
 //! Keys collected in the same precedence order as `Desk::key_with`.
+use super::Desk;
 use super::bindings::{Action, Binding};
-use super::{Desk, Purpose};
 use crate::keymap::parse_keys;
-use crate::shortcuts::{Context, FINDER, PROMPT};
+use crate::shortcuts::Context;
 
 impl Desk {
     #[allow(clippy::too_many_lines, reason = "context-specific key descriptions")]
     pub(crate) fn shortcut_context(&self) -> Context {
         if self.offer_asked() {
-            return Context::new(
+            return crate::shortcuts::bindings::from_presses(
                 "Install language features",
-                &[
-                    ("y / Y / Enter", "Install the offered language features"),
-                    ("n / N", "Decline future offers for this language"),
-                    (
-                        "Any other key",
-                        "Dismiss the offer and use the key in the editor",
-                    ),
-                ],
+                |press| self.describe_answer_offer(press),
             );
         }
         if let Some(input) = &self.input {
-            if input.line.wants_register() {
-                return Context::new(
-                    "Prompt · insert register",
-                    &[
-                        (
-                            "a–z / A–Z / 0–9 / \" / - / _ / + / *",
-                            "Insert the register's contents",
-                        ),
-                        ("Esc / Ctrl+;", "Cancel the prompt"),
-                    ],
-                );
-            }
-            let mut context = Context::new(
-                input
-                    .purpose
-                    .label()
-                    .0
-                    .unwrap_or_else(|| "Command prompt".into()),
-                PROMPT,
-            );
-            if input.purpose == Purpose::Command {
-                context.add(&[
-                    ("Tab / Shift+Tab", "Complete forward / backward"),
-                    ("Down / Ctrl+N", "Next suggestion or history entry"),
-                    ("Up / Ctrl+P", "Previous suggestion or history entry"),
-                ]);
-            }
-            if input.purpose == Purpose::Workspace {
-                context.add(&[
-                    ("Down / Tab", "Next workspace"),
-                    ("Up / Shift+Tab", "Previous workspace"),
-                ]);
-            }
+            let mut context = input.shortcut_context();
+            crate::shortcuts::bindings::normal(&mut context, "Cancel prompt");
+            crate::shortcuts::bindings::paste(&mut context, "Paste clipboard text");
             return context;
         }
-        if self.finding() {
-            let mut context = Context::new("Picker", FINDER);
-            context.add(&[
-                ("Ctrl+V", "Open in a split to the right"),
-                ("Ctrl+X", "Open in a split below"),
-                ("Ctrl+T", "Open in a new tab"),
-            ]);
-            if self
-                .finder
-                .as_ref()
-                .is_some_and(|finder| finder.kind() == crate::finder::Kind::Background)
-            {
-                context.add(&[
-                    ("Ctrl+D", "Dismiss the background tab"),
-                    ("Ctrl+F", "Forward its ports"),
-                ]);
-            }
+        if let Some(finder) = self.finder.as_ref().filter(|_| self.finding()) {
+            let mut context = finder.shortcut_context();
+            crate::shortcuts::bindings::normal(&mut context, "Close picker");
+            crate::shortcuts::bindings::paste(&mut context, "Paste into query");
             return context;
         }
         let pane = self.focused_terminal().and_then(|id| self.pane(id));
@@ -98,37 +48,29 @@ impl Desk {
             board.shortcut_context()
         } else if let Some(review) = self.focused_review() {
             review.shortcut_context()
-        } else if self.focused_browser().is_some() {
-            Context::new(
-                "Browser pane",
-                &[("q", "Close the pane, keeping the browser session")],
-            )
+        } else if let Some(browser) = self.focused_browser() {
+            browser.shortcut_context()
         } else if let Some(pane) = pane {
             pane.shortcut_context()
         } else {
             Context::new("Window", &[])
         };
         self.lesson_shortcuts(&mut context);
+        self.listing_shortcuts(&mut context);
         if self.key_mode() == crate::keymap::KeyMode::Normal && !self.pane_pending() {
-            if let Some(shown) = self.shown
-                && self.focused_editor().is_some()
-                && self.file_in(shown.pane).is_some()
-                && !self.is_lesson_pane(shown.pane)
-            {
-                context.rows.retain(|(key, _)| key != "-");
-                context.add(&[("-", "Open parent directory")]);
-                if self.is_explorer(shown.pane) {
-                    context.rows.retain(|(key, _)| key != "Enter");
-                    context.add(&[
-                        ("Enter", "Open the entry at cursor"),
-                        ("g.", "Toggle hidden directory entries"),
-                    ]);
-                }
-            }
             self.resume_shortcuts(&mut context);
         }
         if self.recording().is_some() && self.key_mode() == crate::keymap::KeyMode::Normal {
-            context.add(&[("q", "Stop recording the macro")]);
+            context.rows.extend(
+                crate::shortcuts::bindings::list("", None, |stroke, _| {
+                    if crate::vim::stops_recording(stroke) {
+                        crate::shortcuts::bindings::Hint::Action("Stop recording macro")
+                    } else {
+                        crate::shortcuts::bindings::Hint::None
+                    }
+                })
+                .rows,
+            );
         }
         if !self.pane_pending() || self.pane_counting().is_some() {
             // Built-in rows use alternatives separated by ` / `. Hide each

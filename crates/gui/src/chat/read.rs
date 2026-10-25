@@ -28,6 +28,8 @@
 //! | `i` `a` `I` `A` `o`, Enter | Type a message |
 //! | `1`–`9`, then the same again or Enter | While the agent asks something, pick an answer, then give it; Esc leaves it be |
 
+use crate::shortcuts::bindings::Hint;
+
 use clackatoo_protocol::{ChatAction, ChatNode, Item};
 use winit::keyboard::{Key, NamedKey};
 
@@ -214,103 +216,191 @@ impl ChatView {
         };
         let visual = self.visual();
         if modifiers.ctrl {
-            let redraw = match (character.map(|ch| ch.to_ascii_lowercase()), modifiers.shift) {
-                // Ctrl+Shift+C copies, as in a terminal.
-                (Some('c'), true) => {
-                    self.copy_picked(Copy::Clipboard);
-                    true
-                }
-                (Some('r'), false) => {
-                    self.undo_key(true);
-                    true
-                }
-                (Some('e'), _) => self.scroll_keeping_cursor(|chat| chat.scroll_lines(-1.0)),
-                (Some('y'), _) => self.scroll_keeping_cursor(|chat| chat.scroll_lines(1.0)),
-                (Some('d'), _) => self.scroll_keeping_cursor(|chat| chat.scroll_half(false)),
-                (Some('u'), _) => self.scroll_keeping_cursor(|chat| chat.scroll_half(true)),
-                _ => false,
-            };
+            let redraw =
+                self.read_control(character.map(|ch| ch.to_ascii_lowercase()), modifiers.shift);
             return (redraw, false);
         }
         if prefix == Some(Prefix::Z) {
             return (self.fold_key(character), false);
         }
-        match (character, press.key) {
-            (Some('i' | 'a' | 'I' | 'A'), _) => {
-                self.leave_visual();
-                return (true, true);
-            }
-            (Some('o'), _) if visual.is_none() => return (true, true),
-            (Some('o'), _) => {
-                if let Some(picked) = &mut self.picked {
-                    std::mem::swap(&mut picked.anchor, &mut picked.head);
-                    self.cursor = Some(picked.head);
-                    self.goal = None;
-                    self.reveal = true;
-                }
-            }
-            (_, Key::Named(NamedKey::Enter)) if self.fold_tool(None) => {}
-            (_, Key::Named(NamedKey::Enter)) => {
-                let Some(cursor) = self.cursor.filter(|cursor| control(cursor.text.piece)) else {
+        self.read_character(press, character, prefix, visual)
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        pub(super) fn read_control / describe_read_control(&mut self, character: Option<char>, shift: bool) -> bool;
+        match (character, shift) => {
+            (Some('c'), true) =>
+                Hint::Action("Copy conversation selection"),
+                {
+                    self.copy_picked(Copy::Clipboard);
+                    true
+                };
+            (Some('r'), false) =>
+                Hint::Action("Redo turn file changes"),
+                {
+                    self.undo_key(true);
+                    true
+                };
+            (Some('e'), _) =>
+                Hint::Action("Scroll down one line"),
+                self.scroll_keeping_cursor(|chat| chat.scroll_lines(-1.0));
+            (Some('y'), _) =>
+                Hint::Action("Scroll up one line"),
+                self.scroll_keeping_cursor(|chat| chat.scroll_lines(1.0));
+            (Some('d'), _) =>
+                Hint::Action("Scroll down half a view"),
+                self.scroll_keeping_cursor(|chat| chat.scroll_half(false));
+            (Some('u'), _) =>
+                Hint::Action("Scroll up half a view"),
+                self.scroll_keeping_cursor(|chat| chat.scroll_half(true));
+            _ =>
+                Hint::None,
+                false;
+        }
+        result
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        pub(super) fn read_character / describe_read_character(
+            &mut self,
+            press: &KeyPress<'_>,
+            character: Option<char>,
+            prefix: Option<Prefix>,
+            visual: Option<Selection>,
+        ) -> (bool, bool);
+        match (character, press.key) => {
+            (Some('i' | 'a' | 'I' | 'A'), _) =>
+                Hint::Action("Compose a message"),
+                {
                     self.leave_visual();
                     return (true, true);
                 };
-                let TextKey { turn, piece, part } = cursor.text;
-                match self.agent_on(turn, part).filter(|_| piece == AGENTS) {
-                    Some(chat) => self.queued.push(Input::Act(ChatAction::Open { chat })),
-                    None if piece == AGENTS => self.toggle_agents(turn),
-                    None => self.toggle_fold(turn),
-                }
-            }
-            (_, Key::Named(NamedKey::Escape)) => self.picked = None,
-            (Some('v'), _) => self.visual_key(visual, Selection::Characters),
-            (Some('V'), _) => self.visual_key(visual, Selection::Lines),
-            (Some('y'), _) => self.yank(),
-            // As in an editor, where it shows what the language server
-            // says of what's under the cursor.
-            // In normal mode only: visual mode keeps its keys for the
-            // selection.
-            (Some('K'), _) if visual.is_none() => {
-                if !self.toggle_detail() {
-                    self.say("the agent hasn't said how much context the chat fills".to_owned());
-                }
-            }
-            (Some('u'), _) => self.undo_key(false),
-            (Some('z'), _) => self.read_prefix = Some(Prefix::Z),
-            (Some('g'), _) if prefix == Some(Prefix::G) => self.go_to_end(Way::Back),
-            (Some('g'), _) => self.read_prefix = Some(Prefix::G),
-            (Some('G'), _) => self.go_to_end(Way::On),
-            (Some('j'), _) | (_, Key::Named(NamedKey::ArrowDown)) => self.vertical(Way::On),
-            (Some('k'), _) | (_, Key::Named(NamedKey::ArrowUp)) => self.vertical(Way::Back),
-            (Some('h'), _) | (_, Key::Named(NamedKey::ArrowLeft)) => self.across(Way::Back),
-            (Some('l'), _) | (_, Key::Named(NamedKey::ArrowRight)) => self.across(Way::On),
-            (Some('w'), _) => self.word(Way::On, false),
-            (Some('e'), _) => self.word(Way::On, true),
-            (Some('b'), _) => self.word(Way::Back, false),
-            (Some(edge @ ('0' | '^' | '$')), _) => self.line_edge(edge),
-            (Some('{'), _) => self.block(Way::Back),
-            (Some('}'), _) => self.block(Way::On),
-            (_, Key::Named(NamedKey::PageDown)) => {
-                return (
-                    self.scroll_keeping_cursor(|chat| chat.scroll_half(false)),
-                    false,
-                );
-            }
-            (_, Key::Named(NamedKey::PageUp)) => {
-                return (
-                    self.scroll_keeping_cursor(|chat| chat.scroll_half(true)),
-                    false,
-                );
-            }
-            _ => return (false, false),
+            (Some('o'), _) if visual.is_none() =>
+                Hint::Action("Compose a message"),
+                return (true, true);
+            (Some('o'), _) =>
+                Hint::Action("Other end of selection"),
+                {
+                    if let Some(picked) = &mut self.picked {
+                        std::mem::swap(&mut picked.anchor, &mut picked.head);
+                        self.cursor = Some(picked.head);
+                        self.goal = None;
+                        self.reveal = true;
+                    }
+                };
+            (_, Key::Named(NamedKey::Enter)) =>
+                Hint::Action("Open or fold item; otherwise compose"),
+                {
+                    if !self.fold_tool(None) {
+                        let Some(cursor) = self.cursor.filter(|cursor| control(cursor.text.piece)) else {
+                            self.leave_visual();
+                            return (true, true);
+                        };
+                        let TextKey { turn, piece, part } = cursor.text;
+                        match self.agent_on(turn, part).filter(|_| piece == AGENTS) {
+                            Some(chat) => self.queued.push(Input::Act(ChatAction::Open { chat })),
+                            None if piece == AGENTS => self.toggle_agents(turn),
+                            None => self.toggle_fold(turn),
+                        }
+                    }
+                };
+            (_, Key::Named(NamedKey::Escape)) =>
+                Hint::Action("Clear selection"),
+                self.picked = None;
+            (Some('v'), _) =>
+                Hint::Action("Select characters"),
+                self.visual_key(visual, Selection::Characters);
+            (Some('V'), _) =>
+                Hint::Action("Select lines"),
+                self.visual_key(visual, Selection::Lines);
+            (Some('y'), _) =>
+                Hint::Action("Copy selection or item at cursor"),
+                self.yank();
+            (Some('K'), _) if visual.is_none() =>
+                Hint::Action("Open context and usage limits"),
+                {
+                    if !self.toggle_detail() {
+                        self.say("the agent hasn't said how much context the chat fills".to_owned());
+                    }
+                };
+            (Some('u'), _) =>
+                Hint::Action("Undo turn file changes"),
+                self.undo_key(false);
+            (Some('z'), _) =>
+                Hint::Prefix,
+                self.read_prefix = Some(Prefix::Z);
+            (Some('g'), _) if prefix == Some(Prefix::G) =>
+                Hint::Action("Start of conversation"),
+                self.go_to_end(Way::Back);
+            (Some('g'), _) =>
+                Hint::Prefix,
+                self.read_prefix = Some(Prefix::G);
+            (Some('G'), _) =>
+                Hint::Action("End of conversation"),
+                self.go_to_end(Way::On);
+            (Some('j'), _) | (_, Key::Named(NamedKey::ArrowDown)) =>
+                Hint::Action("Line down"),
+                self.vertical(Way::On);
+            (Some('k'), _) | (_, Key::Named(NamedKey::ArrowUp)) =>
+                Hint::Action("Line up"),
+                self.vertical(Way::Back);
+            (Some('h'), _) | (_, Key::Named(NamedKey::ArrowLeft)) =>
+                Hint::Action("Character left"),
+                self.across(Way::Back);
+            (Some('l'), _) | (_, Key::Named(NamedKey::ArrowRight)) =>
+                Hint::Action("Character right"),
+                self.across(Way::On);
+            (Some('w'), _) =>
+                Hint::Action("Next word"),
+                self.word(Way::On, false);
+            (Some('e'), _) =>
+                Hint::Action("End of word"),
+                self.word(Way::On, true);
+            (Some('b'), _) =>
+                Hint::Action("Previous word"),
+                self.word(Way::Back, false);
+            (Some(edge @ ('0' | '^' | '$')), _) =>
+                Hint::Action(match edge {
+                    '0' => "Start of line",
+                    '^' => "First word on line",
+                    _ => "End of line",
+                }),
+                self.line_edge(edge);
+            (Some('{'), _) =>
+                Hint::Action("Previous block"),
+                self.block(Way::Back);
+            (Some('}'), _) =>
+                Hint::Action("Next block"),
+                self.block(Way::On);
+            (_, Key::Named(NamedKey::PageDown)) =>
+                Hint::Action("Scroll down half a view"),
+                {
+                    return (
+                        self.scroll_keeping_cursor(|chat| chat.scroll_half(false)),
+                        false,
+                    );
+                };
+            (_, Key::Named(NamedKey::PageUp)) =>
+                Hint::Action("Scroll up half a view"),
+                {
+                    return (
+                        self.scroll_keeping_cursor(|chat| chat.scroll_half(true)),
+                        false,
+                    );
+                };
+            _ =>
+                Hint::None,
+                return (false, false);
         }
-        // Visual mode's selection follows the cursor.
-        if let (Some(picked), Some(cursor)) = (&mut self.picked, self.cursor)
-            && matches!(picked.how, How::Visual(_))
-        {
-            picked.head = cursor;
+        then {
+            // Visual mode's selection follows the cursor.
+            if let (Some(picked), Some(cursor)) = (&mut self.picked, self.cursor)
+                && matches!(picked.how, How::Visual(_))
+            {
+                picked.head = cursor;
+            }
+            (true, false)
         }
-        (true, false)
     }
 
     /// `u`, or with `redo` Ctrl+R: undoes what the turn the cursor's in
@@ -358,14 +448,7 @@ impl ChatView {
             .is_some_and(|cursor| cursor.text.piece == AGENTS);
         // Sideways, the table the cursor's in, as Vim scrolls a line too
         // long for the window: a few characters, or half the column.
-        let (em, half) = (self.cache.size, self.cache.width / 2.0);
-        let sideways = match character {
-            Some('l') => Some(4.0 * em),
-            Some('h') => Some(-4.0 * em),
-            Some('L') => Some(half),
-            Some('H') => Some(-half),
-            _ => None,
-        };
+        let sideways = self.table_scroll_key(character);
         if let Some(pixels) = sideways {
             return self.scroll_sideways(None, pixels);
         }
@@ -374,46 +457,81 @@ impl ChatView {
         {
             return true;
         }
-        match (character, turn) {
-            (Some(all @ ('R' | 'M')), _) => {
-                self.set_all_folds(all == 'R');
-                self.set_all_agents(all == 'R');
-            }
-            (Some('a'), Some(turn)) if card => self.toggle_agents(turn),
-            (Some('o'), Some(turn)) if card => self.set_agents(turn, true),
-            (Some('c'), Some(turn)) if card => self.set_agents(turn, false),
-            (Some('a'), Some(turn)) => self.toggle_fold(turn),
-            (Some('o'), Some(turn)) => self.set_fold(turn, true),
-            (Some('c'), Some(turn)) => self.set_fold(turn, false),
-            _ => return false,
+        self.fold_bound(character, turn, card)
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        pub(super) fn table_scroll_key / describe_table_scroll_key(&mut self, character: Option<char>) -> Option<f32>;
+        match character => {
+            Some('l') =>
+                Hint::Action("Scroll table right"),
+                Some(4.0 * self.cache.size);
+            Some('h') =>
+                Hint::Action("Scroll table left"),
+                Some(-4.0 * self.cache.size);
+            Some('L') =>
+                Hint::Action("Scroll table right half a view"),
+                Some(self.cache.width / 2.0);
+            Some('H') =>
+                Hint::Action("Scroll table left half a view"),
+                Some(-self.cache.width / 2.0);
+            _ =>
+                Hint::None,
+                None;
         }
-        // A chat's line on a card folded away can't keep the cursor: it
-        // goes to the card's own line.
-        if let Some(cursor) = self.cursor
-            && cursor.text.piece == AGENTS
-            && cursor.text.part > 0
-            && !self.agents_open(cursor.text.turn)
-        {
-            self.cursor = Some(Position {
-                text: TextKey {
-                    part: 0,
-                    ..cursor.text
-                },
-                byte: 0,
-            });
-            self.picked = None;
+        result
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        pub(super) fn fold_bound / describe_fold_bound(
+            &mut self,
+            character: Option<char>,
+            turn: Option<usize>,
+            card: bool,
+        ) -> bool;
+        match (character, turn) => {
+            (Some(all @ ('R' | 'M')), _) =>
+                Hint::Action(if all == 'R' {
+                    "Expand all work"
+                } else {
+                    "Fold all work"
+                }),
+                {
+                    self.set_all_folds(all == 'R');
+                    self.set_all_agents(all == 'R');
+                };
+            (Some('a'), Some(turn)) if card =>
+                Hint::Action("Toggle subagent card"),
+                self.toggle_agents(turn);
+            (Some('o'), Some(turn)) if card =>
+                Hint::Action("Expand subagent card"),
+                self.set_agents(turn, true);
+            (Some('c'), Some(turn)) if card =>
+                Hint::Action("Fold subagent card"),
+                self.set_agents(turn, false);
+            (Some('a'), Some(turn)) =>
+                Hint::Action("Toggle work"),
+                self.toggle_fold(turn);
+            (Some('o'), Some(turn)) =>
+                Hint::Action("Expand work"),
+                self.set_fold(turn, true);
+            (Some('c'), Some(turn)) =>
+                Hint::Action("Fold work"),
+                self.set_fold(turn, false);
+            _ =>
+                Hint::None,
+                return false;
         }
-        // What's folded away can't keep the cursor: it goes to the line
-        // its work folds under.
-        if let Some(cursor) = self.cursor
-            && cursor.text.piece >= ITEMS
-            && let Some(turn) = self.node.turns.get(cursor.text.turn)
-        {
-            let shape = self.shape(cursor.text.turn, turn);
-            if !shape.open && cursor.text.piece - ITEMS < shape.answer {
+        then {
+            // A chat's line on a card folded away can't keep the cursor: it
+            // goes to the card's own line.
+            if let Some(cursor) = self.cursor
+                && cursor.text.piece == AGENTS
+                && cursor.text.part > 0
+                && !self.agents_open(cursor.text.turn)
+            {
                 self.cursor = Some(Position {
                     text: TextKey {
-                        piece: FOLD,
                         part: 0,
                         ..cursor.text
                     },
@@ -421,9 +539,28 @@ impl ChatView {
                 });
                 self.picked = None;
             }
+            // What's folded away can't keep the cursor: it goes to the line
+            // its work folds under.
+            if let Some(cursor) = self.cursor
+                && cursor.text.piece >= ITEMS
+                && let Some(turn) = self.node.turns.get(cursor.text.turn)
+            {
+                let shape = self.shape(cursor.text.turn, turn);
+                if !shape.open && cursor.text.piece - ITEMS < shape.answer {
+                    self.cursor = Some(Position {
+                        text: TextKey {
+                            piece: FOLD,
+                            part: 0,
+                            ..cursor.text
+                        },
+                        byte: 0,
+                    });
+                    self.picked = None;
+                }
+            }
+            self.reveal = true;
+            true
         }
-        self.reveal = true;
-        true
     }
 
     /// Opens the tool under the reading cursor, keeping the cursor on its

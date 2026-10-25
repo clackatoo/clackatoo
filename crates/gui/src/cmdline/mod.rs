@@ -23,8 +23,12 @@
 //! arrows, Home and End edit the old text as usual.
 
 pub(crate) mod complete;
+pub(crate) mod controls;
 pub(crate) mod nearest;
 pub(crate) mod recall;
+pub(crate) mod simple;
+
+use crate::shortcuts::bindings::Hint;
 
 use crate::input::KeyPress;
 use crate::vim::{Stroke, prompt_strokes};
@@ -63,18 +67,6 @@ enum Edit {
     DeleteWord,
     /// Ctrl+R: a register's name comes next.
     Register,
-}
-
-impl Edit {
-    /// The edit Ctrl and `ch` make.
-    fn ctrl(ch: char) -> Option<Self> {
-        Some(match ch {
-            'u' => Self::ClearBefore,
-            'w' => Self::DeleteWord,
-            'r' => Self::Register,
-            _ => return None,
-        })
-    }
 }
 
 /// A line being typed, and where its caret is.
@@ -211,25 +203,67 @@ impl Line {
         keyed
     }
 
-    /// Takes `stroke`, a key typed into a prompt.
-    pub(crate) fn stroke(&mut self, stroke: Stroke) -> Keyed {
-        let edit = match stroke {
-            Stroke::Char { ch, ctrl: true } => Edit::ctrl(ch),
-            Stroke::Char { ch, ctrl: false } => {
-                self.put(ch.encode_utf8(&mut [0; 4]));
-                return Keyed::Edited;
-            }
-            Stroke::Backspace => Some(Edit::Backspace),
-            Stroke::Delete => Some(Edit::Delete),
-            Stroke::Left => Some(Edit::Left),
-            Stroke::Right => Some(Edit::Right),
-            Stroke::Home | Stroke::CtrlHome => Some(Edit::Home),
-            Stroke::End | Stroke::CtrlEnd => Some(Edit::End),
-            Stroke::CtrlLeft | Stroke::ShiftLeft => Some(Edit::WordLeft),
-            Stroke::CtrlRight | Stroke::ShiftRight => Some(Edit::WordRight),
-            _ => None,
-        };
-        edit.map_or(Keyed::Other, |edit| self.edit(edit))
+    // Takes `stroke`, a key typed into a prompt.
+    crate::shortcuts::bindings::described_keys! {
+        pub(crate) fn stroke / describe_stroke(&mut self, stroke: Stroke) -> Keyed;
+        match stroke => {
+            Stroke::Backspace =>
+                Hint::Action("Delete previous character"),
+                return self.edit(Edit::Backspace);
+            Stroke::Delete =>
+                Hint::Action("Delete next character"),
+                return self.edit(Edit::Delete);
+            Stroke::Left =>
+                Hint::Action("Move caret left"),
+                return self.edit(Edit::Left);
+            Stroke::Right =>
+                Hint::Action("Move caret right"),
+                return self.edit(Edit::Right);
+            Stroke::Home | Stroke::CtrlHome =>
+                Hint::Action("Start of line"),
+                return self.edit(Edit::Home);
+            Stroke::End | Stroke::CtrlEnd =>
+                Hint::Action("End of line"),
+                return self.edit(Edit::End);
+            Stroke::CtrlLeft | Stroke::ShiftLeft =>
+                Hint::Action("Move back a word"),
+                return self.edit(Edit::WordLeft);
+            Stroke::CtrlRight | Stroke::ShiftRight =>
+                Hint::Action("Move forward a word"),
+                return self.edit(Edit::WordRight);
+            Stroke::Char {
+                ch: 'u',
+                ctrl: true,
+            } =>
+                Hint::Action("Delete before the caret"),
+                return self.edit(Edit::ClearBefore);
+            Stroke::Char {
+                ch: 'w',
+                ctrl: true,
+            } =>
+                Hint::Action("Delete previous word"),
+                return self.edit(Edit::DeleteWord);
+            Stroke::Char {
+                ch: 'r',
+                ctrl: true,
+            } =>
+                Hint::Action("Insert a register"),
+                return self.edit(Edit::Register);
+            Stroke::Char { ch, ctrl: false } =>
+                Hint::Text("Insert text"),
+                {
+                    self.put(ch.encode_utf8(&mut [0; 4]));
+                    return Keyed::Edited;
+                };
+            _ =>
+                Hint::None,
+                {};
+        }
+        then Keyed::Other
+    }
+
+    pub(crate) fn shortcuts(&self, title: &str) -> crate::shortcuts::Context {
+        crate::shortcuts::bindings::list(title, None, |stroke, _| self.describe_stroke(stroke))
     }
 
     fn edit(&mut self, edit: Edit) -> Keyed {

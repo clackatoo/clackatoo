@@ -1,85 +1,45 @@
 use super::{Editor, Prompt};
-use crate::shortcuts::Context;
+use crate::shortcuts::{
+    Context,
+    bindings::{self, Hint},
+};
 use crate::vim::Mode;
 
 impl Editor {
     #[allow(clippy::too_many_lines, reason = "context-specific key descriptions")]
     pub(crate) fn shortcut_context(&self) -> Context {
         if self.rendered() {
-            let mut context = Context::new(
-                "Rendered Markdown",
-                &[
-                    ("j / Down / Ctrl+E", "Scroll down"),
-                    ("k / Up / Ctrl+Y", "Scroll up"),
-                    ("Ctrl+D / Ctrl+U", "Scroll half a page"),
-                    ("PageDown / Ctrl+F / Shift+Down", "Scroll a page down"),
-                    ("PageUp / Shift+Up", "Scroll a page up"),
-                    ("gg / G", "Start / end of document"),
-                    ("gj / gk", "Scroll down / up"),
-                    (
-                        "Other editor keys",
-                        "Show the source and apply the key there",
-                    ),
-                ],
-            );
-            if self.keys.pending() {
-                context.title = format!(
-                    "Rendered Markdown · after {}",
-                    self.keys.shown().unwrap_or_default()
-                );
-            }
-            return context;
+            return super::rendered::shortcuts(&self.keys);
         }
         if let Some(prompt) = &self.prompt {
-            return if matches!(prompt, Prompt::Confirm(_)) {
-                Context::new(
-                    "Confirm substitution",
-                    &[
-                        ("y", "Replace this match"),
-                        ("n", "Skip this match"),
-                        ("a", "Replace all remaining matches"),
-                        ("l", "Replace this match and stop"),
-                        ("q / Esc / Ctrl+;", "Stop replacing"),
-                    ],
-                )
-            } else {
-                match prompt {
-                    Prompt::Search { line, .. } => {
-                        crate::shortcuts::prompt("Editor search", line, true)
-                    }
-                    Prompt::Rename { name, .. } => {
-                        crate::shortcuts::prompt("Rename symbol", name, false)
-                    }
-                    Prompt::Confirm(_) => unreachable!(),
+            return match prompt {
+                Prompt::Confirm(_) => bindings::list("Confirm substitution", None, |stroke, _| {
+                    self.describe_confirm_stroke(stroke)
+                }),
+                Prompt::Search { line, .. } => {
+                    crate::shortcuts::prompt("Editor search", line, true)
+                }
+                Prompt::Rename { name, .. } => {
+                    crate::shortcuts::prompt("Rename symbol", name, false)
                 }
             };
         }
         let mut context = if self.mode == Mode::Insert {
-            Context::new(
-                "Editor · insert mode",
-                &[
-                    ("Esc / Ctrl+;", "Enter normal mode"),
-                    ("Enter", "New line"),
-                    (
-                        "Tab / Shift+Tab",
-                        "Insert indentation, or move through snippet fields",
-                    ),
-                    ("Left / Right / Up / Down", "Move caret"),
-                    ("Home / End", "Start / end of line"),
-                    ("Ctrl+Home / Ctrl+End", "Start / end of file"),
-                    (
-                        "Ctrl+Left / Ctrl+Right / Shift+Left / Shift+Right",
-                        "Move by words",
-                    ),
-                    ("PageUp / PageDown / Shift+Up / Shift+Down", "Move by pages"),
-                    ("Backspace / Ctrl+H", "Delete previous character"),
-                    ("Delete", "Delete next character"),
-                    ("Ctrl+W", "Delete previous word"),
-                    ("Ctrl+U", "Delete to start of inserted text or indentation"),
-                    ("Ctrl+Space / Ctrl+N / Ctrl+P", "Request completions"),
-                    ("Ctrl+Shift+V", "Paste clipboard text"),
-                ],
-            )
+            bindings::list("Editor · insert mode", None, |stroke, _| {
+                let completion = if self.replaying {
+                    Hint::None
+                } else {
+                    self.describe_completion_stroke(stroke)
+                };
+                if completion != Hint::None {
+                    return completion;
+                }
+                let snippet = self.describe_snippet_jump(stroke);
+                if snippet != Hint::None {
+                    return snippet;
+                }
+                self.describe_insert_bound(stroke)
+            })
         } else {
             crate::vim::shortcuts::context(
                 "Editor",
@@ -90,52 +50,35 @@ impl Editor {
                 },
             )
         };
-        if self.actions.is_some() && self.mode == Mode::Normal && !self.keys.pending() {
-            context
-                .rows
-                .retain(|(key, _)| !matches!(key.as_str(), "j" | "k" | "Up" | "Down"));
-            context.add(&[
-                ("j / Down / Tab / Ctrl+N", "Next code action"),
-                ("k / Up / Ctrl+P", "Previous code action"),
-                ("Enter", "Apply code action"),
-                ("1–9", "Apply numbered code action"),
-                ("q / Esc / Ctrl+C", "Close code actions"),
-            ]);
-        }
-        if self.panel.is_some() && !self.keys.pending() {
-            context
-                .rows
-                .retain(|(key, _)| !matches!(key.as_str(), "K" | "Ctrl+E" | "Ctrl+Y"));
-            context.add(&[
-                ("K", "Next page of hover information"),
-                ("Ctrl+E / Ctrl+Y", "Scroll hover information"),
-                ("Esc", "Close hover information"),
-            ]);
-        }
-        if self.completion.is_some() && self.mode == Mode::Insert {
-            context
-                .rows
-                .retain(|(key, _)| key != "Ctrl+Space / Ctrl+N / Ctrl+P");
-            context.add(&[("Ctrl+Space", "Request completions")]);
-            if self.as_you_type.tab {
-                context.add(&[("Tab", "Accept completion, except snippet choices")]);
-            }
-            match self.as_you_type.accept {
-                crate::options::CompleteAccept::Enter => {
-                    context.add(&[("Enter", "Accept completion")]);
+        if !self.keys.pending() {
+            for stroke in bindings::strokes() {
+                let hint = if self.actions.is_some() && self.mode == Mode::Normal && !self.replaying
+                {
+                    self.describe_action_menu_key(stroke)
+                } else {
+                    Hint::None
+                };
+                let hint = if hint == Hint::None && self.panel.is_some() {
+                    self.describe_panel_stroke(stroke)
+                } else {
+                    hint
+                };
+                if hint != Hint::None {
+                    let key = bindings::label(stroke);
+                    for (keys, _) in &mut context.rows {
+                        *keys = keys
+                            .split(" / ")
+                            .filter(|old| *old != key)
+                            .collect::<Vec<_>>()
+                            .join(" / ");
+                    }
+                    context.rows.retain(|(keys, _)| !keys.is_empty());
+                    bindings::add(&mut context, key, hint);
                 }
-                crate::options::CompleteAccept::Picked => {
-                    context.add(&[("Enter", "Accept a completion after moving through the menu")]);
-                }
-                crate::options::CompleteAccept::CtrlY => {}
             }
-            context.add(&[
-                ("Down / Ctrl+N", "Next completion"),
-                ("Up / Ctrl+P", "Previous completion"),
-                ("Ctrl+Y", "Accept completion"),
-                ("Ctrl+E", "Close completions"),
-            ]);
         }
+        crate::shortcuts::bindings::normal(&mut context, "Enter normal mode");
+        crate::shortcuts::bindings::paste(&mut context, "Paste clipboard text");
         context
     }
 }
@@ -185,10 +128,7 @@ mod tests {
         );
         assert!(!has(&inner, "j"));
         assert!(has(&help("f", Mode::Normal), "Any character"));
-        assert!(has(
-            &help("\"", Mode::Normal),
-            "a–z / A–Z / 0–9 / \" / - / _ / + / *"
-        ));
+        assert!(has(&help("\"", Mode::Normal), "Register name"));
         assert!(has(&help("3", Mode::Normal), "w"));
         assert!(!has(&help("", Mode::Normal), "iw"));
         assert!(has(

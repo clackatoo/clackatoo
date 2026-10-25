@@ -1,6 +1,8 @@
 //! The window: starting up, and turning window and daemon events into
 //! frames.
 
+use crate::shortcuts::bindings::Hint;
+
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -1372,7 +1374,7 @@ impl App {
         // Any key closes a menu, and Esc does nothing else.
         if self.menu.take().is_some() {
             self.request_redraw();
-            if matches!(press.key, Key::Named(NamedKey::Escape)) {
+            if menu_key(press).0 {
                 return;
             }
         }
@@ -1434,47 +1436,16 @@ impl App {
                 self.shortcut_help = None;
             }
         } else if !repeat {
-            use crate::shortcuts::{Context, FINDER};
             let context = if self.menu.is_some() {
-                Context::new(
-                    "Window menu",
-                    &[
-                        ("Esc", "Close the menu"),
-                        (
-                            "Any other key",
-                            "Close the menu and use the key in the pane",
-                        ),
-                    ],
-                )
-            } else if self.picker.is_some() {
-                let mut context = Context::new("Connect to a machine", FINDER);
-                for (key, _) in &mut context.rows {
-                    if key == "Esc / Ctrl+C / Ctrl+;" {
-                        *key = "Esc / Ctrl+C".into();
-                    }
-                }
+                crate::shortcuts::bindings::from_presses("Window menu", |press| menu_key(press).1)
+            } else if let Some(picker) = &self.picker {
+                let mut context = picker.shortcut_context();
+                crate::shortcuts::bindings::paste(&mut context, "Paste into query");
                 context
-            } else if let Some(notice) = &self.notice {
-                let mut context = Context::new("Connection", &[]);
-                if matches!(notice, Notice::Ask { .. }) {
-                    context.add(&[
-                        ("Enter", "Submit the answer"),
-                        ("Backspace", "Delete the last character"),
-                        ("Esc", "Cancel connecting"),
-                        ("Ctrl+U", "Clear the answer"),
-                        ("Ctrl+Shift+V", "Paste the answer"),
-                    ]);
-                }
-                if matches!(notice, Notice::Lost { .. }) {
-                    context.add(&[("Enter", "Reconnect")]);
-                }
-                if matches!(notice, Notice::OtherDaemon { .. }) {
-                    context.add(&[("Enter", "Update the incompatible daemon or client")]);
-                }
-                if !matches!(notice, Notice::Ask { .. }) {
-                    context.add(&[("Esc", "Close or return to the machine picker")]);
-                }
-                context
+            } else if self.notice.is_some() {
+                crate::shortcuts::bindings::from_presses("Connection", |press| {
+                    self.describe_notice_key(press, false)
+                })
             } else {
                 self.desk.shortcut_context()
             };
@@ -1793,112 +1764,129 @@ impl App {
         self.request_redraw();
     }
 
-    /// Handles a key while a notice is shown: answering its question, or
-    /// typing the answer to ssh's.
-    fn notice_key(&mut self, press: &input::KeyPress<'_>, repeat: bool) {
-        let Some(notice) = &mut self.notice else {
-            return;
-        };
-        let key = press.key;
-        // A held key, as Enter from the picker that chose the machine,
-        // never answers a notice that came up meanwhile.
-        let enter = matches!(key, Key::Named(NamedKey::Enter)) && !repeat;
-        let escape = matches!(key, Key::Named(NamedKey::Escape)) && !repeat;
-        match notice {
-            Notice::Ask { input, answer, .. } => {
-                if enter || escape {
-                    let reply = enter.then(|| std::mem::take(&mut input.0));
-                    match answer {
-                        Reply::Window(answer) => {
-                            // ssh has given up if this fails, and the
-                            // session thread will say why.
-                            let _ = answer.send(reply);
-                            self.notice = Some(Notice::Connecting);
-                        }
-                        Reply::Daemon { ask, .. } => {
-                            let login = ClientMessage::Login {
-                                ask: *ask,
-                                answer: reply.map(Secret),
-                            };
-                            if let Some(sender) = &mut self.sender
-                                && let Err(err) = sender.send(&login)
-                            {
-                                log::warn!("sending to the daemon failed: {err}");
+    // Handles a key while a notice is shown: answering its question, or
+    // typing the answer to ssh's.
+    crate::shortcuts::bindings::described_keys! {
+        fn notice_key / describe_notice_key(&mut self, press: &input::KeyPress<'_>, repeat: bool) -> ();
+        prepare {
+            let key = press.key;
+            let enter = matches!(key, Key::Named(NamedKey::Enter)) && !repeat;
+            let escape = matches!(key, Key::Named(NamedKey::Escape)) && !repeat;
+        }
+        match self.notice.as_ref() => {
+            Some(Notice::Ask { .. }) =>
+                question_key(press, repeat, press.modifiers).1,
+                {
+                    let Some(Notice::Ask { input, answer, .. }) = &mut self.notice else {
+                        return;
+                    };
+                    let answering = question_key(press, repeat, press.modifiers).0;
+                    if matches!(answering, QuestionKey::Accept | QuestionKey::Cancel) {
+                        let reply =
+                            matches!(answering, QuestionKey::Accept).then(|| std::mem::take(&mut input.0));
+                        match answer {
+                            Reply::Window(answer) => {
+                                // ssh has given up if this fails, and the
+                                // session thread will say why.
+                                let _ = answer.send(reply);
+                                self.notice = Some(Notice::Connecting);
                             }
-                            self.notice = None;
+                            Reply::Daemon { ask, .. } => {
+                                let login = ClientMessage::Login {
+                                    ask: *ask,
+                                    answer: reply.map(Secret),
+                                };
+                                if let Some(sender) = &mut self.sender
+                                    && let Err(err) = sender.send(&login)
+                                {
+                                    log::warn!("sending to the daemon failed: {err}");
+                                }
+                                self.notice = None;
+                            }
                         }
-                    }
-                    self.request_redraw();
-                } else if is_paste(key, self.modifiers) {
-                    match paste_text(&mut self.clipboard, Copy::Clipboard) {
-                        Ok(text) => input.push(&text),
-                        Err(err) => log::warn!("pasting failed: {err:#}"),
-                    }
-                } else if matches!(key, Key::Named(NamedKey::Backspace)) {
-                    input.0.pop();
-                } else if self.modifiers.ctrl {
-                    if matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("u")) {
+                        self.request_redraw();
+                    } else if answering == QuestionKey::Paste {
+                        match paste_text(&mut self.clipboard, Copy::Clipboard) {
+                            Ok(text) => input.push(&text),
+                            Err(err) => log::warn!("pasting failed: {err:#}"),
+                        }
+                    } else if answering == QuestionKey::Delete {
+                        input.0.pop();
+                    } else if answering == QuestionKey::Clear {
                         input.0.clear();
-                    }
-                } else if let Some(text) = press.text {
-                    input.push(text);
-                }
-            }
-            Notice::OtherDaemon { protocol } if enter && *protocol <= PROTOCOL_VERSION => {
-                self.notice = Some(Notice::Replacing {
-                    upgrading: launch::can_upgrade(*protocol),
-                });
-                self.session.replace_daemon();
-            }
-            Notice::OtherDaemon { protocol } if enter && *protocol > PROTOCOL_VERSION => {
-                let failed = match &self.updates.program {
-                    _ if self.updates.running => Some(
-                        "clackatoo is being updated already, as :update asked: open the window \
-                         again once it's done"
-                            .to_owned(),
-                    ),
-                    None => Some("this program can't be found, to update it".to_owned()),
-                    Some(program) => {
-                        self.updates.running = true;
-                        let proxy = self.session.proxy();
-                        updates::update(program.clone(), updates::Asked::ForDaemon, proxy);
-                        None
+                    } else if answering == QuestionKey::Type
+                        && let Some(text) = press.text
+                    {
+                        input.push(text);
                     }
                 };
-                self.notice = Some(Notice::Updating { failed });
-            }
-            Notice::Lost { .. } if enter => {
-                self.notice = Some(Notice::Connecting);
-                self.session.reconnect();
-            }
-            // Not replacing the daemon on a machine picked for this window:
-            // the picker opens again, to pick another.
-            Notice::OtherDaemon { protocol } if escape && self.picked.is_some() => {
-                let why = format!(
-                    "the daemon on {} is from another build of clackatoo (protocol {protocol}, \
-                     this is {PROTOCOL_VERSION}), and was left as it is",
-                    self.picked.take().unwrap_or_default()
-                );
-                self.session.forget();
-                self.open_picker(Purpose::ThisWindow, Some(why));
-            }
-            Notice::Updating { failed: Some(why) } if escape && self.picked.is_some() => {
-                let why = why.clone();
-                self.picked = None;
-                self.session.forget();
-                self.open_picker(Purpose::ThisWindow, Some(why));
-            }
-            Notice::OtherDaemon { .. }
-            | Notice::Lost { .. }
-            | Notice::Connecting
-            | Notice::Updating { .. }
-                if escape =>
-            {
-                self.closing = true;
-            }
-            _ => return,
+            Some(Notice::OtherDaemon { protocol }) if enter && *protocol <= PROTOCOL_VERSION =>
+                Hint::Action("Update incompatible daemon"),
+                {
+                    self.notice = Some(Notice::Replacing {
+                        upgrading: launch::can_upgrade(*protocol),
+                    });
+                    self.session.replace_daemon();
+                };
+            Some(Notice::OtherDaemon { protocol }) if enter && *protocol > PROTOCOL_VERSION =>
+                Hint::Action("Update client for this daemon"),
+                {
+                    let failed = match &self.updates.program {
+                        _ if self.updates.running => Some(
+                            "clackatoo is being updated already, as :update asked: open the window \
+                                 again once it's done"
+                                .to_owned(),
+                        ),
+                        None => Some("this program can't be found, to update it".to_owned()),
+                        Some(program) => {
+                            self.updates.running = true;
+                            let proxy = self.session.proxy();
+                            updates::update(program.clone(), updates::Asked::ForDaemon, proxy);
+                            None
+                        }
+                    };
+                    self.notice = Some(Notice::Updating { failed });
+                };
+            Some(Notice::Lost { .. }) if enter =>
+                Hint::Action("Reconnect"),
+                {
+                    self.notice = Some(Notice::Connecting);
+                    self.session.reconnect();
+                };
+            Some(Notice::OtherDaemon { protocol }) if escape && self.picked.is_some() =>
+                Hint::Action("Return to machine picker"),
+                {
+                    let why = format!(
+                        "the daemon on {} is from another build of clackatoo (protocol {protocol}, \
+                             this is {PROTOCOL_VERSION}), and was left as it is",
+                        self.picked.take().unwrap_or_default()
+                    );
+                    self.session.forget();
+                    self.open_picker(Purpose::ThisWindow, Some(why));
+                };
+            Some(Notice::Updating { failed: Some(why) }) if escape && self.picked.is_some() =>
+                Hint::Action("Return to machine picker"),
+                {
+                    let why = why.clone();
+                    self.picked = None;
+                    self.session.forget();
+                    self.open_picker(Purpose::ThisWindow, Some(why));
+                };
+            Some(
+                Notice::OtherDaemon { .. }
+                | Notice::Lost { .. }
+                | Notice::Connecting
+                | Notice::Updating { .. },
+            ) if escape =>
+                Hint::Action("Close window"),
+                {
+                    self.closing = true;
+                };
+            _ =>
+                Hint::None,
+                return;
         }
-        self.request_redraw();
+        then self.request_redraw()
     }
 
     fn wheel(&mut self, delta: MouseScrollDelta) {
@@ -2861,7 +2849,7 @@ fn present(frame: &mut Frame, picture: &Picture<'_>) -> bool {
 }
 
 /// Whether a key pastes: Ctrl+Shift+V.
-fn is_paste(key: &Key, modifiers: input::Modifiers) -> bool {
+pub(crate) fn is_paste(key: &Key, modifiers: input::Modifiers) -> bool {
     modifiers.ctrl
         && modifiers.shift
         && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("v"))
@@ -4084,5 +4072,53 @@ mod shortcut_tests {
                 .query
                 .contains("a-host")
         );
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QuestionKey {
+    Accept,
+    Cancel,
+    Paste,
+    Delete,
+    Clear,
+    Type,
+    Ignore,
+}
+
+fn question_key(
+    press: &input::KeyPress<'_>,
+    repeat: bool,
+    modifiers: input::Modifiers,
+) -> (QuestionKey, crate::shortcuts::bindings::Hint) {
+    use crate::shortcuts::bindings::Hint;
+    match press.key {
+        Key::Named(NamedKey::Enter) if !repeat => {
+            (QuestionKey::Accept, Hint::Action("Submit answer"))
+        }
+        Key::Named(NamedKey::Escape) if !repeat => {
+            (QuestionKey::Cancel, Hint::Action("Cancel connecting"))
+        }
+        key if is_paste(key, modifiers) => (QuestionKey::Paste, Hint::Action("Paste answer")),
+        Key::Named(NamedKey::Backspace) => {
+            (QuestionKey::Delete, Hint::Action("Delete last character"))
+        }
+        Key::Character(text) if modifiers.ctrl && text.eq_ignore_ascii_case("u") => {
+            (QuestionKey::Clear, Hint::Action("Clear answer"))
+        }
+        _ if modifiers.ctrl => (QuestionKey::Ignore, Hint::None),
+        _ if press.text.is_some() => (QuestionKey::Type, Hint::Text("Type answer")),
+        _ => (QuestionKey::Ignore, Hint::None),
+    }
+}
+
+// Closing a window menu consumes Escape; other keys continue into the pane.
+fn menu_key(press: &input::KeyPress<'_>) -> (bool, Hint) {
+    match press.key {
+        Key::Named(NamedKey::Escape) => (true, Hint::Action("Close the menu")),
+        _ => (
+            false,
+            Hint::Text("Close the menu and use the key in the pane"),
+        ),
     }
 }

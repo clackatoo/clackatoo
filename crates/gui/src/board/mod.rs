@@ -17,6 +17,8 @@
 //! | `A` | Archives the board, or unarchives it |
 //! | `q` | Closes the pane: the board stays |
 
+use crate::shortcuts::bindings::Hint;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clackatoo_protocol::{
@@ -253,72 +255,117 @@ impl BoardPane {
         }
         let count = self.typed.count.take();
         let pending = self.typed.key.take();
-        let ch = match stroke {
-            Stroke::Char { ch, ctrl: false } => ch,
-            Stroke::Char { ch, ctrl: true } => {
-                // Entries are a few lines each: half a pane is a few.
-                let half = (self.list_height() / 6).max(1);
-                match ch {
-                    'd' | 'f' => self.move_by(count.unwrap_or(1) * half, true),
-                    'u' | 'b' => self.move_by(count.unwrap_or(1) * half, false),
-                    'n' => self.move_by(count.unwrap_or(1), true),
-                    'p' => self.move_by(count.unwrap_or(1), false),
-                    _ => return false,
-                }
-                return true;
-            }
-            Stroke::Down => {
-                self.move_by(count.unwrap_or(1), true);
-                return true;
-            }
-            Stroke::Up => {
-                self.move_by(count.unwrap_or(1), false);
-                return true;
-            }
-            Stroke::Home => {
-                self.go_to(0);
-                return true;
-            }
-            Stroke::End => {
-                self.go_to(usize::MAX);
-                return true;
-            }
-            Stroke::Enter => {
-                self.ask_post(PostKind::Note);
-                return true;
-            }
-            _ => return false,
+        let Stroke::Char { ch, ctrl: false } = stroke else {
+            return self.special(stroke, count);
         };
-        match (pending, ch) {
-            (None, '0'..='9') if ch != '0' || count.is_some() => {
-                let digit = ch.to_digit(10).expect("a digit") as usize;
-                let count = count.unwrap_or(0).saturating_mul(10).saturating_add(digit);
-                self.typed.count = Some(count.min(1_000_000));
+        self.plain(ch, count, pending)
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        fn special / describe_special(&mut self, stroke: Stroke, count: Option<usize>) -> bool;
+        match stroke => {
+            Stroke::Char {
+                ch: 'd' | 'f',
+                ctrl: true,
+            } =>
+                Hint::Action("Move down several entries"),
+                self.move_by(count.unwrap_or(1) * (self.list_height() / 6).max(1), true);
+            Stroke::Char {
+                ch: 'u' | 'b',
+                ctrl: true,
+            } =>
+                Hint::Action("Move up several entries"),
+                self.move_by(count.unwrap_or(1) * (self.list_height() / 6).max(1), false);
+            Stroke::Char {
+                ch: 'n',
+                ctrl: true,
+            }
+            | Stroke::Down =>
+                Hint::Action("Next item"),
+                self.move_by(count.unwrap_or(1), true);
+            Stroke::Char {
+                ch: 'p',
+                ctrl: true,
+            }
+            | Stroke::Up =>
+                Hint::Action("Previous item"),
+                self.move_by(count.unwrap_or(1), false);
+            Stroke::Home =>
+                Hint::Action("First item"),
+                self.go_to(0);
+            Stroke::End =>
+                Hint::Action("Last item"),
+                self.go_to(usize::MAX);
+            Stroke::Enter =>
+                Hint::Action("Post a note"),
+                self.ask_post(PostKind::Note);
+            _ =>
+                Hint::None,
                 return false;
-            }
-            (Some('g'), 'g') => self.go_to(count.map_or(0, |count| count - 1)),
-            (Some(_), _) => {}
-            (None, 'g') => {
-                self.typed.count = count;
-                self.typed.key = Some('g');
-                return false;
-            }
-            (None, 'j') => self.move_by(count.unwrap_or(1), true),
-            (None, 'k') => self.move_by(count.unwrap_or(1), false),
-            (None, 'G') => self.go_to(count.map_or(usize::MAX, |count| count - 1)),
-            (None, 'i' | 'o' | 'a') => self.ask_post(PostKind::Note),
-            (None, 'r') => self.ask_post(PostKind::Result),
-            (None, 'e') => self.ask_edit(),
-            (None, 'x') => self.release(),
-            (None, 'A') => {
-                if let Some(summary) = &self.summary {
-                    self.outbox.push(BoardAction::Archive(!summary.archived));
-                }
-            }
-            (None, 'q') => self.asks.push(Ask::Close),
-            _ => return false,
         }
-        true
+        then true
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        fn plain / describe_plain(&mut self, ch: char, count: Option<usize>, pending: Option<char>) -> bool;
+        match (pending, ch) => {
+            (None, '0'..='9') if ch != '0' || count.is_some() =>
+                Hint::Count,
+                {
+                    let digit = ch.to_digit(10).expect("a digit") as usize;
+                    let count = count.unwrap_or(0).saturating_mul(10).saturating_add(digit);
+                    self.typed.count = Some(count.min(1_000_000));
+                    return false;
+                };
+            (Some('g'), 'g') =>
+                Hint::Action("First item or item given by count"),
+                self.go_to(count.map_or(0, |count| count - 1));
+            (Some(_), _) =>
+                Hint::None,
+                {};
+            (None, 'g') =>
+                Hint::Prefix,
+                {
+                    self.typed.count = count;
+                    self.typed.key = Some('g');
+                    return false;
+                };
+            (None, 'j') =>
+                Hint::Action("Next item"),
+                self.move_by(count.unwrap_or(1), true);
+            (None, 'k') =>
+                Hint::Action("Previous item"),
+                self.move_by(count.unwrap_or(1), false);
+            (None, 'G') =>
+                Hint::Action("Last item or item given by count"),
+                self.go_to(count.map_or(usize::MAX, |count| count - 1));
+            (None, 'i' | 'o' | 'a') =>
+                Hint::Action("Post a note"),
+                self.ask_post(PostKind::Note);
+            (None, 'r') =>
+                Hint::Action("Post a result"),
+                self.ask_post(PostKind::Result);
+            (None, 'e') =>
+                Hint::Action("Edit entry"),
+                self.ask_edit();
+            (None, 'x') =>
+                Hint::Action("Release claim"),
+                self.release();
+            (None, 'A') =>
+                Hint::Action("Archive or unarchive board"),
+                {
+                    if let Some(summary) = &self.summary {
+                        self.outbox.push(BoardAction::Archive(!summary.archived));
+                    }
+                };
+            (None, 'q') =>
+                Hint::Action("Close pane"),
+                self.asks.push(Ask::Close);
+            _ =>
+                Hint::None,
+                return false;
+        }
+        then true
     }
 
     /// Starts typing an entry of `kind` to post, unless the board can't
@@ -367,36 +414,21 @@ impl BoardPane {
         let text = match prompt {
             Prompt::Post { text, .. } | Prompt::Edit { text, .. } => text,
         };
-        match stroke {
-            Stroke::Escape => self.prompt = None,
-            Stroke::Backspace if text.is_empty() => self.prompt = None,
-            Stroke::Backspace => {
-                text.pop();
-            }
-            Stroke::Char {
-                ch: 'u',
-                ctrl: true,
-            } => text.clear(),
-            Stroke::Char {
-                ch: 'w',
-                ctrl: true,
-            } => {
-                let kept = text.trim_end_matches(|ch: char| !ch.is_alphanumeric());
-                let kept = kept.trim_end_matches(char::is_alphanumeric).len();
-                text.truncate(kept);
-            }
-            Stroke::Char { ch, ctrl: false } => text.push(ch),
-            Stroke::Enter => match self.prompt.take().expect("a prompt") {
-                Prompt::Post { kind, text } if !text.trim().is_empty() => {
-                    // What's posted is the newest, which the cursor follows.
-                    self.at_end = true;
-                    self.outbox.push(BoardAction::Post { kind, text });
+        match crate::cmdline::simple::key(text, stroke) {
+            crate::cmdline::simple::Outcome::Accept => {
+                match self.prompt.take().expect("a prompt") {
+                    Prompt::Post { kind, text } if !text.trim().is_empty() => {
+                        // What's posted is the newest, which the cursor follows.
+                        self.at_end = true;
+                        self.outbox.push(BoardAction::Post { kind, text });
+                    }
+                    Prompt::Edit { entry, text } if !text.trim().is_empty() => {
+                        self.outbox.push(BoardAction::Edit { entry, text });
+                    }
+                    _ => {}
                 }
-                Prompt::Edit { entry, text } if !text.trim().is_empty() => {
-                    self.outbox.push(BoardAction::Edit { entry, text });
-                }
-                _ => {}
-            },
+            }
+            crate::cmdline::simple::Outcome::Cancel => self.prompt = None,
             _ => {}
         }
     }
@@ -790,24 +822,15 @@ impl crate::vim::ListPane for BoardPane {
 
 impl BoardPane {
     pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
-        use crate::shortcuts::{Context, SIMPLE_PROMPT, list_context};
-        if self.prompt.is_some() {
-            return Context::new("Board entry", SIMPLE_PROMPT);
+        if let Some(prompt) = &self.prompt {
+            let text = match prompt {
+                Prompt::Post { text, .. } | Prompt::Edit { text, .. } => text,
+            };
+            return crate::cmdline::simple::help("Board entry", text);
         }
-        let mut context = list_context(
-            "Board",
-            &self.typed,
-            &[
-                ("i / o / a", "Post a note"),
-                ("r", "Post a result"),
-                ("e", "Edit entry"),
-                ("x", "Release claim"),
-                ("A", "Archive or unarchive board"),
-                ("q", "Close board"),
-            ],
-        );
-        context.rows.retain(|(key, _)| !key.contains("PageDown"));
-        context.add(&[("Ctrl+F / Ctrl+B", "Move down / up several entries")]);
-        context
+        crate::shortcuts::bindings::list("Board", self.typed.key, |stroke, pending| match stroke {
+            Stroke::Char { ch, ctrl: false } => self.describe_plain(ch, self.typed.count, pending),
+            stroke => self.describe_special(stroke, self.typed.count),
+        })
     }
 }

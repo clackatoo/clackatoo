@@ -833,6 +833,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "Ctrl+? lists the current pane, mode and popup's shortcuts, including configured bindings; type to search",
     },
+    News {
+        id: "shared-shortcut-definitions",
+        date: "2026-10-25",
+        lesson: "basics",
+        what: "Shortcut help comes from live key definitions and the Vim parser, including unfinished commands",
+    },
 ];
 
 impl News {
