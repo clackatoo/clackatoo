@@ -905,7 +905,11 @@ pub(super) mod tests {
             shell: "/bin/sh".into(),
             home: dir.to_owned(),
             shell_integration: None,
-            agents: crate::AgentConfig::default(),
+            agents: crate::AgentConfig {
+                dir: None,
+                path: Some(std::ffi::OsString::new()),
+                ..Default::default()
+            },
             mcp: None,
             udp_ports: None,
             languages: None,

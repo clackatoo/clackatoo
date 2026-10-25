@@ -791,6 +791,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Enable Browser during a conversation: its tools stay discoverable, and turning it off blocks calls.",
     },
+    News {
+        id: "agent-upgrade-continuation",
+        date: "2026-10-25",
+        lesson: "agents",
+        what: "Active agent turns continue automatically after daemon upgrades; stopped chats stay stopped",
+    },
 ];
 
 impl News {

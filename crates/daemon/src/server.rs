@@ -1160,6 +1160,12 @@ impl Daemon {
         let mut tool_previews = std::mem::take(&mut handover.state.tool_previews);
         let mut image_originals = std::mem::take(&mut handover.state.image_originals);
         let mut chat_queues = std::mem::take(&mut handover.state.chat_queues);
+        let mut continuations: std::collections::HashMap<_, _> =
+            std::mem::take(&mut handover.state.chat_continuations)
+                .into_iter()
+                .map(|c| (c.chat, c))
+                .collect();
+        let mut continuing = Vec::new();
         let chats = std::mem::take(&mut handover.state.chats);
         let buffers = std::mem::take(&mut handover.state.buffers);
         let explorers = std::mem::take(&mut handover.state.explorers);
@@ -1216,6 +1222,7 @@ impl Daemon {
         daemon.resume_restarts(&state.kept);
         daemon.refresh_kept();
         for chat in chats {
+            let continuation = continuations.remove(&chat.id);
             let agent = daemon.agent_spec(&chat.agent);
             let images = previews.remove(&chat.id);
             let mut chat = HostedChat::resume(chat, &agent);
@@ -1225,6 +1232,12 @@ impl Daemon {
             chat.resume_tool_previews(&mut tool_previews);
             chat.resume_originals(&mut image_originals);
             chat.resume_queue(&mut chat_queues);
+            if let Some(continuation) = continuation {
+                let id = TerminalId(continuation.chat);
+                if chat.continue_after_upgrade(continuation) {
+                    continuing.push(id);
+                }
+            }
             daemon.add_chat(chat);
         }
         daemon.next_buffer = state.next_buffer;
@@ -1297,6 +1310,12 @@ impl Daemon {
         // The handover's copy of every terminal, and the rows restoring
         // their history built, are gone.
         drop(handover);
+        // Every chat, file checkpoint, permission and orphan is restored
+        // before resumed agents can act. No window or user message is needed.
+        for id in continuing {
+            daemon.act(id, vec![crate::chat::Action::Connect]);
+            daemon.watch_chat_queue(id);
+        }
         memory::release_free_memory();
         let terminals = daemon.terminals.len();
         log::info!(
@@ -1357,6 +1376,7 @@ impl Daemon {
         let mut tool_previews = Vec::new();
         let mut image_originals = Vec::new();
         let mut chat_queues = Vec::new();
+        let mut chat_continuations = Vec::new();
         self.abandon_clipboard_asks();
         self.put_back_fits();
         for slot in std::mem::take(&mut self.terminals).into_values() {
@@ -1381,12 +1401,14 @@ impl Daemon {
                     terminals.push(terminal);
                     shells.extend(shell);
                 }
-                Hosted::Chat(chat) => {
+                Hosted::Chat(mut chat) => {
+                    let continuation = chat.prepare_upgrade();
                     chat_previews.push(chat.hand_over_previews());
                     tool_previews.extend(chat.hand_over_tool_previews());
                     image_originals.push(chat.hand_over_originals());
                     chat_queues.push(chat.hand_over_queue());
                     chats.push(chat.hand_over());
+                    chat_continuations.extend(continuation);
                 }
             }
         }
@@ -1442,6 +1464,7 @@ impl Daemon {
                 tool_previews,
                 image_originals,
                 chat_queues,
+                chat_continuations,
                 orphans,
                 workspaces,
                 next_buffer: self.next_buffer,

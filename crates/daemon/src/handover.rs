@@ -71,6 +71,7 @@
 //! 29. Bounded thumbnails returned by tools, kept alongside their tool IDs.
 //! 30. Retained original image data and references from prompt/tool thumbnails.
 //! 31. Pending user messages, restored paused after an upgrade.
+//! 32. Explicit continuations for turns interrupted by a planned upgrade.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -83,12 +84,12 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 31;
+pub(crate) const VERSION: u32 = 32;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-    27, 28, 29, 30, VERSION,
+    27, 28, 29, 30, 31, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -128,7 +129,7 @@ impl Fds {
     }
 }
 
-/// The daemon's state, version 15.
+/// The daemon's state, version 32.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct State {
     /// The listening socket.
@@ -224,8 +225,10 @@ pub(crate) struct State {
     pub(crate) tool_previews: Vec<ToolPreviews>,
     /// Compressed originals and thumbnail handles, since version 30.
     pub(crate) image_originals: Vec<ImageOriginals>,
-    /// Pending drafts, always resumed paused, since version 31.
+    /// Pending drafts, resumed paused unless continuing a turn, since version 31.
     pub(crate) chat_queues: Vec<ChatQueue>,
+    /// Only work interrupted by this upgrade, since version 32.
+    pub(crate) chat_continuations: Vec<ChatContinuation>,
 }
 
 /// Frozen originals, with handles attached by turn/tool/image position.
@@ -1043,8 +1046,97 @@ impl State {
             28 => Ok(postcard::from_bytes::<v28::State>(body)?.into()),
             29 => Ok(postcard::from_bytes::<v29::State>(body)?.into()),
             30 => Ok(postcard::from_bytes::<v30::State>(body)?.into()),
+            31 => Ok(postcard::from_bytes::<v31::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
+        }
+    }
+}
+
+/// Version 31, before automatic continuation after upgrades.
+mod v31 {
+    use super::{
+        Applied, Background, Borrower, Buffer, Chat, ChatPreviews, ChatQueue, Connection, EditLog,
+        Exe, Files, ImageOriginals, Kept, Known, Lender, Lent, Process, Restored, Reviews, Sharing,
+        Shell, Terminal, ToolPreviews, Trusted, Workspaces,
+    };
+    use serde::Deserialize;
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+        edits: EditLog,
+        applied: Vec<Applied>,
+        daemon: u64,
+        reviews: Reviews,
+        recovery_lock: Option<u32>,
+        shells: Vec<Shell>,
+        machine: Option<[u8; 16]>,
+        connections: Vec<Connection>,
+        lent: Vec<Lent>,
+        borrowers: Vec<Borrower>,
+        lenders: Vec<Lender>,
+        sharing: Vec<Sharing>,
+        key: Option<[u8; 32]>,
+        keys: Vec<Known>,
+        background: Vec<Background>,
+        kept: Vec<Kept>,
+        trusted: Vec<Trusted>,
+        exes: Vec<Exe>,
+        restored: Option<Vec<Restored>>,
+        chat_previews: Vec<ChatPreviews>,
+        tool_previews: Vec<ToolPreviews>,
+        image_originals: Vec<ImageOriginals>,
+        chat_queues: Vec<ChatQueue>,
+    }
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: state.recovery_lock,
+                shells: state.shells,
+                machine: state.machine,
+                connections: state.connections,
+                lent: state.lent,
+                borrowers: state.borrowers,
+                lenders: state.lenders,
+                sharing: state.sharing,
+                key: state.key,
+                keys: state.keys,
+                background: state.background,
+                kept: state.kept,
+                trusted: state.trusted,
+                exes: state.exes,
+                restored: state.restored,
+                chat_previews: state.chat_previews,
+                tool_previews: state.tool_previews,
+                image_originals: state.image_originals,
+                chat_queues: state.chat_queues,
+                chat_continuations: Vec::new(),
+            }
         }
     }
 }
@@ -1130,6 +1222,7 @@ mod v30 {
                 tool_previews: state.tool_previews,
                 image_originals: state.image_originals,
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -1215,6 +1308,7 @@ mod v29 {
                 tool_previews: state.tool_previews,
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -1299,6 +1393,7 @@ mod v28 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -1381,6 +1476,7 @@ mod v27 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -1466,6 +1562,7 @@ mod v26 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -1548,6 +1645,7 @@ mod v25 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -1628,6 +1726,7 @@ mod v24 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -1706,6 +1805,7 @@ mod v23 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -1797,6 +1897,7 @@ mod v22 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -1871,6 +1972,7 @@ mod v21 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -1943,6 +2045,7 @@ mod v20 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -2011,6 +2114,7 @@ mod v19 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -2079,6 +2183,7 @@ mod v18 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -2612,6 +2717,7 @@ mod v7 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -2704,6 +2810,7 @@ mod v8 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -2766,6 +2873,7 @@ mod v9 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -2830,6 +2938,7 @@ mod v11 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -2943,6 +3052,7 @@ mod v15 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -3010,6 +3120,7 @@ mod v14 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -3075,6 +3186,7 @@ mod v13 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -3182,6 +3294,7 @@ mod v12 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -3287,6 +3400,7 @@ mod v10 {
                 tool_previews: Vec::new(),
                 image_originals: Vec::new(),
                 chat_queues: Vec::new(),
+                chat_continuations: Vec::new(),
             }
         }
     }
@@ -3555,6 +3669,16 @@ mod tests {
                 dev: 0x803,
                 ino: 1_234_567,
             }],
+            chat_continuations: vec![ChatContinuation {
+                chat: 2,
+                turn: 0,
+                pending: Some(ResumePrompt {
+                    role: None,
+                    text: "not sent yet".into(),
+                    images: Vec::new(),
+                }),
+                queue_paused: false,
+            }],
             chat_queues: vec![ChatQueue {
                 chat: 2,
                 next: 9,
@@ -3808,11 +3932,24 @@ mod tests {
     }
 
     #[test]
+    fn version_32_keeps_explicit_upgrade_continuations() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v32.bin"))
+            .unwrap();
+        let read = State::read(&mut file).unwrap();
+        let continuation = &read.chat_continuations[0];
+        assert_eq!((continuation.chat, continuation.turn), (2, 0));
+        assert_eq!(continuation.pending.as_ref().unwrap().text, "not sent yet");
+        assert!(!continuation.queue_paused);
+    }
+
+    #[test]
     fn version_31_keeps_pending_messages_and_provider_choices() {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v31.bin"))
             .unwrap();
         let read = State::read(&mut file).unwrap();
+        assert!(read.chat_continuations.is_empty());
         let queue = &read.chat_queues[0];
         assert_eq!((queue.chat, queue.next), (2, 9));
         assert_eq!(queue.messages[0].text, "next");
@@ -4151,11 +4288,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v31.bin"]
+    #[ignore = "writes tests/fixtures/handover-v32.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v31.bin"
+            "/tests/fixtures/handover-v32.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();
@@ -4532,4 +4669,21 @@ pub(crate) struct QueuedTarget {
     pub agent: String,
     pub model: Option<String>,
     pub budget: u32,
+}
+
+/// A turn the upgrade interrupted, never inferred from a historical error.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatContinuation {
+    pub chat: u32,
+    pub turn: u64,
+    /// A user prompt still waiting to be sent; otherwise continue the session.
+    pub pending: Option<ResumePrompt>,
+    pub queue_paused: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ResumePrompt {
+    pub role: Option<String>,
+    pub text: String,
+    pub images: Vec<QueuedImage>,
 }

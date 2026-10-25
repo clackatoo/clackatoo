@@ -72,7 +72,7 @@ While an agent works, Enter queues your draft; Shift+Enter still inserts a newli
 
 For text sent to the installed Claude adapter, **Steer** adds the message to the running turn without cancelling it. Other adapters, image messages, and pending provider changes use **Stop & continue**: cancel the current turn, wait for it to finish, then send the new message. The label tells you which behavior will be used. An uncertain steering acknowledgment leaves the message paused so you can check the conversation before retrying.
 
-Stop, a failed turn, or a daemon upgrade pauses the queue. Use ↑ to resume, or × to discard a pending message. Queued text, images and provider choices belong to the daemon, so other windows and remote connections see the same queue. An upgrade preserves it, paused; a full daemon restart does not. The queue holds up to eight messages or 32 MiB, with text limited to 64 KiB per message and the usual image limits.
+Stop or a failed turn pauses the queue. Use ↑ to resume, or × to discard a pending message. Queued text, images and provider choices belong to the daemon, so other windows and remote connections see the same queue. An upgrade preserves it: messages follow automatically continued work, while already paused queues and unconfirmed steering stay paused. A full daemon restart does not preserve it. The queue holds up to eight messages or 32 MiB, with text limited to 64 KiB per message and the usual image limits.
 
 
 ## Viewing images
@@ -408,7 +408,7 @@ Each agent runs one process for all its chats, and stops when its last chat clos
 
 The daemon keeps chats, as it keeps terminals. Closing the window closes nothing: a chat keeps answering, and the next window shows it.
 
-[Upgrading](~clackatoo/reference/cli#upgrade) the daemon keeps each chat's conversation, but stops the agent. An answer that was under way is cut off, and the turn says so. The next message starts the agent again and carries on the same conversation. A chat from a build before chats were kept as turns comes through as one block of its text. Tools from a build before cards come through as lines, without their output or changes. Changes from a build before line numbers come through without them.
+[Upgrading](~clackatoo/reference/cli#upgrade) the daemon keeps each chat's conversation. An answer under way automatically continues in the same provider session and visible turn after the upgrade, without another message or an open window. The agent is told to check interrupted tool results before repeating actions. Messages still waiting to be sent, including images, remain intact; queued messages follow the continued turn. Unconfirmed steering stays paused for review. Idle, completed and manually stopped chats stay idle, as do chats restored after a crash or ordinary daemon restart. The first upgrade from a build without continuation records still needs another message to restart interrupted work. A chat from a build before chats were kept as turns comes through as one block of its text. Tools from a build before cards come through as lines, without their output or changes. Changes from a build before line numbers come through without them.
 
 If the agent stops on its own, the chat says so, and the next message starts it again, carrying on the same conversation.
 

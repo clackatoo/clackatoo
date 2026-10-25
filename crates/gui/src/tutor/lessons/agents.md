@@ -22,7 +22,7 @@ While an agent works, Enter queues your draft; Shift+Enter still inserts a newli
 
 For text sent to the installed Claude adapter, **Steer** adds the message to the running turn without cancelling it. Other adapters, image messages, and pending provider changes use **Stop & continue**: cancel the current turn, wait for it to finish, then send the new message. The label tells you which behavior will be used. An uncertain steering acknowledgment leaves the message paused so you can check the conversation before retrying.
 
-Stop, a failed turn, or a daemon upgrade pauses the queue. Use ↑ to resume, or × to discard a pending message. Queued text, images and provider choices belong to the daemon, so other windows and remote connections see the same queue. An upgrade preserves it, paused; a full daemon restart does not. The queue holds up to eight messages or 32 MiB, with text limited to 64 KiB per message and the usual image limits.
+Stop or a failed turn pauses the queue. Use ↑ to resume, or × to discard a pending message. Queued text, images and provider choices belong to the daemon, so other windows and remote connections see the same queue. An upgrade preserves it: messages follow automatically continued work, while already paused queues and unconfirmed steering stay paused. A full daemon restart does not preserve it. The queue holds up to eight messages or 32 MiB, with text limited to 64 KiB per message and the usual image limits.
 
 
 ## Viewing images
@@ -166,3 +166,7 @@ In the chat, press `i`, ask it to add the line `tutor: hello` to notes.txt, and 
 ```check
 has "tutor: hello"
 ```
+
+## Continuing after upgrades
+
+If a daemon upgrade interrupts an answer, the agent reopens the same provider session and continues the same turn automatically. It is told to check interrupted tool results before repeating actions. Unsent messages and images are preserved. Idle, completed and manually stopped chats stay idle. This applies to planned upgrades, not crashes or ordinary restarts. The first upgrade from a build without continuation records still needs another message.

@@ -5,8 +5,8 @@
 //!
 //! One process runs for each agent chats talk to, by name: every Claude
 //! Code chat shares one, every Codex chat another. An agent doesn't come
-//! through an upgrade: the next build starts it again when one of its
-//! chats is next sent a message.
+//! through an upgrade: the next build starts it again for interrupted
+//! turns, or when an idle chat is next sent a message.
 //!
 //! A chat can move to another agent (see `handoff.rs`). The session it
 //! leaves is closed, and its agent stopped if no chat talks to it now; the
@@ -2202,6 +2202,51 @@ mod tests {
     use super::*;
     use crate::server::agent_files::tests::daemon_with_chat;
     use crate::server::stopping::tests::example;
+
+    #[test]
+    fn an_upgrade_restarts_the_interrupted_agent_without_a_user_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, id) = daemon_with_chat(dir.path());
+        let log = dir.path().join("agent.log");
+        daemon.config.agents.custom = vec![crate::agents::CustomAgent {
+            name: "claude".into(),
+            title: None,
+            starting_mode: None,
+            command: vec![
+                example("fake_agent").into_os_string(),
+                "--log".into(),
+                log.clone().into_os_string(),
+            ],
+        }];
+        let config = daemon.config.clone();
+        let handover = daemon.hand_over(Instant::now()).unwrap();
+        drop(daemon);
+        let mut resumed = Daemon::resume(handover, config).unwrap();
+        assert_eq!(resumed.agents.running.len(), 1, "starts without Send");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while resumed.chat(id).unwrap().answering() {
+            let agents: Vec<_> = resumed.agents.running.keys().copied().collect();
+            for agent in agents {
+                resumed.flush_agent(agent);
+                resumed.read_agent(agent, Reading::Look);
+                resumed.read_agent_errors(agent);
+            }
+            resumed.read_agents_unread();
+            assert!(Instant::now() < deadline, "continuation did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let chat = resumed.chat(id).unwrap();
+        assert_eq!(chat.session(), Some("s1"));
+        assert_eq!(chat.node().turns.len(), 1);
+        assert_eq!(chat.node().turns[0].prompt, "go");
+        assert!(matches!(
+            chat.node().turns[0].end.as_ref().unwrap().outcome,
+            clackatoo_protocol::Outcome::Done
+        ));
+        assert!(chat.node().turns[0].items.iter().any(|item| matches!(item, clackatoo_protocol::Item::Words(text) if text.contains("echo: Clackatoo resumed"))));
+        assert!(std::fs::read_to_string(log).unwrap().contains("resumed s1"));
+        resumed.stop_agents();
+    }
 
     #[test]
     fn chats_get_cached_usage_before_the_modal_opens_and_completions_refresh_it() {

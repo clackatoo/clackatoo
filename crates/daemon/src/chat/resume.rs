@@ -369,6 +369,18 @@ impl HostedChat {
             "cut off by an upgrade".to_owned(),
         )));
     }
+
+    /// Preserve a user message waiting behind history replay as an unsent
+    /// turn. Replayed historical work alone is never continued.
+    pub(super) fn keep_held_for_upgrade(&mut self) {
+        if self.told.load {
+            self.finish_loading();
+        }
+        if let Some(prompt) = self.told.held.take() {
+            self.link = Link::Opening;
+            self.begin(prompt.shown(), prompt, None, &mut Vec::new());
+        }
+    }
 }
 
 /// Some adapters replay image inputs as standalone Markdown links containing

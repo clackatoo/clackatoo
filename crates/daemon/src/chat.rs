@@ -37,6 +37,7 @@ mod originals;
 pub(crate) mod queue;
 mod relations;
 mod resume;
+mod upgrade;
 
 use resume::Held;
 mod subagent;
@@ -357,6 +358,9 @@ pub(crate) struct HostedChat {
     link: Link,
     /// A message sent while there's no session, to go once there is.
     queued: Option<Prompt>,
+    /// A Stop may still be waiting for the adapter's cancellation reply.
+    /// Such a turn must not be continued by an upgrade.
+    stop_requested: bool,
     /// Whether the notice says the agent is slow to open the session: it
     /// goes once the session opens, or isn't waited for.
     slow: bool,
@@ -554,6 +558,7 @@ impl HostedChat {
             session: None,
             link: Link::Opening,
             queued: None,
+            stop_requested: false,
             slow: false,
             told: resume::Told::default(),
             node: ChatNode {
@@ -595,8 +600,8 @@ impl HostedChat {
     }
 
     /// Hands the chat over to the next build. The agent doesn't go with
-    /// it: the next build opens the session again when it's next needed,
-    /// and an answer under way is cut off.
+    /// it. The continuation record separately reopens an interrupted turn;
+    /// without one, the next message opens the session again.
     pub(crate) fn hand_over(mut self) -> handover::Chat {
         self.hand_over_loading();
         if self.answering() {
@@ -1033,6 +1038,7 @@ impl HostedChat {
         from: Option<Sender>,
         actions: &mut Vec<Action>,
     ) {
+        self.stop_requested = false;
         // A session slow to open still is: what says so stays until it
         // comes, or isn't waited for.
         if !self.slow {
@@ -1196,6 +1202,7 @@ impl HostedChat {
     /// message: one that comes after all is closed unseen, and the next
     /// message asks again.
     fn stop(&mut self, actions: &mut Vec<Action>) {
+        self.stop_requested = true;
         if let Some((id, _, _)) = self.user_queue.native {
             self.steered(id, Err("Stopped before acknowledgment".into()));
         }
@@ -4731,6 +4738,193 @@ mod tests {
             Some(&Outcome::Failed("cut off by an upgrade".into()))
         );
         assert_eq!(resumed.node.state, ChatState::Ready);
+    }
+
+    fn upgrade_chat(mut chat: HostedChat) -> HostedChat {
+        let continuation = chat.prepare_upgrade().expect("active turn");
+        let queue = chat.hand_over_queue();
+        let agent = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        let mut resumed = HostedChat::resume(chat.hand_over(), &agent);
+        resumed.resume_queue(&mut [queue]);
+        assert!(resumed.continue_after_upgrade(continuation));
+        resumed
+    }
+
+    #[test]
+    fn upgrade_continues_the_same_turn_and_session_before_queued_messages() {
+        let mut c = chat();
+        connect(&mut c, "s");
+        send(&mut c, "work");
+        words(&mut c, "already done");
+        let next = c.enqueue_user("later".into(), vec![], None).unwrap();
+        let mut c = upgrade_chat(c);
+        assert_eq!(c.session(), Some("s"));
+        assert_eq!(prompts(&c), ["work"]);
+        assert_eq!(c.next_user(), None);
+        assert_eq!(c.node.turns[0].items[0], Item::Words("already done".into()));
+        let actions = connect(&mut c, "s");
+        let prompts: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Prompt(p) => Some(p.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains("inspect its result or current state"));
+        c.answered(Ok(StopReason::EndTurn));
+        assert_eq!(c.next_user(), Some(next));
+        assert!(c.prepare_upgrade().is_none());
+    }
+
+    #[test]
+    fn upgrade_reapplies_selected_settings_before_continuing() {
+        let mut c = chat();
+        c.connected(Opened {
+            session: "s".into(),
+            settings: Some(claude_settings("sonnet")),
+        });
+        c.act(ChatAction::Set {
+            setting: "model".into(),
+            value: "haiku".into(),
+        });
+        send(&mut c, "work");
+        let mut c = upgrade_chat(c);
+        let actions = c.connected(Opened {
+            session: "s".into(),
+            settings: Some(claude_settings("sonnet")),
+        });
+        let setting = actions.iter().position(|a| matches!(a, Action::Set { setting, value } if setting == "model" && value == "haiku")).unwrap();
+        let prompt = actions
+            .iter()
+            .position(|a| matches!(a, Action::Prompt(_)))
+            .unwrap();
+        assert!(setting < prompt);
+    }
+
+    #[test]
+    fn upgrade_keeps_an_unsent_agents_role_briefing() {
+        let mut c = chat();
+        c.role = Some("Review only; do not edit files.".into());
+        send(&mut c, "inspect");
+        let mut c = upgrade_chat(c);
+        assert!(connect(&mut c, "new").iter().any(|a| matches!(a, Action::Briefed { role, text } if role == "Review only; do not edit files." && text.text == "inspect")));
+    }
+
+    #[test]
+    fn upgrade_does_not_restart_idle_completed_failed_or_cancelled_work() {
+        let mut c = chat();
+        assert!(c.prepare_upgrade().is_none());
+        connect(&mut c, "s");
+        send(&mut c, "work");
+        c.answered(Ok(StopReason::EndTurn));
+        assert!(c.prepare_upgrade().is_none());
+        send(&mut c, "more");
+        c.answered(Err("failed".into()));
+        assert!(c.prepare_upgrade().is_none());
+        send(&mut c, "stop this");
+        assert_eq!(c.act(ChatAction::Stop), [Action::Cancel]);
+        assert!(c.answering(), "cancellation still awaiting acknowledgement");
+        assert!(c.prepare_upgrade().is_none());
+        c.answered(Ok(StopReason::Cancelled));
+        assert!(c.prepare_upgrade().is_none());
+    }
+
+    #[test]
+    fn upgrade_keeps_unsent_images_and_survives_another_upgrade_while_connecting() {
+        let mut c = chat();
+        let image = clackatoo_protocol::ChatImage {
+            data: "cG5n".into(),
+            width: 1,
+            height: 1,
+            preview: None,
+        };
+        c.act(ChatAction::SendImages {
+            text: "look".into(),
+            images: vec![image.clone()],
+        });
+        let c = upgrade_chat(c);
+        let mut c = upgrade_chat(c);
+        assert_eq!(c.node.turns.len(), 1);
+        let actions = connect(&mut c, "new");
+        assert!(actions.iter().any(
+            |a| matches!(a, Action::Prompt(p) if p.text == "look" && p.images == [image.clone()])
+        ));
+    }
+
+    #[test]
+    fn upgrade_preserves_held_messages_but_never_continues_historical_replay() {
+        let mut c = resuming();
+        replay_user(&mut c, "old work");
+        assert!(c.prepare_upgrade().is_none());
+        let mut c = resuming();
+        replay_user(&mut c, "old work");
+        send(&mut c, "new work");
+        let mut c = upgrade_chat(c);
+        assert_eq!(prompts(&c), ["old work", "new work"]);
+        assert_eq!(outcome(&c.node.turns[0]), Some(&Outcome::Done));
+        assert!(
+            connect(&mut c, "past")
+                .iter()
+                .any(|a| matches!(a, Action::Prompt(p) if p.text == "new work"))
+        );
+    }
+
+    #[test]
+    fn upgrade_leaves_unconfirmed_steering_paused() {
+        let mut c = chat();
+        connect(&mut c, "s");
+        send(&mut c, "work");
+        let id = c.enqueue_user("redirect".into(), vec![], None).unwrap();
+        c.begin_steering(id).unwrap();
+        let mut c = upgrade_chat(c);
+        connect(&mut c, "s");
+        c.answered(Ok(StopReason::EndTurn));
+        assert!(c.node.delivery.paused);
+        assert_eq!(c.next_user(), None);
+        assert!(c.queued_user(id).is_some());
+    }
+
+    #[test]
+    fn upgrade_refuses_stale_markers_and_missing_sent_sessions() {
+        let mut c = chat();
+        connect(&mut c, "s");
+        send(&mut c, "work");
+        let mut marker = c.prepare_upgrade().unwrap();
+        let agent = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        let handed = c.hand_over();
+        let mut c = HostedChat::resume(handed, &agent);
+        marker.turn += 1;
+        assert!(
+            !c.continue_after_upgrade(crate::handover::ChatContinuation {
+                chat: marker.chat,
+                turn: marker.turn,
+                pending: None,
+                queue_paused: marker.queue_paused
+            })
+        );
+        marker.turn -= 1;
+        c.session = None;
+        assert!(
+            !c.continue_after_upgrade(crate::handover::ChatContinuation {
+                chat: marker.chat,
+                turn: marker.turn,
+                pending: None,
+                queue_paused: marker.queue_paused
+            })
+        );
+        c.session = Some("s".into());
+        assert!(c.continue_after_upgrade(crate::handover::ChatContinuation {
+            chat: marker.chat,
+            turn: marker.turn,
+            pending: None,
+            queue_paused: marker.queue_paused
+        }));
+        assert!(!c.continue_after_upgrade(marker));
     }
 
     #[test]
