@@ -21,6 +21,8 @@ mode insert
 
 Ctrl+; goes to normal mode from anywhere. Plain Esc always goes to the program, since programs such as Vim and less use it; Shift+Esc and Ctrl+\ do what Ctrl+; does.
 
+Press Ctrl+? to see the shortcuts available here (Ctrl+Shift+/ on keyboards where Shift+/ makes `?`). Type to search the keys and descriptions, then scroll with Up/Down, Ctrl+P/Ctrl+N, PageUp/PageDown or the wheel. Esc or Ctrl+; closes help without changing what you were doing. You can open it over a prompt or popup, or after the first key of a sequence such as Ctrl+B. It includes your configured bindings and their descriptions. Programs running inside terminals manage their own shortcuts.
+
 ```check
 focused practice
 mode normal

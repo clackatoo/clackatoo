@@ -425,6 +425,7 @@ pub(crate) struct App {
     last_click: Option<(Instant, Hit, [f32; 2], u8)>,
     /// The menu open, if any.
     menu: Option<Menu>,
+    shortcut_help: Option<crate::shortcuts::Help>,
     /// The window's title, as last set.
     title: String,
     /// Where messages to the daemon go, once connected.
@@ -510,6 +511,7 @@ impl App {
             cursor_icon: CursorIcon::Default,
             last_click: None,
             menu: None,
+            shortcut_help: None,
             title: String::new(),
             sender: None,
             modifiers: input::Modifiers::default(),
@@ -638,7 +640,7 @@ impl App {
         // The picker of a machine, over the panes or a notice, as the
         // finder is.
         let picker = (self.picker.as_mut()).map(|picker| picker.view((finder.rows, finder.cols)));
-        let contents = if self.notice.is_some() {
+        let mut contents = if self.notice.is_some() {
             Contents {
                 workspaces: Vec::new(),
                 tabs: Vec::new(),
@@ -696,6 +698,19 @@ impl App {
                 background: self.desk.background_icon(),
             }
         };
+        if let Some(help) = &mut self.shortcut_help {
+            contents.finder = Some(help.view(finder.rows, finder.cols));
+            contents.menu = None;
+            contents.messages = None;
+            contents.waiting = None;
+            contents.which_keys = None;
+            contents.status = Status::Tabs {
+                mode: None,
+                note: None,
+                kind: NoteKind::Label,
+                panes: 0,
+            };
+        }
         let fonts = &mut self.frame.as_mut()?.fonts;
         let chrome = Chrome::new(geometry, contents, &mut |text, bold| {
             fonts.ui_width(text, bold)
@@ -792,6 +807,9 @@ impl App {
     /// lit up under it.
     fn pointer_moved(&mut self, point: [f32; 2]) {
         self.pointer = Some(point);
+        if self.shortcut_help.is_some() {
+            return;
+        }
         let hit = self.hit(point);
         let icon = match hit {
             Hit::Resize(direction) => resize_icon(direction),
@@ -899,6 +917,9 @@ impl App {
 
     /// A mouse button came up: the end of a click or drag in a pane.
     fn released(&mut self, button: MouseButton) {
+        if self.shortcut_help.is_some() {
+            return;
+        }
         if button == MouseButton::Left && self.desk.drop_divider() {
             return;
         }
@@ -1029,7 +1050,25 @@ impl App {
 
     /// Handles a click: moving or resizing the window, its buttons, and
     /// switching to the workspace, tab or pane clicked.
+    fn click_shortcut_help(&mut self) -> bool {
+        if self.shortcut_help.is_none() {
+            return false;
+        }
+        if self
+            .pointer
+            .is_some_and(|point| !matches!(self.hit(point), Hit::Finder(_)))
+        {
+            self.shortcut_help = None;
+            self.sync_ime();
+            self.request_redraw();
+        }
+        true
+    }
+
     fn clicked(&mut self, button: MouseButton) {
+        if self.click_shortcut_help() {
+            return;
+        }
         let (Some(point), Some(frame)) = (self.pointer, &self.frame) else {
             return;
         };
@@ -1315,13 +1354,21 @@ impl App {
         // While the input method composes, keys are its, and a key it
         // committed as well counts once. A modifier alone types nothing,
         // so it's none of the input method's business.
-        if input::is_modifier(press.key) || self.ime.key(press.text, Instant::now()) {
+        let help_key = crate::shortcuts::requested(press)
+            || self.shortcut_help.is_some()
+                && (*press.key == Key::Named(NamedKey::Escape)
+                    || crate::vim::enters_normal_mode(press));
+        if help_key || input::is_modifier(press.key) || self.ime.key(press.text, Instant::now()) {
             self.key_pressed(press, repeat);
             self.sync_ime();
         }
     }
 
     fn key_pressed(&mut self, press: &input::KeyPress<'_>, repeat: bool) {
+        if self.shortcut_help.is_some() || crate::shortcuts::requested(press) {
+            self.shortcut_key(press, repeat);
+            return;
+        }
         // Any key closes a menu, and Esc does nothing else.
         if self.menu.take().is_some() {
             self.request_redraw();
@@ -1375,6 +1422,67 @@ impl App {
         if redraw {
             self.request_redraw();
         }
+    }
+
+    fn shortcut_key(&mut self, press: &input::KeyPress<'_>, repeat: bool) {
+        if let Some(help) = &mut self.shortcut_help {
+            if is_paste(press.key, press.modifiers) {
+                if let Ok(text) = paste_text(&mut self.clipboard, Copy::Clipboard) {
+                    help.paste(&text);
+                }
+            } else if !(repeat && crate::shortcuts::requested(press)) && help.key(press) {
+                self.shortcut_help = None;
+            }
+        } else if !repeat {
+            use crate::shortcuts::{Context, FINDER};
+            let context = if self.menu.is_some() {
+                Context::new(
+                    "Window menu",
+                    &[
+                        ("Esc", "Close the menu"),
+                        (
+                            "Any other key",
+                            "Close the menu and use the key in the pane",
+                        ),
+                    ],
+                )
+            } else if self.picker.is_some() {
+                let mut context = Context::new("Connect to a machine", FINDER);
+                for (key, _) in &mut context.rows {
+                    if key == "Esc / Ctrl+C / Ctrl+;" {
+                        *key = "Esc / Ctrl+C".into();
+                    }
+                }
+                context
+            } else if let Some(notice) = &self.notice {
+                let mut context = Context::new("Connection", &[]);
+                if matches!(notice, Notice::Ask { .. }) {
+                    context.add(&[
+                        ("Enter", "Submit the answer"),
+                        ("Backspace", "Delete the last character"),
+                        ("Esc", "Cancel connecting"),
+                        ("Ctrl+U", "Clear the answer"),
+                        ("Ctrl+Shift+V", "Paste the answer"),
+                    ]);
+                }
+                if matches!(notice, Notice::Lost { .. }) {
+                    context.add(&[("Enter", "Reconnect")]);
+                }
+                if matches!(notice, Notice::OtherDaemon { .. }) {
+                    context.add(&[("Enter", "Update the incompatible daemon or client")]);
+                }
+                if !matches!(notice, Notice::Ask { .. }) {
+                    context.add(&[("Esc", "Close or return to the machine picker")]);
+                }
+                context
+            } else {
+                self.desk.shortcut_context()
+            };
+            self.desk.drop_divider();
+            self.desk.editor_released();
+            self.shortcut_help = Some(crate::shortcuts::Help::new(context));
+        }
+        self.request_redraw();
     }
 
     fn paste_into_chat(&mut self, chat: TerminalId) {
@@ -1570,7 +1678,7 @@ impl App {
             Ime::Enabled => None,
         };
         let committed = self.ime.event(event, Instant::now());
-        if let Some(composing) = for_chat {
+        if let Some(composing) = for_chat.filter(|_| self.shortcut_help.is_none()) {
             self.composing_in_chat = self.desk.compose_in_chat(composing);
         }
         if let Some(text) = committed {
@@ -1582,6 +1690,10 @@ impl App {
 
     /// Types `text`, as the input method committed it, as if keyed.
     fn type_text(&mut self, text: &str) {
+        if let Some(help) = &mut self.shortcut_help {
+            help.paste(text);
+            return;
+        }
         if let Some(picker) = &mut self.picker {
             picker.paste(text);
             return;
@@ -1619,7 +1731,7 @@ impl App {
             Some(_) => true,
             None => self.notice.is_none() && self.desk.text_goes_to().is_some(),
         };
-        let wanted = typing && self.desk.options().ime;
+        let wanted = (typing || self.shortcut_help.is_some()) && self.desk.options().ime;
         if let Some(allowed) = self.ime.allow(wanted) {
             if let Some(window) = frame.window() {
                 window.set_ime_allowed(allowed);
@@ -1790,7 +1902,7 @@ impl App {
     }
 
     fn wheel(&mut self, delta: MouseScrollDelta) {
-        if self.notice.is_some() && self.picker.is_none() {
+        if self.notice.is_some() && self.picker.is_none() && self.shortcut_help.is_none() {
             return;
         }
         let Some(cell_height) = self.frame.as_ref().map(|frame| frame.fonts.cell.height) else {
@@ -1800,6 +1912,14 @@ impl App {
             MouseScrollDelta::LineDelta(_, y) => f64::from(y) * WHEEL_LINES,
             MouseScrollDelta::PixelDelta(position) => position.y / f64::from(cell_height),
         };
+        if let Some(help) = &mut self.shortcut_help {
+            let lines = lines + self.wheel_remainder;
+            self.wheel_remainder = lines.fract();
+            #[allow(clippy::cast_possible_truncation)]
+            help.scroll(-lines.trunc() as isize);
+            self.request_redraw();
+            return;
+        }
         let Some(point) = self.pointer else {
             return;
         };
@@ -2025,7 +2145,14 @@ impl App {
         // Editors first, as settling one may show its Markdown rendered,
         // which is drawn with the chats.
         self.desk.settle_editors();
-        let (chats, chat_paint) = self.paint_chats(chrome);
+        let (chats, mut chat_paint) = self.paint_chats(chrome);
+        if self.shortcut_help.is_some() {
+            chat_paint.over.clear();
+            chat_paint.over_glyphs.clear();
+            // Modal images are painted above normal overlays. Suppress them
+            // while help owns the window; opening help keeps their state.
+            chat_paint.images.clear();
+        }
         self.desk.settle_explorers();
         self.desk.settle_boards();
         self.desk.settle_browsers();
@@ -2047,7 +2174,11 @@ impl App {
         fills.extend(chat_paint.fills);
         let drawings = drawings(
             desk,
-            keys_here(desk, self.focused, self.picker.is_some()),
+            keys_here(
+                desk,
+                self.focused,
+                self.picker.is_some() || self.shortcut_help.is_some(),
+            ),
             &placement,
             &layout_panes,
             shown.pane,
@@ -2061,7 +2192,11 @@ impl App {
         );
         let focused = drawings.iter().find(|drawing| drawing.focused);
         let cell = geometry.area.cell;
-        let target = desk.text_goes_to();
+        let target = if self.shortcut_help.is_some() {
+            None
+        } else {
+            desk.text_goes_to()
+        };
         let preedit = (self.ime.preedit())
             .filter(|_| !self.composing_in_chat && target == Some(TextTarget::Pane));
         let (ime_area, composed) =
@@ -2167,7 +2302,7 @@ impl App {
             }
         }
         // Ctrl+B p: each pane's number, over it, to pick it by.
-        if desk.numbering_panes() {
+        if desk.numbering_panes() && self.shortcut_help.is_none() {
             let (fills, numbers) = chrome::paint_pane_numbers(geometry, &placement);
             over.extend(fills);
             texts.extend(numbers);
@@ -2226,7 +2361,8 @@ impl App {
         let usage = self
             .desk
             .daemon_has(clackatoo_protocol::wire::PROVIDER_USAGE);
-        let prompting = self.desk.prompt_has_keys() || self.picker.is_some();
+        let prompting =
+            self.desk.prompt_has_keys() || self.picker.is_some() || self.shortcut_help.is_some();
         for (terminal, tile, focused) in tiles {
             let Some(pane) = self.desk.pane_mut(terminal).filter(|pane| pane.is_chat()) else {
                 continue;
@@ -3834,5 +3970,119 @@ mod tests {
         typed.push("hunter2\n");
         assert_eq!(typed.0, "hunter2", "control characters are dropped");
         assert_eq!(format!("{typed:?}"), "Typed(..)");
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+    use clackatoo_daemon::RuntimeDir;
+    use std::path::PathBuf;
+
+    fn app() -> App {
+        let runtime = RuntimeDir::at(PathBuf::from("/unused-shortcut-test"));
+        let session = Session::waiting(
+            &runtime,
+            crate::session::Proxy::Channel(std::sync::mpsc::channel().0),
+        );
+        let mut app = App::new(Instant::now(), None, session, String::new());
+        app.notice = None;
+        app
+    }
+
+    fn key(app: &mut App, notation: &str) {
+        for chord in crate::keymap::parse_keys(notation).unwrap() {
+            app.key_event(&chord.kept().press(), false);
+        }
+    }
+
+    fn desk_keys(app: &mut App, notation: &str) {
+        for chord in crate::keymap::parse_keys(notation).unwrap() {
+            app.desk.key(&chord.kept().press());
+        }
+    }
+
+    #[test]
+    fn shortcut_help_preserves_a_binding_prefix_and_swallows_text_and_clicks() {
+        let mut app = app();
+        desk_keys(&mut app, "<C-b>");
+        let waiting = app.desk.keys_waiting();
+        assert!(waiting.is_some());
+        key(&mut app, "<C-?>");
+        assert!(
+            app.shortcut_help
+                .as_ref()
+                .unwrap()
+                .context
+                .title
+                .contains("After")
+        );
+        key(&mut app, "<C-?>"); // toggle closes, leaving the prefix
+        assert_eq!(app.desk.keys_waiting(), waiting);
+        key(&mut app, "<C-?>");
+        app.type_text("pane");
+        key(&mut app, "<Enter><Down><C-n>");
+        assert_eq!(app.desk.keys_waiting(), waiting);
+        app.pointer = Some([10.0, 10.0]);
+        app.clicked(MouseButton::Left); // outside; no click-through or cancel_keys
+        assert!(app.shortcut_help.is_none());
+        assert_eq!(app.desk.keys_waiting(), waiting);
+        desk_keys(&mut app, "c");
+        assert!(app.desk.keys_waiting().is_none());
+    }
+
+    #[test]
+    fn shortcut_help_keeps_a_prompt_draft_and_normal_mode_key_only_closes_help() {
+        let mut app = app();
+        desk_keys(&mut app, ":set wrap");
+        let before = format!("{:?}", app.desk.status());
+        assert!(before.contains("set wrap"));
+        key(&mut app, "<C-?>");
+        app.type_text("search");
+        key(&mut app, "<Enter><C-;>");
+        assert!(app.shortcut_help.is_none());
+        assert_eq!(format!("{:?}", app.desk.status()), before);
+        key(&mut app, "<C-?>");
+        key(&mut app, "<Esc>");
+        assert_eq!(format!("{:?}", app.desk.status()), before);
+    }
+
+    #[test]
+    fn shortcut_help_can_open_over_connection_questions_and_host_pickers() {
+        let mut app = app();
+        app.notice = Some(Notice::Lost {
+            reason: "testing".into(),
+        });
+        key(&mut app, "<C-?>");
+        assert!(
+            app.shortcut_help
+                .as_ref()
+                .unwrap()
+                .context
+                .rows
+                .iter()
+                .any(|(_, desc)| desc == "Reconnect")
+        );
+        key(&mut app, "<Enter><Esc>");
+        assert!(matches!(app.notice, Some(Notice::Lost { .. })));
+        assert!(!app.closing);
+        app.picker = Some(HostPicker::new(
+            1,
+            Purpose::NewWindow,
+            crate::options::Case::of(app.desk.options()),
+            None,
+        ));
+        app.picker.as_mut().unwrap().paste("a-host");
+        key(&mut app, "<C-?>");
+        app.type_text("filter");
+        key(&mut app, "<Esc>");
+        assert!(
+            app.picker
+                .as_mut()
+                .unwrap()
+                .view((10, 60))
+                .query
+                .contains("a-host")
+        );
     }
 }

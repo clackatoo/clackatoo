@@ -3735,3 +3735,39 @@ mod mouse_tests {
         assert_eq!(input(&mut quiet), "");
     }
 }
+
+impl Pane {
+    pub(crate) fn exclusive_shortcuts(&self) -> Option<crate::shortcuts::Context> {
+        self.chat.as_ref()?.exclusive_shortcuts()
+    }
+
+    pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
+        use crate::shortcuts::Context;
+        if let Some(chat) = &self.chat {
+            return chat.shortcut_context(self.mode);
+        }
+        if let Some(prompt) = &self.prompt {
+            return crate::shortcuts::prompt("Terminal search", &prompt.line, true);
+        }
+        let mut context = if self.mode == Mode::Insert {
+            Context::new(
+                "Terminal · insert mode",
+                &[
+                    ("Ctrl+;", "Enter normal mode"),
+                    (
+                        "Other keys",
+                        "Sent to the terminal program; its own bindings are managed by that program",
+                    ),
+                ],
+            )
+        } else {
+            crate::vim::shortcuts::context("Terminal", &self.keys, self.mode, &normal::TerminalKeys)
+        };
+        context.add(&[
+            ("Ctrl+C", "Send interrupt to terminal program"),
+            ("Ctrl+Shift+C", "Copy selection"),
+            ("Ctrl+Shift+V", "Paste clipboard text"),
+        ]);
+        context
+    }
+}

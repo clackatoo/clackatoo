@@ -787,3 +787,27 @@ impl crate::vim::ListPane for BoardPane {
         BoardPane::prompting(self)
     }
 }
+
+impl BoardPane {
+    pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
+        use crate::shortcuts::{Context, SIMPLE_PROMPT, list_context};
+        if self.prompt.is_some() {
+            return Context::new("Board entry", SIMPLE_PROMPT);
+        }
+        let mut context = list_context(
+            "Board",
+            &self.typed,
+            &[
+                ("i / o / a", "Post a note"),
+                ("r", "Post a result"),
+                ("e", "Edit entry"),
+                ("x", "Release claim"),
+                ("A", "Archive or unarchive board"),
+                ("q", "Close board"),
+            ],
+        );
+        context.rows.retain(|(key, _)| !key.contains("PageDown"));
+        context.add(&[("Ctrl+F / Ctrl+B", "Move down / up several entries")]);
+        context
+    }
+}

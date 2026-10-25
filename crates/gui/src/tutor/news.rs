@@ -827,6 +827,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "Command names ignore case; capitals label panes and pickers, lowercase labels actions",
     },
+    News {
+        id: "context-keyboard-help",
+        date: "2026-10-25",
+        lesson: "basics",
+        what: "Ctrl+? lists the current pane, mode and popup's shortcuts, including configured bindings; type to search",
+    },
 ];
 
 impl News {

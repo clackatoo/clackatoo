@@ -217,7 +217,7 @@ fn defaults() -> Keymap<Binding> {
     }
     bind("niv", "<C-b><C-b>", Action::SendCtrlB, Some("send Ctrl+B"));
 
-    bind("nv", ":", Action::CommandLine, None);
+    bind("nv", ":", Action::CommandLine, Some("Open command prompt"));
     for (keys, kind, label) in FINDER_KEYS {
         bind("nv", keys, Action::Find(kind), Some(label));
     }
@@ -262,17 +262,23 @@ fn defaults() -> Keymap<Binding> {
             "nv",
             &format!("<C-{letter}>"),
             Action::Focus(direction),
-            None,
+            Some(&format!(
+                "Focus pane {}",
+                format!("{direction:?}").to_lowercase()
+            )),
         );
         bind(
             "nv",
             &format!("<A-{letter}>"),
             Action::MoveEdge(direction),
-            None,
+            Some(&format!(
+                "Move pane edge {}",
+                format!("{direction:?}").to_lowercase()
+            )),
         );
     }
-    bind("nv", "<C-o>", jump(true), None);
-    bind("nv", "<C-i>", jump(false), None);
+    bind("nv", "<C-o>", jump(true), Some("Jump back in this tab"));
+    bind("nv", "<C-i>", jump(false), Some("Jump forward in this tab"));
     // The terminal's own keys, as Ctrl+Shift+C is, so programs lose
     // nothing.
     for (keys, back) in [("<C-O>", true), ("<C-I>", false)] {
@@ -280,7 +286,16 @@ fn defaults() -> Keymap<Binding> {
             back,
             within_tab: false,
         };
-        bind("nivc", keys, action, None);
+        bind(
+            "nivc",
+            keys,
+            action,
+            Some(if back {
+                "Jump back across tabs"
+            } else {
+                "Jump forward across tabs"
+            }),
+        );
     }
     bind_review_keys(&mut map);
     name_groups(&mut map);

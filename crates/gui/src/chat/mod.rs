@@ -22,6 +22,7 @@ mod paint;
 mod picker;
 mod queue;
 mod read;
+mod shortcuts;
 mod viewer;
 
 use clackatoo_protocol::{

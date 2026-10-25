@@ -1922,3 +1922,50 @@ impl crate::vim::ListPane for Explorer {
         Explorer::prompting(self)
     }
 }
+
+impl Explorer {
+    pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
+        use crate::shortcuts::{Context, SIMPLE_PROMPT, list_context};
+        if let Some(prompt) = &self.prompt {
+            return if matches!(prompt, Prompt::Confirm { .. }) {
+                Context::new(
+                    "Confirm file operation",
+                    &[("y / Y", "Confirm"), ("Any other key", "Cancel")],
+                )
+            } else {
+                Context::new("File explorer prompt", SIMPLE_PROMPT)
+            };
+        }
+        list_context(
+            "File explorer",
+            &self.typed,
+            &[
+                ("Enter", "Open the file or toggle the directory"),
+                ("l / Right", "Open or enter"),
+                ("h / Left", "Close or leave directory"),
+                ("-", "Parent directory"),
+                (". / g.", "Show or hide hidden files"),
+                ("g?", "Toggle the explorer's inline help"),
+                ("zo", "Expand directory"),
+                ("zc", "Collapse directory"),
+                ("za", "Toggle directory"),
+                ("zR", "Expand all shown directories"),
+                ("zM", "Collapse all directories"),
+                ("/ / ?", "Search forward / backward"),
+                ("n / N", "Repeat / reverse search"),
+                ("R", "Refresh"),
+                ("q", "Close explorer"),
+                ("a", "Create file or directory"),
+                ("r", "Rename"),
+                ("d", "Delete"),
+                ("e", "Edit directory"),
+                ("x", "Cut"),
+                ("y", "Copy"),
+                ("p", "Paste"),
+                ("Ctrl+V", "Open in right split"),
+                ("Ctrl+S", "Open in split below"),
+                ("Ctrl+T", "Open in new tab"),
+            ],
+        )
+    }
+}

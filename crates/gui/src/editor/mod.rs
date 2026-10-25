@@ -59,6 +59,7 @@ mod preview;
 mod registers;
 mod rendered;
 mod scratch;
+mod shortcuts;
 mod snippet;
 mod span;
 mod substitute;

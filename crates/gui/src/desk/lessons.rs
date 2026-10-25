@@ -1335,3 +1335,15 @@ impl Facts for DeskFacts<'_> {
         self.desk.messages_listed().is_some()
     }
 }
+
+impl Desk {
+    pub(super) fn lesson_shortcuts(&self, context: &mut crate::shortcuts::Context) {
+        if self.lesson_tab_shown() && self.key_mode() == KeyMode::Normal {
+            if self.tutor.bracket.is_some() {
+                context.add(&[("s", "Go to the adjacent lesson step")]);
+            } else {
+                context.add(&[("]s / [s", "Next / previous lesson step")]);
+            }
+        }
+    }
+}

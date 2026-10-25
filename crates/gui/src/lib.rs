@@ -54,6 +54,7 @@ mod review;
 mod screen;
 mod scroll;
 mod session;
+mod shortcuts;
 mod smooth;
 mod start;
 mod tutor;

@@ -184,6 +184,7 @@ pub(crate) use restored::Offer;
 mod reviews;
 mod script;
 mod settings;
+mod shortcuts;
 mod starting;
 mod typing;
 mod updating;
@@ -2881,6 +2882,7 @@ mod tests {
     mod mouse;
     mod restored;
     mod scrolling;
+    mod shortcuts;
     mod typing;
 
     use clackatoo_protocol::{ChatState, ChatSummary, Layout, Pane as LayoutPane, View, Workspace};

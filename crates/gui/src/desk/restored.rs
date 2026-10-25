@@ -258,6 +258,21 @@ impl Desk {
     }
 }
 
+impl Desk {
+    pub(super) fn resume_shortcuts(&self, context: &mut crate::shortcuts::Context) {
+        if self
+            .focused_terminal()
+            .and_then(|id| self.drawn_offer(id))
+            .is_some()
+        {
+            context.add(&[
+                ("R", "Put the previous command at the shell prompt"),
+                ("Esc", "Dismiss the previous-command offer"),
+            ]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

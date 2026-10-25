@@ -558,6 +558,33 @@ impl<T> Default for Keymap<T> {
 }
 
 impl<T: Clone> Keymap<T> {
+    /// Live bindings in this mode, narrowed to the pending prefix. A short
+    /// binding hidden by a longer one is not executable by this resolver.
+    pub(crate) fn available(&self, mode: KeyMode) -> Vec<(&[Chord], &T, Option<&str>)> {
+        let mode = if self.waiting.is_empty() {
+            mode
+        } else {
+            self.waiting_mode
+        };
+        let entries = &self.modes[mode.index()];
+        entries
+            .iter()
+            .filter(|(keys, _)| {
+                keys.starts_with(&self.waiting)
+                    && !entries
+                        .keys()
+                        .any(|other| other.len() > keys.len() && other.starts_with(keys))
+            })
+            .map(|(keys, entry)| (keys.as_slice(), &entry.action, entry.label.as_deref()))
+            .collect()
+    }
+
+    pub(crate) fn intercepts(&self, mode: KeyMode, keys: &[Chord]) -> bool {
+        self.modes[mode.index()]
+            .keys()
+            .any(|bound| keys.starts_with(bound) || bound.starts_with(keys))
+    }
+
     /// Binds `keys` in each of `modes`, replacing what they were bound to.
     pub(crate) fn bind(
         &mut self,
@@ -1060,5 +1087,32 @@ mod tests {
         assert_eq!(said("p"), ("p".into(), "p".into()));
         assert_eq!(said("<CR>"), ("Enter".into(), "<CR>".into()));
         assert_eq!(said("<A-x>"), ("Alt+X".into(), "<A-x>".into()));
+    }
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+
+    #[test]
+    fn shortcut_help_tracks_modes_replacement_unbinding_and_pending_prefixes() {
+        let keys = |text| parse_keys(text).unwrap();
+        let mut map = Keymap::default();
+        map.bind(&[KeyMode::Normal], &keys("ga"), 1, Some("old"));
+        map.bind(&[KeyMode::Normal], &keys("ga"), 2, Some("replacement"));
+        map.bind(&[KeyMode::Insert], &keys("ga"), 3, Some("insert"));
+        map.bind(&[KeyMode::Normal], &keys("gx"), 4, None);
+        map.bind(&[KeyMode::Normal], &keys("g"), 5, Some("unreachable"));
+        map.bind(&[KeyMode::Normal], &keys("z"), 6, Some("elsewhere"));
+        assert_eq!(map.available(KeyMode::Insert).len(), 1);
+        assert_eq!(map.available(KeyMode::Normal).len(), 3);
+        map.unbind(&[KeyMode::Normal], &keys("gx"));
+        assert_eq!(map.available(KeyMode::Normal).len(), 2);
+        map.press(KeyMode::Normal, keys("g")[0]);
+        let before = map.waiting().to_vec();
+        let available = map.available(KeyMode::Insert);
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0].2, Some("replacement"));
+        assert_eq!(map.waiting(), before);
     }
 }

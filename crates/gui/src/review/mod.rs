@@ -985,3 +985,25 @@ impl crate::vim::ListPane for Review {
         false
     }
 }
+
+impl Review {
+    pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
+        crate::shortcuts::list_context(
+            "Review",
+            &self.typed,
+            &[
+                ("Enter", "Open location"),
+                ("gc", "Comment at cursor"),
+                ("]h / [h", "Next / previous hunk"),
+                ("]f / [f", "Next / previous file"),
+                ("a", "Keep hunk"),
+                ("A", "Keep file"),
+                ("x", "Reject hunk or remove comment"),
+                ("X", "Reject file"),
+                ("S", "Send comments"),
+                ("R", "Refresh review"),
+                ("q", "Close review"),
+            ],
+        )
+    }
+}

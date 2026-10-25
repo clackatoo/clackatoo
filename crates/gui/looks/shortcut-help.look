@@ -1,0 +1,52 @@
+# Contextual help uses the real window route and keeps the state below it.
+size 900x700
+keys <C-?>
+wait-for Keyboard shortcuts
+shot terminal-insert
+keys <Esc><C-;><C-b><C-?>
+shot pending-binding
+type pane
+shot filtered-binding
+keys <C-;>c
+keys <C-;>:set wrap<C-?>
+shot command-help
+keys <Esc>
+shot command-preserved
+keys <Esc>
+file sample.rs <<END
+fn main() {
+    println!("hello");
+}
+END
+open sample.rs
+keys di<C-?>
+shot pending-object
+keys <Esc><Esc>
+size 480x640
+keys <C-?>
+shot narrow-editor
+keys <C-u>
+type definition
+shot narrow-filtered
+keys <Esc>
+size 1100x900
+keys :Agent claude<CR>i
+type polish
+keys <CR>
+wait-for Image previews are ready
+keys <C-?>
+shot composer-help
+keys <Esc>
+click 245 808
+keys <C-?>
+shot model-help
+keys <C-;>
+shot model-preserved
+keys <Esc>i
+paste-image
+shot image-draft
+click 240 680
+keys <C-?>
+shot image-help
+keys <Esc>
+shot image-preserved
