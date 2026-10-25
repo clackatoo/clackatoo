@@ -17,6 +17,7 @@ use crate::cmdline::recall::{self, Kind, Recalled, Save, Start};
 use crate::cmdline::{Keyed, Line};
 use crate::command;
 use crate::input::KeyPress;
+use crate::vim::{Stroke, prompt_strokes};
 
 /// The lines typed before, and those this window added, for the file.
 #[derive(Debug, Default)]
@@ -207,6 +208,17 @@ impl Desk {
                 }
             }
             self.suggest_completion();
+            return;
+        }
+        if input.purpose == Purpose::Command
+            && let [
+                Stroke::Char {
+                    ch: ch @ ('n' | 'p'),
+                    ctrl: true,
+                },
+            ] = prompt_strokes(press).as_slice()
+        {
+            self.complete(*ch == 'n');
             return;
         }
         let named = match press.key {

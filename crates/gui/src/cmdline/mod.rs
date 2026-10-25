@@ -11,7 +11,7 @@
 //! | Ctrl+W, Ctrl+Backspace | Deletes the word before the caret |
 //! | Ctrl+R and a register's name | Puts in what the register holds (see [`Line::wants_register`]) |
 //! | Up, Down | The lines typed before, oldest last, that start with what's typed (see [`recall`]) |
-//! | Tab, Shift+Tab | Complete the word before the caret, on the command line (see [`complete`]) |
+//! | Tab, Shift+Tab, Ctrl+N, Ctrl+P | Complete the word before the caret, on the command line (see [`complete`]) |
 //!
 //! Backspace on an empty line closes it, as in Vim; whoever owns the line
 //! sees that as [`Keyed::Emptied`].

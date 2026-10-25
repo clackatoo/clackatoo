@@ -210,7 +210,7 @@ fn tabs_pressed_while_files_are_listed_go_through_them_once_they_come() {
     }
     let mut desk = editing(dir.join("x.rs").to_str().unwrap(), "\n");
     type_keys(&mut desk, ":e a");
-    key(&mut desk, NamedKey::Tab);
+    ctrl(&mut desk, "n");
     key(&mut desk, NamedKey::Tab);
     assert_eq!(typed(&desk), (":e a▏".into(), Vec::new()), "nothing yet");
     // Slow to come, it says so.
@@ -224,7 +224,7 @@ fn tabs_pressed_while_files_are_listed_go_through_them_once_they_come() {
     // Shift+Tab, while it's listed, is the last.
     key(&mut desk, NamedKey::Escape);
     type_keys(&mut desk, ":e a");
-    shift_tab(&mut desk);
+    ctrl(&mut desk, "p");
     list(&mut desk);
     assert_eq!(text_of(&desk), ":e a3▏");
 }
@@ -527,4 +527,32 @@ fn suggestion_help_is_displayed_but_never_inserted() {
     key(&mut desk, NamedKey::Enter);
     assert!(desk.input.is_none());
     assert!(desk.options.number, "the setting was applied");
+}
+
+#[test]
+fn ctrl_n_and_p_cycle_suggestions_without_needing_tab_first() {
+    let mut desk = terminal_desk();
+    type_keys(&mut desk, ":set nu");
+    ctrl(&mut desk, "n");
+    assert_eq!(text(&desk), ":set number▏");
+    ctrl(&mut desk, "n");
+    assert_eq!(text(&desk), ":set numberwidth▏");
+    ctrl(&mut desk, "p");
+    assert_eq!(text(&desk), ":set number▏");
+    ctrl(&mut desk, "p");
+    assert_eq!(text(&desk), ":set nu▏", "back to the original word");
+    key(&mut desk, NamedKey::Escape);
+    type_keys(&mut desk, ":set nu");
+    ctrl(&mut desk, "p");
+    assert_eq!(text(&desk), ":set numberwidth▏", "starts at the last match");
+    key(&mut desk, NamedKey::Tab);
+    assert_eq!(
+        text(&desk),
+        ":set nu▏",
+        "shares the same cycling state as Tab"
+    );
+    assert!(
+        desk.input.is_some(),
+        "navigation never executes the command"
+    );
 }

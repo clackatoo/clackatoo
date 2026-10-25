@@ -819,7 +819,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "command-autocomplete",
         date: "2026-10-25",
         lesson: "basics",
-        what: "The : prompt suggests commands and arguments with short descriptions; Tab fills a match without running it",
+        what: "The : prompt suggests commands with descriptions; Tab or Ctrl+N/P fills a match without running it",
     },
 ];
 

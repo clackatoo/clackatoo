@@ -99,7 +99,7 @@ panes 2
 
 ## Complete with Tab
 
-The command line suggests matches as you type: a command's name, an option after `:set`, a file or folder after `:e`, a lesson after `:Tutor`. Each suggestion includes a short description of what it does. Suggestions leave your text alone. Tab fills the word before the caret; with more than one match, Tab and Shift+Tab cycle through them, and then back to what you typed. Once cycling, Down and Up move through the matches too. Enter runs the text in the prompt; Escape closes it.
+The command line suggests matches as you type: a command's name, an option after `:set`, a file or folder after `:e`, a lesson after `:Tutor`. Each suggestion includes a short description of what it does. Suggestions leave your text alone. Tab fills the word before the caret; with more than one match, Tab and Shift+Tab (or Ctrl+N and Ctrl+P) cycle through them, and then back to what you typed. Once cycling, Down and Up move through the matches too. Enter runs the text in the prompt; Escape closes it.
 
 Files are looked up in the background, only when the pane's files are on this machine. Typing and pasting update the suggestions without waiting for disk.
 
