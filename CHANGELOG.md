@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.77 (2026-10-25)
+
+### Features
+
+- **agents:** integrate Antigravity with native tools and cached quotas (efa2e51)
+
 ## 2026.10.76 (2026-10-25)
 
 ### Features
