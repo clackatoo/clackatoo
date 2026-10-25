@@ -10,7 +10,7 @@ Notes for the agents lesson.
 
 ## Opening a chat
 
-`:Agent codex` or `:Agent gemini` opens a chat with that agent in a new tab, at once; `:|Agent codex` opens it beside the focused pane.
+`:Agent codex` or `:Agent antigravity` opens a chat with that agent in a new tab, at once; `:|Agent codex` opens it beside the focused pane.
 
 A chat works in the directory a new terminal would start in, and until its first message it says which agent and folder it has, as `Claude Code in ~/project`. Like any pane, it opens in the window's mode, so after `:Agent` it's in normal mode, and says so: `i` starts typing in its box, Enter sends, and Shift+Enter starts a new line.
 
@@ -45,6 +45,28 @@ Click the × on a thumbnail to remove it, or press Backspace while the message b
 
 A message holds up to four images, at most 16 million pixels each and 8 MiB of encoded image data in total. An agent that does not accept images reports that clearly. The full image is sent to the agent, whose session keeps it. Clackatoo keeps small previews (up to 256 pixels on a side) across window reconnects and daemon upgrades, including on remote connections. Each chat keeps up to 4 MiB of recent previews; older messages retain their image labels. Images sent before previews were supported, or history loaded anew from an agent session after a full daemon restart, show labels only. Switching to a different agent carries the labels with the conversation, so paste the image again if that agent needs to see it.
 
+## Gemini through Antigravity
+
+Choose **Antigravity** in the provider rail, or open `:Agent antigravity`. Clackatoo installs Google's official ACP runtime from a pinned, SHA-256-checked release for x86_64 or ARM64 Linux. It needs no Node.js. Allow about 1.1 GB for the install and another 1 GB for runtime scratch on disk.
+
+Sign in from a terminal on the machine that hosts the chat:
+
+```sh
+clackatoo agent login antigravity
+```
+
+Open the Google link it prints. On the same machine, the browser returns to the runtime and sign-in completes. From a laptop connected through federation, run the command in a terminal belonging to the desktop workspace. Open the link on your laptop; if the browser ends at an unreachable `127.0.0.1` page, copy the complete URL from its address bar, paste it into that terminal and press Enter. Input is hidden. Ctrl+C or `cancel` followed by Enter cancels sign-in. The return URL is accepted only for that login and only once; it never goes into chat history.
+
+This login is separate from the Antigravity IDE. Its credentials stay on the hosting machine, in the private `antigravity-profile` directory beside the installed agents. Runtime scratch lives there too, rather than in `/tmp`. Clackatoo does not import an IDE login or silently use an API key from the environment.
+
+After signing in, send a message or reopen the model picker. Models and settings come from your Google account, rather than a fixed list. Images, queued messages, provider handoffs and session restoration use the same paths as other ACP providers. Antigravity's approval modes are Default, Auto edit and YOLO; the mode names offered by the runtime appear in the permissions menu. Its running turns use Stop & continue for steering.
+
+Click the context gauge to see Antigravity's subscription allowances alongside your other providers: Gemini, Gemini 4 Argon and shared Claude/GPT windows, when Google reports them. These use the same cached background refreshes and reset countdowns. Quota checks do not send model prompts. An untouched allowance has no countdown until Google reports a measured reset.
+
+Antigravity uses its native file tools, including image viewing. Save editor changes before asking it to read them. File diffs, tool approvals, command output and image previews appear in the same chat history as other providers. Images open in the shared full-size viewer.
+
+The separate **Gemini CLI** provider remains available for existing API-key setups.
+
 ## The start page
 
 `:Agent` with no agent named, `:|Agent` beside the pane, or Ctrl+B and then `a`, opens the start page. Its first row is a new chat, with its agent, model and folder: Enter, or `n`, starts it, so a new chat is still one key away. Tab moves between those three, and `h` and `l` change the one picked. They start as the last new chat had them; the `agent` option says which agent to offer before that.
@@ -71,7 +93,7 @@ Choosing another provider stages a handoff with your draft. The “Context hando
 
 Beside the model is one permissions control, showing the approval mode. Its menu groups approval mode, clackatoo tools and browser access; each remains a separate setting. Shift+Tab still steps through the modes.
 
-Beside Send is a small circular context gauge, with the percentage in its centre. The ring fills clockwise, turning amber past 80% and red past 95%; a Claude account limit near full also raises its warning colour. Hover over the gauge for context details. Click it, or press `K` in normal mode, to open Usage & limits: conversation context followed by the account allowances of installed providers. Claude Code and Codex show their reported windows in allowance cards, with a large percentage left and a reset countdown inside each bar; other adapters say when limits are unavailable. Scroll for more providers, and close with Escape or Ctrl+;. Refresh checks again without sending a model prompt; requests are paced to protect provider limits. Readings are cached after the first completed message and refreshed every three messages, at most once a minute. Opening the modal shows the cache immediately and requests a refresh. A failed refresh keeps the last successful reading with its update time.
+Beside Send is a small circular context gauge, with the percentage in its centre. The ring fills clockwise, turning amber past 80% and red past 95%; a Claude account limit near full also raises its warning colour. Hover over the gauge for context details. Click it, or press `K` in normal mode, to open Usage & limits: conversation context followed by the account allowances of installed providers. Claude Code, Codex and Antigravity show their reported windows in allowance cards, with a large percentage left and a reset countdown inside each bar; other adapters say when limits are unavailable. Scroll for more providers, and close with Escape or Ctrl+;. Refresh checks again without sending a model prompt; requests are paced to protect provider limits. Readings are cached after the first completed message and refreshed every three messages, at most once a minute. Opening the modal shows the cache immediately and requests a refresh. A failed refresh keeps the last successful reading with its update time.
 
 ## Which chats need you
 

@@ -8,7 +8,7 @@ use crate::render::{Fill, Paint, icons::Icon};
 pub(super) fn icon_paint(icon: Icon) -> Paint {
     match icon {
         Icon::Claude => Paint::Claude,
-        Icon::Gemini => Paint::Gemini,
+        Icon::Gemini | Icon::Antigravity => Paint::Gemini,
         Icon::OpenAi => Paint::Ink,
         _ => Paint::Icon,
     }

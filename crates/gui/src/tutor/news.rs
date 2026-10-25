@@ -779,6 +779,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Usage limits refresh between messages; opening the gauge shows cached values while checking again.",
     },
+    News {
+        id: "antigravity-provider",
+        date: "2026-10-25",
+        lesson: "agents",
+        what: "Antigravity: Google sign-in, Gemini models, native tools, images and cached subscription limits.",
+    },
 ];
 
 impl News {

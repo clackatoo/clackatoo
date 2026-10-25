@@ -15,7 +15,7 @@ Your messages are bubbles on the right. The agent's answers run the width of a c
 
 | | Does |
 |---|---|
-| `:Agent codex`, `:\|Agent gemini`… | Opens a chat with that agent at once: in a new tab, or beside the focused pane, as `:|Terminal` opens a terminal. |
+| `:Agent codex`, `:\|Agent antigravity`… | Opens a chat with that agent at once: in a new tab, or beside the focused pane, as `:|Terminal` opens a terminal. |
 | `:Agent`, `:\|Agent`, `:-Agent`…, Ctrl+B `a` | Opens the start page, for a chat in a new tab or beside the focused pane. |
 
 Until its first message, a chat says which agent it has and the folder it works in, as `Claude Code in ~/project`, and how to start: in normal mode, "Press i to write a message · Shift+Enter for a new line".
@@ -43,6 +43,28 @@ A chat works in the directory a new terminal would start in: the one the pane it
 Like any new pane, a chat opens in the window's mode, so after `:Agent` it's in normal mode: `i` starts typing into it. A chat that's asking something is always arrived at in normal mode. The first chat starts the agent, which takes a second or two. Until then the chat says it's starting, and a message sent meanwhile waits and goes when it can.
 
 An agent runs in a process group of its own, so stopping it, or choosing Retry, also ends whatever it started, such as the node behind `npx`, and any background job it started without detaching. An upgrade or `clackatoo stop` ends them too: running agents get half a second to finish by themselves, then are asked to stop, and the daemon waits up to a second and a half for them before killing what's left. Before Linux 6.9, only the agent's own process is reached.
+
+## Gemini through Antigravity
+
+Choose **Antigravity** in the provider rail, or open `:Agent antigravity`. Clackatoo installs Google's official ACP runtime from a pinned, SHA-256-checked release for x86_64 or ARM64 Linux. It needs no Node.js. Allow about 1.1 GB for the install and another 1 GB for runtime scratch on disk.
+
+Sign in from a terminal on the machine that hosts the chat:
+
+```sh
+clackatoo agent login antigravity
+```
+
+Open the Google link it prints. On the same machine, the browser returns to the runtime and sign-in completes. From a laptop connected through federation, run the command in a terminal belonging to the desktop workspace. Open the link on your laptop; if the browser ends at an unreachable `127.0.0.1` page, copy the complete URL from its address bar, paste it into that terminal and press Enter. Input is hidden. Ctrl+C or `cancel` followed by Enter cancels sign-in. The return URL is accepted only for that login and only once; it never goes into chat history.
+
+This login is separate from the Antigravity IDE. Its credentials stay on the hosting machine, in the private `antigravity-profile` directory beside the installed agents. Runtime scratch lives there too, rather than in `/tmp`. Clackatoo does not import an IDE login or silently use an API key from the environment.
+
+After signing in, send a message or reopen the model picker. Models and settings come from your Google account, rather than a fixed list. Images, queued messages, provider handoffs and session restoration use the same paths as other ACP providers. Antigravity's approval modes are Default, Auto edit and YOLO; the mode names offered by the runtime appear in the permissions menu. Its running turns use Stop & continue for steering.
+
+Click the context gauge to see Antigravity's subscription allowances alongside your other providers: Gemini, Gemini 4 Argon and shared Claude/GPT windows, when Google reports them. These use the same cached background refreshes and reset countdowns. Quota checks do not send model prompts. An untouched allowance has no countdown until Google reports a measured reset.
+
+Antigravity uses its native file tools, including image viewing. Save editor changes before asking it to read them. File diffs, tool approvals, command output and image previews appear in the same chat history as other providers. Images open in the shared full-size viewer.
+
+The separate **Gemini CLI** provider remains available for existing API-key setups.
 
 ## Queuing and steering
 
@@ -107,7 +129,7 @@ The circular gauge shows context used as a percentage in its centre. Its ring fi
 
 Hover over the gauge for the conversation's token counts and any account limits reported during that chat. Click it, or press `K` in normal mode, to open **Usage & limits**. The modal separates conversation context from account allowances and lists the installed providers, including those whose adapters cannot report limits. Escape, Ctrl+;, the close button or a click outside dismisses it without changing the draft. Scroll or use the arrow and page keys for more windows.
 
-Claude Code and Codex can read their subscription windows without sending a model prompt: short and weekly limits, plus model-specific or extra-spend allowances when reported. Each allowance has a bordered card with a prominent percentage left and a provider-coloured bar. The hatched part is the allowance already used, and the badge inside the bar counts down to reset. Wide windows place the figure beside the bar; narrow panes stack them. Update times beside provider names use the window's local timezone. API-key accounts and adapters without this interface say when subscription limits are unavailable. Custom launch commands are not probed through another installation's sign-in.
+Claude Code, Codex and Antigravity can read their subscription windows without sending a model prompt: short and weekly limits, plus model-specific or extra-spend allowances when reported. Each allowance has a bordered card with a prominent percentage left and a provider-coloured bar. The hatched part is the allowance already used, and the badge inside the bar counts down to reset. Wide windows place the figure beside the bar; narrow panes stack them. Update times beside provider names use the window's local timezone. API-key accounts and adapters without this interface say when subscription limits are unavailable. Custom launch commands are not probed through another installation's sign-in.
 
 The daemon collects these readings, so windows connected remotely see the accounts on that daemon's machine. It caches readings after the first completed message, then refreshes every three completed messages across chats (or on the next completion after five minutes). Opening the modal shows cached values immediately and requests a refresh, as does **Refresh**. All refreshes have a one-minute minimum interval and concurrent windows share the work; nothing polls while chats are idle. New chats receive the same cached readings. Failed reads retain the last successful values and their update time; expired windows say they need a refresh rather than guessing that usage is zero. Readings are collected again after a daemon upgrade.
 
@@ -350,7 +372,7 @@ Which chat started which, and messages waiting their turn, last through an upgra
 
 ## Which agent
 
-A chat talks to Claude Code unless you name another: `claude`, `codex` (OpenAI's Codex) or `gemini` (Gemini CLI, not yet tried with clackatoo). The chat says which in its box: "Message Codex".
+A chat talks to Claude Code unless you name another: `claude`, `codex` (OpenAI's Codex), `antigravity` (Google Antigravity), or `gemini` (Gemini CLI for existing API-key setups). The chat says which in its box: "Message Codex".
 
 clackatoo speaks ACP, the [Agent Client Protocol](https://agentclientprotocol.com). Claude Code and Codex don't speak it themselves, so each runs through an ACP adapter, at a version tried with clackatoo. The daemon looks for an agent's adapter where clackatoo installs it, `~/.local/share/clackatoo/agents`, then on your `PATH`, then runs it with `npx`, which needs Node.js. While it runs from `PATH` or `npx`, the chat offers once to install it, which makes it start faster and work offline: Claude Code's takes about 540 MB and Codex's about 450 MB, each with its own copy of the agent, installed from a lock file so nothing it depends on can change. With none of the three, the chat asks to install it before it can start. A new build that moves to a newer adapter asks again, and removes the old one once nothing uses it.
 
@@ -408,7 +430,7 @@ An upgrade stops the browser; the next page starts it again.
 - There's no menu of agents to pick from: name one after `:Agent`. Codex's Plan mode can't be changed from the box.
 - A file changed both by the agent and by something else at once isn't taken in, and the bar says so.
 - Agents can't yet see what you've selected in an editor. Commands run with the agent's own tool, rather than `run_in_terminal`, show their output once they're done.
-- The account-usage modal is native-only. Gemini and custom adapters do not yet have read-only subscription probes; the phone keeps its existing per-chat usage detail.
+- The account-usage modal is native-only. Gemini CLI and custom adapters do not yet have read-only subscription probes; the phone keeps its existing per-chat usage detail.
 - `/` commands aren't listed or completed as you type them.
 - You can't click or type into a browser pane yourself.
 - An upgrade forgets the cards of subagents that had already closed, so their changes drop out of the chat's and turn's reviews. They stay in `:Review base` and in the gutter, as `chat N`.

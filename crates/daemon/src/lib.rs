@@ -15,6 +15,7 @@
 
 mod agent;
 mod agents;
+pub mod antigravity;
 mod boards;
 mod browser;
 mod buffer;

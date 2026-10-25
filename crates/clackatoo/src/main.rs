@@ -127,6 +127,15 @@ impl RemoteArgs {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Manage an agent's account on this machine.
+    #[command(subcommand)]
+    Agent(AgentCommand),
+    /// Internal managed Antigravity subprocess.
+    #[command(hide = true)]
+    AgentRuntime { program: PathBuf, profile: PathBuf },
+    /// Internal read-only Antigravity quota subprocess.
+    #[command(hide = true)]
+    AgentUsage { profile: PathBuf },
     /// Run the daemon in the foreground. It owns every terminal, so
     /// terminals live exactly as long as it does.
     Daemon(DaemonArgs),
@@ -221,6 +230,15 @@ enum Command {
     /// from: the desktop you're logged in to, the daemon's own
     /// environment, or none.
     Display,
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentCommand {
+    /// Sign in with Google (also works in a federated terminal).
+    Login {
+        #[arg(value_parser = ["antigravity"])]
+        provider: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -459,6 +477,15 @@ fn main() -> ExitCode {
 #[allow(clippy::too_many_lines, reason = "one arm per command")]
 fn run(command: Command) -> anyhow::Result<()> {
     match command {
+        Command::Agent(AgentCommand::Login { .. }) => {
+            clackatoo_daemon::antigravity::login().map_err(Into::into)
+        }
+        Command::AgentRuntime { program, profile } => {
+            clackatoo_daemon::antigravity::run(&program, &profile).map_err(Into::into)
+        }
+        Command::AgentUsage { profile } => {
+            clackatoo_daemon::antigravity::usage(&profile).map_err(Into::into)
+        }
         Command::Daemon(args) => run_daemon(&args),
         Command::List(connection) => list(&connection),
         Command::New(new) => new_terminal(new),

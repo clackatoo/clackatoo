@@ -591,10 +591,14 @@ impl Daemon {
                     let dir = self.config.agents.dir.as_deref();
                     let dir = dir.map(|dir| agents::install_dir(dir, known));
                     self.chat(id)?.offer_install(&format!(
-                        "{} isn't installed. Install its ACP adapter, {}, with npm? It \
+                        "{} isn't installed. Install its ACP runtime ({})? It \
                          takes about {}, in {}. Or give it a command in agents.toml.",
                         known.title,
-                        known.package(),
+                        if known.package().is_empty() {
+                            "Google's official release, checked by SHA-256"
+                        } else {
+                            known.package()
+                        },
                         known.size,
                         dir.unwrap_or_default().display()
                     ));
@@ -614,6 +618,13 @@ impl Daemon {
         spec: AgentSpec,
         command: Vec<OsString>,
     ) -> io::Result<AgentId> {
+        let command = if spec.name == "antigravity"
+            && matches!(spec.launch, crate::agents::Launch::Known(_))
+        {
+            crate::antigravity::launch_command(&command, self.config.agents.dir.as_deref())?
+        } else {
+            command
+        };
         let display = self.display_env();
         let agent = Agent::start(&spec.name, &command, display.as_deref(), &self.parser)?;
         let id = AgentId(self.agents.next);
@@ -878,6 +889,9 @@ impl Daemon {
     fn read_agent_errors(&mut self, id: AgentId) {
         if let Some(slot) = self.agents.running.get_mut(&id) {
             slot.unread_errors = slot.agent.read_errors(&mut self.buffer, OUTPUT_BUDGET);
+            if slot.agent.needs_login() {
+                self.agent_gone(id);
+            }
         }
     }
 
@@ -906,6 +920,12 @@ impl Daemon {
         let buffer = &mut self.buffer[..FIRST_LOOK];
         let read = slot.agent.read(buffer, FIRST_LOOK, &mut incoming);
         let name = slot.spec.name.clone();
+        if slot.agent.needs_login() {
+            self.agent_gone(id);
+            self.agents.incoming = incoming;
+            self.agents.incoming.clear();
+            return None;
+        }
         for message in incoming.drain(..) {
             self.receive_from_agent(id, &name, message);
         }
@@ -985,7 +1005,7 @@ impl Daemon {
             self.agents.context.insert(name.to_owned(), usage.size);
             self.limits_heard(name, session, usage.meta.as_ref());
         }
-        let images = crate::tool_images::extract(&mut update);
+        let images = self.chat(id)?.image_sources(&mut update);
         let chat = self.chat(id)?;
         let settings = matches!(update, SessionUpdate::ConfigOptionUpdate(_));
         if let Some(wrote) = chat.update(update) {
@@ -1148,8 +1168,14 @@ impl Daemon {
                 // Ruled out by the chat's limits, or about clackatoo's own
                 // tools, which ask the user themselves: answered at once.
                 // Limits first, so nothing passing as ours gets past them.
-                let answered = (chat.turned_down(&tool, &options))
-                    .or_else(|| chat.about_own_tools(&tool, &options));
+                let interaction =
+                    name == "antigravity" && tool.tool_call_id.0.starts_with("interaction_");
+                let answered = if interaction {
+                    None
+                } else {
+                    (chat.turned_down(&tool, &options))
+                        .or_else(|| chat.about_own_tools(&tool, &options))
+                };
                 if let Some(option) = answered {
                     if let Some(slot) = self.agents.running.get_mut(&agent) {
                         slot.agent.answer_permission(&request, Some(&option));
@@ -1296,8 +1322,13 @@ impl Daemon {
         // started holds its stderr open and writes on.
         slot.agent.read_errors(&mut self.buffer, OUTPUT_BUDGET);
         let name = slot.spec.name.clone();
+        let needs_login = slot.agent.needs_login();
         let why = (!slot.agent.started()).then(|| slot.agent.last_errors());
-        let why = why.map(|why| why.unwrap_or_else(|| "it said nothing".to_owned()));
+        let why = if needs_login {
+            self.login_hint(id)
+        } else {
+            why.map(|why| why.unwrap_or_else(|| "it said nothing".to_owned()))
+        };
         let stopped = why.as_deref().map_or_else(
             || "it stopped".to_owned(),
             |why| format!("it stopped, saying: {why}"),

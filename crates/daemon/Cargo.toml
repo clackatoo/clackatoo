@@ -25,6 +25,7 @@ globset.workspace = true
 httparse.workspace = true
 ignore.workspace = true
 image.workspace = true
+jiff.workspace = true
 libc.workspace = true
 log.workspace = true
 memchr.workspace = true
@@ -44,6 +45,7 @@ thiserror.workspace = true
 toml_edit.workspace = true
 unicode-width.workspace = true
 ureq.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 clackatoo-netem.workspace = true

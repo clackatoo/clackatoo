@@ -136,6 +136,7 @@ pub(crate) struct Peer {
     errors: Vec<u8>,
     /// The last lines of stderr, to say why it stopped if it stops soon.
     last_errors: VecDeque<String>,
+    login_required: bool,
     /// Where every message to and from it is written, if anywhere.
     trace: Option<File>,
 }
@@ -202,6 +203,7 @@ impl Peer {
             exited: false,
             errors: Vec::new(),
             last_errors: VecDeque::new(),
+            login_required: false,
             trace: None,
         })
     }
@@ -448,6 +450,14 @@ impl Peer {
                         let line: Vec<u8> = self.errors.drain(..=end).collect();
                         let line = String::from_utf8_lossy(&line);
                         let line = line.trim();
+                        if self.name == "agent antigravity" {
+                            if crate::antigravity::authorization_line(line).is_some() {
+                                self.login_required = true;
+                            }
+                            // This runtime may include account details and OAuth URLs in
+                            // diagnostics. The login command owns displaying sign-in URLs.
+                            continue;
+                        }
                         log::debug!("{}: {line}", self.name);
                         self.trace("!!", line.as_bytes());
                         if !line.is_empty() {
@@ -471,8 +481,16 @@ impl Peer {
         }
     }
 
-    /// The last few lines it wrote to stderr, on one line, if it wrote
-    /// any.
+    /// Whether the provider tried to begin an interactive sign-in.
+    pub(crate) fn needs_login(&self) -> bool {
+        self.login_required
+    }
+
+    pub(crate) fn require_login(&mut self) {
+        self.login_required = true;
+    }
+
+    /// The last few lines it wrote to stderr, on one line, if any.
     pub(crate) fn last_errors(&self) -> Option<String> {
         let lines: Vec<&str> = self.last_errors.iter().map(String::as_str).collect();
         (!lines.is_empty()).then(|| lines.join(" / "))
@@ -1264,6 +1282,15 @@ fn parse(name: &str, body: &[u8]) -> Option<Message> {
     let body = body.trim_ascii();
     if body.is_empty() {
         return None;
+    }
+    if name == "agent antigravity"
+        && std::str::from_utf8(body)
+            .ok()
+            .and_then(crate::antigravity::authorization_line)
+            .is_some()
+    {
+        return serde_json::from_value(serde_json::json!({"method":"_clackatoo/login_required"}))
+            .ok();
     }
     serde_json::from_slice(body)
         .map_err(|err| log::debug!("{name}: skipping a message that isn't JSON-RPC: {err}"))

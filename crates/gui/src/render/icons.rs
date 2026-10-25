@@ -8,6 +8,7 @@ pub(crate) enum Icon {
     OpenAi,
     Claude,
     Gemini,
+    Antigravity,
     Agent,
     Bolt,
     BoltFilled,
@@ -33,6 +34,8 @@ impl Icon {
         let name = name.to_ascii_lowercase();
         if name.contains("claude") {
             Self::Claude
+        } else if name.contains("antigravity") {
+            Self::Antigravity
         } else if name.contains("gemini") {
             Self::Gemini
         } else if name.contains("codex") || name.contains("openai") {
@@ -46,6 +49,7 @@ impl Icon {
         let svg = match self {
             Self::OpenAi => Some(include_str!("icons/openai.svg")),
             Self::Claude => Some(include_str!("icons/claude.svg")),
+            Self::Antigravity => Some(include_str!("icons/antigravity.svg")),
             Self::Gemini => Some(include_str!("icons/gemini.svg")),
             _ => None,
         };
@@ -99,7 +103,12 @@ impl Icon {
     pub(crate) fn rasterize(self, size: u16) -> Vec<u8> {
         let path = self.path();
         let mut mask = Mask::new(path.as_ref());
-        let scale = f32::from(size) / 24.0;
+        let scale = f32::from(size)
+            / if self == Self::Antigravity {
+                16.0
+            } else {
+                24.0
+            };
         mask.size(u32::from(size), u32::from(size))
             .transform(Some(Transform::scale(scale, scale)));
         let mut stroke = Stroke::new(if self == Self::Hatch {
@@ -112,7 +121,12 @@ impl Icon {
         stroke.cap(Cap::Round).join(Join::Round);
         if !matches!(
             self,
-            Self::OpenAi | Self::Claude | Self::Gemini | Self::StarFilled | Self::BoltFilled
+            Self::OpenAi
+                | Self::Claude
+                | Self::Gemini
+                | Self::Antigravity
+                | Self::StarFilled
+                | Self::BoltFilled
         ) {
             mask.style(stroke);
         }
@@ -146,6 +160,7 @@ mod tests {
                 Icon::OpenAi,
                 Icon::Claude,
                 Icon::Gemini,
+                Icon::Antigravity,
                 Icon::Star,
                 Icon::Search,
                 Icon::Bolt,

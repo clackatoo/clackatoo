@@ -15,14 +15,20 @@ use std::sync::{
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub(crate) mod antigravity;
+
 #[derive(Debug)]
 struct Probe {
     agent: String,
-    node: PathBuf,
-    entry: PathBuf,
+    source: Source,
 }
-#[derive(Debug, Deserialize)]
-struct Reading {
+#[derive(Debug)]
+enum Source {
+    Node { node: PathBuf, entry: PathBuf },
+    Antigravity { profile: PathBuf },
+}
+#[derive(Debug, Deserialize, serde::Serialize)]
+pub(crate) struct Reading {
     ok: bool,
     limits: Vec<UsageLimit>,
     notice: Option<String>,
@@ -195,6 +201,16 @@ impl Cache {
 }
 
 fn locate_probe(config: &AgentConfig, spec: &crate::agents::AgentSpec) -> Option<Probe> {
+    if let (Launch::Known(known), Some(dir)) = (&spec.launch, &config.dir)
+        && known.name == "antigravity"
+    {
+        return Some(Probe {
+            agent: spec.name.clone(),
+            source: Source::Antigravity {
+                profile: crate::antigravity::profile(dir),
+            },
+        });
+    }
     if let (Launch::Known(known), Some(dir), Some(node)) =
         (&spec.launch, &config.dir, config.usage_node())
     {
@@ -208,8 +224,7 @@ fn locate_probe(config: &AgentConfig, spec: &crate::agents::AgentSpec) -> Option
         };
         entry.filter(|p| p.is_file()).map(|entry| Probe {
             agent: spec.name.clone(),
-            node,
-            entry,
+            source: Source::Node { node, entry },
         })
     } else {
         None
@@ -231,14 +246,26 @@ fn probe_read(
     cancel: &AtomicBool,
     running: &Mutex<Option<Arc<Group>>>,
 ) -> Option<Reading> {
-    let mut child = Command::new(&probe.node)
-        .args([
-            "--input-type=module",
-            "-e",
-            include_str!("provider_usage/probe.mjs"),
-        ])
-        .arg(&probe.agent)
-        .arg(&probe.entry)
+    let mut command = match &probe.source {
+        Source::Node { node, entry } => {
+            let mut command = Command::new(node);
+            command
+                .args([
+                    "--input-type=module",
+                    "-e",
+                    include_str!("provider_usage/probe.mjs"),
+                ])
+                .arg(&probe.agent)
+                .arg(entry);
+            command
+        }
+        Source::Antigravity { profile } => {
+            let mut command = Command::new(std::env::current_exe().ok()?);
+            command.arg("agent-usage").arg(profile);
+            command
+        }
+    };
+    let mut child = command
         .current_dir(std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -311,8 +338,7 @@ mod tests {
             probe_read(
                 &Probe {
                     agent: agent.into(),
-                    node,
-                    entry,
+                    source: Source::Node { node, entry },
                 },
                 &AtomicBool::new(false),
                 &Mutex::new(None),

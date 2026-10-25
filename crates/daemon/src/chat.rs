@@ -2160,6 +2160,7 @@ impl HostedChat {
     /// Takes a change to the session. Returns the files a tool that has
     /// finished says it changed, if the change says so: they're on disk
     /// already, as Claude Code's tools write them.
+    #[allow(clippy::too_many_lines, reason = "one arm per ACP update")]
     pub(crate) fn update(&mut self, update: SessionUpdate) -> Option<Wrote> {
         match update {
             SessionUpdate::AgentMessageChunk(chunk) => self.write(&chunk.content, false),
@@ -2168,7 +2169,7 @@ impl HostedChat {
                 self.revoke_image(&call.tool_call_id.0);
                 self.note_diffs(&call.tool_call_id.0, &call.content);
                 self.note_own_tool(&call.tool_call_id.0, call.raw_input.as_ref());
-                let tool = Tool {
+                let mut tool = Tool {
                     id: call.tool_call_id.0.to_string(),
                     title: clean(&call.title),
                     status: tool_status(call.status),
@@ -2176,6 +2177,9 @@ impl HostedChat {
                     content: tool_content(&call.content),
                     locations: tool_locations(&call.locations),
                 };
+                if self.agent == "antigravity" {
+                    native_output(&mut tool, call.raw_output.as_ref());
+                }
                 let (id, wrote) = (tool.id.clone(), self.wrote(&tool));
                 self.set_tool(tool);
                 self.add_output(&id, call.meta.as_ref());
@@ -2218,6 +2222,9 @@ impl HostedChat {
                 }
                 if let Some(locations) = &update.fields.locations {
                     tool.locations = tool_locations(locations);
+                }
+                if self.agent == "antigravity" {
+                    native_output(&mut tool, update.fields.raw_output.as_ref());
                 }
                 // Claude Code's adapter says what a tool wrote once it has
                 // written it, in an update of its own that may come before
@@ -2618,6 +2625,24 @@ impl HostedChat {
         self.image_receipts
             .push((id.to_owned(), std::sync::Arc::downgrade(&receipt)));
         receipt
+    }
+
+    pub(crate) fn image_sources(
+        &self,
+        update: &mut SessionUpdate,
+    ) -> Option<(String, Vec<crate::tool_images::Source>)> {
+        if let Some(images) = crate::tool_images::extract(update) {
+            return Some(images);
+        }
+        if self.agent != "antigravity" {
+            return None;
+        }
+        let SessionUpdate::ToolCallUpdate(call) = update else {
+            return None;
+        };
+        let tool = self.tool(&call.tool_call_id.0)?;
+        crate::tool_images::antigravity_result(call, tool)
+            .map(|source| (tool.id.clone(), vec![source]))
     }
 
     pub(crate) fn image_target(&mut self, id: &str) -> Option<crate::tool_images::Target> {
@@ -3232,6 +3257,26 @@ fn tool_kind(kind: agent_client_protocol_schema::v1::ToolKind) -> ToolKind {
 /// What a tool shows, as the agent gives it: its text and its changes to
 /// files, cut down to what a chat keeps. Image labels arrive here first;
 /// the bounded worker attaches their pixels separately.
+fn native_output(tool: &mut Tool, raw: Option<&Value>) {
+    let Some(raw) = raw else {
+        return;
+    };
+    let Some(output) = raw
+        .get("combinedOutput")
+        .or_else(|| raw.get("combined_output"))
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    // Native command output is a whole snapshot, not an appended delta.
+    let output = tail(&clean_text(output), TOOL_TEXT);
+    if let Some(previous) = tool.output_mut() {
+        *previous = output;
+    } else {
+        tool.content.push(ToolContent::Output(output));
+    }
+}
+
 fn tool_content(content: &[ToolCallContent]) -> Vec<ToolContent> {
     (content.iter())
         .filter_map(|content| match content {
@@ -3681,6 +3726,59 @@ mod tests {
         let json = format!(r#"{{"sessionId":"s","update":{json}}}"#);
         let notification: SessionNotification = serde_json::from_str(&json).unwrap();
         chat.update(notification.update)
+    }
+
+    #[test]
+    fn antigravity_native_output_is_replaced_and_completed_image_reads_use_the_shared_path() {
+        let mut chat = chat();
+        chat.agent = "antigravity".into();
+        chat.node.agent = "Antigravity".into();
+        chat.begin(
+            "test".into(),
+            Prompt {
+                text: "test".into(),
+                images: Vec::new(),
+            },
+            None,
+            &mut Vec::new(),
+        );
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"cmd","title":"printf ok","kind":"execute","status":"in_progress"}"#,
+        );
+        let output = r#"{"sessionUpdate":"tool_call_update","toolCallId":"cmd","status":"completed","rawOutput":{"combinedOutput":"ok"}}"#;
+        update(&mut chat, output);
+        update(&mut chat, output);
+        assert_eq!(
+            chat.tool("cmd").unwrap().content,
+            vec![ToolContent::Output("ok".into())]
+        );
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"view","title":"Running view_file","kind":"read","status":"in_progress","locations":[{"path":"red.png"}]}"#,
+        );
+        let mut result: SessionUpdate = serde_json::from_str(
+            r#"{"sessionUpdate":"tool_call_update","toolCallId":"view","status":"failed"}"#,
+        )
+        .unwrap();
+        assert!(chat.image_sources(&mut result).is_none());
+        let mut result: SessionUpdate = serde_json::from_str(
+            r#"{"sessionUpdate":"tool_call_update","toolCallId":"view","status":"completed"}"#,
+        )
+        .unwrap();
+        let (id, sources) = chat.image_sources(&mut result).unwrap();
+        assert_eq!(id, "view");
+        assert!(
+            matches!(sources.as_slice(), [crate::tool_images::Source::File(path)] if path == std::path::Path::new("red.png"))
+        );
+        chat.agent = "claude".into();
+        assert!(chat.image_sources(&mut result).is_none());
+        chat.agent = "antigravity".into();
+        chat.update(result.clone());
+        assert!(
+            chat.image_sources(&mut result).is_none(),
+            "duplicate completion does not reread the file"
+        );
     }
 
     #[test]

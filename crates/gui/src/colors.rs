@@ -473,7 +473,7 @@ impl Theme {
                 use crate::render::icons::Icon;
                 let colour = match provider {
                     Icon::Claude => hex_rgba(0xd9_77_57),
-                    Icon::Gemini => hex_rgba(0x9b_88_d4),
+                    Icon::Gemini | Icon::Antigravity => hex_rgba(0x9b_88_d4),
                     _ => self.foreground,
                 };
                 mix(self.palette_background, colour, 0.38)

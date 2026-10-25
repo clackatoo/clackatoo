@@ -299,19 +299,30 @@ impl ChatView {
             "7-day" => "Weekly",
             label => label,
         };
+        let split = (!narrow).then(|| label.split_once(" · ")).flatten();
+        let amount_top = if split.is_some() { 3.6 } else { 2.6 };
         self.usage_text(
             canvas,
             m,
-            label,
+            split.map_or(label, |(family, _)| family),
             [col + inset, at + m.em(1.15), label_width],
             Tone::Plain,
         );
+        if let Some((_, window)) = split {
+            self.usage_text(
+                canvas,
+                Measures::of(m.em(0.85)),
+                window,
+                [col + inset, at + m.em(2.4), label_width],
+                Tone::Muted,
+            );
+        }
         let amount = left.map_or_else(|| "—".into(), |left| format!("{left}%"));
         let amount_width = self.usage_text(
             canvas,
             Measures::of(m.em(2.15)),
             &amount,
-            [col + inset, at + m.em(2.6), label_width],
+            [col + inset, at + m.em(amount_top), label_width],
             Tone::Plain,
         );
         self.usage_text(
@@ -320,7 +331,7 @@ impl ChatView {
             if expired { "refresh needed" } else { "left" },
             [
                 col + inset + amount_width + m.em(0.5),
-                at + m.em(3.65),
+                at + m.em(amount_top + 1.05),
                 label_width.max(m.em(8.0)) - amount_width,
             ],
             Tone::Muted,

@@ -8,3 +8,7 @@ Distributed under CC0; see LICENSE.simple-icons. Brand marks remain their owners
 Other controls in ../icons.rs are original 24-unit vector paths.
 
 Path commands are expanded explicitly to accommodate Zeno 0.3.3's repeated-arc parser. Geometry is unchanged.
+
+`antigravity.svg`: Google Antigravity mark from the official ACP registry,
+https://cdn.agentclientprotocol.com/registry/v1/latest/antigravity-acp.svg
+(retrieved 2026-10-25). Used to identify Google's provider; trademark belongs to Google.

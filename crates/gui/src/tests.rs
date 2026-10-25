@@ -3132,6 +3132,56 @@ fn crowded_bars_keep_the_tab_shown_however_narrow_and_at_twice_the_size() {
 }
 
 #[test]
+fn renders_antigravity_allowances_in_wide_and_narrow_panes() {
+    use clackatoo_protocol::{ProviderUsage, UsageLimit};
+    let mut antigravity = chat_node(false);
+    antigravity.provider_usage = vec![ProviderUsage {
+        agent: "antigravity".into(),
+        title: "Antigravity".into(),
+        checked: 12_000,
+        limits: [
+            ("Gemini · Weekly", 1, Some(220_000_000)),
+            ("Gemini · 5-hour", 4, Some(1_000_000)),
+            ("Claude & GPT (shared) · Weekly", 0, None),
+            ("Claude & GPT (shared) · 5-hour", 0, None),
+            ("Gemini 4 Argon · Weekly", 15, Some(220_000_000)),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(id, (label, used, resets))| UsageLimit {
+            id: id.to_string(),
+            label: label.into(),
+            used,
+            resets,
+        })
+        .collect(),
+        ..Default::default()
+    }];
+    render_chat_sized(
+        "usage-modal-antigravity",
+        antigravity.clone(),
+        "",
+        (1.0, None, [1480.0, 1040.0]),
+        |chat, _| {
+            chat.usage_supported = true;
+            chat.toggle_detail();
+        },
+    );
+    render_chat_wide(
+        "usage-modal-antigravity-narrow",
+        antigravity,
+        "",
+        (1.0, None, 420.0),
+        |chat, fonts| {
+            chat.usage_supported = true;
+            chat.toggle_detail();
+            chat.paint(fonts, [0.0; 2], [420.0, 640.0], true);
+            chat.scroll_by(10_000.0);
+        },
+    );
+}
+
+#[test]
 fn renders_usage_modal_with_provider_windows_and_unavailable_states() {
     use clackatoo_protocol::{ProviderUsage, UsageLimit};
     let mut node = chat_node(false);

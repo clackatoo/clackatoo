@@ -593,6 +593,17 @@ impl Fake {
         match message.get("method").and_then(Value::as_str) {
             Some("initialize") if self.mute_init => {}
             Some("initialize") => self.initialize(&id),
+            Some("session/new" | "session/resume" | "session/load")
+                if std::env::args().any(|a| a.starts_with("--antigravity-login")) =>
+            {
+                let line = "Open the following link to authenticate the ACP server: https://accounts.google.com/o/oauth2/v2/auth?state=never-log-this";
+                if std::env::args().any(|a| a == "--antigravity-login-stdout") {
+                    println!("{line}");
+                    std::io::stdout().flush().unwrap();
+                } else {
+                    eprintln!("{line}");
+                }
+            }
             Some("session/new" | "session/resume" | "session/load") if self.logged_out => {
                 send(&json!({
                 "jsonrpc": "2.0", "id": id,

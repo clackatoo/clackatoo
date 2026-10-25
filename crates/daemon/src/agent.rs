@@ -253,13 +253,17 @@ impl Agent {
             can_steer: false,
             can_list: None,
         };
+        // Antigravity replaces its image-capable view_file with a text-only
+        // client tool when fs is advertised. Keep its native file tools; their
+        // ACP diffs/permissions still flow through the common chat machinery.
+        let client_files = name != "antigravity";
         agent.request(
             Pending::Initialize,
             "initialize",
             &json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "clientCapabilities": {
-                    "fs": { "readTextFile": true, "writeTextFile": true },
+                    "fs": { "readTextFile": client_files, "writeTextFile": client_files },
                     "terminal": false,
                     // Codex's adapter streams commands' output in this,
                     // which the daemon adds to the tool's.
@@ -577,10 +581,16 @@ impl Agent {
         self.peer.read_errors(buffer, budget)
     }
 
+    pub(crate) fn needs_login(&self) -> bool {
+        self.peer.needs_login()
+    }
+
     fn receive(&mut self, message: Message, incoming: &mut Vec<Incoming>) {
         match (message.method, message.id) {
             (Some(method), None) => {
-                if method == "session/update" {
+                if method == "_clackatoo/login_required" && self.name() == "agent antigravity" {
+                    self.peer.require_login();
+                } else if method == "session/update" {
                     match serde_json::from_value::<SessionNotification>(message.params) {
                         Ok(notification) => incoming.push(Incoming::Update {
                             session: notification.session_id.0.to_string(),

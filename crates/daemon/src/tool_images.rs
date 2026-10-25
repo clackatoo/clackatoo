@@ -162,6 +162,30 @@ fn image_path(path: &Path) -> bool {
         })
 }
 
+/// Antigravity 1.4.3's native `view_file` reports the viewed file in ACP
+/// locations, followed by a successful completion with no result content.
+/// Only that completed native read is adapted; ordinary tool inputs/titles
+/// remain insufficient. Decoding and original storage use the same worker.
+pub(crate) fn antigravity_result(
+    call: &agent_client_protocol_schema::v1::ToolCallUpdate,
+    tool: &clackatoo_protocol::Tool,
+) -> Option<Source> {
+    use agent_client_protocol_schema::v1::ToolCallStatus;
+    use clackatoo_protocol::{ToolKind, ToolStatus};
+    if call.fields.status != Some(ToolCallStatus::Completed)
+        || call.fields.content.is_some()
+        || tool.kind != ToolKind::Read
+        || tool.status != ToolStatus::Running
+        || tool.title != "Running view_file"
+        || tool.locations.len() != 1
+        || tool.locations[0].path.len() > 4096
+    {
+        return None;
+    }
+    let path = local_path(&tool.locations[0].path)?;
+    image_path(&path).then_some(Source::File(path))
+}
+
 fn local_path(uri: &str) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStringExt;
     let Some(path) = uri.strip_prefix("file://") else {

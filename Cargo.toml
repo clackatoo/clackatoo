@@ -124,6 +124,7 @@ toml_edit = "0.25"
 unicode-segmentation = "1.13"
 # Fetches releases for `clackatoo update` over HTTPS: small and blocking,
 # with rustls and ring, which QUIC already builds, and Mozilla's roots.
+url = "2.5"
 ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 unicode-width = "0.2"
 vte = { version = "0.15", default-features = false, features = ["std"] }

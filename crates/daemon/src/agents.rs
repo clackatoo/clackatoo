@@ -40,7 +40,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use clackatoo_syntax::servers::{KnownServer, Source};
+use clackatoo_syntax::install::Download;
+use clackatoo_syntax::servers::{KnownServer, Packed, Source};
 
 use crate::profiles::{self, Profile};
 
@@ -60,6 +61,8 @@ macro_rules! locked {
 /// The agent a chat talks to when it asks for none.
 pub(crate) const DEFAULT: &str = "claude";
 
+pub(crate) const ANTIGRAVITY_VERSION: &str = "1.4.3";
+
 /// An agent clackatoo knows: where its adapter comes from, and how it
 /// differs from the others.
 #[derive(Debug)]
@@ -68,7 +71,7 @@ pub(crate) struct Known {
     pub(crate) name: &'static str,
     /// What to show.
     pub(crate) title: &'static str,
-    /// Its adapter, which npm installs.
+    /// Its pinned ACP runtime, installed from npm or a release archive.
     pub(crate) adapter: KnownServer,
     /// The adapter's version, as its package is pinned to.
     pub(crate) version: &'static str,
@@ -110,7 +113,7 @@ impl PartialEq for Known {
 
 impl Eq for Known {}
 
-/// The agents clackatoo knows, checked on 2026-10-13. Their packages and
+/// The agents clackatoo knows; Antigravity checked on 2026-10-25. Their packages and
 /// arguments are the ACP registry's
 /// (<https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json>).
 pub(crate) const KNOWN: &[Known] = &[
@@ -151,6 +154,44 @@ pub(crate) const KNOWN: &[Known] = &[
             set_in: "`~/.codex/config.toml`",
             list: "codex mcp list",
             remote: Some(codex_remote_servers),
+        },
+    },
+    Known {
+        name: "antigravity",
+        title: "Antigravity",
+        adapter: KnownServer {
+            program: "agy_acp_server.par",
+            source: Source::Release {
+                version: ANTIGRAVITY_VERSION,
+                assets: &[
+                    (
+                        "x86_64",
+                        Download {
+                            url: "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.3-linux-x86_64.zip",
+                            sha256: "0634ce5306ba92c932945455e7a83fda78e2d99c33fa8aa6ee0566206a382714",
+                        },
+                    ),
+                    (
+                        "aarch64",
+                        Download {
+                            url: "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.3-linux-arm64.zip",
+                            sha256: "05c153443b0b1175151c760eeddea538950bc9843e317d54786a1f03670182bc",
+                        },
+                    ),
+                ],
+                packed: Packed::Zip,
+                program: "agy_acp_server.par",
+            },
+        },
+        version: ANTIGRAVITY_VERSION,
+        args: &["--uid="],
+        size: "1.1 GB, plus about 1 GB of runtime scratch",
+        starting_mode: Some("default"),
+        login: "clackatoo agent login antigravity",
+        servers: Servers {
+            set_in: "its Clackatoo Antigravity profile",
+            list: "clackatoo agent login antigravity",
+            remote: None,
         },
     },
     Known {
@@ -332,7 +373,13 @@ impl AgentConfig {
                 suggest: None,
             };
         }
-        let installable = self.dir.is_some() && self.program("npm").is_some();
+        let npm = !known.package().is_empty();
+        let installable = self.dir.is_some()
+            && if npm {
+                self.program("npm").is_some()
+            } else {
+                known.adapter.installable()
+            };
         let suggest = installable.then_some(known);
         if let Some(program) = self.program(known.adapter.program) {
             return Start::Ready {
@@ -342,7 +389,7 @@ impl AgentConfig {
                 suggest,
             };
         }
-        if let Some(npx) = self.program("npx") {
+        if let Some(npx) = self.program("npx").filter(|_| npm) {
             let npx = [
                 npx.into_os_string(),
                 "--yes".into(),
@@ -362,6 +409,11 @@ impl AgentConfig {
             Start::Unavailable(format!(
                 "{} isn't installed, and this daemon installs no agents: give it a \
                  command in agents.toml",
+                known.title
+            ))
+        } else if !npm {
+            Start::Unavailable(format!(
+                "{} is not available for this platform",
                 known.title
             ))
         } else {
@@ -750,6 +802,19 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_installs_without_npm_and_never_uses_npx() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = AgentConfig {
+            dir: Some(temp.path().join("agents")),
+            path: Some(temp.path().as_os_str().to_owned()),
+            ..AgentConfig::default()
+        };
+        let spec = config.find("antigravity").unwrap();
+        assert!(matches!(config.start(&spec), Start::Install(k) if k.name == "antigravity"));
+        assert!(!config.installed(&spec));
+    }
+
+    #[test]
     fn every_known_agent_is_found_by_its_name() {
         for known in KNOWN {
             let spec = AgentConfig::default().find(known.name).unwrap();
@@ -759,7 +824,18 @@ mod tests {
                 Launch::Known(super::known(known.name).unwrap())
             );
             let Source::NpmLocked { package, lock, .. } = &known.adapter.source else {
-                panic!("{} isn't from a lockfile", known.name);
+                let Source::Release {
+                    version, assets, ..
+                } = &known.adapter.source
+                else {
+                    panic!("unpinned agent");
+                };
+                assert_eq!(*version, known.version);
+                assert_eq!(assets.len(), 2);
+                for (_, asset) in *assets {
+                    assert_eq!(asset.sha256.len(), 64);
+                }
+                continue;
             };
             assert!(package.ends_with(&format!("@{}", known.version)));
             // The lockfile pins that version, and what it depends on.
@@ -780,7 +856,7 @@ mod tests {
         };
         assert_eq!(
             config.find("nope"),
-            Err("there's no agent called nope: the agents are claude, codex, gemini, mine".into())
+            Err("there's no agent called nope: the agents are claude, codex, antigravity, gemini, mine".into())
         );
     }
 

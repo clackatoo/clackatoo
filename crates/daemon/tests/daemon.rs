@@ -3270,8 +3270,7 @@ fn a_known_agent_not_installed_is_offered_and_one_installed_is_run_from_there() 
     let question = node.question.unwrap();
     assert!(
         question.title.starts_with(
-            "Codex isn't installed. Install its ACP adapter, \
-             @agentclientprotocol/codex-acp@2.2.2, with npm?"
+            "Codex isn't installed. Install its ACP runtime (@agentclientprotocol/codex-acp@2.2.2)?"
         ),
         "{question:?}"
     );
@@ -13755,6 +13754,7 @@ fn the_model_menu_offers_other_agents_models_once_asked() {
         providers,
         [
             ("codex", &ProviderModels::Unknown),
+            ("antigravity", &ProviderModels::NotInstalled),
             ("gemini", &ProviderModels::NotInstalled)
         ]
     );
@@ -19154,4 +19154,126 @@ fn user_queue_stop_continue_and_remove_keep_payloads_and_order() {
     assert_eq!(node.turns[1].prompt, "redirect");
     assert_eq!(node.turns[2].prompt, "after");
     assert!(node.delivery.queued.is_empty());
+}
+
+#[test]
+fn antigravity_sign_in_stops_the_browser_flow_and_keeps_secrets_out_of_chat() {
+    for flag in ["--antigravity-login-stderr", "--antigravity-login-stdout"] {
+        let daemon = TestDaemon::start_with(|_, config| {
+            config.agents.custom.push(CustomAgent {
+                name: "antigravity".into(),
+                title: None,
+                starting_mode: None,
+                command: vec![fake_agent().into(), flag.into()],
+            });
+        });
+        let mut client = daemon.client();
+        let (chat, node) = start_chat_with(&mut client, "antigravity");
+        let ChatState::Failed(why) = &node.state else {
+            panic!("{node:#?}");
+        };
+        assert!(why.contains("clackatoo agent login antigravity"), "{why}");
+        assert!(!format!("{node:?}").contains("never-log-this"));
+        // A retry starts a fresh runtime, not the abandoned auth flow.
+        let node = ask(&mut client, chat, "hello");
+        assert!(
+            matches!(last_outcome(&node), Some(Outcome::Failed(why)) if why.contains("clackatoo agent login antigravity")),
+            "{node:#?}"
+        );
+        assert!(!format!("{node:?}").contains("never-log-this"));
+    }
+}
+
+/// Run with `CLACKATOO_REAL_AGENT` naming `clackatoo agent-runtime PROGRAM PROFILE`
+/// after signing in. Exercises native tools through the real daemon and MCP.
+#[test]
+#[ignore = "talks to a real Antigravity account: set CLACKATOO_REAL_AGENT"]
+fn a_real_antigravity_shows_native_output_images_and_file_edits() {
+    let command = std::env::var("CLACKATOO_REAL_AGENT").expect("runtime command");
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom.push(CustomAgent {
+            name: "antigravity".into(),
+            title: Some("Antigravity".into()),
+            starting_mode: Some("default".into()),
+            command: command.split_whitespace().map(Into::into).collect(),
+        });
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+    });
+    image::RgbImage::from_pixel(32, 32, image::Rgb([255, 0, 0]))
+        .save(daemon.dir.path().join("red.png"))
+        .unwrap();
+    let mut client = daemon.client();
+    client
+        .new_workspace(None, new_chat_with(Some("antigravity")))
+        .unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let wait = Duration::from_mins(2);
+    wait_for_chat_for(&mut client, chat, wait, |node| {
+        node.state == ChatState::Ready
+    });
+    for (setting, value) in [("model", "gemini-3.8-flash"), ("thinking_level", "low")] {
+        client
+            .chat(
+                chat,
+                ChatAction::Set {
+                    setting: setting.into(),
+                    value: value.into(),
+                },
+            )
+            .unwrap();
+        wait_for_chat_for(&mut client, chat, wait, |node| {
+            node.settings
+                .iter()
+                .any(|s| s.id == setting && s.value == value)
+        });
+    }
+    client.chat(chat, ChatAction::Send(
+        "Integration test in the current directory only. Run exactly `printf CLACKATOO_NATIVE_OK` using your native shell tool. View red.png using your native view_file tool. Create result.txt containing exactly CLACKATOO_NATIVE_OK using your native file writing tool. Also call clackatoo's list_panes MCP tool once. Do nothing else; finally reply with the image color.".into()
+    )).unwrap();
+    let node = loop {
+        let node = wait_for_chat_for(&mut client, chat, wait, |node| {
+            last_outcome(node).is_some() || node.question.is_some()
+        });
+        let Some(question) = &node.question else {
+            break node;
+        };
+        let option = question
+            .choices
+            .iter()
+            .find(|choice| choice.kind == clackatoo_protocol::ChoiceKind::AllowOnce)
+            .map(|choice| choice.id.clone());
+        assert!(
+            option.is_some(),
+            "expected an ordinary tool approval: {question:?}"
+        );
+        answer(&mut client, chat, option);
+        wait_for_chat_for(&mut client, chat, wait, |next| {
+            next.question != node.question
+        });
+    };
+    assert!(
+        matches!(last_outcome(&node), Some(Outcome::Done)),
+        "{node:?}"
+    );
+    assert!(last_words(&node).to_lowercase().contains("red"));
+    assert!(
+        node.turns
+            .last()
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Tool(tool) if tool.title.contains("list_panes"))),
+        "MCP tool was not exercised"
+    );
+    assert_eq!(
+        std::fs::read_to_string(daemon.dir.path().join("result.txt"))
+            .unwrap()
+            .trim(),
+        "CLACKATOO_NATIVE_OK"
+    );
+    assert!(node.turns.last().unwrap().items.iter().any(|item| matches!(item, Item::Tool(tool) if tool.content.iter().any(|c| matches!(c, ToolContent::Output(text) if text.contains("CLACKATOO_NATIVE_OK"))))));
+    let node = wait_for_chat_for(&mut client, chat, wait, |node| {
+        node.turns.last().unwrap().items.iter().any(|item| matches!(item, Item::Tool(tool) if tool.content.iter().any(|c| matches!(c, ToolContent::Image(_)))))
+    });
+    assert!(node.usage.is_some_and(|usage| usage.used > 0));
 }
