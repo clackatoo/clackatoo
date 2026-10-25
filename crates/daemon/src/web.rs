@@ -15,7 +15,7 @@
 //! its scripts can't read, which it carries from then on, to `/session`,
 //! `/push` and the WebSocket. A device asking shows a four-digit code,
 //! and waits (`POST /pair/wait`) while every window shows the question;
-//! typing the code into a window, with `:Devices allow CODE`, allows it.
+//! typing the code into a window, with `:devices allow CODE`, allows it.
 //! The code is never shown on the daemon's side, so a device is allowed
 //! only by someone who can see it.
 //!
@@ -648,7 +648,7 @@ impl Web {
             if self.devices.list.len() >= devices::MOST {
                 return Handled::Respond(Response::error(
                     409,
-                    "too many devices are paired: unpair some with :Devices",
+                    "too many devices are paired: unpair some with :devices",
                 ));
             }
             Pairing::New { name, login }
@@ -703,7 +703,7 @@ impl Web {
             return Handled::Respond(Response::error(
                 423,
                 "pairing with the password is locked after too many wrong ones: \
-                 :Devices unlock in a window lets it again",
+                 :devices unlock in a window lets it again",
             ));
         }
         if self.checking.len() >= MOST_CHECKS_WAITING {
@@ -905,7 +905,7 @@ impl Web {
                 if self.devices.list.len() >= devices::MOST {
                     Response::error(
                         409,
-                        "too many devices are paired: unpair some with :Devices",
+                        "too many devices are paired: unpair some with :devices",
                     )
                 } else {
                     log::info!("{} paired, allowed from a window", ask.name);

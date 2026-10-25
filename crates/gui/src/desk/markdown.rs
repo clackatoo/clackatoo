@@ -1,5 +1,5 @@
 //! The desk's side of editors showing Markdown rendered (see
-//! `editor::rendered`): `:Markdown` and `<Space>tm`, which turn it on and
+//! `editor::rendered`): `:markdown` and `<Space>tm`, which turn it on and
 //! off; drawing it, which needs the fonts; its code's colours, which the
 //! daemon is asked for as a chat's are; and clicks on its links.
 //!
@@ -21,7 +21,7 @@ use crate::links::{self, Target};
 use crate::markdown::layout::TextPaint;
 
 impl Desk {
-    /// `:Markdown`: the focused editor shows its Markdown rendered, or its
+    /// `:markdown`: the focused editor shows its Markdown rendered, or its
     /// text again, or the bar says why it can't.
     pub(super) fn toggle_markdown(&mut self) {
         let mut refused = None;

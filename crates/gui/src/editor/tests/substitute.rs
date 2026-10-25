@@ -50,6 +50,21 @@ fn drawn(setup: &mut Setup) -> Vec<String> {
         .collect()
 }
 
+// Clackatoo deliberately accepts any command-name case, unlike Vim.
+#[test]
+fn command_case_leaves_patterns_replacements_and_normal_keys_alone() {
+    assert_eq!(
+        after("Mixed mixed\n", "", "S/Mixed/UPPER/gI"),
+        "UPPER mixed\n"
+    );
+    assert_eq!(
+        after("Mixed\nOther\nMixed\n", "", "G/Mixed/DELETE"),
+        "Other\n"
+    );
+    assert_eq!(after("one\ntwo\n", "", "%NoRmAl A!"), "one!\ntwo!\n");
+    assert_eq!(after("one\ntwo\n", "", "1CoPy 2"), "one\ntwo\none\n");
+}
+
 #[test]
 fn ranges_are_read_as_vim_reads_them() {
     let lines = "1\n2\n3\n4\n5\n6\n";

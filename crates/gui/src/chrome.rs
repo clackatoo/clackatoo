@@ -451,7 +451,7 @@ pub(crate) struct Chrome {
     /// Whether to show the cut note whole without the mouse, as for
     /// something gone wrong, said moments ago.
     notice: bool,
-    /// The messages said lately, raised above the bar, while `:messages`
+    /// The messages said lately, raised above the bar, while `:Messages`
     /// shows them.
     pub(crate) messages: Option<Raised>,
     /// The palette, while something's being typed.
@@ -504,7 +504,7 @@ pub(crate) struct Contents<'a> {
     pub(crate) finder: Option<FinderView>,
     /// Where the strips of workspaces and tabs were scrolled to.
     pub(crate) scrolls: Scrolls,
-    /// The messages said lately, oldest first, while `:messages` shows
+    /// The messages said lately, oldest first, while `:Messages` shows
     /// them.
     pub(crate) messages: Option<&'a [String]>,
     /// The keys waiting for the rest of a binding, written short, as the
@@ -968,7 +968,7 @@ impl Chrome {
                 &mut painted,
             );
         }
-        // The messages said lately, while `:messages` shows them, or else
+        // The messages said lately, while `:Messages` shows them, or else
         // the note cut short, whole, while the mouse is over it or it's
         // just said something's gone wrong.
         let listed = self.messages.as_ref();

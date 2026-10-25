@@ -662,7 +662,7 @@ impl App {
             }
         } else {
             let mut status = self.desk.status();
-            // Whatever the bar says, `:messages` says again later.
+            // Whatever the bar says, `:Messages` says again later.
             self.desk.remember();
             // What the input method is composing shows at the caret, where
             // it'll go, until it's committed.
@@ -980,7 +980,7 @@ impl App {
         self.send_outbox();
     }
 
-    /// Carries out what `:PortForward` asked for, if it was typed, or
+    /// Carries out what `:portforward` asked for, if it was typed, or
     /// run from the config.
     fn forward_ports(&mut self) {
         self.forwards.set_paced(self.desk.options().forwardpace);
@@ -992,7 +992,7 @@ impl App {
             let adding = matches!(forwarding, Forwarding::Add(_) | Forwarding::Config(_));
             if adding
                 && self.session.host().is_some()
-                && !self.desk.needs_daemon(":PortForward", wire::FORWARDS)
+                && !self.desk.needs_daemon(":portforward", wire::FORWARDS)
             {
                 continue;
             }
@@ -1007,7 +1007,7 @@ impl App {
     /// reaches, unless its daemon is too old for them, which the bar says.
     fn attach_forwards(&mut self, forwarder: Forwarder) {
         if !self.forwards.attach(forwarder) && !self.forwards.is_empty() {
-            self.desk.needs_daemon(":PortForward", wire::FORWARDS);
+            self.desk.needs_daemon(":portforward", wire::FORWARDS);
         }
     }
 

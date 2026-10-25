@@ -101,7 +101,7 @@ fn y_keeps_a_block_and_leaves_the_cursor_at_its_top_left() {
     let two = "abcdef\nabcdef\n";
     assert_eq!(with_cursor(two, "j3l<C-v>khy"), (two.into(), (0, 2)));
     assert_eq!(kept(two, "j3l<C-v>khy").0, "cd\ncd");
-    // `:registers` says it's a block.
+    // `:Registers` says it's a block.
     let mut setup = Setup::new(two);
     setup.keys("<C-v>jly");
     assert!(setup.shared.registers.listing()[0].starts_with("b  \"\"   ab^Jab"));

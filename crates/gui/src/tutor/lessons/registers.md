@@ -46,7 +46,7 @@ banana
 
 ## The black hole
 
-What goes to `"_` is thrown away, and the other registers keep theirs: `"_dd` deletes a line without losing what you yanked. `""` is what was last yanked or deleted, which `p` puts; `"0` the last yank; `"1` to `"9` the last deletes of lines, newest first; and `"+` the clipboard. `:registers` lists them.
+What goes to `"_` is thrown away, and the other registers keep theirs: `"_dd` deletes a line without losing what you yanked. `""` is what was last yanked or deleted, which `p` puts; `"0` the last yank; `"1` to `"9` the last deletes of lines, newest first; and `"+` the clipboard. `:Registers` lists them.
 
 ```practice fruit.txt
 apple
@@ -167,4 +167,4 @@ apple
 
 ## More about marks
 
-`` `. `` goes to the last change. `:marks` lists the marks the file can go to in the finder. `'<` and `'>` are the last selection's start and end. Marks move with the text as anyone edits it, an agent included, and lines `:m` moves take theirs with them, the last selection's too: so `gv` after `:'<,'>m '>+1` selects the lines where they went, and the binding `client.keys.map("v", "J", ":m '>+1<CR>gv=gv")`, the keys of a well-known Neovim mapping, moves the lines selected down a line at a time.
+`` `. `` goes to the last change. `:Marks` lists the marks the file can go to in the finder. `'<` and `'>` are the last selection's start and end. Marks move with the text as anyone edits it, an agent included, and lines `:m` moves take theirs with them, the last selection's too: so `gv` after `:'<,'>m '>+1` selects the lines where they went, and the binding `client.keys.map("v", "J", ":m '>+1<CR>gv=gv")`, the keys of a well-known Neovim mapping, moves the lines selected down a line at a time.

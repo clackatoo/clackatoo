@@ -42,7 +42,7 @@ After HOST restarts, as after a power cut, its terminals offer `R` to put what t
 
 Your daemon keeps the connection. It makes it again whenever it drops, and again after your daemon restarts. `:disconnect HOST` ends it, as does `:disconnect` alone in one of its workspaces. While HOST isn't connected, its workspaces stay as they last were, each pane says so over its last screen, and keys for its terminals are turned down rather than sent late; so are they, and anything else asked of it, when HOST hasn't answered for a few seconds ("desk isn't answering"). If ssh needs a password and no window is open to ask, the connection waits until one is. In your config, `client.connect("desk")` connects whenever a window opens.
 
-`:PortForward 8080` in one of HOST's workspaces forwards this machine's port 8080 to HOST's, through your daemon's connection to it, which keeps listening while the connection drops and is made again. `:PortForward` there lists the forwards and `:PortForward! 8080` stops one, as for a window on another machine. A window that's itself on another machine than its daemon can't forward to HOST yet.
+`:portforward 8080` in one of HOST's workspaces forwards this machine's port 8080 to HOST's, through your daemon's connection to it, which keeps listening while the connection drops and is made again. `:portforward` there lists the forwards and `:portforward! 8080` stops one, as for a window on another machine. A window that's itself on another machine than its daemon can't forward to HOST yet.
 
 ## Machines passed on
 
@@ -220,17 +220,17 @@ It only draws a key you typed at a shell prompt with nothing still running, as s
 
 ## Forwarding ports
 
-A program on the other machine that listens on `localhost`, such as a dev server, can't be reached from this machine's browser. `:PortForward` passes a port here to it, as `ssh -L` does, through the window's own connection, so it rides out network changes as the window does.
+A program on the other machine that listens on `localhost`, such as a dev server, can't be reached from this machine's browser. `:portforward` passes a port here to it, as `ssh -L` does, through the window's own connection, so it rides out network changes as the window does.
 
 | Command | Does |
 |---|---|
-| `:PortForward 8080` | `localhost:8080` here reaches `localhost:8080` there. |
-| `:PortForward 3000:8080` | Port 3000 here reaches 8080 there. |
-| `:PortForward 3000:box:8080` | Port 3000 here reaches `box:8080`, as the other machine finds `box`; an IPv6 address goes in brackets, `3000:[::1]:8080`. |
-| `:PortForward box:8080`, `:PortForward [::1]:8080` | The same port here, to a machine the other one reaches. Brackets hold only IPv6 addresses. |
-| `:PortForward 0:8080` | Any free port here, which the bar names. |
-| `:PortForward` | Lists the forwards, and how many connections each has open. |
-| `:PortForward! 8080` | Stops forwarding port 8080 here, cutting off its connections; `:PortForward!` alone stops them all. |
+| `:portforward 8080` | `localhost:8080` here reaches `localhost:8080` there. |
+| `:portforward 3000:8080` | Port 3000 here reaches 8080 there. |
+| `:portforward 3000:box:8080` | Port 3000 here reaches `box:8080`, as the other machine finds `box`; an IPv6 address goes in brackets, `3000:[::1]:8080`. |
+| `:portforward box:8080`, `:portforward [::1]:8080` | The same port here, to a machine the other one reaches. Brackets hold only IPv6 addresses. |
+| `:portforward 0:8080` | Any free port here, which the bar names. |
+| `:portforward` | Lists the forwards, and how many connections each has open. |
+| `:portforward! 8080` | Stops forwarding port 8080 here, cutting off its connections; `:portforward!` alone stops them all. |
 
 - **Only this machine can connect:** the window listens on 127.0.0.1 and ::1, never the network.
 - **Websites in your browser could reach a forwarded port**, as with `ssh -L`: a page you visit can make the browser connect to `localhost:PORT`, and with DNS rebinding, under a name of its own. The forwarded server's own Host check is the defence, as dev servers such as Vite's have; one that answers any Host shouldn't be forwarded while you browse untrusted sites.

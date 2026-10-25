@@ -1145,7 +1145,7 @@ impl Desk {
     }
 
     /// Does `action` to the hunk at the focused editor's cursor, as
-    /// `<Space>hs` and `:Gitsigns` ask, or says the pane has no file.
+    /// `<Space>hs` and `:gitsigns` ask, or says the pane has no file.
     pub(super) fn editor_hunk(&mut self, action: HunkAction) {
         if self
             .in_focused_editor(|editor, copy, _| editor.hunk(action, copy))
@@ -1230,7 +1230,7 @@ impl Desk {
         if failed {
             self.stop_macro(None);
         }
-        // `gq` or `:'<,'>Format`, as `:Format` is, for part of the file.
+        // `gq` or `:'<,'>Format`, as `:format` is, for part of the file.
         if let Some(range) = format {
             self.format_part(buffer, range);
         }
@@ -1339,7 +1339,7 @@ impl Desk {
         held.map_or("", |register| register.text.as_str())
     }
 
-    /// `:registers`: lists what the registers hold, in a panel by the
+    /// `:Registers`: lists what the registers hold, in a panel by the
     /// focused editor's cursor.
     pub(super) fn show_registers(&mut self) {
         let editors = &mut self.editors;
@@ -1355,7 +1355,7 @@ impl Desk {
         editor.show_listing("type name content", rows);
     }
 
-    /// `:marks`: the finder, on the marks the focused editor's file can go
+    /// `:Marks`: the finder, on the marks the focused editor's file can go
     /// to, its own and then the others, each with its line's text, if the
     /// window has it.
     pub(super) fn pick_mark(&mut self) {

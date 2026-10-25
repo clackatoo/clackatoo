@@ -214,9 +214,9 @@ What's yanked and deleted is kept in registers, as in Vim. `"` and a register's 
 | `"_` | Nothing: what goes to it is thrown away, and the others keep theirs. |
 | `"+` `"*` | The clipboard, and the primary selection that a middle click pastes. |
 
-A block is kept as one, its rows a line each, and `p` and `P` put it back as one: a row on each line from the cursor's, padded with spaces where text follows, and on new lines past the end. `:registers` marks it `b`.
+A block is kept as one, its rows a line each, and `p` and `P` put it back as one: a row on each line from the cursor's, padded with spaces where text follows, and on new lines past the end. `:Registers` marks it `b`.
 
-As the option `clipboard` says, the unnamed register goes along with the clipboard by default, as Neovim's `unnamedplus` does: what's yanked or deleted can be pasted anywhere, and `p` puts what was last copied anywhere. Deleting nothing, as `D` on an empty line, leaves them alone. The window reads the clipboard and the primary selection when it gets the focus, off to one side, so a program slow to answer for them never holds it up. In visual mode, `p` and `P` put in place of what's selected; `p` keeps what was selected, as a delete, and `P` doesn't. `:registers` lists them by the cursor.
+As the option `clipboard` says, the unnamed register goes along with the clipboard by default, as Neovim's `unnamedplus` does: what's yanked or deleted can be pasted anywhere, and `p` puts what was last copied anywhere. Deleting nothing, as `D` on an empty line, leaves them alone. The window reads the clipboard and the primary selection when it gets the focus, off to one side, so a program slow to answer for them never holds it up. In visual mode, `p` and `P` put in place of what's selected; `p` keeps what was selected, as a delete, and `P` doesn't. `:Registers` lists them by the cursor.
 
 ## Macros
 
@@ -226,7 +226,7 @@ A key that fails stops the macro, as in Vim: a motion that can't move, a search 
 
 ## Marks
 
-`m` and a letter marks the cursor's place: `a` to `z` for each file on its own, `A` to `Z` anywhere. `` `a `` goes to it, and `'a` to its line; both are jumps, and an operator takes them: `d'a` deletes the lines from here to the mark's. A mark in another file opens it in place, as `:e` does. `` `. `` goes to your last change. Marks move with the text, whoever edits it, and lines `:m` moves take theirs with them; once no pane shows a file, its marks keep their lines. `:marks` lists them in the finder. `'<` and `'>` are the last selection's start and end, which `gv` selects again, kept as Vim keeps them (see `gv` below); by lines, `'<` is the first line's start and `'>` the last's end. They follow lines `:m` moves too, so the binding `client.keys.map("v", "J", ":m '>+1<CR>gv=gv")`, the keys of a well-known Neovim mapping, moves the lines selected down a line at a time, and keeps them selected.
+`m` and a letter marks the cursor's place: `a` to `z` for each file on its own, `A` to `Z` anywhere. `` `a `` goes to it, and `'a` to its line; both are jumps, and an operator takes them: `d'a` deletes the lines from here to the mark's. A mark in another file opens it in place, as `:e` does. `` `. `` goes to your last change. Marks move with the text, whoever edits it, and lines `:m` moves take theirs with them; once no pane shows a file, its marks keep their lines. `:Marks` lists them in the finder. `'<` and `'>` are the last selection's start and end, which `gv` selects again, kept as Vim keeps them (see `gv` below); by lines, `'<` is the first line's start and `'>` the last's end. They follow lines `:m` moves too, so the binding `client.keys.map("v", "J", ":m '>+1<CR>gv=gv")`, the keys of a well-known Neovim mapping, moves the lines selected down a line at a time, and keeps them selected.
 
 ## Substituting
 
@@ -277,7 +277,7 @@ When a file is in a git repository, a column left of the line numbers shows how 
 | `<Space>hr` | Puts the change at the cursor back as git's index has it. `u` undoes it. |
 | `<Space>hs` | Stages the change at the cursor, and only it, as `git add -p` would. |
 
-`:Gitsigns preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` and `prev_hunk` do the same, so `client.cmd` can bind them to other keys. A file with conflicts is compared with your side. A file git converts, such as one whose line endings it changes, or that Git LFS keeps, shows its signs but is staged in a terminal, not a change at a time. Files that git doesn't track, or that are bigger than 8 MiB, have no signs.
+`:gitsigns preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` and `prev_hunk` do the same, so `client.cmd` can bind them to other keys. A file with conflicts is compared with your side. A file git converts, such as one whose line endings it changes, or that Git LFS keeps, shows its signs but is staged in a terminal, not a change at a time. Files that git doesn't track, or that are bigger than 8 MiB, have no signs.
 
 ## Agents' changes
 
@@ -290,15 +290,15 @@ Lines an agent changed and you haven't reviewed have a bar in a column right of 
 | `<Space>c` | Comments on the line, for the agent |
 | `<Space>gr` | Opens a review of the chat's changes (see [Agents](~clackatoo/reference/agents#reviewing-its-changes)) |
 
-`:Blame` writes after each line an agent changed which chat and turn changed it, and `:Blame` again stops.
+`:blame` writes after each line an agent changed which chat and turn changed it, and `:blame` again stops.
 
 ## Writing
 
 | Command | Does |
 |---|---|
 | `:w`, `:write` | Writes the file, formatting it first if the option `formatonsave` is on. |
-| `:Format` | Formats the file, as its [language server](#language-servers) does, as one undo step. If the server won't format the file, the bar says why: "not formatted: …". |
-| `:'<,'>Format`, `:{range}Format` | Formats just those lines, as the language server does, as one undo step. Any changes the server makes outside them are made too, as `:Format`'s are. If the server can't format part of a file, the bar says so. |
+| `:format` | Formats the file, as its [language server](#language-servers) does, as one undo step. If the server won't format the file, the bar says why: "not formatted: …". |
+| `:'<,'>Format`, `:{range}Format` | Formats just those lines, as the language server does, as one undo step. Any changes the server makes outside them are made too, as `:format`'s are. If the server can't format part of a file, the bar says so. |
 | `:w!` | Writes it even if it's changed on disk since it was read or last written. |
 | `:wq`, `:x` | Writes it, then closes the pane. `:wq!` writes it even if it's changed. |
 | `:w NAME`, `:w! NAME`, `:wq NAME` | Names a file with no name yet and writes it there, from the folder it was opened in; not over a file that's there, unless with `!`. In a file that has a name, it's refused. |
@@ -376,7 +376,7 @@ The marks are drawn behind the text, and the selection over it. See [the options
 
 ## Rendered Markdown
 
-`<Space>tm`, or `:Markdown`, shows a Markdown file (`.md`, `.markdown`) rendered, in place of its text: headings, lists, task lists, quotes, tables, rules, links, and code coloured as the editor colours its language, in a column of prose down the pane. Again, it shows the text. Either way it keeps your place: the rendered view opens with the block holding the line at the top of the text's view at its top, and the text comes back with the top block's first line at the top. It's a view of the file: what anyone changes, in another pane or window or an agent's chat, shows as it's made.
+`<Space>tm`, or `:markdown`, shows a Markdown file (`.md`, `.markdown`) rendered, in place of its text: headings, lists, task lists, quotes, tables, rules, links, and code coloured as the editor colours its language, in a column of prose down the pane. Again, it shows the text. Either way it keeps your place: the rendered view opens with the block holding the line at the top of the text's view at its top, and the text comes back with the top block's first line at the top. It's a view of the file: what anyone changes, in another pane or window or an agent's chat, shows as it's made.
 
 | Key | Does |
 |---|---|

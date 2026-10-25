@@ -99,7 +99,7 @@ panes 2
 
 ## Complete with Tab
 
-The command line suggests matches as you type: a command's name, an option after `:set`, a file or folder after `:e`, a lesson after `:Tutor`. Each suggestion includes a short description of what it does. Suggestions leave your text alone. Tab fills the word before the caret; with more than one match, Tab and Shift+Tab (or Ctrl+N and Ctrl+P) cycle through them, and then back to what you typed. Once cycling, Down and Up move through the matches too. Enter runs the text in the prompt; Escape closes it.
+The command line suggests matches as you type: a command's name, an option after `:set`, a file or folder after `:e`, a lesson after `:Tutor`. Each suggestion includes a short description of what it does. Capitals mark panes, pickers and overlays (`Terminal`, `Files`, `Messages`); lowercase marks actions (`write`, `format`, `rename`). You can type command names in any case: `:terminal` and `:TERMINAL` both open a terminal. Autocomplete shows the canonical spelling; filenames and other arguments keep their case. Suggestions leave your text alone. Tab fills the word before the caret; with more than one match, Tab and Shift+Tab (or Ctrl+N and Ctrl+P) cycle through them, and then back to what you typed. Once cycling, Down and Up move through the matches too. Enter runs the text in the prompt; Escape closes it.
 
 Files are looked up in the background, only when the pane's files are on this machine. Typing and pasting update the suggestions without waiting for disk.
 
@@ -157,7 +157,7 @@ shown lesson
 
 When a workspace has more tabs than the bottom bar has room for, it shows those around the tab shown, with a quiet count at either end, such as `‹3` or `5›`, of how many are hidden that way. Click a count to scroll that way. The workspaces in the top bar do the same.
 
-A message keeps to the room the tabs leave, cut short with `…` if it must be: hold the mouse over it to read it all. Type `:messages` to see what the bar has said lately, until the next key.
+A message keeps to the room the tabs leave, cut short with `…` if it must be: hold the mouse over it to read it all. Type `:Messages` to see what the bar has said lately, until the next key.
 
 ```check
 messages

@@ -1,6 +1,6 @@
 //! An editor's rendered view of a Markdown file: its text read as Markdown
 //! and drawn as prose in place of the text, as a chat draws its agent's
-//! words (see [`crate::markdown`]). `:Markdown`, or `<Space>tm`, turns it
+//! words (see [`crate::markdown`]). `:markdown`, or `<Space>tm`, turns it
 //! on and off, keeping the place: the view opens with the block holding
 //! the line at the top of the text's view at its top, and the text comes
 //! back with the line the top block starts on at the top.
@@ -585,7 +585,7 @@ impl Editor {
     }
 
     /// Shows the text rendered, or the text itself if it's rendered, as
-    /// `:Markdown` does, keeping the place, and says which in the bar; or
+    /// `:markdown` does, keeping the place, and says which in the bar; or
     /// says why it can't: the file isn't Markdown.
     pub(crate) fn toggle_rendered(&mut self, copy: &mut BufferCopy) -> Result<Done, String> {
         if self.rendered() {
@@ -616,7 +616,7 @@ impl Editor {
         self.rendered = Some(rendered);
     }
 
-    /// Shows the text itself again, if it's rendered, as `:Markdown` does:
+    /// Shows the text itself again, if it's rendered, as `:markdown` does:
     /// with the line the top block starts on at the top, or as it was, if
     /// the top block holds the line that was at the top. The cursor stays
     /// where it was if that's in view, and else goes to that line.

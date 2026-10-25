@@ -5,13 +5,14 @@
 //! choice's values; files and folders for `:e`, `:Editor` and `:Explore`;
 //! workspaces for `:workspace`; lessons for `:Tutor`; machines for
 //! `:connect` and `:disconnect`, and after a kind of pane's `@`
-//! (`:Terminal@desk`) and `:workspace new@`; and the words `:Gitsigns`,
-//! `:Devices` and `:Review` take.
+//! (`:Terminal@desk`) and `:workspace new@`; and the words `:gitsigns`,
+//! `:devices` and `:Review` take.
 //!
 //! One choice is put in at once. With more, the first is put in, they're
 //! listed under the line, and Tab and Shift+Tab go through them, and past
-//! either end, back to the word as typed. A word matches what starts with
-//! it, or with no such thing, what starts with it in any case.
+//! either end, back to the word as typed. Command names always match without
+//! regard to case. Arguments prefer exact-case prefixes, falling back to
+//! case-insensitive prefixes when there are no exact-case matches.
 //!
 //! Files are listed by the window, from the focused pane's folder, so only
 //! while the daemon is on this machine, and on a thread, so the window
@@ -97,8 +98,9 @@ impl Completion {
             let (mark, name) = split_mark(word);
             // A kind of pane's machine.
             if let Some((kind, machine)) = name.split_once('@')
-                && command::PANES.contains(&kind)
+                && command::PANES.contains(&command::canonical(kind))
             {
+                let kind = command::canonical(kind);
                 let machines = sources.machines.iter().map(String::as_str);
                 let choices = (matching(machines, machine).into_iter())
                     .map(|machine| format!("{mark}{kind}@{machine}"))
@@ -110,7 +112,7 @@ impl Completion {
             } else {
                 command::PANES
             };
-            let names = matching(names.iter().copied(), name).into_iter();
+            let names = matching_commands(names, name).into_iter();
             let choices = names.map(|name| format!("{mark}{name}")).collect();
             return Ok(Found::Done(Self::new(start, word, choices)));
         };
@@ -176,7 +178,7 @@ pub(crate) fn description(before: &str, choice: &str) -> String {
         Takes::Options => option_description(choice),
         Takes::Path => {
             let (_, command) = split_mark(command);
-            let command = command.trim_end_matches('!');
+            let command = command::canonical(command.trim_end_matches('!'));
             if choice.ends_with('/') {
                 "Folder — continue into this directory".to_owned()
             } else if matches!(command, "w" | "write" | "wq" | "x") {
@@ -193,7 +195,9 @@ pub(crate) fn description(before: &str, choice: &str) -> String {
         Takes::Lesson => {
             crate::tutor::lesson(choice).map_or_else(String::new, |lesson| lesson.title.clone())
         }
-        Takes::Host if command == "disconnect" => "Disconnect this machine’s workspaces".to_owned(),
+        Takes::Host if command.eq_ignore_ascii_case("disconnect") => {
+            "Disconnect this machine’s workspaces".to_owned()
+        }
         Takes::Host => "Connect to this machine’s workspaces".to_owned(),
         Takes::Words(_) => argument_description(command, choice).to_owned(),
         Takes::Nothing => String::new(),
@@ -231,27 +235,27 @@ fn argument_description(command: &str, word: &str) -> &'static str {
         .next()
         .unwrap_or(command)
         .trim_end_matches('!');
-    match (command, word) {
-        ("Gitsigns", "preview_hunk") => "Preview the Git change at the cursor",
-        ("Gitsigns", "reset_hunk") => "Discard the Git change at the cursor",
-        ("Gitsigns", "stage_hunk") => "Stage the Git change at the cursor",
-        ("Gitsigns", "next_hunk") => "Jump to the next Git change",
-        ("Gitsigns", "prev_hunk") => "Jump to the previous Git change",
-        ("Devices", "allow") => "Approve a device using its pairing code",
-        ("Devices", "deny") => "Reject pending device pairing requests",
-        ("Devices", "revoke") => "Remove a paired device’s access",
-        ("Devices", "unlock") => "Re-enable pairing after too many failed attempts",
+    match (command::canonical(command), word) {
+        ("gitsigns", "preview_hunk") => "Preview the Git change at the cursor",
+        ("gitsigns", "reset_hunk") => "Discard the Git change at the cursor",
+        ("gitsigns", "stage_hunk") => "Stage the Git change at the cursor",
+        ("gitsigns", "next_hunk") => "Jump to the next Git change",
+        ("gitsigns", "prev_hunk") => "Jump to the previous Git change",
+        ("devices", "allow") => "Approve a device using its pairing code",
+        ("devices", "deny") => "Reject pending device pairing requests",
+        ("devices", "revoke") => "Remove a paired device’s access",
+        ("devices", "unlock") => "Re-enable pairing after too many failed attempts",
         ("keep", "always") => "Restart this command when it exits, too",
         ("keep", "off") => "Stop restarting this terminal command",
         ("Review", "chat") => "Review all changes made by this chat",
         ("Review", "turn") => "Review the last turn, or a numbered turn",
         ("Review", "base") => "Review all changes since the branch’s base",
-        ("ReviewKeep", "file") => "Keep all agent changes in this file",
-        ("ReviewKeep", "turn") => "Keep changes from this turn, or a numbered turn",
-        ("ReviewKeep", "all") => "Keep all changes in the review or chat",
-        ("ReviewReject", "file") => "Reject all agent changes in this file",
-        ("ReviewReject", "turn") => "Reject changes from this turn, or a numbered turn",
-        ("ReviewReject", "all") => "Reject all changes in the review or chat",
+        ("reviewkeep", "file") => "Keep all agent changes in this file",
+        ("reviewkeep", "turn") => "Keep changes from this turn, or a numbered turn",
+        ("reviewkeep", "all") => "Keep all changes in the review or chat",
+        ("reviewreject", "file") => "Reject all agent changes in this file",
+        ("reviewreject", "turn") => "Reject changes from this turn, or a numbered turn",
+        ("reviewreject", "all") => "Reject all changes in the review or chat",
         _ => "",
     }
 }
@@ -282,6 +286,20 @@ fn split_mark(word: &str) -> (&str, &str) {
         .find(|mark| word.starts_with(**mark))
         .map_or(0, |mark| mark.len());
     word.split_at(len)
+}
+
+/// Command spelling is presentation only: all cases show the same choices.
+fn matching_commands(names: &[&str], word: &str) -> Vec<String> {
+    let mut found: Vec<_> = names
+        .iter()
+        .filter(|name| {
+            name.get(..word.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(word))
+        })
+        .map(|name| (*name).to_owned())
+        .collect();
+    found.sort_by_key(|name| name.to_ascii_lowercase());
+    found
 }
 
 /// Those of `names` that start with `word`, or with none, that start with
@@ -558,9 +576,18 @@ mod tests {
         assert_eq!(choices("se", &none()), ["set"]);
         assert_eq!(
             choices("Re", &none()),
-            ["Review", "ReviewKeep", "ReviewReject", "ReviewSend"]
+            [
+                "recover",
+                "Registers",
+                "reload",
+                "rename",
+                "Review",
+                "reviewkeep",
+                "reviewreject",
+                "reviewsend"
+            ]
         );
-        // In any case, when no command starts so.
+        // Commands always match in any case.
         assert_eq!(choices("tut", &none()), ["Tutor"]);
         assert_eq!(choices("|Te", &none()), ["|Terminal"]);
         assert_eq!(choices("-^B", &none()), ["-^Board", "-^Browser"]);
@@ -571,6 +598,37 @@ mod tests {
             panic!("a choice");
         };
         assert_eq!(completion.start, 2);
+    }
+
+    #[test]
+    fn command_completion_and_help_are_independent_of_typed_case() {
+        for prefix in ["re", "Re", "RE", "rE"] {
+            assert_eq!(choices(prefix, &none()), choices("re", &none()));
+        }
+        assert_eq!(choices("f", &none()), ["Files", "format"]);
+        assert_eq!(
+            choices("M", &none()),
+            ["markdown", "Marks", "Messages", "move"]
+        );
+        assert_eq!(choices("SET nu", &none()), choices("set nu", &none()));
+        assert_eq!(choices("rEvIeWkEeP f", &none()), ["file"]);
+        assert_eq!(
+            description("WRITE ", "Notes.TXT"),
+            "Save the buffer to this file"
+        );
+        assert_eq!(
+            description("DISCONNECT ", "MyHost"),
+            "Disconnect this machine’s workspaces"
+        );
+        assert_eq!(
+            description("REVIEWREJECT! ", "file"),
+            "Reject all agent changes in this file"
+        );
+        let sources = Sources {
+            machines: vec!["Desk".into()],
+            ..none()
+        };
+        assert_eq!(choices("|terminal@D", &sources), ["|Terminal@Desk"]);
     }
 
     #[test]

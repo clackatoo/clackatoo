@@ -168,7 +168,7 @@ impl Daemon {
             }
         }
         if !refused.is_empty() && (!force || plans.is_empty()) {
-            let command = if redo { "AgentRedo" } else { "AgentUndo" };
+            let command = if redo { "agentredo" } else { "agentundo" };
             let rest = if plans.is_empty() {
                 String::new()
             } else {
@@ -810,7 +810,7 @@ pub(in crate::server) mod tests {
         assert_eq!(
             world.undo(0, false, false),
             "Couldn't undo turn 1, so nothing was: in a.txt, line 2 has changed since. \
-             :AgentUndo! 1 does the other files."
+             :agentundo! 1 does the other files."
         );
         assert_eq!(world.text(id), "one\nTWO!\nthree\n");
         assert_eq!(world.disk("b.txt").as_deref(), Some("B\n"));
@@ -956,7 +956,7 @@ pub(in crate::server) mod tests {
         assert_eq!(
             world.undo(0, false, false),
             "Couldn't undo turn 1, so nothing was: in late.txt, what the file held before \
-             wasn't seen. :AgentUndo! 1 does the other files."
+             wasn't seen. :agentundo! 1 does the other files."
         );
         assert_eq!(
             world.undo(0, false, true),

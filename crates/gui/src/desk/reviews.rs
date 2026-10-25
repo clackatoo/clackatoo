@@ -10,9 +10,9 @@
 //!
 //! In an editor, `<Space>ga` keeps the agent's change at the cursor, and
 //! `<Space>gx` rejects it; `<Space>c` comments on the cursor's line, in
-//! the palette, for the agent. `:ReviewKeep` and `:ReviewReject` do the
+//! the palette, for the agent. `:reviewkeep` and `:reviewreject` do the
 //! same to the hunk at the cursor, or with `file`, `turn` or `all`, to
-//! many; `:ReviewSend` sends the comments waiting, as one message.
+//! many; `:reviewsend` sends the comments waiting, as one message.
 //!
 //! The chat a review, a comment or a whole turn is of is the one whose
 //! agent changed the line at the cursor; or else the focused review's;
@@ -346,7 +346,7 @@ impl Desk {
             .find(|pane| self.reviews.panes.get(pane).is_some_and(&wanted))
     }
 
-    /// `<Space>ga`, `<Space>gx`, `:ReviewKeep` and `:ReviewReject`: keeps
+    /// `<Space>ga`, `<Space>gx`, `:reviewkeep` and `:reviewreject`: keeps
     /// or rejects, `force`d, the hunk at the cursor, or as `which` says, in
     /// the focused review or editor.
     pub(super) fn review_act(&mut self, keep: bool, force: bool, which: ReviewWhich) {
@@ -450,7 +450,7 @@ impl Desk {
         self.ask_comment(chat, path, line, at);
     }
 
-    /// `:ReviewSend`: the comments waiting go to the chat, as one message.
+    /// `:reviewsend`: the comments waiting go to the chat, as one message.
     pub(super) fn review_send(&mut self) {
         match self.review_chat() {
             Some(chat) => self.request(Request::Review(ReviewAction::Send(chat)), Asked::Reviewed),
@@ -458,7 +458,7 @@ impl Desk {
         }
     }
 
-    /// `:Blame`: the focused editor writes who changed each line agents
+    /// `:blame`: the focused editor writes who changed each line agents
     /// changed after it, or stops.
     pub(super) fn toggle_blame(&mut self) {
         let toggled = self.in_focused_editor(|editor, _, _| editor.toggle_blame());

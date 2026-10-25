@@ -1,4 +1,4 @@
-//! `:PortForward`, as the window carries it out: forwarding ports from
+//! `:portforward`, as the window carries it out: forwarding ports from
 //! this machine to the daemon's, when that's another one (see
 //! [`clackatoo_daemon::forward`]). The window keeps the forwards, as they
 //! outlive each connection to the daemon: they're handed to each new one
@@ -70,7 +70,7 @@ pub(crate) fn report(report: &Report, machine: &str) -> String {
 fn listing(list: &[(Spec, usize)], machine: Option<&str>) -> String {
     if list.is_empty() {
         return match machine {
-            Some(_) => "No ports are forwarded: :PortForward 8080 forwards one".to_owned(),
+            Some(_) => "No ports are forwarded: :portforward 8080 forwards one".to_owned(),
             None => "No ports are forwarded: this window's daemon is on this machine".to_owned(),
         };
     }
@@ -86,11 +86,11 @@ fn listing(list: &[(Spec, usize)], machine: Option<&str>) -> String {
             }
         }
     }
-    said.push_str(" · :PortForward! PORT stops one");
+    said.push_str(" · :portforward! PORT stops one");
     said
 }
 
-/// The host a forward goes to, as written after `:PortForward`: IPv6
+/// The host a forward goes to, as written after `:portforward`: IPv6
 /// addresses in brackets.
 fn host(spec: &Spec) -> String {
     if spec.host.contains(':') {
@@ -147,7 +147,7 @@ mod tests {
         );
         assert_eq!(
             run(&mut forwards, Forwarding::List, Some("desk")).unwrap(),
-            format!("Forwarding {local} → box:8080 · :PortForward! PORT stops one")
+            format!("Forwarding {local} → box:8080 · :portforward! PORT stops one")
         );
         assert_eq!(
             run(&mut forwards, Forwarding::Stop(Some(local)), Some("desk")).unwrap(),
@@ -159,7 +159,7 @@ mod tests {
         );
         assert_eq!(
             run(&mut forwards, Forwarding::List, Some("desk")).unwrap(),
-            "No ports are forwarded: :PortForward 8080 forwards one"
+            "No ports are forwarded: :portforward 8080 forwards one"
         );
         assert_eq!(
             listing(
@@ -169,7 +169,7 @@ mod tests {
                 ],
                 Some("desk")
             ),
-            "Forwarding 8080 (2 connections) · 3000 → [::1]:80 (1 connection) · :PortForward! \
+            "Forwarding 8080 (2 connections) · 3000 → [::1]:80 (1 connection) · :portforward! \
              PORT stops one"
         );
     }
@@ -185,7 +185,7 @@ mod tests {
             Some("desk"),
         )
         .unwrap();
-        let start = format!("Port {port} is in use on this machine: :PortForward ");
+        let start = format!("Port {port} is in use on this machine: :portforward ");
         assert!(said.starts_with(&start), "{said}");
         assert!(said.contains(":8080 forwards port "), "{said}");
     }

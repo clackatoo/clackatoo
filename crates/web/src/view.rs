@@ -1195,7 +1195,7 @@ pub mod pairing {
             .class("pair")
             .child(el("h1").text("clackatoo"))
             .child(el("p").text("In a clackatoo window, type"))
-            .child(el("p").class("code").text(format!(":Devices allow {code}")))
+            .child(el("p").class("code").text(format!(":devices allow {code}")))
             .child(
                 el("p")
                     .class("muted")
@@ -1812,7 +1812,7 @@ mod tests {
         assert!(
             pairing::asking("0042")
                 .all_text()
-                .contains(":Devices allow 0042")
+                .contains(":devices allow 0042")
         );
     }
     #[test]

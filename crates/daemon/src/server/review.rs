@@ -859,7 +859,7 @@ impl Daemon {
             let rest = if plans.is_empty() {
                 String::new()
             } else {
-                " `:ReviewReject!` does the rest.".to_owned()
+                " `:reviewreject!` does the rest.".to_owned()
             };
             return Err(Error::Review(format!(
                 "Couldn't reject, so nothing was: {}.{rest}",
@@ -1762,7 +1762,7 @@ fn pending(count: usize) -> String {
     match count {
         0 => "No comments to send.".to_owned(),
         count => format!(
-            "{} to send: `:ReviewSend` sends them.",
+            "{} to send: `:reviewsend` sends them.",
             counted(count, "comment")
         ),
     }
@@ -2104,7 +2104,7 @@ mod tests {
             refused,
             Err(
                 "Couldn't reject, so nothing was: in b.txt, line 1 has changed since. \
-                 `:ReviewReject!` does the rest."
+                 `:reviewreject!` does the rest."
                     .into()
             )
         );
@@ -2217,7 +2217,7 @@ mod tests {
         };
         assert_eq!(
             act(&mut world, comment("why capitals?", place(2, 4))),
-            Ok("1 comment to send: `:ReviewSend` sends them.".into())
+            Ok("1 comment to send: `:reviewsend` sends them.".into())
         );
         act(&mut world, comment("and this", place(1, 0))).unwrap();
         // A line typed above moves the comments with it.
@@ -2911,7 +2911,7 @@ mod tests {
             refused,
             Err(
                 "Couldn't reject, so nothing was: in b.txt, line 1 has changed since. \
-                 `:ReviewReject!` does the rest."
+                 `:reviewreject!` does the rest."
                     .into()
             )
         );

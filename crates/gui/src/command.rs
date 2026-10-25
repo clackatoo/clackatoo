@@ -1,7 +1,9 @@
 //! The command line, opened with `:` in normal mode: what its commands
 //! mean.
 //!
-//! Capitalised words are kinds of pane, and open one: `Terminal`, `Agent`,
+//! Command names ignore ASCII case. Display names capitalise panes, pickers
+//! and overlays; actions are lowercase. Arguments keep their original case.
+//! Capitalised pane names open one: `Terminal`, `Agent`,
 //! a chat with an agent such as Claude Code (`Agent codex` names which,
 //! or else the `agent` option does), or `Editor PATH`, a file, or a
 //! folder's listing, and with no path, the focused pane's folder's, in a new
@@ -9,36 +11,36 @@
 //! left, `-` below, `-^` above). Any kind of pane goes on the machine of
 //! the pane it's made from, unless `@host` after its name says which:
 //! `Terminal@desk`, `|Editor@desk PATH`, `Explore@local`. A number goes to that line in an editor, as Vim's
-//! does, or else moves to that tab. Lowercase words are the
-//! window's own commands, and Vim's for files, `w`, `q`, `wq` and `e`, and
-//! for options, `set`, and for registers and marks, `registers` and
-//! `marks`, which list them, and `update`, which installs the latest
+//! does, or else moves to that tab. Lowercase words perform actions, including
+//! Vim's for files, `w`, `q`, `wq` and `e`, and
+//! for options, `set`, and for registers and marks, `Registers` and
+//! `Marks`, which list them, and `update`, which installs the latest
 //! release here, or named, on the daemon's machine, and `connect`, which
 //! picks a machine to open a new window on, or named, has the daemon bring
 //! that machine's workspaces in, until `disconnect`. The finder's are
-//! capitalised too, as fzf.vim's are:
-//! `Files`, `Grep` and `Buffers`, each with what to start with typed. So is
-//! `Gitsigns`, with what to do to the hunk at the cursor, as gitsigns.nvim
+//! capitalised too:
+//! `Files`, `Grep` and `Buffers`, each with what to start with typed.
+//! `gitsigns`, with what to do to the hunk at the cursor, as gitsigns.nvim
 //! names it: `preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` or
 //! `prev_hunk`. `Explore`, or `Ex`, opens the tab's file explorer, with a
 //! directory for its root after it if wanted, or with a split's mark
 //! before it, a new one beside the focused pane. `Tutor` opens the tutor's
-//! lessons, a lesson by its name, or with `new`, what's new. In a chat, `AgentUndo`
+//! lessons, a lesson by its name, or with `new`, what's new. In a chat, `agentundo`
 //! undoes what a turn of the agent's changed in files, the turn's number
-//! after it, or else the last, and `AgentRedo` makes it again; with `!`,
+//! after it, or else the last, and `agentredo` makes it again; with `!`,
 //! in the files that can be, though others can't.
-//! `Devices` lists the devices paired with the daemon's web app; `Devices
-//! allow CODE` allows the one asking to pair that shows `CODE`, `Devices
-//! deny` turns down those asking, `Devices revoke N` unpairs one, and
-//! `Devices unlock` lets devices pair with the password again, after too
+//! `devices` lists the devices paired with the daemon's web app; `devices
+//! allow CODE` allows the one asking to pair that shows `CODE`, `devices
+//! deny` turns down those asking, `devices revoke N` unpairs one, and
+//! `devices unlock` lets devices pair with the password again, after too
 //! many wrong ones locked it.
-//! `Markdown` shows the focused editor's Markdown file rendered, as prose,
+//! `markdown` shows the focused editor's Markdown file rendered, as prose,
 //! or its text again.
-//! `PortForward 8080`, in a window on another machine, forwards that port
-//! here to the same port there, as `ssh -L` does; `PortForward 3000:8080`
-//! forwards port 3000 here to 8080 there, and `PortForward
-//! 3000:somehost:8080` to a machine the daemon's reaches. `PortForward`
-//! alone lists the forwards, and `PortForward! 8080` stops one, or with no
+//! `portforward 8080`, in a window on another machine, forwards that port
+//! here to the same port there, as `ssh -L` does; `portforward 3000:8080`
+//! forwards port 3000 here to 8080 there, and `portforward
+//! 3000:somehost:8080` to a machine the daemon's reaches. `portforward`
+//! alone lists the forwards, and `portforward! 8080` stops one, or with no
 //! port, all of them.
 //! `bg` sends the tab shown to the background, where it keeps running out
 //! of the tab bar, and `bgpane` the focused pane alone, in a background
@@ -56,11 +58,11 @@
 //! `Review` opens a review of what agents changed: of the chat's whole
 //! work (`chat`, the default), a turn (`turn`, the last, or `turn N`), or
 //! everything since the branch's base (`base`), to the right of the
-//! focused pane, or with a split's mark, on that side. `ReviewKeep` and
-//! `ReviewReject` keep or reject the agent's change at the cursor, or
+//! focused pane, or with a split's mark, on that side. `reviewkeep` and
+//! `reviewreject` keep or reject the agent's change at the cursor, or
 //! every one of its `file`, of a `turn` (its, or `turn N`), or `all`;
-//! `ReviewReject!` rejects what it can though some can't be. `ReviewSend`
-//! sends the comments waiting to the chat, and `Blame` writes who changed
+//! `reviewreject!` rejects what it can though some can't be. `reviewsend`
+//! sends the comments waiting to the chat, and `blame` writes who changed
 //! each line agents changed after it, or stops.
 //!
 //! A command with a range of lines before it, or Vim's for lines, `s`,
@@ -85,20 +87,20 @@ pub(crate) enum ReviewCommand {
         scope: ReviewScope,
         side: Option<Side>,
     },
-    /// `:ReviewKeep` or, unless `keep`, `:ReviewReject`, `force`d with
+    /// `:reviewkeep` or, unless `keep`, `:reviewreject`, `force`d with
     /// `!`: to the agent's changes `which` names.
     Act {
         keep: bool,
         force: bool,
         which: ReviewWhich,
     },
-    /// `:ReviewSend`: the comments waiting go to the chat.
+    /// `:reviewsend`: the comments waiting go to the chat.
     Send,
-    /// `:Blame`: who changed each line agents changed, after it, or not.
+    /// `:blame`: who changed each line agents changed, after it, or not.
     Blame,
 }
 
-/// Which of the agents' changes `:ReviewKeep` and `:ReviewReject` act on.
+/// Which of the agents' changes `:reviewkeep` and `:reviewreject` act on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReviewWhich {
     /// The one at the cursor.
@@ -163,10 +165,10 @@ pub(crate) enum Command {
     /// kept, or if `drop`, throw them away; or else show the next buffer
     /// whose changes came back that no pane shows.
     Recover { drop: bool },
-    /// `:Format`: format the focused pane's file, as its language server
+    /// `:format`: format the focused pane's file, as its language server
     /// does.
     Format,
-    /// `:Markdown`: show the focused editor's Markdown rendered, as prose,
+    /// `:markdown`: show the focused editor's Markdown rendered, as prose,
     /// or its text again.
     Markdown,
     /// Run the config again, from the start.
@@ -176,15 +178,15 @@ pub(crate) enum Command {
     /// `:Files`, `:Grep`, `:Buffers`, `:Symbols` and the like: the finder,
     /// with this typed.
     Find { kind: finder::Kind, query: String },
-    /// `:Gitsigns`: this, to the hunk at the focused editor's cursor.
+    /// `:gitsigns`: this, to the hunk at the focused editor's cursor.
     Hunk(HunkAction),
-    /// `:registers`: list what the registers hold, by the focused editor's
+    /// `:Registers`: list what the registers hold, by the focused editor's
     /// cursor.
     Registers,
-    /// `:marks`: the finder, on the marks the focused editor's file can go
+    /// `:Marks`: the finder, on the marks the focused editor's file can go
     /// to.
     Marks,
-    /// `:messages`: what the bar has said lately, above it.
+    /// `:Messages`: what the bar has said lately, above it.
     Messages,
     /// One of the focused editor's commands, for lines, as typed: `:s`,
     /// `:g`, `:d`, `:m` and their kin, with any range.
@@ -203,9 +205,9 @@ pub(crate) enum Command {
     /// `:Tutor`: the lessons, to pick one; with a lesson's name, that
     /// lesson; with `new`, what's new.
     Tutor(Option<String>),
-    /// `:AgentUndo`: undo what turn `turn` of the focused chat changed in
+    /// `:agentundo`: undo what turn `turn` of the focused chat changed in
     /// files, counting from 0, or the last that can be; or with `redo`,
-    /// `:AgentRedo`, make it again. With `force`, in the files that can be
+    /// `:agentredo`, make it again. With `force`, in the files that can be
     /// though others can't.
     AgentUndo {
         turn: Option<usize>,
@@ -231,9 +233,9 @@ pub(crate) enum Command {
     Board { place: Place, name: Option<String> },
     /// `:Browser`: the focused chat's page, where `place` says.
     Browser(Place),
-    /// `:Devices`: the devices paired with the web app, or this, to them.
+    /// `:devices`: the devices paired with the web app, or this, to them.
     Devices(DevicesCommand),
-    /// `:PortForward`: forwarding ports from this machine to the daemon's.
+    /// `:portforward`: forwarding ports from this machine to the daemon's.
     PortForward(Forwarding),
     /// Something to do with background tabs.
     Background(BackgroundCommand),
@@ -257,7 +259,7 @@ pub(crate) enum BackgroundCommand {
     List,
 }
 
-/// What `:PortForward` does.
+/// What `:portforward` does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Forwarding {
     /// Lists the forwards.
@@ -272,7 +274,7 @@ pub(crate) enum Forwarding {
     Stop(Option<u16>),
 }
 
-/// What `:Devices` does.
+/// What `:devices` does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DevicesCommand {
     /// Lists them.
@@ -331,7 +333,7 @@ const BOARD: &str = "Board";
 /// The kind of pane that shows a chat's page in the browser.
 const BROWSER: &str = "Browser";
 
-/// What `:Gitsigns` does to the hunk at the cursor, by gitsigns.nvim's
+/// What `:gitsigns` does to the hunk at the cursor, by gitsigns.nvim's
 /// names for it.
 const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
     ("preview_hunk", HunkAction::Preview),
@@ -352,6 +354,20 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
     if let Some(on) = on_machine(word, argument) {
         return on;
     }
+    let (_, name) = place(word);
+    let mark = &word[..word.len() - name.len()];
+    let (name, bang) = name
+        .strip_suffix('!')
+        .map_or((name, ""), |name| (name, "!"));
+    let spelling = canonical(name);
+    let normalized;
+    let word = if spelling == name {
+        word
+    } else {
+        normalized = format!("{mark}{spelling}{bang}");
+        &normalized
+    };
+    // Keep the original line for editor patterns, replacements and Normal keys.
     match word {
         "workspace" | "ws" => return Ok(Command::Workspace(argument.map(str::to_owned))),
         "rename" => {
@@ -362,9 +378,9 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "close" => return Ok(Command::Close),
         "reload" => return Ok(Command::Reload),
         "set" | "se" => return Ok(Command::Set(argument.unwrap_or_default().to_owned())),
-        "registers" | "reg" | "display" | "di" => return Ok(Command::Registers),
-        "marks" => return Ok(Command::Marks),
-        "messages" | "mes" => return Ok(Command::Messages),
+        "Registers" | "reg" | "display" | "di" => return Ok(Command::Registers),
+        "Marks" => return Ok(Command::Marks),
+        "Messages" | "mes" => return Ok(Command::Messages),
         "recover" | "rec" | "recover!" | "rec!" => {
             return match argument {
                 Some(argument) => Err(format!(
@@ -379,8 +395,8 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "connect" => return connect_command(argument),
         "disconnect" => return Ok(Command::Disconnect(argument.map(str::to_owned))),
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
-        "Devices" => return devices_command(argument).map(Command::Devices),
-        "PortForward" | "PortForward!" => {
+        "devices" => return devices_command(argument).map(Command::Devices),
+        "portforward" | "portforward!" => {
             return forwarding(word.ends_with('!'), argument).map(Command::PortForward);
         }
         "bg" | "bgpane" | "Background" => return background_command(word, argument),
@@ -398,7 +414,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
     if crate::editor::is_editor_command(line) {
         return Ok(Command::Editor(line.to_owned()));
     }
-    if word == "Gitsigns" {
+    if word == "gitsigns" {
         return hunk_command(argument);
     }
     if let Some(&(_, kind)) = FINDERS.iter().find(|(name, _)| *name == word) {
@@ -531,7 +547,7 @@ fn unknown(mark: &str, name: &str, at: &str, place: Place) -> String {
 /// running one by mistake loses the pane.
 const CLOSING: [&str; 2] = ["quit", "wq"];
 
-/// `:Devices`, with what to do as `argument` says.
+/// `:devices`, with what to do as `argument` says.
 /// `:connect`'s argument: a machine, if any, and `--no-share` or
 /// `--share`, before or after it, which need one.
 fn connect_command(argument: Option<&str>) -> Result<Command, String> {
@@ -565,7 +581,7 @@ fn connect_command(argument: Option<&str>) -> Result<Command, String> {
 }
 
 fn devices_command(argument: Option<&str>) -> Result<DevicesCommand, String> {
-    let usage = "Devices, then allow CODE, deny, or revoke N";
+    let usage = "devices, then allow CODE, deny, or revoke N";
     let Some(argument) = argument else {
         return Ok(DevicesCommand::List);
     };
@@ -575,23 +591,23 @@ fn devices_command(argument: Option<&str>) -> Result<DevicesCommand, String> {
     };
     match (what, rest) {
         ("allow", Some(code)) => Ok(DevicesCommand::Allow(code.to_owned())),
-        ("allow", None) => Err("allow needs the code the device shows: :Devices allow CODE".into()),
+        ("allow", None) => Err("allow needs the code the device shows: :devices allow CODE".into()),
         ("deny", None) => Ok(DevicesCommand::Deny),
         ("unlock", None) => Ok(DevicesCommand::Unlock),
         ("revoke", Some(number)) => (number.parse())
             .map(DevicesCommand::Revoke)
-            .map_err(|_| format!("{number} isn't a device's number, as :Devices lists them")),
+            .map_err(|_| format!("{number} isn't a device's number, as :devices lists them")),
         _ => Err(format!("no such thing to do to devices: {usage}")),
     }
 }
 
-/// `:PortForward`, or with `stop`, `:PortForward!`, with what `argument`
+/// `:portforward`, or with `stop`, `:portforward!`, with what `argument`
 /// says: a forward, or which port here to stop.
 fn forwarding(stop: bool, argument: Option<&str>) -> Result<Forwarding, String> {
     let spec = argument
         .map(str::parse::<Spec>)
         .transpose()
-        .map_err(|why| format!("{why}: PortForward takes PORT, LOCAL:PORT or LOCAL:HOST:PORT"))?;
+        .map_err(|why| format!("{why}: portforward takes PORT, LOCAL:PORT or LOCAL:HOST:PORT"))?;
     Ok(match (stop, spec) {
         (false, None) => Forwarding::List,
         (false, Some(spec)) => Forwarding::Add(spec),
@@ -599,11 +615,11 @@ fn forwarding(stop: bool, argument: Option<&str>) -> Result<Forwarding, String> 
     })
 }
 
-/// `:Gitsigns`, with what to do to the hunk at the cursor, as `argument`
+/// `:gitsigns`, with what to do to the hunk at the cursor, as `argument`
 /// names it.
 fn hunk_command(argument: Option<&str>) -> Result<Command, String> {
     let Some(argument) = argument else {
-        return Err("Gitsigns needs what to do, as ‘:Gitsigns stage_hunk’".into());
+        return Err("gitsigns needs what to do, as ‘:gitsigns stage_hunk’".into());
     };
     (HUNK_ACTIONS.iter())
         .find(|(name, _)| *name == argument)
@@ -612,9 +628,9 @@ fn hunk_command(argument: Option<&str>) -> Result<Command, String> {
             let names = HUNK_ACTIONS.iter().map(|&(name, _)| name);
             match nearest(argument, names) {
                 Some(near) => {
-                    format!("Gitsigns can't ‘{argument}’: did you mean ‘:Gitsigns {near}’?")
+                    format!("gitsigns can't ‘{argument}’: did you mean ‘:gitsigns {near}’?")
                 }
-                None => format!("Gitsigns can't ‘{argument}’"),
+                None => format!("gitsigns can't ‘{argument}’"),
             }
         })
 }
@@ -654,8 +670,8 @@ fn file_command(word: &str, argument: Option<&str>) -> Option<Result<Command, St
         "wq" | "x" => write(false, true),
         "wq!" | "x!" => write(true, true),
         "e!" | "edit!" => Some(Ok(Command::Discard)),
-        "Format" => Some(Ok(Command::Format)),
-        "Markdown" => Some(Ok(Command::Markdown)),
+        "format" => Some(Ok(Command::Format)),
+        "markdown" => Some(Ok(Command::Markdown)),
         "e" | "edit" => Some(Ok(argument.map_or(Command::EditBlank, |path| {
             Command::Edit {
                 place: Place::Here,
@@ -666,12 +682,12 @@ fn file_command(word: &str, argument: Option<&str>) -> Option<Result<Command, St
     }
 }
 
-/// `:AgentUndo` or `:AgentRedo`, with `!` or not, if `word` is one, and the
+/// `:agentundo` or `:agentredo`, with `!` or not, if `word` is one, and the
 /// turn's number after it, from 1, if there is one.
 fn agent_undo(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
     if !matches!(
         word,
-        "AgentUndo" | "AgentUndo!" | "AgentRedo" | "AgentRedo!"
+        "agentundo" | "agentundo!" | "agentredo" | "agentredo!"
     ) {
         return None;
     }
@@ -686,7 +702,7 @@ fn agent_undo(word: &str, argument: Option<&str>) -> Option<Result<Command, Stri
     };
     Some(Ok(Command::AgentUndo {
         turn,
-        redo: word.starts_with("AgentRedo"),
+        redo: word.starts_with("agentredo"),
         force: word.ends_with('!'),
     }))
 }
@@ -761,11 +777,11 @@ fn pane_of(rest: &str, place: Place, argument: Option<&str>) -> Option<Result<Co
 /// or why it means nothing.
 fn review_command(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
     let command = match word {
-        "ReviewSend" => Ok(ReviewCommand::Send),
-        "Blame" => Ok(ReviewCommand::Blame),
-        "ReviewKeep" | "ReviewReject" | "ReviewReject!" => {
+        "reviewsend" => Ok(ReviewCommand::Send),
+        "blame" => Ok(ReviewCommand::Blame),
+        "reviewkeep" | "reviewreject" | "reviewreject!" => {
             review_which(argument).map(|which| ReviewCommand::Act {
-                keep: word == "ReviewKeep",
+                keep: word == "reviewkeep",
                 force: word.ends_with('!'),
                 which,
             })
@@ -785,7 +801,7 @@ macro_rules! command_names {
 
         /// A short explanation beside each offered command.
         pub(crate) fn description(name: &str) -> &'static str {
-            match name {
+            match canonical(name) {
                 $($name => $description,)+
                 _ => "",
             }
@@ -803,9 +819,9 @@ command_names! {
     "keep" => "Restart this terminal command when the daemon starts",
     "reload" => "Reload your Lua configuration",
     "set" => "View or change settings",
-    "registers" => "Show the contents of registers",
-    "marks" => "Jump to a saved mark",
-    "messages" => "Show recent status messages",
+    "Registers" => "Show the contents of registers",
+    "Marks" => "Jump to a saved mark",
+    "Messages" => "Show recent status messages",
     "recover" => "Recover unsaved file changes",
     "update" => "Install the latest Clackatoo release",
     "connect" => "Bring another machine’s workspaces into this window",
@@ -824,18 +840,18 @@ command_names! {
     "normal" => "Run Normal-mode keys on editor lines",
     "Explore" => "Open the file explorer",
     "Tutor" => "Open an interactive lesson",
-    "Devices" => "Manage paired web devices",
-    "PortForward" => "Manage ports forwarded from another machine",
-    "Format" => "Format the file with its language server",
-    "Markdown" => "Toggle the rendered Markdown view",
-    "AgentUndo" => "Undo file changes from an agent turn",
-    "AgentRedo" => "Redo file changes from an agent turn",
+    "devices" => "Manage paired web devices",
+    "portforward" => "Manage ports forwarded from another machine",
+    "format" => "format the file with its language server",
+    "markdown" => "Toggle the rendered Markdown view",
+    "agentundo" => "Undo file changes from an agent turn",
+    "agentredo" => "Redo file changes from an agent turn",
     "Review" => "Review changes made by agents",
-    "ReviewKeep" => "Keep the selected agent changes",
-    "ReviewReject" => "Reject the selected agent changes",
-    "ReviewSend" => "Send review comments to the agent",
-    "Blame" => "Toggle attribution for agent changes",
-    "Gitsigns" => "Preview, stage, reset or jump between Git changes",
+    "reviewkeep" => "Keep the selected agent changes",
+    "reviewreject" => "Reject the selected agent changes",
+    "reviewsend" => "Send review comments to the agent",
+    "blame" => "Toggle attribution for agent changes",
+    "gitsigns" => "Preview, stage, reset or jump between Git changes",
     "Files" => "Find a file in the project",
     "Grep" => "Search text across project files",
     "Buffers" => "Switch to an open buffer",
@@ -848,6 +864,20 @@ command_names! {
     EDITOR => "Open a file in an editor pane",
     BOARD => "Open or create a board",
     BROWSER => "Open the focused chat’s browser page",
+}
+
+/// Canonical display spelling of a command name, including accepted aliases.
+/// Arguments (paths, hosts, patterns and keys) must never pass through this.
+pub(crate) fn canonical(name: &str) -> &str {
+    const ALIASES: &[&str] = &[
+        "ws", "se", "reg", "display", "di", "mes", "rec", "q", "w", "x", "e", "Ex",
+    ];
+    NAMES
+        .iter()
+        .chain(ALIASES)
+        .copied()
+        .find(|known| known.eq_ignore_ascii_case(name))
+        .unwrap_or(name)
 }
 
 /// The kinds of pane, which a split's mark can come before: `|Terminal`.
@@ -878,30 +908,30 @@ pub(crate) enum Takes {
 /// a split before it or `!` after it.
 pub(crate) fn takes(word: &str) -> Takes {
     // `:e!` throws changes away, and takes nothing.
-    if matches!(word, "e!" | "edit!") {
+    if word.eq_ignore_ascii_case("e!") || word.eq_ignore_ascii_case("edit!") {
         return Takes::Nothing;
     }
     let (_, word) = place(word);
     // The machine `@` names doesn't change what the kind of pane takes.
     let word = word.split_once('@').map_or(word, |(kind, _)| kind);
-    let word = word.strip_suffix('!').unwrap_or(word);
+    let word = canonical(word.strip_suffix('!').unwrap_or(word));
     match word {
         "e" | "edit" | "w" | "write" | "wq" | "x" | EDITOR | "Explore" | "Ex" => Takes::Path,
         "set" | "se" => Takes::Options,
         "workspace" | "ws" => Takes::Workspace,
         "Tutor" => Takes::Lesson,
         "connect" | "disconnect" => Takes::Host,
-        "Gitsigns" => Takes::Words(&[
+        "gitsigns" => Takes::Words(&[
             "preview_hunk",
             "reset_hunk",
             "stage_hunk",
             "next_hunk",
             "prev_hunk",
         ]),
-        "Devices" => Takes::Words(&["allow", "deny", "revoke", "unlock"]),
+        "devices" => Takes::Words(&["allow", "deny", "revoke", "unlock"]),
         "keep" => Takes::Words(&["always", "off"]),
         "Review" => Takes::Words(&["chat", "turn", "base"]),
-        "ReviewKeep" | "ReviewReject" => Takes::Words(&["file", "turn", "all"]),
+        "reviewkeep" | "reviewreject" => Takes::Words(&["file", "turn", "all"]),
         _ => Takes::Nothing,
     }
 }
@@ -918,7 +948,7 @@ fn review_scope(argument: Option<&str>) -> Result<ReviewScope, String> {
     }
 }
 
-/// Which of the agents' changes `:ReviewKeep` and `:ReviewReject`'s
+/// Which of the agents' changes `:reviewkeep` and `:reviewreject`'s
 /// `argument` names.
 fn review_which(argument: Option<&str>) -> Result<ReviewWhich, String> {
     let words: Vec<&str> = argument.unwrap_or_default().split_whitespace().collect();
@@ -971,13 +1001,13 @@ mod tests {
         ("reload", ""),
         ("set", ""),
         ("se", "set"),
-        ("registers", ""),
-        ("reg", "registers"),
-        ("display", "registers"),
-        ("di", "registers"),
-        ("marks", ""),
-        ("messages", ""),
-        ("mes", "messages"),
+        ("Registers", ""),
+        ("reg", "Registers"),
+        ("display", "Registers"),
+        ("di", "Registers"),
+        ("Marks", ""),
+        ("Messages", ""),
+        ("mes", "Messages"),
         ("recover", ""),
         ("rec", "recover"),
         ("Explore", ""),
@@ -986,8 +1016,8 @@ mod tests {
         ("connect", ""),
         ("disconnect", ""),
         ("Tutor", ""),
-        ("Devices", ""),
-        ("PortForward", ""),
+        ("devices", ""),
+        ("portforward", ""),
         ("bg", ""),
         ("bgpane", ""),
         ("Background", ""),
@@ -1000,16 +1030,16 @@ mod tests {
         ("x", "wq"),
         ("e", "edit"),
         ("edit", ""),
-        ("Format", ""),
-        ("Markdown", ""),
-        ("AgentUndo", ""),
-        ("AgentRedo", ""),
+        ("format", ""),
+        ("markdown", ""),
+        ("agentundo", ""),
+        ("agentredo", ""),
         ("Review", ""),
-        ("ReviewSend", ""),
-        ("Blame", ""),
-        ("ReviewKeep", ""),
-        ("ReviewReject", ""),
-        ("Gitsigns", ""),
+        ("reviewsend", ""),
+        ("blame", ""),
+        ("reviewkeep", ""),
+        ("reviewreject", ""),
+        ("gitsigns", ""),
         ("Files", ""),
         ("Grep", ""),
         ("Buffers", ""),
@@ -1049,6 +1079,62 @@ mod tests {
         // And the other way: nothing is offered that isn't here.
         for name in NAMES {
             assert!(PARSED.iter().any(|(word, _)| word == name), "{name}");
+        }
+    }
+
+    #[test]
+    fn command_names_and_aliases_ignore_case_without_changing_arguments() {
+        for &(name, _) in PARSED {
+            for spelling in [name.to_ascii_lowercase(), name.to_ascii_uppercase()] {
+                let actual = parse(&spelling);
+                let expected = parse(name);
+                if matches!(expected, Ok(Command::Editor(_))) {
+                    assert_eq!(actual, Ok(Command::Editor(spelling.clone())));
+                } else {
+                    assert_eq!(actual, expected, "{name}");
+                }
+                assert_eq!(takes(&spelling), takes(name), "{name}");
+            }
+        }
+        for (typed, canonical) in [
+            ("|<tErMiNaL@Desk", "|<Terminal@Desk"),
+            (
+                "-^eDiToR@Desk My\\ Notes.TXT",
+                "-^Editor@Desk My\\ Notes.TXT",
+            ),
+            ("ExPlOrE! MyFolder", "Explore! MyFolder"),
+            ("AGENTUNDO! 3", "agentundo! 3"),
+            ("REVIEWREJECT! turn 2", "reviewreject! turn 2"),
+            ("AGENT MyProvider", "Agent MyProvider"),
+            ("WoRkSpAcE MyWorkspace", "workspace MyWorkspace"),
+            ("CoNnEcT MyHost", "connect MyHost"),
+            ("SeT font=MixedCase", "set font=MixedCase"),
+            ("W! MyFile.TXT", "w! MyFile.TXT"),
+            ("gReP MixedCase", "Grep MixedCase"),
+        ] {
+            assert_eq!(parse(typed), parse(canonical), "{typed}");
+            assert!(parse(typed).is_ok(), "{typed}");
+        }
+        for line in [
+            "S/Mixed/UPPER/g",
+            "%SuBsTiTuTe/Mixed/UPPER/g",
+            "G/Mixed/NORMAL gUiw",
+        ] {
+            assert_eq!(parse(line), Ok(Command::Editor(line.into())));
+        }
+        assert_eq!(takes("EDITOR@Desk"), Takes::Path);
+        assert_eq!(takes("EDIT!"), Takes::Nothing);
+    }
+
+    #[test]
+    fn canonical_names_have_no_case_insensitive_collisions() {
+        for (index, name) in NAMES.iter().enumerate() {
+            assert!(
+                !NAMES[index + 1..]
+                    .iter()
+                    .any(|other| name.eq_ignore_ascii_case(other)),
+                "{name}"
+            );
         }
     }
 
@@ -1324,7 +1410,7 @@ mod tests {
         // What closes a pane isn't offered for a slip, only for its case.
         assert_eq!(err("wqq"), "no command ‘wqq’");
         assert_eq!(err("quiy"), "no command ‘quiy’");
-        assert_eq!(err("QUIT"), "no command ‘QUIT’: did you mean ‘:quit’?");
+        assert_eq!(parse("QUIT"), Ok(Command::Quit { force: false }));
         assert_eq!(err(""), "no command: Tab lists them");
         assert_eq!(
             err("@box"),
@@ -1338,25 +1424,25 @@ mod tests {
     #[test]
     fn hunk_commands_are_named_as_gitsigns_names_them() {
         assert_eq!(
-            parse("Gitsigns stage_hunk").unwrap(),
+            parse("gitsigns stage_hunk").unwrap(),
             Command::Hunk(HunkAction::Stage)
         );
         assert_eq!(
-            parse("Gitsigns prev_hunk").unwrap(),
+            parse("gitsigns prev_hunk").unwrap(),
             Command::Hunk(HunkAction::Next { forward: false })
         );
         assert!(
-            parse("Gitsigns")
+            parse("gitsigns")
                 .unwrap_err()
-                .contains("‘:Gitsigns stage_hunk’")
+                .contains("‘:gitsigns stage_hunk’")
         );
         assert_eq!(
-            parse("Gitsigns blame").unwrap_err(),
-            "Gitsigns can't ‘blame’"
+            parse("gitsigns blame").unwrap_err(),
+            "gitsigns can't ‘blame’"
         );
         assert_eq!(
-            parse("Gitsigns stage_hnk").unwrap_err(),
-            "Gitsigns can't ‘stage_hnk’: did you mean ‘:Gitsigns stage_hunk’?"
+            parse("gitsigns stage_hnk").unwrap_err(),
+            "gitsigns can't ‘stage_hnk’: did you mean ‘:gitsigns stage_hunk’?"
         );
     }
 
@@ -1388,32 +1474,32 @@ mod tests {
         assert!(matches!(parse("-"), Ok(Command::Open { .. })));
         assert!(matches!(parse("-Terminal"), Ok(Command::Open { .. })));
         assert_eq!(parse("set nowrap"), Ok(Command::Set("nowrap".into())));
-        assert_eq!(parse("marks"), Ok(Command::Marks));
-        assert_eq!(parse("messages"), Ok(Command::Messages));
+        assert_eq!(parse("Marks"), Ok(Command::Marks));
+        assert_eq!(parse("Messages"), Ok(Command::Messages));
         assert_eq!(parse("recover"), Ok(Command::Recover { drop: false }));
         assert_eq!(parse("rec!"), Ok(Command::Recover { drop: true }));
         assert!(parse("recover a.txt").is_err());
         assert_eq!(parse("mes"), Ok(Command::Messages));
-        assert_eq!(parse("Devices"), Ok(Command::Devices(DevicesCommand::List)));
+        assert_eq!(parse("devices"), Ok(Command::Devices(DevicesCommand::List)));
         assert_eq!(
-            parse("Devices allow 0042"),
+            parse("devices allow 0042"),
             Ok(Command::Devices(DevicesCommand::Allow("0042".into())))
         );
         assert_eq!(
-            parse("Devices deny"),
+            parse("devices deny"),
             Ok(Command::Devices(DevicesCommand::Deny))
         );
         assert_eq!(
-            parse("Devices unlock"),
+            parse("devices unlock"),
             Ok(Command::Devices(DevicesCommand::Unlock))
         );
         assert_eq!(
-            parse("Devices revoke 3"),
+            parse("devices revoke 3"),
             Ok(Command::Devices(DevicesCommand::Revoke(3)))
         );
-        assert!(parse("Devices allow").is_err());
-        assert!(parse("Devices revoke phone").is_err());
-        assert!(parse("Devices forget").is_err());
+        assert!(parse("devices allow").is_err());
+        assert!(parse("devices revoke phone").is_err());
+        assert!(parse("devices forget").is_err());
         assert!(parse("sx").is_err());
     }
 
@@ -1437,12 +1523,12 @@ mod tests {
     #[test]
     fn agent_undo_takes_a_turn_from_one_and_a_bang_to_force() {
         let undo = |turn, redo, force| Command::AgentUndo { turn, redo, force };
-        assert_eq!(parse("AgentUndo").unwrap(), undo(None, false, false));
-        assert_eq!(parse("AgentUndo 3").unwrap(), undo(Some(2), false, false));
-        assert_eq!(parse("AgentUndo! 1").unwrap(), undo(Some(0), false, true));
-        assert_eq!(parse("AgentRedo!").unwrap(), undo(None, true, true));
-        assert!(parse("AgentUndo 0").is_err());
-        assert!(parse("AgentRedo last").is_err());
+        assert_eq!(parse("agentundo").unwrap(), undo(None, false, false));
+        assert_eq!(parse("agentundo 3").unwrap(), undo(Some(2), false, false));
+        assert_eq!(parse("agentundo! 1").unwrap(), undo(Some(0), false, true));
+        assert_eq!(parse("agentredo!").unwrap(), undo(None, true, true));
+        assert!(parse("agentundo 0").is_err());
+        assert!(parse("agentredo last").is_err());
     }
 
     #[test]
@@ -1457,11 +1543,11 @@ mod tests {
     #[test]
     fn port_forward_adds_lists_and_stops() {
         assert_eq!(
-            parse("PortForward").unwrap(),
+            parse("portforward").unwrap(),
             Command::PortForward(Forwarding::List)
         );
         assert_eq!(
-            parse("PortForward 3000:8080").unwrap(),
+            parse("portforward 3000:8080").unwrap(),
             Command::PortForward(Forwarding::Add(Spec {
                 local: 3000,
                 host: "localhost".into(),
@@ -1469,16 +1555,16 @@ mod tests {
             }))
         );
         assert_eq!(
-            parse("PortForward! 3000").unwrap(),
+            parse("portforward! 3000").unwrap(),
             Command::PortForward(Forwarding::Stop(Some(3000)))
         );
         assert_eq!(
-            parse("PortForward!").unwrap(),
+            parse("portforward!").unwrap(),
             Command::PortForward(Forwarding::Stop(None))
         );
         assert_eq!(
-            parse("PortForward eighty").unwrap_err(),
-            "\"eighty\" isn't a port: PortForward takes PORT, LOCAL:PORT or LOCAL:HOST:PORT"
+            parse("portforward eighty").unwrap_err(),
+            "\"eighty\" isn't a port: portforward takes PORT, LOCAL:PORT or LOCAL:HOST:PORT"
         );
     }
 
@@ -1581,28 +1667,28 @@ mod tests {
         assert!(parse("|ReviewKeep").is_err(), "not a kind of pane");
         let act = |keep, force, which| Command::Review(ReviewCommand::Act { keep, force, which });
         assert_eq!(
-            parse("ReviewKeep").unwrap(),
+            parse("reviewkeep").unwrap(),
             act(true, false, ReviewWhich::Here)
         );
         assert_eq!(
-            parse("ReviewKeep file").unwrap(),
+            parse("reviewkeep file").unwrap(),
             act(true, false, ReviewWhich::File)
         );
         assert_eq!(
-            parse("ReviewReject! turn 3").unwrap(),
+            parse("reviewreject! turn 3").unwrap(),
             act(false, true, ReviewWhich::Turn(Some(2)))
         );
         assert_eq!(
-            parse("ReviewReject all").unwrap(),
+            parse("reviewreject all").unwrap(),
             act(false, false, ReviewWhich::All)
         );
-        assert!(parse("ReviewKeep turn 0").is_err());
+        assert!(parse("reviewkeep turn 0").is_err());
         assert_eq!(
-            parse("ReviewSend").unwrap(),
+            parse("reviewsend").unwrap(),
             Command::Review(ReviewCommand::Send)
         );
         assert_eq!(
-            parse("Blame").unwrap(),
+            parse("blame").unwrap(),
             Command::Review(ReviewCommand::Blame)
         );
     }

@@ -104,7 +104,7 @@ client.keys.map("n", "<Space>ff", function() client.cmd("Files") end)
 
 `client.cmd("reload")` is refused: the config can't run itself again.
 
-`client.forward(spec)` forwards a port as [`:PortForward`](~clackatoo/reference/remote#forwarding-ports) does, `client.forward(8080)` or `client.forward("3000:8080")`, each time a window opens on another machine. A window on this machine passes it over silently; a spec it can't read is an error.
+`client.forward(spec)` forwards a port as [`:portforward`](~clackatoo/reference/remote#forwarding-ports) does, `client.forward(8080)` or `client.forward("3000:8080")`, each time a window opens on another machine. A window on this machine passes it over silently; a spec it can't read is an error.
 
 `client.connect(host)` has the daemon bring another machine's workspaces in, as [`:connect HOST`](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar) does, asking again whenever the window connects to the daemon and saying nothing unless it fails. `client.disconnect(host)` ends that connection. `client.connect("server", {share = false})` keeps that machine from the daemons connected to this one, as `:connect HOST --no-share` does.
 
@@ -181,7 +181,7 @@ Several can go after one `:set`, such as `:set nu rnu`. Each option has a short 
 | `completetab` | `cmpt` | Tab accepts the picked item too. | off |
 | `signaturehelp` | `sig` | Shows the signature of the call you're typing the arguments of. | on |
 | `inlayhints` | `ih` | Writes what the [language server](~clackatoo/reference/editor#language-servers) says between the code: names' types and arguments' parameter names, dim, never part of the text. `<Space>th` toggles it. | on |
-| `markdownview` | `mdv` | How a Markdown file opens in an editor: as its text, `raw`, or [rendered](~clackatoo/reference/editor#rendered-markdown), as prose, `rendered`. `:Markdown` and `<Space>tm` turn each editor from one to the other. | `raw` |
+| `markdownview` | `mdv` | How a Markdown file opens in an editor: as its text, `raw`, or [rendered](~clackatoo/reference/editor#rendered-markdown), as prose, `rendered`. `:markdown` and `<Space>tm` turn each editor from one to the other. | `raw` |
 | `highlightuses` | `hlu` | Lights the other uses of the name the cursor rests on, as the [language server](~clackatoo/reference/editor#language-servers) says; where it's given a value a little brighter. | on |
 | `formatonsave` | `fos` | `:w` formats the file first, as its [language server](~clackatoo/reference/editor#language-servers) does, then writes it. If the server can't format, or takes over 3 seconds, the file is written as it is, and the bottom bar says why. | off |
 | `gitsigns` | `gs` | The column of [git signs](~clackatoo/reference/editor#git-signs) left of the line numbers. While it's on, it's there for every file, so the text doesn't move when the first change comes. | on |

@@ -189,7 +189,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "phone",
         date: "2026-10-13",
         lesson: "remote",
-        what: "Your chats from your phone: a web app the daemon serves, with notifications, paired with :Devices",
+        what: "Your chats from your phone: a web app the daemon serves, with notifications, paired with :devices",
     },
     News {
         id: "slow-session",
@@ -303,7 +303,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "port-forward",
         date: "2026-10-15",
         lesson: "remote",
-        what: ":PortForward 8080 lets a browser here reach port 8080 on a remote window's machine",
+        what: ":portforward 8080 lets a browser here reach port 8080 on a remote window's machine",
     },
     News {
         id: "launch-focus",
@@ -315,13 +315,13 @@ pub(crate) const NEWS: &[News] = &[
         id: "bar-overflow",
         date: "2026-10-15",
         lesson: "basics",
-        what: "Crowded bars scroll their tabs and workspaces, messages keep off the tabs, and :messages shows them again",
+        what: "Crowded bars scroll their tabs and workspaces, messages keep off the tabs, and :Messages shows them again",
     },
     News {
         id: "forward-pace",
         date: "2026-10-15",
         lesson: "remote",
-        what: ":PortForward downloads no longer delay your keys on a slow link (:set noforwardpace)",
+        what: ":portforward downloads no longer delay your keys on a slow link (:set noforwardpace)",
     },
     News {
         id: "answer-in-normal",
@@ -525,7 +525,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "relayed",
         date: "2026-10-18",
         lesson: "remote",
-        what: "In another machine's workspaces, editors, explorers, the finder, reviews, boards and :PortForward work too",
+        what: "In another machine's workspaces, editors, explorers, the finder, reviews, boards and :portforward work too",
     },
     News {
         id: "elsewhere",
@@ -549,7 +549,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "markdown",
         date: "2026-10-19",
         lesson: "markdown",
-        what: "Markdown files rendered in the editor, with <Space>tm or :Markdown, and back to their text with any key that edits",
+        what: "Markdown files rendered in the editor, with <Space>tm or :markdown, and back to their text with any key that edits",
     },
     News {
         id: "display",
@@ -820,6 +820,12 @@ pub(crate) const NEWS: &[News] = &[
         date: "2026-10-25",
         lesson: "basics",
         what: "The : prompt suggests commands with descriptions; Tab or Ctrl+N/P fills a match without running it",
+    },
+    News {
+        id: "command-case",
+        date: "2026-10-25",
+        lesson: "basics",
+        what: "Command names ignore case; capitals label panes and pickers, lowercase labels actions",
     },
 ];
 

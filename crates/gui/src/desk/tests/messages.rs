@@ -1,5 +1,5 @@
 //! What the bar says until the next key, what kind of note it is, and
-//! `:messages`, which shows again what it's said lately.
+//! `:Messages`, which shows again what it's said lately.
 
 use super::*;
 use crate::chrome::NoteKind;

@@ -1,4 +1,4 @@
-//! Formatting a file with its language server: `:Format`, and `:w` when
+//! Formatting a file with its language server: `:format`, and `:w` when
 //! the `formatonsave` option is on; and part of one, `:'<,'>Format` and
 //! `gq` on a selection.
 //!
@@ -38,7 +38,7 @@ struct Write {
 }
 
 impl Desk {
-    /// `:Format`: formats the focused editor's file.
+    /// `:format`: formats the focused editor's file.
     pub(super) fn format_file(&mut self) {
         self.format(None);
     }
@@ -57,7 +57,7 @@ impl Desk {
 
     /// `gq` on a selection, or `:'<,'>Format`: formats bytes `start` to
     /// `end` of `buffer`'s copy, as its language server does, one undo
-    /// step, as `:Format` formats the whole file.
+    /// step, as `:format` formats the whole file.
     pub(super) fn format_part(&mut self, buffer: BufferId, (start, end): (usize, usize)) {
         if !self.needs_daemon("formatting a selection", wire::USES) {
             return;

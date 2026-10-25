@@ -25,7 +25,7 @@
 //!
 //! `a` is "accept"; `x` is Vim's delete, for a change rather than a
 //! character, where `d` would wait for a motion, by habit. Keeping or
-//! rejecting a whole turn is `:ReviewKeep turn` or `:ReviewReject turn`.
+//! rejecting a whole turn is `:reviewkeep turn` or `:reviewreject turn`.
 //!
 //! A review of a turn or a chat lists its subagents' changes too, each
 //! hunk saying whose, as `· explore (chat 7)`. The subagents are listed

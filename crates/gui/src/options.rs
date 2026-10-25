@@ -454,7 +454,7 @@ options! {
     gitsigns("gs", "Show Git changes in the gutter"): bool = true;
     /// A column of its own, right of git's signs, colouring the lines an
     /// agent changed that you haven't reviewed, in a colour for each
-    /// chat. It shows only while a file has such lines, or `:Blame` is
+    /// chat. It shows only while a file has such lines, or `:blame` is
     /// on.
     agentsigns("as", "Mark unreviewed agent changes in the gutter"): bool = true;
     /// How wide a file explorer down the tab's left opens, in cells, as
@@ -576,7 +576,7 @@ options! {
     inlayhints("ih", "Show type and parameter hints in editors"): bool = true;
     /// How a Markdown file opens in an editor: as its text (`raw`), or
     /// rendered, as prose, with its headings, lists, tables and code drawn
-    /// as such (`rendered`). `:Markdown` and `<Space>tm` turn each editor
+    /// as such (`rendered`). `:markdown` and `<Space>tm` turn each editor
     /// from one to the other.
     markdownview("mdv", "How Markdown files open"): MarkdownView = MarkdownView::Raw;
     /// Which of the desktop's the unnamed register goes along with, as in
@@ -645,7 +645,7 @@ options! {
     /// dot, says it's from another machine whatever this says, and the
     /// mouse over it says which, and how its connection is.
     showhost("shh", "When workspace names include their machine"): ShowHost = ShowHost::Ambiguous;
-    /// Ports forwarded to a daemon on another machine (`:PortForward`)
+    /// Ports forwarded to a daemon on another machine (`:portforward`)
     /// send as background traffic: only as fast as the link takes them
     /// without a queue growing, so keys and screens never wait behind a
     /// download. Off, they go as fast as they can, taking the whole of a

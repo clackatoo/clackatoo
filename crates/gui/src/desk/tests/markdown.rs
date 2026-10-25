@@ -1,4 +1,4 @@
-//! `:Markdown` and `<Space>tm`, which show an editor's Markdown rendered,
+//! `:markdown` and `<Space>tm`, which show an editor's Markdown rendered,
 //! and the links in it, opened as links elsewhere in the window are.
 
 use super::*;
@@ -24,7 +24,7 @@ fn markdown_renders_a_markdown_file_and_says_why_not_for_others() {
         desk.focused_editor()
             .map(|(e, c)| (e.mode, c.loaded(), c.path().to_owned(), e.label(c)))
     );
-    // `<Space>tm` turns it back, as `:Markdown` does.
+    // `<Space>tm` turns it back, as `:markdown` does.
     type_keys(&mut desk, " tm");
     assert!(!rendered(&desk));
     type_keys(&mut desk, " tm");

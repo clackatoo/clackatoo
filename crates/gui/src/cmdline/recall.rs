@@ -9,7 +9,7 @@
 //! it runs as it runs it, on a thread of its own, merged with what other
 //! windows have added since, under a lock (see [`Save::run`]). A line
 //! starting with a space isn't kept, as bash's `ignorespace` leaves one
-//! out, nor one too long, nor `:Devices allow` and its code (see
+//! out, nor one too long, nor `:devices allow` and its code (see
 //! [`kept`]).
 //!
 //! ```text
@@ -220,11 +220,14 @@ fn read(path: &Path) -> std::io::Result<Recalled> {
 /// Whether `line`, run as `kind`, is kept, here and in the file: not if
 /// it's empty or longer than [`LONGEST`], or starts with a space, as bash's
 /// `ignorespace` leaves a command out, or would keep a secret, as the code
-/// in `:Devices allow CODE` is.
+/// in `:devices allow CODE` is.
 pub(crate) fn kept(kind: Kind, line: &str) -> bool {
     let secret = kind == Kind::Command && {
         let mut words = line.split_whitespace();
-        (words.next(), words.next()) == (Some("Devices"), Some("allow"))
+        words
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("devices"))
+            && words.next() == Some("allow")
     };
     !line.trim().is_empty() && line.len() <= LONGEST && !line.starts_with(' ') && !secret
 }
@@ -483,7 +486,9 @@ mod tests {
     fn long_lines_secrets_and_lines_starting_with_a_space_arent_kept() {
         assert!(kept(Kind::Command, "set wrap"));
         assert!(!kept(Kind::Command, " set wrap"), "as bash's ignorespace");
-        assert!(!kept(Kind::Command, "Devices allow 1234"));
+        for name in ["Devices", "devices", "DEVICES", "DeViCeS"] {
+            assert!(!kept(Kind::Command, &format!("{name} allow 1234")));
+        }
         assert!(kept(Kind::Command, "Devices"));
         assert!(
             kept(Kind::Search, "Devices allow"),
@@ -495,7 +500,7 @@ mod tests {
         assert_eq!(recall.last(), None);
         // Nor read from a file an older build wrote them in, so they're
         // gone from it once it's written again.
-        let recalled = Recalled::parse(":set wrap\n:Devices allow 1234\n: set list\n/ x\n/fn\n");
+        let recalled = Recalled::parse(":set wrap\n:devices allow 1234\n: set list\n/ x\n/fn\n");
         assert_eq!(recalled.commands.lines(), ["set wrap"]);
         assert_eq!(recalled.searches.lines(), ["fn"]);
         assert!(!recalled.write().contains("1234"));

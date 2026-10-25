@@ -1,5 +1,5 @@
 //! Ports forwarded from this daemon's machine to another it's connected
-//! to (CLACKA-117, phase 3): `:PortForward 8080` in a workspace from
+//! to (CLACKA-117, phase 3): `:portforward 8080` in a workspace from
 //! another machine, in a window on this one, so a browser here reaches a
 //! dev server there.
 //!
@@ -189,7 +189,7 @@ impl Daemon {
     }
 }
 
-/// The host a forward goes to, as written after `:PortForward`: IPv6
+/// The host a forward goes to, as written after `:portforward`: IPv6
 /// addresses in brackets.
 fn shown_host(spec: &Spec) -> String {
     if spec.host.contains(':') {
@@ -203,7 +203,7 @@ fn shown_host(spec: &Spec) -> String {
 /// each has open, for the bar.
 fn listing(list: &[(Spec, usize)], machine: &str) -> String {
     if list.is_empty() {
-        return format!("No ports are forwarded to {machine}: :PortForward 8080 forwards one");
+        return format!("No ports are forwarded to {machine}: :portforward 8080 forwards one");
     }
     let mut said = format!("Forwarding to {machine}");
     for (at, (spec, open)) in list.iter().enumerate() {
@@ -217,6 +217,6 @@ fn listing(list: &[(Spec, usize)], machine: &str) -> String {
             }
         }
     }
-    said.push_str(" · :PortForward! PORT stops one");
+    said.push_str(" · :portforward! PORT stops one");
     said
 }

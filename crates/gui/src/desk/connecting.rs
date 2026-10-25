@@ -19,7 +19,7 @@
 //! itself, as the picker needs no daemon and opens windows, which are the
 //! window's to start. It only notes that it was asked for.
 //!
-//! `:PortForward` is left to the window too, which keeps the forwards, as
+//! `:portforward` is left to the window too, which keeps the forwards, as
 //! they outlive the connection the desk sees.
 
 use clackatoo_protocol::{Connection, ConnectionState, Forwarding, Request, Workspace, wire};
@@ -367,7 +367,7 @@ impl Desk {
         std::mem::take(&mut self.connect_asked)
     }
 
-    /// Takes what `:PortForward` asked for since last time, for the window
+    /// Takes what `:portforward` asked for since last time, for the window
     /// to do.
     pub(crate) fn take_forwards_asked(&mut self) -> Vec<crate::command::Forwarding> {
         std::mem::take(&mut self.forwards_asked)
@@ -399,7 +399,7 @@ impl Desk {
         self.pane_elsewhere(self.shown?.pane)
     }
 
-    /// Carries out `:PortForward`, as `forwarding` asks: the window forwards
+    /// Carries out `:portforward`, as `forwarding` asks: the window forwards
     /// ports to its daemon's machine itself; in a workspace from another
     /// machine, the daemon forwards them there, from its own machine, which
     /// is this window's.
@@ -415,13 +415,13 @@ impl Desk {
             if !matches!(forwarding, Typed::Config(_)) {
                 self.warn(format!(
                     "A window on another machine than its daemon can't forward ports to {host} \
-                     yet: :PortForward in one of the daemon's own workspaces forwards to its \
+                     yet: :portforward in one of the daemon's own workspaces forwards to its \
                      machine"
                 ));
             }
             return;
         }
-        if !self.needs_daemon(":PortForward", wire::RELAY) {
+        if !self.needs_daemon(":portforward", wire::RELAY) {
             return;
         }
         let Some(pane) = self.shown.map(|shown| shown.pane) else {

@@ -125,7 +125,7 @@ pub(crate) enum Action {
     /// Turns inlay hints off, or on, as `:set ih!` does.
     ToggleInlayHints,
     /// Shows the focused editor's Markdown rendered, or its text again, as
-    /// `:Markdown` does.
+    /// `:markdown` does.
     ToggleMarkdown,
     /// Background tabs, as `:bg`, `:bgpane` and `:Background` do.
     Background(crate::command::BackgroundCommand),

@@ -391,7 +391,7 @@ pub enum Query {
     References,
     /// What it is: its type, and its documentation, as `K` shows.
     Hover,
-    /// The whole file formatted, as `:Format` does, with tabs `tab_size`
+    /// The whole file formatted, as `:format` does, with tabs `tab_size`
     /// columns wide, and indenting with spaces if `spaces`. The place is
     /// ignored. The server's edits are made to the buffer, as the user's,
     /// before the answer comes.

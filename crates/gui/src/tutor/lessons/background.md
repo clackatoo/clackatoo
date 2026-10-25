@@ -52,7 +52,7 @@ background 1
 
 ## Ports
 
-The list says the ports each one's programs listen on, as `· :8000`, looked at again every two seconds while it's open. In a window on another machine than the daemon, Ctrl+F in the list forwards them here, as `:PortForward 8000` does.
+The list says the ports each one's programs listen on, as `· :8000`, looked at again every two seconds while it's open. In a window on another machine than the daemon, Ctrl+F in the list forwards them here, as `:portforward 8000` does.
 
 Press Ctrl+B, then `b`, then `l`, and look for `:8000` beside it.
 

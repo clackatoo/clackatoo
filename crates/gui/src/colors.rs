@@ -317,7 +317,7 @@ pub(crate) const fn agent(chat: u32) -> Color {
 /// The sign beside a line an agent changed and you haven't reviewed, and
 /// how it's drawn: a bar down the line in its chat's colour, or for lines
 /// it deleted, a line along the foot of the line above, or the head of
-/// the first, as git's signs are drawn. Kept, under `:Blame`, it's a
+/// the first, as git's signs are drawn. Kept, under `:blame`, it's a
 /// faint dot.
 #[must_use]
 pub(crate) const fn agent_sign(
@@ -344,7 +344,7 @@ pub(crate) const fn agent_sign(
     (text, style)
 }
 
-/// How who changed a line is written after its end under `:Blame`: in
+/// How who changed a line is written after its end under `:blame`: in
 /// the chat's colour, dimmed, as diagnostics are.
 #[must_use]
 pub(crate) const fn blame(chat: u32) -> Style {

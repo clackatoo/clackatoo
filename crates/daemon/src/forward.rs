@@ -1,5 +1,5 @@
 //! Forwarding ports from a window's machine to its daemon's, on another
-//! machine: `:PortForward 8080`, so a browser here reaches a dev server
+//! machine: `:portforward 8080`, so a browser here reaches a dev server
 //! there at `localhost:8080`, as `ssh -L` does.
 //!
 //! A window keeps its [`Forwards`] for as long as it's open, through every
@@ -166,8 +166,8 @@ pub fn refusal(err: &AddError, asked: &Spec) -> String {
         format!("{host}:{}", asked.port)
     };
     let instead = |free: Option<u16>| match free {
-        Some(free) => format!(": :PortForward {free}:{there} forwards port {free} instead"),
-        None => format!(": :PortForward LOCAL:{there} forwards another"),
+        Some(free) => format!(": :portforward {free}:{there} forwards port {free} instead"),
+        None => format!(": :portforward LOCAL:{there} forwards another"),
     };
     match err {
         AddError::InUse { port, free } => {
@@ -177,7 +177,7 @@ pub fn refusal(err: &AddError, asked: &Spec) -> String {
             format!("Only root may listen on port {port} here{}", instead(None))
         }
         AddError::Forwarded(port) => {
-            format!("Port {port} is forwarded already: :PortForward! {port} stops it")
+            format!("Port {port} is forwarded already: :portforward! {port} stops it")
         }
         AddError::Io { .. } => {
             let mut said = err.to_string();

@@ -31,7 +31,7 @@ Back to [the top](#notes).
 
 ## Render it
 
-The practice pane is a Markdown file, as text. `<Space>tm`, or `:Markdown`, shows it rendered: headings, lists, task lists, quotes, tables, and code coloured as an editor colours it, in a column of prose.
+The practice pane is a Markdown file, as text. `<Space>tm`, or `:markdown`, shows it rendered: headings, lists, task lists, quotes, tables, and code coloured as an editor colours it, in a column of prose.
 
 ```check
 focused practice

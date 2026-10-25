@@ -1,6 +1,6 @@
 //! The other uses of the name the cursor rests on, lit once it's rested
 //! there; and part of a file formatted, by `gq` on a selection and by
-//! `:Format` over a range.
+//! `:format` over a range.
 
 use std::time::Instant;
 
@@ -274,11 +274,11 @@ fn format_over_a_range_formats_its_lines() {
     assert_eq!(setup.editor.take_format_asked(), Some((0, 15)));
     assert_eq!(
         ex(&mut setup, "1Format now"),
-        Err(":Format takes nothing after it, but has \"now\"".into())
+        Err(":format takes nothing after it, but has \"now\"".into())
     );
     assert_eq!(
         ex(&mut setup, "g/one/Format"),
-        Err(":Format can't be done by a :g".into())
+        Err(":format can't be done by a :g".into())
     );
     assert_eq!(setup.editor.take_format_asked(), None);
 }

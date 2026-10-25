@@ -464,10 +464,10 @@ pub(crate) struct Editor {
     /// been reviewed (`agentsigns`).
     agent_signs: bool,
     /// Who changed each line agents changed is written after it
-    /// (`:Blame`).
+    /// (`:blame`).
     blame: bool,
     /// The agents' column is shown, as of the last settle: while the file
-    /// has lines not reviewed, or under `:Blame`.
+    /// has lines not reviewed, or under `:blame`.
     agent_column: bool,
     /// The columns marked down the pane, counting from 0 (`colorcolumn`).
     columns: Vec<usize>,
@@ -3944,7 +3944,7 @@ impl Editor {
 
     /// The bytes of the copy's text a command asked to have formatted, as
     /// `gq` and `:'<,'>Format` do, for the desk to ask its language server,
-    /// as it does for `:Format`.
+    /// as it does for `:format`.
     pub(crate) fn take_format_asked(&mut self) -> Option<(usize, usize)> {
         self.format_asked.take()
     }
@@ -5434,7 +5434,7 @@ impl Editor {
 
     /// Works out the cells the signs and line numbers take now: with the
     /// agents' column while the file has lines not reviewed, or under
-    /// `:Blame`.
+    /// `:blame`.
     fn place_gutter(&mut self, copy: &BufferCopy) {
         self.agent_column = self.agent_signs && (self.blame || copy.agents().unreviewed());
         self.gutter = self.gutter_for(self.text(copy).lines());
@@ -5448,7 +5448,7 @@ impl Editor {
     }
 
     /// Writes who changed each line agents changed after it, or stops, as
-    /// `:Blame` toggles. Says which in the bar.
+    /// `:blame` toggles. Says which in the bar.
     pub(crate) fn toggle_blame(&mut self) -> Done {
         self.blame = !self.blame;
         self.status = Some(if self.blame { "blame on" } else { "blame off" }.into());
@@ -5832,7 +5832,7 @@ impl Editor {
         self.close_signature();
     }
 
-    /// Shows `rows`, a list such as `:registers` makes, under `heading`, in
+    /// Shows `rows`, a list such as `:Registers` makes, under `heading`, in
     /// the panel by the cursor, until the cursor moves.
     pub(crate) fn show_listing(&mut self, heading: &str, rows: Vec<String>) {
         self.close_completion();
@@ -6053,7 +6053,7 @@ impl Editor {
 /// search, or the key.
 impl Editor {
     /// Writes after line `line`, whose last row ends at cell `end`, what's
-    /// wrong with it, the `worst` (`virtualtext`), or else under `:Blame`,
+    /// wrong with it, the `worst` (`virtualtext`), or else under `:blame`,
     /// which chat's agent changed it, in which turn.
     fn write_after_line(
         &self,

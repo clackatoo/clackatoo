@@ -1,5 +1,5 @@
 //! What the bottom bar says until the next key, and what it's said lately,
-//! which `:messages` shows again: the window's own messages, as they're
+//! which `:Messages` shows again: the window's own messages, as they're
 //! said, and an editor's, as the bar shows them.
 //!
 //! Something gone wrong is said as a warning: in the warning colour, and
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use super::Desk;
 use crate::chrome::NoteKind;
 
-/// How many messages `:messages` keeps, the oldest going first.
+/// How many messages `:Messages` keeps, the oldest going first.
 const KEPT: usize = 200;
 
 /// How long a warning too long for the bar shows whole above it, unless a
@@ -25,7 +25,7 @@ pub(super) struct Said {
     warned: Option<(String, Instant)>,
     /// What's been said lately, oldest first.
     lately: Vec<String>,
-    /// Whether `:messages` shows them, until the next key.
+    /// Whether `:Messages` shows them, until the next key.
     shown: bool,
     /// What the focused editor said, as last seen in the bar, so it's kept
     /// once however often the bar is drawn.
@@ -33,14 +33,14 @@ pub(super) struct Said {
 }
 
 impl Said {
-    /// Keeps `message`, of something gone wrong, for `:messages`, and
+    /// Keeps `message`, of something gone wrong, for `:Messages`, and
     /// marks it a warning while the bar says it.
     pub(super) fn warned(&mut self, message: &str) {
         self.warned = Some((message.to_owned(), Instant::now()));
         self.keep(message);
     }
 
-    /// Keeps `message` for `:messages`.
+    /// Keeps `message` for `:Messages`.
     pub(super) fn keep(&mut self, message: &str) {
         if self.lately.len() == KEPT {
             self.lately.remove(0);
@@ -111,7 +111,7 @@ impl Desk {
     }
 
     /// Keeps what the focused editor says in the bar, such as `not found`,
-    /// for `:messages`, if it's new since it was last looked at. The window
+    /// for `:Messages`, if it's new since it was last looked at. The window
     /// calls it as it draws the bar.
     pub(crate) fn remember(&mut self) {
         let said = (self.focused_editor()).and_then(|(editor, _)| editor.said());
@@ -125,7 +125,7 @@ impl Desk {
         self.said.seen = said;
     }
 
-    /// `:messages`: shows what's been said lately, above the bar, until
+    /// `:Messages`: shows what's been said lately, above the bar, until
     /// the next key.
     pub(super) fn show_messages(&mut self) {
         if self.said.lately.is_empty() {
@@ -135,12 +135,12 @@ impl Desk {
         self.said.shown = true;
     }
 
-    /// What's been said lately, oldest first, while `:messages` shows it.
+    /// What's been said lately, oldest first, while `:Messages` shows it.
     pub(crate) fn messages_listed(&self) -> Option<&[String]> {
         self.said.shown.then_some(&self.said.lately[..])
     }
 
-    /// A key came: `:messages` closes, and a warning goes from above the
+    /// A key came: `:Messages` closes, and a warning goes from above the
     /// bar. Returns whether anything went, to draw.
     pub(super) fn key_closes_messages(&mut self) -> bool {
         let shown = std::mem::take(&mut self.said.shown);

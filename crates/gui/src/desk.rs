@@ -112,7 +112,7 @@ enum Asked {
     /// `:recover`, whose answer is said in the bar, or is a new tab's
     /// pane, to switch to.
     Recovered,
-    /// `:PortForward` in a workspace from another machine, whose answer
+    /// `:portforward` in a workspace from another machine, whose answer
     /// is said in the bar.
     Forwarded,
     /// Something asked about the devices paired with the web app, whose
@@ -334,7 +334,7 @@ pub(crate) struct Desk {
     /// A message for the focused pane's label, until the next key, such as
     /// why a command failed.
     message: Option<String>,
-    /// What's been said lately, for `:messages`, and whether the message
+    /// What's been said lately, for `:Messages`, and whether the message
     /// is a warning.
     said: messages::Said,
     /// The daemon's offer to install a language, asked in the bar until
@@ -457,7 +457,7 @@ pub(crate) struct Desk {
     /// `client.connect`, and whether to pass each on, if it said, asked
     /// again on each new connection to it.
     config_hosts: Vec<(String, Option<bool>)>,
-    /// What `:PortForward` asked for, waiting for the window to do it, as
+    /// What `:portforward` asked for, waiting for the window to do it, as
     /// the window keeps the forwards (see [`crate::forwards`]).
     forwards_asked: Vec<crate::command::Forwarding>,
     /// The tutor's lessons, and the lesson open.
@@ -1851,7 +1851,7 @@ impl Desk {
         self.user_active();
         self.key_coming();
         self.record_press(press);
-        // Any key but Shift and the like closes `:messages`.
+        // Any key but Shift and the like closes `:Messages`.
         let closed = !input::is_modifier(press.key) && self.key_closes_messages();
         let redraw = self.key_with(press, true);
         let typed = self.type_macros();
@@ -2053,7 +2053,7 @@ impl Desk {
         }
     }
 
-    /// `:AgentUndo` and `:AgentRedo`: the focused chat undoes turn `turn`,
+    /// `:agentundo` and `:agentredo`: the focused chat undoes turn `turn`,
     /// or redoes it if `redo`, `force`d with `!`.
     fn agent_undo(&mut self, turn: Option<usize>, redo: bool, force: bool) {
         let asked = (self.focused_pane()).map_or_else(
@@ -6156,7 +6156,7 @@ mod tests {
         // to unlock it.
         desk.pairing_asked(asking(Vec::new(), true));
         assert!(matches!(desk.status(), Status::Typing { text, .. }
-            if text.contains(":Devices unlock")));
+            if text.contains(":devices unlock")));
         desk.devices_command(crate::command::DevicesCommand::Unlock);
         assert_eq!(answer_all(&mut desk), [Request::UnlockPairing]);
     }
@@ -7658,7 +7658,7 @@ mod tests {
         assert!(format_asked(&mut desk).is_empty(), "not asked twice");
         assert_eq!(note(&desk), "it's being formatted already");
         // The daemon makes its edits, as the user's, one undo step, then
-        // answers, as for `:Format`.
+        // answers, as for `:format`.
         desk.buffer_changed(
             BufferId(7),
             BufferUpdate::Answer {

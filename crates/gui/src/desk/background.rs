@@ -19,7 +19,7 @@
 //! |---|---|
 //! | Enter | Brings it back as a tab of its workspace, going there |
 //! | Ctrl+D | Dismisses it: twice for one still running |
-//! | Ctrl+F | Forwards the ports it listens on here, in a window on another machine, as `:PortForward` does |
+//! | Ctrl+F | Forwards the ports it listens on here, in a window on another machine, as `:portforward` does |
 
 use std::time::{Duration, Instant};
 
@@ -154,7 +154,7 @@ impl Desk {
     }
 
     /// Forwards here the ports the background tab the list's `path` names
-    /// listens on, each to the same port, as `:PortForward PORT` does: in
+    /// listens on, each to the same port, as `:portforward PORT` does: in
     /// a window on another machine than the daemon.
     pub(super) fn forward_background(&mut self, path: &str) {
         let Ok(tab) = path.parse().map(TabId) else {

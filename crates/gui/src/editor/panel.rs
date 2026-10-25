@@ -284,7 +284,7 @@ impl Panel {
         })
     }
 
-    /// A list, as `:registers` shows, a line for each of `rows`, under a
+    /// A list, as `:Registers` shows, a line for each of `rows`, under a
     /// quieter `heading`. `None` if there are no rows.
     pub(crate) fn listing(
         heading: &str,

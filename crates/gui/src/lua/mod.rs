@@ -192,7 +192,7 @@ pub(crate) enum FromLua {
     },
     /// Run a command, as if typed after `:`.
     Command(String),
-    /// Forward a port, as `:PortForward` does, but saying nothing in a
+    /// Forward a port, as `:portforward` does, but saying nothing in a
     /// window on this machine, which has none to forward: a config runs in
     /// every window.
     Forward(clackatoo_daemon::forward::Spec),

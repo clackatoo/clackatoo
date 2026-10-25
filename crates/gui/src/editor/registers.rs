@@ -391,7 +391,7 @@ impl Registers {
         Ok(keys)
     }
 
-    /// The registers that hold something, a line for each as `:registers`
+    /// The registers that hold something, a line for each as `:Registers`
     /// lists them, as Neovim does: `l` for lines, `b` for a block or `c` for
     /// characters, the
     /// name, and the start of the text, with line breaks and other control
@@ -416,7 +416,7 @@ impl Registers {
     }
 }
 
-/// How much of a register's text `:registers` shows, in characters.
+/// How much of a register's text `:Registers` shows, in characters.
 const SHOWN: usize = 100;
 
 /// The start of `text`, on one line, with control characters as `^` and a

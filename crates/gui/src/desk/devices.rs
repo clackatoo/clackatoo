@@ -1,11 +1,11 @@
 //! The devices paired with the daemon's web app, as a window sees them:
 //! those asking to pair, asked about in the bar until a window answers,
-//! `:Devices`, which lists them and answers, and telling the daemon
+//! `:devices`, which lists them and answers, and telling the daemon
 //! whether the window's user is there, so it knows when a phone is to be
 //! notified instead.
 //!
 //! A device asking shows a code, and the bar never does: it's allowed by
-//! typing the code it shows, `:Devices allow CODE`, so only someone who
+//! typing the code it shows, `:devices allow CODE`, so only someone who
 //! can see the device can let it in. Nothing in the bar takes a key, so a
 //! question can't be answered by typing meant for a terminal.
 
@@ -40,17 +40,17 @@ impl Desk {
         }
         let text = match self.pairing.asking.as_slice() {
             [] if self.pairing.locked => "Too many wrong passwords: pairing with the password \
-                                          is locked until :Devices unlock"
+                                          is locked until :devices unlock"
                 .to_owned(),
             [] => return None,
             [ask] => format!(
-                "{} ({}) asks to control clackatoo: :Devices allow and the code it shows, \
-                 or :Devices deny",
+                "{} ({}) asks to control clackatoo: :devices allow and the code it shows, \
+                 or :devices deny",
                 ask.name, ask.from
             ),
             asks => format!(
-                "{} devices ask to control clackatoo: :Devices allow and the code one shows, \
-                 or :Devices deny",
+                "{} devices ask to control clackatoo: :devices allow and the code one shows, \
+                 or :devices deny",
                 asks.len()
             ),
         };
@@ -63,7 +63,7 @@ impl Desk {
         })
     }
 
-    /// Does what `:Devices` says.
+    /// Does what `:devices` says.
     pub(super) fn devices_command(&mut self, command: DevicesCommand) {
         let request = match command {
             DevicesCommand::List => Request::Devices,
@@ -75,7 +75,7 @@ impl Desk {
         self.request(request, Asked::Devices);
     }
 
-    /// The daemon's answer to something `:Devices` asked: what to say in
+    /// The daemon's answer to something `:devices` asked: what to say in
     /// the bar.
     pub(super) fn devices_answered(&mut self, response: Response) -> bool {
         let said = match response {
@@ -133,7 +133,7 @@ fn listing(devices: &[Device], now: u64) -> String {
         })
         .collect();
     format!(
-        "Devices: {} · :Devices revoke N unpairs one",
+        "Devices: {} · :devices revoke N unpairs one",
         each.join(" · ")
     )
 }
@@ -182,7 +182,7 @@ mod tests {
         assert_eq!(
             listed,
             "Devices: 1 phone 1 (connected, notified) · 2 phone 2 (used 3 days ago) · \
-             :Devices revoke N unpairs one"
+             :devices revoke N unpairs one"
         );
         assert!(listing(&[], 0).starts_with("No devices"));
         assert_eq!(ago(30_000), "just now");

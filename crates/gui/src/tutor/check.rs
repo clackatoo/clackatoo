@@ -21,7 +21,7 @@
 //! | `rooted "PATH"` | A file explorer in the lesson's tab is rooted at PATH, from the lesson's folder: `.` for the folder itself. |
 //! | `file "NAME"` | The focused editor's file is called NAME. |
 //! | `recording R` | A macro is being recorded into register R. |
-//! | `messages` | `:messages` shows what the bar has said lately. |
+//! | `messages` | `:Messages` shows what the bar has said lately. |
 //! | `saved` | The practice file has no changes that aren't written. |
 //! | `rendered` | The focused editor shows its Markdown rendered. |
 //! | `background N` | The workspace shown has N background tabs. |
@@ -155,7 +155,7 @@ pub(crate) trait Facts {
     fn file(&self) -> Option<String>;
     /// The register a macro is being recorded into.
     fn recording(&self) -> Option<char>;
-    /// Whether `:messages` shows what the bar has said lately.
+    /// Whether `:Messages` shows what the bar has said lately.
     fn messages_shown(&self) -> bool;
     /// Whether the focused editor shows its Markdown rendered.
     fn rendered(&self) -> bool;
