@@ -404,14 +404,14 @@ fn main() {
                             continue;
                         }
                         match action {
-                            ChatAction::Submit { text, .. } => {
+                            ChatAction::Submit { text, images, .. } => {
                                 if text == "delayed" {
                                     std::thread::sleep(std::time::Duration::from_millis(350));
                                 }
                                 node.delivery.queued.push(QueuedMessage {
                                     id: 20,
                                     text,
-                                    images: 0,
+                                    images: u8::try_from(images.len()).unwrap(),
                                     target: None,
                                 });
                             }

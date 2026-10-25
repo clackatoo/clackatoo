@@ -71,6 +71,10 @@ Tap the model name for **Agent settings**: model, permissions, reasoning and any
 
 Draft text stays with its chat when you navigate away, and survives reloads in the same browser tab through session storage. It clears only after the daemon accepts that exact message. If sending fails or the connection is lost, the text is kept. A lost acknowledgment may mean the message was delivered: the app tells you to check the conversation before retrying, and never resends it automatically. Drafts aren't shared between devices; an unavailable browser storage API limits recovery to the current page.
 
+**Attach photos** beside Send opens the device's photo/file picker, including in the iPhone Home Screen app. Choose up to four photos or screenshots and review the thumbnails above the message box; × removes one. You can send photos with or without text, or queue them while an agent works. Photos are prepared locally and uploaded only when you send. Browser-decodable images are converted to PNG, with a maximum side of 4,096 pixels and the same 8 MiB encoded message limit as the native client. An unsupported format asks you to choose a PNG or JPEG export.
+
+Unsent photos stay with their chat across navigation and connection interruptions, and clear only when their submission is accepted. They live in this page's memory, so reloading or closing the page discards them; text drafts still survive reloads. An unconfirmed send never retries automatically.
+
 ## Terminals
 
 The **Terminals** filter lists each workspace’s terminals, with what each is running, where, and its size; terminals in no workspace are under Elsewhere. Tap one to follow it.

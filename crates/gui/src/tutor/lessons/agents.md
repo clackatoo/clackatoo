@@ -31,6 +31,8 @@ Stop or a failed turn pauses the queue. Use ↑ to resume, or × to discard a pe
 
 ## Viewing images
 
+In the web app, tap **Attach photos** beside Send to choose photos or screenshots. Up to four thumbnails appear above the message box; × removes one. Send an image on its own or add text, and Queue works while the agent is busy. Photos stay with that chat while navigating and reconnecting, and clear only after delivery is accepted. Unsent photos are kept in this page's memory, so send them before reloading or closing the page. Large photos are reduced to a maximum side of 4,096 pixels; unsupported formats show an error so you can choose a PNG or JPEG export.
+
 Click an image in the message box, a sent message, or a tool result to open the same image viewer over the chat. Escape, Ctrl+; (the normal-mode shortcut), or the × closes it and returns you to your draft and previous mode. While it is open, typing, pasting, scrolling and clicks on the chat behind it do nothing. The × on a draft thumbnail still removes that attachment.
 
 The viewer loads the original image when opened and shows its pixel dimensions when ready. Drafts use the local attachment; sent messages and image tools fetch the original through the daemon connection, including remote and federated chats. Chat updates still carry only small thumbnails. Each chat retains up to 32 MiB / 128 recent encoded originals across window reconnects and daemon upgrades. Older images whose original was never retained or has expired explicitly show “Original unavailable · thumbnail only”. Originals are not saved across a full daemon restart. Decoding runs in the background, with a 16-million-pixel and 8,192-pixel-per-side limit.

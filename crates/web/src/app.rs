@@ -14,6 +14,7 @@
 
 use std::cell::RefCell;
 
+mod photos;
 mod terminal;
 mod viewport;
 
@@ -111,6 +112,7 @@ enum Pairing {
 /// The parts of the page showing a chat.
 #[derive(Debug)]
 struct ChatPage {
+    photos: photos::Controls,
     main: HtmlElement,
     scroller: DomElement,
     latest: HtmlElement,
@@ -148,6 +150,7 @@ impl ChatPage {
         open: &crate::state::OpenChat,
     ) -> bool {
         let node = open.view.as_ref().and_then(|v| v.chat());
+        self.photos.draw(document, state, open.id);
         let queue = node.map_or_else(|| el("div"), |n| view::queue(n, state.online));
         if queue != self.shown_queue {
             dom::replace_children(document, &self.queue, &el("div").child(queue.clone()));
@@ -166,8 +169,10 @@ impl ChatPage {
             )
         });
         let sending = state.submitting.contains(&open.id);
-        let disabled = draft.trim().is_empty()
+        let empty = draft.trim().is_empty() && state.images.get(&open.id).is_none_or(Vec::is_empty);
+        let disabled = empty
             || sending
+            || state.loading_images.contains(&open.id)
             || state.online != crate::state::Online::Open
             || node.is_none();
         for button in [&self.send_button, &self.steer_button] {
@@ -191,7 +196,7 @@ impl ChatPage {
             .send_button
             .class_list()
             .toggle_with_force("queue-send", busy);
-        self.intent.set_hidden(!busy || draft.trim().is_empty());
+        self.intent.set_hidden(!busy || empty);
         self.send_button.set_text_content(Some(if sending {
             "…"
         } else if busy {
@@ -199,10 +204,11 @@ impl ChatPage {
         } else {
             "↑"
         }));
-        self.steer_button
-            .set_hidden(!busy || draft.trim().is_empty());
+        self.steer_button.set_hidden(!busy || empty);
         self.steer_button.set_text_content(Some(
-            if node.is_some_and(|n| n.delivery.native_steering) {
+            if node.is_some_and(|n| n.delivery.native_steering)
+                && state.images.get(&open.id).is_none_or(Vec::is_empty)
+            {
                 "Steer now"
             } else {
                 "Stop & continue"
@@ -537,6 +543,7 @@ fn listen_to_page(window: &Window, document: &Document, root: &DomElement) {
         }
     });
     listen_for_chat_input(root);
+    photos::listen(root);
     // Scrolling doesn't bubble: heard on the way down.
     listen(root, "scroll", true, |_| {
         with_app(App::scrolled);
@@ -1785,6 +1792,7 @@ impl App {
         .unchecked_into();
         let dock = part("dock");
         let composer = part("composer");
+        let photos = photos::Controls::new(document);
         let stage = dom::element_of(
             document,
             &el("section").class("chat-stage").attr("id", "chat-stage"),
@@ -1808,6 +1816,7 @@ impl App {
         let row = part("row");
         let (textarea, send_button, steer_button) = composer_inputs(document);
         let _ = row.append_child(&menus);
+        photos.mount(&row, &composer);
         let _ = intent.append_child(&steer_button);
         let _ = row.append_child(&send_button);
         // At the top of the box's bar, which stays at the screen's foot,
@@ -1844,6 +1853,7 @@ impl App {
         self.root.set_text_content(None);
         let _ = self.root.append_child(&main);
         ChatPage {
+            photos,
             main,
             scroller,
             latest,
@@ -1953,6 +1963,8 @@ impl App {
                 "delivering queued message",
             ),
             Action::Stop => self.state.chat(ChatAction::Stop, "stopping the agent"),
+            Action::AttachPhotos => self.attach_photos(),
+            Action::RemovePhoto(id) => self.remove_photo(id),
             Action::Send | Action::Steer => {
                 self.state.submit(action == Action::Steer);
             }

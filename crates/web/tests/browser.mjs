@@ -70,6 +70,69 @@ try {
   };
   await tightComposer();
 
+  // The real file input, local decode/PNG normalization, thumbnails and wire
+  // submission. No provider credentials or model requests are involved.
+  const photo=await page.evaluate(()=>{
+    const c=document.createElement('canvas');c.width=20;c.height=30;
+    const ctx=c.getContext('2d');ctx.fillStyle='#ef3344';ctx.fillRect(0,0,20,30);
+    return {png:c.toDataURL('image/png').split(',')[1],jpeg:c.toDataURL('image/jpeg').split(',')[1]};
+  });
+  const png={name:'screenshot.png',mimeType:'image/png',buffer:Buffer.from(photo.png,'base64')};
+  const jpeg={name:'photo.jpg',mimeType:'image/jpeg',buffer:Buffer.from(photo.jpeg,'base64')};
+  const chooser=page.waitForEvent('filechooser');
+  await page.getByRole('button',{name:'Attach photos',exact:true}).click();
+  await (await chooser).setFiles([png,jpeg]);
+  await page.waitForFunction(()=>document.querySelectorAll('.draft-photo').length===2 && !document.querySelector('#photo-input').disabled);
+  assert.equal(await page.locator('.draft-photo canvas').first().evaluate(c=>c.height),30);
+  assert(await page.getByRole('button',{name:'Stop & continue',exact:true}).isVisible(),'image steering label should explain interruption');
+  await noOverflow();
+  await page.screenshot({path:`${output}/phone-photo-draft.png`});
+  await page.getByRole('button',{name:'Remove photo 1',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('.draft-photo').length===1);
+  await page.getByRole('button',{name:'Queue message',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('.draft-photo').length===0);
+  assert(actions.some(a=>a.startsWith('Submit')&&a.includes('text: ""')&&a.includes('ChatImage')&&a.includes('width: 20')&&a.includes('iVBOR')),'photo was not normalized to PNG and sent');
+  await page.locator('[data-action="remove-queued:20"]').click();
+  await page.locator('#photo-input').setInputFiles([png,png,png,png,png]);
+  await page.getByText('Attach up to four photos per message.',{exact:true}).waitFor();
+  assert.equal(await page.locator('.draft-photo').count(),0);
+  await page.locator('#photo-input').setInputFiles({name:'bad.png',mimeType:'image/png',buffer:Buffer.from('not an image')});
+  await page.getByText(/This photo could not be decoded/).waitFor();
+  await page.locator('#photo-input').setInputFiles(png);
+  await page.waitForFunction(()=>document.querySelectorAll('.draft-photo').length===1 && !document.querySelector('#photo-input').disabled);
+  await page.locator('#message').fill('reject');
+  await page.getByRole('button',{name:'Queue message',exact:true}).click();
+  await page.getByText(/Message not sent:/).waitFor();
+  assert.equal(await page.locator('.draft-photo').count(),1,'rejection discarded photo');
+  await page.getByRole('button',{name:'All agents',exact:true}).click();
+  await page.locator('.home .chat .title').filter({hasText:'Polish the mobile experience'}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('.draft-photo').length===1);
+  await page.getByRole('button',{name:'Remove photo 1',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('.draft-photo').length===0);
+  await page.locator('#message').fill('');
+  // A decode finishing after navigation must not put the photo in the newly
+  // opened chat, or allow a partial message to be sent before it finishes.
+  await page.evaluate(()=>{
+    window.savedCreateImageBitmap=window.createImageBitmap;
+    window.createImageBitmap=async(...args)=>{
+      await new Promise(resolve=>setTimeout(resolve,600));
+      return window.savedCreateImageBitmap(...args);
+    };
+  });
+  await page.locator('#photo-input').setInputFiles(png);
+  await page.getByText('Preparing photos…',{exact:true}).waitFor();
+  assert(await page.getByRole('button',{name:'Queue message',exact:true}).isDisabled());
+  await page.getByRole('button',{name:'All agents',exact:true}).click();
+  await page.locator('.home .chat .title').filter({hasText:'Review authentication changes'}).click();
+  await page.locator('#message').waitFor();
+  await page.waitForTimeout(700);
+  assert.equal(await page.locator('.draft-photo').count(),0,'decode attached to the wrong chat');
+  await page.getByRole('button',{name:'All agents',exact:true}).click();
+  await page.locator('.home .chat .title').filter({hasText:'Polish the mobile experience'}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('.draft-photo').length===1);
+  await page.getByRole('button',{name:'Remove photo 1',exact:true}).click();
+  await page.evaluate(()=>{window.createImageBitmap=window.savedCreateImageBitmap;delete window.savedCreateImageBitmap;});
+
   await page.locator('#message').fill('Draft survives navigation');
   await page.getByRole('button',{name:'All agents',exact:true}).click();
   await page.locator('.home .chat .title').filter({hasText:'Polish the mobile experience'}).click();
@@ -251,6 +314,6 @@ try {
   await page.screenshot({path:`${output}/phone-terminal.png`});
   await noOverflow();
   assert.deepEqual(errors,[]);
-  console.log('PASS: dashboard filters/search; navigation and reload drafts; rejected delivery; native steering; global models/favorites/permissions/usage; paged history/anchors/reconnect; scroll/latest; delayed acknowledgments; 320px/390px/keyboard/landscape/desktop layout; approvals; image pixels; terminal Fit.');
+  console.log('PASS: dashboard filters/search; navigation and reload drafts; photo picker/PNG normalization/removal/image-only send/rejection/async navigation; native steering; global models/favorites/permissions/usage; paged history/anchors/reconnect; scroll/latest; delayed acknowledgments; 320px/390px/keyboard/landscape/desktop layout; approvals; image pixels; terminal Fit.');
   await context.close();
 } finally { await browser.close(); server.close(); }

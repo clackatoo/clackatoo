@@ -863,6 +863,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Inspect tool permissions, services and discovery with :Capabilities",
     },
+    News {
+        id: "web-photo-attachments",
+        date: "2026-10-25",
+        lesson: "agents",
+        what: "Attach photos and screenshots from the web composer",
+    },
 ];
 
 impl News {

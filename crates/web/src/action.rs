@@ -23,6 +23,8 @@ pub enum Action {
     Stop,
     /// Sends what's typed.
     Send,
+    AttachPhotos,
+    RemovePhoto(u64),
     /// Asks for notifications.
     Notify,
     /// Pairs with the password typed.
@@ -179,6 +181,8 @@ impl Action {
             Self::Answer { question, choice } => format!("answer:{question}:{choice}"),
             Self::Stop => "stop".to_owned(),
             Self::Send => "send".to_owned(),
+            Self::AttachPhotos => "attach-photos".to_owned(),
+            Self::RemovePhoto(id) => format!("remove-photo:{id}"),
             Self::Notify => "notify".to_owned(),
             Self::Pair => "pair".to_owned(),
             Self::Ask => "ask".to_owned(),
@@ -220,6 +224,8 @@ impl Action {
             }
             ("stop", "") => Self::Stop,
             ("send", "") => Self::Send,
+            ("attach-photos", "") => Self::AttachPhotos,
+            ("remove-photo", id) => Self::RemovePhoto(id.parse().ok()?),
             ("notify", "") => Self::Notify,
             ("pair", "") => Self::Pair,
             ("ask", "") => Self::Ask,

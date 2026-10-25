@@ -14,6 +14,9 @@ use clackatoo_protocol::{
 use crate::keys::{self, Key, Modifiers};
 use crate::term::{Fit, OpenTerminal};
 
+mod images;
+pub use images::Attachment;
+
 /// How long what was last sent may go unanswered, in milliseconds,
 /// before keys for a terminal are turned down rather than sent: a key
 /// that reaches a shell long after it was typed may do what the user no
@@ -138,6 +141,7 @@ enum Asked {
     Submitted {
         chat: TerminalId,
         text: String,
+        images: Vec<u64>,
     },
     /// Something the user did, as "sending the message".
     Doing(&'static str),
@@ -174,6 +178,9 @@ pub struct State {
     pub home_filter: HomeFilter,
     pub home_query: String,
     pub drafts: BTreeMap<TerminalId, String>,
+    pub images: BTreeMap<TerminalId, Vec<Attachment>>,
+    pub loading_images: BTreeSet<TerminalId>,
+    next_image: u64,
     pub submitting: BTreeSet<TerminalId>,
     pub dirty: Dirty,
     /// Now, in milliseconds, as the app last said.
@@ -211,6 +218,9 @@ impl Default for State {
             home_filter: HomeFilter::All,
             home_query: String::new(),
             drafts: BTreeMap::new(),
+            images: BTreeMap::new(),
+            loading_images: BTreeSet::new(),
+            next_image: 0,
             submitting: BTreeSet::new(),
             dirty: Dirty::default(),
             now: 0.0,
@@ -303,10 +313,15 @@ impl State {
     fn answered(&mut self, response: Response) {
         let asked = self.asked.pop_front().map(|(asked, _)| asked);
         self.keys_heard();
-        if let Some(Asked::Submitted { chat, text }) = &asked {
+        if let Some(Asked::Submitted { chat, text, images }) = &asked {
             self.submitting.remove(chat);
-            if !matches!(response, Response::Error(_)) && self.drafts.get(chat) == Some(text) {
-                self.drafts.remove(chat);
+            if !matches!(response, Response::Error(_)) {
+                if self.drafts.get(chat) == Some(text) {
+                    self.drafts.remove(chat);
+                }
+                if let Some(current) = self.images.get_mut(chat) {
+                    current.retain(|image| !images.contains(&image.id));
+                }
             }
         }
         match (response, asked) {
@@ -902,7 +917,11 @@ impl State {
             return;
         };
         let text = self.drafts.get(&terminal).cloned().unwrap_or_default();
-        if text.trim().is_empty() || self.submitting.contains(&terminal) {
+        let attachments = self.images.get(&terminal).cloned().unwrap_or_default();
+        if (text.trim().is_empty() && attachments.is_empty())
+            || self.submitting.contains(&terminal)
+            || self.loading_images.contains(&terminal)
+        {
             return;
         }
         if self.online != Online::Open {
@@ -917,7 +936,7 @@ impl State {
                 terminal,
                 action: ChatAction::Submit {
                     text: text.clone(),
-                    images: Vec::new(),
+                    images: attachments.iter().map(|a| (*a.image).clone()).collect(),
                     target: None,
                     steer,
                 },
@@ -925,6 +944,7 @@ impl State {
             Asked::Submitted {
                 chat: terminal,
                 text,
+                images: attachments.iter().map(|a| a.id).collect(),
             },
         );
         self.dirty.footer = true;
