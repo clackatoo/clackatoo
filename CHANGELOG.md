@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026.10.74 (2026-10-25)
+
+This release brings image attachments and full-resolution image viewing to agent
+chats, a redesigned composer and searchable model picker with favourites, queued
+messages and steering, and a provider usage dashboard. Provider switches remain
+pending until the next message is sent.
+
+The interface also gains smooth scrolling across native panes, grouped file-change
+and undo controls, compact queue and steering controls, and a larger usage modal
+with percentage remaining, provider-coloured allowance bars and reset countdowns.
+
+### Features
+
+- **agents:** paste clipboard images into chat messages (CLACKA-132) (7f9904d)
+- **agents:** render retained image thumbnails in chats (CLACKA-132) (cce902e)
+- **agents:** refine chat layout and tool summaries (CLACKA-133) (c9821b9)
+- **gui:** polish composer icons and inline context gauge (8a2521b)
+- **gui:** refine model navigation and expose fast mode (1f7d697)
+- **agents:** show image tool results in chat history (CLACKA-137) (8c5f4d6)
+- **gui:** share an image modal across chat previews (CLACKA-138) (08a00ed)
+- **gui:** load original chat images on demand (CLACKA-139) (1856765)
+- **chat:** stage provider handoffs until send (CLACKA-140) (6979eb8)
+- **chat:** add queued prompts and steering (e04b28b)
+- **chat:** show provider usage limits from the context gauge (9feab77)
+
 ## 2026.10.73 (2026-10-23)
 
 ### Features
