@@ -111,26 +111,8 @@ pub fn terminal_header(state: &State, term: &OpenTerminal) -> Element {
         Online::Connecting => said.push("connecting…".to_owned()),
         Online::Open => {}
     }
-    let fit = match term.fit {
-        Fit::Off => el("button")
-            .class("quiet")
-            .class("fit")
-            .action(&Action::Fit)
-            .text("Fit"),
-        Fit::Asked(_) => el("button")
-            .class("quiet")
-            .class("fit")
-            .attr("disabled", "")
-            .text("Fitting…"),
-        Fit::On(_) => el("button")
-            .class("fit")
-            .class("fitted")
-            .action(&Action::Unfit)
-            .attr("aria-label", "Fitted to the phone: tap to put back")
-            .text("Fitted ✕"),
-    };
     el("header")
-        .class("bar chat-bar")
+        .class("bar chat-bar terminal-bar")
         .child(
             el("button")
                 .class("back")
@@ -144,7 +126,15 @@ pub fn terminal_header(state: &State, term: &OpenTerminal) -> Element {
                 .child(el("h1").text(title))
                 .child(el("div").class("meta").text(said.join(" · "))),
         )
-        .child(fit)
+        .child(
+            el("button")
+                .class("terminal-options term-controls-toggle")
+                .action(&Action::TerminalControls)
+                .attr("aria-label", "Terminal options")
+                .attr("aria-expanded", "false")
+                .attr("aria-controls", "terminal-controls")
+                .text("⋯"),
+        )
 }
 
 /// What's under a terminal: whether keys go, and if not, how many were
@@ -169,14 +159,104 @@ pub fn key_row(state: &State, term: &OpenTerminal) -> Element {
     if let Some(note) = &state.note {
         part = part.child(el("p").class("note").text(note.clone()));
     }
-    let keys = RowKey::ALL.into_iter().map(|key| {
+    let key = |key: RowKey| {
         el("button")
             .class("key")
             .class_if(key == RowKey::Ctrl && term.ctrl, "on")
             .action(&Action::Key(key))
+            .attr("aria-label", key.name())
             .text(key.label())
-    });
-    part.child(el("div").class("key-row").children(keys))
+    };
+    let primary = [
+        RowKey::Escape,
+        RowKey::Tab,
+        RowKey::Ctrl,
+        RowKey::Left,
+        RowKey::Up,
+        RowKey::Down,
+        RowKey::Right,
+    ];
+    let extra = [
+        RowKey::CtrlC,
+        RowKey::Pipe,
+        RowKey::Tilde,
+        RowKey::Slash,
+        RowKey::Dash,
+        RowKey::Paste,
+    ];
+    part = part.child(terminal_controls(term, extra.into_iter().map(key)));
+    part.child(
+        el("div")
+            .class("key-toolbar")
+            .child(
+                el("div")
+                    .class("key-row")
+                    .children(primary.into_iter().map(key)),
+            )
+            .child(
+                el("button")
+                    .class("terminal-hide")
+                    .action(&Action::HideKeyboard)
+                    .attr("aria-label", "Hide keyboard")
+                    .text("⌄"),
+            ),
+    )
+    .child(
+        el("div")
+            .class("terminal-idle")
+            .child(el("button").action(&Action::Type).text("⌨  Keyboard"))
+            .child(el("span").text("Tap output to type")),
+    )
+}
+
+fn terminal_controls(term: &OpenTerminal, extra: impl IntoIterator<Item = Element>) -> Element {
+    let fit = match term.fit {
+        Fit::Off => el("button")
+            .class("quiet")
+            .class("fit")
+            .action(&Action::Fit)
+            .text("Fit"),
+        Fit::Asked(_) => el("button")
+            .class("quiet")
+            .class("fit")
+            .attr("disabled", "")
+            .text("Fitting…"),
+        Fit::On(_) => el("button")
+            .class("fit")
+            .class("fitted")
+            .action(&Action::Unfit)
+            .attr("aria-label", "Fitted to the phone: tap to put back")
+            .text("Fitted ✕"),
+    };
+    el("div")
+        .class("terminal-controls")
+        .attr("id", "terminal-controls")
+        .child(
+            el("div")
+                .class("terminal-size-controls")
+                .child(el("span").text("Text size"))
+                .child(
+                    el("button")
+                        .action(&Action::SmallerText)
+                        .attr("aria-label", "Smaller terminal text")
+                        .text("A−"),
+                )
+                .child(el("span").class("terminal-font-size"))
+                .child(
+                    el("button")
+                        .action(&Action::LargerText)
+                        .attr("aria-label", "Larger terminal text")
+                        .text("A+"),
+                )
+                .child(el("button").action(&Action::ResetText).text("Reset")),
+        )
+        .child(
+            el("div")
+                .class("terminal-fit-row")
+                .child(fit)
+                .child(el("span").text("Resize the shared terminal to this screen")),
+        )
+        .child(el("div").class("key-row extra-keys").children(extra))
 }
 
 /// What the connection is, as a dot and a word.
@@ -1629,19 +1709,25 @@ mod tests {
     }
 
     #[test]
-    fn a_terminals_header_offers_fitting_and_says_when_its_fitted() {
+    fn terminal_controls_offer_fitting_and_say_when_its_fitted() {
         let mut state = State::default();
         state.open_terminal(TerminalId(2));
         let size = clackatoo_protocol::Size::new(40, 30).unwrap();
         let term = state.term.as_mut().unwrap();
-        let header = terminal_header(&State::default(), term);
-        assert_eq!(
-            header.find_all("data-action")[1].get("data-action"),
-            Some("fit")
+        let controls = key_row(&State::default(), term);
+        assert!(
+            controls
+                .find_all("data-action")
+                .iter()
+                .any(|e| e.get("data-action") == Some("fit"))
         );
         term.fit = Fit::On(size);
-        let header = terminal_header(&State::default(), term);
-        let fitted = header.find_all("data-action")[1];
+        let controls = key_row(&State::default(), term);
+        let fitted = controls
+            .find_all("data-action")
+            .into_iter()
+            .find(|e| e.get("data-action") == Some("unfit"))
+            .unwrap();
         assert_eq!(fitted.get("data-action"), Some("unfit"));
         assert!(fitted.all_text().contains("Fitted"));
     }
@@ -1662,12 +1748,13 @@ mod tests {
             .unwrap();
         assert_eq!(ctrl.get("class"), Some("key on"));
         let labels: Vec<String> = (row.find_all("data-action").into_iter())
+            .filter(|e| e.get("data-action").is_some_and(|a| a.starts_with("key:")))
             .map(Element::all_text)
             .collect();
         assert_eq!(
             labels,
             [
-                "Esc", "Tab", "Ctrl", "^C", "←", "↑", "↓", "→", "|", "~", "/", "-", "Paste"
+                "^C", "|", "~", "/", "-", "Paste", "Esc", "Tab", "Ctrl", "←", "↑", "↓", "→"
             ]
         );
     }

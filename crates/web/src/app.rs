@@ -292,8 +292,8 @@ struct App {
     /// When the chat shown is next drawn for its seconds to count, while
     /// its agent works, in milliseconds since the Unix epoch.
     count_at: f64,
-    /// The key on the row of keys a finger is on, and where it came down.
-    pressed: Option<(RowKey, (f64, f64))>,
+    /// The terminal control a finger is on, and where it came down.
+    pressed: Option<(Action, (f64, f64))>,
     /// Counts the phone's screen changes, so the terminal is fitted again
     /// only once it settles.
     refits: u32,
@@ -788,14 +788,9 @@ fn touch_listeners(
         event.prevent_default();
     }));
     kept.push(listen_kept(keys, "touchstart", move |event| {
-        let key = (event.target())
-            .and_then(|target| target.dyn_into::<DomElement>().ok())
-            .and_then(|target| target.closest(".key").ok().flatten())
+        let key = terminal_control_target(&event)
             .and_then(|key| key.get_attribute("data-action"))
-            .and_then(|action| match Action::decode(&action) {
-                Some(Action::Key(key)) => Some(key),
-                _ => None,
-            });
+            .and_then(|action| Action::decode(&action));
         let at = event.dyn_ref::<TouchEvent>().and_then(first);
         if let (Some(key), Some(at)) = (key, at) {
             // Keeps the box focused, and the keyboard up.
@@ -824,22 +819,29 @@ fn touch_listeners(
                 if let Some((key, _)) = app.pressed.take()
                     && ended
                 {
-                    app.act(Action::Key(key));
+                    app.act(key);
                 }
             });
         }));
     }
     // With a mouse, a key pressed keeps the box focused too.
     kept.push(listen_kept(keys, "mousedown", |event| {
-        let on_key = (event.target())
-            .and_then(|target| target.dyn_into::<DomElement>().ok())
-            .and_then(|target| target.closest(".key").ok().flatten())
-            .is_some();
+        let on_key = terminal_control_target(&event).is_some();
         if on_key {
             event.prevent_default();
         }
     }));
     kept
+}
+
+fn terminal_control_target(event: &Event) -> Option<DomElement> {
+    event
+        .target()?
+        .dyn_into::<DomElement>()
+        .ok()?
+        .closest(".key, .terminal-hide, .term-controls-toggle, .terminal-controls button")
+        .ok()
+        .flatten()
 }
 
 /// Listens for `kind` on `target`, able to keep the browser from doing
@@ -1901,18 +1903,14 @@ impl App {
             Action::Home => self.go(""),
             Action::Open(chat) => self.go(&format!("#chat/{chat}")),
             Action::OpenTerminal(terminal) => self.go(&format!("#term/{terminal}")),
-            Action::Fit => {
-                let size = self.term_page.as_ref().and_then(TermPage::phone_size);
-                if size.is_some() {
-                    self.state.fit(size);
-                }
-            }
-            Action::Unfit => self.state.fit(None),
-            Action::Type => {
-                if let Some(page) = &self.term_page {
-                    let _ = page.input.focus();
-                }
-            }
+            Action::Fit
+            | Action::Unfit
+            | Action::Type
+            | Action::HideKeyboard
+            | Action::TerminalControls
+            | Action::SmallerText
+            | Action::LargerText
+            | Action::ResetText => self.terminal_control(action),
             Action::Key(RowKey::Ctrl) => self.state.tap_ctrl(),
             Action::Key(RowKey::Paste) => self.paste_clipboard(),
             Action::Key(key) => {

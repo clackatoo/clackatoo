@@ -1,5 +1,5 @@
 //! The page showing a terminal: its header, its rows, the history above
-//! them, the row of keys, and the box typed into, which takes the phone's
+//! them, the compact key row, and an invisible input that takes the phone's
 //! keyboard.
 //!
 //! Rows are the page's own elements, one per row, and only rows that
@@ -8,8 +8,8 @@
 //! rows each time, which a phone lays out well within a frame, and the
 //! text stays text, to select and copy.
 //!
-//! The rows are drawn at the terminal's own size, the font made as large
-//! as fits the phone's width, but never under [`MIN_FONT`]: a wider
+//! The rows are drawn at the terminal's own size, the default font kept
+//! between [`MIN_FONT`] and 16 pixels: a wider
 //! terminal pans sideways instead. Pinching zooms, for as long as the
 //! terminal is shown.
 
@@ -18,6 +18,7 @@ use wasm_bindgen::JsCast as _;
 use wasm_bindgen::closure::Closure;
 use web_sys::{Document, Element as DomElement, Event, HtmlElement, HtmlInputElement};
 
+use crate::action::Action;
 use crate::dom;
 use crate::grid::{self, Cursor};
 use crate::state::State;
@@ -27,17 +28,17 @@ use crate::view;
 
 /// The smallest font rows are drawn in to fit the phone's width, in CSS
 /// pixels: a wider terminal pans sideways rather than go smaller.
-pub(super) const MIN_FONT: f64 = 7.0;
+pub(super) const MIN_FONT: f64 = 14.0;
 
 /// The font a terminal fitted to the phone is sized for, unless the user
 /// pinched to another.
-const FIT_FONT: f64 = 12.0;
+const FIT_FONT: f64 = 14.0;
 
 /// The smallest and largest fonts pinching gets to.
-const PINCH_FONTS: (f64, f64) = (4.0, 40.0);
+const PINCH_FONTS: (f64, f64) = (10.0, 32.0);
 
 /// A row's height over its font's size: `.grid`'s `line-height`.
-const LINE_HEIGHT: f64 = 1.2;
+const LINE_HEIGHT: f64 = 1.45;
 
 /// What the box typed into always holds, and nothing else: a zero-width
 /// space, so Backspace on a phone's keyboard has something to delete,
@@ -82,6 +83,7 @@ pub(super) struct TermPage {
     pinch: Option<(f64, f64)>,
     /// Whether anything has been drawn.
     drawn: bool,
+    controls_open: bool,
     /// What hears the fingers on the rows and the keys, for as long as
     /// the page is shown.
     _touches: Vec<Closure<dyn FnMut(Event)>>,
@@ -100,12 +102,12 @@ impl TermPage {
         let history = make(&el("div").class("history"));
         let screen = make(&el("div").class("screen"));
         let keys = make(&el("div").class("keys-slot"));
-        let typing = make(&el("div").class("type-row"));
         // What's typed goes as it's typed, so nothing the phone's keyboard
         // does to words may touch it.
         let input: HtmlInputElement = make(
             &el("input")
                 .attr("id", "keys")
+                .class("terminal-input")
                 .attr("type", "text")
                 .attr("autocomplete", "off")
                 .attr("autocorrect", "off")
@@ -116,19 +118,17 @@ impl TermPage {
                 .attr("value", SENTINEL),
         )
         .unchecked_into();
-        let label = make(&el("span").class("type-label").text("Type"));
         let _ = grid.append_child(&history);
         let _ = grid.append_child(&screen);
         let _ = scroller.append_child(&grid);
-        let _ = typing.append_child(&label);
-        let _ = typing.append_child(&input);
-        for part in [&header, &scroller, &keys, &typing] {
+        let _ = main.append_child(&input);
+        for part in [&header, &scroller, &keys] {
             let _ = main.append_child(part);
         }
         root.set_text_content(None);
         let _ = root.append_child(&main);
         let ratio = measure(document, &grid);
-        let touches = super::touch_listeners(&scroller, &keys);
+        let touches = super::touch_listeners(&scroller, &main);
         Self {
             main,
             header,
@@ -146,6 +146,7 @@ impl TermPage {
             zoomed: None,
             pinch: None,
             drawn: false,
+            controls_open: false,
             _touches: touches,
         }
     }
@@ -163,6 +164,7 @@ impl TermPage {
             dom::replace_children(document, &self.keys, &el("div").child(keys.clone()));
             self.shown_keys = keys;
         }
+        self.sync_controls();
         let Some(grid) = term.grid() else {
             if fresh {
                 let opening = el("p").class("muted").text("Opening…");
@@ -294,7 +296,9 @@ impl TermPage {
             return;
         }
         let fits = self.width() / (f64::from(self.cols.max(1)) * self.ratio);
-        let font = self.zoomed.unwrap_or(fits.max(MIN_FONT));
+        // Use whole pixels so a fitted grid does not grow taller than the
+        // space calculated with FIT_FONT through fractional rounding.
+        let font = self.zoomed.unwrap_or(fits.floor().clamp(MIN_FONT, 16.0));
         self.set_font(font);
     }
 
@@ -305,6 +309,7 @@ impl TermPage {
         }
         let at_bottom = self.at_bottom();
         self.font = font;
+        self.sync_controls();
         let _ = (self.grid.style()).set_property("font-size", &format!("{font:.2}px"));
         if at_bottom {
             self.to_bottom();
@@ -313,14 +318,14 @@ impl TermPage {
 
     /// The width rows have, inside the scroller's padding.
     fn width(&self) -> f64 {
-        f64::from(self.scroller.client_width() - 12).max(1.0)
+        f64::from(self.scroller.client_width() - 24).max(1.0)
     }
 
     /// The size the terminal would be to fit the phone: as many cells of
     /// [`FIT_FONT`], or the font pinched to, as fit the rows' space.
     pub(super) fn phone_size(&self) -> Option<Size> {
         let font = self.zoomed.unwrap_or(FIT_FONT);
-        let height = f64::from(self.scroller.client_height() - 8).max(1.0);
+        let height = f64::from(self.scroller.client_height() - 32).max(1.0);
         let fit = |space: f64, cell: f64| {
             let cells = (space / cell).floor().clamp(2.0, f64::from(u16::MAX));
             #[allow(
@@ -359,10 +364,42 @@ impl TermPage {
         self.pinch = None;
     }
 
+    pub(super) fn toggle_controls(&mut self) {
+        self.controls_open = !self.controls_open;
+        self.sync_controls();
+    }
+
+    pub(super) fn change_font(&mut self, step: Option<f64>) {
+        self.zoomed = step.map(|step| (self.font + step).clamp(PINCH_FONTS.0, PINCH_FONTS.1));
+        self.fit_font();
+    }
+
+    fn sync_controls(&self) {
+        let _ = self
+            .main
+            .class_list()
+            .toggle_with_force("controls-open", self.controls_open);
+        if let Ok(Some(toggle)) = self.header.query_selector(".term-controls-toggle") {
+            let _ = toggle.set_attribute(
+                "aria-expanded",
+                if self.controls_open { "true" } else { "false" },
+            );
+        }
+        if let Ok(Some(size)) = self.keys.query_selector(".terminal-font-size") {
+            size.set_text_content(Some(&format!("{:.0}", self.font)));
+        }
+    }
+
     /// Puts the page where the phone shows it, above its keyboard: the
     /// visual viewport, `height` pixels tall, `top` pixels down the page.
     pub(super) fn place(&self, top: f64, height: f64) {
         let at_bottom = self.at_bottom();
+        let typing = self
+            .input
+            .owner_document()
+            .and_then(|d| d.active_element())
+            .is_some_and(|active| active == *self.input.unchecked_ref::<DomElement>());
+        let _ = self.main.class_list().toggle_with_force("typing", typing);
         let style = self.main.style();
         let _ = style.set_property("top", &format!("{top}px"));
         let _ = style.set_property("height", &format!("{height}px"));
@@ -386,5 +423,47 @@ fn measure(document: &Document, grid: &HtmlElement) -> f64 {
     } else {
         // Nothing laid out yet: monospace fonts are about this.
         0.6
+    }
+}
+
+impl super::App {
+    pub(super) fn terminal_control(&mut self, action: Action) {
+        match action {
+            Action::Fit => {
+                let size = self.term_page.as_ref().and_then(TermPage::phone_size);
+                if size.is_some() {
+                    self.state.fit(size);
+                }
+            }
+            Action::Unfit => self.state.fit(None),
+            Action::Type => {
+                if let Some(page) = &self.term_page {
+                    let _ = page.input.focus();
+                }
+            }
+            Action::HideKeyboard => {
+                if let Some(page) = &self.term_page {
+                    let _ = page.input.blur();
+                }
+                self.viewport_settling();
+            }
+            Action::TerminalControls => {
+                if let Some(page) = &mut self.term_page {
+                    page.toggle_controls();
+                }
+                self.viewport_changed();
+            }
+            Action::SmallerText | Action::LargerText | Action::ResetText => {
+                if let Some(page) = &mut self.term_page {
+                    page.change_font(match action {
+                        Action::SmallerText => Some(-1.0),
+                        Action::LargerText => Some(1.0),
+                        _ => None,
+                    });
+                }
+                self.viewport_changed();
+            }
+            _ => {}
+        }
     }
 }

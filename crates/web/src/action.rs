@@ -46,6 +46,11 @@ pub enum Action {
     Unfit,
     /// Brings up the keyboard, to type into the terminal shown.
     Type,
+    HideKeyboard,
+    TerminalControls,
+    SmallerText,
+    LargerText,
+    ResetText,
     /// A key on the row above the keyboard.
     Key(RowKey),
     /// Shows how much context the chat shown fills, in full, or hides it.
@@ -191,6 +196,11 @@ impl Action {
             Self::Fit => "fit".to_owned(),
             Self::Unfit => "unfit".to_owned(),
             Self::Type => "type".to_owned(),
+            Self::ResetText => "reset-text".to_owned(),
+            Self::LargerText => "larger-text".to_owned(),
+            Self::SmallerText => "smaller-text".to_owned(),
+            Self::TerminalControls => "terminal-controls".to_owned(),
+            Self::HideKeyboard => "hide-keyboard".to_owned(),
             Self::Key(key) => format!("key:{}", key.name()),
             Self::Usage => "usage".to_owned(),
             Self::Settings => "settings".to_owned(),
@@ -232,6 +242,11 @@ impl Action {
             ("fit", "") => Self::Fit,
             ("unfit", "") => Self::Unfit,
             ("type", "") => Self::Type,
+            ("reset-text", "") => Self::ResetText,
+            ("larger-text", "") => Self::LargerText,
+            ("smaller-text", "") => Self::SmallerText,
+            ("terminal-controls", "") => Self::TerminalControls,
+            ("hide-keyboard", "") => Self::HideKeyboard,
             ("key", name) => Self::Key(RowKey::ALL.into_iter().find(|key| key.name() == name)?),
             ("usage", "") => Self::Usage,
             ("settings", "") => Self::Settings,
@@ -320,6 +335,11 @@ mod tests {
             Action::Fit,
             Action::Unfit,
             Action::Type,
+            Action::ResetText,
+            Action::LargerText,
+            Action::SmallerText,
+            Action::TerminalControls,
+            Action::HideKeyboard,
             Action::Usage,
         ]
         .into_iter()

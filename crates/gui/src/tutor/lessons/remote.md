@@ -58,9 +58,9 @@ Draft text stays per chat, including across reloads in the same browser tab, and
 
 ## Terminals from your phone
 
-The app's **Terminals** filter lists each workspace's terminals, with what each is running and where. Tap one to see it as it is, at its own size: its rows as wide as the phone allows, and if they're wider still, panned sideways with a finger; pinch to zoom. Scroll up for its history. **Fit** sizes the terminal to the phone instead, and says Fitted while it lasts; it goes back to the size your windows want when you tap Fitted, leave the terminal, or type into it from a window.
+The app's **Terminals** filter lists each workspace's terminals, with what each is running and where. Tap one to see it as it is, at its own size: readable text with sideways panning for wide terminals; pinch to zoom or open **⋯** for text size controls. Scroll up for its history. **Fit**, under **⋯**, sizes the terminal to the phone instead, and says Fitted while it lasts; it goes back to the size your windows want when you tap Fitted, leave the terminal, or type into it from a window.
 
-Tap the rows to bring up the keyboard; what you type goes as you type it, a key at a time, and the row above the keyboard has Esc, Tab, Ctrl (for the next key), Ctrl+C, the arrows, `|`, `~`, `/`, `-` and Paste. When the daemon can't be reached, or hasn't answered for three seconds, keys are turned down and the phone says so, rather than reach a shell long after you meant them.
+Tap the rows or **Keyboard** to type. What you type goes as you type it, a key at a time. A compact row appears with Esc, Tab, Ctrl (for the next key), the arrows and a down chevron to hide the keyboard. **⋯** holds Ctrl+C, `|`, `~`, `/`, `-` and Paste. When the daemon can't be reached, or hasn't answered for three seconds, keys are turned down and the phone says so, rather than reach a shell long after you meant them.
 
 ## Another machine's workspaces, in your bar
 

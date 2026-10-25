@@ -361,6 +361,14 @@ fn main() {
                         reply(&ServerMessage::Response(Response::Done));
                         terminal_snapshot(terminal_info().size);
                     }
+                    Request::SendInput { bytes, .. } => {
+                        let mut hex = String::with_capacity(bytes.len() * 2);
+                        for byte in bytes {
+                            write!(hex, "{byte:02x}").unwrap();
+                        }
+                        eprintln!("TerminalInput {hex}");
+                        reply(&ServerMessage::Response(Response::Done));
+                    }
                     Request::Fit { size, .. } => {
                         reply(&ServerMessage::Response(Response::Done));
                         terminal_snapshot(size.unwrap_or_else(|| terminal_info().size));

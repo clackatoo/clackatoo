@@ -875,6 +875,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Web model, permissions and tools share one composer menu",
     },
+    News {
+        id: "web-terminal-polish",
+        date: "2026-10-25",
+        lesson: "remote",
+        what: "Readable web terminals, a compact typing row and text sizing under the options menu",
+    },
 ];
 
 impl News {
