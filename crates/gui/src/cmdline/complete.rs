@@ -160,6 +160,102 @@ impl Completion {
     }
 }
 
+/// Help for a visible completion, using the command before its word.
+/// Kept separate from replacement text: selecting help never types it.
+pub(crate) fn description(before: &str, choice: &str) -> String {
+    let start = word_start(before);
+    let command = before[..start].split_whitespace().next();
+    let Some(command) = command else {
+        let (_, name) = split_mark(choice);
+        if let Some((kind, _)) = name.split_once('@') {
+            return format!("{} on this machine", command::description(kind));
+        }
+        return command::description(name).to_owned();
+    };
+    match command::takes(command) {
+        Takes::Options => option_description(choice),
+        Takes::Path => {
+            let (_, command) = split_mark(command);
+            let command = command.trim_end_matches('!');
+            if choice.ends_with('/') {
+                "Folder — continue into this directory".to_owned()
+            } else if matches!(command, "w" | "write" | "wq" | "x") {
+                "Save the buffer to this file".to_owned()
+            } else {
+                "Open this file".to_owned()
+            }
+        }
+        Takes::Workspace if choice.starts_with("new@") => {
+            "Create a workspace on this machine".to_owned()
+        }
+        Takes::Workspace => "Switch to this workspace".to_owned(),
+        Takes::Lesson if choice == "new" => "See what’s new in Clackatoo".to_owned(),
+        Takes::Lesson => {
+            crate::tutor::lesson(choice).map_or_else(String::new, |lesson| lesson.title.clone())
+        }
+        Takes::Host if command == "disconnect" => "Disconnect this machine’s workspaces".to_owned(),
+        Takes::Host => "Connect to this machine’s workspaces".to_owned(),
+        Takes::Words(_) => argument_description(command, choice).to_owned(),
+        Takes::Nothing => String::new(),
+    }
+}
+
+fn option_description(choice: &str) -> String {
+    let (name, value) = choice
+        .split_once('=')
+        .map_or((choice, None), |(name, value)| (name, Some(value)));
+    let find = |name| {
+        options::ALL
+            .iter()
+            .find(|info| info.name == name || info.short == name)
+    };
+    let (prefix, info) = if let Some(info) = find(name) {
+        ("", Some(info))
+    } else if let Some(name) = name.strip_prefix("no") {
+        ("Off · ", find(name))
+    } else if let Some(name) = name.strip_prefix("inv") {
+        ("Toggle · ", find(name))
+    } else {
+        ("", None)
+    };
+    info.map_or_else(String::new, |info| match value {
+        Some(value) => format!("{}: {value}", info.description),
+        None => format!("{prefix}{}", info.description),
+    })
+}
+
+fn argument_description(command: &str, word: &str) -> &'static str {
+    let (_, command) = split_mark(command);
+    let command = command
+        .split('@')
+        .next()
+        .unwrap_or(command)
+        .trim_end_matches('!');
+    match (command, word) {
+        ("Gitsigns", "preview_hunk") => "Preview the Git change at the cursor",
+        ("Gitsigns", "reset_hunk") => "Discard the Git change at the cursor",
+        ("Gitsigns", "stage_hunk") => "Stage the Git change at the cursor",
+        ("Gitsigns", "next_hunk") => "Jump to the next Git change",
+        ("Gitsigns", "prev_hunk") => "Jump to the previous Git change",
+        ("Devices", "allow") => "Approve a device using its pairing code",
+        ("Devices", "deny") => "Reject pending device pairing requests",
+        ("Devices", "revoke") => "Remove a paired device’s access",
+        ("Devices", "unlock") => "Re-enable pairing after too many failed attempts",
+        ("keep", "always") => "Restart this command when it exits, too",
+        ("keep", "off") => "Stop restarting this terminal command",
+        ("Review", "chat") => "Review all changes made by this chat",
+        ("Review", "turn") => "Review the last turn, or a numbered turn",
+        ("Review", "base") => "Review all changes since the branch’s base",
+        ("ReviewKeep", "file") => "Keep all agent changes in this file",
+        ("ReviewKeep", "turn") => "Keep changes from this turn, or a numbered turn",
+        ("ReviewKeep", "all") => "Keep all changes in the review or chat",
+        ("ReviewReject", "file") => "Reject all agent changes in this file",
+        ("ReviewReject", "turn") => "Reject changes from this turn, or a numbered turn",
+        ("ReviewReject", "all") => "Reject all changes in the review or chat",
+        _ => "",
+    }
+}
+
 /// Where the word that ends `before` starts: after the last blank, of any
 /// width, that isn't written `\ `.
 fn word_start(before: &str) -> usize {
@@ -369,6 +465,77 @@ impl Listing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_offered_builtin_has_short_help() {
+        for choice in choices("", &none()) {
+            assert!(!description("", &choice).is_empty(), "command {choice}");
+        }
+        for name in command::PANES {
+            assert!(
+                !description("|", &format!("|{name}")).is_empty(),
+                "pane {name}"
+            );
+        }
+        for info in options::ALL {
+            assert!(
+                !description("set ", info.name).is_empty(),
+                "option {}",
+                info.name
+            );
+            if info.kind == Kind::Bool {
+                for prefix in ["no", "inv"] {
+                    let help = description("set ", &format!("{prefix}{}", info.name));
+                    assert!(help.contains(info.description));
+                }
+            }
+            if let Kind::Choice(words) = info.kind {
+                for value in words {
+                    let help = description("set ", &format!("{}={value}", info.name));
+                    assert!(help.contains(info.description));
+                }
+            }
+        }
+        for command in command::NAMES {
+            if let Takes::Words(words) = command::takes(command) {
+                for word in words {
+                    assert!(
+                        !description(&format!("{command} "), word).is_empty(),
+                        "{command} {word}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_help_describes_the_argument_in_its_context() {
+        assert_eq!(
+            description("e ", "src/"),
+            "Folder — continue into this directory"
+        );
+        assert_eq!(
+            description("w ", "notes.md"),
+            "Save the buffer to this file"
+        );
+        assert_eq!(description("e ", "notes.md"), "Open this file");
+        assert_eq!(description("ws ", "project"), "Switch to this workspace");
+        assert_eq!(
+            description("ws new@", "new@desk"),
+            "Create a workspace on this machine"
+        );
+        assert_eq!(
+            description("|Terminal@", "|Terminal@desk"),
+            "Open a new terminal on this machine"
+        );
+        for lesson in crate::tutor::lessons() {
+            assert_eq!(description("Tutor ", lesson.id), lesson.title);
+        }
+        assert_eq!(
+            description("ReviewReject! ", "file"),
+            "Reject all agent changes in this file"
+        );
+    }
 
     /// What `before` could be, listing any files at once.
     fn choices(before: &str, sources: &Sources) -> Vec<String> {

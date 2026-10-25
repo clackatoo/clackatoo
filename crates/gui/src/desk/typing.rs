@@ -11,7 +11,7 @@ use winit::keyboard::{Key, NamedKey};
 
 use super::bindings::CHOICES;
 use super::{Asked, Desk, Input, Purpose};
-use crate::chrome::Status;
+use crate::chrome::{PaletteChoice, Status};
 use crate::cmdline::complete::{Completion, Found, Listed, Listing, Sources};
 use crate::cmdline::recall::{self, Kind, Recalled, Save, Start};
 use crate::cmdline::{Keyed, Line};
@@ -527,7 +527,7 @@ impl Desk {
                 if choices.is_empty() && !name.is_empty() {
                     choices.push((format!("New workspace “{name}”"), true));
                 }
-                choices
+                choices.into_iter().map(Into::into).collect()
             }
             // As many as fit, from the one picked.
             (_, Some(completion)) => {
@@ -539,7 +539,14 @@ impl Desk {
                     .enumerate()
                     .skip(top)
                     .take(CHOICES))
-                .map(|(index, choice)| (choice.clone(), Some(index) == completion.picked))
+                .map(|(index, choice)| PaletteChoice {
+                    text: choice.clone(),
+                    description: crate::cmdline::complete::description(
+                        input.line.before_caret(),
+                        choice,
+                    ),
+                    picked: Some(index) == completion.picked,
+                })
                 .collect()
             }
             // A folder slow to list says so.
@@ -549,7 +556,7 @@ impl Desk {
                         && self.listing_for(input, asked)
                 }) =>
             {
-                vec![("listing…".to_owned(), false)]
+                vec![("listing…".to_owned(), false).into()]
             }
             _ => Vec::new(),
         };

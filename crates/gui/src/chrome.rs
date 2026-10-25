@@ -335,6 +335,24 @@ pub(crate) struct Item<T> {
     pub(crate) tip: Option<(String, Rect)>,
 }
 
+/// A palette row. Help is presentation only, never completion text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PaletteChoice {
+    pub(crate) text: String,
+    pub(crate) description: String,
+    pub(crate) picked: bool,
+}
+
+impl From<(String, bool)> for PaletteChoice {
+    fn from((text, picked): (String, bool)) -> Self {
+        Self {
+            text,
+            description: String::new(),
+            picked,
+        }
+    }
+}
+
 /// What the bottom bar and the palette show.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
@@ -345,7 +363,7 @@ pub(crate) enum Status {
     Typing {
         label: Option<String>,
         text: String,
-        choices: Vec<(String, bool)>,
+        choices: Vec<PaletteChoice>,
         /// The bytes of `text` selected, which what's typed first replaces.
         selected: Option<std::ops::Range<usize>>,
         under: Option<Box<Status>>,
@@ -645,7 +663,7 @@ impl Chrome {
             height: pill_height,
         });
 
-        let status = contents.status;
+        let mut status = contents.status;
         let bottom = lay_out_bottom(
             &geometry,
             (&status, contents.waiting.as_deref()),
@@ -669,9 +687,22 @@ impl Chrome {
         );
         // Drawn only with the bottom bar, as notices take its place.
         let messages = (contents.messages).map(|lines| raise(&geometry, lines, None, false));
-        let (palette, palette_text_x, choices) = match &status {
+        let (palette, palette_text_x, choices) = match &mut status {
             Status::Typing { label, choices, .. } => {
-                let (rect, rows) = place_palette(&geometry, choices.len());
+                let described = choices.iter().any(|choice| !choice.description.is_empty());
+                let (rect, rows) = place_palette(&geometry, choices.len(), described);
+                // On a short window keep the selected item among the rows that fit.
+                let top = choices
+                    .iter()
+                    .position(|choice| choice.picked)
+                    .map_or(0, |picked| (picked + 1).saturating_sub(rows.len()));
+                choices.drain(..top);
+                choices.truncate(rows.len());
+                let width = rect.width - 6.0 * padding;
+                for choice in choices {
+                    choice.text = cut_to(&choice.text, width, false, measure);
+                    choice.description = cut_to(&choice.description, width, false, measure);
+                }
                 let label = label
                     .as_deref()
                     .map_or(0.0, |label| measure(label, false) + 2.0 * padding);
@@ -1122,23 +1153,36 @@ impl Chrome {
                 ink: Ink::Plain,
                 font: TextFont::Mono,
             });
-            for ((choice, picked), row) in choices.iter().zip(&self.choices) {
-                if *picked {
+            for (choice, row) in choices.iter().zip(&self.choices) {
+                if choice.picked {
                     painted.over.push(Fill::rounded(
                         row.to_array(),
                         Paint::Chosen,
                         (1.5 * metrics.padding).round(),
                     ));
                 }
+                let described = !choice.description.is_empty();
+                let text_y = (row.y
+                    + (row.height - metrics.ui_line * if described { 2.0 } else { 1.0 }) / 2.0)
+                    .round();
                 painted.over_texts.push(Text {
-                    origin: [
-                        row.x + 2.0 * metrics.padding,
-                        (row.y + (row.height - metrics.ui_line) / 2.0).round(),
-                    ],
-                    content: choice,
-                    ink: if *picked { Ink::Plain } else { Ink::Muted },
+                    origin: [row.x + 2.0 * metrics.padding, text_y],
+                    content: &choice.text,
+                    ink: if described || choice.picked {
+                        Ink::Plain
+                    } else {
+                        Ink::Muted
+                    },
                     font: TextFont::Ui,
                 });
+                if described {
+                    painted.over_texts.push(Text {
+                        origin: [row.x + 2.0 * metrics.padding, text_y + metrics.ui_line],
+                        content: &choice.description,
+                        ink: Ink::Muted,
+                        font: TextFont::Ui,
+                    });
+                }
             }
         }
     }
@@ -1752,7 +1796,7 @@ fn place_buttons(geometry: &Geometry, layout: &ButtonLayout) -> (Vec<(Button, Re
 /// The palette: in the middle of the window, wide enough for most
 /// commands, a line of text tall, and `choices` rows taller. Returns it,
 /// and where each choice goes.
-fn place_palette(geometry: &Geometry, choices: usize) -> (Rect, Vec<Rect>) {
+fn place_palette(geometry: &Geometry, choices: usize, described: bool) -> (Rect, Vec<Rect>) {
     let metrics = geometry.metrics;
     let padding = metrics.padding;
     let [width, height] = geometry.size;
@@ -1760,7 +1804,7 @@ fn place_palette(geometry: &Geometry, choices: usize) -> (Rect, Vec<Rect>) {
         .min(90.0 * metrics.cell[0])
         .min(width - 4.0 * padding);
     let line_height = (metrics.cell[1] + 4.0 * padding).round();
-    let row_height = metrics.pill_height();
+    let row_height = metrics.pill_height() + if described { metrics.ui_line } else { 0.0 };
     // As many choices as fit in the window.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let fit = ((height - line_height - 5.0 * padding) / row_height).max(0.0) as usize;
@@ -2867,6 +2911,40 @@ mod tests {
             Hit::Resize(ResizeDirection::SouthEast)
         );
         assert_eq!(chrome.hit([400.0, 1.0], true), Hit::TopBar);
+    }
+
+    #[test]
+    fn described_palette_rows_fit_and_keep_the_selection_visible() {
+        let chrome = chrome(
+            Status::Typing {
+                label: None,
+                text: ":set ▏".into(),
+                choices: (0..30)
+                    .map(|index| PaletteChoice {
+                        text: format!("option{index}"),
+                        description:
+                            "A long description that must be shortened to stay inside the popup "
+                                .repeat(3),
+                        picked: index == 29,
+                    })
+                    .collect(),
+                selected: None,
+                under: None,
+            },
+            &ButtonLayout::default(),
+        );
+        let Status::Typing { choices, .. } = &chrome.status else {
+            panic!("palette")
+        };
+        assert!(choices.last().unwrap().picked);
+        assert_eq!(choices.len(), chrome.choices.len());
+        let rect = chrome.palette.unwrap();
+        for (choice, row) in choices.iter().zip(&chrome.choices) {
+            assert!(choice.description.ends_with('…'));
+            assert!(measure(&choice.description, false) <= row.width - 4.0 * METRICS.padding);
+            assert!(row.height >= 2.0 * METRICS.ui_line);
+            assert!(row.y + row.height <= rect.y + rect.height);
+        }
     }
 
     #[test]

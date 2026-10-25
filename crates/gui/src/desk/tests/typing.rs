@@ -20,7 +20,13 @@ fn shift_tab(desk: &mut Desk) {
 /// it, with the one picked.
 fn typed(desk: &Desk) -> (String, Vec<(String, bool)>) {
     match desk.status() {
-        Status::Typing { text, choices, .. } => (text, choices),
+        Status::Typing { text, choices, .. } => (
+            text,
+            choices
+                .into_iter()
+                .map(|choice| (choice.text, choice.picked))
+                .collect(),
+        ),
         Status::Tabs { .. } => panic!("nothing's typed"),
     }
 }
@@ -504,4 +510,21 @@ fn completion_at_a_moved_caret_preserves_the_text_after_it() {
     );
     key(&mut desk, NamedKey::Tab);
     assert_eq!(text(&desk), ":set number▏ wrap");
+}
+
+#[test]
+fn suggestion_help_is_displayed_but_never_inserted() {
+    let mut desk = terminal_desk();
+    desk.options.number = false;
+    type_keys(&mut desk, ":set nu");
+    let Status::Typing { choices, .. } = desk.status() else {
+        panic!("prompt")
+    };
+    assert_eq!(choices[0].text, "number");
+    assert_eq!(choices[0].description, "Show line numbers");
+    key(&mut desk, NamedKey::Tab);
+    assert_eq!(text(&desk), ":set number▏");
+    key(&mut desk, NamedKey::Enter);
+    assert!(desk.input.is_none());
+    assert!(desk.options.number, "the setting was applied");
 }

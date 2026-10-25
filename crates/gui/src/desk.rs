@@ -4915,7 +4915,10 @@ mod tests {
         ]));
         ctrl_b(&mut desk, "w");
         let choices = |desk: &Desk| match desk.status() {
-            Status::Typing { choices, .. } => choices,
+            Status::Typing { choices, .. } => choices
+                .into_iter()
+                .map(|choice| (choice.text, choice.picked))
+                .collect::<Vec<_>>(),
             Status::Tabs { .. } => panic!("the picker closed"),
         };
         assert_eq!(choices(&desk).len(), 3);

@@ -631,9 +631,9 @@ fn the_palette_is_drawn_over_the_panes() {
             label: Some("Workspace".into()),
             text: "o▏".into(),
             choices: vec![
-                ("clackatoo".into(), false),
-                ("dotfiles".into(), true),
-                ("homelab".into(), false),
+                ("clackatoo".into(), false).into(),
+                ("dotfiles".into(), true).into(),
+                ("homelab".into(), false).into(),
             ],
             selected: None,
             under: None,
