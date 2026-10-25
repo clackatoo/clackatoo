@@ -797,6 +797,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Active agent turns continue automatically after daemon upgrades; stopped chats stay stopped",
     },
+    News {
+        id: "codex-native-steering",
+        date: "2026-10-25",
+        lesson: "agents",
+        what: "Steer Codex's active turn without cancelling its work, with Ctrl+Enter or the queued message's arrow",
+    },
 ];
 
 impl News {

@@ -1011,9 +1011,19 @@ fn safe_steering(result: &Value) -> bool {
         .pointer("/_meta/steering/supported")
         .and_then(Value::as_bool)
         == Some(true)
-        && result.pointer("/agentInfo/name").and_then(Value::as_str)
-            == Some("@agentclientprotocol/claude-agent-acp")
-        && result.pointer("/agentInfo/version").and_then(Value::as_str) == Some("0.88.0")
+        && matches!(
+            (
+                result.pointer("/agentInfo/name").and_then(Value::as_str),
+                result.pointer("/agentInfo/version").and_then(Value::as_str)
+            ),
+            (
+                Some("@agentclientprotocol/claude-agent-acp"),
+                Some("0.88.0")
+            ) | (
+                Some("@agentclientprotocol/codex-acp"),
+                Some("2.2.2+clackatoo.1")
+            )
+        )
 }
 
 #[cfg(test)]
@@ -1025,6 +1035,16 @@ mod steering_tests {
         assert!(safe_steering(&v));
         v["agentInfo"]["name"] = json!("@agentclientprotocol/codex-acp");
         assert!(!safe_steering(&v));
+        v["agentInfo"]["version"] = json!("2.2.2");
+        assert!(
+            !safe_steering(&v),
+            "unpatched Codex loses idle-turn ownership"
+        );
+        v["agentInfo"]["version"] = json!("2.2.2+clackatoo.1");
+        assert!(safe_steering(&v));
+        v["_meta"]["steering"]["supported"] = json!(false);
+        assert!(!safe_steering(&v));
+        v["_meta"]["steering"]["supported"] = json!(true);
         v["agentInfo"]["name"] = json!("@agentclientprotocol/claude-agent-acp");
         v["agentInfo"]["version"] = json!("0.87.0");
         assert!(!safe_steering(&v));

@@ -572,8 +572,8 @@ impl Fake {
                         json!({ "close": {}, "resume": {} })
                     },
                 },
-                "agentInfo": if std::env::args().any(|a| a == "--steering") { json!({ "name": "@agentclientprotocol/claude-agent-acp", "version": "0.88.0" }) } else { json!({ "name": "fake-agent", "version": "0" }) },
-                "_meta": { "steering": { "supported": std::env::args().any(|a| a == "--steering") } },
+                "agentInfo": if std::env::args().any(|a| a == "--codex-steering") { json!({ "name": "@agentclientprotocol/codex-acp", "version": "2.2.2+clackatoo.1" }) } else if std::env::args().any(|a| a == "--steering") { json!({ "name": "@agentclientprotocol/claude-agent-acp", "version": "0.88.0" }) } else { json!({ "name": "fake-agent", "version": "0" }) },
+                "_meta": { "steering": { "supported": std::env::args().any(|a| a == "--steering" || a == "--codex-steering") } },
                 "authMethods": [],
             }),
         );

@@ -36,6 +36,8 @@
 //! it starts it again after an upgrade or a crash with no window there,
 //! for a chat opened from a phone as from a desktop, on its own machine.
 
+mod codex_steering;
+
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -143,7 +145,7 @@ pub(crate) const KNOWN: &[Known] = &[
             program: "codex-acp",
             source: locked!("codex", "@agentclientprotocol/codex-acp@2.2.2"),
         },
-        version: "2.2.2",
+        version: codex_steering::VERSION,
         args: &[],
         size: "450 MB",
         // Codex starts in the mode its own config gives, as it does in a
@@ -281,6 +283,16 @@ pub struct AgentConfig {
 }
 
 impl Known {
+    /// The prepared entry point. Codex's backport lives beside the original
+    /// bundle; a partial install cannot accidentally enable native steering.
+    fn installed_program(&self, dir: &Path) -> PathBuf {
+        if self.name == "codex" {
+            codex_steering::program(dir)
+        } else {
+            self.adapter.installed_program(dir)
+        }
+    }
+
     /// Its adapter's package, as `name@version`.
     pub(crate) fn package(&self) -> &'static str {
         match &self.adapter.source {
@@ -363,7 +375,7 @@ impl AgentConfig {
         };
         let args = known.args.iter().map(OsString::from);
         let installed = (self.dir.as_deref())
-            .map(|dir| known.adapter.installed_program(&install_dir(dir, known)))
+            .map(|dir| known.installed_program(&install_dir(dir, known)))
             .filter(|program| program.is_file());
         if let Some(program) = installed {
             return Start::Ready {
@@ -455,7 +467,7 @@ impl AgentConfig {
             }),
             Launch::Known(known) => {
                 let installed = (self.dir.as_deref())
-                    .map(|dir| known.adapter.installed_program(&install_dir(dir, known)));
+                    .map(|dir| known.installed_program(&install_dir(dir, known)));
                 installed.is_some_and(|program| program.is_file())
                     || self.program(known.adapter.program).is_some()
             }
@@ -651,13 +663,16 @@ pub(crate) fn install(dir: &Path, known: &Known, keep: &[PathBuf]) -> Result<(),
     fs::create_dir_all(dir).map_err(|err| failed(&err))?;
     let _locked = clackatoo_syntax::servers::lock(dir).map_err(|err| failed(&err))?;
     let installed = install_dir(dir, known);
-    if known.adapter.installed_program(&installed).is_file() {
+    if known.installed_program(&installed).is_file() {
         log::info!("{} was installed meanwhile", known.title);
     } else {
         known
             .adapter
             .install(&installed)
             .map_err(|err| failed(&err))?;
+        if known.name == "codex" {
+            codex_steering::install(&installed).map_err(|err| failed(&err))?;
+        }
     }
     let prefix = format!("{}-", known.name);
     let others = (fs::read_dir(dir).into_iter().flatten().flatten())
@@ -837,7 +852,8 @@ mod tests {
                 }
                 continue;
             };
-            assert!(package.ends_with(&format!("@{}", known.version)));
+            let upstream = known.version.split('+').next().unwrap();
+            assert!(package.ends_with(&format!("@{upstream}")));
             // The lockfile pins that version, and what it depends on.
             let (name, version) = package.rsplit_once('@').unwrap();
             let lock: serde_json::Value = serde_json::from_str(lock).unwrap();
@@ -996,9 +1012,7 @@ mod tests {
             }
         );
         // Installed: run from there, with nothing to suggest.
-        let installed = codex
-            .adapter
-            .installed_program(&install_dir(&agents, codex));
+        let installed = codex.installed_program(&install_dir(&agents, codex));
         program(&installed);
         assert_eq!(
             config.start(&spec),
@@ -1053,9 +1067,7 @@ mod tests {
     fn an_install_keeps_what_runs_and_what_agents_toml_names() {
         let dir = tempfile::tempdir().unwrap();
         let codex = known("codex").unwrap();
-        let installed = codex
-            .adapter
-            .installed_program(&install_dir(dir.path(), codex));
+        let installed = codex.installed_program(&install_dir(dir.path(), codex));
         program(&installed);
         let old = |version: &str| dir.path().join(format!("codex-{version}"));
         for version in ["1.0.0", "1.1.0", "1.2.0"] {

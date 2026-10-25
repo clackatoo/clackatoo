@@ -3296,7 +3296,7 @@ fn a_known_agent_not_installed_is_offered_and_one_installed_is_run_from_there() 
     // Installed, as if npm had put the adapter where clackatoo looks for
     // it: the next message runs it from there.
     let program =
-        (daemon.dir.path()).join("agents/codex-2.2.2/codex-acp/node_modules/.bin/codex-acp");
+        (daemon.dir.path()).join("agents/codex-2.2.2+clackatoo.1/codex-acp/node_modules/@agentclientprotocol/codex-acp/dist/clackatoo.js");
     script(
         &program,
         &format!("exec {} --codex", fake_agent().display()),
@@ -19079,10 +19079,15 @@ fn a_shell_that_starts_another_says_so_and_types_nothing() {
 
 #[test]
 fn user_queue_and_native_steering_deliver_once_across_clients() {
+    check_native_steering("--steering");
+    check_native_steering("--codex-steering");
+}
+
+fn check_native_steering(flag: &str) {
     let daemon = TestDaemon::start_with_agent(|dir| {
         vec![
             fake_agent().into(),
-            "--steering".into(),
+            flag.into(),
             "--log".into(),
             dir.join("agent.log").into(),
         ]
@@ -19130,6 +19135,48 @@ fn user_queue_and_native_steering_deliver_once_across_clients() {
             .iter()
             .any(|i| matches!(i, Item::Words(t) if t.contains("steered: redirect")))
     );
+}
+
+#[test]
+fn codex_steering_keeps_the_turn_running_until_explicitly_stopped() {
+    let daemon =
+        TestDaemon::start_with_agent(|_| vec![fake_agent().into(), "--codex-steering".into()]);
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    client.chat(chat, ChatAction::Send("wait".into())).unwrap();
+    wait_for_chat(&mut client, chat, |n| {
+        n.delivery.native_steering && n.turns.len() == 1
+    });
+    client
+        .chat(
+            chat,
+            ChatAction::Submit {
+                text: "keep-working".into(),
+                images: vec![],
+                target: None,
+                steer: true,
+            },
+        )
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |n| {
+        n.turns[0].items.iter().any(|i| matches!(i, Item::Other(t) if t.contains("You · Steering") && !t.contains("sending")))
+    });
+    assert_eq!(node.turns.len(), 1);
+    assert!(node.turns[0].end.is_none());
+    assert!(node.delivery.queued.is_empty());
+    assert!(
+        node.turns[0]
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Words(t) if t.contains("steered: keep-working")))
+    );
+    client.chat(chat, ChatAction::Stop).unwrap();
+    let node = wait_for_chat(&mut client, chat, |n| n.turns[0].end.is_some());
+    assert_eq!(node.turns.len(), 1);
+    assert!(matches!(
+        node.turns[0].end.as_ref().unwrap().outcome,
+        Outcome::Stopped
+    ));
 }
 
 #[test]
