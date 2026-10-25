@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.76 (2026-10-25)
+
+### Features
+
+- **agents:** refresh cached usage limits between messages (87d1f60)
+
 ## 2026.10.75 (2026-10-25)
 
 ### Fixes
