@@ -609,7 +609,7 @@ impl ChatView {
     pub(crate) fn set_offline(&mut self, offline: bool) {
         if self.offline && !offline && self.usage_modal {
             self.queued
-                .push(Input::Act(ChatAction::RefreshUsage { force: false }));
+                .push(Input::Act(ChatAction::RefreshUsage { force: true }));
         }
         self.offline = offline;
         if offline {
@@ -953,7 +953,7 @@ impl ChatView {
     fn open_usage(&mut self) {
         self.show_usage();
         self.queued
-            .push(Input::Act(ChatAction::RefreshUsage { force: false }));
+            .push(Input::Act(ChatAction::RefreshUsage { force: true }));
     }
 
     /// Hides the meter's detail if a key or a click showed it, as the
@@ -1816,7 +1816,7 @@ impl ChatView {
             self.show_usage();
             settled
                 .actions
-                .push(ChatAction::RefreshUsage { force: false });
+                .push(ChatAction::RefreshUsage { force: true });
             return;
         }
         // A click closes the meter's detail, if a click showed it, unless
@@ -3884,7 +3884,7 @@ mod tests {
             opened
                 .actions
                 .iter()
-                .any(|a| matches!(a, ChatAction::RefreshUsage { force: false }))
+                .any(|a| matches!(a, ChatAction::RefreshUsage { force: true }))
         );
         for index in 0..12 {
             view.node
@@ -3915,7 +3915,7 @@ mod tests {
             view.settle(&mut fonts)
                 .actions
                 .iter()
-                .any(|a| matches!(a, ChatAction::RefreshUsage { force: false }))
+                .any(|a| matches!(a, ChatAction::RefreshUsage { force: true }))
         );
         assert!(view.modal_key(&Key::Named(NamedKey::Escape), false));
         assert!(!view.viewing_modal());

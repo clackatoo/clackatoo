@@ -1030,6 +1030,13 @@ impl Daemon {
             return false;
         };
         chat.answered(result);
+        if self
+            .agents
+            .usage
+            .after_message(&self.config.agents, self.waker.clone())
+        {
+            self.offer_usage();
+        }
         self.settle_turn(terminal);
         true
     }
@@ -1512,6 +1519,7 @@ impl Daemon {
                 .cloned()
                 .collect();
             chat.set_providers(others);
+            chat.set_provider_usage(self.agents.usage.reports.clone());
             told.push(id);
         }
         for id in told {
@@ -2163,6 +2171,33 @@ mod tests {
     use super::*;
     use crate::server::agent_files::tests::daemon_with_chat;
     use crate::server::stopping::tests::example;
+
+    #[test]
+    fn chats_get_cached_usage_before_the_modal_opens_and_completions_refresh_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, id) = daemon_with_chat(dir.path());
+        // Never probe real credentials from this test.
+        daemon.config.agents.dir = None;
+        daemon.config.agents.path = Some(OsString::new());
+        let cached = clackatoo_protocol::ProviderUsage {
+            agent: "claude".into(),
+            title: "Claude Code".into(),
+            checked: 123,
+            ..Default::default()
+        };
+        daemon.agents.usage.reports = vec![cached.clone()];
+        daemon.offer_providers(Some(id));
+        assert_eq!(daemon.chat(id).unwrap().node().provider_usage, vec![cached]);
+        assert!(daemon.prompt_answered(
+            id,
+            Ok(agent_client_protocol_schema::v1::StopReason::EndTurn),
+            false
+        ));
+        assert!(
+            daemon.chat(id).unwrap().node().provider_usage.is_empty(),
+            "completion refreshes the cache using installed providers"
+        );
+    }
 
     #[test]
     #[allow(unsafe_code)]

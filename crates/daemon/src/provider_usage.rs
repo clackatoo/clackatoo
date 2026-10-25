@@ -51,22 +51,45 @@ pub(crate) struct Cache {
     pub(crate) reports: Vec<ProviderUsage>,
     requested: Option<Instant>,
     worker: Option<Worker>,
+    messages: u8,
 }
 impl Cache {
     pub(crate) fn stop(&mut self) {
         self.worker = None;
     }
 
+    /// Warm the cache after the first message, then every three completed
+    /// messages across chats. Slow conversations also refresh on the first
+    /// completion after five minutes. No timer or idle polling is needed.
+    pub(crate) fn after_message(&mut self, config: &AgentConfig, waker: Arc<mio::Waker>) -> bool {
+        self.messages = self.messages.saturating_add(1);
+        if self.messages >= 3
+            || self
+                .requested
+                .is_none_or(|at| at.elapsed() >= Duration::from_mins(5))
+        {
+            self.refresh(config, true, waker)
+        } else {
+            false
+        }
+    }
+
     /// A refresh never starts a model turn. Manual refreshes also have a floor.
-    pub(crate) fn refresh(&mut self, config: &AgentConfig, force: bool, waker: Arc<mio::Waker>) {
+    pub(crate) fn refresh(
+        &mut self,
+        config: &AgentConfig,
+        force: bool,
+        waker: Arc<mio::Waker>,
+    ) -> bool {
         if self.worker.is_some()
             || self
                 .requested
                 .is_some_and(|at| at.elapsed() < Duration::from_secs(if force { 60 } else { 300 }))
         {
-            return;
+            return false;
         }
         self.requested = Some(Instant::now());
+        self.messages = 0;
         let mut probes = Vec::new();
         let old = std::mem::take(&mut self.reports);
         for spec in config
@@ -102,7 +125,7 @@ impl Cache {
             self.reports.push(report);
         }
         if probes.is_empty() {
-            return;
+            return true;
         }
         let (send, receive) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -143,6 +166,7 @@ impl Cache {
                 }
             }
         }
+        true
     }
 
     pub(crate) fn take(&mut self) -> bool {
@@ -443,6 +467,67 @@ mod tests {
         assert!(cache.reports[0].limits.is_empty());
         assert!(cache.reports[0].checked > 123);
     }
+    #[test]
+    fn message_refreshes_warm_count_coalesce_and_retry_after_the_floor() {
+        let poll = mio::Poll::new().unwrap();
+        let waker = Arc::new(mio::Waker::new(poll.registry(), mio::Token(0)).unwrap());
+        let config = AgentConfig {
+            dir: None,
+            ..AgentConfig::default()
+        };
+        let mut cache = Cache::default();
+        cache.after_message(&config, waker.clone());
+        assert!(
+            cache.requested.is_some(),
+            "first completion warms the cache"
+        );
+        assert_eq!(cache.messages, 0);
+        cache.requested = Instant::now().checked_sub(Duration::from_secs(61));
+        let old = cache.requested;
+        for _ in 0..2 {
+            cache.after_message(&config, waker.clone());
+        }
+        assert_eq!(cache.requested, old, "wait for three messages");
+        cache.after_message(&config, waker.clone());
+        assert_ne!(cache.requested, old);
+        let recent = cache.requested;
+        for _ in 0..300 {
+            cache.after_message(&config, waker.clone());
+        }
+        assert_eq!(
+            cache.requested, recent,
+            "fast messages cannot bypass pacing"
+        );
+        cache.requested = old;
+        cache.after_message(&config, waker.clone());
+        assert_ne!(
+            cache.requested, old,
+            "deferred count retries on later activity"
+        );
+        assert_eq!(cache.messages, 0);
+        cache.requested = Instant::now().checked_sub(Duration::from_secs(301));
+        let stale = cache.requested;
+        cache.after_message(&config, waker.clone());
+        assert_ne!(cache.requested, stale, "slow conversations refresh too");
+
+        let (_send, receive) = mpsc::channel();
+        cache.worker = Some(Worker {
+            receive,
+            cancel: Arc::new(AtomicBool::new(false)),
+            group: Arc::new(Mutex::new(None)),
+            thread: None,
+        });
+        cache.requested = old;
+        for _ in 0..3 {
+            cache.after_message(&config, waker.clone());
+        }
+        assert_eq!(cache.requested, old, "one probe at a time");
+        assert_eq!(cache.messages, 3);
+        cache.stop();
+        cache.after_message(&config, waker);
+        assert_ne!(cache.requested, old);
+    }
+
     #[test]
     fn refreshes_are_shared_and_paced_even_when_forced() {
         let poll = mio::Poll::new().unwrap();

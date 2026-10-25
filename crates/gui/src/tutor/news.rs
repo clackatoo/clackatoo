@@ -773,6 +773,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Click the context gauge for account usage across providers, with reset times and read-only refresh.",
     },
+    News {
+        id: "usage-cache",
+        date: "2026-10-25",
+        lesson: "agents",
+        what: "Usage limits refresh between messages; opening the gauge shows cached values while checking again.",
+    },
 ];
 
 impl News {
