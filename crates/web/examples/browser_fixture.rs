@@ -174,6 +174,7 @@ fn setting(id: &str, name: &str, kind: SettingKind, choices: &[&str]) -> Setting
     }
 }
 
+#[allow(clippy::too_many_lines, reason = "complete browser fixture state")]
 fn node(id: TerminalId) -> ChatNode {
     let turn = |i| {
         Turn {
@@ -183,6 +184,19 @@ fn node(id: TerminalId) -> ChatNode {
     }
     };
     let mut node = ChatNode {
+        activities: vec![clackatoo_protocol::Activity {
+            id: "web-build".into(),
+            owner: id,
+            turn: 39,
+            title: "Build mobile client".into(),
+            command: "cargo build".into(),
+            cwd: "/project".into(),
+            pane: Some(clackatoo_protocol::PaneId(9)),
+            started: now(),
+            ended: None,
+            state: clackatoo_protocol::ActivityState::Running,
+            result: String::new(),
+        }],
         agent: "Codex".into(),
         state: ChatState::Answering,
         turns: (0..40).map(turn).collect(),
@@ -305,6 +319,31 @@ fn main() {
                     protocol_version: PROTOCOL_VERSION,
                 }),
                 ClientMessage::Request(request) => match request {
+                    Request::HarnessCapabilities { .. } => {
+                        reply(&ServerMessage::Response(Response::Text(
+                            serde_json::json!([
+                                ["Native window", "Off — no window granted"],
+                                ["Managed activities", "Available"],
+                                ["Model acknowledgment", "Unconfirmed"]
+                            ])
+                            .to_string(),
+                        )));
+                    }
+                    Request::CancelActivity { terminal, id } => {
+                        eprintln!("CancelActivity {id}");
+                        let node = nodes.entry(terminal).or_insert_with(|| node(terminal));
+                        for a in &mut node.activities {
+                            if a.id == id {
+                                a.state = clackatoo_protocol::ActivityState::Cancelling;
+                            }
+                        }
+                        reply(&ServerMessage::Response(Response::Done));
+                        snapshot(
+                            terminal,
+                            &node.since_turn(starts.get(&terminal).copied().or(Some(0))),
+                        );
+                    }
+
                     Request::WatchWorkspaces => {
                         reply(&ServerMessage::Response(Response::Workspaces(workspaces())));
                     }

@@ -1007,6 +1007,29 @@ impl Daemon {
                     Ok((Request::ChatOriginal { terminal, original }, Then::Pass)),
                 )
             }),
+            &Request::HarnessCapabilities { terminal: local } => {
+                terminal(self, local).map(|(at, terminal)| {
+                    (
+                        at,
+                        Ok((Request::HarnessCapabilities { terminal }, Then::Pass)),
+                    )
+                })
+            }
+            Request::CancelActivity {
+                terminal: local,
+                id,
+            } => terminal(self, *local).map(|(at, terminal)| {
+                (
+                    at,
+                    Ok((
+                        Request::CancelActivity {
+                            terminal,
+                            id: id.clone(),
+                        },
+                        Then::Pass,
+                    )),
+                )
+            }),
             &Request::Capture { terminal: local } => terminal(self, local)
                 .map(|(at, terminal)| (at, Ok((Request::Capture { terminal }, Then::Pass)))),
             &Request::CloseTerminal { terminal: local } => terminal(self, local)

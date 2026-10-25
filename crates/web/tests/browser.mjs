@@ -110,6 +110,17 @@ try {
   await page.getByText('83% left',{exact:true}).waitFor();
   await page.screenshot({path:`${output}/phone-usage.png`});
   await page.keyboard.press('Escape');
+  await page.getByRole('button',{name:'Harness capabilities',exact:true}).click();
+  await page.getByRole('dialog',{name:'Harness capabilities'}).waitFor();
+  await page.getByText('Off — no window granted',{exact:true}).waitFor();
+  await noOverflow();
+  await page.screenshot({path:`${output}/phone-capabilities.png`});
+  await page.keyboard.press('Escape');
+  await page.getByRole('dialog',{name:'Harness capabilities'}).waitFor({state:'hidden'});
+  await page.getByRole('button',{name:'Stop activity',exact:true}).click();
+  await page.getByText('Build mobile client · Stopping',{exact:true}).waitFor();
+  assert(actions.includes('CancelActivity web-build'));
+  await page.screenshot({path:`${output}/phone-activity.png`});
   await page.locator('.conversation').evaluate(el=>el.scrollTop=0);
   const anchor=page.locator('[data-turn="32"]');
   const topBefore=await anchor.evaluate(e=>{e.dataset.retained='yes';return e.getBoundingClientRect().top;});

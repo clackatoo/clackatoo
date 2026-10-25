@@ -1280,6 +1280,7 @@ impl Daemon {
         daemon.resume_files(state.next_files, explorers);
         // Messages waiting in chats' inboxes go as their turns end.
         daemon.resume_talk();
+        daemon.resume_activities(&state.activities);
         daemon.agent_files.log = edit_log::EditLog::resume(edits);
         daemon.resume_reviews(reviews);
         daemon.learn_from_chats();
@@ -1375,6 +1376,7 @@ impl Daemon {
         // Written, for the next build to keep on from, before anything
         // goes over to it.
         self.keep_last();
+        let activities = self.hand_over_activities().map_err(io::Error::other)?;
         let mut fds = Fds::default();
         let listener = fds.add(self.listener.as_fd().try_clone_to_owned()?);
         let mut terminals = Vec::new();
@@ -1475,6 +1477,7 @@ impl Daemon {
                 image_originals,
                 chat_queues,
                 chat_continuations,
+                activities,
                 orphans,
                 workspaces,
                 next_buffer: self.next_buffer,
@@ -2765,7 +2768,9 @@ impl Daemon {
                     | ClientMessage::Colour { .. }
                     | ClientMessage::Place { .. }
                     | ClientMessage::Dismiss { .. }
-                    | ClientMessage::Login { .. }),
+                    | ClientMessage::Login { .. }
+                    | ClientMessage::NativeGrant { .. }
+                    | ClientMessage::NativeReply { .. }),
                 ) => {
                     if let Some(message) = self.route_message(token, message) {
                         self.serve_unanswered(token, message);
@@ -2811,6 +2816,8 @@ impl Daemon {
     /// or what's on its clipboard, for a program that asked.
     fn serve_unanswered(&mut self, token: Token, message: ClientMessage) {
         match message {
+            ClientMessage::NativeGrant { chat, access } => self.native_grant(token, chat, access),
+            ClientMessage::NativeReply { id, result } => self.native_reply(token, id, result),
             ClientMessage::Edit {
                 buffer,
                 seq,
@@ -3011,6 +3018,22 @@ impl Daemon {
             )));
         }
         let response = match request {
+            Request::HarnessCapabilities { terminal } => {
+                if self.may_see_terminal(token, terminal) && self.chat_ref(terminal).is_some() {
+                    Ok(Response::Text(self.harness_capabilities(terminal)))
+                } else {
+                    Err(Error::NotAChat(terminal))
+                }
+            }
+            Request::CancelActivity { terminal, id } => {
+                if self.may_see_terminal(token, terminal) {
+                    self.cancel_activity(terminal, &id)
+                        .map(|_| Response::Done)
+                        .map_err(Error::Other)
+                } else {
+                    Err(Error::NotAChat(terminal))
+                }
+            }
             Request::Version => Ok(Response::Text(env!("CARGO_PKG_VERSION").to_owned())),
             Request::ListTerminals => Ok(Response::Terminals(self.terminal_infos(token))),
             Request::NewTerminal(request) => {
@@ -3667,6 +3690,7 @@ impl Daemon {
     /// Takes the client at `token` off the viewers of the terminals it
     /// follows.
     fn forget_viewer(&mut self, token: Token, client: &Client) {
+        self.native_disconnected(token);
         for id in client.views.keys() {
             if let Some(slot) = self.terminals.get_mut(id) {
                 slot.viewers.retain(|&viewer| viewer != token);

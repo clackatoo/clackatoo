@@ -1148,6 +1148,123 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             })),
         ),
     ]);
+    let activity = crate::Activity {
+        id: "build-1".into(),
+        owner: terminal,
+        turn: 2,
+        title: "Build".into(),
+        command: "make".into(),
+        cwd: "/src".into(),
+        pane: Some(PaneId(8)),
+        started: 10,
+        ended: Some(20),
+        state: crate::ActivityState::Exited(0),
+        result: "done".into(),
+    };
+    samples.extend(
+        [
+            Client(ClientMessage::NativeGrant {
+                chat: terminal,
+                access: crate::NativeAccess::Control,
+            }),
+            Client(ClientMessage::NativeReply {
+                id: 7,
+                result: Ok(crate::NativeReply {
+                    revision: 4,
+                    description: "window".into(),
+                    png: Some("abc".into()),
+                }),
+            }),
+            Client(ClientMessage::Request(Request::HarnessCapabilities {
+                terminal,
+            })),
+            Client(ClientMessage::Request(Request::CancelActivity {
+                terminal,
+                id: "build-1".into(),
+            })),
+            Server(ServerMessage::Event(Event::NativeRequest {
+                id: 7,
+                chat: terminal,
+                action: crate::NativeAction::Click {
+                    revision: 4,
+                    x: 20,
+                    y: 40,
+                },
+            })),
+            Server(ServerMessage::Event(Event::NativeGrantAck {
+                chat: terminal,
+                access: crate::NativeAccess::Inspect,
+                reason: "granted".into(),
+            })),
+            Server(ServerMessage::Event(Event::View {
+                terminal,
+                update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Activities(vec![
+                    activity.clone(),
+                ]))]),
+            })),
+            Server(ServerMessage::Event(Event::View {
+                terminal,
+                update: ViewUpdate::Snapshot(View {
+                    title: "activities".into(),
+                    cwd: None,
+                    root: Node::Chat(Box::new(ChatNode {
+                        activities: vec![activity],
+                        ..chat()
+                    })),
+                }),
+            })),
+        ]
+        .map(|sample| (crate::wire::HARNESS, sample)),
+    );
+    for action in [
+        crate::NativeAction::Snapshot,
+        crate::NativeAction::Type {
+            revision: 4,
+            text: "hello".into(),
+        },
+        crate::NativeAction::Key {
+            revision: 4,
+            key: "<Esc>".into(),
+        },
+    ] {
+        samples.push((
+            crate::wire::HARNESS,
+            Server(ServerMessage::Event(Event::NativeRequest {
+                id: 8,
+                chat: terminal,
+                action,
+            })),
+        ));
+    }
+    for state in [
+        crate::ActivityState::Starting,
+        crate::ActivityState::Running,
+        crate::ActivityState::Cancelling,
+        crate::ActivityState::Unknown,
+        crate::ActivityState::Refused,
+    ] {
+        samples.push((
+            crate::wire::HARNESS,
+            Server(ServerMessage::Event(Event::View {
+                terminal,
+                update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Activities(vec![
+                    crate::Activity {
+                        id: "status".into(),
+                        owner: terminal,
+                        turn: 2,
+                        title: "work".into(),
+                        command: "true".into(),
+                        cwd: "/src".into(),
+                        pane: None,
+                        started: 1,
+                        ended: None,
+                        state,
+                        result: String::new(),
+                    },
+                ]))]),
+            })),
+        ));
+    }
     samples
 }
 
@@ -2702,6 +2819,7 @@ fn chat() -> ChatNode {
         usage: Some(usage()),
         providers: vec![provider()],
         subagents: vec![subagent()],
+        activities: Vec::new(),
         provider_usage: vec![crate::ProviderUsage {
             agent: "codex".into(),
             title: "Codex".into(),

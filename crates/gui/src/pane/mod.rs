@@ -296,6 +296,12 @@ impl Pane {
     }
 
     /// The text the chat drew last (see [`ChatView::shown_text`]).
+    pub(crate) fn native_controls(&self) -> Vec<(String, [f32; 4])> {
+        self.chat
+            .as_ref()
+            .map_or_else(Vec::new, |chat| chat.native_controls())
+    }
+
     pub(crate) fn chat_text(&self) -> Option<String> {
         self.chat.as_ref().map(|chat| chat.shown_text())
     }
@@ -419,6 +425,15 @@ impl Pane {
         let settled = chat.settle(fonts);
         let original = chat.take_original_request();
         let first_turn = chat.first_turn();
+        for id in settled.cancel_activities {
+            self.request(
+                Request::CancelActivity {
+                    terminal: self.terminal,
+                    id,
+                },
+                Pending::Other,
+            );
+        }
         for mut action in settled.actions {
             if let ChatAction::Undo { turn, .. } | ChatAction::Redo { turn, .. } = &mut action {
                 *turn += first_turn;

@@ -21,7 +21,7 @@ const PAD: f32 = 0.8;
 pub(super) struct CardLaid {
     /// The tool it was laid out from, and whether it was open: when
     /// either changes, it's laid out again.
-    tool: Tool,
+    pub(super) tool: Tool,
     open: bool,
     /// How the tool went: "✓".
     mark: Laid,

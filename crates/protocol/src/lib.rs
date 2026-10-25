@@ -52,6 +52,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod activity;
 mod board;
 mod browser;
 mod buffer;
@@ -63,6 +64,7 @@ mod find;
 mod forward;
 pub mod frame;
 mod machines;
+mod native;
 mod review;
 mod view;
 pub mod wire;
@@ -75,6 +77,9 @@ pub use clackatoo_term::{
     Selection, ShellState, Size, Style, Underline, Which,
 };
 use serde::{Deserialize, Serialize};
+
+pub use activity::{Activity, ActivityState};
+pub use native::{NativeAccess, NativeAction, NativeReply};
 
 pub use board::{
     BoardAction, BoardAuthor, BoardEntry, BoardId, BoardLink, BoardScope, BoardSummary,
@@ -122,7 +127,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 104;
+pub const PROTOCOL_VERSION: u32 = 105;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -359,6 +364,20 @@ pub enum ClientMessage {
         /// The answer.
         answer: Option<Secret>,
     },
+    /// Set this connection's grant for one chat. Off revokes immediately.
+    NativeGrant {
+        /// The chat allowed to use this window.
+        chat: TerminalId,
+        /// The explicit human-selected privilege.
+        access: NativeAccess,
+    },
+    /// Answer a native request on the same connection that received it.
+    NativeReply {
+        /// Daemon-issued request identity.
+        id: u64,
+        /// Result, or refusal from the window's own permission checks.
+        result: Result<NativeReply, String>,
+    },
 }
 
 /// Everything the daemon sends.
@@ -572,6 +591,25 @@ pub enum Event {
     /// daemon's own, those listening on none with none. Only to a client
     /// that asked, of protocol 96 or later.
     Listening(Vec<Listening>),
+    /// Request to the window that explicitly granted this chat access.
+    NativeRequest {
+        /// Daemon-issued request identity.
+        id: u64,
+        /// Chat making the request.
+        chat: TerminalId,
+        /// Action, checked independently by daemon and window.
+        action: NativeAction,
+    },
+
+    /// Confirms or revokes this window's native-access grant.
+    NativeGrantAck {
+        /// Chat the grant belongs to.
+        chat: TerminalId,
+        /// Effective privilege; Off also reports a refused request.
+        access: NativeAccess,
+        /// Human-readable explanation.
+        reason: String,
+    },
 }
 
 /// The TCP ports a background tab's programs listen on: see
@@ -1372,6 +1410,18 @@ pub enum Request {
         terminal: TerminalId,
         /// Exclusive end of the page.
         before: u32,
+    },
+    /// Inspect actual harness availability for an attached chat.
+    HarnessCapabilities {
+        /// The chat whose tools are inspected.
+        terminal: TerminalId,
+    },
+    /// Cancel one managed operation owned by an attached chat.
+    CancelActivity {
+        /// The owning chat.
+        terminal: TerminalId,
+        /// Stable operation identity.
+        id: String,
     },
 }
 

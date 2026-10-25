@@ -76,6 +76,7 @@ fn size() -> Size {
 /// Keeping the workspaces: where, and what's waiting to be written.
 #[derive(Debug, Default)]
 pub(super) struct Keeping {
+    serial: u64,
     /// The file they're kept in, while this daemon holds its lock.
     path: Option<PathBuf>,
     /// The lock, held while it's open.
@@ -160,8 +161,22 @@ impl Keeping {
 }
 
 impl Daemon {
+    pub(super) fn activity_storage_enabled(&self) -> bool {
+        self.keeping.path.is_some()
+    }
     /// Notes that something kept has changed: the workspaces are written
     /// a moment later.
+    pub(super) fn persist_activity_intent(&mut self) -> Result<u64, String> {
+        if self.keeping.path.is_none() {
+            return Err("Managed activities need durable workspace storage enabled.".into());
+        }
+        self.keep();
+        if self.keeping.writer.is_none() {
+            return Err("The operation journal writer could not start.".into());
+        }
+        Ok(self.keeping.serial)
+    }
+
     pub(super) fn keep_soon(&mut self) {
         if self.keeping.path.is_some() && self.keeping.due.is_none() {
             self.keeping.due = Some(Instant::now() + KEEP_AFTER);
@@ -171,6 +186,14 @@ impl Daemon {
     /// Writes the workspaces, if it's time to: a while after a write
     /// failed, too, whether they've changed since or not.
     pub(super) fn keep_if_due(&mut self) {
+        if let Some(serial) = self
+            .keeping
+            .writer
+            .as_ref()
+            .and_then(saved::Writer::written)
+        {
+            self.activities_written(serial);
+        }
         if self.write_failed() {
             self.keeping.due.get_or_insert(Instant::now() + KEEP_AGAIN);
         }
@@ -219,7 +242,7 @@ impl Daemon {
             }
         }
         if let Some(writer) = &self.keeping.writer {
-            writer.write(state.clone());
+            self.keeping.serial = writer.write(state.clone());
             self.keeping.last = Some(state);
         }
     }
@@ -336,6 +359,7 @@ impl Daemon {
         (self.keeping.places)
             .retain(|pane, (buffer, _)| shown.contains(&(*pane, Content::Buffer(*buffer))));
         let mut state = State {
+            operations: self.tools.activities.clone(),
             clackatoo_workspaces: saved::VERSION,
             workspaces: Vec::new(),
             active: None,
@@ -638,6 +662,7 @@ impl Daemon {
         self.workspaces.set_restored(restored);
         self.workspaces.refresh_background();
         self.restate_backgrounds();
+        self.restore_cold_activities(state.operations, &chats);
         self.keep_restored();
         self.restore_borrowers(&state.borrowers);
         self.restore_keys(&state.keys);

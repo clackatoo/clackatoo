@@ -371,6 +371,7 @@ fn answer_start(turn: &Turn) -> usize {
 /// Turn `index` of `node`, the chat shown, as `open` has it folded, at
 /// `now`, in milliseconds since the Unix epoch.
 #[must_use]
+#[allow(clippy::too_many_lines, reason = "renders the ordered parts of a turn")]
 pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element {
     let section = el("section")
         .class("turn")
@@ -426,6 +427,28 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
     }
     for (at, item) in turn.items.iter().enumerate().skip(answer) {
         section = section.child(item_view(item, open, index, at));
+    }
+    for (at, activity) in node
+        .activities
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.turn as usize == index)
+    {
+        let mut card = el("section").class("activity-card").child(item_view(
+            &Item::Tool(activity.card()),
+            open,
+            index,
+            turn.items.len() + at,
+        ));
+        if activity.state.active() {
+            card = card.child(
+                el("button")
+                    .class("quiet")
+                    .action(&Action::CancelActivity(at))
+                    .text("Stop activity"),
+            );
+        }
+        section = section.child(card);
     }
     for subagent in node
         .subagents
@@ -759,6 +782,28 @@ pub fn box_bar(node: &ChatNode, open: &OpenChat, now: u64, offset: Offset<'_>) -
                 .action(&Action::Usage)
                 .text("Usage")
         }));
+    bar = bar.child(
+        el("button")
+            .class("quiet")
+            .action(&Action::Capabilities)
+            .attr("aria-label", "Harness capabilities")
+            .text("Tools"),
+    );
+    if open.folds.get("capabilities").copied().unwrap_or(false) {
+        let mut content = el("div").class("usage-content");
+        if open.capabilities.is_empty() {
+            content = content.child(el("p").text("Reading live harness state…"));
+        }
+        for (name, detail) in &open.capabilities {
+            content = content.child(
+                el("section")
+                    .class("context-card")
+                    .child(el("h3").text(name.clone()))
+                    .child(el("p").text(detail.clone())),
+            );
+        }
+        bar = bar.child(sheet("Harness capabilities", Action::Capabilities, content));
+    }
     if open.folds.get(SETTINGS_FOLD).copied().unwrap_or(false) {
         bar = bar.child(sheet(
             "Agent settings",

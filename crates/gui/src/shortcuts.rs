@@ -47,6 +47,7 @@ pub(crate) fn requested(press: &KeyPress<'_>) -> bool {
 
 #[derive(Debug)]
 pub(crate) struct Help {
+    title: &'static str,
     pub(crate) context: Context,
     query: Line,
     first: usize,
@@ -57,6 +58,17 @@ impl Help {
     pub(crate) fn new(mut context: Context) -> Self {
         context.add(&[("Ctrl+?", "Show shortcuts for this state")]);
         Self {
+            title: "Keyboard shortcuts",
+            context,
+            query: Line::default(),
+            first: 0,
+            page: 10,
+        }
+    }
+
+    pub(crate) fn information(context: Context) -> Self {
+        Self {
+            title: "Harness capabilities",
             context,
             query: Line::default(),
             first: 0,
@@ -154,7 +166,7 @@ impl Help {
         shown.truncate(rows);
         let query = self.query.shown();
         FinderView {
-            title: "Keyboard shortcuts",
+            title: self.title,
             place: None,
             query: fit(
                 &query,
@@ -176,7 +188,7 @@ impl Help {
             rows: shown,
             selected: None,
             preview: None,
-            empty: matches.is_empty().then(|| "No matching shortcuts".into()),
+            empty: matches.is_empty().then(|| "No matches".into()),
         }
     }
 }

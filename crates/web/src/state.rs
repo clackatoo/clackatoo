@@ -110,6 +110,7 @@ pub struct Dirty {
 /// The chat shown.
 #[derive(Debug)]
 pub struct OpenChat {
+    pub capabilities: Vec<(String, String)>,
     pub picker: crate::settings::Picker,
     pub id: TerminalId,
     /// What it shows, once the daemon has sent it.
@@ -126,6 +127,7 @@ pub struct OpenChat {
 /// if it fails.
 #[derive(Clone, Debug)]
 enum Asked {
+    Capabilities(TerminalId),
     /// Nothing to say: its failure is only logged.
     Quiet,
     ChatHistory {
@@ -325,6 +327,19 @@ impl State {
                     term.dirty.header = true;
                 }
             }
+            (Response::Text(text), Some(Asked::Capabilities(chat))) => {
+                if let Some(open) = &mut self.open
+                    && open.id == chat
+                {
+                    open.capabilities = serde_json::from_str(&text).unwrap_or_else(|_| {
+                        vec![(
+                            "Unavailable".into(),
+                            "Could not decode capability report".into(),
+                        )]
+                    });
+                    self.dirty.footer = true;
+                }
+            }
             (Response::History(lines), Some(Asked::History { generation })) => {
                 if let Some(term) = &mut self.term {
                     term.history_came(generation, lines);
@@ -347,6 +362,7 @@ impl State {
     /// said, and gives up what waited on it.
     fn failed(&mut self, err: &clackatoo_protocol::Error, asked: &Asked) {
         let note = match asked {
+            Asked::Capabilities(_) => Some(format!("Could not inspect capabilities: {err}")),
             Asked::Quiet => None,
             Asked::ChatHistory { terminal, before } => {
                 if let Some(open) = self
@@ -489,6 +505,34 @@ impl State {
     }
 
     /// Shows chat `id`.
+    pub fn inspect_capabilities(&mut self) {
+        if let Some(open) = &self.open {
+            self.request(
+                Request::HarnessCapabilities { terminal: open.id },
+                Asked::Capabilities(open.id),
+            );
+        }
+    }
+
+    pub fn cancel_activity(&mut self, index: usize) {
+        let Some(open) = &self.open else {
+            return;
+        };
+        let Some(activity) = open
+            .view
+            .as_ref()
+            .and_then(|v| v.chat())
+            .and_then(|n| n.activities.get(index))
+        else {
+            return;
+        };
+        let request = Request::CancelActivity {
+            terminal: open.id,
+            id: activity.id.clone(),
+        };
+        self.request(request, Asked::Doing("stopping the activity"));
+    }
+
     pub fn open_chat(&mut self, id: TerminalId) {
         if self.open.as_ref().is_some_and(|open| open.id == id) {
             return;
@@ -496,6 +540,7 @@ impl State {
         self.close_chat();
         self.close_terminal();
         self.open = Some(OpenChat {
+            capabilities: Vec::new(),
             picker: crate::settings::Picker::default(),
             id,
             view: None,
@@ -963,6 +1008,11 @@ fn mark(dirty: &mut Dirty, patch: &Patch) {
         | ChatPatch::Output { turn, .. }
         | ChatPatch::Files { turn, .. } => {
             dirty.turns.insert(*turn as usize);
+        }
+        ChatPatch::Activities(activities) => {
+            dirty
+                .turns
+                .extend(activities.iter().map(|a| a.turn as usize));
         }
         ChatPatch::Subagents(subagents) => {
             dirty

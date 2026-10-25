@@ -16,6 +16,7 @@ bench = false
 
 [dependencies]
 clackatoo-protocol.workspace = true
+serde_json.workspace = true
 # Lays a terminal's lines out cell by cell, as the emulator does.
 clackatoo-term.workspace = true
 # Reads the agents' words as Markdown, as the window does, laid out here

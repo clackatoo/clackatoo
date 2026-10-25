@@ -205,6 +205,10 @@ pub(crate) enum Command {
     /// `:Tutor`: the lessons, to pick one; with a lesson's name, that
     /// lesson; with `new`, what's new.
     Tutor(Option<String>),
+    /// Grant or revoke agent access to this window.
+    AgentAccess(clackatoo_protocol::NativeAccess),
+    /// Inspect this chat's live harness capabilities.
+    Capabilities,
     /// `:agentundo`: undo what turn `turn` of the focused chat changed in
     /// files, counting from 0, or the last that can be; or with `redo`,
     /// `:agentredo`, make it again. With `force`, in the files that can be
@@ -394,6 +398,13 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "update" => return Ok(Command::Update(argument.map(str::to_owned))),
         "connect" => return connect_command(argument),
         "disconnect" => return Ok(Command::Disconnect(argument.map(str::to_owned))),
+        "Capabilities" => return Ok(Command::Capabilities),
+        "agentaccess" => return match argument {
+            Some("off") => Ok(Command::AgentAccess(clackatoo_protocol::NativeAccess::Off)),
+            Some("inspect") => Ok(Command::AgentAccess(clackatoo_protocol::NativeAccess::Inspect)),
+            Some("control") => Ok(Command::AgentAccess(clackatoo_protocol::NativeAccess::Control)),
+            _ => Err("Use :agentaccess off|inspect|control in the window and chat you intend to grant. Control allows clicks and typing throughout this window.".into()),
+        },
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
         "devices" => return devices_command(argument).map(Command::Devices),
         "portforward" | "portforward!" => {
@@ -840,6 +851,8 @@ command_names! {
     "normal" => "Run Normal-mode keys on editor lines",
     "Explore" => "Open the file explorer",
     "Tutor" => "Open an interactive lesson",
+    "Capabilities" => "Inspect this chat's tools, permissions and discovery status",
+    "agentaccess" => "Grant this chat inspect/control access to this window, or revoke it (off)",
     "devices" => "Manage paired web devices",
     "portforward" => "Manage ports forwarded from another machine",
     "format" => "format the file with its language server",
@@ -920,6 +933,7 @@ pub(crate) fn takes(word: &str) -> Takes {
         "set" | "se" => Takes::Options,
         "workspace" | "ws" => Takes::Workspace,
         "Tutor" => Takes::Lesson,
+        "agentaccess" => Takes::Words(&["off", "inspect", "control"]),
         "connect" | "disconnect" => Takes::Host,
         "gitsigns" => Takes::Words(&[
             "preview_hunk",
@@ -1016,6 +1030,8 @@ mod tests {
         ("connect", ""),
         ("disconnect", ""),
         ("Tutor", ""),
+        ("Capabilities", ""),
+        ("agentaccess", ""),
         ("devices", ""),
         ("portforward", ""),
         ("bg", ""),

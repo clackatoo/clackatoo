@@ -88,6 +88,7 @@ pub(crate) struct Settled {
     pub(crate) redraw: bool,
     /// Asks for the daemon.
     pub(crate) actions: Vec<ChatAction>,
+    pub(crate) cancel_activities: Vec<String>,
     /// Text to put on the clipboard, or the primary selection, oldest
     /// first.
     pub(crate) copied: Vec<(String, Copy)>,
@@ -96,6 +97,7 @@ pub(crate) struct Settled {
 /// Something in the chat that does something when clicked.
 #[derive(Clone, Debug, PartialEq)]
 enum Hit {
+    CancelActivity(String),
     ModelSearch,
     MenuSurface,
     ModelRail,
@@ -500,6 +502,14 @@ impl ChatView {
         view
     }
 
+    pub(crate) fn native_controls(&self) -> Vec<(String, [f32; 4])> {
+        self.hits
+            .iter()
+            .take(128)
+            .map(|(hit, bounds)| (format!("{hit:?}").chars().take(200).collect(), *bounds))
+            .collect()
+    }
+
     pub(crate) fn first_turn(&self) -> u32 {
         self.node.first_turn
     }
@@ -590,6 +600,10 @@ impl ChatView {
     }
 
     /// Applies an update from the daemon.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "handles each update while preserving layout caches"
+    )]
     pub(crate) fn apply(&mut self, update: &ViewUpdate) {
         self.heard = Some(self.now());
         let asked = self.node.question.as_ref().map(|question| question.id);
@@ -667,6 +681,18 @@ impl ChatView {
                                     .collect();
                                 for turn in turns {
                                     self.restyled(turn);
+                                }
+                            }
+                            if let clackatoo_protocol::ChatPatch::Activities(new) = patch {
+                                let turns: Vec<_> = self
+                                    .node
+                                    .activities
+                                    .iter()
+                                    .chain(new)
+                                    .filter_map(|a| a.turn.checked_sub(self.node.first_turn))
+                                    .collect();
+                                for turn in turns {
+                                    self.restyled(turn as usize);
                                 }
                             }
                             self.node.apply(patch.clone());
@@ -2151,6 +2177,7 @@ impl ChatView {
                 self.menu = None;
                 self.choose(setting, value, settled);
             }
+            Some(Hit::CancelActivity(id)) => settled.cancel_activities.push(id),
             Some(Hit::Card(turn, tool)) => {
                 self.restyled(turn);
                 if !self.open_cards.remove(&tool) {
@@ -2462,6 +2489,7 @@ fn touches(patch: &clackatoo_protocol::ChatPatch) -> Option<usize> {
         | ChatPatch::Providers(_)
         | ChatPatch::Subagents(_)
         | ChatPatch::Delivery(_)
+        | ChatPatch::Activities(_)
         | ChatPatch::ProviderUsage(_)
         | ChatPatch::History { .. } => None,
     }

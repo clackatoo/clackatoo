@@ -236,6 +236,9 @@ fn argument_description(command: &str, word: &str) -> &'static str {
         .unwrap_or(command)
         .trim_end_matches('!');
     match (command::canonical(command), word) {
+        ("agentaccess", "off") => "Revoke this window's agent access",
+        ("agentaccess", "inspect") => "Let this chat inspect the selected window",
+        ("agentaccess", "control") => "Let this chat click and type throughout the selected window",
         ("gitsigns", "preview_hunk") => "Preview the Git change at the cursor",
         ("gitsigns", "reset_hunk") => "Discard the Git change at the cursor",
         ("gitsigns", "stage_hunk") => "Stage the Git change at the cursor",

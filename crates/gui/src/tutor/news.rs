@@ -839,6 +839,30 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "Shortcut help comes from live key definitions and the Vim parser, including unfinished commands",
     },
+    News {
+        id: "agent-window-access",
+        date: "2026-10-25",
+        lesson: "agents",
+        what: "Explicit Inspect and Control grants for a selected window with :agentaccess",
+    },
+    News {
+        id: "managed-activities",
+        date: "2026-10-25",
+        lesson: "agents",
+        what: "Persistent activity cards and completion notifications for long-running work",
+    },
+    News {
+        id: "operation-recovery",
+        date: "2026-10-25",
+        lesson: "agents",
+        what: "Durable operation IDs prevent reruns after interrupted calls",
+    },
+    News {
+        id: "harness-capabilities",
+        date: "2026-10-25",
+        lesson: "agents",
+        what: "Inspect tool permissions, services and discovery with :Capabilities",
+    },
 ];
 
 impl News {

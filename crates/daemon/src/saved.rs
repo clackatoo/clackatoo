@@ -73,6 +73,9 @@ const MAX_FILE: u64 = 4 * 1024 * 1024;
 /// The workspaces, as the file has them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct State {
+    /// Versioned operation journal; old builds safely ignore it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) operations: Vec<Operation>,
     /// The format's version, [`VERSION`]; named so, first, so the file
     /// says what it is.
     pub(crate) clackatoo_workspaces: u32,
@@ -514,7 +517,9 @@ pub(crate) fn keep_previous(path: &Path) -> io::Result<()> {
 /// The thread that writes the file, started with the first write.
 #[derive(Debug)]
 pub(crate) struct Writer {
-    states: Sender<State>,
+    states: Sender<(u64, State)>,
+    written: Receiver<u64>,
+    serial: std::cell::Cell<u64>,
     /// Says when the thread has finished.
     stopped: Receiver<()>,
 }
@@ -534,8 +539,9 @@ impl Writer {
         failed: Arc<AtomicBool>,
         notify: impl Fn() + Send + 'static,
     ) -> io::Result<Self> {
-        let (states, receive) = mpsc::channel::<State>();
+        let (states, receive) = mpsc::channel::<(u64, State)>();
         let (stop, stopped) = mpsc::channel();
+        let (complete, written) = mpsc::channel();
         std::thread::Builder::new()
             .name("workspaces".into())
             .spawn(move || {
@@ -544,7 +550,7 @@ impl Writer {
                     while gate.as_ref().is_some_and(|gate| !gate.exists()) {
                         std::thread::sleep(Duration::from_millis(10));
                     }
-                    let newest = receive.try_iter().last().unwrap_or(first);
+                    let (serial, newest) = receive.try_iter().last().unwrap_or(first);
                     if let Err(err) = write(&path, &newest.encode()) {
                         log::error!(
                             "the workspaces couldn't be kept in {}: {err}",
@@ -552,25 +558,42 @@ impl Writer {
                         );
                         failed.store(true, Ordering::Release);
                         notify();
+                    } else {
+                        let _ = complete.send(serial);
+                        notify();
                     }
                 }
                 let _ = stop.send(());
             })?;
-        Ok(Self { states, stopped })
+        Ok(Self {
+            states,
+            stopped,
+            written,
+            serial: std::cell::Cell::new(0),
+        })
     }
 
     /// Has the thread write `state` as the file, once it has written what
     /// it's writing now, if it is. Only the newest of those waiting then is
     /// written.
-    pub(crate) fn write(&self, state: State) {
-        let _ = self.states.send(state);
+    pub(crate) fn write(&self, state: State) -> u64 {
+        let serial = self.serial.get() + 1;
+        self.serial.set(serial);
+        let _ = self.states.send((serial, state));
+        serial
+    }
+
+    pub(crate) fn written(&self) -> Option<u64> {
+        self.written.try_iter().last()
     }
 
     /// Has the thread write what's waiting and stop, waiting up to `wait`
     /// for it. Returns whether it stopped in time. One that didn't goes on
     /// by itself, as one stuck in a write to a disk that's gone would.
     pub(crate) fn stop(self, wait: Duration) -> bool {
-        let Self { states, stopped } = self;
+        let Self {
+            states, stopped, ..
+        } = self;
         drop(states);
         !matches!(stopped.recv_timeout(wait), Err(RecvTimeoutError::Timeout))
     }
@@ -580,6 +603,12 @@ impl Writer {
 /// made afresh for the user alone, never through a link or into anything
 /// left there, synced, then renamed over it, and the rename synced.
 fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if bytes.len() as u64 > MAX_FILE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "workspace state exceeds the readable size limit",
+        ));
+    }
     let dir = path.parent().unwrap_or(Path::new("."));
     make_dir(dir)?;
     let temporary = with_suffix(path, ".new");
@@ -616,6 +645,7 @@ mod tests {
             })
         };
         State {
+            operations: Vec::new(),
             clackatoo_workspaces: VERSION,
             workspaces: vec![
                 Workspace {
@@ -719,6 +749,16 @@ mod tests {
             borrowers: Vec::new(),
             keys: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_oversized_journal_never_replaces_the_last_readable_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces");
+        let good = state().encode();
+        write(&path, &good).unwrap();
+        assert!(write(&path, &vec![b'x'; usize::try_from(MAX_FILE).unwrap() + 1]).is_err());
+        assert_eq!(fs::read(&path).unwrap(), good);
     }
 
     #[test]
@@ -976,5 +1016,95 @@ mod tests {
         assert!(!open_to_others(folder));
         let previous = with_suffix(&path, ".previous");
         assert_eq!(fs::read(&path).unwrap(), fs::read(previous).unwrap());
+    }
+}
+
+/// Version-one operation record. This serialized shape is frozen; future
+/// migrations must read it rather than changing its meaning in place.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Operation {
+    #[serde(with = "stored_activity")]
+    pub(crate) activity: clackatoo_protocol::Activity,
+    pub(crate) terminal: clackatoo_protocol::TerminalId,
+    pub(crate) expect: Option<u32>,
+    pub(crate) renumbered: u64,
+    pub(crate) notified: bool,
+    #[serde(skip)]
+    pub(crate) waiting_for: Option<u64>,
+}
+
+// Persistence is deliberately independent of the evolving client protocol.
+mod stored_activity {
+    use clackatoo_protocol::{Activity, ActivityState};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct V1 {
+        id: String,
+        owner: u32,
+        turn: u32,
+        title: String,
+        command: String,
+        cwd: String,
+        pane: Option<u32>,
+        started: u64,
+        ended: Option<u64>,
+        state: State,
+        result: String,
+    }
+    #[derive(Serialize, Deserialize)]
+    enum State {
+        Starting,
+        Running,
+        Exited(i32),
+        Cancelling,
+        Unknown,
+        Refused,
+    }
+    pub(super) fn serialize<S: Serializer>(a: &Activity, s: S) -> Result<S::Ok, S::Error> {
+        V1 {
+            id: a.id.clone(),
+            owner: a.owner.0,
+            turn: a.turn,
+            title: a.title.clone(),
+            command: a.command.clone(),
+            cwd: a.cwd.clone(),
+            pane: a.pane.map(|p| p.0),
+            started: a.started,
+            ended: a.ended,
+            result: a.result.clone(),
+            state: match a.state {
+                ActivityState::Starting => State::Starting,
+                ActivityState::Running => State::Running,
+                ActivityState::Exited(c) => State::Exited(c),
+                ActivityState::Cancelling => State::Cancelling,
+                ActivityState::Unknown => State::Unknown,
+                ActivityState::Refused => State::Refused,
+            },
+        }
+        .serialize(s)
+    }
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Activity, D::Error> {
+        let a = V1::deserialize(d)?;
+        Ok(Activity {
+            id: a.id,
+            owner: clackatoo_protocol::TerminalId(a.owner),
+            turn: a.turn,
+            title: a.title,
+            command: a.command,
+            cwd: a.cwd,
+            pane: a.pane.map(clackatoo_protocol::PaneId),
+            started: a.started,
+            ended: a.ended,
+            result: a.result,
+            state: match a.state {
+                State::Starting => ActivityState::Starting,
+                State::Running => ActivityState::Running,
+                State::Exited(c) => ActivityState::Exited(c),
+                State::Cancelling => ActivityState::Cancelling,
+                State::Unknown => ActivityState::Unknown,
+                State::Refused => ActivityState::Refused,
+            },
+        })
     }
 }

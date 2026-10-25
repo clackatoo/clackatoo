@@ -1,6 +1,8 @@
 //! The window: starting up, and turning window and daemon events into
 //! frames.
 
+mod native;
+
 use crate::shortcuts::bindings::Hint;
 
 use std::sync::{Arc, mpsc};
@@ -320,6 +322,8 @@ struct Frame {
     /// Whether the compositor shows what's behind the window where it's
     /// see-through, which lets the window round its corners.
     transparent: bool,
+    capture: bool,
+    captured: Option<look::Picture>,
 }
 
 /// What frames are drawn on.
@@ -402,6 +406,7 @@ const MENU_ITEMS: [&str; 2] = ["Rename", "Close"];
     reason = "independent states of the window"
 )]
 pub(crate) struct App {
+    native: native::Native,
     started: Instant,
     startup: Option<Startup>,
     frame: Option<Frame>,
@@ -501,6 +506,7 @@ impl App {
         let proxy = session.proxy();
         let forwards = Forwards::new(move || drop(proxy.send_event(SessionEvent::Forwards)));
         Self {
+            native: native::Native::default(),
             started,
             startup,
             frame: None,
@@ -616,6 +622,8 @@ impl App {
             renderer,
             fonts,
             transparent,
+            capture: false,
+            captured: None,
         })
     }
 
@@ -666,6 +674,13 @@ impl App {
             }
         } else {
             let mut status = self.desk.status();
+            if let Some((chat, access)) = self.native.grant
+                && let Status::Tabs { note, .. } = &mut status
+            {
+                *note = Some(format!(
+                    "Agent {access:?} · chat {chat} · :agentaccess off to revoke"
+                ));
+            }
             // Whatever the bar says, `:Messages` says again later.
             self.desk.remember();
             // What the input method is composing shows at the caret, where
@@ -690,7 +705,14 @@ impl App {
                 menu: self
                     .menu
                     .map(|menu| (menu.at, self.menu_items(menu.target))),
-                alert: self.reconnecting().or_else(|| self.out_of_contact()),
+                alert: self
+                    .reconnecting()
+                    .or_else(|| self.out_of_contact())
+                    .or_else(|| {
+                        self.native
+                            .grant
+                            .map(|(_, access)| format!("Agent {access:?} · Revoke"))
+                    }),
                 rounded,
                 finder,
                 scrolls: self.scrolls,
@@ -962,6 +984,10 @@ impl App {
     /// Hands the URLs links asked to open to the desktop's opener.
     fn open_links(&mut self) {
         for url in self.desk.take_opened() {
+            if self.native.automating {
+                self.native.refused = true;
+                continue;
+            }
             crate::desktop::open(&url);
         }
     }
@@ -1068,6 +1094,9 @@ impl App {
     }
 
     fn clicked(&mut self, button: MouseButton) {
+        if self.revoke_native_click(button) {
+            return;
+        }
         if self.click_shortcut_help() {
             return;
         }
@@ -1223,6 +1252,9 @@ impl App {
             Some(host) => format!("{title} — {host}"),
             None => title.to_owned(),
         };
+        let title = self.native.grant.map_or(title.clone(), |(chat, access)| {
+            format!("[{access:?} access · chat {chat}] {title}")
+        });
         if title != self.title {
             if let Some(window) = frame.window() {
                 window.set_title(&title);
@@ -1259,6 +1291,10 @@ impl App {
     /// Sends what the desk has for the daemon, and tells the config's Lua
     /// what's changed.
     fn send_outbox(&mut self) {
+        if let Some(report) = self.desk.capability_report.take() {
+            self.shortcut_help = Some(crate::shortcuts::Help::information(report));
+            self.request_redraw();
+        }
         self.desk.sync_lua();
         // What was typed or clicked in a chat goes first, as it needs the
         // fonts, which the desk hasn't got, and may copy.
@@ -1292,7 +1328,21 @@ impl App {
         let Some(sender) = &mut self.sender else {
             return;
         };
-        for message in messages {
+        for mut message in messages {
+            if self.native.automating && native::changes_authority(&message) {
+                self.native.refused = true;
+                continue;
+            }
+            if let ClientMessage::NativeGrant { chat, access } = &mut message {
+                if *access == clackatoo_protocol::NativeAccess::Off {
+                    if let Some((owner, _)) = self.native.grant {
+                        *chat = owner;
+                    }
+                    self.native.grant = None;
+                    self.native.snapshot = None;
+                }
+                self.native.pending = Some((*chat, *access));
+            }
             if let Err(err) = sender.send(&message) {
                 log::warn!("sending to the daemon failed: {err}");
             }
@@ -1574,6 +1624,10 @@ impl App {
     /// HOST` does, in a process of its own that outlives this window.
     fn open_window_on(&mut self, host: &str) {
         use std::os::unix::process::CommandExt as _;
+        if self.native.automating {
+            self.native.refused = true;
+            return;
+        }
         let Some(program) = &self.updates.program else {
             self.desk
                 .say("this program can't be found, to open a window with".into());
@@ -2806,6 +2860,13 @@ fn surface_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat
 /// Draws `picture` into the window and shows it. Returns whether a frame
 /// was shown.
 fn present(frame: &mut Frame, picture: &Picture<'_>) -> bool {
+    if std::mem::take(&mut frame.capture) {
+        let size = frame.size();
+        let offscreen = look::Offscreen::new(&frame.gpu.device, size, frame.scale_factor());
+        let mut renderer = Renderer::new(&frame.gpu.device, wgpu::TextureFormat::Rgba8Unorm);
+        offscreen.render(&frame.gpu, &mut renderer, picture, &mut frame.fonts);
+        frame.captured = Some(offscreen.read(&frame.gpu));
+    }
     let (window, surface, config) = match &mut frame.target {
         Target::Window {
             window,
@@ -3315,6 +3376,11 @@ impl App {
 
 impl App {
     fn handle_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        if !matches!(&event, WindowEvent::RedrawRequested) {
+            self.native
+                .revision
+                .set(self.native.revision.get().wrapping_add(1));
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -3455,6 +3521,24 @@ impl App {
 
     #[allow(clippy::too_many_lines, reason = "one arm per event, each short")]
     fn handle_session_event(&mut self, event: SessionEvent) {
+        // Reporting a snapshot changes the requesting chat's transcript. That
+        // must not invalidate stable composer controls. Clicks also compare
+        // the observed target against its current bounds below.
+        let own_update = matches!(&event,
+            SessionEvent::Message(ServerMessage::Event(Event::View { terminal, .. }))
+            if self.native.grant.is_some_and(|(owner, _)| owner == *terminal));
+        if !own_update
+            && !matches!(
+                &event,
+                SessionEvent::Message(ServerMessage::Event(
+                    Event::NativeRequest { .. } | Event::Chats(_) | Event::Workspaces(_)
+                ))
+            )
+        {
+            self.native
+                .revision
+                .set(self.native.revision.get().wrapping_add(1));
+        }
         match event {
             SessionEvent::Connected {
                 sender,
@@ -3561,6 +3645,29 @@ impl App {
                     self.request_redraw();
                 }
             }
+            SessionEvent::Message(ServerMessage::Event(Event::NativeGrantAck {
+                chat,
+                access,
+                reason,
+            })) => {
+                if access == clackatoo_protocol::NativeAccess::Off {
+                    if self.native.grant.is_some_and(|(owner, _)| owner == chat) {
+                        self.native.grant = None;
+                    }
+                } else if self.native.pending == Some((chat, access)) {
+                    self.native.grant = Some((chat, access));
+                }
+                self.native.pending = None;
+                self.native.snapshot = None;
+                self.desk.say(reason);
+                self.update_title();
+                self.request_redraw();
+            }
+            SessionEvent::Message(ServerMessage::Event(Event::NativeRequest {
+                id,
+                chat,
+                action,
+            })) => self.native_request(id, chat, action),
             SessionEvent::Message(ServerMessage::Event(Event::View { terminal, update })) => {
                 if self.desk.view_changed(terminal, &update) {
                     self.request_redraw();
@@ -3693,6 +3800,9 @@ impl App {
 
     /// The connection was lost, or a try at making it failed, `why`.
     fn lost(&mut self, why: String) {
+        self.native.grant = None;
+        self.native.pending = None;
+        self.native.snapshot = None;
         log::warn!("lost the daemon: {why}");
         let was_connected = self.sender.take().is_some();
         self.desk.lost();

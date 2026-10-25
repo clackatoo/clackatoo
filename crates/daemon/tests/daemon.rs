@@ -4649,6 +4649,8 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Login { .. }
             | Event::Forwarded(_)
             | Event::Said(_)
+            | Event::NativeRequest { .. }
+            | Event::NativeGrantAck { .. }
             | Event::Listening(_)) => {
                 panic!("expected a buffer update, got {other:?}")
             }
@@ -11542,6 +11544,14 @@ fn the_tools_speak_mcp_over_the_relays_stdio() {
             "board_claim",
             "board_release",
             "board_archive",
+            "native_snapshot",
+            "native_click",
+            "native_type",
+            "native_key",
+            "start_activity",
+            "read_activities",
+            "cancel_activity",
+            "harness_capabilities",
         ]
     );
     // A notification needs no answer: the next line answers the ping.
@@ -19352,4 +19362,158 @@ fn a_real_antigravity_shows_native_output_images_and_file_edits() {
         node.turns.last().unwrap().items.iter().any(|item| matches!(item, Item::Tool(tool) if tool.content.iter().any(|c| matches!(c, ToolContent::Image(_)))))
     });
     assert!(node.usage.is_some_and(|usage| usage.used > 0));
+}
+
+// Managed work must be durable before any shell input is sent.
+fn managed_daemon(gate: Option<PathBuf>) -> TestDaemon {
+    TestDaemon::start_with(|dir, config| {
+        config.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        let shell = dir.join("bash");
+        std::fs::write(&shell, MARKING_SHELL).unwrap();
+        std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        config.shell = shell.into();
+        config.shell_integration = Some(dir.into());
+        config.workspaces = Some(dir.join("workspaces"));
+        config.keep_gate = gate;
+    })
+}
+
+#[test]
+fn managed_activity_is_persisted_before_execution_and_duplicate_ids_do_not_rerun() {
+    use clackatoo_protocol::ActivityState;
+    let held = tempfile::tempdir().unwrap();
+    let gate = held.path().join("gate");
+    let daemon = managed_daemon(Some(gate.clone()));
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let marker = held.path().join("ran");
+    let arguments = serde_json::json!({"id":"once", "title":"One job", "command":format!("echo done >> {}", marker.display())});
+    let prompt = format!("mcp start_activity {arguments}");
+    let node = ask(&mut client, chat, &prompt);
+    assert_eq!(node.activities[0].state, ActivityState::Starting);
+    assert!(!marker.exists(), "command must wait for the durable writer");
+    let duplicate = ask(&mut client, chat, &prompt);
+    assert_eq!(duplicate.activities.len(), 1);
+    assert!(!marker.exists());
+    std::fs::write(&gate, "go").unwrap();
+    let done = wait_for_chat(&mut client, chat, |n| {
+        n.activities
+            .first()
+            .is_some_and(|a| a.state == ActivityState::Exited(0))
+    });
+    assert!(done.activities[0].result.contains("done"));
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "done\n");
+    let _ = ask(&mut client, chat, &prompt);
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "done\n");
+    let mismatch = last_words(&ask(
+        &mut client,
+        chat,
+        "mcp start_activity {\"id\":\"once\",\"title\":\"Other\",\"command\":\"false\"}",
+    ));
+    assert!(mismatch.contains("different request"), "{mismatch}");
+    let other = start_tooled_chat(&mut client, AgentTools::Allow);
+    let words = last_words(&ask(
+        &mut client,
+        other,
+        "mcp read_activities {\"id\":\"once\"}",
+    ));
+    assert!(words.contains("No operation"), "{words}");
+}
+
+#[test]
+fn managed_activity_cancelled_before_persistence_never_runs() {
+    use clackatoo_protocol::ActivityState;
+    let held = tempfile::tempdir().unwrap();
+    let gate = held.path().join("gate");
+    let daemon = managed_daemon(Some(gate.clone()));
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let marker = held.path().join("ran");
+    let args = serde_json::json!({"id":"cancel", "title":"Cancel me", "command":format!("touch {}", marker.display())});
+    ask(&mut client, chat, &format!("mcp start_activity {args}"));
+    let node = ask(&mut client, chat, "mcp cancel_activity {\"id\":\"cancel\"}");
+    assert_eq!(node.activities[0].state, ActivityState::Refused);
+    std::fs::write(&gate, "go").unwrap();
+    wait_for_kept(&daemon.dir.path().join("workspaces"), |s| {
+        s.contains("Cancelled before")
+    });
+    assert!(!marker.exists());
+}
+
+#[test]
+fn native_access_defaults_off_and_inspect_cannot_control() {
+    use clackatoo_protocol::{NativeAccess, NativeReply};
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let words = last_words(&ask(&mut client, chat, "mcp native_snapshot"));
+    assert!(words.contains("access is Off"), "{words}");
+    let mut window = daemon.client();
+    window.attach(chat).unwrap();
+    window
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let (mut sender, mut receiver) = window.split().unwrap();
+    sender
+        .send(&ClientMessage::NativeGrant {
+            chat,
+            access: NativeAccess::Inspect,
+        })
+        .unwrap();
+    loop {
+        if let ServerMessage::Event(Event::NativeGrantAck { access, .. }) =
+            receiver.receive().unwrap()
+        {
+            assert_eq!(access, NativeAccess::Inspect);
+            break;
+        }
+    }
+    let words = last_words(&ask(
+        &mut client,
+        chat,
+        "mcp native_click {\"revision\":1,\"x\":2,\"y\":3}",
+    ));
+    assert!(words.contains("requires Control"), "{words}");
+    client
+        .chat(chat, ChatAction::Send("mcp native_snapshot".into()))
+        .unwrap();
+    let id = loop {
+        if let ServerMessage::Event(Event::NativeRequest { id, .. }) = receiver.receive().unwrap() {
+            break id;
+        }
+    };
+    // Another authenticated window cannot answer a request addressed elsewhere.
+    let (mut stranger, _) = daemon.client().split().unwrap();
+    stranger
+        .send(&ClientMessage::NativeReply {
+            id,
+            result: Ok(NativeReply {
+                revision: 1,
+                description: "wrong window".into(),
+                png: None,
+            }),
+        })
+        .unwrap();
+    sender
+        .send(&ClientMessage::NativeGrant {
+            chat,
+            access: NativeAccess::Off,
+        })
+        .unwrap();
+    sender
+        .send(&ClientMessage::NativeReply {
+            id,
+            result: Ok(NativeReply {
+                revision: 1,
+                description: "late reply".into(),
+                png: None,
+            }),
+        })
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |n| last_outcome(n).is_some());
+    let words = last_words(&node);
+    assert!(words.contains("revoked"), "{words}");
+    assert!(!words.contains("wrong window") && !words.contains("late reply"));
 }

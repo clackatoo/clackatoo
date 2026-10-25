@@ -1,0 +1,35 @@
+# Exercise the actual native permission, screenshot and input routes.
+size 1100x900
+kept <<END
+{"clackatoo_workspaces":1,"workspaces":[{"name":"harness","tabs":[{"layout":{"pane":{"terminal":{"cwd":"$PROJECT"}}}}]}]}
+END
+keys <C-;>:set agenttools=allow<CR>
+keys <C-;>:Agent claude<CR>i
+type mcp native_snapshot
+keys <CR>
+wait-for access is Off
+keys <C-;>:agentaccess inspect<CR>i
+type mcp native_snapshot
+keys <CR>
+wait-for image/png picture
+shot native-inspect
+keys <C-;>:agentaccess control<CR>i
+type mcp native_snapshot
+keys <S-CR>
+type mcp native_key {"revision":$REVISION,"key":"<C-?>"}
+keys <CR>
+wait-for Keyboard shortcuts
+shot native-control
+keys <Esc><C-;>:Capabilities<CR>
+wait-for Harness capabilities
+shot capabilities
+keys <Esc>:agentaccess off<CR>
+keys i
+type mcp start_activity {"id":"build-demo","title":"Build project","command":"sleep 3; printf build-complete"}
+keys <CR>
+sleep 350
+shot activity-running
+wait-for Completed
+shot activity-complete
+size 480x640
+shot activity-narrow

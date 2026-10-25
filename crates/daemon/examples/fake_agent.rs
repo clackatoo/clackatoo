@@ -1303,10 +1303,12 @@ fn call_tools(session: &str, server: &Value, calls: &[String]) {
         let _ = child.wait();
         return;
     }
+    let mut revision = 0u64;
     for (n, call) in calls.iter().enumerate() {
         let call = call.strip_prefix("mcp ").unwrap_or(call);
         let (name, arguments) = call.split_once(' ').unwrap_or((call, "{}"));
-        let arguments: Value = serde_json::from_str(arguments).unwrap();
+        let arguments: Value =
+            serde_json::from_str(&arguments.replace("$REVISION", &revision.to_string())).unwrap();
         let id = n as u64 + 1;
         let answer = ask(
             id,
@@ -1324,6 +1326,14 @@ fn call_tools(session: &str, server: &Value, calls: &[String]) {
                 let text = answer["result"]["content"][0]["text"]
                     .as_str()
                     .unwrap_or_default();
+                if let Some(value) = text
+                    .lines()
+                    .next()
+                    .and_then(|s| s.strip_prefix("revision="))
+                    .and_then(|s| s.parse().ok())
+                {
+                    revision = value;
+                }
                 // A picture is said as its type and size.
                 let mut pictures = String::new();
                 let images = (answer["result"]["content"].as_array().into_iter())

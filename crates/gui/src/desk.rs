@@ -76,6 +76,7 @@ enum Asker {
 /// What the window asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Asked {
+    Capabilities,
     /// A new pane, to switch to once made.
     Pane,
     /// Something typed on the command line, whose failure is shown.
@@ -101,7 +102,10 @@ enum Asked {
     PaneAt(Option<FileLocation>),
     /// A new file explorer, to switch to once made, showing the file at
     /// `reveal` once it can, and editing a folder as text if `edit`.
-    Explorer { reveal: Option<String>, edit: bool },
+    Explorer {
+        reveal: Option<String>,
+        edit: bool,
+    },
     /// A new tab's pane, showing a buffer with no file yet for `:e` alone,
     /// to switch to once made, with an explorer of this folder beside it.
     Blank(Option<String>),
@@ -274,6 +278,7 @@ const POINTED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 #[derive(Debug, Default)]
 #[allow(clippy::struct_excessive_bools, reason = "each is so or not")]
 pub(crate) struct Desk {
+    pub(crate) capability_report: Option<crate::shortcuts::Context>,
     scrolling: HashMap<PaneId, scrolling::Gesture>,
     /// The daemon's workspaces, as last heard.
     workspaces: Workspaces,
@@ -496,6 +501,31 @@ pub(crate) struct Desk {
 
 impl Desk {
     // --- What's shown -----------------------------------------------------
+
+    pub(crate) fn native_controls(&self) -> serde_json::Value {
+        let Some(placement) = self.placement() else {
+            return serde_json::Value::Null;
+        };
+        let Some(tab) = self.shown_tab() else {
+            return serde_json::Value::Null;
+        };
+        let panes = tab.layout.panes();
+        let mut controls = Vec::new();
+        for (id, tile) in placement.panes.into_iter().take(64) {
+            let Some(pane) = panes.iter().find(|p| p.id == id) else {
+                continue;
+            };
+            controls.push(serde_json::json!({"role":"pane","id":id.0,"content":format!("{:?}", pane.content),"bounds":[tile.rect.x,tile.rect.y,tile.rect.width,tile.rect.height]}));
+            if let Content::Terminal(terminal) = pane.content
+                && let Some(view) = self.panes.get(&terminal)
+            {
+                for (label, [x, y, w, h]) in view.native_controls() {
+                    controls.push(serde_json::json!({"role":"control","label":label,"bounds":[tile.origin[0]+x,tile.origin[1]+y,w,h]}));
+                }
+            }
+        }
+        serde_json::Value::Array(controls)
+    }
 
     pub(crate) fn shown(&self) -> Option<Shown> {
         self.shown
@@ -1627,6 +1657,25 @@ impl Desk {
                 }
                 redraw
             }
+            Some(Asker::Window(Asked::Capabilities)) => {
+                match response {
+                    Response::Text(text) => {
+                        match serde_json::from_str::<crate::shortcuts::Rows>(&text) {
+                            Ok(rows) => {
+                                self.capability_report = Some(crate::shortcuts::Context {
+                                    title: "Live daemon state · listed tools do not grant access"
+                                        .into(),
+                                    rows,
+                                });
+                            }
+                            Err(err) => self.warn(format!("Could not read capabilities: {err}")),
+                        }
+                    }
+                    Response::Error(err) => self.warn(err.to_string()),
+                    _ => {}
+                }
+                true
+            }
             Some(Asker::Window(Asked::Resize)) => {
                 self.resizes_pending -= 1;
                 if let Response::Error(err) = response {
@@ -2726,6 +2775,34 @@ impl Desk {
             Command::EditBlank => self.edit_blank(),
             Command::Quit { force } => self.quit(force),
             Command::Tutor(topic) => self.tutor(topic.as_deref()),
+            Command::Capabilities => {
+                if !self.needs_daemon("harness capabilities", wire::HARNESS) {
+                    return;
+                }
+                if let Some(terminal) = self.focused_terminal() {
+                    self.request(
+                        Request::HarnessCapabilities { terminal },
+                        Asked::Capabilities,
+                    );
+                }
+            }
+            Command::AgentAccess(access) => {
+                if !self.needs_daemon("native access", wire::HARNESS) {
+                    return;
+                }
+                if let Some(chat) = if access == clackatoo_protocol::NativeAccess::Off {
+                    Some(TerminalId(0))
+                } else {
+                    self.focused_terminal()
+                        .filter(|id| self.panes.get(id).is_some_and(Pane::is_chat))
+                } {
+                    self.outbox
+                        .push(ClientMessage::NativeGrant { chat, access });
+                    self.say("Requesting window access change…".into());
+                } else {
+                    self.say("Focus the chat to grant access to this window.".into());
+                }
+            }
             Command::Write { force, quit, name } => self.write_file(force, quit, name),
             Command::Discard => self.discard_changes(),
             Command::Recover { drop } => self.recover(drop),
@@ -2991,6 +3068,8 @@ mod tests {
                 | ClientMessage::Place { .. }
                 | ClientMessage::Dismiss { .. }
                 | ClientMessage::Login { .. }
+                | ClientMessage::NativeGrant { .. }
+                | ClientMessage::NativeReply { .. }
                 | ClientMessage::Upgrade { .. } => None,
             })
             .collect();

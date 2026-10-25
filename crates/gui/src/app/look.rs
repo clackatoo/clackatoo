@@ -54,7 +54,7 @@ pub(super) struct Offscreen {
 
 impl Offscreen {
     /// A picture `size` pixels big, at `scale` pixels to a point.
-    fn new(device: &wgpu::Device, size: [u32; 2], scale: f64) -> Self {
+    pub(super) fn new(device: &wgpu::Device, size: [u32; 2], scale: f64) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen"),
             size: wgpu::Extent3d {
@@ -73,6 +73,13 @@ impl Offscreen {
             texture,
             scale,
             redraw: Cell::new(true),
+        }
+    }
+
+    pub(super) fn read(&self, gpu: &Gpu) -> Picture {
+        Picture {
+            size: self.size(),
+            rgba: render::read_back((&gpu.device, &gpu.queue), &self.texture),
         }
     }
 
@@ -259,6 +266,8 @@ impl Window {
             renderer,
             fonts,
             transparent: false,
+            capture: false,
+            captured: None,
         });
         app.fit_panes();
         Ok(Self {

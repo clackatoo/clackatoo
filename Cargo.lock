@@ -767,6 +767,7 @@ dependencies = [
  "clackatoo-term",
  "js-sys",
  "pulldown-cmark",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

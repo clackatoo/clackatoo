@@ -45,7 +45,9 @@ use crate::browser::Act;
 use crate::chat::Choices;
 use crate::mcp::{self, Connection, Incoming, Tool};
 
+mod activities;
 mod boards;
+mod native;
 mod subagents;
 mod talk;
 
@@ -79,6 +81,8 @@ pub(super) struct Tools {
     /// Calls waiting: for the user to allow them, or for a command to
     /// finish.
     waiting: Vec<Waiting>,
+    pub(super) activities: Vec<crate::saved::Operation>,
+    native: BTreeMap<TerminalId, (Token, clackatoo_protocol::NativeAccess)>,
     /// The number the next call waiting for the user gets.
     next_call: u64,
     /// The terminals agents have run commands in.
@@ -136,6 +140,11 @@ enum Wait {
     /// The browser's answer to the call it was handed as `call`. The
     /// browser's thread gives up on its own waits.
     Browser { call: u64 },
+    Native {
+        call: u64,
+        window: Token,
+        due: Instant,
+    },
 }
 
 /// A terminal an agent ran a command in, or typed into.
@@ -448,7 +457,11 @@ impl Daemon {
         }
         let commands = matches!(
             tool,
-            Tool::RunInTerminal { .. } | Tool::SendToTerminal { .. }
+            Tool::RunInTerminal { .. }
+                | Tool::RunInBackground { .. }
+                | Tool::StartActivity { .. }
+                | Tool::CancelActivity { .. }
+                | Tool::SendToTerminal { .. }
         );
         (commands && limits.no_commands()).then(|| {
             format!(
@@ -631,6 +644,17 @@ impl Daemon {
             self.answer_tool(token, &id, Err(refused.to_owned()));
             return;
         }
+        if let Tool::StartActivity { id: operation, .. } = &tool
+            && self
+                .tools
+                .activities
+                .iter()
+                .any(|r| r.activity.owner == chat && r.activity.id == *operation)
+        {
+            // Recovery is read-only: an unanswered approval is never replayed.
+            self.carry_out(token, chat, id, tool);
+            return;
+        }
         // What would be refused anyway isn't asked about.
         if let Some(why) =
             (self.limits_refused(chat, &tool)).or_else(|| self.talk_refused(chat, &tool))
@@ -686,7 +710,8 @@ impl Daemon {
                     .unwrap_or_default();
                 Some(asked("run", command, &format!("in a new terminal{place}")))
             }
-            Tool::RunInBackground { command, cwd, .. } => {
+            Tool::RunInBackground { command, cwd, .. }
+            | Tool::StartActivity { command, cwd, .. } => {
                 if tools == AgentTools::Allow {
                     return None;
                 }
@@ -800,8 +825,22 @@ impl Daemon {
 
     /// Does what `tool` asks, for the agent of the chat `chat`, and
     /// answers, unless it waits.
+    #[allow(clippy::too_many_lines, reason = "dispatches the tool catalogue")]
     fn carry_out(&mut self, token: Token, chat: TerminalId, id: Value, tool: Tool) {
         let result = match tool {
+            Tool::StartActivity {
+                id,
+                title,
+                command,
+                cwd,
+            } => self.start_activity(chat, &id, title, command, cwd),
+            Tool::ReadActivities { id } => self.read_activities(chat, id.as_deref()),
+            Tool::CancelActivity { id } => self.cancel_activity(chat, &id),
+            Tool::Capabilities => Ok(self.harness_capabilities(chat)),
+            Tool::Native(action) => {
+                self.native_call(token, chat, id, action);
+                return;
+            }
             Tool::OpenFile { path, line } => self.open_file(chat, &path, line),
             Tool::RunInTerminal { command, cwd, name } => {
                 self.run_in_terminal(chat, command, cwd.as_deref(), name)
@@ -1283,13 +1322,12 @@ impl Daemon {
     /// `run_in_background`: starts a shell in a new background tab of the
     /// chat's workspace, and types `command` at its first prompt. Nothing
     /// is shown: the user finds it in their list of background tabs.
-    fn run_in_background(
+    fn background_terminal(
         &mut self,
         chat: TerminalId,
-        command: String,
+        command: &str,
         cwd: Option<&str>,
-        name: Option<String>,
-    ) -> Result<String, String> {
+    ) -> Result<(PaneId, TerminalId), String> {
         let dir = self.chat_dir(chat)?;
         let cwd = match cwd {
             Some(cwd) => super::buffers::resolve(cwd, Path::new(&dir), &self.config.home),
@@ -1304,15 +1342,23 @@ impl Daemon {
         let workspace = workspace.id;
         let size = self.chat(chat).ok_or("the chat has closed")?.size();
         let cwd = cwd.to_string_lossy().into_owned();
+        let (pane, terminal) = (self.start_background(workspace, (Some(cwd), None), size, command))
+            .map_err(|err| err.to_string())?;
+        Ok((pane, terminal))
+    }
+
+    fn run_in_background(
+        &mut self,
+        chat: TerminalId,
+        command: String,
+        cwd: Option<&str>,
+        name: Option<String>,
+    ) -> Result<String, String> {
+        let (pane, terminal) = self.background_terminal(chat, &command, cwd)?;
         let shown = format!("`{command}`");
-        let (pane, terminal) =
-            (self.start_background(workspace, (Some(cwd), None), size, &command))
-                .map_err(|err| err.to_string())?;
         self.type_at_first_prompt(terminal, command, Some(chat), name);
         Ok(format!(
-            "Running {shown} in pane {pane}, in a background tab: out of the user's tab bar, \
-             in their list of background tabs. wait_for_terminal waits for it to finish; \
-             read_terminal reads its output."
+            "Running {shown} in pane {pane}, in a background tab: out of the user's tab bar, in their list of background tabs. wait_for_terminal waits for it to finish; read_terminal reads its output."
         ))
     }
 
@@ -1506,12 +1552,17 @@ impl Daemon {
         self.typing_into(terminal, false);
         match typed {
             Ok(()) => {
+                self.activity_started(terminal);
                 let commanded = self.tools.commanded.get(&terminal);
                 let block = commanded.and_then(|commanded| commanded.expect);
                 let renumbered = commanded.map_or(0, |commanded| commanded.renumbered);
                 self.kept_typed(terminal, block, renumbered);
             }
             Err(why) => {
+                if let Some(commanded) = self.tools.commanded.get_mut(&terminal) {
+                    commanded.failed = Some(why.clone());
+                }
+                self.observe_activity(terminal, false);
                 log::warn!("terminal {terminal}: the command couldn't be typed: {why}");
             }
         }
@@ -1520,6 +1571,7 @@ impl Daemon {
     /// Answers the calls waiting for `terminal`'s command to finish, if it
     /// has, or if `ended`.
     fn answer_finished(&mut self, terminal: TerminalId, ended: bool) {
+        self.observe_activity(terminal, ended);
         if !(self.tools.waiting.iter())
             .any(|waiting| matches!(waiting.what, Wait::Finish { terminal: waited, .. } if waited == terminal))
         {
@@ -1607,12 +1659,22 @@ impl Daemon {
     /// The terminal `terminal` closed: calls waiting on it are answered,
     /// and, for a chat, its agent's calls are refused.
     pub(super) fn tools_closed(&mut self, terminal: TerminalId) {
+        self.answer_finished(terminal, true);
         self.tools.commanded.remove(&terminal);
         self.tools.talk.forget(terminal);
-        self.answer_finished(terminal, true);
         self.tools.sides.remove(&terminal);
         self.tools.editors.remove(&terminal);
         self.chat_left_browser(terminal);
+        if let Some((window, _)) = self.tools.native.remove(&terminal) {
+            self.send_event(
+                window,
+                clackatoo_protocol::Event::NativeGrantAck {
+                    chat: terminal,
+                    access: clackatoo_protocol::NativeAccess::Off,
+                    reason: "Window access revoked: the owning chat closed.".into(),
+                },
+            );
+        }
         let (gone, kept) = std::mem::take(&mut self.tools.waiting)
             .into_iter()
             .partition(|waiting| waiting.chat == terminal);
@@ -1640,6 +1702,7 @@ impl Daemon {
             Wait::Finish { due, .. }
             | Wait::Turn { due, .. }
             | Wait::Chats { due, .. }
+            | Wait::Native { due, .. }
             | Wait::Boards { due, .. } => Some(due),
             Wait::Permission { .. } | Wait::Browser { .. } => None,
         });
@@ -1771,7 +1834,7 @@ impl Daemon {
             .into_iter()
             .partition(|waiting| {
                 matches!(waiting.what, Wait::Finish { due, .. } | Wait::Turn { due, .. }
-                    | Wait::Chats { due, .. } | Wait::Boards { due, .. } if due <= now)
+                    | Wait::Chats { due, .. } | Wait::Native { due, .. } | Wait::Boards { due, .. } if due <= now)
             });
         self.tools.waiting = kept;
         for waiting in timed_out {
@@ -1787,6 +1850,10 @@ impl Daemon {
                     let summary = self.summary(waiting.chat, chats);
                     let answer = format!("The wait timed out.\n{summary}");
                     self.answer_tool(waiting.token, &waiting.id, Ok(answer));
+                    continue;
+                }
+                Wait::Native { .. } => {
+                    self.answer_tool(waiting.token, &waiting.id, Err("The window did not answer in time. Its action outcome is unknown; inspect before retrying.".into()));
                     continue;
                 }
                 Wait::Boards { .. } => {

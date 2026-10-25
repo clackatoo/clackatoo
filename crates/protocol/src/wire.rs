@@ -244,6 +244,8 @@ gates! {
     PROVIDER_USAGE = 103,
     /// Opt-in recent chat snapshots and older history pages.
     CHAT_HISTORY = 104,
+    /// Managed agent activities and explicit window access.
+    HARNESS = 105,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -412,6 +414,7 @@ impl Since for ChatPatch {
             Self::Delivery(_) => CHAT_QUEUE,
             Self::ProviderUsage(_) => PROVIDER_USAGE,
             Self::History { .. } => CHAT_HISTORY,
+            Self::Activities(_) => HARNESS,
         }
     }
 }
@@ -542,6 +545,7 @@ impl Since for Event {
             Self::Forwarded(_) => RELAY,
             Self::Said(_) => LEND,
             Self::Listening(_) => BACKGROUND,
+            Self::NativeRequest { .. } | Self::NativeGrantAck { .. } => HARNESS,
         }
     }
 }
@@ -923,6 +927,19 @@ pub trait Downgrade: Sized {
 /// daemon still: refuse image messages rather than dropping attachments.
 impl Downgrade for ClientMessage {
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
+        if wire < HARNESS
+            && matches!(
+                self,
+                Self::NativeGrant { .. }
+                    | Self::NativeReply { .. }
+                    | Self::Request(
+                        crate::Request::HarnessCapabilities { .. }
+                            | crate::Request::CancelActivity { .. }
+                    )
+            )
+        {
+            return Downgraded::Refused;
+        }
         if wire < CHAT_HISTORY {
             match self {
                 Self::Request(crate::Request::AttachRecent { terminal, .. }) => {
@@ -1045,7 +1062,8 @@ fn without_optional_chat_updates(message: &ServerMessage, wire: u32) -> Option<S
         return None;
     };
     let unsupported = |patch: &Patch| {
-        matches!(patch, Patch::Chat(ChatPatch::History { .. }) if wire < CHAT_HISTORY)
+        matches!(patch, Patch::Chat(ChatPatch::Activities(_)) if wire < HARNESS)
+            || matches!(patch, Patch::Chat(ChatPatch::History { .. }) if wire < CHAT_HISTORY)
             || matches!(patch, Patch::Chat(ChatPatch::Delivery(_)) if wire < CHAT_QUEUE)
             || matches!(patch, Patch::Chat(ChatPatch::ProviderUsage(_)) if wire < PROVIDER_USAGE)
     };
@@ -1101,7 +1119,7 @@ impl Downgrade for ServerMessage {
         if newest(self) <= wire {
             return Downgraded::AsIs;
         }
-        if wire < CHAT_HISTORY
+        if wire < HARNESS
             && let Some(older) = without_optional_chat_updates(self, wire)
         {
             return match older.downgrade(wire) {
@@ -1150,7 +1168,9 @@ impl Downgrade for ServerMessage {
         }
         match self {
             Self::Event(
-                Event::Exited { .. }
+                Event::NativeGrantAck { .. }
+                | Event::NativeRequest { .. }
+                | Event::Exited { .. }
                 | Event::Coloured { .. }
                 | Event::Connections(_)
                 | Event::Login { .. }
@@ -1507,7 +1527,9 @@ mod tests {
         matches!(
             message,
             ServerMessage::Event(
-                Event::Exited { .. }
+                Event::NativeRequest { .. }
+                    | Event::NativeGrantAck { .. }
+                    | Event::Exited { .. }
                     | Event::Coloured { .. }
                     | Event::Connections(_)
                     | Event::Login { .. }

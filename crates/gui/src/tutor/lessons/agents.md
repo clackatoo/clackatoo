@@ -174,3 +174,54 @@ has "tutor: hello"
 ## Continuing after upgrades
 
 If a daemon upgrade interrupts an answer, the agent reopens the same provider session and continues the same turn automatically. It is told to check interrupted tool results before repeating actions. Unsent messages and images are preserved. Idle, completed and manually stopped chats stay idle. This applies to planned upgrades, not crashes or ordinary restarts. The first upgrade from a build without continuation records still needs another message.
+
+
+## Native window access
+
+Native access starts **Off**. Focus the chat in the window you want to share,
+then run `:agentaccess inspect` for screenshots and visible controls, or
+`:agentaccess control` to also allow clicks, text and keys throughout that
+window. This is broad access to what the window can display and operate.
+The title and top bar identify the grant. Click the top bar's **Revoke** badge
+or use `:agentaccess off` from any pane. Closing the window, disconnecting or upgrading also clears it.
+Automation cannot use window input to answer approval questions, change chat
+permissions or grant itself access. Control is not an operating-system sandbox.
+
+Only one chat can control a window, and one window can be granted to a chat.
+Federated mirrored chats cannot receive a grant; open a window directly on the
+remote daemon with `--remote` instead. The browser app cannot grant native access.
+Each input consumes an observed screenshot revision; changed targets or human
+input require another screenshot. These tools do not change desktop focus.
+
+## Managed activities and recovery
+
+Ask the agent to use a managed activity for a long build, test run, deployment
+or bounded watcher. Its persistent card shows Starting, Running, Stopping and
+the observed result in native and web chat history. Expand the card for its
+command and bounded final output. Stop requests Ctrl+C; it does not claim the
+process has exited until shell integration reports it. The background pane is
+also available through `:Background`.
+
+The harness tells agents when to use `start_activity`, `read_activities` and
+`cancel_activity`. Existing command approvals apply. A stable operation ID is
+saved before execution; asking to start the same ID and command returns the
+existing record. Reusing it for a different command is refused. Completion
+notifies the owning chat, without resuming a chat explicitly stopped by you.
+
+Jobs and their records survive a planned daemon upgrade. After a full restart,
+unfinished operations say **Outcome unknown** and never restart automatically.
+A command whose startup was interrupted is also marked unknown. Agents must
+inspect the record and current state before deciding what to do. This recovery
+covers managed activities, not every provider or external tool call.
+
+Activities require workspace storage and shell integration. Each chat retains
+at most 64 jobs, with 8 active; the daemon keeps at most 128. Results retain the
+last inspected terminal output up to 4 KiB; the terminal keeps its own scrollback.
+
+## Inspecting capabilities
+
+`:Capabilities` shows the focused chat's tools policy, command restrictions,
+browser configuration and permission, native grant, and tool connection.
+The web composer's **Tools** button opens the same report. Agents can call
+`harness_capabilities` themselves. A requested tool catalogue is reported
+separately from model acknowledgment: the harness cannot prove a model saw it.

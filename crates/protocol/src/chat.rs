@@ -66,6 +66,13 @@ pub struct ChatNode {
         deserialize_with = "wire::since::<{ wire::CHAT_HISTORY }, _, _>"
     )]
     pub first_message: u32,
+    /// Daemon-owned background work belonging to this chat.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::HARNESS }, _>",
+        deserialize_with = "wire::since::<{ wire::HARNESS }, _, _>"
+    )]
+    pub activities: Vec<crate::Activity>,
 }
 
 /// One provider account's quota readings. Context belongs to the chat, not here.
@@ -1032,6 +1039,8 @@ pub enum ChatPatch {
         /// Older turns, oldest first.
         turns: Vec<Turn>,
     },
+    /// Complete bounded activity list for this chat.
+    Activities(Vec<crate::Activity>),
 }
 
 /// A small, decoded image for chat history. Shared by snapshots and paint
@@ -1315,6 +1324,7 @@ impl ChatNode {
             subagents: self.subagents.clone(),
             delivery: self.delivery.clone(),
             provider_usage: self.provider_usage.clone(),
+            activities: self.activities.clone(),
             first_turn: self
                 .first_turn
                 .saturating_add(u32::try_from(start).unwrap_or(u32::MAX)),
@@ -1393,6 +1403,7 @@ impl ChatNode {
             ChatPatch::Subagents(subagents) => self.subagents = subagents,
             ChatPatch::Delivery(delivery) => self.delivery = delivery,
             ChatPatch::ProviderUsage(usage) => self.provider_usage = usage,
+            ChatPatch::Activities(activities) => self.activities = activities,
             ChatPatch::History {
                 first,
                 before,

@@ -11,7 +11,10 @@ const CONTINUE: &str = "Clackatoo resumed this session after a daemon upgrade in
     The upgrade may have interrupted a tool after it already acted: inspect its \
     result or current state before repeating it. Do not assume an interrupted \
     command failed or rerun completed actions. Keep the user's existing scope \
-    and permissions; an unanswered approval is not permission.";
+    and permissions; an unanswered approval is not permission. \
+    Use read_activities to recover managed operation IDs and recorded outcomes before \
+    starting replacement work. Reusing an operation ID inspects the existing job, \
+    never starts it twice.";
 
 impl HostedChat {
     pub(crate) fn prepare_upgrade(&mut self) -> Option<ChatContinuation> {

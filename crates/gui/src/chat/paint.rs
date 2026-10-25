@@ -657,6 +657,24 @@ impl ChatView {
             y += piece.height;
             laid.pieces.insert(key, piece);
         }
+        let activities: Vec<_> = self
+            .node
+            .activities
+            .iter()
+            .filter(|activity| {
+                activity.turn.checked_sub(self.node.first_turn) == u32::try_from(index).ok()
+            })
+            .map(clackatoo_protocol::Activity::card)
+            .collect();
+        for (at, tool) in activities.iter().enumerate() {
+            let key = ITEMS + turn.items.len() + at;
+            y += m.em(0.6);
+            let card = self.card(fonts, m, old_cards.remove(&key), tool, column);
+            let height = card.height;
+            laid.spans.push(Span::of(Piece::Card(key), y, height));
+            laid.cards.insert(key, card);
+            y += height;
+        }
         // The chats its agent started, as a card under its work.
         let started = self.subagents_in(index).len();
         if started > 0 {
@@ -912,6 +930,7 @@ impl ChatView {
 
     /// Draws turn `index` with the column's left and the turn's top at
     /// `origin`: what of it is in view.
+    #[allow(clippy::too_many_lines, reason = "renders the ordered turn pieces")]
     fn draw_turn(
         &self,
         canvas: &mut Canvas<'_>,
@@ -948,6 +967,32 @@ impl ChatView {
                             column,
                             (drawn, &self.previews),
                         );
+                        if let Some(id) = card.tool.id.strip_prefix("clackatoo-activity:")
+                            && self
+                                .node
+                                .activities
+                                .iter()
+                                .any(|a| a.id == id && a.state.active())
+                        {
+                            let bounds = [
+                                origin[0] + column - m.em(2.5),
+                                top + m.em(0.25),
+                                m.em(2.0),
+                                m.em(2.0),
+                            ];
+                            canvas.fill(Fill::rounded(bounds, Paint::Raised, m.em(0.4)));
+                            canvas.fill(Fill::icon(
+                                [
+                                    bounds[0] + m.em(0.5),
+                                    bounds[1] + m.em(0.5),
+                                    m.em(1.0),
+                                    m.em(1.0),
+                                ],
+                                Icon::Close,
+                                Paint::Icon,
+                            ));
+                            drawn.hit(canvas.clip, Hit::CancelActivity(id.to_owned()), bounds);
+                        }
                     }
                 }
                 Piece::Prompt => {

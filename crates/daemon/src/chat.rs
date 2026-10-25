@@ -2974,6 +2974,17 @@ impl HostedChat {
         self.set_usage(None);
     }
 
+    pub(crate) fn activity_notifications_allowed(&self) -> bool {
+        !self.stop_requested && !matches!(self.node.state, ChatState::Failed(_))
+    }
+
+    pub(crate) fn set_activities(&mut self, activities: Vec<clackatoo_protocol::Activity>) {
+        if self.node.activities != activities {
+            self.node.activities.clone_from(&activities);
+            self.journal.push(ChatPatch::Activities(activities));
+        }
+    }
+
     pub(crate) fn set_provider_usage(&mut self, usage: Vec<clackatoo_protocol::ProviderUsage>) {
         if self.node.provider_usage != usage {
             self.node.provider_usage.clone_from(&usage);
@@ -3102,6 +3113,10 @@ fn weight(patch: &ChatPatch) -> usize {
                     .map(|preview| preview.rgba.len())
                     .sum::<usize>()
         }
+        ChatPatch::Activities(activities) => activities
+            .iter()
+            .map(|a| a.command.len() + a.result.len() + a.title.len() + 256)
+            .sum(),
         ChatPatch::Delivery(delivery) => delivery.queued.iter().map(|p| p.text.len() + 128).sum(),
         ChatPatch::ProviderUsage(providers) => providers
             .iter()

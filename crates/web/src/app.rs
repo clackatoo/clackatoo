@@ -1926,6 +1926,15 @@ impl App {
                     self.state.chat(answer, "answering");
                 }
             }
+            Action::Capabilities => {
+                self.state.toggle_fold("capabilities");
+                if let Some(open) = &mut self.state.open {
+                    open.folds.insert(view::SETTINGS_FOLD.into(), false);
+                    open.folds.insert(view::USAGE_FOLD.into(), false);
+                }
+                self.state.inspect_capabilities();
+            }
+            Action::CancelActivity(index) => self.state.cancel_activity(index),
             Action::Usage | Action::Settings | Action::Permissions => self.toggle_sheet(action),
             Action::Filter(filter) => {
                 self.state.home_filter = filter;
@@ -2027,6 +2036,7 @@ impl App {
                 view::USAGE_FOLD
             };
             open.folds.insert(other.into(), false);
+            open.folds.insert("capabilities".into(), false);
         }
         let opening = self
             .state
@@ -2141,6 +2151,7 @@ impl App {
             if let Some(open) = &mut self.state.open {
                 open.folds.insert(view::SETTINGS_FOLD.into(), false);
                 open.folds.insert(view::USAGE_FOLD.into(), false);
+                open.folds.insert("capabilities".into(), false);
             }
             self.focus_settings_trigger();
             self.draw_soon();
