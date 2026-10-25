@@ -294,7 +294,9 @@ The tools are an MCP server (the [Model Context Protocol](https://modelcontextpr
 
 ## The browser
 
-A chat's agent can drive a web page once you turn its Browser setting on, from the chip beside Tools in the box, or for every new chat with `:set chatbrowser`. It's off unless you do.
+A chat's agent can drive a web page once you turn Browser on in the permissions menu beside the model, or for every new chat with `:set chatbrowser`. It's off unless you do. Enabling it works during an existing conversation without starting a new chat; disabling it closes the page and blocks further browser calls immediately.
+
+When the daemon supports browsing, the tools are advertised from the start, even while Browser is off. Agents that cache their tool lists can therefore use them once you enable Browser. Every call checks the current setting; seeing the tools does not grant access.
 
 | Tool | Does |
 |---|---|

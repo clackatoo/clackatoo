@@ -785,6 +785,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Antigravity: Google sign-in, Gemini models, native tools, images and cached subscription limits.",
     },
+    News {
+        id: "browser-discovery",
+        date: "2026-10-25",
+        lesson: "agents",
+        what: "Enable Browser during a conversation: its tools stay discoverable, and turning it off blocks calls.",
+    },
 ];
 
 impl News {

@@ -15356,11 +15356,11 @@ fn found_named(dir: &Path, name: &str) -> Vec<PathBuf> {
 }
 
 #[test]
-fn the_browsers_tools_are_listed_while_its_setting_is_on() {
+fn browser_tools_stay_discoverable_but_obey_the_live_setting() {
     use std::io::BufRead;
-    let daemon = with_tools_and_a_browser();
+    let daemon = with_fake_browser(&serde_json::json!({}), None, Duration::from_mins(1));
     let mut client = daemon.client();
-    let chat = start_browsing_chat(&mut client);
+    let chat = start_chat(&mut client);
     let mut relay = std::process::Command::new(fake_agent())
         .args(["mcp", "--chat", &chat.0.to_string(), "--socket"])
         .arg(daemon.socket())
@@ -15387,18 +15387,17 @@ fn the_browsers_tools_are_listed_while_its_setting_is_on() {
     )
     .unwrap();
     let started = read();
-    assert_eq!(
-        started["result"]["capabilities"]["tools"]["listChanged"],
-        true
-    );
+    assert!(started["result"]["capabilities"]["tools"]["listChanged"].is_null());
     let instructions = started["result"]["instructions"].as_str().unwrap();
     assert!(
-        instructions.contains("The browser_ tools drive"),
+        instructions.contains("The browser_ tools drive")
+            && instructions.contains("being listed does not grant access"),
         "{instructions}"
     );
     writeln!(input, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list"}}"#).unwrap();
+    let initial_tools = listed(&read());
     assert_eq!(
-        listed(&read()),
+        initial_tools,
         [
             "browser_navigate",
             "browser_back",
@@ -15410,15 +15409,45 @@ fn the_browsers_tools_are_listed_while_its_setting_is_on() {
             "browser_read",
         ]
     );
-    // Turned off, the agent is told the list changed, and it's without them.
-    let off = ChatAction::Set {
+    let set_browser = |value: &str| ChatAction::Set {
         setting: "clackatoo.browser".to_owned(),
-        value: "off".to_owned(),
+        value: value.to_owned(),
     };
-    client.chat(chat, off).unwrap();
-    assert_eq!(read()["method"], "notifications/tools/list_changed");
-    writeln!(input, r#"{{"jsonrpc":"2.0","id":3,"method":"tools/list"}}"#).unwrap();
-    assert!(listed(&read()).is_empty());
+    let navigate = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": { "name": "browser_navigate", "arguments": { "url": "https://example.com/" } }
+    });
+    // Discoverable while off, but never opens a page or asks permission.
+    writeln!(input, "{navigate}").unwrap();
+    let refused = read();
+    assert_eq!(refused["result"]["isError"], true);
+    assert!(refused.to_string().contains("this chat's browser is off"));
+    assert!(browser_calls(&daemon).is_empty());
+    assert!(chat_now(&mut client, chat).question.is_none());
+
+    // The agent uses its original catalogue, without reconnecting or
+    // handling list_changed. Enabling still requires first-page approval.
+    client.chat(chat, set_browser("on")).unwrap();
+    writeln!(input, "{navigate}").unwrap();
+    wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    assert!(browser_calls(&daemon).is_empty());
+    answer(&mut client, chat, Some("browse".to_owned()));
+    let opened = read();
+    assert_eq!(opened["id"], 3);
+    assert_ne!(opened["result"]["isError"], true, "{opened}");
+    assert!(opened.to_string().contains("Page: https://example.com/"));
+    assert!(!browser_calls(&daemon).is_empty());
+
+    // Disabling closes the page and revokes cached tools immediately;
+    // their names remain discoverable for a later enable.
+    client.chat(chat, set_browser("off")).unwrap();
+    writeln!(input, "{navigate}").unwrap();
+    let refused = read();
+    assert_eq!(refused["result"]["isError"], true);
+    assert!(refused.to_string().contains("this chat's browser is off"));
+    assert!(chat_now(&mut client, chat).question.is_none());
+    writeln!(input, r#"{{"jsonrpc":"2.0","id":4,"method":"tools/list"}}"#).unwrap();
+    assert_eq!(listed(&read()), initial_tools);
     drop(input);
     assert!(relay.wait().unwrap().success());
 }

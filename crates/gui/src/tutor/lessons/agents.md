@@ -147,7 +147,7 @@ Add your own, or change these, in the daemon's `agents.toml`, under `[profiles.N
 
 ## The browser
 
-A chat's agent can drive a web page once you turn on its **Browser** setting, from the chip along the box's bottom, or for every new chat with `:set chatbrowser`. It opens pages, reads them as an outline of headings, links, buttons and text boxes, clicks, types and takes pictures, each a tool call you see in the chat. Before its first page, it asks.
+A chat's agent can drive a web page once you turn on **Browser** in the permissions menu beside the model, or for every new chat with `:set chatbrowser`. You can turn it on during an existing conversation; no new chat is needed. It opens pages, reads them as an outline of headings, links, buttons and text boxes, clicks, types and takes pictures, each a tool call you see in the chat. Before its first page, it asks. Turning Browser off closes its page and blocks further browser calls immediately.
 
 The browser is clackatoo's own, headless, with a profile of its own: never your browser, and never logged in as you. Each chat's page is kept apart from the others'. Its first page opens in a pane beside the chat, where you watch it as it goes; `:|Browser` opens the focused chat's page beside it, and `q` closes the pane.
 

@@ -289,8 +289,10 @@ impl Daemon {
             return;
         };
         let instructions = self.tools_instructions(chat);
-        let browser = self.config.browser.is_some()
-            && (self.chat_ref(chat)).is_some_and(crate::chat::HostedChat::browser);
+        // Agents can cache the first catalogue for the whole session, even
+        // when they accept MCP's list_changed notification. Advertise what
+        // the daemon supports; call_tool checks the chat's live permissions.
+        let browser = self.config.browser.is_some();
         let entry = self.sources.vacant_entry();
         let new = Token(entry.key());
         if let Err(err) = self
@@ -335,8 +337,7 @@ impl Daemon {
             .and_then(|own| own.limits().told())
             .map(|told| format!(" {told}"))
             .unwrap_or_default();
-        let browsing = own.is_some_and(crate::chat::HostedChat::browser);
-        let browser = if browsing && self.config.browser.is_some() {
+        let browser = if self.config.browser.is_some() {
             format!(" {}", mcp::BROWSING)
         } else {
             String::new()
@@ -354,22 +355,10 @@ impl Daemon {
         )
     }
 
-    /// The chat `chat`'s Browser setting went on or off: its connections
-    /// list the browser's tools, or stop, and with it off, its page
-    /// closes.
+    /// The chat `chat`'s Browser setting went on or off. Its catalogue
+    /// stays stable; with it off, its page closes and pending requests
+    /// lose permission immediately.
     pub(super) fn browser_turned(&mut self, chat: TerminalId, on: bool) {
-        let mut changed = Vec::new();
-        for (key, source) in &mut self.sources {
-            if let Source::Tools(connection) = source
-                && connection.chat == chat
-            {
-                connection.set_browser(on && self.config.browser.is_some());
-                changed.push(Token(key));
-            }
-        }
-        for token in changed {
-            self.flush_tools(token);
-        }
         if !on {
             self.close_page(chat);
             // Its questions about the browser go: the answer can't let it.
