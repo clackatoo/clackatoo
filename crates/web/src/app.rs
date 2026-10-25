@@ -114,6 +114,7 @@ enum Pairing {
 struct ChatPage {
     photos: photos::Controls,
     main: HtmlElement,
+    viewport_probe: HtmlElement,
     scroller: DomElement,
     latest: HtmlElement,
     history: HtmlElement,
@@ -1507,10 +1508,12 @@ impl App {
         if let Some(page) = &self.page {
             let bottom = near_bottom(&page.scroller);
             if let Some(viewport) = self.window.visual_viewport() {
+                let (top, height, safe_only) =
+                    viewport::chat_geometry(&self.window, &page.viewport_probe, &viewport);
                 let _ = page
                     .main
                     .style()
-                    .set_property("--viewport-top", &format!("{}px", viewport.offset_top()));
+                    .set_property("--viewport-top", &format!("{top}px"));
                 let layout_height = self
                     .window
                     .inner_height()
@@ -1523,28 +1526,25 @@ impl App {
                     .map_or(layout_height, |root| {
                         layout_height.max(f64::from(root.client_height()))
                     });
-                let obscured = viewport.height() < layout_height - 1.0;
+                let obscured = !safe_only && viewport.height() < layout_height - 1.0;
                 page.main.set_class_name(if obscured {
                     "chat-page keyboard-open"
                 } else {
                     "chat-page"
                 });
-                // Always fit the visible rectangle. Safari can pan it to the
+                // Fit the visible rectangle. Safari can pan it to the
                 // layout's bottom, or report innerHeight already reduced, while
                 // 100dvh still extends behind the keyboard. Neither proves that
                 // the keyboard closed. Dismissal supplies a new visible height.
                 let _ = page
                     .main
                     .style()
-                    .set_property("--viewport-height", &format!("{}px", viewport.height()));
+                    .set_property("--viewport-height", &format!("{height}px"));
                 let _ = page
                     .main
                     .style()
-                    .set_property("height", &format!("{}px", viewport.height()));
-                let _ = page
-                    .main
-                    .style()
-                    .set_property("top", &format!("{}px", viewport.offset_top()));
+                    .set_property("height", &format!("{height}px"));
+                let _ = page.main.style().set_property("top", &format!("{top}px"));
             }
             if bottom {
                 page.scroller.set_scroll_top(page.scroller.scroll_height());
@@ -1773,8 +1773,7 @@ impl App {
     /// typed in.
     fn chat_page(&self) -> ChatPage {
         let document = &self.document;
-        let main: HtmlElement =
-            dom::element_of(document, &el("main").class("chat-page")).unchecked_into();
+        let (main, viewport_probe) = viewport::chat_frame(document);
         let part = |class: &str| dom::element_of(document, &el("div").class(class));
         let header = part("header-slot");
         let turns = part("turns");
@@ -1855,6 +1854,7 @@ impl App {
         ChatPage {
             photos,
             main,
+            viewport_probe,
             scroller,
             latest,
             history,

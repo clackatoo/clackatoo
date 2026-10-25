@@ -4,6 +4,47 @@
 use super::{App, Document, HtmlInputElement, HtmlTextAreaElement, Window, with_app};
 use wasm_bindgen::{JsCast as _, prelude::Closure};
 
+pub(super) fn chat_frame(document: &Document) -> (web_sys::HtmlElement, web_sys::HtmlElement) {
+    let main = super::dom::element_of(document, &super::el("main").class("chat-page"));
+    let probe = super::dom::element_of(
+        document,
+        &super::el("div")
+            .class("viewport-probe")
+            .attr("aria-hidden", "true"),
+    );
+    let _ = main.append_child(&probe);
+    (main.unchecked_into(), probe.unchecked_into())
+}
+
+/// Home Screen `WebKit` can report a visual viewport shorter by its safe-area
+/// insets even with no keyboard (`WebKit` 254868). Compare with an independent
+/// CSS vh measurement, never screen.height: split-screen windows need their
+/// own bounds. A real keyboard reduction or pinch zoom still uses visualViewport.
+pub(super) fn chat_geometry(
+    window: &Window,
+    probe: &web_sys::HtmlElement,
+    viewport: &web_sys::VisualViewport,
+) -> (f64, f64, bool) {
+    let height = viewport.height();
+    if super::standalone(window) && (viewport.scale() - 1.0).abs() < 0.01 {
+        let full = f64::from(probe.offset_height());
+        let style = window.get_computed_style(probe).ok().flatten();
+        let inset = |name| {
+            style
+                .as_ref()
+                .and_then(|style| style.get_property_value(name).ok())
+                .and_then(|value| value.trim_end_matches("px").parse::<f64>().ok())
+                .unwrap_or(0.0)
+        };
+        let safe = inset("padding-top") + inset("padding-bottom");
+        let missing = full - height;
+        if missing >= 0.0 && missing <= safe + 1.0 && viewport.offset_top() <= safe + 1.0 {
+            return (0.0, full, true);
+        }
+    }
+    (viewport.offset_top(), height, false)
+}
+
 #[derive(Default)]
 pub(super) struct Tracking {
     frame_asked: bool,

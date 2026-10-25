@@ -239,13 +239,15 @@ try {
   await tightComposer();
   // innerHeight can already reflect the keyboard while CSS 100dvh does not.
   await page.evaluate(()=>{
+    const original=Object.getOwnPropertyDescriptor(window,'innerHeight');
+    window.restoreInnerHeight=()=>Object.defineProperty(window,'innerHeight',original);
     Object.defineProperty(window,'innerHeight',{value:420,configurable:true});
     Object.defineProperty(visualViewport,'offsetTop',{value:0,configurable:true});
     visualViewport.dispatchEvent(new Event('resize'));
   });
   await page.waitForFunction(()=>document.querySelector('.composer').getBoundingClientRect().bottom<=420);
   await tightComposer();
-  await page.evaluate(()=>{delete window.innerHeight;});
+  await page.evaluate(()=>{window.restoreInnerHeight();delete window.restoreInnerHeight;});
   await page.evaluate(()=>{delete visualViewport.height;delete visualViewport.offsetTop;visualViewport.dispatchEvent(new Event('resize'));});
   await tightComposer();
   assert(await page.locator('.chat-page').evaluate(e=>Math.abs(parseFloat(e.style.height)-visualViewport.height)<1),'stale keyboard height survived');
@@ -273,6 +275,45 @@ try {
     await tightComposer();
     assert(!await page.locator('.chat-page').evaluate(e=>e.classList.contains('keyboard-open')),'keyboard inset survived dismissal');
   }
+  // Home Screen WebKit can exclude status-bar space from visualViewport even
+  // without a keyboard. Simulate that independently of the CSS viewport.
+  await page.evaluate(()=>{
+    document.styleSheets[0].insertRule('.viewport-probe { padding-top:62px !important; padding-bottom:34px !important; }',0);
+    document.querySelector('.chat-page').style.paddingTop='62px';
+  });
+  await page.evaluate(()=>{
+    Object.defineProperty(navigator,'standalone',{value:true,configurable:true});
+    Object.defineProperty(visualViewport,'height',{value:innerHeight-62,configurable:true});
+    visualViewport.dispatchEvent(new Event('resize'));
+  });
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  await page.waitForFunction(()=>Math.abs(document.querySelector('.composer').getBoundingClientRect().bottom-(innerHeight-6))<2);
+  assert(!await page.locator('.chat-page').evaluate(e=>e.classList.contains('keyboard-open')),'status-bar inset mistaken for keyboard');
+  await page.screenshot({path:`${output}/home-screen-composer.png`});
+  await page.evaluate(()=>{
+    Object.defineProperty(visualViewport,'height',{value:420,configurable:true});
+    visualViewport.dispatchEvent(new Event('resize'));
+  });
+  await tightComposer();
+  assert(await page.locator('.chat-page').evaluate(e=>e.classList.contains('keyboard-open')));
+  await page.evaluate(()=>{
+    Object.defineProperty(visualViewport,'height',{value:innerHeight-62,configurable:true});
+    visualViewport.dispatchEvent(new Event('resize'));
+  });
+  await page.waitForFunction(()=>Math.abs(document.querySelector('.composer').getBoundingClientRect().bottom-(innerHeight-6))<2);
+  // Pinch zoom must still fit the visual viewport, even for a small reduction.
+  await page.evaluate(()=>{
+    Object.defineProperty(visualViewport,'scale',{value:1.1,configurable:true});
+    visualViewport.dispatchEvent(new Event('resize'));
+  });
+  await tightComposer();
+  await page.evaluate(()=>{
+    document.styleSheets[0].deleteRule(0);
+    document.querySelector('.chat-page').style.removeProperty('padding-top');
+    delete navigator.standalone;delete visualViewport.height;delete visualViewport.scale;
+    visualViewport.dispatchEvent(new Event('resize'));
+  });
+  await tightComposer();
   await page.setViewportSize({width:390,height:420});
   await page.locator('#message').focus();
   await page.waitForFunction(()=>{const r=document.querySelector('.send')?.getBoundingClientRect();return r && r.bottom<=420;});

@@ -76,6 +76,8 @@ input::placeholder, textarea::placeholder { color: var(--subtle); }
 /* Chat: only the conversation scrolls. Header and composer stay reachable. */
 .chat-page { position: fixed; top: 0; left: 0; right: 0; height: 100vh; height: 100dvh; display: flex; flex-direction: column; padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); }
 .chat-stage { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+/* Independent of the pixel height set on chat-page; no flow or hit targets. */
+.viewport-probe { position: fixed; top: 0; left: 0; width: 0; height: 100vh; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); visibility: hidden; pointer-events: none; overflow: hidden; }
 .session-sidebar { display: none; }
 .chat-page .header-slot { flex: none; }
 .chat-bar .back { background: transparent; color: var(--text); font-size: 28px; padding: 0; width: 44px; flex: none; }
