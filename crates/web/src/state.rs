@@ -40,6 +40,55 @@ pub enum Online {
     Lost(u32),
 }
 
+/// The dashboard's explicit scopes. Search applies within the chosen scope.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HomeFilter {
+    #[default]
+    All,
+    Attention,
+    Working,
+    Terminals,
+}
+
+impl HomeFilter {
+    pub const ALL: [Self; 4] = [Self::All, Self::Attention, Self::Working, Self::Terminals];
+
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "agents",
+            Self::Attention => "attention",
+            Self::Working => "working",
+            Self::Terminals => "terminals",
+        }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "Agents",
+            Self::Attention => "Needs you",
+            Self::Working => "Working",
+            Self::Terminals => "Terminals",
+        }
+    }
+
+    #[must_use]
+    pub fn matches(self, chat: &ChatSummary) -> bool {
+        match self {
+            Self::All => true,
+            Self::Attention => {
+                chat.needs_you() || matches!(chat.state, clackatoo_protocol::ChatState::Failed(_))
+            }
+            Self::Working => matches!(
+                chat.state,
+                clackatoo_protocol::ChatState::Starting | clackatoo_protocol::ChatState::Answering
+            ),
+            Self::Terminals => false,
+        }
+    }
+}
+
 /// What changed since the screen was last drawn.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools, reason = "each part changed or didn't")]
@@ -59,6 +108,7 @@ pub struct Dirty {
 /// The chat shown.
 #[derive(Debug)]
 pub struct OpenChat {
+    pub picker: crate::settings::Picker,
     pub id: TerminalId,
     /// What it shows, once the daemon has sent it.
     pub view: Option<View>,
@@ -71,10 +121,12 @@ pub struct OpenChat {
 
 /// What a request was for, to take in its answer, or say what went wrong
 /// if it fails.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Asked {
     /// Nothing to say: its failure is only logged.
     Quiet,
+    /// Keep a draft until this exact submission is acknowledged.
+    Submitted { chat: TerminalId, text: String },
     /// Something the user did, as "sending the message".
     Doing(&'static str),
     /// The list of terminals.
@@ -104,6 +156,11 @@ pub struct State {
     pub term: Option<OpenTerminal>,
     /// Something to tell the user for a while, such as what failed.
     pub note: Option<String>,
+    /// Local view choices and drafts never change daemon configuration.
+    pub home_filter: HomeFilter,
+    pub home_query: String,
+    pub drafts: BTreeMap<TerminalId, String>,
+    pub submitting: BTreeSet<TerminalId>,
     pub dirty: Dirty,
     /// Now, in milliseconds, as the app last said.
     pub now: f64,
@@ -137,6 +194,10 @@ impl Default for State {
             open: None,
             term: None,
             note: None,
+            home_filter: HomeFilter::All,
+            home_query: String::new(),
+            drafts: BTreeMap::new(),
+            submitting: BTreeSet::new(),
             dirty: Dirty::default(),
             now: 0.0,
             asked: VecDeque::new(),
@@ -190,6 +251,10 @@ impl State {
     /// The connection was lost, and is tried again in `retry` seconds.
     pub fn lost(&mut self, retry: u32) {
         self.online = Online::Lost(retry);
+        if !self.submitting.is_empty() {
+            self.note = Some("Connection lost before delivery was confirmed. Your draft is kept; check the conversation before retrying.".into());
+            self.submitting.clear();
+        }
         self.asked.clear();
         self.outbox.clear();
         self.listing = false;
@@ -219,6 +284,12 @@ impl State {
     fn answered(&mut self, response: Response) {
         let asked = self.asked.pop_front().map(|(asked, _)| asked);
         self.keys_heard();
+        if let Some(Asked::Submitted { chat, text }) = &asked {
+            self.submitting.remove(chat);
+            if !matches!(response, Response::Error(_)) && self.drafts.get(chat) == Some(text) {
+                self.drafts.remove(chat);
+            }
+        }
         match (response, asked) {
             (Response::Workspaces(workspaces), _) => {
                 self.workspaces = workspaces;
@@ -250,24 +321,27 @@ impl State {
                     term.dirty.header = true;
                 }
             }
-            (Response::Error(err), Some(asked)) => self.failed(&err, asked),
+            (Response::Error(err), Some(asked)) => self.failed(&err, &asked),
             _ => {}
         }
     }
 
     /// The request for `asked` failed, with `err`: says so, if it's to be
     /// said, and gives up what waited on it.
-    fn failed(&mut self, err: &clackatoo_protocol::Error, asked: Asked) {
+    fn failed(&mut self, err: &clackatoo_protocol::Error, asked: &Asked) {
         let note = match asked {
             Asked::Quiet => None,
             Asked::Doing(what) => Some(format!("Failed {what}: {err}")),
+            Asked::Submitted { .. } => {
+                Some(format!("Message not sent: {err}. Your draft is kept."))
+            }
             Asked::Terminals => {
                 self.listing = false;
                 None
             }
             Asked::History { generation } => {
                 if let Some(term) = &mut self.term {
-                    term.history_failed(generation);
+                    term.history_failed(*generation);
                 }
                 None
             }
@@ -375,6 +449,7 @@ impl State {
         self.close_chat();
         self.close_terminal();
         self.open = Some(OpenChat {
+            picker: crate::settings::Picker::default(),
             id,
             view: None,
             folds: BTreeMap::new(),
@@ -699,6 +774,41 @@ impl State {
         }
         let terminal = open.id;
         self.request(Request::Chat { terminal, action }, Asked::Doing(doing));
+    }
+
+    /// Submit once, preserving the draft until the daemon accepts it. Never
+    /// replay on reconnect: an unanswered request may already have acted.
+    pub fn submit(&mut self, steer: bool) {
+        let Some(terminal) = self.open.as_ref().map(|open| open.id) else {
+            return;
+        };
+        let text = self.drafts.get(&terminal).cloned().unwrap_or_default();
+        if text.trim().is_empty() || self.submitting.contains(&terminal) {
+            return;
+        }
+        if self.online != Online::Open {
+            self.note = Some("You're offline. Your draft is kept until you send it.".into());
+            self.dirty.footer = true;
+            return;
+        }
+        self.submitting.insert(terminal);
+        self.note = None;
+        self.request(
+            Request::Chat {
+                terminal,
+                action: ChatAction::Submit {
+                    text: text.clone(),
+                    images: Vec::new(),
+                    target: None,
+                    steer,
+                },
+            },
+            Asked::Submitted {
+                chat: terminal,
+                text,
+            },
+        );
+        self.dirty.footer = true;
     }
 
     /// Tells the daemon whether the user is looking at the app.
@@ -1365,5 +1475,82 @@ mod tests {
         let ids = |list: Vec<&TerminalInfo>| list.iter().map(|info| info.id.0).collect::<Vec<_>>();
         assert_eq!(ids(state.terminals_of(Some(WorkspaceId(1)))), [2]);
         assert_eq!(ids(state.terminals_of(None)), [5], "in no pane");
+    }
+    fn sending_state() -> State {
+        let mut state = State::default();
+        state.connected();
+        state.open_chat(TerminalId(4));
+        state.asked.clear();
+        state.take_outbox();
+        state.drafts.insert(TerminalId(4), "first draft".into());
+        state
+    }
+
+    #[test]
+    fn draft_is_only_cleared_when_the_exact_submission_is_accepted() {
+        let mut state = sending_state();
+        state.submit(false);
+        state.submit(false);
+        assert_eq!(state.take_outbox().len(), 1, "double taps submit once");
+        assert_eq!(state.drafts[&TerminalId(4)], "first draft");
+        state.receive(ServerMessage::Response(Response::Done));
+        assert!(!state.drafts.contains_key(&TerminalId(4)));
+        assert!(state.submitting.is_empty());
+        state.drafts.insert(TerminalId(4), "next".into());
+        state.submit(true);
+        state
+            .drafts
+            .insert(TerminalId(4), "typed while waiting".into());
+        state.receive(ServerMessage::Response(Response::Done));
+        assert_eq!(state.drafts[&TerminalId(4)], "typed while waiting");
+    }
+
+    #[test]
+    fn offline_and_rejected_messages_keep_the_draft() {
+        let mut state = sending_state();
+        state.lost(1);
+        state.submit(false);
+        assert!(state.take_outbox().is_empty());
+        assert_eq!(state.drafts[&TerminalId(4)], "first draft");
+        state.online = Online::Open;
+        state.submit(true);
+        let sent = state.take_outbox();
+        assert!(matches!(
+            &sent[0],
+            ClientMessage::Request(Request::Chat {
+                action: ChatAction::Submit { steer: true, .. },
+                ..
+            })
+        ));
+        state.receive(ServerMessage::Response(Response::Error(
+            clackatoo_protocol::Error::NoSuchTerminal(TerminalId(4)),
+        )));
+        assert_eq!(state.drafts[&TerminalId(4)], "first draft");
+        assert!(state.submitting.is_empty());
+        assert!(state.note.as_ref().unwrap().contains("Message not sent"));
+    }
+
+    #[test]
+    fn uncertain_delivery_is_never_automatically_replayed() {
+        let mut state = sending_state();
+        state.submit(false);
+        state.take_outbox();
+        state.lost(1);
+        state.connected();
+        assert_eq!(state.drafts[&TerminalId(4)], "first draft");
+        assert!(
+            state
+                .note
+                .as_ref()
+                .unwrap()
+                .contains("before delivery was confirmed")
+        );
+        assert!(state.take_outbox().iter().all(|m| !matches!(
+            m,
+            ClientMessage::Request(Request::Chat {
+                action: ChatAction::Submit { .. },
+                ..
+            })
+        )));
     }
 }

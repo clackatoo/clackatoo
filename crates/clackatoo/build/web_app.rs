@@ -65,6 +65,7 @@ pub(crate) fn build() {
         for watched in [
             "crates/web/src",
             "crates/web/static",
+            "crates/gui/src/render/icons",
             "crates/web/Cargo.toml",
             "crates/protocol/src",
             "crates/term/src",

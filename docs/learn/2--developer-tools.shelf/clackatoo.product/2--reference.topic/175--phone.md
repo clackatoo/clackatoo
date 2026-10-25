@@ -53,13 +53,23 @@ On an iPhone, add the app to the home screen first (Share → Add to Home Screen
 
 What a phone does in a chat is logged with the device's number.
 
-While the agent works, the bar at the foot of a chat says what it's doing and for how long, beside three pulsing dots, however far up you've scrolled. The seconds count only while the page is on screen and the app is connected, and the dots keep still if your phone asks for less motion. In the list of chats, those whose agent is starting or working show the dots too.
+While the agent works, the bar at the foot of a chat says what it's doing and for how long, beside three pulsing dots, however far up you've scrolled. The seconds count only while the page is on screen and the app is connected, and the dots keep still if your phone asks for less motion. In the list of chats, running agents have a blue activity ring; approvals, unread replies and failures have distinct markers.
 
-At the end of the box's menus is how much of its context the chat fills, as `42% context` over a thin bar that turns amber past 80% and red past 95%, as in a window, with a Claude account's 5-hour or weekly limit before it once that's past 80%. Tap it for the detail above the menus: the tokens, and each limit, how much is used and when it resets, in your phone's time. Tap it again to hide it.
+## Managing agents
+
+The overview opens on **Agents**, grouped by workspace. **Needs you** filters to approvals, unread replies and failed sessions; **Working** shows running agents. Workspaces that need attention come first. Search matches chat titles, providers and workspace names within the selected filter. **Terminals** is a separate view, with search matching names and directories. The top bar says whether the app is connected or retrying.
+
+In a chat, the conversation scrolls independently of its header and composer. New output follows while you're near the bottom; scrolling back keeps your place and reveals **Latest** to return to the end. Pending approvals stay above the composer, with their full choices. On wide screens, the session list stays beside the conversation. The composer follows the phone's visible screen when the keyboard opens. Long tool output and code scroll sideways inside their own blocks. Message attachments and tool images show their retained thumbnails.
+
+Tap the model name for **Agent settings**: model, permissions, reasoning and any other settings offered by the provider. Search models across all providers, or choose a provider tab. Star a model to keep it in Favorites, saved in this browser. Search shows matching favorites first; clearing it returns to the previous provider. The sheet opens on Favorites when you have any, otherwise on the current provider. The shield beside the model opens permissions, tools and browser access together. The context gauge opens **Context & usage**, with the chat's token counts and available account allowances across providers. Opening it asks for fresh readings while showing cached values. Both panels close with their close button, a tap outside, or Escape; keyboard focus stays inside the panel until it closes.
+
+**Send** submits a message when idle. While the agent is working, **Queue** adds it to the shared queue. **Steer now** sends text into supported active sessions without stopping their work; unsupported sessions explicitly say **Stop & continue**. Ctrl+Enter (Command+Enter on a Mac) sends when idle and steers while working; plain Enter adds a line. Queued messages have controls to send them now or remove them. **Stop** always stops the agent.
+
+Draft text stays with its chat when you navigate away, and survives reloads in the same browser tab through session storage. It clears only after the daemon accepts that exact message. If sending fails or the connection is lost, the text is kept. A lost acknowledgment may mean the message was delivered: the app tells you to check the conversation before retrying, and never resends it automatically. Drafts aren't shared between devices; an unavailable browser storage API limits recovery to the current page.
 
 ## Terminals
 
-Each workspace lists its terminals under its chats, with what each is running, where, and its size; terminals in no workspace are under Elsewhere. Tap one to follow it.
+The **Terminals** filter lists each workspace’s terminals, with what each is running, where, and its size; terminals in no workspace are under Elsewhere. Tap one to follow it.
 
 A terminal is shown at its own size, the one your windows gave it: as wide as the phone allows, but never in type under 7 pixels, so a wider one pans sideways under your finger. Pinch to zoom. Scroll up for its history, fetched as you go. A command that failed ends its prompt's line with a dim red `✗` and its exit status, as in a window, on the screen and in history.
 
@@ -71,7 +81,7 @@ The log notes the device that fits a terminal, or starts typing into one, never 
 
 ## Notifications
 
-Tap **Turn on** in the app. The phone is then told when a chat finishes a turn, or asks you something, while no window you're using shows it. A window counts as in use while it has the focus and has been used in the last five minutes. A notification carries only the chat's title and a few words, sealed for your device, and goes only to Apple's, Google's, Mozilla's or Microsoft's push services.
+Tap **Enable** in the overview. The phone is then told when a chat finishes a turn, or asks you something, while no window you're using shows it. A window counts as in use while it has the focus and has been used in the last five minutes. A notification carries only the chat's title and a few words, sealed for your device, and goes only to Apple's, Google's, Mozilla's or Microsoft's push services.
 
 ## What's kept
 

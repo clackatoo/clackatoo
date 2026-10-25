@@ -24,7 +24,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
     AddEventListenerOptions, Document, Element as DomElement, Event, HtmlElement, HtmlInputElement,
-    HtmlSelectElement, HtmlTextAreaElement, InputEvent, KeyboardEvent, MessageEvent, Notification,
+    HtmlTextAreaElement, InputEvent, KeyboardEvent, MessageEvent, Notification,
     NotificationPermission, PushSubscriptionOptionsInit, RequestInit, TouchEvent, VisibilityState,
     WebSocket, Window,
 };
@@ -110,6 +110,14 @@ enum Pairing {
 /// The parts of the page showing a chat.
 #[derive(Debug)]
 struct ChatPage {
+    main: HtmlElement,
+    scroller: DomElement,
+    latest: HtmlElement,
+    send_button: HtmlElement,
+    steer_button: HtmlElement,
+    intent: HtmlElement,
+    queue: DomElement,
+    shown_queue: crate::ui::Element,
     header: DomElement,
     turns: DomElement,
     /// The line saying what the agent is doing, while it works, and the
@@ -128,6 +136,125 @@ struct ChatPage {
     shown_header: crate::ui::Element,
     shown_footer: crate::ui::Element,
     shown_menus: crate::ui::Element,
+}
+
+impl ChatPage {
+    fn draw_controls(
+        &mut self,
+        document: &Document,
+        state: &State,
+        open: &crate::state::OpenChat,
+    ) -> bool {
+        let node = open.view.as_ref().and_then(|v| v.chat());
+        let queue = node.map_or_else(|| el("div"), |n| view::queue(n, state.online));
+        if queue != self.shown_queue {
+            dom::replace_children(document, &self.queue, &el("div").child(queue.clone()));
+            self.shown_queue = queue;
+        }
+        let draft = state.drafts.get(&open.id).cloned().unwrap_or_default();
+        let changed = self.textarea.value() != draft;
+        if changed {
+            self.textarea.set_value(&draft);
+            grow(&self.textarea);
+        }
+        let busy = node.is_some_and(|n| {
+            matches!(
+                n.state,
+                clackatoo_protocol::ChatState::Answering | clackatoo_protocol::ChatState::Starting
+            )
+        });
+        let sending = state.submitting.contains(&open.id);
+        let disabled = draft.trim().is_empty()
+            || sending
+            || state.online != crate::state::Online::Open
+            || node.is_none();
+        for button in [&self.send_button, &self.steer_button] {
+            if disabled {
+                let _ = button.set_attribute("disabled", "");
+            } else {
+                let _ = button.remove_attribute("disabled");
+            }
+        }
+        let _ = self.send_button.set_attribute(
+            "aria-label",
+            if sending {
+                "Sending message"
+            } else if busy {
+                "Queue message"
+            } else {
+                "Send message"
+            },
+        );
+        let _ = self
+            .send_button
+            .class_list()
+            .toggle_with_force("queue-send", busy);
+        self.intent.set_hidden(!busy || draft.trim().is_empty());
+        self.send_button.set_text_content(Some(if sending {
+            "…"
+        } else if busy {
+            "Queue"
+        } else {
+            "↑"
+        }));
+        self.steer_button
+            .set_hidden(!busy || draft.trim().is_empty());
+        self.steer_button.set_text_content(Some(
+            if node.is_some_and(|n| n.delivery.native_steering) {
+                "Steer now"
+            } else {
+                "Stop & continue"
+            },
+        ));
+        changed
+    }
+
+    fn draw_turns(
+        &mut self,
+        document: &Document,
+        open: &crate::state::OpenChat,
+        dirty: &crate::state::Dirty,
+        fresh: bool,
+        now: u64,
+    ) {
+        let node = open.view.as_ref().and_then(|view| view.chat());
+        if let Some(node) = node {
+            let drawn = self.turns.child_element_count() as usize;
+            if fresh || dirty.all_turns {
+                self.turns.set_text_content(None);
+                for index in 0..node.turns.len() {
+                    let turn = view::turn(node, open, index, now);
+                    let _ = self.turns.append_child(&dom::element_of(document, &turn));
+                }
+            } else {
+                for &index in &dirty.turns {
+                    if index >= node.turns.len() {
+                        continue;
+                    }
+                    let turn = dom::element_of(document, &view::turn(node, open, index, now));
+                    match self
+                        .turns
+                        .children()
+                        .item(u32::try_from(index).unwrap_or(u32::MAX))
+                    {
+                        Some(old) if index < drawn => {
+                            let _ = self.turns.replace_child(&turn, &old);
+                        }
+                        _ => {
+                            // A turn added: those before it are drawn already.
+                            let _ = self.turns.append_child(&turn);
+                        }
+                    }
+                }
+            }
+        } else if fresh {
+            self.turns.set_text_content(None);
+            let _ = self.turns.append_child(&dom::element_of(
+                document,
+                &el("p").class("muted").text("Opening…"),
+            ));
+        }
+    }
 }
 
 struct App {
@@ -178,6 +305,37 @@ impl Drop for Socket {
     }
 }
 
+fn near_bottom(scroller: &DomElement) -> bool {
+    scroller.scroll_top() + scroller.client_height() >= scroller.scroll_height() - 80
+}
+
+fn composer_inputs(document: &Document) -> (HtmlTextAreaElement, HtmlElement, HtmlElement) {
+    let textarea: HtmlTextAreaElement = document
+        .create_element("textarea")
+        .expect("textarea")
+        .unchecked_into();
+    textarea.set_id("message");
+    textarea.set_rows(1);
+    let _ = textarea.set_attribute("placeholder", "Message your agent…");
+    let _ = textarea.set_attribute("enterkeyhint", "enter");
+    let _ = textarea.set_attribute("aria-label", "Message your agent");
+    let send_button: HtmlElement = dom::element_of(
+        document,
+        &el("button").class("send").action(&Action::Send).text("↑"),
+    )
+    .unchecked_into();
+    let steer_button: HtmlElement = dom::element_of(
+        document,
+        &el("button")
+            .class("quiet steer")
+            .attr("hidden", "")
+            .action(&Action::Steer)
+            .text("Steer now"),
+    )
+    .unchecked_into();
+    (textarea, send_button, steer_button)
+}
+
 /// Starts the app.
 pub(crate) fn start() {
     std::panic::set_hook(Box::new(|info| {
@@ -222,6 +380,88 @@ pub(crate) fn start() {
     spawn_local(boot());
 }
 
+fn listen_for_chat_input(root: &DomElement) {
+    listen(root, "compositionend", false, |event| {
+        if target_id(&event).is_some_and(|id| id == "model-search") {
+            with_app(App::draw_soon);
+        }
+    });
+    listen(root, "input", false, |event| {
+        if target_id(&event).is_some_and(|id| id == "model-search") {
+            with_app(|app| {
+                let query = app.input("model-search").unwrap_or_default();
+                if let Some(open) = &mut app.state.open {
+                    open.picker.query = query;
+                }
+                if !event
+                    .dyn_ref::<InputEvent>()
+                    .is_some_and(InputEvent::is_composing)
+                {
+                    app.draw_soon();
+                }
+            });
+        }
+        if target_id(&event).is_some_and(|id| id == "home-search") {
+            with_app(|app| {
+                app.state.home_query = app.input("home-search").unwrap_or_default();
+                app.state.dirty.home = true;
+                app.draw_soon();
+            });
+        }
+        if let Some(area) = event
+            .target()
+            .and_then(|target| target.dyn_into::<HtmlTextAreaElement>().ok())
+        {
+            grow(&area);
+            with_app(|app| {
+                if let Some(open) = &app.state.open {
+                    app.state.drafts.insert(open.id, area.value());
+                    app.save_draft(open.id);
+                    app.draw_soon();
+                }
+            });
+        }
+    });
+    listen(root, "keydown", false, |event| {
+        let Some(key) = event.dyn_ref::<KeyboardEvent>() else {
+            return;
+        };
+        if key.is_composing() {
+            return;
+        }
+        let handled = with_app(|app| app.sheet_key(key)).unwrap_or(false);
+        if handled {
+            return;
+        }
+        if matches!(key.key().as_str(), "Enter" | " ") {
+            let target = event.target().and_then(|t| t.dyn_into::<DomElement>().ok());
+            if let Some(target) =
+                target.filter(|t| t.get_attribute("role").as_deref() == Some("button"))
+                && let Some(action) = target
+                    .get_attribute("data-action")
+                    .and_then(|a| Action::decode(&a))
+            {
+                event.prevent_default();
+                with_app(|app| app.act(action));
+                return;
+            }
+        }
+        let in_message = target_id(&event).is_some_and(|id| id == "message");
+        if in_message && key.key() == "Enter" && (key.meta_key() || key.ctrl_key()) {
+            event.prevent_default();
+            with_app(|app| {
+                let busy = app
+                    .state
+                    .open
+                    .as_ref()
+                    .and_then(|o| o.view.as_ref()?.chat())
+                    .is_some_and(|n| n.state == clackatoo_protocol::ChatState::Answering);
+                app.act(if busy { Action::Steer } else { Action::Send });
+            });
+        }
+    });
+}
+
 /// Listens for what happens on the page: taps, picks from menus, parts
 /// opened and folded, typing, the page hidden or shown, the address
 /// changed, and notifications tapped.
@@ -230,6 +470,14 @@ fn listen_to_page(window: &Window, document: &Document, root: &DomElement) {
         let target = event
             .target()
             .and_then(|target| target.dyn_into::<DomElement>().ok());
+        if let Some(element) = target.as_ref().and_then(|t| {
+            t.closest("[data-pick], [data-picker-tab], [data-model-provider], [data-favorite]")
+                .ok()
+                .flatten()
+        }) {
+            with_app(|app| app.picker_clicked(&element));
+            return;
+        }
         let action = (target.and_then(|target| target.closest("[data-action]").ok().flatten()))
             .and_then(|element| element.get_attribute("data-action"))
             .and_then(|action| Action::decode(&action));
@@ -239,19 +487,6 @@ fn listen_to_page(window: &Window, document: &Document, root: &DomElement) {
                 app.act(action);
             }
         });
-    });
-    listen(root, "change", false, |event| {
-        let Some(select) = event
-            .target()
-            .and_then(|target| target.dyn_into::<HtmlSelectElement>().ok())
-        else {
-            return;
-        };
-        let pick = (select.get_attribute("data-setting"))
-            .and_then(|setting| Pick::decode(&setting, &select.value()));
-        if let Some(pick) = pick {
-            with_app(|app| app.picked(pick));
-        }
     });
     listen(root, "focusin", false, |event| {
         let model = (event
@@ -276,24 +511,7 @@ fn listen_to_page(window: &Window, document: &Document, root: &DomElement) {
             with_app(|app| app.state.folded(&fold, open));
         }
     });
-    listen(root, "input", false, |event| {
-        if let Some(area) = event
-            .target()
-            .and_then(|target| target.dyn_into::<HtmlTextAreaElement>().ok())
-        {
-            grow(&area);
-        }
-    });
-    listen(root, "keydown", false, |event| {
-        let Some(key) = event.dyn_ref::<KeyboardEvent>() else {
-            return;
-        };
-        let in_message = target_id(&event).is_some_and(|id| id == "message");
-        if in_message && key.key() == "Enter" && (key.meta_key() || key.ctrl_key()) {
-            event.prevent_default();
-            with_app(|app| app.act(Action::Send));
-        }
-    });
+    listen_for_chat_input(root);
     // Scrolling doesn't bubble: heard on the way down.
     listen(root, "scroll", true, |_| {
         with_app(App::scrolled);
@@ -1015,6 +1233,7 @@ impl App {
 
     /// Takes in what came over the WebSocket.
     fn received(&mut self, bytes: &[u8]) {
+        let submitting = self.state.submitting.clone();
         let Some(socket) = &mut self.socket else {
             return;
         };
@@ -1036,6 +1255,13 @@ impl App {
             if self.state.receive(message) == Received::Reload {
                 let _ = self.window.location().reload();
                 return;
+            }
+        }
+        // Acknowledgments may arrive after navigation. Persist the cleared
+        // draft for that chat too, so a later reload cannot resurrect it.
+        for chat in submitting {
+            if !self.state.submitting.contains(&chat) {
+                self.save_draft(chat);
             }
         }
         self.send();
@@ -1103,11 +1329,18 @@ impl App {
         for message in &messages {
             match frame::encode(PROTOCOL_VERSION, message) {
                 Ok(frame) => bytes.extend_from_slice(&frame),
-                Err(err) => web_sys::console::error_1(&format!("{err}").into()),
+                Err(err) => {
+                    web_sys::console::error_1(&format!("{err}").into());
+                    self.lost();
+                    return;
+                }
             }
         }
-        let _ = socket.ws.send_with_u8_array(&bytes);
-        self.check_keys_later();
+        if socket.ws.send_with_u8_array(&bytes).is_err() {
+            self.lost();
+        } else {
+            self.check_keys_later();
+        }
     }
 
     /// Looks again at whether keys go once what's waited for has gone
@@ -1171,11 +1404,44 @@ impl App {
         } else if self.state.dirty.home || self.page.is_some() || self.term_page.is_some() {
             self.page = None;
             self.term_page = None;
-            let home = view::home(&self.state, self.notifications(), now);
-            dom::replace_children(&self.document, &self.root, &el("div").child(home));
+            if self.document.get_element_by_id("chat-stage").is_none()
+                && let Some(results) = self.document.get_element_by_id("home-results")
+            {
+                let content = crate::dashboard::results(&self.state, self.notifications(), now);
+                dom::replace_children(&self.document, &results, &el("div").child(content));
+                if let Ok(Some(old)) = self.root.query_selector(".home-bar .online")
+                    && let Some(parent) = old.parent_node()
+                {
+                    let _ = parent.replace_child(
+                        &dom::element_of(&self.document, &view::online(self.state.online)),
+                        &old,
+                    );
+                }
+            } else {
+                let home = view::home(&self.state, self.notifications(), now);
+                dom::replace_children(&self.document, &self.root, &el("div").child(home));
+            }
+        }
+        if self.state.open.is_some() && self.state.dirty.home {
+            self.draw_sidebar(now);
         }
         self.state.drawn();
         self.send();
+    }
+
+    fn draw_sidebar(&self, now: u64) {
+        if let Some(results) = self.document.get_element_by_id("home-results") {
+            let content = crate::dashboard::results(&self.state, Notifications::On, now);
+            dom::replace_children(&self.document, &results, &el("div").child(content));
+        }
+        if let Ok(Some(old)) = self.root.query_selector(".home-bar .online")
+            && let Some(parent) = old.parent_node()
+        {
+            let _ = parent.replace_child(
+                &dom::element_of(&self.document, &view::online(self.state.online)),
+                &old,
+            );
+        }
     }
 
     /// Draws what changed in the terminal shown, then asks for older
@@ -1199,6 +1465,9 @@ impl App {
     /// The terminal's rows were scrolled: older history is asked for as
     /// the top of what's held nears.
     fn scrolled(&mut self) {
+        if let Some(page) = &self.page {
+            page.latest.set_hidden(near_bottom(&page.scroller));
+        }
         if self.term_page.as_ref().is_some_and(TermPage::near_top) {
             self.state.older_history();
             self.send();
@@ -1208,6 +1477,30 @@ impl App {
     /// The phone's screen changed size, or its keyboard came or went: the
     /// terminal's page is put above the keyboard, its font fitted again.
     fn viewport_changed(&mut self) {
+        if let Some(page) = &self.page {
+            let bottom = near_bottom(&page.scroller);
+            if let Some(viewport) = self.window.visual_viewport() {
+                let _ = page
+                    .main
+                    .style()
+                    .set_property("--viewport-top", &format!("{}px", viewport.offset_top()));
+                let _ = page
+                    .main
+                    .style()
+                    .set_property("--viewport-height", &format!("{}px", viewport.height()));
+                let _ = page
+                    .main
+                    .style()
+                    .set_property("top", &format!("{}px", viewport.offset_top()));
+                let _ = page
+                    .main
+                    .style()
+                    .set_property("height", &format!("{}px", viewport.height()));
+            }
+            if bottom {
+                page.scroller.set_scroll_top(page.scroller.scroll_height());
+            }
+        }
         let Some(page) = &mut self.term_page else {
             return;
         };
@@ -1319,10 +1612,7 @@ impl App {
         let Some(page) = &mut self.page else {
             return;
         };
-        let scroller = self.document.scrolling_element();
-        let at_bottom = scroller.as_ref().is_none_or(|scroller| {
-            scroller.scroll_top() + scroller.client_height() >= scroller.scroll_height() - 80
-        });
+        let at_bottom = near_bottom(&page.scroller);
         let header = view::chat_header(&self.state, open);
         if fresh || header != page.shown_header {
             dom::replace_children(
@@ -1333,45 +1623,7 @@ impl App {
             page.shown_header = header;
         }
         let node = open.view.as_ref().and_then(|view| view.chat());
-        let dirty = &self.state.dirty;
-        if let Some(node) = node {
-            let drawn = page.turns.child_element_count() as usize;
-            if fresh || dirty.all_turns {
-                page.turns.set_text_content(None);
-                for index in 0..node.turns.len() {
-                    let turn = view::turn(node, open, index, now);
-                    let _ = page
-                        .turns
-                        .append_child(&dom::element_of(&self.document, &turn));
-                }
-            } else {
-                for &index in &dirty.turns {
-                    if index >= node.turns.len() {
-                        continue;
-                    }
-                    let turn = dom::element_of(&self.document, &view::turn(node, open, index, now));
-                    match page
-                        .turns
-                        .children()
-                        .item(u32::try_from(index).unwrap_or(u32::MAX))
-                    {
-                        Some(old) if index < drawn => {
-                            let _ = page.turns.replace_child(&turn, &old);
-                        }
-                        _ => {
-                            // A turn added: those before it are drawn already.
-                            let _ = page.turns.append_child(&turn);
-                        }
-                    }
-                }
-            }
-        } else if fresh {
-            page.turns.set_text_content(None);
-            let _ = page.turns.append_child(&dom::element_of(
-                &self.document,
-                &el("p").class("muted").text("Opening…"),
-            ));
-        }
+        page.draw_turns(&self.document, open, &self.state.dirty, fresh, now);
         let online = self.state.online;
         let working = node.and_then(|node| view::working(node, online, now));
         let next_second = node.and_then(|node| view::next_second(node, online, now));
@@ -1397,13 +1649,21 @@ impl App {
             |node| view::box_bar(node, open, now, &zone_offset),
         );
         if fresh || menus != page.shown_menus {
-            dom::replace_children(&self.document, &page.menus, &el("div").child(menus.clone()));
+            dom::replace_panel(&self.document, &page.menus, &el("div").child(menus.clone()));
             page.shown_menus = menus;
         }
-        if (at_bottom || fresh)
-            && let Some(scroller) = scroller
-        {
-            scroller.set_scroll_top(scroller.scroll_height());
+        let draft_changed = page.draw_controls(&self.document, &self.state, open);
+        if at_bottom || fresh {
+            page.scroller.set_scroll_top(page.scroller.scroll_height());
+        }
+        page.latest.set_hidden(near_bottom(&page.scroller));
+        let id = open.id;
+        if draft_changed {
+            self.save_draft(id);
+        }
+        self.focus_sheet();
+        if fresh {
+            self.viewport_changed();
         }
         if let Some(at) = next_second {
             self.count_later(at);
@@ -1440,31 +1700,50 @@ impl App {
     /// typed in.
     fn chat_page(&self) -> ChatPage {
         let document = &self.document;
-        let main = dom::element_of(document, &el("main").class("chat-page"));
+        let main: HtmlElement =
+            dom::element_of(document, &el("main").class("chat-page")).unchecked_into();
         let part = |class: &str| dom::element_of(document, &el("div").class(class));
         let header = part("header-slot");
         let turns = part("turns");
         let footer = part("footer-slot");
-        let composer = part("composer");
-        let menus = part("menus-slot");
-        let row = part("row");
-        let textarea: HtmlTextAreaElement = document
-            .create_element("textarea")
-            .expect("textarea")
-            .unchecked_into();
-        textarea.set_id("message");
-        textarea.set_rows(1);
-        let _ = textarea.set_attribute("placeholder", "Message");
-        let _ = textarea.set_attribute("enterkeyhint", "enter");
-        let send = dom::element_of(
+        let scroller = part("conversation");
+        let queue = part("queue-slot");
+        let latest: HtmlElement = dom::element_of(
             document,
             &el("button")
-                .class("send")
-                .action(&Action::Send)
-                .text("Send"),
+                .class("latest")
+                .attr("hidden", "")
+                .action(&Action::Latest)
+                .text("↓ Latest"),
+        )
+        .unchecked_into();
+        let dock = part("dock");
+        let composer = part("composer");
+        let stage = dom::element_of(
+            document,
+            &el("section").class("chat-stage").attr("id", "chat-stage"),
         );
-        let _ = row.append_child(&textarea);
-        let _ = row.append_child(&send);
+        let sidebar = dom::element_of(
+            document,
+            &el("aside")
+                .class("session-sidebar")
+                .attr("aria-label", "Sessions")
+                .child(crate::dashboard::home(
+                    &self.state,
+                    Notifications::On,
+                    epoch_millis(),
+                )),
+        );
+        let intent: HtmlElement = part("composer-intent").unchecked_into();
+        intent.set_hidden(true);
+        let intent_text = dom::element_of(document, &el("span").text("Send to queue"));
+        let _ = intent.append_child(&intent_text);
+        let menus = part("menus-slot");
+        let row = part("row");
+        let (textarea, send_button, steer_button) = composer_inputs(document);
+        let _ = row.append_child(&menus);
+        let _ = intent.append_child(&steer_button);
+        let _ = row.append_child(&send_button);
         // At the top of the box's bar, which stays at the screen's foot,
         // so it's seen wherever the turns are scrolled to. Hidden until
         // the agent works.
@@ -1480,15 +1759,31 @@ impl App {
         let seconds = dom::element_of(document, &el("span").class("seconds"));
         let _ = working.append_child(&doing);
         let _ = working.append_child(&seconds);
-        let _ = composer.append_child(&working);
-        let _ = composer.append_child(&menus);
+        let _ = dock.append_child(&footer);
+        let _ = dock.append_child(&working);
+        let _ = dock.append_child(&queue);
+        let _ = composer.append_child(&intent);
+        let _ = composer.append_child(&textarea);
         let _ = composer.append_child(&row);
-        for part in [&header, &turns, &footer, &composer] {
-            let _ = main.append_child(part);
+        let _ = scroller.append_child(&turns);
+
+        let _ = dock.append_child(&composer);
+        for part in [&header, &scroller, latest.unchecked_ref(), &dock] {
+            let _ = stage.append_child(part);
         }
+        let _ = main.append_child(&sidebar);
+        let _ = main.append_child(&stage);
         self.root.set_text_content(None);
         let _ = self.root.append_child(&main);
         ChatPage {
+            main,
+            scroller,
+            latest,
+            send_button,
+            steer_button,
+            intent,
+            queue,
+            shown_queue: el("div"),
             header,
             turns,
             working,
@@ -1559,41 +1854,28 @@ impl App {
                     self.state.chat(answer, "answering");
                 }
             }
-            Action::Usage => {
-                self.state.toggle_fold(view::USAGE_FOLD);
-                self.draw_soon();
+            Action::Usage | Action::Settings | Action::Permissions => self.toggle_sheet(action),
+            Action::Filter(filter) => {
+                self.state.home_filter = filter;
+                self.state.dirty.home = true;
             }
-            Action::Stop => self.state.chat(ChatAction::Stop, "stopping the agent"),
-            Action::Send => {
-                let Some(page) = &self.page else {
-                    return;
-                };
-                let text = page.textarea.value();
-                if text.trim().is_empty() {
-                    return;
+            Action::Latest => {
+                if let Some(page) = &self.page {
+                    page.scroller.set_scroll_top(page.scroller.scroll_height());
                 }
-                page.textarea.set_value("");
-                grow(&page.textarea);
-                self.state
-                    .chat(ChatAction::Send(text), "sending the message");
             }
-            Action::Notify => {
-                let key = self.session.key.clone();
-                spawn_local(async move {
-                    let outcome = notify(key).await;
-                    with_app(|app| {
-                        match outcome {
-                            Ok(()) => {
-                                app.session.notifications = true;
-                                app.state.note = None;
-                            }
-                            Err(why) => app.state.note = Some(why),
-                        }
-                        app.state.dirty.home = true;
-                        app.draw_soon();
-                    });
-                });
+            Action::RemoveQueued(id) => self
+                .state
+                .chat(ChatAction::RemoveQueued { id }, "removing queued message"),
+            Action::SendQueued(id) => self.state.chat(
+                ChatAction::SendQueued { id, steer: true },
+                "delivering queued message",
+            ),
+            Action::Stop => self.state.chat(ChatAction::Stop, "stopping the agent"),
+            Action::Send | Action::Steer => {
+                self.state.submit(action == Action::Steer);
             }
+            Action::Notify => self.enable_notifications(),
             Action::Pair | Action::Renew => {
                 let name = self
                     .input("device-name")
@@ -1622,6 +1904,197 @@ impl App {
         }
         self.send();
         self.draw_soon();
+    }
+
+    fn toggle_sheet(&mut self, action: Action) {
+        if action != Action::Usage {
+            let saved = self
+                .window
+                .local_storage()
+                .ok()
+                .flatten()
+                .and_then(|s| s.get_item("clackatoo.model-favorites").ok().flatten())
+                .and_then(|text| js_sys::JSON::parse(&text).ok())
+                .filter(js_sys::Array::is_array)
+                .map(|v| {
+                    js_sys::Array::from(&v)
+                        .iter()
+                        .take(512)
+                        .filter_map(|v| v.as_string())
+                        .collect()
+                });
+            if let Some(open) = &mut self.state.open {
+                open.picker.permissions = action == Action::Permissions;
+                open.picker.query.clear();
+                if let Some(saved) = saved {
+                    open.picker.favorites = saved;
+                }
+                open.picker.provider = if open.picker.favorites.is_empty() {
+                    open.view
+                        .as_ref()
+                        .and_then(|v| v.chat())
+                        .map_or_else(String::new, |n| n.agent.clone())
+                } else {
+                    "Favorites".into()
+                };
+            }
+        }
+        let fold = if action == Action::Usage {
+            view::USAGE_FOLD
+        } else {
+            view::SETTINGS_FOLD
+        };
+        self.state.toggle_fold(fold);
+        if let Some(open) = &mut self.state.open {
+            let other = if fold == view::USAGE_FOLD {
+                view::SETTINGS_FOLD
+            } else {
+                view::USAGE_FOLD
+            };
+            open.folds.insert(other.into(), false);
+        }
+        let opening = self
+            .state
+            .open
+            .as_ref()
+            .is_some_and(|o| o.folds.get(fold).copied().unwrap_or(false));
+        if opening && action == Action::Usage {
+            self.state
+                .chat(ChatAction::RefreshUsage { force: true }, "refreshing usage");
+        } else if opening {
+            self.menu_opened();
+        }
+        if !opening {
+            self.focus_settings_trigger();
+        }
+        self.draw_soon();
+    }
+
+    fn picker_clicked(&mut self, element: &DomElement) {
+        if let Some(value) = element.get_attribute("data-pick") {
+            if let Some(pick) = element
+                .get_attribute("data-setting")
+                .and_then(|id| Pick::decode(&id, &value))
+            {
+                self.picked(pick);
+            }
+        } else if let Some(open) = &mut self.state.open {
+            if let Some(tab) = element.get_attribute("data-picker-tab") {
+                open.picker.permissions = tab == "permissions";
+            } else if let Some(provider) = element.get_attribute("data-model-provider") {
+                open.picker.provider = provider;
+                open.picker.query.clear();
+            } else if let Some(key) = element.get_attribute("data-favorite") {
+                if !open.picker.favorites.remove(&key) && open.picker.favorites.len() < 512 {
+                    open.picker.favorites.insert(key);
+                }
+                if let Ok(Some(storage)) = self.window.local_storage() {
+                    let values: Vec<_> = open
+                        .picker
+                        .favorites
+                        .iter()
+                        .map(|s| json_string(s))
+                        .collect();
+                    let _ = storage.set_item(
+                        "clackatoo.model-favorites",
+                        &format!("[{}]", values.join(",")),
+                    );
+                }
+            }
+        }
+        self.draw_soon();
+    }
+
+    fn enable_notifications(&mut self) {
+        let key = self.session.key.clone();
+        spawn_local(async move {
+            let outcome = notify(key).await;
+            with_app(|app| {
+                match outcome {
+                    Ok(()) => {
+                        app.session.notifications = true;
+                        app.state.note = None;
+                    }
+                    Err(why) => app.state.note = Some(why),
+                }
+                app.state.dirty.home = true;
+                app.draw_soon();
+            });
+        });
+    }
+
+    fn save_draft(&self, chat: TerminalId) {
+        if let Ok(Some(storage)) = self.window.session_storage() {
+            let key = format!("clackatoo.draft.{chat}");
+            match self.state.drafts.get(&chat).filter(|s| !s.is_empty()) {
+                Some(text) => {
+                    let _ = storage.set_item(&key, text);
+                }
+                None => {
+                    let _ = storage.remove_item(&key);
+                }
+            }
+        }
+    }
+
+    fn focus_settings_trigger(&self) {
+        if let Some(trigger) = self.document.get_element_by_id("settings-trigger")
+            && let Some(html) = trigger.dyn_ref::<HtmlElement>()
+        {
+            let _ = html.focus();
+        }
+    }
+
+    fn focus_sheet(&self) {
+        if let Ok(Some(sheet)) = self.root.query_selector("[role=dialog]") {
+            let active = self.document.active_element();
+            if !active.is_some_and(|active| sheet.contains(Some(&active)))
+                && let Ok(Some(close)) = sheet.query_selector(".sheet-close")
+                && let Some(html) = close.dyn_ref::<HtmlElement>()
+            {
+                let _ = html.focus();
+            }
+        }
+    }
+
+    fn sheet_key(&mut self, key: &KeyboardEvent) -> bool {
+        let Ok(Some(sheet)) = self.root.query_selector("[role=dialog]") else {
+            return false;
+        };
+        if key.key() == "Escape" {
+            key.prevent_default();
+            if let Some(open) = &mut self.state.open {
+                open.folds.insert(view::SETTINGS_FOLD.into(), false);
+                open.folds.insert(view::USAGE_FOLD.into(), false);
+            }
+            self.focus_settings_trigger();
+            self.draw_soon();
+            return true;
+        }
+        if key.key() == "Tab"
+            && let Ok(items) = sheet.query_selector_all(
+                "button:not([disabled]), select:not([disabled]), input:not([disabled])",
+            )
+        {
+            let first = items.item(0).and_then(|n| n.dyn_into::<HtmlElement>().ok());
+            let last = items
+                .item(items.length().saturating_sub(1))
+                .and_then(|n| n.dyn_into::<HtmlElement>().ok());
+            let active = self.document.active_element();
+            let target = if key.shift_key() && active.as_ref() == first.as_ref().map(AsRef::as_ref)
+            {
+                last
+            } else if !key.shift_key() && active.as_ref() == last.as_ref().map(AsRef::as_ref) {
+                first
+            } else {
+                None
+            };
+            if let Some(target) = target {
+                key.prevent_default();
+                let _ = target.focus();
+            }
+        }
+        false
     }
 
     /// The value of the input with `id`, if there's one.
@@ -1674,6 +2147,15 @@ impl App {
                 .map(TerminalId)
         };
         if let Some(chat) = id("#chat/") {
+            if self.state.open.as_ref().is_none_or(|open| open.id != chat) {
+                self.page = None;
+            }
+            if !self.state.drafts.contains_key(&chat)
+                && let Ok(Some(storage)) = self.window.session_storage()
+                && let Ok(Some(draft)) = storage.get_item(&format!("clackatoo.draft.{chat}"))
+            {
+                self.state.drafts.insert(chat, draft);
+            }
             self.state.open_chat(chat);
         } else if let Some(terminal) = id("#term/") {
             if self

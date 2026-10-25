@@ -5,6 +5,7 @@
 use clackatoo_protocol::TerminalId;
 
 use crate::keys::{Key, Modifiers};
+use crate::state::HomeFilter;
 
 /// What tapping something does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,7 +15,10 @@ pub enum Action {
     /// Shows a chat.
     Open(TerminalId),
     /// Answers question `question` with its choice at `choice`.
-    Answer { question: u64, choice: usize },
+    Answer {
+        question: u64,
+        choice: usize,
+    },
     /// Stops the agent answering.
     Stop,
     /// Sends what's typed.
@@ -44,6 +48,13 @@ pub enum Action {
     Key(RowKey),
     /// Shows how much context the chat shown fills, in full, or hides it.
     Usage,
+    Settings,
+    Permissions,
+    Latest,
+    Filter(HomeFilter),
+    Steer,
+    RemoveQueued(u64),
+    SendQueued(u64),
 }
 
 /// The keys on the row above the phone's keyboard: those a phone's
@@ -177,6 +188,13 @@ impl Action {
             Self::Type => "type".to_owned(),
             Self::Key(key) => format!("key:{}", key.name()),
             Self::Usage => "usage".to_owned(),
+            Self::Settings => "settings".to_owned(),
+            Self::Permissions => "permissions".to_owned(),
+            Self::Latest => "latest".to_owned(),
+            Self::Filter(filter) => format!("filter:{}", filter.name()),
+            Self::Steer => "steer".to_owned(),
+            Self::RemoveQueued(id) => format!("remove-queued:{id}"),
+            Self::SendQueued(id) => format!("send-queued:{id}"),
         }
     }
 
@@ -208,14 +226,24 @@ impl Action {
             ("type", "") => Self::Type,
             ("key", name) => Self::Key(RowKey::ALL.into_iter().find(|key| key.name() == name)?),
             ("usage", "") => Self::Usage,
+            ("settings", "") => Self::Settings,
+            ("permissions", "") => Self::Permissions,
+            ("latest", "") => Self::Latest,
+            ("filter", name) => Self::Filter(
+                HomeFilter::ALL
+                    .into_iter()
+                    .find(|filter| filter.name() == name)?,
+            ),
+            ("steer", "") => Self::Steer,
+            ("remove-queued", id) => Self::RemoveQueued(id.parse().ok()?),
+            ("send-queued", id) => Self::SendQueued(id.parse().ok()?),
             _ => return None,
         })
     }
 }
 
-/// What picking from a chat's menus does: a menu's `<select>` names its
-/// setting in `data-setting`, and each option says what it does in its
-/// value.
+/// What picking from a chat's settings does. Each choice names its setting
+/// in `data-setting` and encodes its value in `data-pick`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pick {
     /// Gives the setting with this ID this value.

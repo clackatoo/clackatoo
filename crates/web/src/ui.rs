@@ -27,6 +27,8 @@ pub struct Element {
     /// refuses.
     pub styles: Vec<(&'static str, String)>,
     pub children: Vec<Node>,
+    /// Bounded daemon thumbnail, painted as pixels rather than HTML.
+    pub image: Option<clackatoo_protocol::ChatPreview>,
 }
 
 /// A new element with `tag`.
@@ -39,6 +41,14 @@ pub fn el(tag: &'static str) -> Element {
 }
 
 impl Element {
+    #[must_use]
+    pub fn preview(mut self, image: &clackatoo_protocol::ChatPreview) -> Self {
+        if self.tag == "canvas" && image.valid() {
+            self.image = Some(image.clone());
+        }
+        self
+    }
+
     /// The same, with `class` among its classes.
     #[must_use]
     pub fn class(mut self, class: &str) -> Self {

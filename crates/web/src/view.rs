@@ -7,12 +7,12 @@
 //! [`grid`](crate::grid)'s).
 
 use clackatoo_protocol::{
-    ChatNode, ChatState, ChatSummary, ChoiceKind, Diff, Fullness, Item, Outcome, ProviderModels,
-    Said, Setting, SettingKind, Subagent, SubagentStatus, TerminalInfo, TerminalStatus, Tool,
-    ToolContent, ToolStatus, Turn, TurnFilesState, WorkspaceId,
+    ChatNode, ChatState, ChatSummary, ChoiceKind, Diff, Fullness, Item, Outcome, Said, SettingKind,
+    Subagent, SubagentStatus, TerminalInfo, TerminalStatus, Tool, ToolContent, ToolStatus, Turn,
+    TurnFilesState,
 };
 
-use crate::action::{Action, Pick, RowKey};
+use crate::action::{Action, RowKey};
 use crate::markdown;
 use crate::state::{Online, OpenChat, State};
 use crate::term::{Fit, OpenTerminal};
@@ -39,74 +39,7 @@ pub enum Notifications {
 /// The list of chats, by workspace.
 #[must_use]
 pub fn home(state: &State, notifications: Notifications, now: u64) -> Element {
-    let mut page = el("main").class("home").child(
-        el("header")
-            .class("bar")
-            .child(el("h1").text("clackatoo"))
-            .child(online(state.online)),
-    );
-    if let Some(note) = &state.note {
-        page = page.child(el("p").class("note").text(note.clone()));
-    }
-    page = match notifications {
-        Notifications::On | Notifications::Unsupported { ios: false } => page,
-        Notifications::Off => page.child(
-            el("div")
-                .class("banner")
-                .child(el("span").text("Be told when a chat finishes, or asks you something."))
-                .child(el("button").action(&Action::Notify).text("Turn on")),
-        ),
-        Notifications::Blocked => page.child(
-            el("p")
-                .class("banner")
-                .text("Notifications are blocked: allow them in the browser's settings."),
-        ),
-        Notifications::Unsupported { ios: true } => page.child(el("p").class("banner").text(
-            "On iPhone, notifications come once clackatoo is on the home screen: Share, \
-             then Add to Home Screen, then open it from there.",
-        )),
-    };
-    let mut workspaces: Vec<(Option<WorkspaceId>, String)> = (state.workspaces.list.iter())
-        .map(|workspace| (Some(workspace.id), workspace.name.clone()))
-        .collect();
-    workspaces.push((None, "Elsewhere".to_owned()));
-    let mut any = false;
-    for (id, name) in workspaces {
-        let mut chats: Vec<&ChatSummary> = (state.chats.iter())
-            .filter(|chat| chat.workspace == id)
-            .collect();
-        let terminals = state.terminals_of(id);
-        if chats.is_empty() && terminals.is_empty() {
-            continue;
-        }
-        any = true;
-        // What needs the user first, then the latest.
-        chats.sort_by_key(|chat| {
-            (
-                !chat.needs_you(),
-                chat.parent.is_some(),
-                u64::MAX - chat.active,
-            )
-        });
-        let mut section = el("section").class("workspace").child(el("h2").text(name));
-        if !chats.is_empty() {
-            let rows = chats.into_iter().map(|chat| chat_row(chat, now));
-            section = section.child(el("ul").class("chats").children(rows));
-        }
-        if !terminals.is_empty() {
-            let rows = terminals.into_iter().map(terminal_row);
-            section = section.child(el("ul").class("chats terminals").children(rows));
-        }
-        page = page.child(section);
-    }
-    if !any && state.online == Online::Open {
-        page = page.child(
-            el("p")
-                .class("empty")
-                .text("No chats or terminals yet: start a chat in a window with :Agent."),
-        );
-    }
-    page
+    crate::dashboard::home(state, notifications, now)
 }
 
 /// What a terminal is called: the title its program set, else what it's
@@ -124,7 +57,7 @@ fn terminal_title(terminal: &TerminalInfo) -> String {
 
 /// A terminal, as a row of the list: what it's called, and what it's
 /// running, where, and at what size.
-fn terminal_row(terminal: &TerminalInfo) -> Element {
+pub(crate) fn terminal_row(terminal: &TerminalInfo) -> Element {
     let mut said = Vec::new();
     match terminal.status {
         TerminalStatus::Running => {
@@ -143,6 +76,8 @@ fn terminal_row(terminal: &TerminalInfo) -> Element {
     el("li")
         .class("chat")
         .class("terminal")
+        .attr("tabindex", "0")
+        .attr("role", "button")
         .action(&Action::OpenTerminal(terminal.id))
         .child(
             el("div")
@@ -196,7 +131,13 @@ pub fn terminal_header(state: &State, term: &OpenTerminal) -> Element {
     };
     el("header")
         .class("bar chat-bar")
-        .child(el("button").class("back").action(&Action::Home).text("‹"))
+        .child(
+            el("button")
+                .class("back")
+                .attr("aria-label", "All agents")
+                .action(&Action::Home)
+                .text("‹"),
+        )
         .child(
             el("div")
                 .class("heading")
@@ -239,9 +180,9 @@ pub fn key_row(state: &State, term: &OpenTerminal) -> Element {
 }
 
 /// What the connection is, as a dot and a word.
-fn online(online: Online) -> Element {
+pub(crate) fn online(online: Online) -> Element {
     let (class, said) = match online {
-        Online::Open => ("up", String::new()),
+        Online::Open => ("up", "Connected".to_owned()),
         Online::Connecting => ("connecting", "Connecting…".to_owned()),
         Online::Lost(retry) => ("lost", format!("Offline: trying again in {retry}s")),
     };
@@ -249,28 +190,64 @@ fn online(online: Online) -> Element {
 }
 
 /// A chat, as a row of the list.
-fn chat_row(chat: &ChatSummary, now: u64) -> Element {
-    let mut row = el("li")
+pub(crate) fn chat_row(chat: &ChatSummary, now: u64) -> Element {
+    let (status, label) = if chat.asking {
+        ("asking", "Needs approval")
+    } else {
+        match &chat.state {
+            ChatState::Failed(_) => ("error", "Failed"),
+            ChatState::Answering | ChatState::Starting => ("running", "Working"),
+            ChatState::Ready if chat.unseen => ("unread", "New reply"),
+            ChatState::Ready => ("idle", "Ready"),
+        }
+    };
+    let mut side = el("span").class("session-side");
+    if chat.active > 0 {
+        side = side.child(
+            el("span")
+                .class("session-time")
+                .text(ago(now.saturating_sub(chat.active))),
+        );
+    }
+    if chat.asking {
+        side = side.child(el("span").class("badge").text("Approve"));
+    } else if chat.unseen {
+        side = side.child(
+            el("span")
+                .class("unread-dot")
+                .attr("aria-label", "Unread reply"),
+        );
+    }
+    el("li")
         .class("chat")
+        .class(status)
         .class_if(chat.parent.is_some(), "sub")
         .class_if(chat.needs_you(), "needs")
-        .action(&Action::Open(chat.chat));
-    let mut top = el("div")
-        .class("top")
-        .child(el("span").class("title").text(chat.title.clone()));
-    if chat.asking {
-        top = top.child(el("span").class("badge").text("Asks you"));
-    } else if matches!(chat.state, ChatState::Starting | ChatState::Answering) {
-        top = top.child(dots(now));
-    } else if chat.unseen {
-        top = top.child(el("span").class("badge new").text("New"));
-    }
-    row = row.child(top);
-    let mut said = vec![chat.agent.clone(), state_word(&chat.state).to_owned()];
-    if chat.active > 0 {
-        said.push(ago(now.saturating_sub(chat.active)));
-    }
-    row.child(el("div").class("meta").text(said.join(" · ")))
+        .attr("tabindex", "0")
+        .attr("role", "button")
+        .action(&Action::Open(chat.chat))
+        .child(
+            el("span")
+                .class("session-status")
+                .class(status)
+                .attr("aria-hidden", "true"),
+        )
+        .child(
+            el("span")
+                .class("session-body")
+                .child(el("span").class("title").text(chat.title.clone()))
+                .child(
+                    el("span")
+                        .class("meta")
+                        .child(
+                            el("span")
+                                .class("session-provider")
+                                .text(chat.agent.clone()),
+                        )
+                        .child(el("span").class("session-state").text(label)),
+                ),
+        )
+        .child(side)
 }
 
 /// How long the dots take to pulse one after another and start again, in
@@ -344,18 +321,34 @@ pub fn chat_header(state: &State, open: &OpenChat) -> Element {
         said.push(node.agent.clone());
         said.push(state_word(&node.state).to_owned());
     }
-    if let Online::Lost(retry) = state.online {
-        said.push(format!("offline, trying again in {retry}s"));
+    match state.online {
+        Online::Lost(retry) => said.push(format!("offline, retrying in {retry}s")),
+        Online::Connecting => said.push("reconnecting…".into()),
+        Online::Open => {}
     }
     let mut header = el("header")
         .class("bar chat-bar")
-        .child(el("button").class("back").action(&Action::Home).text("‹"))
+        .child(
+            el("button")
+                .class("back")
+                .attr("aria-label", "All agents")
+                .action(&Action::Home)
+                .text("‹"),
+        )
         .child(
             el("div")
                 .class("heading")
                 .child(el("h1").text(title))
                 .child(el("div").class("meta").text(said.join(" · "))),
         );
+    if node.is_some_and(|node| node.question.is_some()) {
+        header = header.child(
+            el("button")
+                .class("attention-button")
+                .action(&Action::Latest)
+                .text("Needs you"),
+        );
+    }
     if node.is_some_and(|node| node.state == ChatState::Answering) {
         header = header.child(
             el("button")
@@ -391,12 +384,22 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
             .child(el("div").class("divider").text(switch.label()));
     }
     let mut section = section;
-    if !turn.prompt.is_empty() {
+    if !turn.prompt.is_empty() || !turn.previews.is_empty() {
         let mut prompt = el("div").class("prompt");
         if let Some(from) = &turn.from {
             prompt = prompt.child(el("div").class("from").text(format!("From {}", from.title)));
         }
-        section = section.child(prompt.child(el("div").class("bubble").text(turn.prompt.clone())));
+        if !turn.previews.is_empty() {
+            prompt = prompt.child(
+                el("div")
+                    .class("image-previews")
+                    .children(turn.previews.iter().filter(|p| p.valid()).map(preview)),
+            );
+        }
+        if !turn.prompt.is_empty() {
+            prompt = prompt.child(el("div").class("bubble").text(turn.prompt.clone()));
+        }
+        section = section.child(prompt);
     }
     let answer = answer_start(turn);
     let running = turn.end.is_none();
@@ -549,9 +552,7 @@ fn tool_view(tool: &Tool, open: &OpenChat, key: String) -> Element {
             }
             ToolContent::Diff(diff) => diff_view(diff),
             ToolContent::Output(output) => el("pre").class("output").text(last_lines(output)),
-            ToolContent::Image(_) => el("p")
-                .class("muted")
-                .text("Image preview available in the desktop client"),
+            ToolContent::Image(image) => preview(image),
         });
     }
     if tool.content.is_empty() && !tool.locations.is_empty() {
@@ -564,6 +565,14 @@ fn tool_view(tool: &Tool, open: &OpenChat, key: String) -> Element {
         details = details.child(el("p").class("muted").text(places.join("\n")));
     }
     details
+}
+
+fn preview(image: &clackatoo_protocol::ChatPreview) -> Element {
+    el("canvas")
+        .class("image-preview")
+        .attr("role", "img")
+        .attr("aria-label", "Image attachment preview")
+        .preview(image)
 }
 
 /// The last [`MOST_LINES`] lines of `text`, saying how many went before.
@@ -637,6 +646,8 @@ fn card(subagent: &Subagent, now: u64) -> Element {
         .class("card")
         .class_if(subagent.status == SubagentStatus::Asking, "needs")
         .class_if(subagent.status.going(), "going")
+        .attr("tabindex", "0")
+        .attr("role", "button")
         .action(&Action::Open(subagent.chat))
         .child(el("div").class("task").text(subagent.task.clone()))
         .child(el("div").class("meta").text(format!("{who} · {status}")))
@@ -698,64 +709,6 @@ pub fn footer(state: &State, node: Option<&ChatNode>) -> Element {
     footer
 }
 
-/// The shown chat's menus: its model, among its agent's and the other
-/// agents', its mode, its effort, and what it may do with clackatoo's
-/// tools.
-#[must_use]
-pub fn menus(node: &ChatNode) -> Element {
-    let mut menus = el("div").class("menus");
-    let order = [
-        SettingKind::Model,
-        SettingKind::Mode,
-        SettingKind::Effort,
-        SettingKind::Tools,
-    ];
-    for kind in order {
-        for setting in node.settings.iter().filter(|setting| setting.kind == kind) {
-            let mut select = setting_menu(setting);
-            if kind == SettingKind::Model {
-                select = select.children(node.providers.iter().map(|provider| {
-                    let options: Vec<Element> = match &provider.models {
-                        ProviderModels::Known(models) if !models.is_empty() => (models.iter())
-                            .map(|model| {
-                                el("option")
-                                    .attr(
-                                        "value",
-                                        Pick::switch_value(&provider.agent, Some(&model.value)),
-                                    )
-                                    .text(format!("{} · {}", provider.title, model.name))
-                            })
-                            .collect(),
-                        models => {
-                            let said = match models {
-                                ProviderModels::Learning => " (finding out…)",
-                                ProviderModels::NotInstalled => " (to install)",
-                                ProviderModels::Failed(_) => " (couldn't say)",
-                                _ => "",
-                            };
-                            vec![
-                                el("option")
-                                    .attr("value", Pick::switch_value(&provider.agent, None))
-                                    .text(format!("{}{said}", provider.title)),
-                            ]
-                        }
-                    };
-                    el("optgroup")
-                        .attr("label", provider.title.clone())
-                        .children(options)
-                }));
-            }
-            menus = menus.child(
-                el("label")
-                    .class("menu")
-                    .child(el("span").text(setting.name.clone()))
-                    .child(select),
-            );
-        }
-    }
-    menus
-}
-
 /// How many minutes ahead of UTC the phone's clock is, or was, or will
 /// be, at a time in milliseconds since the Unix epoch.
 pub type Offset<'a> = &'a dyn Fn(u64) -> i64;
@@ -765,10 +718,230 @@ pub type Offset<'a> = &'a dyn Fn(u64) -> i64;
 /// [`usage_detail`] says.
 #[must_use]
 pub fn box_bar(node: &ChatNode, open: &OpenChat, now: u64, offset: Offset<'_>) -> Element {
-    let detail = usage_detail(node, open, now, offset);
+    let model = node
+        .settings
+        .iter()
+        .find(|s| s.kind == SettingKind::Model)
+        .map_or_else(
+            || node.agent.clone(),
+            |s| {
+                s.choices
+                    .iter()
+                    .find(|c| c.value == s.value)
+                    .map_or_else(|| s.value.clone(), |c| c.name.clone())
+            },
+        );
+    let mut bar = el("div")
+        .class("composer-bar")
+        .child(
+            el("button")
+                .class("model-button")
+                .action(&Action::Settings)
+                .attr("aria-haspopup", "dialog")
+                .attr("id", "settings-trigger")
+                .child(crate::provider_icon::mark(&node.agent))
+                .child(el("span").class("model-name").text(model))
+                .child(el("span").class("muted").text("⌄")),
+        )
+        .child(
+            el("button")
+                .class("permissions-button")
+                .action(&Action::Permissions)
+                .attr("aria-label", "Permissions")
+                .attr("aria-haspopup", "dialog")
+                .attr("title", "Permissions")
+                .child(el("span").class("shield-icon").attr("aria-hidden", "true")),
+        )
+        .child(meter(node, now).unwrap_or_else(|| {
+            el("button")
+                .class("meter")
+                .action(&Action::Usage)
+                .text("Usage")
+        }));
+    if open.folds.get(SETTINGS_FOLD).copied().unwrap_or(false) {
+        bar = bar.child(sheet(
+            "Agent settings",
+            Action::Settings,
+            crate::settings::panel(node, &open.picker),
+        ));
+    }
+    if open.folds.get(USAGE_FOLD).copied().unwrap_or(false) {
+        bar = bar.child(sheet(
+            "Context & usage",
+            Action::Usage,
+            usage_panel(node, open, now, offset),
+        ));
+    }
+    bar
+}
+
+fn usage_panel(node: &ChatNode, open: &OpenChat, now: u64, offset: Offset<'_>) -> Element {
+    let mut detail = el("div").class("usage-content");
+    if let Some(usage) = node.usage {
+        detail = detail.child(
+            el("section")
+                .class("context-card")
+                .child(el("h3").text("This chat"))
+                .child(
+                    el("strong").class("context-total").text(
+                        usage
+                            .percent()
+                            .map_or_else(|| "—".into(), |p| format!("{p}%")),
+                    ),
+                )
+                .child(el("span").class("muted").text(" context used"))
+                .children(usage_detail(node, open, now, offset)),
+        );
+    }
+    detail = detail.child(
+        el("h3")
+            .class("allowances-heading")
+            .text("Account allowances"),
+    );
+    for provider in &node.provider_usage {
+        let mut section = el("section").class("provider-usage").child(
+            el("h3")
+                .child(crate::provider_icon::mark(&provider.agent))
+                .text(provider.title.clone()),
+        );
+        if provider.refreshing {
+            section = section.child(el("p").class("muted").text("Refreshing…"));
+        }
+        if let Some(notice) = &provider.notice {
+            section = section.child(el("p").class("muted").text(notice.clone()));
+        }
+        for limit in &provider.limits {
+            let left = 100_u8.saturating_sub(limit.used);
+            let mut card = el("div")
+                .class("quota-card")
+                .class_if(left < 20, "low")
+                .child(
+                    el("div")
+                        .class("quota-heading")
+                        .child(el("span").text(limit.label.clone()))
+                        .child(el("strong").text(format!("{left}% left"))),
+                )
+                .child(
+                    el("div")
+                        .class("quota-track")
+                        .attr("role", "meter")
+                        .attr("aria-label", limit.label.clone())
+                        .attr("aria-valuemin", "0")
+                        .attr("aria-valuemax", "100")
+                        .attr("aria-valuenow", left.to_string())
+                        .child(el("i").style("width", format!("{left}%"))),
+                );
+            if let Some(at) = limit.resets {
+                card = card.child(
+                    el("p")
+                        .class("muted")
+                        .text(format!("Resets {}", resets(at, now, offset))),
+                );
+            }
+            section = section.child(card);
+        }
+        detail = detail.child(section);
+    }
+    if node.usage.is_none() && node.provider_usage.is_empty() {
+        detail = detail.child(
+            el("p")
+                .class("muted")
+                .text("Usage hasn't been reported yet."),
+        );
+    }
+    detail
+}
+
+pub const SETTINGS_FOLD: &str = "settings";
+
+/// The same accessible sheet for settings and account usage. Its close button
+/// takes focus; the app contains Tab and restores focus when it closes.
+fn sheet(title: &str, close: Action, content: Element) -> Element {
     el("div")
-        .children(detail)
-        .child(menus(node).children(meter(node, now)))
+        .class("sheet-layer")
+        .child(
+            el("button")
+                .class("sheet-backdrop")
+                .attr("tabindex", "-1")
+                .attr("aria-label", "Close panel")
+                .action(&close),
+        )
+        .child(
+            el("section")
+                .class("sheet")
+                .attr("role", "dialog")
+                .attr("aria-modal", "true")
+                .attr("aria-label", title)
+                .child(
+                    el("header")
+                        .class("sheet-header")
+                        .child(el("h2").text(title))
+                        .child(
+                            el("button")
+                                .class("quiet sheet-close")
+                                .attr("aria-label", "Close panel")
+                                .action(&close)
+                                .text("Done"),
+                        ),
+                )
+                .child(el("div").class("sheet-body").child(content)),
+        )
+}
+
+/// Shared daemon queue, with stable IDs so stale taps cannot affect another item.
+#[must_use]
+pub fn queue(node: &ChatNode, online: Online) -> Element {
+    let mut list = el("div").class("queue");
+    if node.delivery.queued.is_empty() {
+        return list;
+    }
+    let title = if node.delivery.paused {
+        "Queue paused"
+    } else {
+        "Up next"
+    };
+    list = list.child(
+        el("div")
+            .class("queue-heading")
+            .text(format!("{title} · {}", node.delivery.queued.len())),
+    );
+    for message in &node.delivery.queued {
+        let steering =
+            node.delivery.native_steering && message.images == 0 && message.target.is_none();
+        let busy = matches!(node.state, ChatState::Answering | ChatState::Starting);
+        let label = if !busy {
+            "Send now"
+        } else if steering {
+            "Steer now"
+        } else {
+            "Stop & continue"
+        };
+        let mut send = el("button")
+            .class("quiet")
+            .action(&Action::SendQueued(message.id))
+            .text(label);
+        let mut remove = el("button")
+            .class("quiet")
+            .attr("aria-label", "Remove queued message")
+            .action(&Action::RemoveQueued(message.id))
+            .text("×");
+        if online != Online::Open || node.delivery.sending.is_some() {
+            send = send.attr("disabled", "");
+            remove = remove.attr("disabled", "");
+        }
+        let mut text = el("div").class("queued-text").text(message.text.clone());
+        if message.images > 0 {
+            text = text.child(el("small").text(format!(" · {} image(s)", message.images)));
+        }
+        list = list.child(
+            el("div")
+                .class("queued-message")
+                .child(text)
+                .child(send)
+                .child(remove),
+        );
+    }
+    list
 }
 
 /// The fold that opens the meter's detail, in [`OpenChat::folds`].
@@ -785,7 +958,7 @@ fn fullness_class(fullness: Fullness) -> Option<&'static str> {
 }
 
 /// The meter of how much of its context the chat fills, at the end of its
-/// menus, as the window has it by the model menu: "42% context" over a
+/// menus, as the window has it by the model menu: "42%" over a
 /// thin bar, amber past 80% and red past 95%, and before it, the
 /// account's limit over five hours or a week, once that's as full, and
 /// not yet past when it resets, at `now`. Tapping it shows the detail
@@ -794,7 +967,14 @@ fn fullness_class(fullness: Fullness) -> Option<&'static str> {
 pub fn meter(node: &ChatNode, now: u64) -> Option<Element> {
     let usage = node.usage?;
     let percent = usage.percent();
-    let mut meter = el("button").class("meter").action(&Action::Usage);
+    let mut meter = el("button")
+        .class("meter")
+        .action(&Action::Usage)
+        .attr(
+            "aria-label",
+            format!("{} — context and usage limits", usage.label()),
+        )
+        .attr("aria-haspopup", "dialog");
     if let Some(class) = percent.map(Fullness::of).and_then(fullness_class) {
         meter = meter.class(class);
     }
@@ -807,10 +987,16 @@ pub fn meter(node: &ChatNode, now: u64) -> Option<Element> {
     }
     let mut context = el("span")
         .class("context")
-        .child(el("span").text(usage.label()));
+        .child(el("span").text(percent.map_or_else(|| "—".into(), |p| format!("{p}%"))));
     if let Some(percent) = percent {
         let filled = el("i").style("width", format!("{percent}%"));
         context = context.child(el("span").class("bar").child(filled));
+    }
+    if let Some(percent) = percent {
+        meter = meter.style(
+            "--context",
+            format!("{}deg", u16::from(percent) * 360 / 100),
+        );
     }
     Some(meter.child(context))
 }
@@ -839,12 +1025,7 @@ pub fn usage_detail(
         };
         [el("dt").text(line.name), said]
     });
-    Some(
-        el("dl")
-            .class("usage")
-            .children(rows.flatten())
-            .action(&Action::Usage),
-    )
+    Some(el("dl").class("usage").children(rows.flatten()))
 }
 
 /// The days of the week, from Sunday.
@@ -922,23 +1103,6 @@ fn civil(days: i64) -> (i64, i64, i64) {
     };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
     (year, month, date)
-}
-
-/// A menu of `setting`'s choices, with its value picked.
-fn setting_menu(setting: &Setting) -> Element {
-    let options = setting.choices.iter().map(|choice| {
-        let option = el("option")
-            .attr("value", Pick::set_value(&choice.value))
-            .text(choice.name.clone());
-        if choice.value == setting.value {
-            option.attr("selected", "")
-        } else {
-            option
-        }
-    });
-    el("select")
-        .attr("data-setting", setting.id.clone())
-        .children(options)
 }
 
 /// The pairing screen's parts.
@@ -1079,7 +1243,7 @@ pub mod pairing {
 #[cfg(test)]
 mod tests {
     use clackatoo_protocol::{
-        Choice, Location, Question, SettingChoice, TerminalId, TurnEnd, Workspace, Workspaces,
+        Choice, Location, Question, TerminalId, TurnEnd, Workspace, WorkspaceId, Workspaces,
     };
 
     use super::*;
@@ -1136,12 +1300,24 @@ mod tests {
             .iter()
             .filter_map(|row| row.get("data-action"))
             .collect();
-        assert_eq!(opened, ["notify", "open:2", "open:1", "open:3"]);
+        assert_eq!(
+            opened,
+            [
+                "filter:agents",
+                "filter:attention",
+                "filter:working",
+                "filter:terminals",
+                "open:2",
+                "open:1",
+                "open:3",
+                "notify"
+            ]
+        );
         let text = page.all_text();
         assert!(text.contains("clackatoo"));
-        assert!(text.contains("Asks you"));
+        assert!(text.contains("Needs approval"));
         assert!(text.contains("Elsewhere"));
-        assert!(text.contains("Claude Code · ready · 5m"), "{text}");
+        assert!(text.contains("Claude CodeReady5m"), "{text}");
     }
 
     #[test]
@@ -1284,46 +1460,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_model_menu_offers_other_agents() {
-        let mut node = ChatNode::default();
-        node.settings.push(Setting {
-            id: "model".into(),
-            name: "Model".into(),
-            kind: SettingKind::Model,
-            value: "sonnet".into(),
-            choices: ["haiku", "sonnet"]
-                .into_iter()
-                .map(|value| SettingChoice {
-                    value: value.into(),
-                    name: value.into(),
-                    description: None,
-                })
-                .collect(),
-        });
-        node.providers.push(clackatoo_protocol::Provider {
-            agent: "codex".into(),
-            title: "Codex".into(),
-            models: ProviderModels::Unknown,
-        });
-        let menus = menus(&node);
-        let select = &menus.find_all("data-setting")[0];
-        let values: Vec<String> = (select.children.iter())
-            .flat_map(|child| match child {
-                Node::Element(option) if option.tag == "option" => vec![option.clone()],
-                Node::Element(group) => (group.children.iter())
-                    .filter_map(|child| match child {
-                        Node::Element(option) => Some(option.clone()),
-                        Node::Text(_) => None,
-                    })
-                    .collect(),
-                Node::Text(_) => Vec::new(),
-            })
-            .map(|option| option.get("value").unwrap().to_owned())
-            .collect();
-        assert_eq!(values, ["set:haiku", "set:sonnet", "switch:codex:"]);
-    }
-
     /// A chat whose agent has said it fills `used` of 200k tokens, and
     /// `five_hour` of its account's limit over five hours.
     fn using(used: u64, five_hour: Option<u8>) -> ChatNode {
@@ -1348,7 +1484,7 @@ mod tests {
         let quiet = meter(&using(84_000, Some(42)), now).unwrap();
         assert_eq!(quiet.get("class"), Some("meter"));
         assert_eq!(quiet.get("data-action"), Some("usage"));
-        assert_eq!(quiet.all_text(), "42% context");
+        assert_eq!(quiet.all_text(), "42%");
         let bar = &quiet.find_all("class").last().unwrap().children[0];
         assert!(
             matches!(bar, Node::Element(filled) if filled.styles == [("width", "42%".to_owned())]),
@@ -1359,11 +1495,11 @@ mod tests {
         // Said to fill more than it holds: all of it.
         let full = meter(&using(u64::MAX, None), now).unwrap();
         assert_eq!(full.get("class"), Some("meter full"));
-        assert_eq!(full.all_text(), "100% context");
+        assert_eq!(full.all_text(), "100%");
         // A limit all but reached goes before it, in red.
         let limit = meter(&using(84_000, Some(97)), now).unwrap();
         assert_eq!(limit.get("class"), Some("meter"));
-        assert_eq!(limit.all_text(), "5-hour 97%42% context");
+        assert_eq!(limit.all_text(), "5-hour 97%42%");
     }
 
     #[test]
@@ -1386,9 +1522,9 @@ mod tests {
         let detail = usage_detail(&node, &open, later, &|_| 60).unwrap();
         assert_eq!(detail.all_text(), "Context84k of 200k tokens, 42%");
         let limit = meter(&using(84_000, Some(97)), now).unwrap();
-        assert_eq!(limit.all_text(), "5-hour 97%42% context");
+        assert_eq!(limit.all_text(), "5-hour 97%42%");
         let reset = meter(&using(84_000, Some(97)), later).unwrap();
-        assert_eq!(reset.all_text(), "42% context");
+        assert_eq!(reset.all_text(), "42%");
     }
 
     #[test]
@@ -1456,11 +1592,21 @@ mod tests {
             command: Some("cargo test".into()),
         }];
         state.online = Online::Open;
+        state.home_filter = crate::state::HomeFilter::Terminals;
         let page = home(&state, Notifications::On, 0);
         let opened: Vec<&str> = (page.find_all("data-action").into_iter())
             .filter_map(|row| row.get("data-action"))
             .collect();
-        assert_eq!(opened, ["term:2"]);
+        assert_eq!(
+            opened,
+            [
+                "filter:agents",
+                "filter:attention",
+                "filter:working",
+                "filter:terminals",
+                "term:2"
+            ]
+        );
         let text = page.all_text();
         assert!(text.contains("cargo test"), "{text}");
         assert!(text.contains("/home/jack/clackatoo · 80×24"), "{text}");
@@ -1631,7 +1777,7 @@ mod tests {
     }
 
     #[test]
-    fn a_chat_at_work_has_dots_in_the_list() {
+    fn a_chat_at_work_has_a_running_marker_in_the_list() {
         let mut working = summary(1, None, false, 0);
         working.state = ChatState::Answering;
         let asking = ChatSummary {
@@ -1641,7 +1787,7 @@ mod tests {
         let ready = summary(3, None, false, 0);
         let dots = |chat: &ChatSummary| {
             (chat_row(chat, 0).find_all("class").into_iter())
-                .any(|element| element.get("class") == Some("dots"))
+                .any(|element| element.get("class") == Some("session-status running"))
         };
         assert!(dots(&working));
         assert!(!dots(&asking), "it waits for you, and says so");
@@ -1666,6 +1812,61 @@ mod tests {
             pairing::asking("0042")
                 .all_text()
                 .contains(":Devices allow 0042")
+        );
+    }
+    #[test]
+    fn queued_controls_use_stable_ids_and_label_cancelling_fallbacks() {
+        let mut node = ChatNode {
+            state: ChatState::Answering,
+            ..ChatNode::default()
+        };
+        node.delivery.native_steering = true;
+        node.delivery
+            .queued
+            .push(clackatoo_protocol::QueuedMessage {
+                id: 87,
+                text: "guide".into(),
+                images: 0,
+                target: None,
+            });
+        let shown = queue(&node, Online::Open);
+        assert!(shown.all_text().contains("Steer now"));
+        assert!(
+            shown
+                .find_all("data-action")
+                .iter()
+                .any(|e| e.get("data-action") == Some("remove-queued:87"))
+        );
+        node.delivery.queued[0].images = 1;
+        assert!(
+            queue(&node, Online::Open)
+                .all_text()
+                .contains("Stop & continue")
+        );
+        assert_eq!(queue(&node, Online::Lost(1)).find_all("disabled").len(), 2);
+    }
+
+    #[test]
+    fn dashboard_search_and_attention_include_failed_work() {
+        let mut state = State::default();
+        let mut failed = summary(2, None, false, 0);
+        failed.state = ChatState::Failed("offline".into());
+        state.chats = vec![summary(1, None, false, 0), failed];
+        state.home_filter = crate::state::HomeFilter::Attention;
+        let page = home(&state, Notifications::On, 0);
+        assert!(page.all_text().contains("chat 2"));
+        assert!(!page.all_text().contains("chat 1"));
+        state.home_query = "CLAUDE".into();
+        assert!(
+            home(&state, Notifications::On, 0)
+                .all_text()
+                .contains("chat 2")
+        );
+        state.home_query = "nothing".into();
+        assert!(
+            home(&state, Notifications::On, 0)
+                .all_text()
+                .contains("No matches")
         );
     }
 }

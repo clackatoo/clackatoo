@@ -803,6 +803,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Steer Codex's active turn without cancelling its work, with Ctrl+Enter or the queued message's arrow",
     },
+    News {
+        id: "mobile-agent-workspace",
+        date: "2026-10-25",
+        lesson: "remote",
+        what: "A mobile-first web app: compact sessions, searchable models, saved drafts, queues and approvals",
+    },
 ];
 
 impl News {

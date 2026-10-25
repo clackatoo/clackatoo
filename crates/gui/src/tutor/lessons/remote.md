@@ -48,9 +48,17 @@ The daemon can serve a web app, for your phone or any browser: your chats by wor
 
 A phone pairs once: with the password `clackatoo web password` sets, or by asking a window. Asking shows a code on the phone, and the window's bar says a device asks; type `:Devices allow` and the code to let it in, or `:Devices deny`. `:Devices` lists what's paired, and `:Devices revoke 2` unpairs the second, cutting it off at once. After fifty wrong passwords in a row, pairing with the password locks, the bar says so, and `:Devices unlock` lets it again. Turn on notifications in the app, and the phone is told when a chat finishes, or asks you something, while no window you're using shows it. On an iPhone, add the app to the home screen first (Share, then Add to Home Screen), and pair it from there: only an app on the home screen gets notifications.
 
+## Managing agents from your phone
+
+The web overview has **Agents**, **Needs you**, **Working** and **Terminals** filters, with search across names and workspaces. The conversation scrolls independently of its header and composer; **Latest** takes you back to new output, and pending approvals stay above the composer. Wide screens keep the session list beside the conversation. The composer stays above the phone keyboard.
+
+Tap the model for global model search, provider tabs and saved favorites. The shield opens permissions; the context gauge opens context and connected-provider usage. Close a sheet with Done, a tap outside, or Escape. **Queue** adds a message while the agent works; **Steer now** guides supported sessions without stopping them, with **Stop & continue** explicitly labelled for others. Ctrl+Enter (Command+Enter on a Mac) sends or steers; Enter adds a line. Pending messages can be sent now or removed.
+
+Draft text stays per chat, including across reloads in the same browser tab, and clears only after the daemon accepts it. If delivery couldn't be confirmed, check the conversation before retrying: nothing resends by itself.
+
 ## Terminals from your phone
 
-The app lists each workspace's terminals under its chats, with what each is running and where. Tap one to see it as it is, at its own size: its rows as wide as the phone allows, and if they're wider still, panned sideways with a finger; pinch to zoom. Scroll up for its history. **Fit** sizes the terminal to the phone instead, and says Fitted while it lasts; it goes back to the size your windows want when you tap Fitted, leave the terminal, or type into it from a window.
+The app's **Terminals** filter lists each workspace's terminals, with what each is running and where. Tap one to see it as it is, at its own size: its rows as wide as the phone allows, and if they're wider still, panned sideways with a finger; pinch to zoom. Scroll up for its history. **Fit** sizes the terminal to the phone instead, and says Fitted while it lasts; it goes back to the size your windows want when you tap Fitted, leave the terminal, or type into it from a window.
 
 Tap the rows to bring up the keyboard; what you type goes as you type it, a key at a time, and the row above the keyboard has Esc, Tab, Ctrl (for the next key), Ctrl+C, the arrows, `|`, `~`, `/`, `-` and Paste. When the daemon can't be reached, or hasn't answered for three seconds, keys are turned down and the phone says so, rather than reach a shell long after you meant them.
 

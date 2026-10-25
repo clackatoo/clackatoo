@@ -20,10 +20,13 @@
 
 pub mod action;
 mod app;
+mod dashboard;
 mod dom;
 pub mod grid;
 pub mod keys;
 pub mod markdown;
+mod provider_icon;
+pub mod settings;
 pub mod state;
 pub mod term;
 pub mod ui;
