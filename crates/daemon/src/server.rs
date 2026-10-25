@@ -146,6 +146,12 @@ const TYPING: Duration = Duration::from_secs(1);
 /// what its streams have taken, before it's dropped.
 const MOST_UNSENT: usize = 8 * 1024 * 1024;
 
+/// A web connection holds the in-flight frame here rather than in QUIC's streams.
+/// Allow one maximum-size protocol frame plus the usual backlog headroom:
+/// a chat snapshot must not disconnect a reader before it can drain the socket.
+/// View updates already wait for the previous update to drain and be acked.
+const MOST_WEB_UNSENT: usize = frame::MAX_FRAME_LEN + MOST_UNSENT;
+
 /// How long a terminal's output must pause before its scrollback is
 /// compacted: long enough that a flood never stops for it, short enough
 /// that the memory comes back soon after.
@@ -3523,7 +3529,12 @@ impl Daemon {
                 Link::Web(link) => link.unsent(),
                 _ => 0,
             };
-        if remote && unsent > MOST_UNSENT {
+        let limit = if matches!(client.link, Link::Web(_)) {
+            MOST_WEB_UNSENT
+        } else {
+            MOST_UNSENT
+        };
+        if remote && unsent > limit {
             log::warn!("dropping a client on another machine {unsent} B behind");
             self.drop_client_saying(token, "the window fell too far behind");
             return;
@@ -4098,6 +4109,109 @@ mod tests {
     use clackatoo_term::Config;
 
     use super::*;
+
+    /// A web reader with a real, nonblocking socket, so large frames remain
+    /// queued until the test lets the reader catch up.
+    fn web_reader(daemon: &mut Daemon) -> (Token, std::os::unix::net::UnixStream) {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        ours.set_nonblocking(true).unwrap();
+        theirs.set_nonblocking(true).unwrap();
+        let mut stream = mio::net::UnixStream::from_std(ours);
+        let token = Token(daemon.sources.vacant_key());
+        daemon
+            .poll
+            .registry()
+            .register(&mut stream, token, Interest::READABLE)
+            .unwrap();
+        let now = Instant::now();
+        let link = crate::web::HttpConn::new(
+            crate::web::Transport::Plain(crate::web::Stream::Unix(stream)),
+            crate::web::Peer::Local,
+            now,
+            Duration::from_secs(10),
+            true,
+        )
+        .into_link(1, now);
+        daemon
+            .sources
+            .insert(Source::Client(Client::new(Link::Web(Box::new(link)))));
+        (token, theirs)
+    }
+
+    #[test]
+    fn a_web_reader_can_drain_a_large_chat_snapshot() {
+        use std::io::Read as _;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, id) = agent_files::tests::daemon_with_chat(dir.path());
+        let (token, mut reader) = web_reader(&mut daemon);
+        let mut node = daemon.chat_ref(id).unwrap().node().clone();
+        node.turns[0].items.push(clackatoo_protocol::Item::Words(
+            "x".repeat(frame::MAX_FRAME_LEN - 4096),
+        ));
+        let snapshot = ServerMessage::Event(clackatoo_protocol::Event::View {
+            terminal: id,
+            update: ViewUpdate::Snapshot(View {
+                title: "Large conversation".into(),
+                cwd: None,
+                root: clackatoo_protocol::Node::Chat(Box::new(node)),
+            }),
+        });
+        let encoded = frame::encode(PROTOCOL_VERSION, &snapshot).unwrap();
+        assert!(encoded.len() > 8 * 1024 * 1024);
+        let Some(Source::Client(client)) = daemon.sources.get_mut(token.0) else {
+            panic!("client")
+        };
+        client.outgoing.extend_from_slice(&encoded);
+        // No reads yet: the old 8 MiB limit dropped even a healthy reader.
+        daemon.flush_client(token);
+        assert!(
+            daemon.sources.contains(token.0),
+            "a legal snapshot disconnected its reader"
+        );
+        let mut received = Vec::new();
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            match reader.read_to_end(&mut received) {
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
+                result => panic!("reader closed: {result:?}"),
+            }
+            daemon.flush_client(token);
+            let Some(Source::Client(client)) = daemon.sources.get(token.0) else {
+                panic!("client dropped")
+            };
+            if !client.backlogged() {
+                let _ = reader.read_to_end(&mut received);
+                break;
+            }
+            assert!(Instant::now() < until, "snapshot did not drain");
+        }
+        // A single server binary WebSocket frame, with its 64-bit length.
+        assert_eq!(&received[..2], &[0x82, 127]);
+        assert_eq!(
+            u64::from_be_bytes(received[2..10].try_into().unwrap()),
+            encoded.len() as u64
+        );
+        assert_eq!(&received[10..], &encoded);
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&received[10..]);
+        assert_eq!(
+            decoder.decode::<ServerMessage>(PROTOCOL_VERSION).unwrap(),
+            Some(snapshot)
+        );
+    }
+
+    #[test]
+    fn a_web_reader_with_excessive_backlog_is_still_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = agent_files::tests::daemon_with_chat(dir.path());
+        let (token, _reader) = web_reader(&mut daemon);
+        let Some(Source::Client(client)) = daemon.sources.get_mut(token.0) else {
+            panic!("client")
+        };
+        client.outgoing.resize(MOST_WEB_UNSENT + 4 * 1024 * 1024, 0);
+        daemon.flush_client(token);
+        assert!(!daemon.sources.contains(token.0));
+    }
 
     #[test]
     fn messages_that_cant_be_read_are_forgotten_as_time_goes_by() {

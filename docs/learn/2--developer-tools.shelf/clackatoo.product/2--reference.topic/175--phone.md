@@ -87,6 +87,10 @@ Tap **Enable** in the overview. The phone is then told when a chat finishes a tu
 
 `~/.local/share/clackatoo/web/`: `devices.json`, with names, token hashes, push subscriptions and whether password pairing is locked, and `vapid.p8`, the key notifications are signed with. Only you can read either.
 
+## A chat keeps reconnecting
+
+If a chat stays on **Opening** while the connection keeps retrying, inspect the daemon's `daemon.log` in its runtime directory. Repeated "dropping a client on another machine" warnings with more than 8 MiB pending can indicate an older daemon whose send-buffer limit is smaller than a valid conversation snapshot. Update the daemon; a large initial snapshot is allowed to drain before further view updates are sent.
+
 ## Building it
 
 The web app is built into the program when it's compiled, which needs the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` 0.2.129. A build without them serves a page saying the app is missing; `CLACKATOO_WEB_APP=off` leaves it out on purpose. Releases always include it.
