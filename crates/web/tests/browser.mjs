@@ -60,6 +60,11 @@ try {
   assert.equal(await page.locator('.turn').count(),8,'opening should only render the recent page');
   assert.equal(await page.locator('.turn').first().getAttribute('data-turn'),'32');
   const tightComposer=async()=>{
+    await page.waitForFunction(()=>{
+      const bottom=document.querySelector('.composer').getBoundingClientRect().bottom;
+      const gap=visualViewport.offsetTop+visualViewport.height-bottom;
+      return gap>=-1 && gap<=7;
+    });
     const gap=await page.locator('.composer').evaluate(e=>visualViewport.offsetTop+visualViewport.height-e.getBoundingClientRect().bottom);
     assert(gap>=-1 && gap<=7,`composer bottom gap ${gap}px`);
   };
@@ -161,9 +166,50 @@ try {
   });
   await tightComposer();
   assert(await page.locator('.chat-page').evaluate(e=>e.classList.contains('keyboard-open')));
+  // Safari can pan the visual viewport to the layout viewport's bottom.
+  // That does not mean the keyboard has gone away.
+  await page.evaluate(()=>{
+    Object.defineProperty(visualViewport,'offsetTop',{value:innerHeight-420,configurable:true});
+    visualViewport.dispatchEvent(new Event('scroll'));
+  });
+  await page.waitForFunction(()=>Math.abs(document.querySelector('.composer').getBoundingClientRect().bottom-(visualViewport.offsetTop+visualViewport.height-6))<2);
+  await tightComposer();
+  // innerHeight can already reflect the keyboard while CSS 100dvh does not.
+  await page.evaluate(()=>{
+    Object.defineProperty(window,'innerHeight',{value:420,configurable:true});
+    Object.defineProperty(visualViewport,'offsetTop',{value:0,configurable:true});
+    visualViewport.dispatchEvent(new Event('resize'));
+  });
+  await page.waitForFunction(()=>document.querySelector('.composer').getBoundingClientRect().bottom<=420);
+  await tightComposer();
+  await page.evaluate(()=>{delete window.innerHeight;});
   await page.evaluate(()=>{delete visualViewport.height;delete visualViewport.offsetTop;visualViewport.dispatchEvent(new Event('resize'));});
   await tightComposer();
-  assert.equal(await page.locator('.chat-page').evaluate(e=>e.style.height),'','stale keyboard height survived');
+  assert(await page.locator('.chat-page').evaluate(e=>Math.abs(parseFloat(e.style.height)-visualViewport.height)<1),'stale keyboard height survived');
+  // Focus/tap/restore may precede the new measurement, without a subsequent
+  // resize event. These are event-order simulations, not an iOS keyboard.
+  for (const trigger of ['focusin','pointerup','pageshow','visibilitychange']) {
+    await page.waitForTimeout(1200); // Previous transition checks must be spent.
+    await page.locator('.conversation').evaluate(el=>el.scrollTop=400);
+    const reading=await page.locator('.conversation').evaluate(el=>el.scrollTop);
+    await page.evaluate(async trigger=>{
+      const target=trigger==='pageshow'?window:trigger==='visibilitychange'?document:document.querySelector('#message');
+      target.dispatchEvent(new Event(trigger,{bubbles:true}));
+      await new Promise(resolve=>setTimeout(resolve,200));
+      Object.defineProperty(visualViewport,'height',{value:420,configurable:true});
+      Object.defineProperty(visualViewport,'offsetTop',{value:18,configurable:true});
+    },trigger);
+    await tightComposer();
+    assert(Math.abs(await page.locator('.conversation').evaluate(el=>el.scrollTop)-reading)<2,'keyboard moved the reading position');
+    await page.evaluate(async()=>{
+      document.querySelector('#message').dispatchEvent(new Event('focusout',{bubbles:true}));
+      await new Promise(resolve=>setTimeout(resolve,200));
+      delete visualViewport.height;
+      delete visualViewport.offsetTop;
+    });
+    await tightComposer();
+    assert(!await page.locator('.chat-page').evaluate(e=>e.classList.contains('keyboard-open')),'keyboard inset survived dismissal');
+  }
   await page.setViewportSize({width:390,height:420});
   await page.locator('#message').focus();
   await page.waitForFunction(()=>{const r=document.querySelector('.send')?.getBoundingClientRect();return r && r.bottom<=420;});

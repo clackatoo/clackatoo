@@ -15,6 +15,7 @@
 use std::cell::RefCell;
 
 mod terminal;
+mod viewport;
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{ChatAction, PROTOCOL_VERSION, TerminalId};
@@ -292,6 +293,7 @@ struct App {
     refits: u32,
     /// A frame is asked for, to draw in.
     frame_asked: bool,
+    viewport: viewport::Tracking,
     /// The user chose to pair in Safari, not in the app on the home
     /// screen.
     pair_here: bool,
@@ -385,6 +387,7 @@ pub(crate) fn start() {
             pressed: None,
             refits: 0,
             frame_asked: false,
+            viewport: viewport::Tracking::default(),
             pair_here: false,
             present_said: 0.0,
         });
@@ -538,16 +541,7 @@ fn listen_to_page(window: &Window, document: &Document, root: &DomElement) {
     listen(root, "scroll", true, |_| {
         with_app(App::scrolled);
     });
-    listen(window, "resize", false, |_| {
-        with_app(App::viewport_changed);
-    });
-    if let Some(viewport) = window.visual_viewport() {
-        for kind in ["resize", "scroll"] {
-            listen(&viewport, kind, false, |_| {
-                with_app(App::viewport_changed);
-            });
-        }
-    }
+    viewport::listen(window, document);
     listen(document, "visibilitychange", false, |_| {
         with_app(App::visibility_changed);
     });
@@ -1516,27 +1510,30 @@ impl App {
                     .ok()
                     .and_then(|h| h.as_f64())
                     .unwrap_or(viewport.height());
-                let obscured = viewport.height() + viewport.offset_top() < layout_height - 1.0;
+                let layout_height = self
+                    .document
+                    .document_element()
+                    .map_or(layout_height, |root| {
+                        layout_height.max(f64::from(root.client_height()))
+                    });
+                let obscured = viewport.height() < layout_height - 1.0;
                 page.main.set_class_name(if obscured {
                     "chat-page keyboard-open"
                 } else {
                     "chat-page"
                 });
-                if obscured {
-                    let _ = page
-                        .main
-                        .style()
-                        .set_property("--viewport-height", &format!("{}px", viewport.height()));
-                    let _ = page
-                        .main
-                        .style()
-                        .set_property("height", &format!("{}px", viewport.height()));
-                } else {
-                    // Let dynamic viewport units follow browser chrome. A pixel
-                    // height captured while the keyboard was open must not stick.
-                    let _ = page.main.style().remove_property("height");
-                    let _ = page.main.style().remove_property("--viewport-height");
-                }
+                // Always fit the visible rectangle. Safari can pan it to the
+                // layout's bottom, or report innerHeight already reduced, while
+                // 100dvh still extends behind the keyboard. Neither proves that
+                // the keyboard closed. Dismissal supplies a new visible height.
+                let _ = page
+                    .main
+                    .style()
+                    .set_property("--viewport-height", &format!("{}px", viewport.height()));
+                let _ = page
+                    .main
+                    .style()
+                    .set_property("height", &format!("{}px", viewport.height()));
                 let _ = page
                     .main
                     .style()
@@ -2277,6 +2274,7 @@ impl App {
         }
         // Seen again: drawn, so an agent's seconds count on from now.
         if here {
+            self.viewport_settling();
             self.draw_soon();
         }
         self.send();
