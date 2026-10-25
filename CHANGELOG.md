@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.78 (2026-10-25)
+
+### Fixes
+
+- **agents:** keep browser tools discoverable across permission changes (e9ef2d1)
+
 ## 2026.10.77 (2026-10-25)
 
 ### Features
