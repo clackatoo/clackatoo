@@ -57,6 +57,7 @@ try {
   assert.deepEqual(await page.locator('canvas.image-preview').first().evaluate(c=>Array.from(c.getContext('2d').getImageData(0,0,1,1).data)),[35,90,65,255]);
   await noOverflow();
   await page.screenshot({path:`${output}/phone-chat.png`});
+  assert.equal(await page.locator('.composer-bar button').count(),2,'composer should only expose model/settings and usage');
   assert.equal(await page.locator('.turn').count(),8,'opening should only render the recent page');
   assert.equal(await page.locator('.turn').first().getAttribute('data-turn'),'32');
   const tightComposer=async()=>{
@@ -178,13 +179,19 @@ try {
   await page.getByText('83% left',{exact:true}).waitFor();
   await page.screenshot({path:`${output}/phone-usage.png`});
   await page.keyboard.press('Escape');
-  await page.getByRole('button',{name:'Harness capabilities',exact:true}).click();
-  await page.getByRole('dialog',{name:'Harness capabilities'}).waitFor();
+  await page.locator('#settings-trigger').click();
+  await page.locator('[data-picker-tab="tools"]').click();
+  await page.getByRole('dialog',{name:'Agent settings'}).waitFor();
   await page.getByText('Off — no window granted',{exact:true}).waitFor();
   await noOverflow();
   await page.screenshot({path:`${output}/phone-capabilities.png`});
+  await page.locator('[data-picker-tab="model"]').click();
+  await page.getByLabel('Search all models').waitFor();
+  await page.locator('[data-picker-tab="permissions"]').click();
+  await page.getByRole('button',{name:'Ask',exact:true}).waitFor();
   await page.keyboard.press('Escape');
-  await page.getByRole('dialog',{name:'Harness capabilities'}).waitFor({state:'hidden'});
+  await page.getByRole('dialog',{name:'Agent settings'}).waitFor({state:'hidden'});
+  assert(await page.locator('#settings-trigger').evaluate(e=>document.activeElement===e),'closing settings should return focus to the model button');
   await page.getByRole('button',{name:'Stop activity',exact:true}).click();
   await page.getByText('Build mobile client · Stopping',{exact:true}).waitFor();
   assert(actions.includes('CancelActivity web-build'));

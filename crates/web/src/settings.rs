@@ -10,8 +10,16 @@ use std::collections::BTreeSet;
 pub struct Picker {
     pub query: String,
     pub provider: String,
-    pub permissions: bool,
+    pub tab: Tab,
     pub favorites: BTreeSet<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Tab {
+    #[default]
+    Model,
+    Permissions,
+    Tools,
 }
 
 struct Model {
@@ -59,28 +67,42 @@ fn models(node: &ChatNode) -> Vec<Model> {
     rows
 }
 
-pub fn panel(node: &ChatNode, picker: &Picker) -> Element {
+pub fn panel(node: &ChatNode, picker: &Picker, capabilities: &[(String, String)]) -> Element {
     let mut panel = el("div").class("settings-panel").child(
         el("div")
             .class("settings-tabs")
             .attr("aria-label", "Agent settings")
             .children(
-                [("Model", false), ("Permissions", true)].map(|(name, permissions)| {
+                [
+                    ("Model", "model", Tab::Model),
+                    ("Permissions", "permissions", Tab::Permissions),
+                    ("Tools", "tools", Tab::Tools),
+                ]
+                .map(|(name, key, tab)| {
                     el("button")
-                        .attr(
-                            "data-picker-tab",
-                            if permissions { "permissions" } else { "model" },
-                        )
-                        .class_if(picker.permissions == permissions, "selected")
-                        .attr(
-                            "aria-pressed",
-                            (picker.permissions == permissions).to_string(),
-                        )
+                        .attr("data-picker-tab", key)
+                        .class_if(picker.tab == tab, "selected")
+                        .attr("aria-pressed", (picker.tab == tab).to_string())
                         .text(name)
                 }),
             ),
     );
-    if picker.permissions {
+    if picker.tab == Tab::Tools {
+        let mut content = el("div").class("usage-content");
+        if capabilities.is_empty() {
+            content = content.child(el("p").text("Reading live harness state…"));
+        }
+        for (name, detail) in capabilities {
+            content = content.child(
+                el("section")
+                    .class("context-card")
+                    .child(el("h3").text(name.clone()))
+                    .child(el("p").text(detail.clone())),
+            );
+        }
+        return panel.child(content);
+    }
+    if picker.tab == Tab::Permissions {
         return panel.children(
             node.settings
                 .iter()
@@ -325,22 +347,23 @@ mod tests {
         };
         picker.favorites.insert("claude\u{1f}Sonnet".into());
         assert_eq!(
-            picks(&panel(&node, &picker)),
+            picks(&panel(&node, &picker, &[])),
             ["switch:claude:Sonnet", "set:Sol"]
         );
         picker.query.clear();
-        assert_eq!(picks(&panel(&node, &picker)), ["set:Sol", "set:Luna"]);
+        assert_eq!(picks(&panel(&node, &picker, &[])), ["set:Sol", "set:Luna"]);
         picker.provider = "Favorites".into();
-        assert_eq!(picks(&panel(&node, &picker)), ["switch:claude:Sonnet"]);
+        assert_eq!(picks(&panel(&node, &picker, &[])), ["switch:claude:Sonnet"]);
     }
     #[test]
     fn permissions_never_mix_in_model_choices() {
         let panel = panel(
             &node(),
             &Picker {
-                permissions: true,
+                tab: Tab::Permissions,
                 ..Picker::default()
             },
+            &[],
         );
         assert_eq!(picks(&panel), ["set:ask", "set:auto"]);
         assert!(panel.find_all("id").is_empty());

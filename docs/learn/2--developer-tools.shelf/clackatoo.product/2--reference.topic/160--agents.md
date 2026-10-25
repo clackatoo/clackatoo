@@ -485,6 +485,6 @@ last inspected terminal output up to 4 KiB; the terminal keeps its own scrollbac
 
 `:Capabilities` shows the focused chat's tools policy, command restrictions,
 browser configuration and permission, native grant, and tool connection.
-The web composer's **Tools** button opens the same report. Agents can call
+On the web, open the model selector and choose its **Tools** tab for the same report. Agents can call
 `harness_capabilities` themselves. A requested tool catalogue is reported
 separately from model acknowledgment: the harness cannot prove a model saw it.

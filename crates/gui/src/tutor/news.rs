@@ -869,6 +869,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Attach photos and screenshots from the web composer",
     },
+    News {
+        id: "web-unified-settings",
+        date: "2026-10-25",
+        lesson: "agents",
+        what: "Web model, permissions and tools share one composer menu",
+    },
 ];
 
 impl News {

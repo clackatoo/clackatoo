@@ -1933,16 +1933,8 @@ impl App {
                     self.state.chat(answer, "answering");
                 }
             }
-            Action::Capabilities => {
-                self.state.toggle_fold("capabilities");
-                if let Some(open) = &mut self.state.open {
-                    open.folds.insert(view::SETTINGS_FOLD.into(), false);
-                    open.folds.insert(view::USAGE_FOLD.into(), false);
-                }
-                self.state.inspect_capabilities();
-            }
             Action::CancelActivity(index) => self.state.cancel_activity(index),
-            Action::Usage | Action::Settings | Action::Permissions => self.toggle_sheet(action),
+            Action::Usage | Action::Settings => self.toggle_sheet(action),
             Action::Filter(filter) => {
                 self.state.home_filter = filter;
                 self.state.dirty.home = true;
@@ -2017,7 +2009,7 @@ impl App {
                         .collect()
                 });
             if let Some(open) = &mut self.state.open {
-                open.picker.permissions = action == Action::Permissions;
+                open.picker.tab = crate::settings::Tab::Model;
                 open.picker.query.clear();
                 if let Some(saved) = saved {
                     open.picker.favorites = saved;
@@ -2045,7 +2037,6 @@ impl App {
                 view::USAGE_FOLD
             };
             open.folds.insert(other.into(), false);
-            open.folds.insert("capabilities".into(), false);
         }
         let opening = self
             .state
@@ -2074,7 +2065,11 @@ impl App {
             }
         } else if let Some(open) = &mut self.state.open {
             if let Some(tab) = element.get_attribute("data-picker-tab") {
-                open.picker.permissions = tab == "permissions";
+                open.picker.tab = match tab.as_str() {
+                    "permissions" => crate::settings::Tab::Permissions,
+                    "tools" => crate::settings::Tab::Tools,
+                    _ => crate::settings::Tab::Model,
+                };
             } else if let Some(provider) = element.get_attribute("data-model-provider") {
                 open.picker.provider = provider;
                 open.picker.query.clear();
@@ -2095,6 +2090,10 @@ impl App {
                     );
                 }
             }
+        }
+        if element.get_attribute("data-picker-tab").as_deref() == Some("tools") {
+            self.state.inspect_capabilities();
+            self.send();
         }
         self.draw_soon();
     }
@@ -2160,7 +2159,6 @@ impl App {
             if let Some(open) = &mut self.state.open {
                 open.folds.insert(view::SETTINGS_FOLD.into(), false);
                 open.folds.insert(view::USAGE_FOLD.into(), false);
-                open.folds.insert("capabilities".into(), false);
             }
             self.focus_settings_trigger();
             self.draw_soon();

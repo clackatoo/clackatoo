@@ -763,18 +763,10 @@ pub fn box_bar(node: &ChatNode, open: &OpenChat, now: u64, offset: Offset<'_>) -
                 .action(&Action::Settings)
                 .attr("aria-haspopup", "dialog")
                 .attr("id", "settings-trigger")
+                .attr("title", "Model, permissions and tools")
                 .child(crate::provider_icon::mark(&node.agent))
                 .child(el("span").class("model-name").text(model))
                 .child(el("span").class("muted").text("⌄")),
-        )
-        .child(
-            el("button")
-                .class("permissions-button")
-                .action(&Action::Permissions)
-                .attr("aria-label", "Permissions")
-                .attr("aria-haspopup", "dialog")
-                .attr("title", "Permissions")
-                .child(el("span").class("shield-icon").attr("aria-hidden", "true")),
         )
         .child(meter(node, now).unwrap_or_else(|| {
             el("button")
@@ -782,33 +774,11 @@ pub fn box_bar(node: &ChatNode, open: &OpenChat, now: u64, offset: Offset<'_>) -
                 .action(&Action::Usage)
                 .text("Usage")
         }));
-    bar = bar.child(
-        el("button")
-            .class("quiet")
-            .action(&Action::Capabilities)
-            .attr("aria-label", "Harness capabilities")
-            .text("Tools"),
-    );
-    if open.folds.get("capabilities").copied().unwrap_or(false) {
-        let mut content = el("div").class("usage-content");
-        if open.capabilities.is_empty() {
-            content = content.child(el("p").text("Reading live harness state…"));
-        }
-        for (name, detail) in &open.capabilities {
-            content = content.child(
-                el("section")
-                    .class("context-card")
-                    .child(el("h3").text(name.clone()))
-                    .child(el("p").text(detail.clone())),
-            );
-        }
-        bar = bar.child(sheet("Harness capabilities", Action::Capabilities, content));
-    }
     if open.folds.get(SETTINGS_FOLD).copied().unwrap_or(false) {
         bar = bar.child(sheet(
             "Agent settings",
             Action::Settings,
-            crate::settings::panel(node, &open.picker),
+            crate::settings::panel(node, &open.picker, &open.capabilities),
         ));
     }
     if open.folds.get(USAGE_FOLD).copied().unwrap_or(false) {
