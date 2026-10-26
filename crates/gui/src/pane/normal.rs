@@ -12,10 +12,9 @@
 //! and the window only the lines it has shown.
 
 use clackatoo_protocol::{Match, Position, Request};
-use clackatoo_term::{MOST_LINES, MOST_TEXT};
 use winit::keyboard::Key;
 
-use super::{Copy, Document, Lines, Mode, Pane, Pending, Selection};
+use super::{CopyTo, Document, Lines, Mode, Pane, Pending, Selection};
 use crate::cmdline::{Keyed, Line};
 use crate::input::KeyPress;
 use crate::motion::{Block, Cursor, Motion, Point, start_of_cell};
@@ -138,9 +137,14 @@ impl Dialect for TerminalKeys {
     }
 
     fn takes(&self, command: &Command<Self::Own>) -> bool {
-        // A register is for nothing a terminal takes, but Esc after one
-        // still does what Esc does, as in Vim.
-        if command.register.is_some() && command.action != Action::Own(TerminalAction::Escape) {
+        // A register is for a yank, which keeps its text there, as an
+        // editor's does; and Esc after one still does what Esc does, as in
+        // Vim.
+        let yank = matches!(command.action, Action::Operate(Operator::Yank, _));
+        if command.register.is_some()
+            && !yank
+            && command.action != Action::Own(TerminalAction::Escape)
+        {
             return false;
         }
         match command.action {
@@ -196,7 +200,7 @@ impl Pane {
         if let Some((copy, _)) = terminal_control(press) {
             self.keys.clear();
             if copy {
-                return self.yank_selection();
+                return self.yank_selection(CopyTo::Register(Some('+')));
             }
             self.send_keyed(vec![0x03]);
             return false;
@@ -217,6 +221,7 @@ impl Pane {
     /// Does `command`, which [`TerminalKeys`] took.
     fn execute(&mut self, command: Command<TerminalAction>) -> bool {
         let count = command.count;
+        let to = CopyTo::Register(command.register);
         match command.action {
             Action::Move(motion) => {
                 let motion = self.finds.remember(motion);
@@ -224,24 +229,26 @@ impl Pane {
             }
             Action::Operate(Operator::Yank, Target::Motion(motion)) => {
                 let motion = self.finds.remember(motion);
-                self.yank_motion(motion, count)
+                self.yank_motion(motion, count, to)
             }
             Action::FindAgain { reverse } => match self.finds.again(reverse) {
                 Some(motion) => self.move_cursor(motion, count),
                 None => false,
             },
-            Action::Operate(Operator::Yank, Target::Lines) => self.yank_lines(command.times()),
-            Action::Operate(Operator::Yank, Target::Selection) => self.yank_selection(),
+            Action::Operate(Operator::Yank, Target::Lines) => self.yank_lines(command.times(), to),
+            Action::Operate(Operator::Yank, Target::Selection) => self.yank_selection(to),
             // `Y` in visual mode: the lines selected, a block as it is.
             Action::Operate(Operator::Yank, Target::SelectedLines) => {
                 if matches!(self.mode, Mode::Visual(kind) if kind != Selection::Block) {
                     self.mode = Mode::Visual(Selection::Lines);
                 }
-                self.yank_selection()
+                self.yank_selection(to)
             }
             // Copied after `y`, selected in visual mode.
             Action::Operate(Operator::Yank, Target::Object { object, inner })
-            | Action::Select { object, inner } => self.use_object(object, inner, command.times()),
+            | Action::Select { object, inner } => {
+                self.use_object(object, inner, command.times(), to)
+            }
             Action::Insert(Entry::Before) => self.insert(),
             Action::Visual { lines: false } => self.toggle_visual(Selection::Characters),
             Action::Visual { lines: true } => self.toggle_visual(Selection::Lines),
@@ -303,29 +310,6 @@ impl Pane {
             self.follow_cursor();
         }
         true
-    }
-
-    /// Takes in what the daemon answered a copy or a search with.
-    /// What `asked` lines asked for was cut short by the daemon, as it cuts
-    /// any copy at [`MOST_TEXT`] and [`MOST_LINES`], it's said, wherever
-    /// it went.
-    pub(super) fn copied(&mut self, text: String, to: Copy, asked: u64) {
-        let lines = text.lines().count().max(1);
-        let cut = asked > MOST_LINES || text.len() + 4 > MOST_TEXT;
-        // Selecting with the mouse copies to the primary selection all the
-        // time, which isn't worth a message.
-        if cut {
-            self.status = Some(format!(
-                "copied {lines} lines, cut short: a copy stops at {MOST_LINES} lines or 4 MiB"
-            ));
-        } else if to == Copy::Clipboard {
-            self.status = Some(if lines == 1 {
-                "copied".into()
-            } else {
-                format!("copied {lines} lines")
-            });
-        }
-        self.yanked = Some((text, to));
     }
 
     /// Takes in where a search from `from` found its text, if anywhere,
@@ -511,11 +495,11 @@ impl Pane {
 
     /// Copies the selection and returns to normal mode, with the cursor at
     /// the selection's start.
-    fn yank_selection(&mut self) -> bool {
+    fn yank_selection(&mut self, to: CopyTo) -> bool {
         let Some((start, end, kind)) = self.selection() else {
             return false;
         };
-        self.copy(start, end, kind, Copy::Clipboard);
+        self.copy(start, end, kind, to);
         self.leave_visual();
         self.cursor = Some(Cursor::new(start));
         self.follow_cursor();
@@ -524,13 +508,13 @@ impl Pane {
 
     /// `yy` and `Y`: copies the cursor's line, and with a count, as many
     /// lines from it as there are.
-    fn yank_lines(&mut self, lines: usize) -> bool {
+    fn yank_lines(&mut self, lines: usize, to: CopyTo) -> bool {
         let Some(cursor) = self.cursor else {
             return false;
         };
         let mut last = cursor;
         last.repeat(Motion::Down(1), lines.saturating_sub(1), &Document(self));
-        self.copy(cursor.at, last.at, Selection::Lines, Copy::Clipboard);
+        self.copy(cursor.at, last.at, Selection::Lines, to);
         true
     }
 

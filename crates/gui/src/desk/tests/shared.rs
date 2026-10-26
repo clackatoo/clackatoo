@@ -1,6 +1,11 @@
 //! What one pane leaves for the others, driven through the desk as a
 //! window drives it: the window's last `f`, `t`, `F` or `T`, which `;`
-//! and `,` find again in any pane.
+//! and `,` find again in any pane, and what a terminal yanks, which goes
+//! into the registers as an editor's yank does.
+
+use crate::editor::Register;
+use crate::options::Clipboard;
+use crate::pane::{CopyTo, Yanked};
 
 use super::*;
 
@@ -69,4 +74,78 @@ fn a_find_in_an_editor_is_found_again_in_a_terminal_and_back() {
     assert!(note(&desk).ends_with("1:3"), "{}", note(&desk));
     type_keys(&mut desk, ";");
     assert!(note(&desk).ends_with("1:5"), "{}", note(&desk));
+}
+
+#[test]
+fn a_terminals_yank_is_put_by_p_in_an_editor_and_lines_as_lines() {
+    let (mut desk, screen) = terminal_beside_editor("one two\r\nthree", "abc\n");
+    desk.take_yanked();
+    // `yy` on the terminal's last line, where its cursor starts.
+    type_keys(&mut desk, "yy");
+    serve(&mut desk, &screen);
+    assert_eq!(register(&mut desk, '"').as_deref(), Some("three\n"));
+    assert_eq!(register(&mut desk, '0').as_deref(), Some("three\n"));
+    // `clipboard` says the unnamed register goes along with the
+    // clipboard, as for an editor's yank.
+    assert_eq!(
+        desk.take_yanked(),
+        [("three\n".to_owned(), Copy::Clipboard)]
+    );
+    ctrl(&mut desk, "l");
+    type_keys(&mut desk, "p");
+    assert_eq!(editor_text(&desk), "abc\nthree\n", "a line, below");
+    // A register named first: `"a`, and by characters.
+    ctrl(&mut desk, "h");
+    type_keys(&mut desk, "k0\"ayw");
+    serve(&mut desk, &screen);
+    assert_eq!(register(&mut desk, 'a').as_deref(), Some("one "));
+    assert_eq!(register(&mut desk, '0').as_deref(), Some("three\n"), "kept");
+    ctrl(&mut desk, "l");
+    type_keys(&mut desk, "gg0\"ap");
+    assert_eq!(editor_text(&desk), "aone bc\nthree\n");
+    // `"A` adds to it, and `p` puts what was last kept, wherever.
+    ctrl(&mut desk, "h");
+    type_keys(&mut desk, "\"Ayy");
+    serve(&mut desk, &screen);
+    assert_eq!(register(&mut desk, 'a').as_deref(), Some("one \none two\n"));
+}
+
+#[test]
+fn a_terminals_yank_keeps_off_the_clipboard_when_clipboard_says_so() {
+    let (mut desk, screen) = terminal_beside_editor("one", "abc\n");
+    command(&mut desk, "set clipboard=none");
+    desk.take_yanked();
+    type_keys(&mut desk, "yy");
+    serve(&mut desk, &screen);
+    assert!(desk.take_yanked().is_empty());
+    assert_eq!(register(&mut desk, '"').as_deref(), Some("one\n"));
+    // `"+` still goes there.
+    type_keys(&mut desk, "\"+yy");
+    serve(&mut desk, &screen);
+    assert_eq!(desk.take_yanked(), [("one\n".to_owned(), Copy::Clipboard)]);
+}
+
+#[test]
+fn a_mouse_selection_goes_on_the_primary_selection_alone_as_vims_goes_in_star() {
+    let mut desk = desk(one_tab(pane(1)));
+    desk.shared_mut().registers.set_sync(Clipboard::UnnamedPlus);
+    let yank = |text: &str, to| Yanked {
+        register: Register::chars(text.into()),
+        to,
+    };
+    desk.terminal_yanked(yank("kept", CopyTo::Register(None)));
+    desk.terminal_yanked(yank("selected", CopyTo::Primary));
+    assert_eq!(register(&mut desk, '*').as_deref(), Some("selected"));
+    assert_eq!(
+        register(&mut desk, '"').as_deref(),
+        Some("kept"),
+        "not here"
+    );
+    assert_eq!(
+        desk.take_yanked(),
+        [
+            ("kept".to_owned(), Copy::Clipboard),
+            ("selected".to_owned(), Copy::Primary)
+        ]
+    );
 }

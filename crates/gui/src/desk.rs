@@ -1644,8 +1644,8 @@ impl Desk {
                     return false;
                 };
                 let redraw = pane.answered(response);
-                if let Some((text, to)) = pane.take_yanked() {
-                    self.copied(text, to);
+                if let Some(yanked) = pane.take_yanked() {
+                    self.terminal_yanked(yanked);
                 }
                 redraw
             }

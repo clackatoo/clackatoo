@@ -35,10 +35,12 @@ mod normal;
 mod operator;
 mod predict;
 mod requests;
+mod yank;
 
 pub(crate) use mouse::{Copy, PaneMouse};
 use predict::Predictor;
 pub(crate) use requests::Requests;
+pub(crate) use yank::{CopyTo, Yanked};
 
 /// Text just copied, highlighted until `until`.
 #[derive(Clone, Copy, Debug)]
@@ -60,8 +62,8 @@ enum Pending {
     /// History lines, the range asked for and the history's generation
     /// then.
     History(Range<u64>, u64),
-    /// Text to copy, where to, and how many lines were asked for.
-    Text(Copy, u64),
+    /// Text to copy, where to, and what of.
+    Text(yank::Copying),
     /// A search, from where, and whether it went backward.
     Search(Point, bool),
     /// A block, and what for.
@@ -128,7 +130,7 @@ pub(crate) struct Pane {
     /// A short message for the label, until the next key.
     status: Option<String>,
     /// Text copied, and where the window is to put it.
-    yanked: Option<(String, Copy)>,
+    yanked: Option<Yanked>,
     /// Text selected with the mouse.
     mouse_selection: Option<mouse::MouseSelection>,
     /// Text just copied to the clipboard.
@@ -446,8 +448,8 @@ impl Pane {
                 self.fetch_history();
                 true
             }
-            (Some(Pending::Text(to, lines)), Response::Text(text)) => {
-                self.copied(text, to, lines);
+            (Some(Pending::Text(copying)), Response::Text(text)) => {
+                self.copied(text, copying);
                 true
             }
             (Some(Pending::Search(from, backward)), Response::Found(found)) => {
@@ -462,9 +464,9 @@ impl Pane {
         }
     }
 
-    /// Takes text copied, for the window to put on the clipboard or the
-    /// primary selection.
-    pub(crate) fn take_yanked(&mut self) -> Option<(String, Copy)> {
+    /// Takes text copied, for the window to keep in the registers or put
+    /// on the primary selection.
+    pub(crate) fn take_yanked(&mut self) -> Option<Yanked> {
         self.yanked.take()
     }
 
@@ -479,8 +481,9 @@ impl Pane {
         let ctrl_backslash = is_ctrl_backslash(press);
         let to_normal = enters_normal_mode(press);
         let after_ctrl_backslash = std::mem::take(&mut self.after_ctrl_backslash);
-        // Text selected with the mouse is copied by Ctrl+Shift+C, or `y` in
-        // normal mode with nothing typed, and any other key forgets it.
+        // Text selected with the mouse is copied by Ctrl+Shift+C, as `"+y`,
+        // or yanked by `y` in normal mode with nothing typed, and any other
+        // key forgets it.
         let ctrl_shift_c =
             modifiers.ctrl && matches!(press.key, Key::Character(text) if text == "C");
         let y = self.mode == Mode::Normal
@@ -488,7 +491,8 @@ impl Pane {
             && !modifiers.alt
             && !self.keys.pending()
             && matches!(press.key, Key::Character(text) if text == "y");
-        if (ctrl_shift_c || y) && self.copy_mouse_selection(Copy::Clipboard) {
+        let to = CopyTo::Register(ctrl_shift_c.then_some('+'));
+        if (ctrl_shift_c || y) && self.copy_mouse_selection(to) {
             self.mouse_selection = None;
             return true;
         }
@@ -1559,7 +1563,9 @@ mod tests {
         keys(&mut pane, "y");
         serve(&mut pane, &terminal);
         assert_eq!(
-            pane.take_yanked().map(|(text, _)| text).as_deref(),
+            pane.take_yanked()
+                .map(|yanked| yanked.register.text)
+                .as_deref(),
             Some("hello")
         );
         assert_eq!(pane.mode, Mode::Normal);
@@ -1569,14 +1575,18 @@ mod tests {
         keys(&mut pane, "Vjy");
         serve(&mut pane, &terminal);
         assert_eq!(
-            pane.take_yanked().map(|(text, _)| text).as_deref(),
-            Some("hello world\nsecond")
+            pane.take_yanked()
+                .map(|yanked| yanked.register.text)
+                .as_deref(),
+            Some("hello world\nsecond\n")
         );
         keys(&mut pane, "jyy");
         serve(&mut pane, &terminal);
         assert_eq!(
-            pane.take_yanked().map(|(text, _)| text).as_deref(),
-            Some("second")
+            pane.take_yanked()
+                .map(|yanked| yanked.register.text)
+                .as_deref(),
+            Some("second\n")
         );
     }
 
@@ -1791,7 +1801,7 @@ mod tests {
     fn yanked(pane: &mut Pane, terminal: &Terminal, keys_: &str) -> Option<String> {
         keys(pane, keys_);
         serve(pane, terminal);
-        pane.take_yanked().map(|(text, _)| text)
+        pane.take_yanked().map(|yanked| yanked.register.text)
     }
 
     #[test]
@@ -1809,10 +1819,31 @@ mod tests {
         // From the last word, `w` would go to the next line, so stops at
         // this one's end.
         assert_eq!(yank("$byw").as_deref(), Some("six"));
-        assert_eq!(yank("yj").as_deref(), Some("one two six\nfour five"));
-        assert_eq!(yank("jygg").as_deref(), Some("one two six\nfour five"));
+        assert_eq!(yank("yj").as_deref(), Some("one two six\nfour five\n"));
+        assert_eq!(yank("jygg").as_deref(), Some("one two six\nfour five\n"));
         // Anything else after `y` cancels it.
         assert_eq!(yank("yxw"), None);
+    }
+
+    #[test]
+    fn a_register_named_before_a_yank_is_where_it_goes_and_is_for_nothing_else() {
+        let terminal = terminal("one two\r\nfour five");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let mut yank = |keys_: &str| {
+            keys(&mut pane, keys_);
+            serve(&mut pane, &terminal);
+            pane.take_yanked()
+                .map(|yanked| (yanked.register.text, yanked.to))
+        };
+        let named = |name| CopyTo::Register(Some(name));
+        assert_eq!(yank("gg0\"ayw"), Some(("one ".into(), named('a'))));
+        assert_eq!(yank("\"Byy"), Some(("one two\n".into(), named('B'))));
+        assert_eq!(yank("vl\"+y"), Some(("on".into(), named('+'))));
+        assert_eq!(yank("yw"), Some(("one ".into(), CopyTo::Register(None))));
+        // Before anything but a yank, a register spends the keys.
+        assert_eq!(yank("\"aj"), None);
+        assert_eq!(cursor(&pane).1, 0, "didn't move");
     }
 
     #[test]
@@ -2195,14 +2226,14 @@ mod tests {
         let mut yank = |keys: &str| yanked(&mut pane, &terminal, keys);
         assert_eq!(
             yank("gg03yy").as_deref(),
-            Some("one two six\nfour five\nseven")
+            Some("one two six\nfour five\nseven\n")
         );
-        assert_eq!(yank("2Y").as_deref(), Some("one two six\nfour five"));
+        assert_eq!(yank("2Y").as_deref(), Some("one two six\nfour five\n"));
         assert_eq!(yank("y2w").as_deref(), Some("one two "));
         assert_eq!(yank("2y2w").as_deref(), Some("one two six\nfour "));
         assert_eq!(
             yank("y3G").as_deref(),
-            Some("one two six\nfour five\nseven")
+            Some("one two six\nfour five\nseven\n")
         );
         // More lines than there are copies those there are.
         let rest = yank("3G9yy").unwrap_or_default();
@@ -2254,21 +2285,6 @@ mod tests {
         let mut yank = |keys: &str| yanked(&mut pane, &terminal, keys);
         assert_eq!(yank("gg0yw").as_deref(), Some("one"));
         assert_eq!(yank("gg0y2w").as_deref(), Some("one\n  two "));
-    }
-
-    #[test]
-    fn a_copy_the_daemon_cut_short_says_so() {
-        let terminal = terminal("one");
-        let mut pane = pane(&terminal);
-        pane.copied("a\nb".into(), Copy::Clipboard, 2);
-        assert_eq!(pane.label().as_deref(), Some("copied 2 lines"));
-        pane.copied("a\nb".into(), Copy::Primary, clackatoo_term::MOST_LINES + 1);
-        assert!(
-            pane.label()
-                .is_some_and(|label| label.contains("cut short")),
-            "{:?}",
-            pane.label()
-        );
     }
 
     #[test]
@@ -2435,11 +2451,11 @@ mod tests {
         normal_mode(&mut pane);
         assert_eq!(
             yanked(&mut pane, &terminal, "ggjyib").as_deref(),
-            Some("a\nb")
+            Some("a\nb\n")
         );
         assert_eq!(
             yanked(&mut pane, &terminal, "yab").as_deref(),
-            Some("$ ls\na\nb")
+            Some("$ ls\na\nb\n")
         );
         assert_eq!(pane.label().as_deref(), Some("copied 3 lines"));
         // `false` printed nothing.
@@ -2460,7 +2476,7 @@ mod tests {
         assert_eq!(selected, 3, "the block is selected");
         assert_eq!(
             yanked(&mut pane, &terminal, "y").as_deref(),
-            Some("$ ls\na\nb")
+            Some("$ ls\na\nb\n")
         );
         assert_eq!(yanked(&mut pane, &terminal, "[[").as_deref(), None);
         assert_eq!(pane.label().as_deref(), Some("no block here"));
@@ -2574,7 +2590,7 @@ mod tests {
         // An operator takes as far as history goes, as Vim's.
         let lines: Vec<String> = (1..=9).map(|n| format!("line {n}")).collect();
         let yank = yanked(&mut pane, &terminal, "y99L");
-        assert_eq!(yank, Some(lines.join("\n")));
+        assert_eq!(yank, Some(lines.join("\n") + "\n"));
     }
 
     #[test]
@@ -2583,12 +2599,12 @@ mod tests {
         let mut pane = pane(&terminal);
         normal_mode(&mut pane);
         let mut yank = |keys: &str| yanked(&mut pane, &terminal, keys);
-        assert_eq!(yank("3Gygg").as_deref(), Some("line 1\nline 2\nline 3"));
-        assert_eq!(yank("4Gy2gg").as_deref(), Some("line 2\nline 3\nline 4"));
-        assert_eq!(yank("ggy2gg").as_deref(), Some("line 1\nline 2"));
+        assert_eq!(yank("3Gygg").as_deref(), Some("line 1\nline 2\nline 3\n"));
+        assert_eq!(yank("4Gy2gg").as_deref(), Some("line 2\nline 3\nline 4\n"));
+        assert_eq!(yank("ggy2gg").as_deref(), Some("line 1\nline 2\n"));
         assert_eq!(
             yank("gg2y3gg").as_deref(),
-            Some("line 1\nline 2\nline 3\nline 4\nline 5\nline 6")
+            Some("line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n")
         );
         // `yg` and a key that isn't `g` copies nothing, and spends the key.
         assert_eq!(yank("gg0ygw"), None);
@@ -2676,7 +2692,10 @@ mod tests {
         assert_eq!(at(&mut pane, "$gE"), line("  one tw.th", 4));
         // `y` takes them as `d` would: lines, or both ends of `ge`.
         let mut yank = |keys_: &str| yanked(&mut pane, &terminal, keys_);
-        assert_eq!(yank("gg05ly+").as_deref(), Some("  one tw.th\nfour  five"));
+        assert_eq!(
+            yank("gg05ly+").as_deref(),
+            Some("  one tw.th\nfour  five\n")
+        );
         assert_eq!(yank("gg06lyge").as_deref(), Some("e t"));
         assert_eq!(yank("gg010ly5|").as_deref(), Some("e tw.t"));
     }
@@ -2687,8 +2706,8 @@ mod tests {
         let mut pane = pane(&terminal);
         normal_mode(&mut pane);
         let mut yank = |keys_: &str| yanked(&mut pane, &terminal, keys_);
-        assert_eq!(yank("gg03lyip").as_deref(), Some("one\n  two"));
-        assert_eq!(yank("ggyap").as_deref(), Some("one\n  two\n"));
+        assert_eq!(yank("gg03lyip").as_deref(), Some("one\n  two\n"));
+        assert_eq!(yank("ggyap").as_deref(), Some("one\n  two\n\n"));
         assert_eq!(cursor(&pane).2, 0, "at the paragraph's start");
     }
 
@@ -2782,7 +2801,9 @@ mod tests {
         press(&mut pane, backspace, Modifiers::default());
         serve(&mut pane, &terminal);
         assert_eq!(
-            pane.take_yanked().map(|(text, _)| text).as_deref(),
+            pane.take_yanked()
+                .map(|yanked| yanked.register.text)
+                .as_deref(),
             Some("i"),
             "as yh"
         );
@@ -2790,14 +2811,16 @@ mod tests {
         named(&mut pane, NamedKey::Enter);
         serve(&mut pane, &terminal);
         assert_eq!(
-            pane.take_yanked().map(|(text, _)| text).as_deref(),
-            Some("line 1\nline 2"),
+            pane.take_yanked()
+                .map(|yanked| yanked.register.text)
+                .as_deref(),
+            Some("line 1\nline 2\n"),
             "as yj"
         );
         // The view's lines, the ends of words of anything but blanks, and
         // the first non-blank.
         let mut yank = |keys: &str| yanked(&mut pane, &terminal, keys);
-        assert_eq!(yank("ggyH").as_deref(), Some("line 1"));
+        assert_eq!(yank("ggyH").as_deref(), Some("line 1\n"));
         assert_eq!(yank("gg0yE").as_deref(), Some("line"));
         assert_eq!(yank("gg0yW").as_deref(), Some("line "));
         assert_eq!(yank("gg$y^").as_deref(), Some("line "));
@@ -2943,7 +2966,9 @@ mod tests {
         press(&mut pane, Key::Character("C".into()), ctrl_shift);
         serve(&mut pane, &terminal);
         assert_eq!(
-            pane.take_yanked().map(|(text, _)| text).as_deref(),
+            pane.take_yanked()
+                .map(|yanked| yanked.register.text)
+                .as_deref(),
             Some("hello")
         );
         assert_eq!(pane.mode, Mode::Normal);
@@ -3040,7 +3065,7 @@ mod mouse_tests {
     }
 
     /// Answers a request for text, and returns what was copied, and where.
-    fn copied(pane: &mut Pane, terminal: &Terminal) -> Option<(String, Copy)> {
+    fn copied(pane: &mut Pane, terminal: &Terminal) -> Option<(String, CopyTo)> {
         for message in pane.take_outbox() {
             if let ClientMessage::Request(Request::Text {
                 from,
@@ -3055,6 +3080,7 @@ mod mouse_tests {
             }
         }
         pane.take_yanked()
+            .map(|yanked| (yanked.register.text, yanked.to))
     }
 
     const LEFT: MouseButton = MouseButton::Left;
@@ -3076,7 +3102,7 @@ mod mouse_tests {
         mouse_with(&mut pane, MouseAction::Release(LEFT), [2, 3], 1, alt);
         assert_eq!(
             copied(&mut pane, &terminal),
-            Some(("bcd\nb\nbc ".into(), Copy::Primary))
+            Some(("bcd\nb\nbc ".into(), CopyTo::Primary))
         );
         // Ctrl and Alt drag one too, and open no link.
         let ctrl_alt = Modifiers { ctrl: true, ..alt };
@@ -3092,7 +3118,7 @@ mod mouse_tests {
         mouse_with(&mut pane, MouseAction::Release(LEFT), [0, 2], 1, ctrl_alt);
         assert_eq!(
             copied(&mut pane, &terminal),
-            Some(("cd\n\nc ".into(), Copy::Primary))
+            Some(("cd\n\nc ".into(), CopyTo::Primary))
         );
     }
 
@@ -3219,7 +3245,7 @@ mod mouse_tests {
         mouse(&mut pane, MouseAction::Release(LEFT), [1, 2], 1);
         assert_eq!(
             copied(&mut pane, &terminal),
-            Some(("world\nsec".to_owned(), Copy::Primary))
+            Some(("world\nsec".to_owned(), CopyTo::Primary))
         );
         // It stays shown, and Ctrl+Shift+C copies it to the clipboard.
         assert_eq!(pane.highlights(5).len(), 2);
@@ -3248,7 +3274,7 @@ mod mouse_tests {
         });
         assert_eq!(
             copied(&mut pane, &terminal),
-            Some(("world\nsec".to_owned(), Copy::Clipboard))
+            Some(("world\nsec".to_owned(), CopyTo::Register(Some('+'))))
         );
         // Nothing went to the program, and the selection is gone, but for
         // a moment the clipboard's copy is highlighted. The primary
@@ -3278,7 +3304,7 @@ mod mouse_tests {
         key(&mut pane, "y");
         assert_eq!(
             copied(&mut pane, &terminal),
-            Some(("world\nsec".to_owned(), Copy::Clipboard))
+            Some(("world\nsec".to_owned(), CopyTo::Register(None)))
         );
         // After `y`, the next `y` is `yy`, which copies the cursor's line,
         // where the drag began.
@@ -3287,7 +3313,7 @@ mod mouse_tests {
         key(&mut pane, "y");
         assert_eq!(
             copied(&mut pane, &terminal),
-            Some(("hello world".to_owned(), Copy::Clipboard))
+            Some(("hello world\n".to_owned(), CopyTo::Register(None)))
         );
     }
 
@@ -3299,13 +3325,13 @@ mod mouse_tests {
         mouse(&mut pane, MouseAction::Release(LEFT), [0, 8], 2);
         assert_eq!(
             copied(&mut pane, &terminal),
-            Some(("~/a.txt".to_owned(), Copy::Primary))
+            Some(("~/a.txt".to_owned(), CopyTo::Primary))
         );
         mouse(&mut pane, MouseAction::Press(LEFT), [1, 1], 3);
         mouse(&mut pane, MouseAction::Release(LEFT), [1, 1], 3);
         assert_eq!(
             copied(&mut pane, &terminal),
-            Some(("second".to_owned(), Copy::Primary))
+            Some(("second".to_owned(), CopyTo::Primary))
         );
     }
 

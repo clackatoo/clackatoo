@@ -10,15 +10,15 @@
 
 use clackatoo_protocol::{Block, Request, Which};
 
-use super::{Copy, Document, Mode, Pane, Pending, Selection};
+use super::{CopyTo, Document, Mode, Pane, Pending, Selection};
 use crate::motion::{Cursor, Lines, Motion, Point, Reach, Taken, before, last_char};
 use crate::objects::{Object, Selected};
 
 /// What a block asked of the daemon is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BlockUse {
-    /// `yib` or `yab`: copy its output, or all of it.
-    Copy { inner: bool },
+    /// `yib` or `yab`: copy its output, or all of it, to where it goes.
+    Copy { inner: bool, to: CopyTo },
     /// `ib` or `ab` in visual mode: select it.
     Select { inner: bool },
     /// `[[` or `]]`: move to its start.
@@ -29,7 +29,7 @@ impl Pane {
     /// `y` and `motion`: copies what the motion moves over, as `count`
     /// says it moves (see [`Cursor::go`]). The cursor moves to the start of
     /// it, as it does when the motion goes back.
-    pub(super) fn yank_motion(&mut self, motion: Motion, count: Option<usize>) -> bool {
+    pub(super) fn yank_motion(&mut self, motion: Motion, count: Option<usize>, to: CopyTo) -> bool {
         let Some(cursor) = self.cursor else {
             return false;
         };
@@ -53,7 +53,7 @@ impl Pane {
         let Some((last, kind)) = copied else {
             return false;
         };
-        self.copy(start, last, kind, Copy::Clipboard);
+        self.copy(start, last, kind, to);
         if moved.at < cursor.at {
             self.cursor = Some(moved);
             self.follow_cursor();
@@ -63,7 +63,13 @@ impl Pane {
 
     /// `object`, found around the cursor, just its insides if `inner`:
     /// copied after `y`, or selected in visual mode.
-    pub(super) fn use_object(&mut self, object: Object, inner: bool, count: usize) -> bool {
+    pub(super) fn use_object(
+        &mut self,
+        object: Object,
+        inner: bool,
+        count: usize,
+        to: CopyTo,
+    ) -> bool {
         let Some(cursor) = self.cursor else {
             return false;
         };
@@ -72,7 +78,7 @@ impl Pane {
             let use_ = if visual {
                 BlockUse::Select { inner }
             } else {
-                BlockUse::Copy { inner }
+                BlockUse::Copy { inner, to }
             };
             self.ask_for_block(cursor.at.line, Which::At, use_);
             return false;
@@ -138,7 +144,7 @@ impl Pane {
         } else {
             Selection::Characters
         };
-        self.copy(found.start(), found.last(), kind, Copy::Clipboard);
+        self.copy(found.start(), found.last(), kind, to);
         self.cursor = Some(Cursor::new(found.start()));
         self.follow_cursor();
         true
@@ -181,17 +187,12 @@ impl Pane {
         };
         let line_start = |line| Point { line, col: 0 };
         match use_ {
-            BlockUse::Copy { inner } => {
+            BlockUse::Copy { inner, to } => {
                 let Some((first, last)) = lines(inner) else {
                     self.status = Some("no output".into());
                     return;
                 };
-                self.copy(
-                    line_start(first),
-                    line_start(last),
-                    Selection::Lines,
-                    Copy::Clipboard,
-                );
+                self.copy(line_start(first), line_start(last), Selection::Lines, to);
                 self.cursor = Some(Cursor::new(line_start(first)));
             }
             // Esc may have ended visual mode while the daemon was asked.

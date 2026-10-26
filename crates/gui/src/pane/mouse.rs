@@ -7,8 +7,10 @@
 //!
 //! Otherwise dragging selects characters, a double click a word and a
 //! triple click lines, and letting go copies the selection to the primary
-//! selection, which a middle click pastes, as elsewhere on Linux.
-//! Ctrl+Shift+C, or `y` in normal mode, copies it to the clipboard. In
+//! selection, which a middle click pastes, as elsewhere on Linux, and
+//! as Vim puts a mouse selection in `"*` alone. Ctrl+Shift+C copies it
+//! to the clipboard, and `y` in normal mode yanks it, as `y` does any
+//! text, into the registers (see [`super::yank`]). In
 //! normal mode a click also moves the cursor. The selection stays shown
 //! until the next key or click.
 //!
@@ -21,7 +23,7 @@
 use clackatoo_term::Row;
 use clackatoo_term::mouse::{self, MouseAction, MouseButton, MouseEvent, MouseTracking};
 
-use super::{Document, Mode, Pane, Pending, Selection};
+use super::{CopyTo, Document, Mode, Pane, Selection};
 use crate::input::Modifiers;
 use crate::motion::{Block, Cursor, Point};
 
@@ -239,7 +241,7 @@ impl Pane {
         };
         selection.dragging = false;
         if selection.started {
-            self.copy_mouse_selection(Copy::Primary);
+            self.copy_mouse_selection(CopyTo::Primary);
         } else {
             self.mouse_selection = None;
         }
@@ -248,7 +250,7 @@ impl Pane {
 
     /// Copies the mouse selection, if there is one, to `to`. Returns
     /// whether there was one.
-    pub(super) fn copy_mouse_selection(&mut self, to: Copy) -> bool {
+    pub(super) fn copy_mouse_selection(&mut self, to: CopyTo) -> bool {
         let Some((start, end, kind)) = self.mouse_selected() else {
             return false;
         };
@@ -273,37 +275,6 @@ impl Pane {
             Selection::Characters | Selection::Lines => ordered(selection.anchor, selection.head),
         };
         Some((start, end, selection.kind))
-    }
-
-    /// Asks the daemon for the text from `start` to `end`, for `to`. Text
-    /// for the clipboard is highlighted for a moment, to show what went.
-    /// A block goes from its top left corner, `start`, to its bottom right,
-    /// `end`.
-    pub(super) fn copy(&mut self, start: Point, end: Point, kind: Selection, to: Copy) {
-        if to == Copy::Clipboard {
-            self.flash = Some(super::Flash {
-                start,
-                end,
-                kind,
-                until: std::time::Instant::now() + crate::render::FLASH,
-            });
-        }
-        let (from, to_place) = (super::normal::position(start), super::normal::position(end));
-        let request = match kind {
-            Selection::Block => clackatoo_protocol::Request::BlockText {
-                terminal: self.terminal(),
-                from,
-                to: to_place,
-            },
-            Selection::Characters | Selection::Lines => clackatoo_protocol::Request::Text {
-                terminal: self.terminal(),
-                from,
-                to: to_place,
-                whole_lines: kind == Selection::Lines,
-            },
-        };
-        let lines = end.line.abs_diff(start.line) + 1;
-        self.request(request, Pending::Text(to, lines));
     }
 }
 

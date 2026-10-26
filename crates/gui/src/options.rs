@@ -580,11 +580,12 @@ options! {
     /// from one to the other.
     markdownview("mdv", "How Markdown files open"): MarkdownView = MarkdownView::Raw;
     /// Which of the desktop's the unnamed register goes along with, as in
-    /// Neovim: the clipboard, so what's yanked or deleted in an editor can
-    /// be pasted anywhere, and `p` puts what was copied anywhere; the
-    /// primary selection, which a middle click pastes; or neither, the
-    /// registers being the window's own but for `"+` and `"*`.
-    clipboard("cb", "Clipboard used by unnamed editor registers"): Clipboard = Clipboard::UnnamedPlus;
+    /// Neovim: the clipboard, so what's yanked or deleted in an editor, or
+    /// yanked in a terminal, can be pasted anywhere, and `p` puts what was
+    /// copied anywhere; the primary selection, which a middle click pastes;
+    /// or neither, the registers being the window's own but for `"+` and
+    /// `"*`.
+    clipboard("cb", "Clipboard used by the unnamed register"): Clipboard = Clipboard::UnnamedPlus;
     /// What programs in terminals may do with the clipboard, through OSC
     /// 52, as Neovim and tmux do, even over ssh: put text on it (`copy`),
     /// read what's there (`paste`), both, or neither. Reading is off

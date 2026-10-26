@@ -97,7 +97,7 @@ use panel::{Hover, Panel};
 pub(crate) use pattern::{Matching, Pattern};
 pub(crate) use pieces::{GiveUp, PATIENCE};
 use preview::Preview;
-use registers::Wrote;
+pub(crate) use registers::Wrote;
 pub(crate) use registers::{Register, Registers};
 use rendered::Rendered;
 use span::Span;

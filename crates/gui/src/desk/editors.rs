@@ -24,12 +24,14 @@ use clackatoo_text::Edit;
 use super::jumps::{FilePlace, Jump, Jumps};
 use super::{Asked, Desk, Purpose};
 use crate::command::Place;
-use crate::editor::{BufferCopy, Came, Done, Editor, GiveUp, Heard, HunkAction, Marks, Shared};
+use crate::editor::{
+    BufferCopy, Came, Done, Editor, GiveUp, Heard, HunkAction, Marks, Shared, Wrote,
+};
 use crate::explorer::Explorer;
 use crate::finder::Finder;
 use crate::input::{KeptPress, KeyPress};
 use crate::options::{Clipboard, Options};
-use crate::pane::Copy;
+use crate::pane::{Copy, CopyTo, Yanked};
 use crate::vim::Stroke;
 
 /// The editors, by the pane each is, and the buffers they show.
@@ -1233,9 +1235,7 @@ impl Desk {
             &made,
             Came::Made,
         );
-        for (text, to) in editors.shared.registers.take_to_system() {
-            copy_later(&mut self.yanked, text, to);
-        }
+        self.registers_to_system();
         if let Some(byte) = left {
             self.record_jump(focused, Some(byte));
         }
@@ -1329,6 +1329,28 @@ impl Desk {
     pub(super) fn copied(&mut self, text: String, to: Copy) {
         self.editors.shared.registers.copied(to, text.clone());
         copy_later(&mut self.yanked, text, to);
+    }
+
+    /// Takes in what a terminal copied: into the registers, as an editor's
+    /// yank is, or onto the primary selection alone, as a mouse selection
+    /// is, as Vim puts one in `"*` (see `pane::yank`).
+    pub(super) fn terminal_yanked(&mut self, yanked: Yanked) {
+        match yanked.to {
+            CopyTo::Primary => self.copied(yanked.register.text, Copy::Primary),
+            CopyTo::Register(name) => {
+                let registers = &mut self.editors.shared.registers;
+                registers.wrote(name, yanked.register, Wrote::Yank);
+                self.registers_to_system();
+            }
+        }
+    }
+
+    /// Sends on what the registers put on the clipboard or the primary
+    /// selection, for the window to put there.
+    fn registers_to_system(&mut self) {
+        for (text, to) in self.editors.shared.registers.take_to_system() {
+            copy_later(&mut self.yanked, text, to);
+        }
     }
 
     /// The window is asking what's on the clipboard and the primary
