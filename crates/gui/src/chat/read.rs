@@ -599,7 +599,12 @@ impl ChatView {
                     }
                 }
             }
-            ChatKey::Escape => self.picked = None,
+            // Esc stops selecting, and lighting up the last search's
+            // matches, as `:nohlsearch` does.
+            ChatKey::Escape => {
+                self.picked = None;
+                self.stop_highlighting();
+            }
             ChatKey::Detail => {
                 if !self.toggle_detail() {
                     self.say("the agent hasn't said how much context the chat fills".to_owned());

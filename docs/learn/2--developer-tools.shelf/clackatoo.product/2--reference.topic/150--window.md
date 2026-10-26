@@ -217,6 +217,7 @@ Up and Down go back through the commands you've typed, in this window and others
 | `:Editor PATH`, `:\|Editor PATH`…, `:e PATH`, `:e` | [Edits the file](~clackatoo/reference/editor), in a new tab or beside the focused pane; `:e` in place of the file an editor shows, and alone, an explorer beside an empty file. |
 | `:Files`, `:Grep PATTERN`, `:Buffers`, `:Diagnostics`, `:Symbols`, `:ProjectSymbols NAME` | Opens [the finder](#the-finder), with what follows typed. |
 | `:Registers`, `:reg` | Lists what an editor's [registers](~clackatoo/reference/editor#registers) hold, by its cursor. |
+| `:nohlsearch`, `:noh` | Stops lighting up what the last search matched in the focused pane: a chat's matches, or an editor's or a terminal's match found, until the next search. |
 | `:Messages`, `:mes` | Shows what the bottom bar has said lately, above it, until the next key. |
 | `:Marks` | Opens [the finder](#the-finder) on the [marks](~clackatoo/reference/editor#marks) the focused file can go to. |
 | `:1`, `:2`… | In an editor, goes to that line, as Vim does, as do `:$`, `:+3` and `:'a`. Elsewhere, moves to that tab of the workspace shown. |

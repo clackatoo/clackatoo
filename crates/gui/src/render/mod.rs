@@ -250,6 +250,8 @@ pub(crate) enum Paint {
     Removed,
     /// Behind text selected, in a chat, as a terminal's selection is.
     Selected,
+    /// Behind what a search matches, in a chat, as an editor's match is.
+    Found,
     /// A gauge's filling while there's room to spare, quietly...
     Gauge,
     /// ...in amber once it's getting full...

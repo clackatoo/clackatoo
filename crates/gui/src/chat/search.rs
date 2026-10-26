@@ -14,8 +14,11 @@
 //! card. Only turns the chat has loaded are searched: older ones come as
 //! it's scrolled up to.
 //!
-//! The cursor goes to the match; matches aren't lit up, as the chat's
-//! painter has no pass for them.
+//! The cursor goes to the match, and every match in view is lit up, as
+//! Vim's `hlsearch` lights them, until Esc or `:nohlsearch`, and again at
+//! the next search. Only blocks laid out and drawn are looked through for
+//! them, no more than [`MOST_LIT`] in a block, and nothing once they're
+//! not lit.
 //!
 //! A long chat isn't laid out, as laying out every turn would take
 //! seconds. So each piece of a turn, its message, each of the agent's
@@ -51,6 +54,9 @@ use crate::vim::{WRAPPED_TO_BOTTOM, WRAPPED_TO_TOP};
 /// The most bytes of what the chat holds one step of a search reads.
 pub(super) const MOST_READ: usize = 64 << 20;
 
+/// The most matches lit up in one block of text drawn.
+const MOST_LIT: usize = 512;
+
 /// The most turns one step of a search lays out to look in.
 pub(super) const MOST_LAID: usize = 32;
 
@@ -66,6 +72,9 @@ pub(super) struct Searching {
     last: Option<(String, bool)>,
     /// How searches treat case, as the options say.
     case: Case,
+    /// The last search's pattern, while what it matches is lit up: from
+    /// a search until Esc or `:nohlsearch`, as Vim's `hlsearch` lights it.
+    lit: Option<Pattern>,
 }
 
 /// A search being typed.
@@ -132,6 +141,51 @@ struct Looked {
 }
 
 impl ChatView {
+    /// Stops lighting up what the last search matches, as Esc and
+    /// `:nohlsearch` do, until the next search.
+    pub(crate) fn stop_highlighting(&mut self) {
+        self.search.lit = None;
+    }
+
+    /// What the last search matches in the text drawn, while it's lit up:
+    /// each match's block, by its place among those shown, and its bytes,
+    /// no more than [`MOST_LIT`] of them
+    /// in a block. Only what's laid out and in view is looked through, and
+    /// nothing at all once it isn't lit.
+    pub(crate) fn lit_matches(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+        let Some(pattern) = &self.search.lit else {
+            return Vec::new();
+        };
+        let mut lit = Vec::new();
+        for (index, shown) in self.shown.iter().enumerate() {
+            if control(shown.key.piece) {
+                continue;
+            }
+            let Some(text) = self.text(shown.key) else {
+                continue;
+            };
+            let text = text.text;
+            let mut at = 0;
+            for _ in 0..MOST_LIT {
+                let Some(found) = (at <= text.len())
+                    .then(|| pattern.find_at(text, at))
+                    .flatten()
+                else {
+                    break;
+                };
+                if found.end > found.start {
+                    lit.push((index, found.start..found.end));
+                    at = found.end;
+                } else if found.start < text.len() {
+                    at = after(text, found.start);
+                } else {
+                    break;
+                }
+            }
+        }
+        lit
+    }
+
     /// Takes how searches treat case, as the options say.
     pub(crate) fn set_case(&mut self, case: Case) {
         self.search.case = case;
@@ -255,6 +309,7 @@ impl ChatView {
                 return;
             }
         };
+        self.search.lit = Some(pattern.clone());
         let (mut at, mut left, mut taken) = (from, count.max(1), 0);
         let (mut first, mut found, mut wrapped) = (None, None, false);
         let mut spent = Spent::new(&pattern);
@@ -960,6 +1015,33 @@ mod tests {
         assert_eq!(super::lines_bytes("a\nbb\nccc\n", 2, true), 7);
         assert_eq!(super::lines_bytes("a\nbb", 9, true), 4);
         assert_eq!(super::lines_bytes("a\nbb", 0, true), 0);
+    }
+
+    #[test]
+    fn every_match_in_view_is_lit_up_until_esc() {
+        let lit = |chat: &mut ChatView, fonts: &mut Fonts| {
+            let drawn = paint(chat, fonts);
+            (drawn.fills.iter().chain(&drawn.over))
+                .filter(|fill| fill.paint == crate::render::Paint::Found)
+                .count()
+        };
+        let (mut chat, mut fonts) = reading(talk(&[
+            ("find the cat", "a cat sat"),
+            ("no", "another cat"),
+        ]));
+        assert_eq!(lit(&mut chat, &mut fonts), 0, "nothing searched");
+        read(&mut chat, "gg");
+        search(&mut chat, &mut fonts, "/cat");
+        assert_eq!(lit(&mut chat, &mut fonts), 3);
+        assert_eq!(chat.lit_matches().len(), 3);
+        // Esc stops it, until the next search.
+        read_named(&mut chat, NamedKey::Escape);
+        assert_eq!(lit(&mut chat, &mut fonts), 0);
+        read(&mut chat, "n");
+        chat.settle(&mut fonts);
+        assert_eq!(lit(&mut chat, &mut fonts), 3);
+        chat.stop_highlighting();
+        assert!(chat.lit_matches().is_empty());
     }
 
     #[test]

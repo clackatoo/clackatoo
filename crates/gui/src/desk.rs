@@ -2788,6 +2788,7 @@ impl Desk {
             Command::Find { kind, query } => self.open_finder(kind, query),
             Command::Hunk(action) => self.editor_hunk(action),
             Command::Registers => self.show_registers(),
+            Command::NoHighlight => self.stop_highlighting(),
             Command::Messages => self.show_messages(),
             Command::Devices(command) => self.devices_command(command),
             Command::Marks => self.open_finder(crate::finder::Kind::Marks, String::new()),
@@ -9429,6 +9430,32 @@ mod tests {
         let chat = desk.chat_mut(TerminalId(1)).expect("the chat");
         assert_eq!(chat.view().cursor_byte(), Some("cargo tes".len()));
         assert!(!desk.holding(), "nothing left waiting");
+    }
+
+    #[test]
+    fn nohlsearch_stops_lighting_up_a_chats_matches() {
+        let (mut desk, mut fonts) = chat_with_code();
+        normal_mode(&mut desk);
+        paint_chat(&mut desk, &mut fonts);
+        type_text(&mut desk, "/cargo");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        desk.settle_chats(&mut fonts);
+        paint_chat(&mut desk, &mut fonts);
+        let lit = |desk: &mut Desk| {
+            desk.chat_mut(TerminalId(1))
+                .unwrap()
+                .view()
+                .lit_matches()
+                .len()
+        };
+        assert_eq!(lit(&mut desk), 1);
+        command(&mut desk, "noh");
+        assert_eq!(lit(&mut desk), 0);
     }
 
     #[test]

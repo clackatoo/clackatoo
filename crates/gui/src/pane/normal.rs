@@ -499,6 +499,11 @@ impl Pane {
     /// waits with the selection, and `y` after them, or alone, yanks it,
     /// into the register named. `None` for any other key, which is the
     /// pane's, and forgets the selection.
+    /// Stops lighting up the match found, as `:nohlsearch` does.
+    pub(crate) fn forget_match(&mut self) {
+        self.found = None;
+    }
+
     /// The mode the bar shows: visual while text selected with the mouse
     /// is what `y` would yank, as Vim takes a mouse selection as a visual
     /// one, with nothing typed but a count or a register.

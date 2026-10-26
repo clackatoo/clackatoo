@@ -119,7 +119,7 @@ What's yanked goes into the registers, as an editor's yank does: `"ayy` into `a`
 
 ## Searching a chat
 
-`/` in a chat's normal mode types a search in the bar, and Enter goes to it; `?` searches back. `n` searches again, and `N` back, round the chat's ends. The pattern is Vim's, as in an editor, and Up brings back searches typed before. It searches the text the chat shows, messages, the agent's words and cards' lines, and its folded work too: a match there opens the turn's work, or the tool's card, to show it. Only the turns loaded are searched; scroll up to load older ones.
+`/` in a chat's normal mode types a search in the bar, and Enter goes to it; `?` searches back. `n` searches again, and `N` back, round the chat's ends. The pattern is Vim's, as in an editor, and Up brings back searches typed before. It searches the text the chat shows, messages, the agent's words and cards' lines, and its folded work too: a match there opens the turn's work, or the tool's card, to show it. Every match in view is lit up until Esc or `:noh`. Only the turns loaded are searched; scroll up to load older ones.
 
 ## Copying, and when it was said
 

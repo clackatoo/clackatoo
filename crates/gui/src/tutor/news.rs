@@ -963,7 +963,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "chat-search",
         date: "2026-10-26",
         lesson: "agents",
-        what: "/ and ? search a chat's text, n and N again; a match in folded work opens it",
+        what: "/ and ? search a chat's text, n and N again, every match lit up until Esc or :noh",
     },
 ];
 

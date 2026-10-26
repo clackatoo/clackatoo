@@ -608,6 +608,24 @@ impl ChatView {
         Some(self.note(fonts, m, label, Tone::Muted, f32::INFINITY))
     }
 
+    /// Draws what the last search matches, in view, while it's lit up.
+    fn draw_lit(&self, canvas: &mut Canvas<'_>, pane: [f32; 2]) {
+        for (index, range) in self.lit_matches() {
+            let shown = &self.shown[index];
+            let Some(text) = self.text(shown.key) else {
+                continue;
+            };
+            let range = Range::new(
+                Cursor::from_byte_index(text.layout, range.start, Affinity::Downstream),
+                Cursor::from_byte_index(text.layout, range.end, Affinity::Upstream),
+            );
+            let at = [pane[0] + shown.at[0], pane[1] + shown.at[1]];
+            for (bounds, _) in range.geometry(text.layout) {
+                canvas.fill(Fill::solid(rect_at(bounds, at), Paint::Found));
+            }
+        }
+    }
+
     /// Draws what's selected, the cursor in normal mode if `caret`, and
     /// over the block of code under the mouse, `label` on the button
     /// that copies it. The pane's top left is at `pane`.
@@ -624,6 +642,7 @@ impl ChatView {
         let view = canvas.clip;
         let left = pane[0] + self.column_right - self.cache.width;
         canvas.clip = super::intersection(view, [left, view[1], self.cache.width, view[3]]);
+        self.draw_lit(canvas, pane);
         if let Some((start, end)) = self.picked_range() {
             for shown in &self.shown {
                 if shown.key < start.text || shown.key > end.text || control(shown.key.piece) {

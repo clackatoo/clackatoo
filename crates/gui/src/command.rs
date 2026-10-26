@@ -183,6 +183,9 @@ pub(crate) enum Command {
     /// `:Registers`: list what the registers hold, by the focused editor's
     /// cursor.
     Registers,
+    /// `:nohlsearch`: stop lighting up what the last search matches, in the
+    /// focused pane, until the next search.
+    NoHighlight,
     /// `:Marks`: the finder, on the marks the focused editor's file can go
     /// to.
     Marks,
@@ -383,6 +386,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "reload" => return Ok(Command::Reload),
         "set" | "se" => return Ok(Command::Set(argument.unwrap_or_default().to_owned())),
         "Registers" | "reg" | "display" | "di" => return Ok(Command::Registers),
+        "nohlsearch" | "noh" => return Ok(Command::NoHighlight),
         "Marks" => return Ok(Command::Marks),
         "Messages" | "mes" => return Ok(Command::Messages),
         "recover" | "rec" | "recover!" | "rec!" => {
@@ -831,6 +835,7 @@ command_names! {
     "reload" => "Reload your Lua configuration",
     "set" => "View or change settings",
     "Registers" => "Show the contents of registers",
+    "nohlsearch" => "Stop highlighting the last search's matches",
     "Marks" => "Jump to a saved mark",
     "Messages" => "Show recent status messages",
     "recover" => "Recover unsaved file changes",
@@ -883,7 +888,7 @@ command_names! {
 /// Arguments (paths, hosts, patterns and keys) must never pass through this.
 pub(crate) fn canonical(name: &str) -> &str {
     const ALIASES: &[&str] = &[
-        "ws", "se", "reg", "display", "di", "mes", "rec", "q", "w", "x", "e", "Ex",
+        "ws", "se", "reg", "display", "di", "mes", "rec", "q", "w", "x", "e", "Ex", "noh",
     ];
     NAMES
         .iter()
@@ -1016,6 +1021,8 @@ mod tests {
         ("set", ""),
         ("se", "set"),
         ("Registers", ""),
+        ("nohlsearch", ""),
+        ("noh", "nohlsearch"),
         ("reg", "Registers"),
         ("display", "Registers"),
         ("di", "Registers"),

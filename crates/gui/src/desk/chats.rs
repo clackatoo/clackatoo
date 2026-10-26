@@ -151,6 +151,21 @@ impl Desk {
         redraw
     }
 
+    /// `:nohlsearch`: the focused pane stops lighting up what its last
+    /// search matches: a chat's every match, an editor's or a terminal's
+    /// match found.
+    pub(super) fn stop_highlighting(&mut self) {
+        if let Some(chat) = self.focused_chat_mut() {
+            chat.view_mut().stop_highlighting();
+        } else if let Some(shown) = self.shown
+            && let Some(editor) = self.editors.panes.get_mut(&shown.pane)
+        {
+            editor.forget_match();
+        } else if let Some(pane) = self.focused_pane() {
+            pane.forget_match();
+        }
+    }
+
     /// Whether a chat's yank or search failed since this was last asked.
     pub(super) fn take_chat_failed(&mut self) -> bool {
         (self.chats.values_mut()).fold(false, |failed, chat| chat.take_failed() | failed)

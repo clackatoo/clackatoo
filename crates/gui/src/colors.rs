@@ -463,6 +463,7 @@ impl Theme {
             // pixels there, as they're scaled; it was the faintness).
             Paint::FocusEdge => faint(self.accent, FOCUS_EDGE),
             Paint::Selected => faint(self.accent, 0.35),
+            Paint::Found => faint(self.accent, 0.6),
             Paint::Accent => self.accent,
             Paint::Picked => self.picked,
             Paint::PickedEdge => self.picked_edge,
