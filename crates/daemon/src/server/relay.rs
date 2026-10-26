@@ -940,9 +940,13 @@ impl Daemon {
             | Request::Split { .. }
             | Request::SplitTab { .. }) => self.route_new_pane(token, request),
             // Asked of every daemon whose background tabs are shown, as
-            // well as looked for here.
+            // well as looked for here: but not for another daemon, which
+            // is shown none of the background tabs this one shows of
+            // others', and would only ask back, and on, for ever.
             request @ Request::Background(BackgroundAction::Ports) => {
-                self.ask_ports_there(token);
+                if !self.relays(token) {
+                    self.ask_ports_there(token);
+                }
                 Routed::Here(request)
             }
             request => match self.route_shown(token, &request) {
@@ -2054,6 +2058,7 @@ impl Daemon {
         self.lending_lost(at);
         self.buffers_lost(at);
         self.forwards_lost(at);
+        self.ports_lost(at);
         for followed in self.links.list[at].relayed.followed.values_mut() {
             followed.upstream = false;
             followed.owed = false;
@@ -2179,6 +2184,8 @@ impl Daemon {
             for local in gone {
                 self.finish_relayed_streams(local);
             }
+            // So are its background tabs, and their ports.
+            self.ports_lost(at);
         }
         if taken.changed {
             self.tell_workspaces();

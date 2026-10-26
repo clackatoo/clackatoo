@@ -194,11 +194,17 @@ impl World {
             daemon.restore_workspaces();
         }
         let shutdown = daemon.shutdown_handle();
-        let thread = std::thread::spawn(move || drop(daemon.run().expect("daemon failed")));
+        let task = std::sync::Arc::new(std::sync::OnceLock::new());
+        let its_task = std::sync::Arc::clone(&task);
+        let thread = std::thread::spawn(move || {
+            let _ = its_task.set(std::fs::read_link("/proc/thread-self").ok());
+            drop(daemon.run().expect("daemon failed"));
+        });
         TestDaemon {
             socket,
             shutdown,
             thread: Some(thread),
+            task,
         }
     }
 
@@ -218,6 +224,8 @@ struct TestDaemon {
     socket: PathBuf,
     shutdown: ShutdownHandle,
     thread: Option<JoinHandle<()>>,
+    /// Its thread, under `/proc`, as `/proc/thread-self` names it there.
+    task: std::sync::Arc<std::sync::OnceLock<Option<PathBuf>>>,
 }
 
 impl TestDaemon {
@@ -225,6 +233,18 @@ impl TestDaemon {
         let mut client = Client::connect(&self.socket).expect("connect");
         client.set_read_timeout(Some(PATIENCE)).unwrap();
         client
+    }
+
+    /// How long its loop's thread has run, in clock ticks, as `/proc`
+    /// counts them, user and system together.
+    fn ticks(&self) -> u64 {
+        let task = (self.task.get().cloned().flatten()).expect("its thread is known");
+        let stat = std::fs::read_to_string(Path::new("/proc").join(task).join("stat")).unwrap();
+        let after = stat.rsplit_once(") ").expect("a stat").1;
+        let fields: Vec<&str> = after.split_whitespace().collect();
+        // utime and stime, the 14th and 15th fields, the 12th and 13th
+        // after the program's name.
+        fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
     }
 
     /// Which machine it is.
@@ -5772,4 +5792,58 @@ fn another_machines_agents_past_sessions_are_listed_through_this_daemon() {
         matches!(&refused, Err(why) if why.contains("isn't connected")),
         "{refused:?}"
     );
+}
+
+/// Two daemons connected both ways, each with a background tab, ask each
+/// other for the ports those listen on once, for a window: never back, and
+/// on, for ever, as each would if it asked for the other's relay too
+/// (CLACKA-122).
+#[test]
+fn daemons_connected_both_ways_ask_each_other_for_ports_once() {
+    use clackatoo_protocol::BackgroundAction;
+    let world = World::new();
+    let desk = world.start("desk");
+    let laptop = world.start("laptop");
+    for (daemon, name) in [(&desk, "d"), (&laptop, "l")] {
+        let mut client = daemon.client();
+        client.new_workspace(Some(name.into()), shell()).unwrap();
+        let workspace = client.watch_workspaces().unwrap().list[0].id;
+        let start = BackgroundAction::Start {
+            workspace,
+            command: "sleep 600".into(),
+            cwd: None,
+            pane: None,
+            size: Size::new(60, 10).unwrap(),
+        };
+        let started = client.request(&Request::Background(start)).unwrap();
+        assert!(matches!(started, Response::PaneCreated(_)), "{started:?}");
+    }
+    let mut window = desk.client();
+    connect(&mut window, "laptop");
+    let mut at_laptop = laptop.client();
+    connect(&mut at_laptop, "desk");
+    for (client, theirs_named) in [(&mut window, "l"), (&mut at_laptop, "d")] {
+        wait_for_workspaces(client, |shown| {
+            theirs(shown, theirs_named).is_some_and(|w| !w.background.is_empty())
+        });
+    }
+    let before = desk.ticks() + laptop.ticks();
+    let asked = window.request(&Request::Background(BackgroundAction::Ports));
+    assert_eq!(asked.unwrap(), Response::Done);
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "the ports never came");
+        let event = (window.next_event())
+            .expect("the ports never came: are the daemons asking each other for ever?");
+        if let Event::Listening(listening) = event
+            && listening.len() == 2
+        {
+            break;
+        }
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    let spent = desk.ticks() + laptop.ticks() - before;
+    // Asking back and on for ever keeps both loops busy: some 400 ticks in
+    // two seconds. Asked once, they're idle.
+    assert!(spent < 100, "the daemons' loops ran {spent} ticks");
 }

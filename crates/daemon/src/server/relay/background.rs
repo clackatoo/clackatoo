@@ -165,15 +165,28 @@ impl Daemon {
             {
                 continue;
             }
-            let ports = ClientMessage::Request(Request::Background(BackgroundAction::Ports));
-            if self.send_upstream(at, &ports, Expect::Nothing).is_err() {
-                continue;
+            // Asked already, the answer on its way is told this client too.
+            let asked = !self.links.list[at].relayed.ports_waiting.is_empty();
+            if !asked {
+                let ports = ClientMessage::Request(Request::Background(BackgroundAction::Ports));
+                if self.send_upstream(at, &ports, Expect::Nothing).is_err() {
+                    continue;
+                }
             }
             let waiting = &mut self.links.list[at].relayed.ports_waiting;
             if !waiting.contains(&token) {
                 waiting.push(token);
             }
         }
+    }
+
+    /// The connection at `at` has gone: what its daemon said of the ports
+    /// is of no more use, and no answer comes for those waiting, whose
+    /// tokens a later client may have.
+    pub(super) fn ports_lost(&mut self, at: usize) {
+        let relayed = &mut self.links.list[at].relayed;
+        relayed.ports.clear();
+        relayed.ports_waiting.clear();
     }
 
     /// Takes in `listening`, the ports the background tabs of the daemon
@@ -490,6 +503,46 @@ mod tests {
             }
         }
         assert_eq!(heard(&mut there), []);
+    }
+
+    /// Ports asked by another daemon are never asked on: two daemons
+    /// connected both ways would ask each other, and back, for ever. Nor
+    /// are they asked of a daemon again while its answer is on its way;
+    /// and none is waited for once its connection is lost.
+    #[test]
+    fn ports_are_asked_once_and_never_for_another_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there) = with_background(dir.path());
+        let ports = Request::Background(BackgroundAction::Ports);
+        let (relaying, _relaying_end) = client(&mut daemon);
+        if let Some(Source::Client(client)) = daemon.sources.get_mut(relaying.0) {
+            client.relays = true;
+        }
+        let routed = daemon.route_request(relaying, ports.clone());
+        assert!(matches!(routed, Routed::Here(_)));
+        assert_eq!(heard(&mut there), [], "asked on for a daemon");
+
+        let (window, _window_end) = client(&mut daemon);
+        let (other, _other_end) = client(&mut daemon);
+        daemon.route_request(window, ports.clone());
+        daemon.route_request(other, ports.clone());
+        daemon.route_request(window, ports.clone());
+        assert_eq!(heard(&mut there), [ClientMessage::Request(ports.clone())]);
+        let waiting = &daemon.links.list[0].relayed.ports_waiting;
+        assert_eq!(waiting, &[window, other]);
+
+        // Its answer tells them, and the next asks again.
+        say(&mut there, &ServerMessage::Response(Response::Done));
+        say(
+            &mut there,
+            &ServerMessage::Event(Event::Listening(Vec::new())),
+        );
+        daemon.read_reached(link, Reading::Look);
+        assert!(daemon.links.list[0].relayed.ports_waiting.is_empty());
+        daemon.route_request(window, ports.clone());
+        assert_eq!(heard(&mut there), [ClientMessage::Request(ports)]);
+        daemon.ports_lost(0);
+        assert!(daemon.links.list[0].relayed.ports_waiting.is_empty());
     }
 
     /// The ports another machine's background tabs listen on are asked of

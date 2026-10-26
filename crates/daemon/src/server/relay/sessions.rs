@@ -199,7 +199,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines, reason = "one answer after another, each short")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one answer after another, each short"
+    )]
     fn another_machines_sessions_are_asked_by_its_number_and_made_safe() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, link, mut there) = linked(dir.path());
