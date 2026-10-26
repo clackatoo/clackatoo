@@ -11,7 +11,6 @@
 //! whole document: history, then the screen. The view follows it, and
 //! stays put while output arrives, so the text being read doesn't move.
 
-use std::collections::VecDeque;
 use std::ops::Range;
 use std::time::Instant;
 
@@ -37,9 +36,11 @@ mod mouse;
 mod normal;
 mod operator;
 mod predict;
+mod requests;
 
 pub(crate) use mouse::{Copy, PaneMouse};
 use predict::Predictor;
+pub(crate) use requests::Requests;
 
 /// Text just copied, highlighted until `until`.
 #[derive(Clone, Copy, Debug)]
@@ -94,9 +95,7 @@ struct Overlay {
 /// the window sends.
 #[derive(Debug)]
 pub(crate) struct Pane {
-    terminal: TerminalId,
-    /// Messages for the daemon, oldest first.
-    outbox: Vec<ClientMessage>,
+    requests: Requests<Pending>,
     /// The size last asked of the daemon.
     requested_size: Option<Size>,
     screen: Option<Screen>,
@@ -148,9 +147,6 @@ pub(crate) struct Pane {
     mouse_selection: Option<mouse::MouseSelection>,
     /// Text just copied to the clipboard.
     flash: Option<Flash>,
-    pending: VecDeque<Pending>,
-    /// A view update was applied but not yet drawn and acknowledged.
-    unacknowledged: bool,
     /// The keys of a command being typed in normal or visual mode.
     keys: vim::Keys,
     /// Ctrl+\ just left insert mode, and pressing it again sends it to
@@ -177,8 +173,7 @@ pub(crate) struct Pane {
 impl Pane {
     pub(crate) fn new(terminal: TerminalId) -> Self {
         Self {
-            terminal,
-            outbox: Vec::new(),
+            requests: Requests::new(terminal),
             requested_size: None,
             screen: None,
             chat: None,
@@ -203,8 +198,6 @@ impl Pane {
             chat_copies: Vec::new(),
             mouse_selection: None,
             flash: None,
-            pending: VecDeque::new(),
-            unacknowledged: false,
             keys: vim::Keys::default(),
             after_ctrl_backslash: false,
             blank: RowBuilder::new(0).finish(false),
@@ -355,7 +348,7 @@ impl Pane {
         } else {
             ChatAction::Undo { turn, force }
         };
-        let terminal = self.terminal;
+        let terminal = self.terminal();
         self.request(Request::Chat { terminal, action }, Pending::Other);
         Ok(())
     }
@@ -406,7 +399,7 @@ impl Pane {
         if let Some(before) = chat.older_request() {
             self.request(
                 Request::ChatHistory {
-                    terminal: self.terminal,
+                    terminal: self.terminal(),
                     before,
                 },
                 Pending::ChatHistory(before),
@@ -428,7 +421,7 @@ impl Pane {
         for id in settled.cancel_activities {
             self.request(
                 Request::CancelActivity {
-                    terminal: self.terminal,
+                    terminal: self.terminal(),
                     id,
                 },
                 Pending::Other,
@@ -465,7 +458,7 @@ impl Pane {
             };
             self.request(
                 Request::Chat {
-                    terminal: self.terminal,
+                    terminal: self.terminal(),
                     action,
                 },
                 pending,
@@ -474,7 +467,7 @@ impl Pane {
         if let Some((serial, original)) = original {
             self.request(
                 Request::ChatOriginal {
-                    terminal: self.terminal,
+                    terminal: self.terminal(),
                     original,
                 },
                 Pending::Original(serial),
@@ -667,11 +660,9 @@ impl Pane {
     /// Starts over on a new connection to the daemon, which sends a fresh
     /// snapshot. Whatever was sent on the old one is forgotten, unanswered.
     pub(crate) fn reconnected(&mut self) {
-        self.outbox.clear();
-        self.pending.clear();
+        self.requests.reconnected();
         self.history.forget_fetch();
         self.requested_size = None;
-        self.unacknowledged = false;
         self.predictor.reconnected();
         self.overlay = None;
     }
@@ -691,7 +682,7 @@ impl Pane {
         self.requested_size = Some(size);
         self.request(
             Request::Resize {
-                terminal: self.terminal,
+                terminal: self.terminal(),
                 size,
             },
             Pending::Other,
@@ -705,12 +696,12 @@ impl Pane {
             && self.chat.is_none()
         {
             self.chat = Some(Box::new(ChatView::of_view(view, node)));
-            self.unacknowledged = true;
+            self.requests.changed();
             return true;
         }
         if let Some(chat) = &mut self.chat {
             chat.apply(update);
-            self.unacknowledged = true;
+            self.requests.changed();
             return true;
         }
         let old_end = self.screen.as_ref().map(|screen| screen.state.history_end);
@@ -759,7 +750,7 @@ impl Pane {
         }
         self.keep_cursor_in_bounds();
         self.forget_unseen_links();
-        self.unacknowledged = true;
+        self.requests.changed();
         self.fetch_history();
         true
     }
@@ -767,7 +758,7 @@ impl Pane {
     /// Takes the daemon's answer to the oldest request. Returns whether the
     /// pane must be redrawn.
     pub(crate) fn answered(&mut self, response: Response) -> bool {
-        let pending = self.pending.pop_front();
+        let pending = self.requests.answered();
         if let Some(Pending::Input(number)) = pending {
             if let Response::Error(err) = response {
                 log::warn!("the daemon refused input: {err}");
@@ -842,11 +833,7 @@ impl Pane {
 
     /// Tells the daemon the last update is on screen, so it sends the next.
     pub(crate) fn drawn(&mut self) {
-        if std::mem::take(&mut self.unacknowledged) {
-            self.send(ClientMessage::FrameDone {
-                terminal: self.terminal,
-            });
-        }
+        self.requests.drawn();
     }
 
     /// Handles a key press. Returns whether the pane must be redrawn.
@@ -1344,7 +1331,7 @@ impl Pane {
             let count = u16::try_from(wanted.end - wanted.start).unwrap_or(u16::MAX);
             self.request(
                 Request::History {
-                    terminal: self.terminal,
+                    terminal: self.terminal(),
                     end: wanted.end,
                     count,
                 },
@@ -1372,7 +1359,7 @@ impl Pane {
             .sent(input, self.screen.as_ref(), Instant::now());
         self.request(
             Request::SendInput {
-                terminal: self.terminal,
+                terminal: self.terminal(),
                 bytes,
             },
             Pending::Input(number),
@@ -1381,17 +1368,17 @@ impl Pane {
     }
 
     fn request(&mut self, request: Request, pending: Pending) {
-        self.pending.push_back(pending);
-        self.send(ClientMessage::Request(request));
+        self.requests.request(request, pending);
     }
 
-    fn send(&mut self, message: ClientMessage) {
-        self.outbox.push(message);
+    /// The terminal it shows.
+    fn terminal(&self) -> TerminalId {
+        self.requests.terminal()
     }
 
     /// Takes the messages waiting for the daemon.
     pub(crate) fn take_outbox(&mut self) -> Vec<ClientMessage> {
-        std::mem::take(&mut self.outbox)
+        self.requests.take_outbox()
     }
 }
 

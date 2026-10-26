@@ -158,7 +158,7 @@ impl Pane {
     fn ask_for_block(&mut self, line: u64, which: Which, use_: BlockUse) {
         self.request(
             Request::Block {
-                terminal: self.terminal,
+                terminal: self.terminal(),
                 line,
                 which,
             },

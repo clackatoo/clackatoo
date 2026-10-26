@@ -421,7 +421,7 @@ impl Pane {
         let backward = backward != reverse;
         self.request(
             Request::Search {
-                terminal: self.terminal,
+                terminal: self.terminal(),
                 exact: self.case.exact(&query),
                 query,
                 from: position(cursor.at),

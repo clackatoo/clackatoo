@@ -315,12 +315,12 @@ impl Pane {
         let (from, to_place) = (super::normal::position(start), super::normal::position(end));
         let request = match kind {
             Selection::Block => clackatoo_protocol::Request::BlockText {
-                terminal: self.terminal,
+                terminal: self.terminal(),
                 from,
                 to: to_place,
             },
             Selection::Characters | Selection::Lines => clackatoo_protocol::Request::Text {
-                terminal: self.terminal,
+                terminal: self.terminal(),
                 from,
                 to: to_place,
                 whole_lines: kind == Selection::Lines,
