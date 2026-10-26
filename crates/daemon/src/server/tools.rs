@@ -1536,16 +1536,7 @@ impl Daemon {
         let pasted = (self.terminals.get(&terminal))
             .and_then(|slot| slot.terminal.grid())
             .is_some_and(|grid| grid.input_modes().bracketed_paste);
-        // Pasted, a command of several lines is one command.
-        let mut bytes = Vec::new();
-        if pasted {
-            bytes.extend_from_slice(b"\x1b[200~");
-            bytes.extend_from_slice(command.as_bytes());
-            bytes.extend_from_slice(b"\x1b[201~");
-        } else {
-            bytes.extend_from_slice(command.replace('\n', "\r").as_bytes());
-        }
-        bytes.push(b'\r');
+        let bytes = command_bytes(&command, pasted);
         // The daemon's own typing, which takes nothing over.
         self.typing_into(terminal, true);
         let typed = self.type_into(terminal, &bytes, true);
@@ -2253,9 +2244,34 @@ mod keeping_whose {
     }
 }
 
+/// What typing `command` at a shell's prompt sends, and Enter: `pasted`,
+/// as one bracketed paste, so a command of several lines is one command,
+/// filtered as a window's paste is, so nothing in it can end the paste
+/// early and type the rest as keys; or else as typed, its newlines Enter.
+fn command_bytes(command: &str, pasted: bool) -> Vec<u8> {
+    let mut bytes = if pasted {
+        clackatoo_term::bracketed_paste(command)
+    } else {
+        command.replace('\n', "\r").into_bytes()
+    };
+    bytes.push(b'\r');
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_typed_as_a_paste_cant_end_the_paste_early() {
+        let bytes = command_bytes("echo a\x1b[201~; rm -rf ~\nls", true);
+        assert_eq!(bytes, b"\x1b[200~echo a[201~; rm -rf ~\nls\x1b[201~\r");
+        let hidden = command_bytes("\x1b[20\x1b[201~1~x", true);
+        let inner = &hidden[6..hidden.len() - 7];
+        assert!(!inner.contains(&0x1b), "{hidden:?}");
+        // Not pasted, it's typed as it is, its newlines Enter.
+        assert_eq!(command_bytes("a\nb", false), b"a\rb\r");
+    }
 
     #[test]
     fn quoted_text_is_code_no_backtick_in_it_can_end() {
