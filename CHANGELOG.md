@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026.10.83 (2026-10-26)
+
+### Fixes
+
+- **gui:** Ctrl+B Ctrl+B in a chat says it's for a terminal (CLACKA-164) (c29ec30)
+- **gui:** a terminal whose screen has come is never taken over by a chat (CLACKA-164) (052d03b)
+
 ## 2026.10.82 (2026-10-26)
 
 ### Features
