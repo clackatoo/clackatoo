@@ -6048,6 +6048,39 @@ fn a_background_tab_another_machine_lends_is_kept_through_reconnecting_and_resta
     assert_eq!(lent_by(&mut laptop.client()), lent);
 }
 
+/// A shell laptop lends desk as a background tab is dismissed here while
+/// laptop can't be reached, as laptop may never be again; once it is, it
+/// no longer lends it (CLACKA-122).
+#[test]
+fn a_background_tab_another_machine_lends_is_dismissed_while_it_cant_be_reached() {
+    use clackatoo_protocol::BackgroundAction;
+    let world = World::new();
+    let (laptop, desk, mut window, home, made) = lent_in_background(&world, "sleep 600");
+    let tab = background_named(&mut window, "sleep 600").tab.id;
+    assert_eq!(lent_by(&mut laptop.client()), 2);
+    world.password(Some("hunter2"));
+    kill(&pid(&world, "ssh.laptop.pid"));
+    wait_for_state(&mut window, "laptop", |state| {
+        *state == ConnectionState::NeedsPassword
+    });
+    let dismissed = window.request(&Request::Background(BackgroundAction::Dismiss { tab }));
+    assert_eq!(dismissed.unwrap(), Response::Done);
+    let shown = window.watch_workspaces().unwrap();
+    assert!(background_of(&shown, made).is_none());
+    assert!(found_workspace(&shown, home).background.is_empty());
+
+    let mut answering = desk.client();
+    answering.watch_connections(true).unwrap();
+    let (ask, ..) = next_question(&mut answering);
+    answering.answer_login(ask, Some("hunter2".into())).unwrap();
+    wait_for_state(&mut window, "laptop", connected);
+    let deadline = Instant::now() + PATIENCE;
+    while lent_by(&mut laptop.client()) != 1 {
+        assert!(Instant::now() < deadline, "laptop still lends it");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// The workspace `id` in `workspaces`.
 fn found_workspace(workspaces: &Workspaces, id: clackatoo_protocol::WorkspaceId) -> Workspace {
     workspaces.get(id).expect("the workspace").clone()

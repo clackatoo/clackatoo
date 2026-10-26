@@ -347,12 +347,11 @@ impl Daemon {
 
     /// Closes background tab `tab`, and its terminals.
     fn dismiss_background(&mut self, tab: TabId) -> Result<Response, Error> {
-        // A shell another machine lends goes there, as its pane goes here.
+        // A shell another machine lends goes there, as its pane goes here:
+        // at once, or once that machine is reached again, which gives back
+        // what it lends that no pane here shows.
         let borrowed = self.workspaces.background_borrowed(tab);
         if !borrowed.is_empty() {
-            for &(_, lender) in &borrowed {
-                self.can_ask_lender(lender)?;
-            }
             for (pane, _) in borrowed {
                 self.workspaces.remove_pane(pane);
             }
