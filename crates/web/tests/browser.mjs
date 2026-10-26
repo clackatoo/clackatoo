@@ -432,6 +432,12 @@ try {
   await noOverflow();
   await page.screenshot({path:`${output}/small-phone-background.png`});
   await page.setViewportSize({width:390,height:844});
+  // Left alone, the second tap's time runs out, and the button says so.
+  const idle=page.locator('.chat.background').filter({hasText:'trail serve'});
+  await idle.getByRole('button',{name:'Dismiss trail serve',exact:true}).click();
+  await idle.getByRole('button',{name:/Tap again to stop/}).waitFor();
+  await idle.getByRole('button',{name:'Dismiss trail serve',exact:true}).waitFor({timeout:5000});
+  assert(!actions.some(a=>a.includes('Dismiss { tab: TabId(23) }')));
   await page.locator('.chat.background').filter({hasText:'trail serve'}).getByRole('button',{name:/Bring trail serve back/}).click();
   await page.locator('.grid').getByText('Checking clackatoo-web',{exact:false}).waitFor();
   assert(actions.some(a=>a.includes('Bring { tab: TabId(23) }')));

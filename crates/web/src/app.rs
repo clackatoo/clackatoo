@@ -1771,6 +1771,23 @@ impl App {
             .set_timeout_with_callback_and_timeout_and_arguments_0(count.unchecked_ref(), wait);
     }
 
+    /// Draws the list again once `wait` milliseconds, and a moment more,
+    /// have gone: as a second tap's time to dismiss a background tab runs
+    /// out, so its button asks no more.
+    fn redraw_home_after(&self, wait: f64) {
+        let redraw = Closure::once_into_js(|| {
+            with_app(|app| {
+                app.state.dirty.home = true;
+                app.draw_soon();
+            });
+        });
+        #[allow(clippy::cast_possible_truncation, reason = "a few seconds")]
+        let wait = (wait + 50.0) as i32;
+        let _ = self
+            .window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(redraw.unchecked_ref(), wait);
+    }
+
     /// The page showing a chat: its parts, empty, and the box a message is
     /// typed in.
     fn chat_page(&self) -> ChatPage {
@@ -1939,7 +1956,12 @@ impl App {
                     self.go(&format!("#term/{terminal}"));
                 }
             }
-            Action::Dismiss(tab) => self.state.dismiss(tab),
+            Action::Dismiss(tab) => {
+                self.state.dismiss(tab);
+                if self.state.confirming(tab) {
+                    self.redraw_home_after(crate::state::DISMISS_FOR);
+                }
+            }
             Action::OlderChat => {
                 self.state.older_chat();
             }
