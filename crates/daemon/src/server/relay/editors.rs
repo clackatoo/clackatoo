@@ -930,8 +930,9 @@ impl Daemon {
             viewer.loaded = false;
             let window = viewer.window;
             followed.forget_waiting(|made| made.window == window);
-            if (self.client_wire(token)).is_some_and(|wire| wire >= clackatoo_protocol::wire::RELAY)
-            {
+            // A daemon relaying in turn takes it only from 106 on: an older
+            // one would wait for ever on the change it has on its way.
+            if self.reattaches(token) {
                 self.tell_relayed(token, local, BufferUpdate::Reattach);
             } else {
                 self.attach_again_for(at, local, token);
@@ -2830,6 +2831,36 @@ mod tests {
         assert!(
             matches!(&sent[..], [ClientMessage::Edit { change, .. }] if *change == insert(6, "b", 10)),
             "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn a_relaying_client_too_old_to_attach_again_itself_is_attached_again_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there, local) = with_buffer(dir.path());
+        let (a, mut to_a) = client(&mut daemon);
+        attach(&mut daemon, (link, &mut there), a, local, 1);
+        updates(&mut to_a);
+        // A daemon relaying for windows of its own, from before 106.
+        let Some(Source::Client(relaying)) = daemon.sources.get_mut(a.0) else {
+            panic!("a client");
+        };
+        relaying.relays = true;
+        relaying.wire = clackatoo_protocol::wire::UNDO_STATE - 1;
+        change(&mut daemon, a, local, 41, insert(0, "a", 10));
+        heard(&mut there);
+        say(&mut there, &buffer(BufferUpdate::Reattach));
+        daemon.read_reached(link, Reading::Look);
+        // Not told to attach again, which it would wait on for ever: the
+        // buffer's attached again here for it.
+        assert!(!updates(&mut to_a).contains(&(local, BufferUpdate::Reattach)));
+        let asked = asked_of_buffers(&mut there);
+        assert!(
+            matches!(
+                &asked[..],
+                [ClientMessage::Request(Request::AttachBuffer { .. })]
+            ),
+            "{asked:?}"
         );
     }
 }
