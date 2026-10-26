@@ -5206,9 +5206,10 @@ mod v33 {
 /// Version 34, before workspaces lent as background tabs.
 mod v34 {
     use super::{
-        Applied, Background, Borrower, Buffer, BufferUndo, Chat, ChatContinuation, ChatPreviews, ChatQueue,
-        Connection, Deserialize, EditLog, Exe, Files, ImageOriginals, Kept, Known, Lender, Lent,
-        Process, Restored, Reviews, Sharing, Shell, Terminal, ToolPreviews, Trusted, Workspaces,
+        Applied, Background, Borrower, Buffer, BufferUndo, Chat, ChatContinuation, ChatPreviews,
+        ChatQueue, Connection, Deserialize, EditLog, Exe, Files, ImageOriginals, Kept, Known,
+        Lender, Lent, Process, Restored, Reviews, Sharing, Shell, Terminal, ToolPreviews, Trusted,
+        Workspaces,
     };
     #[derive(Debug, Deserialize)]
     pub(super) struct State {
