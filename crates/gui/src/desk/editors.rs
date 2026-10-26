@@ -891,13 +891,28 @@ impl Desk {
         }
         // A chat's yank or search waits for the fonts, which the window
         // settles it with before it draws: keys wait with it, so the next
-        // sees where it left the cursor, and what it yanked.
+        // sees where it left the cursor, and what it yanked. It may wait
+        // behind a paste reading the clipboard, so it can be given up on,
+        // as an editor's wait can.
+        let now = std::time::Instant::now();
         if self.chat_waits_to_settle() {
+            let pane = self.shown.map_or(PaneId(0), |shown| shown.pane);
+            let (since, _) = *self.chat_wait.get_or_insert((now, pane));
+            if cancel || now >= since + crate::editor::PATIENCE {
+                self.chat_wait = None;
+                self.gave_up();
+                if !cancel {
+                    self.say(
+                        "the keys typed waited too long for the chat: they were dropped".into(),
+                    );
+                    return None;
+                }
+                return Some(true);
+            }
             let held = given_back.or_else(|| unmade.map(|make| make()));
             self.editors.held.extend(held);
             return Some(false);
         }
-        let now = std::time::Instant::now();
         if let Some(editor) =
             (self.editors.panes.values_mut()).find(|editor| editor.waiting_for_grammar())
         {
@@ -978,6 +993,14 @@ impl Desk {
                 gave_up = true;
             }
         }
+        // Keys held for a chat's yank or search were typed for it.
+        if self
+            .chat_wait
+            .is_some_and(|(_, pane)| Some(pane) != focused)
+        {
+            self.chat_wait = None;
+            gave_up = true;
+        }
         if self.macro_left_behind() {
             self.stop_macro(Some("the macro was stopped: the focus moved".into()));
             gave_up = true;
@@ -994,10 +1017,16 @@ impl Desk {
     fn drop_held_for_none(&mut self) {
         if !self.editors_wait_for_grammar()
             && !self.macro_waiting()
+            && !self.chat_waits_to_settle()
             && !self.editors.held.is_empty()
         {
             self.editors.held.clear();
-            self.say("the editor waiting for the grammar closed: nothing was done".into());
+            let what = if self.chat_wait.take().is_some() {
+                "the chat the keys typed waited for closed: they were dropped"
+            } else {
+                "the editor waiting for the grammar closed: nothing was done"
+            };
+            self.say(what.into());
         }
     }
 

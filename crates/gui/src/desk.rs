@@ -360,6 +360,9 @@ pub(crate) struct Desk {
     /// Text copied, waiting for the window to put on the clipboard or the
     /// primary selection, oldest first.
     yanked: Vec<(String, Copy)>,
+    /// Since when keys have waited for the focused chat's yank or search
+    /// to settle, and in which pane, while they do.
+    chat_wait: Option<(std::time::Instant, PaneId)>,
     /// The window's last `f`, `t`, `F` or `T`, which every pane it makes
     /// shares, so `;` and `,` find it again in any of them, as in Vim.
     finds: vim::Finds,
@@ -9426,6 +9429,51 @@ mod tests {
         let chat = desk.chat_mut(TerminalId(1)).expect("the chat");
         assert_eq!(chat.view().cursor_byte(), Some("cargo tes".len()));
         assert!(!desk.holding(), "nothing left waiting");
+    }
+
+    #[test]
+    fn keys_waiting_behind_a_chats_paste_neither_hang_the_window_nor_get_lost() {
+        use crate::clipboard_image::Pasted;
+        let (mut desk, mut fonts) = chat_with_code();
+        normal_mode(&mut desk);
+        paint_chat(&mut desk, &mut fonts);
+        // Ctrl+Shift+V reads the clipboard on a thread; `yy` waits behind
+        // it, and `j` behind that. Settling can do nothing yet, and says
+        // so at once, rather than going round for ever.
+        assert!(desk.begin_image_paste(TerminalId(1)));
+        type_text(&mut desk, "yy");
+        desk.settle_chats(&mut fonts);
+        type_text(&mut desk, "j");
+        let rounds = || super::chats::SETTLE_ROUNDS.with(std::cell::Cell::get);
+        let before = rounds();
+        desk.settle_chats(&mut fonts);
+        assert_eq!(rounds() - before, 1, "one round, not round and round");
+        assert!(desk.holding(), "j waits");
+        // The clipboard read, it all goes.
+        desk.finish_image_paste(TerminalId(1), Ok(Pasted::Text(String::new())));
+        desk.settle_chats(&mut fonts);
+        assert!(!desk.holding());
+        assert_eq!(register(&mut desk, '0').as_deref(), Some("cargo test\n"));
+        // Esc pressed gives up what waits, as it does an editor's wait.
+        assert!(desk.begin_image_paste(TerminalId(1)));
+        type_text(&mut desk, "yyj");
+        assert!(desk.holding());
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        assert!(!desk.holding());
+        // The focus leaving the chat gives up the keys typed for it.
+        desk.finish_image_paste(TerminalId(1), Ok(Pasted::Text(String::new())));
+        desk.settle_chats(&mut fonts);
+        assert!(desk.begin_image_paste(TerminalId(1)));
+        type_text(&mut desk, "yyj");
+        assert!(desk.holding());
+        desk.show_pane(PaneId(2));
+        type_text(&mut desk, "k");
+        assert!(!desk.holding(), "dropped, not typed into another pane");
     }
 
     #[test]

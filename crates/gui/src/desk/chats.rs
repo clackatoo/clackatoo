@@ -19,6 +19,16 @@ use super::Desk;
 use crate::chat::ChatPane;
 use crate::input::KeyPress;
 
+/// The most rounds of settling chats and typing the keys that waited for
+/// them [`Desk::settle_chats`] goes, a bound it never reaches.
+const MOST_ROUNDS: usize = 4096;
+
+#[cfg(test)]
+thread_local! {
+    /// How many rounds [`Desk::settle_chats`] has gone, for tests.
+    pub(super) static SETTLE_ROUNDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl Desk {
     /// The chat `terminal` is, if it's one.
     pub(crate) fn chat(&self, terminal: TerminalId) -> Option<&ChatPane> {
@@ -100,7 +110,10 @@ impl Desk {
     /// now, and if one yanks or searches again, it's settled in turn.
     pub(crate) fn settle_chats(&mut self, fonts: &mut crate::fonts::Fonts) -> bool {
         let mut redraw = false;
-        loop {
+        // Bounded too, though each round takes a key or ends.
+        for _ in 0..MOST_ROUNDS {
+            #[cfg(test)]
+            SETTLE_ROUNDS.with(|rounds| rounds.set(rounds.get() + 1));
             let (mut copied, mut yanked) = (Vec::new(), Vec::new());
             for chat in self.chats.values_mut() {
                 redraw |= chat.settle(fonts);
@@ -114,6 +127,12 @@ impl Desk {
             for yank in yanked {
                 self.pane_yanked(yank);
             }
+            // Still waiting, as behind a paste reading the clipboard: the
+            // keys stay held, for the settling once it's read.
+            if self.chat_waits_to_settle() {
+                return redraw;
+            }
+            self.chat_wait = None;
             if !self.holding() && !self.frames_typing() {
                 break;
             }
