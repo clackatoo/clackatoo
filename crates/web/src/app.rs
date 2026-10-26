@@ -1602,10 +1602,16 @@ impl App {
     /// take as typed, one command each, go only once the user says so.
     fn pasted(&mut self, text: &str) {
         if let Some(lines) = self.state.paste_runs_lines(text) {
-            let ask = format!(
-                "Paste {lines} lines? The program hasn't asked for pastes to be marked, so \
-                 each line runs as if typed."
-            );
+            let ask = if lines == 1 {
+                "Paste this? The program hasn't asked for pastes to be marked, so the line \
+                 before the last runs as if typed."
+                    .to_owned()
+            } else {
+                format!(
+                    "Paste this? The program hasn't asked for pastes to be marked, so the \
+                     {lines} lines before the last run as if typed."
+                )
+            };
             if self.window.confirm_with_message(&ask) != Ok(true) {
                 return;
             }

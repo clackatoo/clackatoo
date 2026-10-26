@@ -764,19 +764,20 @@ impl State {
         self.send_keys(keys::paste(text, modes))
     }
 
-    /// How many lines pasting `text` would run, one command each, if more
-    /// than one: the program hasn't asked for pastes to be marked, so
-    /// each line ends with Enter, and it's best asked first. A line ends
-    /// at CR, LF or both, as each is sent as Enter.
+    /// How many lines pasting `text` would run, one command each, if any:
+    /// the program hasn't asked for pastes to be marked, so each line break
+    /// is Enter, and it's best asked first. Those ending the paste aren't
+    /// sent (see [`clackatoo_term::unbracketed`]), so only the lines before
+    /// the last run. A line ends at CR, LF or both, as each is one Enter.
     #[must_use]
     pub fn paste_runs_lines(&self, text: &str) -> Option<usize> {
         let modes = self.term.as_ref()?.grid()?.state.modes;
         if modes.bracketed_paste {
             return None;
         }
-        let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        let lines = text.trim_end_matches('\n').split('\n').count();
-        (lines > 1).then_some(lines)
+        let typed = clackatoo_term::unbracketed(text).replace("\r\n", "\n");
+        let runs = typed.matches(['\r', '\n']).count();
+        (runs > 0).then_some(runs)
     }
 
     /// Sends `bytes` to the terminal shown, as typed, unless keys don't go
@@ -1560,10 +1561,13 @@ mod tests {
     #[test]
     fn pastes_are_capped_and_lines_that_would_run_are_counted() {
         let mut state = showing_a_terminal(InputModes::default());
+        // The line breaks ending a paste aren't sent, so a line copied
+        // whole runs nothing, blank lines after it or not.
         assert_eq!(state.paste_runs_lines("ls\n"), None, "one line");
-        assert_eq!(state.paste_runs_lines("ls\nrm x\r\n"), Some(2));
+        assert_eq!(state.paste_runs_lines("ls\n\n"), None);
+        assert_eq!(state.paste_runs_lines("ls\nrm x\r\n"), Some(1), "ls runs");
         assert_eq!(
-            state.paste_runs_lines("a\rb\r"),
+            state.paste_runs_lines("a\rb\rc"),
             Some(2),
             "CR alone ends one too"
         );
