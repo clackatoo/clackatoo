@@ -5311,3 +5311,405 @@ fn original_images_are_fetched_on_demand_through_the_federated_chat() {
         Response::Error(_)
     ));
 }
+
+// --- Chats going on with their sessions through other machines ----------
+
+/// A new chat with the agent for tests, going on with its session
+/// `past-1`, in `cwd`, as one picked on the start page does: it loads the
+/// session, which tells a conversation of its own.
+fn resumed_chat(cwd: &Path) -> PaneTerminal {
+    PaneTerminal::Agent(NewAgent {
+        size: Size::new(60, 10).unwrap(),
+        cwd: Some(cwd.display().to_string()),
+        agent: None,
+        tools: clackatoo_protocol::AgentTools::Off,
+        task: false,
+        browser: false,
+        model: None,
+        resume: Some(clackatoo_protocol::ResumeSession {
+            session: "past-1".into(),
+            title: "Fix the parser".into(),
+        }),
+    })
+}
+
+/// `chat`'s view, as `client` is shown it, once it's as `done` says,
+/// answering each change it's sent meanwhile as drawn.
+fn wait_for_chat(
+    client: &mut Client,
+    chat: TerminalId,
+    done: impl Fn(&ChatNode) -> bool,
+) -> ChatNode {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        for event in client.take_events() {
+            if let Event::View { terminal, .. } = event {
+                client.frame_done(terminal).unwrap();
+            }
+        }
+        let captured = client.capture(chat);
+        if let Ok(view) = &captured
+            && let Some(node) = view.chat()
+            && done(node)
+        {
+            return node.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out; the chat: {captured:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Sends `text` to `chat`, and waits for its answer to end.
+fn ask_chat(client: &mut Client, chat: TerminalId, text: &str) -> ChatNode {
+    client.chat(chat, ChatAction::Send(text.into())).unwrap();
+    wait_for_chat(client, chat, |node| {
+        (node.turns.last()).is_some_and(|turn| turn.prompt == text && turn.end.is_some())
+    })
+}
+
+/// Waits until the workspaces `host` keeps in `world` say `text`.
+fn wait_for_kept(world: &World, host: &str, text: &str) {
+    let file = world.host(host).join("workspaces");
+    let deadline = Instant::now() + PATIENCE;
+    while !std::fs::read_to_string(&file).is_ok_and(|kept| kept.contains(text)) {
+        assert!(Instant::now() < deadline, "{host} never kept {text}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Attaches `client` to `terminal`, on another machine, once this daemon's
+/// connection there holds: just after this daemon restarts, the machine
+/// there still hears the connection of its last run for a few seconds, and
+/// turns this one down meanwhile.
+fn attach_when_reached(client: &mut Client, terminal: TerminalId) -> View {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        match client.attach(terminal) {
+            Ok(()) => break,
+            Err(ClientError::Daemon(Error::Other(why))) if Instant::now() < deadline => {
+                assert!(
+                    why.contains("lost") || why.contains("isn't"),
+                    "attaching: {why}"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => panic!("attaching: {err:?}"),
+        }
+    }
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "no snapshot came");
+        if let Event::View {
+            terminal: changed,
+            update: ViewUpdate::Snapshot(view),
+        } = client.next_event().expect("an event")
+        {
+            client.frame_done(changed).unwrap();
+            if changed == terminal {
+                return view;
+            }
+        }
+    }
+}
+
+/// A chat in a workspace of laptop's, shown through desk, goes on with its
+/// session after either daemon restarts, as one of desk's own does: laptop
+/// makes it again as it starts, and it loads its session as desk's window
+/// shows it, none of what's told again acting now; desk, starting again,
+/// shows it as it is (CLACKA-163).
+#[test]
+fn a_chat_in_another_machines_workspace_goes_on_with_its_session_after_either_restarts() {
+    let world = World::new();
+    let project = world.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let laptop = world.start_with("laptop", true);
+    laptop
+        .client()
+        .new_workspace(Some("work".into()), resumed_chat(&project))
+        .unwrap();
+    let desk = world.start_with("desk", true);
+    let mut window = desk.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "laptop");
+    let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "work").is_some());
+    let chat = first_terminal(theirs(&shown, "work").unwrap());
+    attach_to(&mut window, chat);
+    // Its session's conversation so far is told as it loads.
+    wait_for_chat(&mut window, chat, |node| !node.turns.is_empty());
+    wait_for_kept(&world, "laptop", "past-1");
+
+    // Laptop, the chat's machine, restarts.
+    drop(laptop);
+    let laptop = world.start_with("laptop", true);
+    let shown = wait_for_workspaces(&mut window, |shown| {
+        theirs(shown, "work").is_some_and(|work| first_terminal(work) != chat)
+    });
+    let again = first_terminal(theirs(&shown, "work").unwrap());
+    attach_to(&mut window, again);
+    // Shown, it loads its session again, telling the conversation so
+    // far, none of which acts now.
+    wait_for_chat(&mut window, again, |node| {
+        !node.turns.is_empty() && node.state == clackatoo_protocol::ChatState::Ready
+    });
+    let node = ask_chat(&mut window, again, "settings");
+    assert!(last_words(&node).contains("haiku"), "{node:#?}");
+
+    // Desk, the daemon showing it, restarts.
+    drop(window);
+    drop(desk);
+    let desk = world.start_with("desk", true);
+    let mut window = desk.client();
+    let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "work").is_some());
+    let third = first_terminal(theirs(&shown, "work").unwrap());
+    attach_when_reached(&mut window, third);
+    let node = ask_chat(&mut window, third, "cwd");
+    let project = project.display().to_string();
+    assert!(last_words(&node).contains(&project), "{node:#?}");
+    drop(laptop);
+}
+
+/// A chat laptop lends one of desk's workspaces goes on with its session
+/// after either restarts: laptop makes it again in the workspace it lends,
+/// which desk's layout finds by its key (CLACKA-163).
+#[test]
+fn a_chat_borrowed_from_another_machine_goes_on_with_its_session_after_either_restarts() {
+    let world = World::new();
+    let project = world.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let laptop = world.start_with("laptop", true);
+    let laptop_id = laptop.machine().id;
+    let desk = world.start_with("desk", true);
+    let mut window = desk.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "laptop");
+    wait_for_state(&mut window, "laptop", connected);
+    let first = window.new_workspace(Some("home".into()), shell()).unwrap();
+    let shown = window.watch_workspaces().unwrap();
+    let home = found(&shown, first).0.id;
+    let there = made(
+        &mut window,
+        &new_tab_on(home, resumed_chat(&project), laptop_id),
+    );
+    let chat = terminal_of(wait_for_borrowed(&mut window, there));
+    attach_to(&mut window, chat);
+    wait_for_chat(&mut window, chat, |node| !node.turns.is_empty());
+    wait_for_kept(&world, "laptop", "past-1");
+
+    // The lender restarts.
+    drop(laptop);
+    let laptop = world.start_with("laptop", true);
+    let shown = wait_for_workspaces(&mut window, |shown| {
+        (shown.find_pane(there))
+            .is_some_and(|(_, _, pane)| pane.content.terminal().is_some_and(|now| now != chat))
+    });
+    let again = terminal_of(found(&shown, there).1.content);
+    attach_to(&mut window, again);
+    // Shown, it loads its session again, telling the conversation so
+    // far, none of which acts now.
+    wait_for_chat(&mut window, again, |node| {
+        !node.turns.is_empty() && node.state == clackatoo_protocol::ChatState::Ready
+    });
+    let node = ask_chat(&mut window, again, "settings");
+    assert!(last_words(&node).contains("haiku"), "{node:#?}");
+
+    // The borrower restarts.
+    wait_for_kept(&world, "desk", "home");
+    drop(window);
+    drop(desk);
+    let desk = world.start_with("desk", true);
+    let mut window = desk.client();
+    let shown = wait_for_workspaces(&mut window, |shown| {
+        (shown.list.iter()).any(|w| w.name == "home" && w.tabs.len() == 2)
+    });
+    let home_now = (shown.list.iter()).find(|w| w.name == "home").unwrap();
+    let pane = home_now.tabs[1].layout.panes()[0].id;
+    let third = terminal_of(wait_for_borrowed(&mut window, pane));
+    attach_when_reached(&mut window, third);
+    let node = ask_chat(&mut window, third, "cwd");
+    let project = project.display().to_string();
+    assert!(last_words(&node).contains(&project), "{node:#?}");
+    drop(laptop);
+}
+
+/// A daemon in a process of its own, killed as it's dropped, so a test
+/// that fails leaves none running.
+struct Killed(std::process::Child);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A chat answering in a workspace of laptop's, shown through desk, goes on
+/// with its turn as laptop's daemon upgrades, as one of desk's own does
+/// (47423b3): the daemon there continues it by itself, and desk shows the
+/// same chat, by the same number, carrying on (CLACKA-163). Laptop's daemon
+/// runs in a process of its own here, so it can upgrade.
+#[test]
+fn a_chat_answering_on_another_machine_goes_on_after_it_upgrades() {
+    use std::io::Read as _;
+    let world = World::new();
+    let dir = world.host("laptop");
+    let state = world.path().join("laptop-state");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    let log = std::fs::File::create(world.path().join("laptop.log")).unwrap();
+    let child = Command::new(example("daemon"))
+        .arg("daemon")
+        .env("CLACKATOO_UDP_PORTS", "off")
+        .env("CLACKATOO_BROWSER", "off")
+        .env("XDG_RUNTIME_DIR", &dir)
+        .env("XDG_STATE_HOME", &state)
+        .env("XDG_DATA_HOME", state.join("data"))
+        .env("XDG_CONFIG_HOME", state.join("config"))
+        .env("HOME", &dir)
+        .env("CLACKATOO_AGENT", example("fake_agent"))
+        .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_WORKSPACES", "off")
+        .env("CLACKATOO_BOARDS", "off")
+        .env("CLACKATOO_RECOVERY", "off")
+        .stderr(log)
+        .stdout(Stdio::null())
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let child = Killed(child);
+    let socket = dir.join("clackatoo/daemon.sock");
+    let deadline = Instant::now() + PATIENCE;
+    while Client::connect(&socket).is_err() {
+        assert!(Instant::now() < deadline, "laptop never answered");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut at_laptop = Client::connect(&socket).unwrap();
+    at_laptop.set_read_timeout(Some(PATIENCE)).unwrap();
+    at_laptop
+        .new_workspace(Some("work".into()), chat())
+        .unwrap();
+    let desk = world.start("desk");
+    let mut window = desk.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "laptop");
+    let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "work").is_some());
+    let chat = first_terminal(theirs(&shown, "work").unwrap());
+    attach_to(&mut window, chat);
+    window.chat(chat, ChatAction::Send("wait".into())).unwrap();
+    wait_for_chat(&mut window, chat, |node| {
+        node.state == clackatoo_protocol::ChatState::Answering
+    });
+
+    // Laptop upgrades while its agent answers.
+    let bin = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let next = bin.path().join("daemon-next");
+    std::fs::hard_link(example("daemon"), &next).unwrap();
+    {
+        use clackatoo_protocol::PROTOCOL_VERSION;
+        use clackatoo_protocol::frame;
+        use std::os::unix::ffi::OsStrExt;
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        let upgrade = ClientMessage::Upgrade {
+            protocol_version: PROTOCOL_VERSION,
+            executable: next.as_os_str().as_bytes().to_vec(),
+        };
+        stream
+            .write_all(&frame::encode(PROTOCOL_VERSION, &upgrade).unwrap())
+            .unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        let mut decoder = clackatoo_protocol::frame::FrameDecoder::new();
+        decoder.push(&answer);
+        let refused: Option<ServerMessage> = decoder.decode(PROTOCOL_VERSION).unwrap();
+        assert!(refused.is_none(), "{refused:?}");
+    }
+    let deadline = Instant::now() + PATIENCE;
+    while std::fs::read_link(format!("/proc/{}/exe", child.0.id())).ok() != Some(next.clone()) {
+        assert!(Instant::now() < deadline, "laptop never upgraded");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let node = wait_for_chat(&mut window, chat, |node| {
+        last_words(node).contains("Clackatoo resumed")
+            && node.turns.last().is_some_and(|turn| turn.end.is_some())
+    });
+    // The same turn goes on, in the same session, as the daemon there
+    // asks: nothing a window here did.
+    assert_eq!(node.turns.len(), 1, "{node:#?}");
+    let ended = node.turns[0].end.as_ref().map(|end| &end.outcome);
+    assert!(
+        matches!(ended, Some(clackatoo_protocol::Outcome::Done)),
+        "{node:#?}"
+    );
+}
+
+#[test]
+fn a_chat_of_this_machine_in_another_machines_layout_goes_on_after_this_one_restarts() {
+    let mut mixed = Mixed::new();
+    let laptop = mixed.laptop().machine().id;
+    let project = mixed.world.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let (_, content) = mixed.place(resumed_chat(&project));
+    let chat = terminal_of(content);
+    attach_to(&mut mixed.window, chat);
+    wait_for_chat(&mut mixed.window, chat, |node| !node.turns.is_empty());
+    wait_for_kept(&mixed.world, "laptop", "past-1");
+    drop(mixed.laptop.take());
+    let laptop_again = mixed.world.start_with("laptop", true);
+    let mut window = laptop_again.client();
+    let shown = wait_for_workspaces(&mut window, |shown| {
+        (panes_of(shown, laptop).iter()).any(|pane| matches!(pane.content, Content::Terminal(_)))
+    });
+    let again = terminal_of(panes_of(&shown, laptop)[0].content);
+    attach_to(&mut window, again);
+    // Shown, it loads its session again, telling the conversation so
+    // far, none of which acts now.
+    wait_for_chat(&mut window, again, |node| {
+        !node.turns.is_empty() && node.state == clackatoo_protocol::ChatState::Ready
+    });
+    let node = ask_chat(&mut window, again, "settings");
+    assert!(last_words(&node).contains("haiku"), "{node:#?}");
+    mixed.laptop = Some(laptop_again);
+}
+
+#[test]
+fn a_chat_on_a_machine_passed_on_goes_on_with_its_session_after_it_restarts() {
+    let world = World::new();
+    let project = world.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let server = world.start_with("server", true);
+    server
+        .client()
+        .new_workspace(Some("srv".into()), resumed_chat(&project))
+        .unwrap();
+    let desk = world.start("desk");
+    let mut at_desk = desk.client();
+    connect(&mut at_desk, "server");
+    wait_for_workspaces(&mut at_desk, |shown| theirs(shown, "srv").is_some());
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "desk");
+    let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "srv").is_some());
+    going(&mut window, "server", &["desk"]);
+    let chat = first_terminal(theirs(&shown, "srv").unwrap());
+    attach_to(&mut window, chat);
+    wait_for_chat(&mut window, chat, |node| !node.turns.is_empty());
+    wait_for_kept(&world, "server", "past-1");
+    drop(server);
+    let server = world.start_with("server", true);
+    let shown = wait_for_workspaces(&mut window, |shown| {
+        theirs(shown, "srv").is_some_and(|srv| first_terminal(srv) != chat)
+    });
+    let again = first_terminal(theirs(&shown, "srv").unwrap());
+    attach_to(&mut window, again);
+    // Shown, it loads its session again, telling the conversation so
+    // far, none of which acts now.
+    wait_for_chat(&mut window, again, |node| {
+        !node.turns.is_empty() && node.state == clackatoo_protocol::ChatState::Ready
+    });
+    let node = ask_chat(&mut window, again, "settings");
+    assert!(last_words(&node).contains("haiku"), "{node:#?}");
+    drop(server);
+}
