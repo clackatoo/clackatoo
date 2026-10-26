@@ -145,8 +145,12 @@ impl ChatView {
             }
             Motion::LineEnd => {
                 let mut end = start;
+                // As far as there are lines, as `3$` on the last goes.
                 for _ in 1..times {
-                    end = self.next_line(end)?;
+                    match self.next_line(end) {
+                        Some(next) => end = next,
+                        None => break,
+                    }
                 }
                 let text = self.text(end.text)?;
                 let (first, last) = hard_line(text.text, end.byte);
@@ -314,7 +318,8 @@ impl ChatView {
     fn next_line(&self, at: Position) -> Option<Position> {
         if let Some(text) = self.text(at.text) {
             let (_, end) = hard_line(text.text, at.byte);
-            if end < text.text.len() {
+            // A line break ending the text starts no line after it.
+            if end + 1 < text.text.len() {
                 return Some(Position {
                     byte: end + 1,
                     ..at
@@ -794,6 +799,22 @@ mod tests {
         read(&mut chat, "G$yam");
         yanked(&mut chat, &mut fonts);
         assert_eq!(chat.cursor.unwrap().text.piece, PROMPT);
+    }
+
+    #[test]
+    fn a_count_past_the_last_line_stops_there_and_a_last_line_break_is_no_line() {
+        let code = "```\nalpha\nbeta\n```";
+        let (mut chat, mut fonts) = reading(talk(&[("one", code)]));
+        read(&mut chat, "gg}jy3$");
+        assert_eq!(yanked(&mut chat, &mut fonts), [chars("beta")]);
+        read(&mut chat, "ky5$");
+        assert_eq!(yanked(&mut chat, &mut fonts), [chars("alpha\nbeta")]);
+        // A message ending with a line break: `yj` from its line goes on
+        // to the answer, not to an empty line after it.
+        let (mut chat, mut fonts) = reading(talk(&[("one\n", "first")]));
+        read(&mut chat, "ggyj");
+        let taken = yanked(&mut chat, &mut fonts).remove(0).0;
+        assert!(taken.ends_with("first\n"), "{taken:?}");
     }
 
     #[test]
