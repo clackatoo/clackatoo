@@ -326,7 +326,7 @@ In insert mode, keys reach the program the way xterm sends them, which nearly ev
 - Arrows, Home, End, Insert, Delete, Page Up, Page Down and F1 to F12 send escape sequences, with any modifiers held.
 - When a program asks for them, arrows and the number pad send application codes, which Vim and less expect.
 
-Ctrl+Shift+V pastes, and Ctrl+Shift+C copies text [selected with the mouse](#the-mouse); neither reaches the program. If the program has asked for bracketed paste, the text is marked as pasted, so editors don't treat it as typing and shells don't run it line by line. Otherwise newlines are sent as Enter.
+Ctrl+Shift+V pastes, and Ctrl+Shift+C copies text [selected with the mouse](#the-mouse); neither reaches the program. If the program has asked for bracketed paste, the text is marked as pasted, so editors don't treat it as typing and shells don't run it line by line. Otherwise newlines are sent as Enter, but for one at the very end, which is dropped, so a line copied whole, as a yank by lines is, waits at the prompt rather than running. The phone pastes the same way.
 
 Typing while scrolled up returns the view to the live screen.
 
@@ -407,7 +407,7 @@ A selection by characters lights each line to a cell past its text, which is wha
 
 Any motion extends a selection, including `gg`, `G` and searches. What you copy lights up for a moment, so you can see what went. Copied text is what the program printed: a line that wrapped only because it reached the window's edge comes out as one line, and blanks at the ends of lines are left out.
 
-What `y` copies goes into the [registers](~clackatoo/reference/editor#registers) exactly as an editor's yank does: into the unnamed register, which `p` in an editor puts, and `"0`, or into the register named before it; and, as the [option](~clackatoo/reference/config#options) `clipboard` says, onto the clipboard, as it is unless you change it, or the primary selection. With `clipboard=none` it stays in the window's registers, and `"+y` or Ctrl+Shift+C puts it on the clipboard. It keeps its kind, so `p` puts lines copied by lines as lines below the cursor's, and a block as a block. Lines copied by lines end with a newline, as an editor's do and as Vim's `"+yy` does; a shell that takes bracketed paste, as bash, zsh and fish do, still doesn't run a line pasted into it until you press Enter.
+What `y` copies goes into the [registers](~clackatoo/reference/editor#registers) exactly as an editor's yank does: into the unnamed register, which `p` in an editor puts, and `"0`, or into the register named before it; and, as the [option](~clackatoo/reference/config#options) `clipboard` says, onto the clipboard, as it is unless you change it, or the primary selection. With `clipboard=none` it stays in the window's registers, and `"+y` or Ctrl+Shift+C puts it on the clipboard. It keeps its kind, so `p` puts lines copied by lines as lines below the cursor's, and a block as a block. Lines copied by lines end with a newline, as an editor's do and as Vim's `"+yy` does. Pasted into a terminal, that never runs the line: a shell that takes bracketed paste, as bash, zsh and fish do, takes it as text, and to any other program the newline that ends a paste isn't sent (see [Typing](#typing)).
 
 ### Text objects
 

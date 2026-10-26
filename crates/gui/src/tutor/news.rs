@@ -951,7 +951,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "terminal-registers",
         date: "2026-10-26",
         lesson: "basics",
-        what: "y in a terminal yanks into the registers, \"x too, so p puts it in an editor, lines as lines",
+        what: "y in a terminal yanks into the registers, \"x too, for p in editors; unbracketed pastes drop a last newline",
     },
 ];
 

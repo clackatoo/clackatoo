@@ -9,12 +9,18 @@
 //! leaves another. So, as xterm and kitty do, the text loses every escape
 //! and other control character but tab, carriage return and newline,
 //! which nothing pasted needs and which can't make the terminator.
+//!
+//! A program that didn't gets the text as typed, its newlines as Enter,
+//! but for one at the very end, which is dropped: lines copied whole, as
+//! a yank by lines in a terminal or an editor is, end with one, and it
+//! mustn't run the last of them as it lands.
 
 use crate::InputModes;
 
 /// What pasting `text` sends to a program in `modes`: bracketed, with
 /// control characters taken out, if the program asked for that;
-/// otherwise as typed, with its newlines as Enter.
+/// otherwise as typed, with its newlines as Enter, but for one ending it,
+/// which is dropped, so the paste doesn't run what it ends.
 #[must_use]
 pub fn paste(text: &str, modes: InputModes) -> Vec<u8> {
     if modes.bracketed_paste {
@@ -30,6 +36,9 @@ pub fn paste(text: &str, modes: InputModes) -> Vec<u8> {
         bytes.extend_from_slice(b"\x1b[201~");
         bytes
     } else {
+        let text = (text.strip_suffix("\r\n"))
+            .or_else(|| text.strip_suffix(['\n', '\r']))
+            .unwrap_or(text);
         text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
     }
 }
@@ -76,7 +85,19 @@ mod tests {
     }
 
     #[test]
-    fn without_bracketing_newlines_are_enter() {
-        assert_eq!(paste("ls\nexit\r\n", InputModes::default()), b"ls\rexit\r");
+    fn without_bracketing_newlines_are_enter_but_the_last_is_dropped() {
+        let plain = InputModes::default();
+        assert_eq!(paste("ls\nexit\r\n", plain), b"ls\rexit");
+        assert_eq!(paste("ls\n", plain), b"ls");
+        assert_eq!(paste("ls\r", plain), b"ls");
+        // One only: a blank line copied with it is still typed.
+        assert_eq!(paste("ls\n\n", plain), b"ls\r");
+        assert_eq!(paste("ls", plain), b"ls");
+        assert_eq!(paste("\n", plain), b"");
+    }
+
+    #[test]
+    fn bracketed_the_last_newline_stays_as_the_program_takes_it_as_text() {
+        assert_eq!(paste("ls\n", bracketed()), b"\x1b[200~ls\n\x1b[201~");
     }
 }

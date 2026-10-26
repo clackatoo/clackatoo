@@ -319,7 +319,8 @@ mod tests {
     #[test]
     fn pastes_are_marked_when_the_program_asks() {
         let plain = InputModes::default();
-        assert_eq!(paste("ls\nexit\r\n", plain), b"ls\rexit\r");
+        // The newline ending it is dropped, so it runs nothing as it lands.
+        assert_eq!(paste("ls\nexit\r\n", plain), b"ls\rexit");
         let bracketed = InputModes {
             bracketed_paste: true,
             ..InputModes::default()

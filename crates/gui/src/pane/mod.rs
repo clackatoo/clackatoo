@@ -1285,6 +1285,30 @@ mod tests {
     }
 
     #[test]
+    fn a_paste_ending_a_line_runs_nothing_unless_bracketed() {
+        let sent = |pane: &mut Pane| -> Vec<Vec<u8>> {
+            (pane.take_outbox().into_iter())
+                .filter_map(|message| match message {
+                    ClientMessage::Request(Request::SendInput { bytes, .. }) => Some(bytes),
+                    _ => None,
+                })
+                .collect()
+        };
+        // A line yanked by lines ends with a newline: unbracketed, it's
+        // dropped, so the line waits at the prompt.
+        let mut plain = pane(&terminal("$ "));
+        plain.paste("make test\n");
+        assert_eq!(sent(&mut plain), [b"make test".to_vec()]);
+        // Bracketed, the program takes it as text, newline and all.
+        let mut bracketed = pane(&terminal("\x1b[?2004h$ "));
+        bracketed.paste("make test\n");
+        assert_eq!(
+            sent(&mut bracketed),
+            [b"\x1b[200~make test\n\x1b[201~".to_vec()]
+        );
+    }
+
+    #[test]
     fn the_size_is_asked_for_again_after_reconnecting_or_another_resize() {
         let size = Size::new(12, 5).unwrap();
         let mut pane = pane(&terminal(""));
