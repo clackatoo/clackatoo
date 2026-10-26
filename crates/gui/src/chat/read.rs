@@ -1406,6 +1406,14 @@ mod tests {
     use crate::pane::Copy;
     use crate::vim::Selection;
 
+    impl ChatView {
+        /// Where normal mode's cursor is in its text, by byte, for tests
+        /// outside the chat.
+        pub(crate) fn cursor_byte(&self) -> Option<usize> {
+            self.cursor.map(|cursor| cursor.byte)
+        }
+    }
+
     fn reading(node: clackatoo_protocol::ChatNode) -> (ChatView, crate::fonts::Fonts) {
         let mut fonts = fonts();
         let mut chat = ChatView::new(String::new(), node);

@@ -77,6 +77,37 @@ fn a_find_in_an_editor_is_found_again_in_a_terminal_and_back() {
 }
 
 #[test]
+fn a_find_in_an_editor_is_found_again_in_a_chat() {
+    let layout = side_by_side(vec![file_pane(1, 7), pane(2)]);
+    let mut desk = desk(one_tab(layout));
+    load(&mut desk, 7, "/t.txt", "a b\n");
+    let node = crate::chat::fixtures::talk(&[("one", "alpha beta")]);
+    desk.view_changed(
+        TerminalId(2),
+        &ViewUpdate::Snapshot(View {
+            title: "chat".into(),
+            cwd: None,
+            root: clackatoo_protocol::Node::Chat(Box::new(node)),
+        }),
+    );
+    normal_mode(&mut desk);
+    type_keys(&mut desk, "fb");
+    assert!(note(&desk).ends_with("1:3"), "{}", note(&desk));
+    ctrl(&mut desk, "l");
+    let mut fonts = crate::chat::fixtures::fonts();
+    let paint = |desk: &mut Desk, fonts: &mut crate::fonts::Fonts| {
+        let chat = desk.chat_mut(TerminalId(2)).expect("the chat's pane");
+        chat.paint(fonts, [0.0; 2], [900.0, 1000.0], true);
+    };
+    paint(&mut desk, &mut fonts);
+    type_keys(&mut desk, "G0");
+    paint(&mut desk, &mut fonts);
+    type_keys(&mut desk, ";");
+    let chat = desk.chat_mut(TerminalId(2)).expect("the chat's pane");
+    assert_eq!(chat.view_mut().cursor_byte(), Some("alpha ".len()));
+}
+
+#[test]
 fn a_terminals_yank_is_put_by_p_in_an_editor_and_lines_as_lines() {
     let (mut desk, screen) = terminal_beside_editor("one two\r\nthree", "abc\n");
     desk.take_yanked();
