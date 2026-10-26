@@ -186,10 +186,12 @@ The list is the [finder's](#the-finder), with this workspace's background tabs f
 |---|---|
 | Enter | Brings it back as a tab of its workspace, after the others, going there. A terminal of it whose shell has exited starts again as a new shell in its folder, offering `R` to put what it ran at the prompt. |
 | Ctrl+D | Dismisses it, closing its terminals. One still running asks first, in the list's top right: a second Ctrl+D within three seconds ends it. |
-| Ctrl+F | In a window on [another machine](~clackatoo/reference/remote#forwarding-ports) than the daemon, forwards the ports it listens on here, each to the same port, as `:portforward 8080` does. |
+| Ctrl+F | In a window on [another machine](~clackatoo/reference/remote#forwarding-ports) than the daemon, or for a background tab of another machine's workspace, forwards the ports it listens on here, each to the same port, as `:portforward 8080` does. |
 | Esc | Closes the list. |
 
-A background tab whose terminals have ended stays, its last screen readable, until it's dismissed or brought back: nothing vanishes by itself. Closing a workspace closes its background tabs with it; a window from before protocol 96, which doesn't know they're there, can't. A workspace keeps 64 background tabs at most, and chats don't go to the background, only terminals. A workspace on [another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar) keeps its background tabs to itself for now: they aren't listed here, and its tabs can't be sent to the background from here.
+A background tab whose terminals have ended stays, its last screen readable, until it's dismissed or brought back: nothing vanishes by itself. Closing a workspace closes its background tabs with it; a window from before protocol 96, which doesn't know they're there, can't. A workspace keeps 64 background tabs at most, and chats don't go to the background, only terminals.
+
+A workspace on [another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar) shows its background tabs here as your own do: in its icon, in the list, with the ports they listen on and their ` ↻` marks, and everything above works on them, on that machine: `:bg`, `:bgpane`, `:bg CMD` (in its focused pane's folder there), Enter, Ctrl+D and `:keep`. A pane of one of your own workspaces borrowed from another machine can't go to the background, or start one, yet: `:bg CMD` there says so.
 
 ### The command line
 

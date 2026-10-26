@@ -923,6 +923,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "text-objects",
         what: "u puts the cursor back where the change began, and the selection for gv, as Vim's undo does",
     },
+    News {
+        id: "background-elsewhere",
+        date: "2026-10-26",
+        lesson: "background",
+        what: "Background tabs and :keep on :connect'ed machines' workspaces, and on the phone",
+    },
 ];
 
 impl News {

@@ -73,3 +73,9 @@ In the terminal beside this lesson, run `echo kept`, then in normal mode type `:
 ```check
 kept 1
 ```
+
+## On other machines, and your phone
+
+A workspace on another machine you've `:connect`ed to shows that machine's background tabs too: in the icon, in the list, with their ports and ` ↻` marks. Everything here works on them, on that machine: Ctrl+B b t, Enter, Ctrl+D, `:bg CMD` in its folder there, and `:keep`. Ctrl+F in the list forwards such a one's ports from that machine, whichever workspace is shown.
+
+The web app on your phone lists each workspace's background tabs under **Terminals**, after its terminals; a workspace's heading says `⚙ 1` as the icon here does. **Bring back** puts one back in its tab bar and shows it, and **✕** dismisses it, with a second tap for one still running. A phone can't `:keep` a terminal.
