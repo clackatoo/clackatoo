@@ -1660,6 +1660,29 @@ mod tests {
     }
 
     #[test]
+    fn semicolon_finds_again_what_another_pane_of_the_window_found() {
+        use crate::motion::Motion;
+
+        let (mut chat, _fonts) = reading(talk(&[("one", "alpha beta")]));
+        let window = crate::vim::Finds::default();
+        chat.share_finds(&window);
+        read(&mut chat, "G0");
+        // `fb` in an editor of the window.
+        let find = |ch, till, again| Motion::Find {
+            ch,
+            forward: true,
+            till,
+            again,
+        };
+        window.remember(find('b', false, false));
+        read(&mut chat, ";");
+        assert_eq!(chat.cursor.unwrap().byte, "alpha ".len());
+        // And `ta` here is the window's.
+        read(&mut chat, "0ta");
+        assert_eq!(window.again(false), Some(find('a', true, true)));
+    }
+
+    #[test]
     fn the_scrolling_keys_take_counts_and_go_as_far_as_in_any_pane() {
         let (mut chat, mut fonts) = reading(crate::chat::fixtures::long_chat(12));
         let ctrl = |chat: &mut ChatView, key: &str| {

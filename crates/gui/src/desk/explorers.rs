@@ -555,6 +555,7 @@ impl Desk {
                 );
                 copy.set_machine(self.pane_machine(pane));
                 let mut editor = Editor::new(buffer, &self.options);
+                editor.share_finds(&self.finds);
                 editor.hide_starts(listing::mark_len);
                 editor.keep_lines(listing::is_up);
                 editor.style_lines(listing::style);

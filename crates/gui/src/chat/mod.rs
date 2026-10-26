@@ -428,6 +428,11 @@ impl ChatView {
         chat
     }
 
+    /// Takes the window's last find, which `;` and `,` here find again.
+    pub(crate) fn share_finds(&mut self, finds: &crate::vim::Finds) {
+        self.finds = finds.clone();
+    }
+
     pub(crate) fn new(title: String, node: ChatNode) -> Self {
         let mut view = Self {
             node,

@@ -520,7 +520,7 @@ pub(crate) struct Editor {
     last_change: Option<Change>,
     /// How many times what's typed in insert mode goes in, as after `3i`.
     insert_times: usize,
-    /// The last `f`, `t`, `F` or `T`.
+    /// The window's last `f`, `t`, `F` or `T`.
     finds: vim::Finds,
     /// What's being typed in the bar.
     prompt: Option<Prompt>,
@@ -946,6 +946,11 @@ impl Editor {
             // Until the next settle works out the numbers afresh.
             self.gutter = 0;
         }
+    }
+
+    /// Takes the window's last find, which `;` and `,` here find again.
+    pub(crate) fn share_finds(&mut self, finds: &vim::Finds) {
+        self.finds = finds.clone();
     }
 
     /// Takes in the options, as they've changed.

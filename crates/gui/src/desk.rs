@@ -360,6 +360,9 @@ pub(crate) struct Desk {
     /// Text copied, waiting for the window to put on the clipboard or the
     /// primary selection, oldest first.
     yanked: Vec<(String, Copy)>,
+    /// The window's last `f`, `t`, `F` or `T`, which every pane it makes
+    /// shares, so `;` and `,` find it again in any of them, as in Vim.
+    finds: vim::Finds,
     /// URLs links asked to open, waiting for the window to hand to the
     /// desktop's opener.
     opened: Vec<String>,
@@ -1250,6 +1253,7 @@ impl Desk {
             }
             self.panes.entry(terminal).or_insert_with(|| {
                 let mut pane = Pane::new(terminal);
+                pane.share_finds(&self.finds);
                 pane.set_options(&self.options);
                 pane.set_remote(self.remote);
                 pane
@@ -2912,6 +2916,7 @@ mod tests {
     mod mouse;
     mod restored;
     mod scrolling;
+    mod shared;
     mod shortcuts;
     mod typing;
 

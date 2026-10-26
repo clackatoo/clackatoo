@@ -115,7 +115,7 @@ pub(crate) struct Pane {
     startofline: bool,
     /// How far Ctrl+D and its kin go.
     paging: vim::Paging,
-    /// The last `f`, `t`, `F` or `T`, for `;` and `,`.
+    /// The window's last `f`, `t`, `F` or `T`, for `;` and `,`.
     finds: vim::Finds,
     /// Where motions left the cursor, or a selection's other end, on
     /// lines not fetched yet.
@@ -191,6 +191,11 @@ impl Pane {
             overlay: None,
             keyed: None,
         }
+    }
+
+    /// Takes the window's last find, which `;` and `,` here find again.
+    pub(crate) fn share_finds(&mut self, finds: &vim::Finds) {
+        self.finds = finds.clone();
     }
 
     /// Takes in the options, as they've changed.

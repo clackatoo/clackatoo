@@ -4,6 +4,9 @@
 //! [`super::Dialect`]): the editor's language server keys, say, or a
 //! terminal's `gx`.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use crate::motion::Motion;
 use crate::objects::Object;
 
@@ -189,19 +192,24 @@ pub(crate) fn page_rows(view: u64, across: Option<[Option<u64>; 4]>) -> u64 {
     }
 }
 
-/// The last `f`, `t`, `F` or `T`, for `;` and `,` to find again: each
-/// pane that takes them keeps one.
-#[derive(Clone, Copy, Debug, Default)]
+/// The last `f`, `t`, `F` or `T`, for `;` and `,` to find again: one for
+/// the whole window, as Vim keeps one for every window, so `fx` in an
+/// editor and `;` in a terminal, a chat or a list finds `x` again.
+///
+/// It's a handle: clones are the same find. The window makes one and
+/// gives every pane a clone of it as the pane is made (`share_finds`);
+/// one made by `default` is a pane's own until then, as in tests.
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Finds {
-    last: Option<Motion>,
+    last: Rc<Cell<Option<Motion>>>,
 }
 
 impl Finds {
     /// Notes `motion` if it's a find, and gives it back; or for `;` or
     /// `,` after an operator, the last find again, if there's been one.
-    pub(crate) fn remember(&mut self, motion: Motion) -> Motion {
+    pub(crate) fn remember(&self, motion: Motion) -> Motion {
         match motion {
-            Motion::Find { .. } => self.last = Some(motion),
+            Motion::Find { .. } => self.last.set(Some(motion)),
             Motion::FindAgain { reverse } => return self.again(reverse).unwrap_or(motion),
             _ => {}
         }
@@ -213,7 +221,7 @@ impl Finds {
     pub(crate) fn again(&self, reverse: bool) -> Option<Motion> {
         let Some(Motion::Find {
             ch, forward, till, ..
-        }) = self.last
+        }) = self.last.get()
         else {
             return None;
         };
@@ -356,7 +364,7 @@ mod tests {
 
     #[test]
     fn finds_again_the_last_find_the_same_way_or_back() {
-        let mut finds = Finds::default();
+        let finds = Finds::default();
         assert_eq!(finds.again(false), None);
         let t = Motion::Find {
             ch: 'x',
@@ -381,6 +389,27 @@ mod tests {
             again: true,
         };
         assert_eq!(finds.again(true), Some(back));
+    }
+
+    #[test]
+    fn a_clone_of_finds_is_the_same_find() {
+        let window = Finds::default();
+        let (editor, terminal) = (window.clone(), window.clone());
+        let f = Motion::Find {
+            ch: 'x',
+            forward: true,
+            till: false,
+            again: false,
+        };
+        editor.remember(f);
+        let again = Motion::Find {
+            ch: 'x',
+            forward: true,
+            till: false,
+            again: true,
+        };
+        assert_eq!(terminal.again(false), Some(again));
+        assert_eq!(Finds::default().again(false), None, "a new one is its own");
     }
 
     #[test]

@@ -61,6 +61,7 @@ impl Desk {
         }
         let pane = self.panes.remove(&terminal)?;
         let mut chat = ChatPane::taking_over(pane, view, node);
+        chat.view_mut().share_finds(&self.finds);
         chat.set_options(&self.options);
         Some(self.chats.entry(terminal).insert_entry(chat).into_mut())
     }

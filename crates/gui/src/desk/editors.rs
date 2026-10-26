@@ -320,7 +320,9 @@ impl Desk {
         let (editors, options) = (&mut self.editors, &self.options);
         for (&(pane, buffer), machine) in shown.iter().zip(machines) {
             if let std::collections::hash_map::Entry::Vacant(entry) = editors.panes.entry(pane) {
-                entry.insert(Editor::new(buffer, options));
+                entry
+                    .insert(Editor::new(buffer, options))
+                    .share_finds(&self.finds);
                 // Made again as the daemon started: where it was, it goes.
                 let restored = (self.workspaces.restored.iter())
                     .find(|restored| restored.pane == pane)
