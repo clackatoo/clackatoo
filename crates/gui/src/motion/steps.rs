@@ -28,6 +28,13 @@ impl Step {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Every step asked for of any `Steps` on this thread, for tests to
+    /// count what a command costs through its public way in.
+    pub(crate) static STEPS_ASKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The character Vim reads at a line's end.
 pub(crate) const NUL: char = '\0';
 
@@ -46,6 +53,9 @@ pub(crate) struct Steps<'a, L: Lines> {
     lines: &'a L,
     kept: RefCell<Option<Kept<L::Row<'a>>>>,
     left: std::cell::Cell<usize>,
+    /// Whether a step was asked for past the budget: what was found then
+    /// was found short of looking, and is nothing to go by.
+    ran_out: std::cell::Cell<bool>,
     /// Every step asked for, past the budget too.
     #[cfg(test)]
     asked: std::cell::Cell<usize>,
@@ -62,6 +72,7 @@ impl<'a, L: Lines> Steps<'a, L> {
             lines,
             kept: RefCell::new(None),
             left: std::cell::Cell::new(steps),
+            ran_out: std::cell::Cell::new(false),
             #[cfg(test)]
             asked: std::cell::Cell::new(0),
         }
@@ -70,10 +81,23 @@ impl<'a, L: Lines> Steps<'a, L> {
     /// Spends a step of the budget: false if there's none left.
     fn spend(&self) -> bool {
         #[cfg(test)]
-        self.asked.set(self.asked.get() + 1);
+        {
+            self.asked.set(self.asked.get() + 1);
+            STEPS_ASKED.with(|asked| asked.set(asked.get() + 1));
+        }
         let left = self.left.get();
-        self.left.set(left.saturating_sub(1));
-        left > 0
+        if left == 0 {
+            self.ran_out.set(true);
+            return false;
+        }
+        self.left.set(left - 1);
+        true
+    }
+
+    /// Whether the budget ran out: a search that did can't say what it
+    /// found, as it stopped short.
+    pub(crate) fn ran_out(&self) -> bool {
+        self.ran_out.get()
     }
 
     /// How many steps were asked for, past the budget too.

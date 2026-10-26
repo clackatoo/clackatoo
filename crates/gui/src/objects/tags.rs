@@ -161,9 +161,77 @@ fn opening_before<L: Lines>(steps: &Steps<'_, L>, from: Point) -> Option<Point> 
     }
 }
 
+/// How many steps finding the last closing tags of all names takes, at
+/// most: a budget of their own, so a tag near the top of a long file,
+/// whose closing tag is the only one of its name, is still found.
+const LAST_CLOSING_WORK: usize = 8 * WORK;
+
+/// Where the last closing tag of each name is, as it's asked for: the
+/// text's last `</name>`, found back from its end once a name, `None`
+/// if it has none. A tag with no end, as `<br>` or `<img>`, is then known
+/// to have none at once, each time its kind is tried again.
+struct LastClosing<'a, L: Lines> {
+    steps: Steps<'a, L>,
+    known: std::cell::RefCell<std::collections::HashMap<Vec<char>, Option<Point>>>,
+}
+
+impl<'a, L: Lines> LastClosing<'a, L> {
+    fn new(lines: &'a L) -> Self {
+        Self {
+            steps: Steps::budgeted(lines, LAST_CLOSING_WORK),
+            known: std::cell::RefCell::default(),
+        }
+    }
+
+    /// The text's last `</name>`, either case, found back from its end.
+    fn last_of(&self, name: &[char]) -> Option<Point> {
+        let steps = &self.steps;
+        let last = steps.lines().bounds().1;
+        let mut pos = Point {
+            line: last,
+            col: steps.end(last),
+        };
+        loop {
+            if steps.dec(&mut pos).stuck() {
+                return None;
+            }
+            if closes(steps, pos, name) {
+                return Some(pos);
+            }
+        }
+    }
+
+    /// Whether the text has a `</name>`, either case, after `from`: `None`
+    /// if that's not known, as looking for names has used its budget.
+    fn any_after(&self, name: &[char], from: Point) -> Option<bool> {
+        let key: Vec<char> = name.iter().flat_map(|ch| ch.to_lowercase()).collect();
+        let cached = self.known.borrow().get(&key).copied();
+        let found = if let Some(found) = cached {
+            found
+        } else {
+            let found = self.last_of(name);
+            if self.steps.ran_out() {
+                return None;
+            }
+            self.known.borrow_mut().insert(key, found);
+            found
+        };
+        Some(found.is_some_and(|last| last > from))
+    }
+}
+
 /// The closing tag named `name` after `from` that pairs with the opening
-/// one before it, as `searchpair()` on finds it.
-fn closing_after<L: Lines>(steps: &Steps<'_, L>, from: Point, name: &[char]) -> Option<Point> {
+/// one before it, as `searchpair()` on finds it: none at once if the
+/// text's last of its name is before `from`.
+fn closing_after<L: Lines>(
+    steps: &Steps<'_, L>,
+    from: Point,
+    name: &[char],
+    known: &LastClosing<'_, L>,
+) -> Option<Point> {
+    if known.any_after(name, from) == Some(false) {
+        return None;
+    }
     let words = steps.lines().words();
     let mut pos = from;
     let mut nest = 0usize;
@@ -297,6 +365,7 @@ fn tag_block<L: Lines>(
             }
         }
     }
+    let known = LastClosing::new(steps.lines());
     let mut include = include;
     let count_arg = count.max(1);
     let mut count = count_arg;
@@ -323,7 +392,8 @@ fn tag_block<L: Lines>(
         if name.is_empty() {
             return None;
         }
-        if let Some(end) = closing_after(steps, cursor, &name).filter(|&end| end >= old_end) {
+        if let Some(end) = closing_after(steps, cursor, &name, &known).filter(|&end| end >= old_end)
+        {
             cursor = end;
         } else {
             // A tag with no end, or one that ends before the last found:
@@ -396,7 +466,9 @@ fn current_in<L: Lines>(
     include: bool,
     count: usize,
 ) -> Option<(Point, Point, bool)> {
-    let (start, end, inclusive) = tag_block(steps, at, None, include, count)?;
+    let found = tag_block(steps, at, None, include, count);
+    // Stopped short of looking, what it found is nothing to go by.
+    let (start, end, inclusive) = found.filter(|_| !steps.ran_out())?;
     if end < start {
         return Some((start, start, false));
     }
@@ -427,7 +499,8 @@ pub(super) fn select<L: Lines>(
     count: usize,
 ) -> Option<(Point, Point)> {
     let steps = Steps::budgeted(lines, WORK);
-    let (start, end, _) = tag_block(&steps, cursor, Some(anchor), include, count)?;
+    let found = tag_block(&steps, cursor, Some(anchor), include, count);
+    let (start, end, _) = found.filter(|_| !steps.ran_out())?;
     Some((start, if end < start { start } else { end }))
 }
 
@@ -475,6 +548,91 @@ mod tests {
         let last = lines.bounds().1;
         let found = current_in(&steps, Point { line: last, col: 1 }, false, 1);
         (steps.asked(), found)
+    }
+
+    /// What `it`, or `at` with `include`, finds from `at` in `text`
+    /// within a budget of `budget` steps.
+    fn within(text: &str, at: Point, include: bool, budget: usize) -> Option<(Point, Point, bool)> {
+        let lines = Plain::new(text);
+        current_in(&Steps::budgeted(&lines, budget), at, include, 1)
+    }
+
+    #[test]
+    fn a_budget_run_out_part_way_finds_nothing_rather_than_a_wrong_block() {
+        let cases = [
+            ("<div class=\"x\">hello</div>", Point { line: 0, col: 17 }),
+            (
+                "<div>\n  <p>hi</p>\nhello\n</div>",
+                Point { line: 2, col: 2 },
+            ),
+        ];
+        for (text, at) in cases {
+            for include in [false, true] {
+                let whole = within(text, at, include, WORK);
+                assert!(whole.is_some(), "{text:?}");
+                for budget in 0..2000 {
+                    let found = within(text, at, include, budget);
+                    assert!(
+                        found.is_none() || found == whole,
+                        "{text:?} at {budget}: {found:?}, not {whole:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_attribute_is_found_through_or_not_at_all() {
+        let data = vec!["x".repeat(50_000); 6].join("\n");
+        let text = format!("<div data=\"{data}\">\nhello\n</div>");
+        let found = within(&text, Point { line: 7, col: 2 }, false, WORK);
+        let inside = (
+            Point {
+                line: 6,
+                col: 50_002,
+            },
+            Point { line: 7, col: 5 },
+            true,
+        );
+        assert!(found.is_none() || found == Some(inside), "{found:?}");
+    }
+
+    #[test]
+    fn tags_with_no_end_cost_a_look_each_kind_not_each_time() {
+        let mut text = String::from("<div>\n");
+        text.push_str(&"<img src=\"a.png\"><br>\n".repeat(5));
+        text.push_str("hello\n");
+        // About 83 KB after it, each tag with no end a look to the end.
+        text.push_str(&"<span class=\"a long attribute, as pages have\">\n".repeat(2000));
+        text.push_str("</div>");
+        let lines = Plain::new(&text);
+        let steps = Steps::budgeted(&lines, WORK);
+        let found = current_in(&steps, Point { line: 6, col: 2 }, true, 1);
+        assert_eq!(
+            found.map(|(start, _, _)| start),
+            Some(Point { line: 0, col: 0 })
+        );
+        assert!(steps.asked() < WORK / 2, "{}", steps.asked());
+    }
+
+    #[test]
+    fn the_way_in_is_budgeted() {
+        // Every `<` an opening tag named for the rest of the line.
+        let text = format!("{}\nx", "<".repeat(5000));
+        let lines = Plain::new(&text);
+        let before = crate::motion::steps::STEPS_ASKED.with(std::cell::Cell::get);
+        assert_eq!(current(&lines, Point { line: 1, col: 0 }, false, 1), None);
+        let at = Point { line: 0, col: 4999 };
+        assert_eq!(select(&lines, at, at, false, 1), None);
+        let asked = crate::motion::steps::STEPS_ASKED.with(std::cell::Cell::get) - before;
+        assert!(asked <= 2 * (WORK + LAST_CLOSING_WORK) + 200, "{asked}");
+    }
+
+    #[test]
+    fn looking_back_for_a_tag_stops_when_the_budget_does() {
+        let lines = Plain::new("abcdefgh");
+        let steps = Steps::budgeted(&lines, 2);
+        assert!(!in_tag(&steps, Point { line: 0, col: 5 }, false));
     }
 
     #[test]
