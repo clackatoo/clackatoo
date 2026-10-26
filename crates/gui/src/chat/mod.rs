@@ -328,8 +328,12 @@ pub(crate) struct ChatView {
     reveal: bool,
     /// The view scrolled: the cursor stays in it.
     keep_cursor: bool,
-    /// The first key of a two-key command in normal mode.
-    read_prefix: Option<read::Prefix>,
+    /// The keys of a command half typed in normal or visual mode.
+    keys: crate::vim::Keys,
+    /// The last `f`, `t`, `F` or `T`, for `;` and `,`.
+    finds: crate::vim::Finds,
+    /// How far its scrolling keys go.
+    paging: crate::vim::Paging,
     /// The block of code under the mouse, which shows a button to copy it.
     hovered_code: Option<TextKey>,
     /// The block of code just copied with its button, which says so.
@@ -477,7 +481,9 @@ impl ChatView {
             goal: None,
             reveal: false,
             keep_cursor: false,
-            read_prefix: None,
+            keys: crate::vim::Keys::default(),
+            finds: crate::vim::Finds::default(),
+            paging: crate::vim::Paging::default(),
             hovered_code: None,
             copied_code: None,
             copied_answer: None,
@@ -2348,7 +2354,8 @@ impl ChatView {
         self.scroll_by(-lines * self.line_height)
     }
 
-    /// Scrolls half a view up, or down.
+    /// Scrolls half a view up, or down, as tests scroll it.
+    #[cfg(test)]
     pub(crate) fn scroll_half(&mut self, up: bool) -> bool {
         let half = self.view_height / 2.0;
         self.scroll_by(if up { -half } else { half })
@@ -2383,9 +2390,13 @@ impl ChatView {
     /// What the bottom bar says about the chat: what the window last said
     /// of it, or how far up the view is.
     pub(crate) fn label(&self) -> Option<String> {
-        self.said
-            .clone()
-            .or_else(|| (!self.follow && self.max_scroll > 0.0).then(|| "↑ scrolled".to_owned()))
+        let said = (self.said.clone())
+            .or_else(|| (!self.follow && self.max_scroll > 0.0).then(|| "↑ scrolled".to_owned()));
+        // A command half typed shows first, as Vim's `showcmd` shows it.
+        match (self.keys.shown(), said) {
+            (Some(keys), Some(said)) => Some(format!("{keys}  {said}")),
+            (keys, said) => keys.or(said),
+        }
     }
 
     /// Says `text` in the bottom bar, until the next key in the chat.
@@ -4117,11 +4128,11 @@ mod tests {
         // `K` hiding what a click showed ends a two-key command half
         // typed, as any key does.
         fixtures::read(&mut view, "g");
-        assert!(view.pending());
+        assert!(view.keys().pending());
         view.detail = Some(Asked);
         fixtures::read(&mut view, "K");
         assert_eq!(view.detail, None);
-        assert!(!view.pending());
+        assert!(!view.keys().pending());
     }
 
     #[test]

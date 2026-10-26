@@ -162,16 +162,17 @@ The new agent hears the conversation with your next message, before it, fenced o
 Undoing turns, reviewing changes, boards, clackatoo's tools and the `claudetask` choice stay the chat's, whichever agent answered. The mode and effort carry over where the new agent has one by the same name; where it hasn't, it uses its own, and a chat an agent started gets the new agent's safest mode; the line across the chat says which. The new agent doesn't see the old one's thinking or the whole output of its tools, only what the chat shows, and its first answer costs more, as nothing of the conversation is cached for it yet. You can stage a handoff while the agent is answering, but must wait until it finishes or stop it before sending. Pending choices stay in this window with the draft; closing the window discards them. Turn numbers, as in `:agentundo 3`, skip the lines where the chat moved.
 ## Normal mode
 
-In normal mode, a solid cursor moves through the conversation's text, and the view follows it. Coming into normal mode puts it on the last line in view, unless it's in view already:
+In normal mode, a solid cursor moves through the conversation's text, and the view follows it. Coming into normal mode puts it on the last line in view, unless it's in view already. Keys are read as a terminal's and an editor's are, so a count goes before a move (`3j`, `2w`), a command half typed shows at the start of the bar, and Ctrl+? lists them:
 
 | Key | Does |
 |---|---|
-| `h` `j` `k` `l`, arrows | A character, or a line. |
-| `w` `b` `e` | By words. |
+| `h` `j` `k` `l`, arrows, `+` `-` | A character, or a line. |
+| `w` `b` `e`, `W` `B` `E` | By words, or by anything between blanks. |
+| `f` `t` `F` `T`, `;` `,` | To a character on the line, or just before it, back with `F` and `T`; `;` again, `,` the other way. |
 | `0` `^` `$` | The start of the line, its first word, its end. |
 | `{` `}` | The block before or after. |
 | `gg` `G` | The start or end of the chat. |
-| Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y, Page Down Page Up | Scroll half a view, or a line. The cursor stays in view. |
+| Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y, Ctrl+F, Page Down Page Up | Scroll half a view, a line, or a page of the view less two lines, as far as in any pane, with a count. The cursor stays in view. |
 | `v` `V` | Select characters, or lines. `o` goes to the other end, Esc stops. |
 | `y` | Copies what's selected to the clipboard, or else what the cursor's in: a block of code, a message, an answer as its Markdown, a card, or on a "Worked for" line, the whole turn. |
 | `za` `zo` `zc`, Enter on a "Worked for" line | Opens or folds the turn's work, or on a subagents' line, their card. `zR` and `zM` open or fold every turn and every card. |

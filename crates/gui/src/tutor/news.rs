@@ -905,6 +905,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "text-objects",
         what: "Y in visual mode copies the lines selected, whole, as Vim's does, not the cursor's line",
     },
+    News {
+        id: "chatkeys",
+        date: "2026-10-26",
+        lesson: "agents",
+        what: "A chat reads keys as every pane does: counts, W B E, f t ; , and Ctrl+F, shown as typed",
+    },
 ];
 
 impl News {

@@ -11,14 +11,18 @@
 //! what was laid out last; what they copy waits for the fonts, as the turns
 //! it takes in may need laying out.
 //!
+//! The keys are read by the grammar every pane reads them with, as
+//! [`ChatKeys`] says a chat reads them, so a count goes before any move.
+//!
 //! | Keys | What they do |
 //! |---|---|
-//! | `h` `j` `k` `l`, arrows | Move a character, or a line |
-//! | `w` `b` `e` | Move by words |
+//! | `h` `j` `k` `l`, arrows, `+` `-` | Move a character, or a line |
+//! | `w` `b` `e`, `W` `B` `E` | Move by words, or by anything between blanks |
+//! | `f` `t` `F` `T`, `;` `,` | To a character on the line, or just before it, and again |
 //! | `0` `^` `$` | To the start of the line, its first word, its end |
 //! | `{` `}` | To the block before, or after |
 //! | `gg` `G` | To the start of the chat, or its end |
-//! | Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y | Scroll half a view, or a line |
+//! | Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y, Ctrl+F and the pages | Scroll as far as in any pane, the cursor kept in view |
 //! | `v` `V` | Select characters, or lines; `o` goes to the other end |
 //! | `y` | Copy what's selected, or the block of code, message or card under the cursor |
 //! | `za` `zo` `zc`, Enter | Open or fold the tool, turn's work, or subagents under the cursor; `zR` and `zM` all turns and subagents |
@@ -28,8 +32,6 @@
 //! | `i` `a` `I` `A` `o`, Enter | Type a message |
 //! | `1`–`9`, then the same again or Enter | While the agent asks something, pick an answer, then give it; Esc leaves it be |
 
-use crate::shortcuts::bindings::Hint;
-
 use clackatoo_protocol::{ChatAction, ChatNode, Item};
 use winit::keyboard::{Key, NamedKey};
 
@@ -37,16 +39,184 @@ use super::card::Card;
 use super::paint::{AGENTS, FOLD, How, ITEMS, PROMPT, Picked, Position, TextKey, control};
 use super::{ChatView, Input};
 use crate::input::KeyPress;
+use crate::motion::Motion;
 use crate::pane::Copy;
-use crate::vim::Selection;
+use crate::vim::{Action, Command, Dialect, Parsed, Read, Reader, Scroll, Selection, Stroke};
 
-/// The first key of a two-key command, waiting for the second.
+/// What `z` and a key fold or open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Prefix {
-    /// `g`, and `gg` goes to the start.
-    G,
-    /// `z`, for opening and folding.
-    Z,
+pub(crate) enum Fold {
+    /// `za`: the work, tool or card under the cursor, open or folded.
+    Toggle,
+    /// `zo`: it, opened.
+    Open,
+    /// `zc`: it, folded.
+    Close,
+    /// `zR`, or `zM` if not `open`: every turn's work and card.
+    All { open: bool },
+}
+
+/// A command of a chat's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChatKey {
+    /// `i`, `a`, `I` and `A`, in visual mode too: type a message.
+    Compose,
+    /// Enter: open or fold what's under the cursor, or type a message.
+    Enter,
+    /// Esc: stop selecting.
+    Escape,
+    /// `y`: copy what's selected, or the block, message or card under the
+    /// cursor, whole.
+    Copy,
+    /// `K`: the chat's context and limits, shown or hidden.
+    Detail,
+    /// `u`, or Ctrl+R if `redo`: the turn's changes to files.
+    Undo {
+        redo: bool,
+    },
+    Fold(Fold),
+    /// `zl` and `zh`, `zL` and `zH` if `half`: the table the cursor's in,
+    /// sideways.
+    Sideways {
+        right: bool,
+        half: bool,
+    },
+}
+
+/// How a chat reads keys in normal and visual mode: the moves it has, by
+/// its lines laid out in proportional fonts, with counts, `f` `t` `F` `T`
+/// `;` `,` on a line, `v` `V` `o`, the scrolling keys as far as in any
+/// pane, and the keys into insert mode, which type a message; and its own:
+/// Enter, `y`, `K`, `u` and Ctrl+R for turns, and `z` for folding and
+/// tables. It takes no register, mark, edit or operator: a chat's text
+/// isn't the user's to change.
+pub(crate) struct ChatKeys;
+
+impl Dialect for ChatKeys {
+    type Own = ChatKey;
+
+    fn describe(&self, action: ChatKey) -> String {
+        match action {
+            ChatKey::Compose => "Compose a message",
+            ChatKey::Enter => "Open or fold item; otherwise compose",
+            ChatKey::Escape => "Clear selection",
+            ChatKey::Copy => "Copy selection or item at cursor",
+            ChatKey::Detail => "Open context and usage limits",
+            ChatKey::Undo { redo: false } => "Undo turn file changes",
+            ChatKey::Undo { redo: true } => "Redo turn file changes",
+            ChatKey::Fold(Fold::Toggle) => "Toggle work, tool or subagents",
+            ChatKey::Fold(Fold::Open) => "Expand work, tool or subagents",
+            ChatKey::Fold(Fold::Close) => "Fold work, tool or subagents",
+            ChatKey::Fold(Fold::All { open: true }) => "Expand all work",
+            ChatKey::Fold(Fold::All { open: false }) => "Fold all work",
+            ChatKey::Sideways {
+                right: true,
+                half: false,
+            } => "Scroll table right",
+            ChatKey::Sideways {
+                right: false,
+                half: false,
+            } => "Scroll table left",
+            ChatKey::Sideways {
+                right: true,
+                half: true,
+            } => "Scroll table right half a view",
+            ChatKey::Sideways {
+                right: false,
+                half: true,
+            } => "Scroll table left half a view",
+        }
+        .into()
+    }
+
+    fn own(&self, stroke: Stroke, _keys: &mut Reader<'_>, visual: bool) -> Option<Read<ChatKey>> {
+        let key = match stroke {
+            Stroke::Enter => ChatKey::Enter,
+            Stroke::Escape => ChatKey::Escape,
+            Stroke::Char {
+                ch: 'r',
+                ctrl: true,
+            } => ChatKey::Undo { redo: true },
+            Stroke::Char { ch, ctrl: false } => match ch {
+                'i' | 'a' | 'I' | 'A' => ChatKey::Compose,
+                // In visual mode, `o` goes to the selection's other end.
+                'o' if !visual => ChatKey::Compose,
+                'O' if !visual => return Some(Read::No),
+                'y' => ChatKey::Copy,
+                'u' => ChatKey::Undo { redo: false },
+                'K' if !visual => ChatKey::Detail,
+                'K' => return Some(Read::No),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(Read::Yes(key))
+    }
+
+    fn after_z(
+        &self,
+        stroke: Stroke,
+        _keys: &mut Reader<'_>,
+        _visual: bool,
+    ) -> Option<Read<ChatKey>> {
+        let key = match stroke.plain()? {
+            'a' => ChatKey::Fold(Fold::Toggle),
+            'o' => ChatKey::Fold(Fold::Open),
+            'c' => ChatKey::Fold(Fold::Close),
+            'R' => ChatKey::Fold(Fold::All { open: true }),
+            'M' => ChatKey::Fold(Fold::All { open: false }),
+            'l' | 'h' | 'L' | 'H' => {
+                let ch = stroke.plain()?;
+                ChatKey::Sideways {
+                    right: ch.eq_ignore_ascii_case(&'l'),
+                    half: ch.is_ascii_uppercase(),
+                }
+            }
+            _ => return None,
+        };
+        Some(Read::Yes(key))
+    }
+
+    fn takes(&self, command: &Command<ChatKey>) -> bool {
+        if command.register.is_some() {
+            return false;
+        }
+        match command.action {
+            Action::Move(motion) => matches!(
+                motion,
+                Motion::Down(_)
+                    | Motion::Up(_)
+                    | Motion::RowDown(_)
+                    | Motion::RowUp(_)
+                    | Motion::Left
+                    | Motion::Right
+                    | Motion::LeftOver
+                    | Motion::RightOver
+                    | Motion::WordStart
+                    | Motion::WordEnd
+                    | Motion::WordBack
+                    | Motion::BigWordStart
+                    | Motion::BigWordEnd
+                    | Motion::BigWordBack
+                    | Motion::LineStart
+                    | Motion::FirstNonBlank
+                    | Motion::LineEnd
+                    | Motion::NextLine
+                    | Motion::PreviousLine
+                    | Motion::Paragraph { .. }
+                    | Motion::First
+                    | Motion::Last
+                    | Motion::Find { .. }
+            ),
+            Action::FindAgain { .. }
+            | Action::Scroll(_)
+            | Action::Visual { .. }
+            | Action::OtherEnd
+            | Action::Insert(_)
+            | Action::Own(_) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Which way to move.
@@ -68,16 +238,16 @@ impl ChatView {
         }
     }
 
-    /// Whether a two-key command is half typed, such as `z` waiting for
-    /// `a`, which the next key is for.
-    pub(crate) fn pending(&self) -> bool {
-        self.read_prefix.is_some()
+    /// The keys of a command half typed in normal or visual mode, such as
+    /// `z` waiting for `a`, or a count.
+    pub(crate) fn keys(&self) -> &crate::vim::Keys {
+        &self.keys
     }
 
-    /// Forgets a two-key command half typed, as a binding of the window's
-    /// took the key after it.
-    pub(crate) fn forget_prefix(&mut self) {
-        self.read_prefix = None;
+    /// Forgets what's half typed, as a binding of the window's took the
+    /// key after a count.
+    pub(crate) fn forget_keys(&mut self) {
+        self.keys.clear();
     }
 
     /// Ends what was half done in reading as the focus leaves the chat: a
@@ -85,7 +255,7 @@ impl ChatView {
     /// armed. The cursor stays where it is.
     pub(crate) fn leave(&mut self) {
         self.leave_visual();
-        self.read_prefix = None;
+        self.keys.clear();
         self.armed = None;
     }
 
@@ -128,8 +298,8 @@ impl ChatView {
         }
         let k = matches!(press.key, Key::Character(text) if text == "K");
         if detail && k && self.visual().is_none() {
-            // A two-key command half typed is over, as with any other key.
-            self.read_prefix = None;
+            // A command half typed is over, as with any other key.
+            self.keys.clear();
             return (true, false);
         }
         let (redraw, insert) = self.read(press);
@@ -150,7 +320,7 @@ impl ChatView {
             return false;
         };
         let modifiers = press.modifiers;
-        if modifiers.ctrl || modifiers.alt || self.read_prefix.is_some() {
+        if modifiers.ctrl || modifiers.alt || self.keys.pending() {
             return false;
         }
         let number = match press.key {
@@ -206,201 +376,218 @@ impl ChatView {
     }
 
     /// A key in normal or visual mode, as [`read_key`](Self::read_key)
-    /// says.
+    /// says: read by the grammar every pane reads keys with, as
+    /// [`ChatKeys`] says a chat reads them.
     fn read(&mut self, press: &KeyPress<'_>) -> (bool, bool) {
-        let prefix = self.read_prefix.take();
+        // Ctrl+Shift+C copies what's selected, as in other panes,
+        // whatever's half typed.
         let modifiers = press.modifiers;
-        let character = match press.key {
-            Key::Character(text) => text.chars().next(),
-            _ => None,
-        };
-        let visual = self.visual();
-        if modifiers.ctrl {
-            let redraw =
-                self.read_control(character.map(|ch| ch.to_ascii_lowercase()), modifiers.shift);
-            return (redraw, false);
+        if modifiers.ctrl
+            && modifiers.shift
+            && matches!(press.key, Key::Character(text) if text.eq_ignore_ascii_case("c"))
+        {
+            self.keys.clear();
+            self.copy_picked(Copy::Clipboard);
+            return (true, false);
         }
-        if prefix == Some(Prefix::Z) {
-            return (self.fold_key(character), false);
-        }
-        self.read_character(press, character, prefix, visual)
-    }
-
-    crate::shortcuts::bindings::described_keys! {
-        pub(super) fn read_control / describe_read_control(&mut self, character: Option<char>, shift: bool) -> bool;
-        match (character, shift) => {
-            (Some('c'), true) =>
-                Hint::Action("Copy conversation selection"),
-                {
-                    self.copy_picked(Copy::Clipboard);
-                    true
-                };
-            (Some('r'), false) =>
-                Hint::Action("Redo turn file changes"),
-                {
-                    self.undo_key(true);
-                    true
-                };
-            (Some('e'), _) =>
-                Hint::Action("Scroll down one line"),
-                self.scroll_keeping_cursor(|chat| chat.scroll_lines(-1.0));
-            (Some('y'), _) =>
-                Hint::Action("Scroll up one line"),
-                self.scroll_keeping_cursor(|chat| chat.scroll_lines(1.0));
-            (Some('d'), _) =>
-                Hint::Action("Scroll down half a view"),
-                self.scroll_keeping_cursor(|chat| chat.scroll_half(false));
-            (Some('u'), _) =>
-                Hint::Action("Scroll up half a view"),
-                self.scroll_keeping_cursor(|chat| chat.scroll_half(true));
-            _ =>
-                Hint::None,
-                false;
-        }
-        result
-    }
-
-    crate::shortcuts::bindings::described_keys! {
-        pub(super) fn read_character / describe_read_character(
-            &mut self,
-            press: &KeyPress<'_>,
-            character: Option<char>,
-            prefix: Option<Prefix>,
-            visual: Option<Selection>,
-        ) -> (bool, bool);
-        match (character, press.key) => {
-            (Some('i' | 'a' | 'I' | 'A'), _) =>
-                Hint::Action("Compose a message"),
-                {
-                    self.leave_visual();
-                    return (true, true);
-                };
-            (Some('o'), _) if visual.is_none() =>
-                Hint::Action("Compose a message"),
-                return (true, true);
-            (Some('o'), _) =>
-                Hint::Action("Other end of selection"),
-                {
-                    if let Some(picked) = &mut self.picked {
-                        std::mem::swap(&mut picked.anchor, &mut picked.head);
-                        self.cursor = Some(picked.head);
-                        self.goal = None;
-                        self.reveal = true;
+        let visual = self.visual().is_some();
+        let mut redraw = false;
+        for stroke in crate::vim::strokes(press, false) {
+            let was_pending = self.keys.pending();
+            match self.keys.read(stroke, visual, &ChatKeys) {
+                Parsed::Incomplete => redraw = true,
+                Parsed::Nothing => redraw |= was_pending,
+                Parsed::Command(command) => {
+                    let (drawn, insert) = self.execute(command);
+                    if insert {
+                        return (true, true);
                     }
-                };
-            (_, Key::Named(NamedKey::Enter)) =>
-                Hint::Action("Open or fold item; otherwise compose"),
-                {
-                    if !self.fold_tool(None) {
-                        let Some(cursor) = self.cursor.filter(|cursor| control(cursor.text.piece)) else {
-                            self.leave_visual();
-                            return (true, true);
-                        };
-                        let TextKey { turn, piece, part } = cursor.text;
-                        match self.agent_on(turn, part).filter(|_| piece == AGENTS) {
-                            Some(chat) => self.queued.push(Input::Act(ChatAction::Open { chat })),
-                            None if piece == AGENTS => self.toggle_agents(turn),
-                            None => self.toggle_fold(turn),
-                        }
-                    }
-                };
-            (_, Key::Named(NamedKey::Escape)) =>
-                Hint::Action("Clear selection"),
-                self.picked = None;
-            (Some('v'), _) =>
-                Hint::Action("Select characters"),
-                self.visual_key(visual, Selection::Characters);
-            (Some('V'), _) =>
-                Hint::Action("Select lines"),
-                self.visual_key(visual, Selection::Lines);
-            (Some('y'), _) =>
-                Hint::Action("Copy selection or item at cursor"),
-                self.yank();
-            (Some('K'), _) if visual.is_none() =>
-                Hint::Action("Open context and usage limits"),
-                {
-                    if !self.toggle_detail() {
-                        self.say("the agent hasn't said how much context the chat fills".to_owned());
-                    }
-                };
-            (Some('u'), _) =>
-                Hint::Action("Undo turn file changes"),
-                self.undo_key(false);
-            (Some('z'), _) =>
-                Hint::Prefix,
-                self.read_prefix = Some(Prefix::Z);
-            (Some('g'), _) if prefix == Some(Prefix::G) =>
-                Hint::Action("Start of conversation"),
-                self.go_to_end(Way::Back);
-            (Some('g'), _) =>
-                Hint::Prefix,
-                self.read_prefix = Some(Prefix::G);
-            (Some('G'), _) =>
-                Hint::Action("End of conversation"),
-                self.go_to_end(Way::On);
-            (Some('j'), _) | (_, Key::Named(NamedKey::ArrowDown)) =>
-                Hint::Action("Line down"),
-                self.vertical(Way::On);
-            (Some('k'), _) | (_, Key::Named(NamedKey::ArrowUp)) =>
-                Hint::Action("Line up"),
-                self.vertical(Way::Back);
-            (Some('h'), _) | (_, Key::Named(NamedKey::ArrowLeft)) =>
-                Hint::Action("Character left"),
-                self.across(Way::Back);
-            (Some('l'), _) | (_, Key::Named(NamedKey::ArrowRight)) =>
-                Hint::Action("Character right"),
-                self.across(Way::On);
-            (Some('w'), _) =>
-                Hint::Action("Next word"),
-                self.word(Way::On, false);
-            (Some('e'), _) =>
-                Hint::Action("End of word"),
-                self.word(Way::On, true);
-            (Some('b'), _) =>
-                Hint::Action("Previous word"),
-                self.word(Way::Back, false);
-            (Some(edge @ ('0' | '^' | '$')), _) =>
-                Hint::Action(match edge {
-                    '0' => "Start of line",
-                    '^' => "First word on line",
-                    _ => "End of line",
-                }),
-                self.line_edge(edge);
-            (Some('{'), _) =>
-                Hint::Action("Previous block"),
-                self.block(Way::Back);
-            (Some('}'), _) =>
-                Hint::Action("Next block"),
-                self.block(Way::On);
-            (_, Key::Named(NamedKey::PageDown)) =>
-                Hint::Action("Scroll down half a view"),
-                {
-                    return (
-                        self.scroll_keeping_cursor(|chat| chat.scroll_half(false)),
-                        false,
-                    );
-                };
-            (_, Key::Named(NamedKey::PageUp)) =>
-                Hint::Action("Scroll up half a view"),
-                {
-                    return (
-                        self.scroll_keeping_cursor(|chat| chat.scroll_half(true)),
-                        false,
-                    );
-                };
-            _ =>
-                Hint::None,
-                return (false, false);
-        }
-        then {
-            // Visual mode's selection follows the cursor.
-            if let (Some(picked), Some(cursor)) = (&mut self.picked, self.cursor)
-                && matches!(picked.how, How::Visual(_))
-            {
-                picked.head = cursor;
+                    redraw |= drawn;
+                }
             }
-            (true, false)
         }
+        (redraw, false)
+    }
+
+    /// Does `command`, read whole. Returns whether the chat must be
+    /// redrawn, and whether it goes to insert mode, to type a message.
+    fn execute(&mut self, command: Command<ChatKey>) -> (bool, bool) {
+        let times = command.times();
+        match command.action {
+            Action::Move(motion) => {
+                let motion = self.finds.remember(motion);
+                self.moved(motion, times);
+            }
+            Action::FindAgain { reverse } => match self.finds.again(reverse) {
+                Some(motion) => self.moved(motion, times),
+                None => return (false, false),
+            },
+            Action::Scroll(scroll) => {
+                let moved = self.scroll_keeping_cursor(|chat| chat.scrolled(scroll, command.count));
+                return (moved, false);
+            }
+            Action::Visual { lines } => {
+                let kind = if lines {
+                    Selection::Lines
+                } else {
+                    Selection::Characters
+                };
+                self.visual_key(self.visual(), kind);
+            }
+            Action::OtherEnd => {
+                if let Some(picked) = &mut self.picked {
+                    std::mem::swap(&mut picked.anchor, &mut picked.head);
+                    self.cursor = Some(picked.head);
+                    self.goal = None;
+                    self.reveal = true;
+                }
+            }
+            Action::Insert(_) | Action::Own(ChatKey::Compose) => {
+                self.leave_visual();
+                return (true, true);
+            }
+            Action::Own(own) => return self.own(own),
+            // Nothing else is taken (see `ChatKeys::takes`).
+            _ => return (false, false),
+        }
+        self.follow_selection();
+        (true, false)
+    }
+
+    /// Does `key`, a command of a chat's own.
+    fn own(&mut self, key: ChatKey) -> (bool, bool) {
+        match key {
+            ChatKey::Compose => return (true, true),
+            ChatKey::Enter => {
+                if !self.fold_tool(None) {
+                    let Some(cursor) = self.cursor.filter(|cursor| control(cursor.text.piece))
+                    else {
+                        self.leave_visual();
+                        return (true, true);
+                    };
+                    let TextKey { turn, piece, part } = cursor.text;
+                    match self.agent_on(turn, part).filter(|_| piece == AGENTS) {
+                        Some(chat) => self.queued.push(Input::Act(ChatAction::Open { chat })),
+                        None if piece == AGENTS => self.toggle_agents(turn),
+                        None => self.toggle_fold(turn),
+                    }
+                }
+            }
+            ChatKey::Escape => self.picked = None,
+            ChatKey::Copy => self.yank(),
+            ChatKey::Detail => {
+                if !self.toggle_detail() {
+                    self.say("the agent hasn't said how much context the chat fills".to_owned());
+                }
+            }
+            ChatKey::Undo { redo } => self.undo_key(redo),
+            ChatKey::Fold(fold) => return (self.fold_key(fold), false),
+            ChatKey::Sideways { right, half } => {
+                let pixels = if half {
+                    self.cache.width / 2.0
+                } else {
+                    4.0 * self.cache.size
+                };
+                let moved = self.scroll_sideways(None, if right { pixels } else { -pixels });
+                return (moved, false);
+            }
+        }
+        self.follow_selection();
+        (true, false)
+    }
+
+    /// Visual mode's selection follows the cursor.
+    fn follow_selection(&mut self) {
+        if let (Some(picked), Some(cursor)) = (&mut self.picked, self.cursor)
+            && matches!(picked.how, How::Visual(_))
+        {
+            picked.head = cursor;
+        }
+    }
+
+    /// Moves the cursor by `motion`, `times` times, or until it goes no
+    /// further, so a count as big as there is costs no more than the chat.
+    fn moved(&mut self, motion: Motion, times: usize) {
+        if let Motion::Find {
+            ch,
+            forward,
+            till,
+            again,
+        } = motion
+        {
+            self.find((ch, forward, till, again), times);
+            return;
+        }
+        for _ in 0..times {
+            let before = (self.cursor, self.goal);
+            self.move_once(motion);
+            if (self.cursor, self.goal) == before {
+                break;
+            }
+            // `gg`, `G`, `0`, `^` and `$` go where they go, once.
+            if matches!(
+                motion,
+                Motion::First
+                    | Motion::Last
+                    | Motion::LineStart
+                    | Motion::FirstNonBlank
+                    | Motion::LineEnd
+            ) {
+                break;
+            }
+        }
+    }
+
+    /// Moves the cursor once by `motion`, one of those [`ChatKeys`]
+    /// takes.
+    fn move_once(&mut self, motion: Motion) {
+        match motion {
+            Motion::Down(_) | Motion::RowDown(_) => self.vertical(Way::On),
+            Motion::Up(_) | Motion::RowUp(_) => self.vertical(Way::Back),
+            Motion::Left | Motion::LeftOver => self.across(Way::Back),
+            Motion::Right | Motion::RightOver => self.across(Way::On),
+            Motion::WordStart => self.word(Way::On, false, false),
+            Motion::WordEnd => self.word(Way::On, true, false),
+            Motion::WordBack => self.word(Way::Back, false, false),
+            Motion::BigWordStart => self.word(Way::On, false, true),
+            Motion::BigWordEnd => self.word(Way::On, true, true),
+            Motion::BigWordBack => self.word(Way::Back, false, true),
+            Motion::LineStart => self.line_edge('0'),
+            Motion::FirstNonBlank => self.line_edge('^'),
+            Motion::LineEnd => self.line_edge('$'),
+            Motion::NextLine => {
+                self.vertical(Way::On);
+                self.line_edge('^');
+            }
+            Motion::PreviousLine => {
+                self.vertical(Way::Back);
+                self.line_edge('^');
+            }
+            Motion::Paragraph { forward } => {
+                self.block(if forward { Way::On } else { Way::Back });
+            }
+            Motion::First => self.go_to_end(Way::Back),
+            Motion::Last => self.go_to_end(Way::On),
+            _ => {}
+        }
+    }
+
+    /// Ctrl+E, Ctrl+Y, Ctrl+D, Ctrl+U, Ctrl+F and the pages, `count`
+    /// typed, as far as they go in any pane (see [`crate::vim::Paging`]).
+    /// Returns whether the view moved.
+    fn scrolled(&mut self, scroll: Scroll, count: Option<usize>) -> bool {
+        let (Scroll::Line { down } | Scroll::HalfPage { down } | Scroll::Page { down }) = scroll;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "rows in view"
+        )]
+        let view = (self.view_height / self.line_height.max(1.0))
+            .floor()
+            .max(1.0) as u64;
+        #[allow(clippy::cast_precision_loss, reason = "rows in view")]
+        let rows = self.paging.rows(scroll, count, view) as f32;
+        self.scroll_by(if down { rows } else { -rows } * self.line_height)
     }
 
     /// `u`, or with `redo` Ctrl+R: undoes what the turn the cursor's in
@@ -437,101 +624,69 @@ impl ChatView {
         }));
     }
 
-    /// `z` and then `character`: opens or folds the work of the turn the
-    /// cursor's in, or every turn's.
-    fn fold_key(&mut self, character: Option<char>) -> bool {
-        let turn = self.cursor.map(|cursor| cursor.text.turn);
+    /// `za`, `zo`, `zc`, `zR` or `zM`: opens or folds the work of the turn
+    /// the cursor's in, or of every turn; on a tool, the tool; on the card
+    /// of the chats a turn started, the card. Returns whether it did.
+    fn fold_key(&mut self, fold: Fold) -> bool {
+        let open = match fold {
+            Fold::Toggle => None,
+            Fold::Open => Some(true),
+            Fold::Close => Some(false),
+            Fold::All { open } => {
+                self.set_all_folds(open);
+                self.set_all_agents(open);
+                self.after_fold();
+                return true;
+            }
+        };
+        if self.fold_tool(open) {
+            return true;
+        }
+        let Some(turn) = self.cursor.map(|cursor| cursor.text.turn) else {
+            return false;
+        };
         // On the card of the chats the turn started, it's the card that
         // opens and folds.
         let card = self
             .cursor
             .is_some_and(|cursor| cursor.text.piece == AGENTS);
-        // Sideways, the table the cursor's in, as Vim scrolls a line too
-        // long for the window: a few characters, or half the column.
-        let sideways = self.table_scroll_key(character);
-        if let Some(pixels) = sideways {
-            return self.scroll_sideways(None, pixels);
+        match (open, card) {
+            (None, true) => self.toggle_agents(turn),
+            (Some(open), true) => self.set_agents(turn, open),
+            (None, false) => self.toggle_fold(turn),
+            (Some(open), false) => self.set_fold(turn, open),
         }
-        if matches!(character, Some('a' | 'o' | 'c'))
-            && self.fold_tool(character.filter(|&key| key != 'a').map(|key| key == 'o'))
+        self.after_fold();
+        true
+    }
+
+    /// Puts the cursor where it can be after a fold: off a chat's line on
+    /// a card folded away, onto the card's own, and out of a turn's work
+    /// folded away, onto the line it folds under.
+    fn after_fold(&mut self) {
+        if let Some(cursor) = self.cursor
+            && cursor.text.piece == AGENTS
+            && cursor.text.part > 0
+            && !self.agents_open(cursor.text.turn)
         {
-            return true;
+            self.cursor = Some(Position {
+                text: TextKey {
+                    part: 0,
+                    ..cursor.text
+                },
+                byte: 0,
+            });
+            self.picked = None;
         }
-        self.fold_bound(character, turn, card)
-    }
-
-    crate::shortcuts::bindings::described_keys! {
-        pub(super) fn table_scroll_key / describe_table_scroll_key(&mut self, character: Option<char>) -> Option<f32>;
-        match character => {
-            Some('l') =>
-                Hint::Action("Scroll table right"),
-                Some(4.0 * self.cache.size);
-            Some('h') =>
-                Hint::Action("Scroll table left"),
-                Some(-4.0 * self.cache.size);
-            Some('L') =>
-                Hint::Action("Scroll table right half a view"),
-                Some(self.cache.width / 2.0);
-            Some('H') =>
-                Hint::Action("Scroll table left half a view"),
-                Some(-self.cache.width / 2.0);
-            _ =>
-                Hint::None,
-                None;
-        }
-        result
-    }
-
-    crate::shortcuts::bindings::described_keys! {
-        pub(super) fn fold_bound / describe_fold_bound(
-            &mut self,
-            character: Option<char>,
-            turn: Option<usize>,
-            card: bool,
-        ) -> bool;
-        match (character, turn) => {
-            (Some(all @ ('R' | 'M')), _) =>
-                Hint::Action(if all == 'R' {
-                    "Expand all work"
-                } else {
-                    "Fold all work"
-                }),
-                {
-                    self.set_all_folds(all == 'R');
-                    self.set_all_agents(all == 'R');
-                };
-            (Some('a'), Some(turn)) if card =>
-                Hint::Action("Toggle subagent card"),
-                self.toggle_agents(turn);
-            (Some('o'), Some(turn)) if card =>
-                Hint::Action("Expand subagent card"),
-                self.set_agents(turn, true);
-            (Some('c'), Some(turn)) if card =>
-                Hint::Action("Fold subagent card"),
-                self.set_agents(turn, false);
-            (Some('a'), Some(turn)) =>
-                Hint::Action("Toggle work"),
-                self.toggle_fold(turn);
-            (Some('o'), Some(turn)) =>
-                Hint::Action("Expand work"),
-                self.set_fold(turn, true);
-            (Some('c'), Some(turn)) =>
-                Hint::Action("Fold work"),
-                self.set_fold(turn, false);
-            _ =>
-                Hint::None,
-                return false;
-        }
-        then {
-            // A chat's line on a card folded away can't keep the cursor: it
-            // goes to the card's own line.
-            if let Some(cursor) = self.cursor
-                && cursor.text.piece == AGENTS
-                && cursor.text.part > 0
-                && !self.agents_open(cursor.text.turn)
-            {
+        if let Some(cursor) = self.cursor
+            && cursor.text.piece >= ITEMS
+            && let Some(turn) = self.node.turns.get(cursor.text.turn)
+        {
+            let shape = self.shape(cursor.text.turn, turn);
+            if !shape.open && cursor.text.piece - ITEMS < shape.answer {
                 self.cursor = Some(Position {
                     text: TextKey {
+                        piece: FOLD,
                         part: 0,
                         ..cursor.text
                     },
@@ -539,28 +694,8 @@ impl ChatView {
                 });
                 self.picked = None;
             }
-            // What's folded away can't keep the cursor: it goes to the line
-            // its work folds under.
-            if let Some(cursor) = self.cursor
-                && cursor.text.piece >= ITEMS
-                && let Some(turn) = self.node.turns.get(cursor.text.turn)
-            {
-                let shape = self.shape(cursor.text.turn, turn);
-                if !shape.open && cursor.text.piece - ITEMS < shape.answer {
-                    self.cursor = Some(Position {
-                        text: TextKey {
-                            piece: FOLD,
-                            part: 0,
-                            ..cursor.text
-                        },
-                        byte: 0,
-                    });
-                    self.picked = None;
-                }
-            }
-            self.reveal = true;
-            true
         }
+        self.reveal = true;
     }
 
     /// Opens the tool under the reading cursor, keeping the cursor on its
@@ -906,8 +1041,10 @@ impl ChatView {
 
     /// `w`, `e` or `b`: the start of the next word, the end of this one or
     /// the next, or the start of this one or the one before, going on to
-    /// the next block, or back to the one before, at either end.
-    fn word(&mut self, way: Way, end: bool) {
+    /// the next block, or back to the one before, at either end; `W`, `E`
+    /// and `B` if `big`, for anything between blanks.
+    fn word(&mut self, way: Way, end: bool, big: bool) {
+        let kind = if big { big_class } else { class };
         let Some(cursor) = self.cursor_or_default() else {
             return;
         };
@@ -916,21 +1053,71 @@ impl ChatView {
         };
         let byte = super::paint::within(text.text, cursor.byte);
         let found = match (way, end) {
-            (Way::On, false) => next_word_start(text.text, byte),
-            (Way::On, true) => word_end(text.text, byte),
-            (Way::Back, _) => word_start_before(text.text, byte),
+            (Way::On, false) => next_word_start(text.text, byte, kind),
+            (Way::On, true) => word_end(text.text, byte, kind),
+            (Way::Back, _) => word_start_before(text.text, byte, kind),
         };
         if let Some(byte) = found {
             self.go(Position { byte, ..cursor });
         } else if let Some(key) = self.next_text(cursor.text, way) {
             let byte = match (way, self.text(key)) {
                 (Way::Back, Some(text)) => {
-                    word_start_before(text.text, text.text.len()).unwrap_or(0)
+                    word_start_before(text.text, text.text.len(), kind).unwrap_or(0)
                 }
-                (Way::On, Some(text)) if end => word_end(text.text, 0).unwrap_or(0),
+                (Way::On, Some(text)) if end => word_end(text.text, 0, kind).unwrap_or(0),
                 _ => 0,
             };
             self.go(Position { text: key, byte });
+        }
+        self.goal = None;
+    }
+
+    /// `f`, `t`, `F` or `T` (`forward`, `till`) and `ch`, `count` times:
+    /// the `count`th `ch` on the cursor's line after it, or before it, or
+    /// the character just before that, or after it going back; found
+    /// `again`, by `;` or `,`, a `t` or `T` doesn't stop at one right by
+    /// the cursor, as Vim's doesn't. Nowhere if there aren't so many.
+    fn find(&mut self, (ch, forward, till, again): (char, bool, bool, bool), count: usize) {
+        let Some(cursor) = self.cursor_or_default() else {
+            return;
+        };
+        let Some(text) = self.text(cursor.text) else {
+            return;
+        };
+        let line = super::paint::line_of(text.layout, cursor.byte);
+        let Some((_, range)) = super::paint::line_middle(text.layout, line) else {
+            return;
+        };
+        let end = range.end.min(text.text.len());
+        let start = range.start.min(end);
+        let chars: Vec<(usize, char)> = text.text[start..end]
+            .trim_end_matches(['\n', '\r'])
+            .char_indices()
+            .map(|(at, ch)| (start + at, ch))
+            .collect();
+        let byte = super::paint::within(text.text, cursor.byte);
+        let Some(here) = chars.iter().position(|&(at, _)| at >= byte) else {
+            return;
+        };
+        let skip = usize::from(till && again);
+        let found = if forward {
+            (chars.iter().enumerate())
+                .skip(here + 1 + skip)
+                .filter(|(_, (_, found))| *found == ch)
+                .nth(count - 1)
+                .map(|(index, _)| if till { index - 1 } else { index })
+        } else {
+            (chars[..here.saturating_sub(skip)].iter().enumerate())
+                .rev()
+                .filter(|(_, (_, found))| *found == ch)
+                .nth(count - 1)
+                .map(|(index, _)| if till { index + 1 } else { index })
+        };
+        if let Some(index) = found {
+            self.go(Position {
+                byte: chars[index].0,
+                ..cursor
+            });
         }
         self.goal = None;
     }
@@ -1107,9 +1294,15 @@ fn class(ch: char) -> u8 {
     }
 }
 
+/// What sort of character `ch` is, for WORDs: blank, or not, as Vim's `W`
+/// sees them.
+fn big_class(ch: char) -> u8 {
+    u8::from(!ch.is_whitespace())
+}
+
 /// Where the next word after the one at `byte` in `text` starts, if one
-/// does.
-fn next_word_start(text: &str, byte: usize) -> Option<usize> {
+/// does, words as `class` sorts characters.
+fn next_word_start(text: &str, byte: usize, class: fn(char) -> u8) -> Option<usize> {
     let mut chars = text[byte..].char_indices().map(|(at, ch)| (byte + at, ch));
     let (_, first) = chars.next()?;
     let mut was = class(first);
@@ -1125,7 +1318,7 @@ fn next_word_start(text: &str, byte: usize) -> Option<usize> {
 
 /// Where the word at `byte` in `text` ends, or if `byte` is at its end
 /// already, the next one: its last character.
-fn word_end(text: &str, byte: usize) -> Option<usize> {
+fn word_end(text: &str, byte: usize, class: fn(char) -> u8) -> Option<usize> {
     let chars: Vec<(usize, char)> = text[byte..]
         .char_indices()
         .map(|(at, ch)| (byte + at, ch))
@@ -1143,7 +1336,7 @@ fn word_end(text: &str, byte: usize) -> Option<usize> {
 
 /// Where the word before `byte` in `text` starts, or the one `byte` is
 /// in, if it's not at its start.
-fn word_start_before(text: &str, byte: usize) -> Option<usize> {
+fn word_start_before(text: &str, byte: usize, class: fn(char) -> u8) -> Option<usize> {
     let chars: Vec<(usize, char)> = text[..byte].char_indices().collect();
     let mut index = chars.len().checked_sub(1)?;
     while class(chars[index].1) == 0 {
@@ -1160,7 +1353,7 @@ fn word_start_before(text: &str, byte: usize) -> Option<usize> {
 mod tests {
     use winit::keyboard::NamedKey;
 
-    use super::{next_word_start, word_end, word_start_before};
+    use super::{big_class, class, next_word_start, word_end, word_start_before};
     use crate::chat::ChatView;
     use crate::chat::fixtures::{fonts, paint, read, read_named, talk};
     use crate::chat::paint::{FOLD, ITEMS, PROMPT, TextKey};
@@ -1377,16 +1570,106 @@ mod tests {
     }
 
     #[test]
+    fn keys_are_read_by_the_grammar_with_counts_finds_and_words_of_anything_but_blanks() {
+        let (mut chat, mut fonts) =
+            reading(talk(&[("one", "alpha beta.gamma delta, epsilon zeta")]));
+        read(&mut chat, "G0");
+        let byte = |chat: &ChatView| chat.cursor.unwrap().byte;
+        assert_eq!(byte(&chat), 0);
+        // A count, shown in the bar while it's typed.
+        read(&mut chat, "3");
+        assert_eq!(chat.label().as_deref(), Some("3"));
+        read(&mut chat, "w");
+        assert_eq!(byte(&chat), "alpha beta.".len());
+        read(&mut chat, "0W");
+        assert_eq!(byte(&chat), "alpha ".len());
+        read(&mut chat, "E");
+        assert_eq!(byte(&chat), "alpha beta.gamma".len() - 1);
+        read(&mut chat, "B");
+        assert_eq!(byte(&chat), "alpha ".len());
+        // `f`, `t`, `;` and `,` on the line, a count finding that many.
+        read(&mut chat, "0fa");
+        assert_eq!(byte(&chat), "alph".len());
+        read(&mut chat, "2fa");
+        assert_eq!(byte(&chat), "alpha beta.g".len());
+        read(&mut chat, "0te");
+        assert_eq!(byte(&chat), "alpha b".len() - 1);
+        read(&mut chat, ";");
+        assert_eq!(byte(&chat), "alpha beta.gamma d".len() - 1);
+        read(&mut chat, ",");
+        assert_eq!(byte(&chat), "alpha be".len());
+        // Ctrl+E with a count is the window's to scroll; a count before a
+        // key a chat doesn't take, as `d`, spends it.
+        read(&mut chat, "2d");
+        assert!(chat.keys().pending());
+        read(&mut chat, "w");
+        assert!(!chat.keys().pending());
+        paint(&mut chat, &mut fonts);
+        let rows = chat.shortcut_context(crate::vim::Mode::Normal).rows;
+        let has = |key: &str| rows.iter().any(|(k, _)| k == key);
+        assert!(has("za") && has("zL") && has("W") && has("K"), "{rows:?}");
+        assert!(has("f + character") && !has("O"), "{rows:?}");
+        assert!(rows.contains(&("o".into(), "Compose a message".into())));
+        assert!(!has("dd") && !has("p"), "nothing that changes text");
+    }
+
+    #[test]
+    fn the_scrolling_keys_take_counts_and_go_as_far_as_in_any_pane() {
+        let (mut chat, mut fonts) = reading(crate::chat::fixtures::long_chat(12));
+        let ctrl = |chat: &mut ChatView, key: &str| {
+            chat.read_key(&crate::input::KeyPress {
+                key: &winit::keyboard::Key::Character(key.into()),
+                text: None,
+                location: winit::keyboard::KeyLocation::Standard,
+                code: None,
+                modifiers: crate::input::Modifiers {
+                    ctrl: true,
+                    ..crate::input::Modifiers::default()
+                },
+            })
+        };
+        read(&mut chat, "gg");
+        paint(&mut chat, &mut fonts);
+        let top = chat.scroll;
+        ctrl(&mut chat, "e");
+        let line = chat.scroll - top;
+        assert!(line > 0.0);
+        read(&mut chat, "3");
+        ctrl(&mut chat, "e");
+        assert!(
+            (chat.scroll - top - 4.0 * line).abs() < 0.5,
+            "four lines in all"
+        );
+        // A page is the view less two lines, as in any pane.
+        let before = chat.scroll;
+        read_named(&mut chat, NamedKey::PageDown);
+        let rows = (chat.view_height / chat.line_height).floor();
+        assert!(
+            (chat.scroll - before - (rows - 2.0) * chat.line_height).abs() < 0.5,
+            "{} {} {} {} {}",
+            chat.scroll,
+            before,
+            rows,
+            chat.line_height,
+            chat.max_scroll
+        );
+    }
+
+    #[test]
     fn words_are_found_as_vim_finds_them() {
         let text = "fn main() {  x }";
-        assert_eq!(next_word_start(text, 0), Some(3));
-        assert_eq!(next_word_start(text, 3), Some(7));
-        assert_eq!(next_word_start(text, 10), Some(13));
-        assert_eq!(word_end(text, 0), Some(1));
-        assert_eq!(word_end(text, 1), Some(6));
-        assert_eq!(word_start_before(text, 7), Some(3));
-        assert_eq!(word_start_before(text, 5), Some(3));
-        assert_eq!(word_start_before(text, 0), None);
-        assert_eq!(next_word_start("end", 0), None);
+        assert_eq!(next_word_start(text, 0, class), Some(3));
+        assert_eq!(next_word_start(text, 3, class), Some(7));
+        assert_eq!(next_word_start(text, 10, class), Some(13));
+        assert_eq!(word_end(text, 0, class), Some(1));
+        assert_eq!(word_end(text, 1, class), Some(6));
+        assert_eq!(word_start_before(text, 7, class), Some(3));
+        assert_eq!(word_start_before(text, 5, class), Some(3));
+        assert_eq!(word_start_before(text, 0, class), None);
+        assert_eq!(next_word_start("end", 0, class), None);
+        // WORDs: anything between blanks.
+        assert_eq!(next_word_start(text, 0, big_class), Some(3));
+        assert_eq!(next_word_start(text, 3, big_class), Some(10));
+        assert_eq!(word_end(text, 3, big_class), Some(8));
     }
 }

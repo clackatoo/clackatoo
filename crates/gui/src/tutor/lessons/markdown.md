@@ -40,7 +40,7 @@ rendered
 
 ## Read it, then write in it
 
-The rendered view is for reading. `j` and `k` scroll it a line, Ctrl+D and Ctrl+U half a view, `gg` and `G` to the top and the end; and so does the wheel. A click on a link opens it: a web page with your browser, a file in the editor, and `#` and a heading, such as `the top`, scrolls to that heading.
+The rendered view is for reading. `j` and `k` scroll it a line, or as many as a count says, as `5j`, Ctrl+D and Ctrl+U half a view, `gg` and `G` to the top and the end; and so does the wheel. A click on a link opens it: a web page with your browser, a file in the editor, and `#` and a heading, such as `the top`, scrolls to that heading.
 
 Any other key goes to the text. Press `i`: the text comes back, where the view was, in insert mode, to type in. It's the same file either way, and `:w` writes it from either.
 

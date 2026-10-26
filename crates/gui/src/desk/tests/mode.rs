@@ -1397,9 +1397,43 @@ fn an_answer_armed_is_dropped_when_the_command_line_or_a_binding_has_the_next_ke
     key(&mut desk, "1");
     desk.settle_chats(&mut fonts);
     assert_eq!(answers(&mut desk), 0, "armed again, not given");
-    // A chat's `g` half typed leaves `:` to the bindings too.
+    // A chat's `g` half typed takes the next key, as in every pane on
+    // the grammar: `g:` is no command, its keys spent.
     key(&mut desk, "g:");
-    assert!(desk.input.is_some(), "the command line opens after g");
-    named(&mut desk, NamedKey::Escape);
-    assert!(!desk.pane_pending(), "and the g is forgotten");
+    assert!(desk.input.is_none(), "the g takes the :");
+    assert!(!desk.pane_pending(), "and is forgotten");
+}
+
+#[test]
+fn a_count_typed_in_a_chat_is_the_windows_with_a_binding_and_shows_in_the_bar() {
+    use clackatoo_protocol::Node;
+    let mut desk = desk(one_tab(side_by_side(vec![pane(2), pane(1)])));
+    snapshot(&mut desk, 2);
+    desk.view_changed(
+        TerminalId(1),
+        &ViewUpdate::Snapshot(View {
+            title: "chat".into(),
+            cwd: None,
+            root: Node::Chat(Box::new(crate::chat::fixtures::talk(&[("one", "first")]))),
+        }),
+    );
+    normal_mode(&mut desk);
+    let key = |desk: &mut Desk, text: &str| {
+        for ch in text.chars() {
+            press(
+                desk,
+                Key::Character(ch.to_string().into()),
+                None,
+                Modifiers::default(),
+            );
+        }
+    };
+    key(&mut desk, "12");
+    assert!(desk.pane_pending());
+    assert_eq!(desk.pane_counting(), Some(12));
+    // `:` after a count alone is the window's: the command line, over as
+    // many lines.
+    key(&mut desk, ":");
+    assert!(desk.input.is_some(), "the command line opens after a count");
+    assert!(!desk.pane_pending(), "the count went with it");
 }

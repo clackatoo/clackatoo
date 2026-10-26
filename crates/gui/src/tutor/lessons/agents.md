@@ -107,7 +107,7 @@ A tab says what its chats are doing after its name: `⋯` while one is at work, 
 
 ## Reading in normal mode
 
-Ctrl+; puts the chat in normal mode, with a solid cursor on the last line in view, or where it was if that's still in view. `h`, `j`, `k`, `l`, `w`, `b`, `gg` and `G` move it as in an editor; in a table, `j` and `k` go to the cell below and above. `v` and `V` select, and `y` copies. `za` opens or folds the turn's work under the cursor, and on the line of a turn's subagents, their card; `zR` opens all of them, and `zM` folds them.
+Ctrl+; puts the chat in normal mode, with a solid cursor on the last line in view, or where it was if that's still in view. `h`, `j`, `k`, `l`, `w`, `b`, `W`, `B`, `E`, `f` and `t` with `;` and `,`, `gg` and `G` move it as in an editor, with a count before them, as `3j`, and Ctrl+E, Ctrl+D and Ctrl+F scroll as far as in any pane; in a table, `j` and `k` go to the cell below and above. Ctrl+? lists every key. `v` and `V` select, and `y` copies. `za` opens or folds the turn's work under the cursor, and on the line of a turn's subagents, their card; `zR` opens all of them, and `zM` folds them.
 
 ## Copying, and when it was said
 

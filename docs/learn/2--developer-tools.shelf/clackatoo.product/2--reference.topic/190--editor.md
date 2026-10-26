@@ -385,7 +385,7 @@ The marks are drawn behind the text, and the selection over it. See [the options
 | Ctrl+F, Page Down, Page Up | A view less two lines, which stay in view; a count goes that many |
 | `gg` `G` | The top, the end; `10G` or `10gg`, the block holding line 10 |
 
-The wheel scrolls it too. Any other key is the text's: the text comes back where the view was, and the key does there what it does, so `i` types at the start of the top block, and `/` searches the text. `:w`, `:q` and the rest of the command line are the same either way.
+The keys are read as the text's are, so a count or `g` shows in the bar while it's typed, and Esc forgets it. The wheel scrolls it too. Any other key is the text's: the text comes back where the view was, and the key does there what it does, so `i` types at the start of the top block, and `/` searches the text. `:w`, `:q` and the rest of the command line are the same either way.
 
 A click on a link opens it: a web address with the desktop's opener, as a terminal's links open; a file in the editor, in place of this one, as `:e` would, written from the Markdown file's folder; and `#` and a heading scrolls to that heading, named as GitHub names them. An image shows its text, after `▣`.
 

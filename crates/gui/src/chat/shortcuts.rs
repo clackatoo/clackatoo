@@ -1,4 +1,4 @@
-use super::{ChatView, read::Prefix};
+use super::{ChatView, read::ChatKeys};
 use crate::shortcuts::{
     Context,
     bindings::{self, Hint},
@@ -47,37 +47,6 @@ impl ChatView {
         })
     }
 
-    fn describe_conversation(
-        &self,
-        press: &crate::input::KeyPress<'_>,
-        prefix: Option<Prefix>,
-    ) -> Hint {
-        let character = match press.key {
-            winit::keyboard::Key::Character(text) => text.chars().next(),
-            _ => None,
-        };
-        if press.modifiers.ctrl {
-            return self.describe_read_control(
-                character.map(|ch| ch.to_ascii_lowercase()),
-                press.modifiers.shift,
-            );
-        }
-        if prefix == Some(Prefix::Z) {
-            let table = self.describe_table_scroll_key(character);
-            if table != Hint::None {
-                return table;
-            }
-            return self.describe_fold_bound(
-                character,
-                self.cursor.map(|cursor| cursor.text.turn),
-                self.cursor
-                    .is_some_and(|cursor| cursor.text.piece == super::paint::AGENTS),
-            );
-        }
-        self.describe_read_character(press, character, prefix, self.visual())
-    }
-
-    #[allow(clippy::too_many_lines, reason = "context-specific key descriptions")]
     pub(crate) fn shortcut_context(&self, mode: Mode) -> Context {
         let mut context = if mode == Mode::Insert {
             if self.node.question.is_some() {
@@ -103,41 +72,13 @@ impl ChatView {
                 context
             }
         } else {
-            let mut context = Context::new("Agent conversation", &[]);
-            for key in bindings::presses() {
-                let kept = key.kept();
-                let press = kept.press();
-                let hint = self.describe_conversation(&press, self.read_prefix);
-                if hint == Hint::Prefix {
-                    let prefix = match press.key {
-                        winit::keyboard::Key::Character(text) if text == "g" => Prefix::G,
-                        _ => Prefix::Z,
-                    };
-                    for next in bindings::presses().filter(|key| {
-                        !key.ctrl && !key.alt && matches!(key.base, crate::keymap::Base::Char(_))
-                    }) {
-                        let tail = next.kept();
-                        let hint = self.describe_conversation(&tail.press(), Some(prefix));
-                        if hint != self.describe_conversation(&tail.press(), None) {
-                            bindings::add(
-                                &mut context,
-                                format!(
-                                    "{}{}",
-                                    crate::shortcuts::sequence(&[key]),
-                                    crate::shortcuts::sequence(&[next])
-                                ),
-                                hint,
-                            );
-                        }
-                    }
-                } else {
-                    bindings::add(&mut context, crate::shortcuts::sequence(&[key]), hint);
-                }
-            }
+            // Walked from how the chat reads keys, as every pane's are.
+            let mut context =
+                crate::vim::shortcuts::context("Agent conversation", &self.keys, mode, &ChatKeys);
             bindings::normal(&mut context, "Clear selection and pending command");
             context
         };
-        if self.read_prefix.is_none()
+        if !self.keys.pending()
             && let Some(question) = &self.node.question
         {
             for (index, choice) in question.choices.iter().take(9).enumerate() {

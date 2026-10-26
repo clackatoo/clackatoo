@@ -558,25 +558,24 @@ impl Pane {
     /// Ctrl+\ waiting to be pressed again isn't: any other key does what
     /// it would.
     pub(crate) fn pending(&self) -> bool {
-        self.keys.pending() || self.chat.as_ref().is_some_and(|chat| chat.pending())
+        self.keys.pending() || self.chat.as_ref().is_some_and(|chat| chat.keys().pending())
     }
 
     /// The count typed, if that's all that's waiting: a key the pane
-    /// doesn't take after it is the window's, as `:` is. A chat's `g` or
-    /// `z` half typed counts as a count of one, so `g:` is `:` too.
+    /// doesn't take after it is the window's, as `:` is. A chat's, in it.
     pub(crate) fn counting(&self) -> Option<usize> {
         if let Some(chat) = &self.chat {
-            return chat.pending().then_some(1);
+            return chat.keys().counting();
         }
         self.keys.counting()
     }
 
-    /// Forgets a count typed, or a chat's two-key command half typed, as a
-    /// binding of the window's took the key after it.
+    /// Forgets a count typed, a chat's too, as a binding of the window's
+    /// took the key after it.
     pub(crate) fn forget_count(&mut self) {
         self.keys.clear();
         if let Some(chat) = &mut self.chat {
-            chat.forget_prefix();
+            chat.forget_keys();
         }
     }
 
