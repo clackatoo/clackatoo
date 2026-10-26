@@ -1297,6 +1297,9 @@ mod tests {
         let mut plain = pane(&terminal("$ "));
         plain.paste("make test\n");
         assert_eq!(sent(&mut plain), [b"make test".to_vec()]);
+        // With the blank line under it too, as `yj` copies them.
+        plain.paste("make deploy\n\n");
+        assert_eq!(sent(&mut plain), [b"make deploy".to_vec()]);
         // Bracketed, the program takes it as text, newline and all.
         let mut bracketed = pane(&terminal("\x1b[?2004h$ "));
         bracketed.paste("make test\n");

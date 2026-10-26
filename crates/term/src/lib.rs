@@ -44,7 +44,7 @@ pub use damage::Damage;
 pub use document::{MOST_LINES, MOST_TEXT, Match, Position};
 pub use grid::Grid;
 pub use links::{Hyperlink, LinkId};
-pub use paste::paste;
+pub use paste::{bracketed_paste, paste, unbracketed};
 pub use row::{MAX_EXTRA, Row, RowBuilder};
 pub use scrollback::Compaction;
 pub use size::{InvalidSize, Size};

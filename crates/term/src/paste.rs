@@ -11,36 +11,55 @@
 //! which nothing pasted needs and which can't make the terminator.
 //!
 //! A program that didn't gets the text as typed, its newlines as Enter,
-//! but for one at the very end, which is dropped: lines copied whole, as
-//! a yank by lines in a terminal or an editor is, end with one, and it
-//! mustn't run the last of them as it lands.
+//! but for those at the very end, which are dropped: lines copied whole,
+//! as a yank by lines in a terminal or an editor is, end with one, or
+//! more with blank lines after, and they mustn't run the last line as it
+//! lands. Only the end is kept from running: each line before the last
+//! still runs as Enter types it.
 
 use crate::InputModes;
 
 /// What pasting `text` sends to a program in `modes`: bracketed, with
 /// control characters taken out, if the program asked for that;
-/// otherwise as typed, with its newlines as Enter, but for one ending it,
-/// which is dropped, so the paste doesn't run what it ends.
+/// otherwise as typed, with its newlines as Enter, but for those ending
+/// it, which are dropped, so the paste doesn't run what it ends.
 #[must_use]
 pub fn paste(text: &str, modes: InputModes) -> Vec<u8> {
     if modes.bracketed_paste {
-        let mut bytes = Vec::with_capacity(text.len() + 12);
-        bytes.extend_from_slice(b"\x1b[200~");
-        for ch in text.chars() {
-            if ch.is_control() && !matches!(ch, '\t' | '\r' | '\n') {
-                continue;
-            }
-            let mut buffer = [0; 4];
-            bytes.extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
-        }
-        bytes.extend_from_slice(b"\x1b[201~");
-        bytes
+        bracketed_paste(text)
     } else {
-        let text = (text.strip_suffix("\r\n"))
-            .or_else(|| text.strip_suffix(['\n', '\r']))
-            .unwrap_or(text);
-        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+        unbracketed(text)
+            .replace("\r\n", "\r")
+            .replace('\n', "\r")
+            .into_bytes()
     }
+}
+
+/// `text` between `ESC [200~` and `ESC [201~`, with every control
+/// character but tab, carriage return and newline taken out, so nothing in
+/// it can end the paste early: what a program that turned on bracketed
+/// paste is given, by a paste or by anything typing text for it as one.
+#[must_use]
+pub fn bracketed_paste(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(text.len() + 12);
+    bytes.extend_from_slice(b"\x1b[200~");
+    for ch in text.chars() {
+        if ch.is_control() && !matches!(ch, '\t' | '\r' | '\n') {
+            continue;
+        }
+        let mut buffer = [0; 4];
+        bytes.extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
+    }
+    bytes.extend_from_slice(b"\x1b[201~");
+    bytes
+}
+
+/// What of `text` a paste not bracketed types: all but the line breaks
+/// that end it, however many, so it can't run its last line; each line
+/// break before that is still Enter, and runs the line it ends.
+#[must_use]
+pub fn unbracketed(text: &str) -> &str {
+    text.trim_end_matches(['\r', '\n'])
 }
 
 #[cfg(test)]
@@ -85,13 +104,14 @@ mod tests {
     }
 
     #[test]
-    fn without_bracketing_newlines_are_enter_but_the_last_is_dropped() {
+    fn without_bracketing_newlines_are_enter_but_those_ending_it_are_dropped() {
         let plain = InputModes::default();
         assert_eq!(paste("ls\nexit\r\n", plain), b"ls\rexit");
         assert_eq!(paste("ls\n", plain), b"ls");
         assert_eq!(paste("ls\r", plain), b"ls");
-        // One only: a blank line copied with it is still typed.
-        assert_eq!(paste("ls\n\n", plain), b"ls\r");
+        // Blank lines copied after it don't run it either.
+        assert_eq!(paste("ls\n\r\n\n", plain), b"ls");
+        assert_eq!(paste("\n\n", plain), b"");
         assert_eq!(paste("ls", plain), b"ls");
         assert_eq!(paste("\n", plain), b"");
     }
