@@ -562,7 +562,7 @@ impl ChatView {
             Action::Operate(Operator::Yank, target) => {
                 self.yank(target, command.count, command.register);
             }
-            Action::Search { backward } => self.start_search(backward),
+            Action::Search { backward } => self.start_search(backward, command.count),
             Action::SearchAgain { reverse } => self.search_again(reverse, command.count),
             Action::Own(own) => return self.own(own),
             // Nothing else is taken (see `ChatKeys::takes`).
