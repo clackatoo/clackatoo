@@ -260,6 +260,12 @@ impl Desk {
         }
         self.close_editor_panel(pane);
         self.editor_leaves(pane);
+        if let Some(review) = self.reviews.panes.get_mut(&pane) {
+            review.leave();
+        }
+        if let Some(board) = self.boards.panes.get_mut(&pane) {
+            board.leave();
+        }
         let terminal =
             (self.workspaces.find_pane(pane)).and_then(|(_, _, found)| found.content.terminal());
         if let Some(found) = terminal.and_then(|terminal| self.panes.get_mut(&terminal)) {

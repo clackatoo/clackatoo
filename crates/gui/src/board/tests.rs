@@ -35,7 +35,11 @@ fn entry(id: u32, kind: PostKind, text: &str) -> BoardEntry {
 
 /// A pane 40 by 10 showing `entries`.
 fn pane(entries: Vec<BoardEntry>) -> BoardPane {
-    let mut pane = BoardPane::new(BoardId(1), true);
+    let options = Options {
+        cursorline: true,
+        ..Options::default()
+    };
+    let mut pane = BoardPane::new(BoardId(1), &options);
     pane.resize(Size::new(40, 10).unwrap());
     let count = u32::try_from(entries.len()).unwrap();
     pane.update(BoardUpdate::Snapshot {
@@ -236,4 +240,88 @@ fn text_wraps_at_spaces_and_cuts_what_is_too_long() {
     assert_eq!(span(90_000), "1m");
     assert_eq!(span(3_600_000 + 120_000), "1h 2m");
     assert_eq!(span(3 * 86_400_000), "3d");
+}
+
+/// A pane of ten entries, each two lines and a gap, three to a view.
+fn ten() -> BoardPane {
+    let entries = (1..=10)
+        .map(|id| entry(id, PostKind::Note, &format!("entry {id}")))
+        .collect();
+    let mut pane = pane(entries);
+    keys(&mut pane, "gg");
+    pane.settle();
+    pane
+}
+
+fn keys(pane: &mut BoardPane, keys: &str) {
+    for stroke in Stroke::read(keys) {
+        pane.stroke(stroke);
+    }
+}
+
+#[test]
+fn a_board_moves_by_entries_as_every_list_does() {
+    let mut pane = ten();
+    assert_eq!(ListRows::shown(&pane), 0..3);
+    keys(&mut pane, "L");
+    assert_eq!(pane.cursor, 2);
+    keys(&mut pane, "M");
+    assert_eq!(pane.cursor, 1);
+    keys(&mut pane, "5G");
+    assert_eq!(pane.cursor, 4);
+    pane.settle();
+    keys(&mut pane, "zt");
+    pane.settle();
+    assert_eq!(ListRows::top(&pane), 4);
+    keys(&mut pane, "<C-y>");
+    pane.settle();
+    assert_eq!((ListRows::top(&pane), pane.cursor), (3, 4));
+    // Ctrl+D: half the entries in view, the cursor going with them.
+    keys(&mut pane, "<C-d>");
+    pane.settle();
+    assert_eq!((ListRows::top(&pane), pane.cursor), (4, 5));
+    // Ctrl+F: a page, as far as in any pane: a view of three keeps none.
+    keys(&mut pane, "<C-f>");
+    pane.settle();
+    assert_eq!((ListRows::top(&pane), pane.cursor), (7, 7));
+    keys(&mut pane, "<End>");
+    assert_eq!(pane.cursor, 9);
+    keys(&mut pane, "3<C-p>");
+    assert_eq!(pane.cursor, 6);
+    // What's half typed shows in the bar.
+    keys(&mut pane, "2g");
+    assert!(pane.label().starts_with("2g  plan"), "{}", pane.label());
+    keys(&mut pane, "g");
+    assert_eq!(pane.cursor, 1);
+}
+
+#[test]
+fn searches_find_entries_by_what_they_say() {
+    let mut pane = ten();
+    keys(&mut pane, "/entry 7");
+    assert!(pane.prompting());
+    assert_eq!(pane.label(), "/entry 7▏");
+    keys(&mut pane, "<CR>");
+    assert!(!pane.prompting());
+    assert_eq!(pane.cursor, 6);
+    keys(&mut pane, "/entry 1<CR>");
+    assert_eq!(pane.cursor, 9, "entry 10 next after 7");
+    keys(&mut pane, "n");
+    assert_eq!(pane.cursor, 0, "round to entry 1");
+    keys(&mut pane, "N");
+    assert_eq!(pane.cursor, 9);
+    keys(&mut pane, "/nothing<CR>");
+    assert_eq!(pane.label(), "no entry matches nothing");
+}
+
+#[test]
+fn a_boards_keys_help_comes_from_how_it_reads_them() {
+    let pane = ten();
+    let rows = pane.shortcut_context().rows;
+    let has = |key: &str, said: &str| rows.iter().any(|(k, d)| k == key && d == said);
+    assert!(has("i", "Post a note"), "{rows:?}");
+    assert!(has("r", "Post a result"));
+    assert!(has("zz", "Cursor line at centre"));
+    assert!(has("n", "Repeat search"));
+    assert!(!rows.iter().any(|(key, _)| key == "p"), "nothing to put");
 }

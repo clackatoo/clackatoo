@@ -261,3 +261,89 @@ fn the_cursor_stays_on_its_hunk_as_the_list_changes() {
     assert!(rows(&mut review).contains(&"Nothing to review.".to_owned()));
     assert!(keys(&mut review, "a").is_empty());
 }
+
+#[test]
+fn brackets_take_counts_without_walking_them_and_show_while_half_typed() {
+    let mut review = review();
+    keys(&mut review, "2]h");
+    assert_eq!(review.label(), "b.rs  hunk 3 of 3");
+    // Round as many times as a count says comes back where it was.
+    keys(&mut review, "99999999]h");
+    assert_eq!(review.label(), "b.rs  hunk 3 of 3");
+    keys(&mut review, "4[h");
+    assert_eq!(review.label(), "a.rs  hunk 2 of 3");
+    // What's half typed shows first in the bar, as Vim's showcmd does.
+    keys(&mut review, "3]");
+    assert!(review.pending());
+    assert_eq!(review.label(), "3]  a.rs  hunk 2 of 3");
+    keys(&mut review, "<Esc>");
+    assert!(!review.pending());
+}
+
+#[test]
+fn the_lists_moves_work_in_a_review() {
+    let mut review = review();
+    review.resize(Size::new(60, 10).unwrap());
+    review.settle();
+    keys(&mut review, "gg");
+    assert_eq!(review.cursor, 0);
+    keys(&mut review, "5G");
+    assert_eq!(review.cursor, 4);
+    keys(&mut review, "L");
+    assert_eq!(review.cursor, 9);
+    keys(&mut review, "H");
+    assert_eq!(review.cursor, 0);
+    keys(&mut review, "<C-e>");
+    assert_eq!((review.cursor, review.top), (1, 1));
+    keys(&mut review, "<C-d>");
+    assert_eq!((review.cursor, review.top), (6, 6));
+    keys(&mut review, "zt");
+    assert_eq!(review.top, 6);
+    // Keys a review doesn't take spend what was typed.
+    keys(&mut review, "dw");
+    assert!(!review.pending());
+    assert_eq!(review.cursor, 6);
+    assert!(keys(&mut review, "\"ax").is_empty(), "no registers");
+}
+
+#[test]
+fn searches_find_lines_files_and_comments() {
+    let mut review = review();
+    keys(&mut review, "/more");
+    assert_eq!(review.label(), "/more▏");
+    keys(&mut review, "<CR>");
+    assert!(
+        matches!(&review.lines[review.cursor], Line::Text { text, .. } if text.contains("more();"))
+    );
+    keys(&mut review, "/b.rs<CR>");
+    assert_eq!(review.label(), "b.rs  1 hunk");
+    keys(&mut review, "/why<CR>");
+    assert!(matches!(review.lines[review.cursor], Line::Comment { .. }));
+    keys(&mut review, "/nowhere<CR>");
+    assert_eq!(review.label(), "no line matches nowhere");
+    // `?` goes back; `n` the way it went, `N` the other.
+    keys(&mut review, "gg?\\.rs<CR>");
+    assert_eq!(review.label(), "b.rs  1 hunk");
+    keys(&mut review, "n");
+    assert_eq!(review.label(), "a.rs  2 hunks");
+    keys(&mut review, "N");
+    assert_eq!(review.label(), "b.rs  1 hunk");
+}
+
+#[test]
+fn its_keys_help_comes_from_how_it_reads_them() {
+    let mut review = review();
+    let rows = review.shortcut_context().rows;
+    let has = |rows: &[(String, String)], key: &str, said: &str| {
+        rows.iter().any(|(k, d)| k == key && d == said)
+    };
+    assert!(has(&rows, "]h", "Next hunk"), "{rows:?}");
+    assert!(has(&rows, "gc", "Comment on this line"));
+    assert!(has(&rows, "zt", "Cursor line at top"));
+    assert!(has(&rows, "/", "Search forward"));
+    assert!(!rows.iter().any(|(key, _)| key == "dd"), "no operators");
+    keys(&mut review, "]");
+    let after = review.shortcut_context();
+    assert!(after.title.contains("after ]"), "{}", after.title);
+    assert!(has(&after.rows, "f", "Next file"));
+}

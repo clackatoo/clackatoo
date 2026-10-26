@@ -78,7 +78,7 @@ impl Desk {
             boards
                 .panes
                 .entry(pane)
-                .or_insert_with(|| BoardPane::new(board, self.options.cursorline));
+                .or_insert_with(|| BoardPane::new(board, &self.options));
         }
         if !self.connected {
             return;
@@ -108,7 +108,7 @@ impl Desk {
     /// Passes the options on to every board pane, as they've changed.
     pub(super) fn board_options(&mut self) {
         for board in self.boards.panes.values_mut() {
-            board.set_cursorline(self.options.cursorline);
+            board.set_options(&self.options);
         }
     }
 

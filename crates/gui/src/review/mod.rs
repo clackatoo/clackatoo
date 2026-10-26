@@ -13,8 +13,9 @@
 //!
 //! | Key | Does |
 //! |---|---|
-//! | `j` `k`, `gg` `G`, Ctrl+D Ctrl+U | Moves, with a count |
+//! | `j` `k`, `gg` `G`, `H` `M` `L`, Ctrl+D Ctrl+U Ctrl+F Ctrl+E Ctrl+Y, `zt` `zz` `zb` | Moves, with a count, as every list does (see [`list`]) |
 //! | `]h` `[h`, `]f` `[f` | To the next hunk or the one before, the next file or the one before |
+//! | `/` `?` `n` `N` | Searches the lines, the files' names and the comments, with the editor's patterns |
 //! | Enter | Goes to the line in an editor |
 //! | `a`, `A` | Keeps the hunk, or every hunk of its file |
 //! | `x`, `X` | Rejects the hunk, or every hunk of its file; on a comment, takes it back |
@@ -33,8 +34,6 @@
 //! undoing the turn leaves their changes: rejecting them here takes them
 //! out.
 
-use crate::shortcuts::bindings::Hint;
-
 use clackatoo_protocol::{
     Attributes, Hunks, ReviewAction, ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
     Size, Style, TerminalId,
@@ -42,9 +41,11 @@ use clackatoo_protocol::{
 use clackatoo_term::{Row, RowBuilder};
 
 use crate::colors;
-use crate::options::Options;
+use crate::motion::Motion;
+use crate::options::{Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
-use crate::vim::Stroke;
+use crate::vim::list::{self, ListRows, ListSearch};
+use crate::vim::{Action, Command, Dialect, Keys, Mode, Paging, Parsed, Read, Reader, Stroke};
 
 #[cfg(test)]
 mod tests;
@@ -161,8 +162,14 @@ pub(crate) struct Review {
     rows: Vec<Row>,
     lit: Vec<Option<HighlightKind>>,
     cursor_cell: Option<(usize, usize)>,
-    /// A count typed, and `g`, `]` or `[`, waiting for the key after.
-    typed: crate::vim::HalfTyped,
+    /// The keys of a command half typed.
+    keys: Keys,
+    /// How far its scrolling keys go.
+    paging: Paging,
+    /// The search being typed, and the last.
+    search: ListSearch,
+    /// How a search matches case, as the editor's do.
+    case: Case,
     /// What to ask the desk, oldest first.
     asks: Vec<Ask>,
     /// What the bar says until the next key.
@@ -187,7 +194,10 @@ impl Review {
             rows: Vec::new(),
             lit: Vec::new(),
             cursor_cell: None,
-            typed: crate::vim::HalfTyped::default(),
+            keys: Keys::default(),
+            paging: Paging::default(),
+            search: ListSearch::default(),
+            case: Case::of(options),
             asks: Vec::new(),
             message: None,
         };
@@ -213,16 +223,21 @@ impl Review {
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.tabstop = options.tabstop as usize;
         self.cursorline = options.cursorline;
+        self.case = Case::of(options);
     }
 
     pub(crate) fn resize(&mut self, size: Size) {
-        self.height = usize::from(size.rows());
+        let height = usize::from(size.rows());
+        if height != self.height {
+            self.paging.resized();
+        }
+        self.height = height;
         self.width = usize::from(size.cols());
     }
 
     /// Whether a key is half typed, as `g` or a count is.
     pub(crate) fn pending(&self) -> bool {
-        self.typed.pending()
+        self.keys.pending()
     }
 
     /// What the window's title says.
@@ -230,8 +245,25 @@ impl Review {
         &self.title
     }
 
-    /// What the bar says: a message, or where the cursor is.
+    /// What the bar says: a search being typed, or the keys of a command
+    /// half typed, then a message, or where the cursor is.
     pub(crate) fn label(&self) -> String {
+        if let Some(label) = self.search.label() {
+            return label;
+        }
+        list::showing(&self.keys, self.place_label())
+    }
+
+    /// Ends what was half done as the focus leaves the review: a command
+    /// half typed, and a search being typed.
+    pub(crate) fn leave(&mut self) {
+        self.keys.clear();
+        self.search.give_up();
+    }
+
+    /// What the bar says but for keys half typed: a message, or where the
+    /// cursor is.
+    fn place_label(&self) -> String {
         if let Some(message) = &self.message {
             return message.clone();
         }
@@ -341,7 +373,7 @@ impl Review {
         if found.is_none() {
             // Off the hunks, as at the top: to the first.
             if self.lines.get(self.cursor).and_then(Line::hunk).is_none() {
-                self.next_of(true, |line| matches!(line, Line::Hunk { .. }));
+                self.next_of(true, 1, |line| matches!(line, Line::Hunk { .. }));
             }
         }
     }
@@ -397,215 +429,113 @@ impl Review {
     /// Does what `stroke` does. Returns whether it should be drawn again.
     pub(crate) fn stroke(&mut self, stroke: Stroke) -> bool {
         self.message = None;
-        let count = self.typed.count.take();
-        let pending = self.typed.key.take();
-        let Stroke::Char { ch, ctrl } = stroke else {
-            return self.named(stroke, count);
+        if self.search.typing() {
+            if self.search.key(stroke) == list::Typed::Done {
+                self.search_again(false, 1);
+            }
+            return true;
+        }
+        let was_pending = self.keys.pending();
+        match self.keys.read(stroke, false, &ReviewKeys) {
+            Parsed::Incomplete => true,
+            Parsed::Nothing => was_pending,
+            Parsed::Command(command) => {
+                self.execute(command);
+                true
+            }
+        }
+    }
+
+    /// Does `command`, read whole.
+    fn execute(&mut self, command: Command<ReviewKey>) {
+        let mut paging = self.paging;
+        let moved = list::go(self, &mut paging, &command);
+        self.paging = paging;
+        if moved {
+            return;
+        }
+        let count = command.times();
+        let own = match command.action {
+            Action::Search { backward } => return self.search.start(backward),
+            Action::SearchAgain { reverse } => return self.search_again(reverse, count),
+            Action::Own(own) => own,
+            // Nothing else is taken (see `ReviewKeys::takes`).
+            _ => return,
         };
-        if ctrl {
-            return self.ctrl(ch, count);
+        match own {
+            ReviewKey::Go(motion) => {
+                let mut paging = self.paging;
+                list::go_own(self, &mut paging, motion, command.count);
+                self.paging = paging;
+            }
+            ReviewKey::Open => self.open_here(),
+            ReviewKey::Comment => self.comment_here(),
+            ReviewKey::Next { file, forward } => {
+                self.next_of(forward, count, |line| match line {
+                    Line::File { .. } => file,
+                    Line::Hunk { .. } => !file,
+                    _ => false,
+                });
+            }
+            ReviewKey::Keep { file } => self.act_on(file, true),
+            ReviewKey::Reject => self.reject_or_uncomment(),
+            ReviewKey::RejectFile => self.act_on(true, false),
+            ReviewKey::Send => match self.list.chat {
+                Some(chat) => self.asks.push(Ask::Act(ReviewAction::Send(chat))),
+                None => self.message = Some("this review is of no chat".to_owned()),
+            },
+            ReviewKey::Refresh => {
+                let review = self.id;
+                self.asks.push(Ask::Act(ReviewAction::Refresh(review)));
+            }
+            ReviewKey::Close => self.asks.push(Ask::Close),
         }
-        self.plain(ch, count, pending)
     }
 
-    crate::shortcuts::bindings::described_keys! {
-        fn plain / describe_plain(&mut self, ch: char, count: Option<usize>, pending: Option<char>) -> bool;
-        match (pending, ch) => {
-            (None, '0'..='9') if ch != '0' || count.is_some() =>
-                Hint::Count,
-                {
-                    let digit = ch.to_digit(10).expect("a digit") as usize;
-                    let count = count.unwrap_or(0).saturating_mul(10).saturating_add(digit);
-                    self.typed.count = Some(count.min(1_000_000));
-                    return false;
-                };
-            (Some('g'), 'g') =>
-                Hint::Action("First item or item given by count"),
-                self.go_to(count.map_or(0, |count| count - 1));
-            (Some('g'), 'c') =>
-                Hint::Action("Comment on this line"),
-                self.comment_here();
-            (Some(bracket @ (']' | '[')), 'h') =>
-                Hint::Action(if bracket == ']' {
-                    "Next hunk"
-                } else {
-                    "Previous hunk"
-                }),
-                {
-                    for _ in 0..count.unwrap_or(1) {
-                        self.next_of(bracket == ']', |line| matches!(line, Line::Hunk { .. }));
-                    }
-                };
-            (Some(bracket @ (']' | '[')), 'f') =>
-                Hint::Action(if bracket == ']' {
-                    "Next file"
-                } else {
-                    "Previous file"
-                }),
-                {
-                    for _ in 0..count.unwrap_or(1) {
-                        self.next_of(bracket == ']', |line| matches!(line, Line::File { .. }));
-                    }
-                };
-            (Some(_), _) =>
-                Hint::None,
-                {};
-            (None, 'g' | ']' | '[') =>
-                Hint::Prefix,
-                {
-                    self.typed.count = count;
-                    self.typed.key = Some(ch);
-                    return false;
-                };
-            (None, 'j') =>
-                Hint::Action("Next item"),
-                self.move_by(count.unwrap_or(1), true);
-            (None, 'k') =>
-                Hint::Action("Previous item"),
-                self.move_by(count.unwrap_or(1), false);
-            (None, 'G') =>
-                Hint::Action("Last item or item given by count"),
-                self.go_to(count.map_or(usize::MAX, |count| count - 1));
-            (None, 'a') =>
-                Hint::Action("Keep hunk"),
-                self.act_on(false, true);
-            (None, 'A') =>
-                Hint::Action("Keep file"),
-                self.act_on(true, true);
-            (None, 'x') =>
-                Hint::Action("Reject hunk or remove comment"),
-                self.reject_or_uncomment();
-            (None, 'X') =>
-                Hint::Action("Reject file"),
-                self.act_on(true, false);
-            (None, 'S') =>
-                Hint::Action("Send review to agent"),
-                match self.list.chat {
-                    Some(chat) => self.asks.push(Ask::Act(ReviewAction::Send(chat))),
-                    None => self.message = Some("this review is of no chat".to_owned()),
-                };
-            (None, 'R') =>
-                Hint::Action("Refresh review"),
-                {
-                    let review = self.id;
-                    self.asks.push(Ask::Act(ReviewAction::Refresh(review)));
-                };
-            (None, 'q') =>
-                Hint::Action("Close pane"),
-                self.asks.push(Ask::Close);
-            _ =>
-                Hint::None,
-                return false;
-        }
-        then true
-    }
-
-    // Does what a key that types no character does.
-    crate::shortcuts::bindings::described_keys! {
-        fn named / describe_named(&mut self, stroke: Stroke, count: Option<usize>) -> bool;
-        match stroke => {
-            Stroke::Down =>
-                Hint::Action("Next item"),
-                self.move_by(count.unwrap_or(1), true);
-            Stroke::Up =>
-                Hint::Action("Previous item"),
-                self.move_by(count.unwrap_or(1), false);
-            Stroke::Enter =>
-                Hint::Action("Open file at this line"),
-                self.open_here();
-            Stroke::Home =>
-                Hint::Action("First item"),
-                self.go_to(0);
-            Stroke::End =>
-                Hint::Action("Last item"),
-                self.go_to(usize::MAX);
-            Stroke::PageDown =>
-                Hint::Action("Page down"),
-                self.page(count.unwrap_or(1), true, false);
-            Stroke::PageUp =>
-                Hint::Action("Page up"),
-                self.page(count.unwrap_or(1), false, false);
-            Stroke::Escape =>
-                Hint::Action("Cancel pending command"),
-                {};
-            _ =>
-                Hint::None,
-                return false;
-        }
-        then true
-    }
-
-    // Does what a key with Ctrl does.
-    crate::shortcuts::bindings::described_keys! {
-        fn ctrl / describe_ctrl(&mut self, ch: char, count: Option<usize>) -> bool;
-        match ch => {
-            'd' =>
-                Hint::Action("Half page down"),
-                self.page(count.unwrap_or(1), true, true);
-            'u' =>
-                Hint::Action("Half page up"),
-                self.page(count.unwrap_or(1), false, true);
-            'f' =>
-                Hint::Action("Page down"),
-                self.page(count.unwrap_or(1), true, false);
-            'b' =>
-                Hint::Action("Page up"),
-                self.page(count.unwrap_or(1), false, false);
-            'n' =>
-                Hint::Action("Next item"),
-                self.move_by(count.unwrap_or(1), true);
-            'p' =>
-                Hint::Action("Previous item"),
-                self.move_by(count.unwrap_or(1), false);
-            _ =>
-                Hint::None,
-                return false;
-        }
-        then true
-    }
-
-    fn move_by(&mut self, by: usize, down: bool) {
-        let last = self.lines.len().saturating_sub(1);
-        self.cursor = if down {
-            self.cursor.saturating_add(by).min(last)
-        } else {
-            self.cursor.saturating_sub(by)
+    /// `n`, or `N` if `reverse`: to the `count`th line the last search
+    /// matches, the way it went, round the ends.
+    fn search_again(&mut self, reverse: bool, count: usize) {
+        let pattern = match self.search.pattern(self.case) {
+            None => return,
+            Some(Err(why)) => {
+                self.message = Some(why);
+                return;
+            }
+            Some(Ok(pattern)) => pattern,
         };
-    }
-
-    fn go_to(&mut self, line: usize) {
-        self.cursor = line.min(self.lines.len().saturating_sub(1));
-    }
-
-    fn page(&mut self, count: usize, down: bool, half: bool) {
-        let height = self.height.max(1);
-        let page = if half {
-            (height / 2).max(1)
-        } else {
-            height.saturating_sub(2).max(1)
+        let matches = |at: usize| {
+            self.searched(&self.lines[at])
+                .is_some_and(|text| pattern.find_at(text, 0).is_some())
         };
-        let by = page.saturating_mul(count);
-        if down {
-            self.top = self.top.saturating_add(by);
+        let len = self.lines.len();
+        if let Some(at) = self.search.again(reverse, count, len, self.cursor, matches) {
+            self.cursor = at;
         } else {
-            self.top = self.top.saturating_sub(by);
+            let query = self.search.query().unwrap_or_default();
+            self.message = Some(format!("no line matches {query}"));
         }
-        self.move_by(by, down);
     }
 
-    /// To the next line `wanted` takes after the cursor's, or before it,
-    /// going round the ends. Says so if there's none.
-    fn next_of(&mut self, forward: bool, wanted: impl Fn(&Line) -> bool) {
-        let count = self.lines.len();
-        let found = (1..=count)
-            .map(|step| {
-                if forward {
-                    (self.cursor + step) % count
-                } else {
-                    (self.cursor + count - step % count) % count
-                }
-            })
-            .find(|&at| wanted(&self.lines[at]));
+    /// The text of `line` a search looks in: a changed line's, a file's
+    /// name, a comment's.
+    fn searched<'a>(&'a self, line: &'a Line) -> Option<&'a str> {
+        match line {
+            Line::Text { text, .. } => Some(text),
+            Line::File { file } => Some(&self.list.files[*file].shown),
+            Line::Comment { comment } => {
+                (self.list.comments.get(*comment)).map(|comment| comment.text.as_str())
+            }
+            Line::Note(note) => Some(note),
+            _ => None,
+        }
+    }
+
+    /// To the `count`th line `wanted` takes after the cursor's, or before
+    /// it, going round the ends. Says so if there's none.
+    fn next_of(&mut self, forward: bool, count: usize, wanted: impl Fn(&Line) -> bool) {
+        let found = list::round(self.lines.len(), self.cursor, count, !forward, |at| {
+            wanted(&self.lines[at])
+        });
         match found {
             Some(at) => self.cursor = at,
             None => self.message = Some("there are no hunks".to_owned()),
@@ -1056,26 +986,188 @@ fn expand_tabs(line: &str, tabstop: usize) -> String {
     out
 }
 
-impl crate::vim::ListPane for Review {
-    fn half_typed(&self) -> &crate::vim::HalfTyped {
-        &self.typed
+/// A command of a review's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewKey {
+    /// Home, End, Ctrl+N and Ctrl+P (see [`list::own_move`]).
+    Go(Motion),
+    /// Enter: to the line in an editor.
+    Open,
+    /// `gc`: comment on the line.
+    Comment,
+    /// `]h`, `[h`, `]f` and `[f`: to the next hunk, or file, or the one
+    /// before.
+    Next { file: bool, forward: bool },
+    /// `a`, or `A` for the whole file: keep.
+    Keep { file: bool },
+    /// `x`: reject the hunk, or take back the comment.
+    Reject,
+    /// `X`: reject the file's hunks.
+    RejectFile,
+    /// `S`: send the comments.
+    Send,
+    /// `R`: work the list out afresh.
+    Refresh,
+    /// `q`: close the review.
+    Close,
+}
+
+/// How a review reads keys: a list's (see [`list`]), with its own for
+/// what's reviewed, and `/` `?` `n` `N` searching its lines.
+struct ReviewKeys;
+
+impl Dialect for ReviewKeys {
+    type Own = ReviewKey;
+
+    fn describe(&self, action: ReviewKey) -> String {
+        match action {
+            ReviewKey::Go(motion) => return list::describe_move(motion),
+            ReviewKey::Open => "Open file at this line",
+            ReviewKey::Comment => "Comment on this line",
+            ReviewKey::Next {
+                file: false,
+                forward: true,
+            } => "Next hunk",
+            ReviewKey::Next {
+                file: false,
+                forward: false,
+            } => "Previous hunk",
+            ReviewKey::Next {
+                file: true,
+                forward: true,
+            } => "Next file",
+            ReviewKey::Next {
+                file: true,
+                forward: false,
+            } => "Previous file",
+            ReviewKey::Keep { file: false } => "Keep hunk",
+            ReviewKey::Keep { file: true } => "Keep file",
+            ReviewKey::Reject => "Reject hunk or remove comment",
+            ReviewKey::RejectFile => "Reject file",
+            ReviewKey::Send => "Send review to agent",
+            ReviewKey::Refresh => "Refresh review",
+            ReviewKey::Close => "Close pane",
+        }
+        .into()
     }
 
-    fn half_typed_mut(&mut self) -> &mut crate::vim::HalfTyped {
-        &mut self.typed
+    fn own(
+        &self,
+        stroke: Stroke,
+        _keys: &mut Reader<'_>,
+        _visual: bool,
+    ) -> Option<Read<ReviewKey>> {
+        if let Some(motion) = list::own_move(stroke) {
+            return Some(Read::Yes(ReviewKey::Go(motion)));
+        }
+        let key = match stroke {
+            Stroke::Enter => ReviewKey::Open,
+            Stroke::Char { ch, ctrl: false } => match ch {
+                'a' => ReviewKey::Keep { file: false },
+                'A' => ReviewKey::Keep { file: true },
+                'x' => ReviewKey::Reject,
+                'X' => ReviewKey::RejectFile,
+                'S' => ReviewKey::Send,
+                'R' => ReviewKey::Refresh,
+                'q' => ReviewKey::Close,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(Read::Yes(key))
+    }
+
+    fn after_g(
+        &self,
+        stroke: Stroke,
+        _keys: &mut Reader<'_>,
+        _visual: bool,
+    ) -> Option<Read<ReviewKey>> {
+        (stroke.plain()? == 'c').then_some(Read::Yes(ReviewKey::Comment))
+    }
+
+    fn after_bracket(
+        &self,
+        backward: bool,
+        stroke: Stroke,
+        _keys: &mut Reader<'_>,
+        _visual: bool,
+    ) -> Option<Read<ReviewKey>> {
+        let file = match stroke.plain()? {
+            'h' => false,
+            'f' => true,
+            _ => return None,
+        };
+        Some(Read::Yes(ReviewKey::Next {
+            file,
+            forward: !backward,
+        }))
+    }
+
+    fn takes(&self, command: &Command<ReviewKey>) -> bool {
+        command.register.is_none()
+            && (list::moves(command)
+                || matches!(
+                    command.action,
+                    Action::Own(_) | Action::Search { .. } | Action::SearchAgain { .. }
+                ))
+    }
+}
+
+impl ListRows for Review {
+    fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    fn set_cursor(&mut self, item: usize) {
+        self.cursor = item;
+    }
+
+    fn top(&self) -> usize {
+        self.top
+    }
+
+    fn set_top(&mut self, item: usize) {
+        self.top = item.min(self.lines.len().saturating_sub(1));
+    }
+
+    fn shown(&self) -> std::ops::Range<usize> {
+        let end = (self.top + self.height.max(1)).min(self.lines.len());
+        self.top..end.max(self.top + 1)
+    }
+}
+
+impl crate::vim::KeyState for Review {
+    fn mode(&self) -> Mode {
+        Mode::Normal
     }
 
     fn prompting(&self) -> bool {
-        false
+        self.search.typing()
+    }
+
+    fn pending(&self) -> bool {
+        self.keys.pending()
+    }
+
+    fn counting(&self) -> Option<usize> {
+        self.keys.counting()
+    }
+
+    fn forget_count(&mut self) {
+        self.keys.clear();
     }
 }
 
 impl Review {
     pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
-        crate::shortcuts::bindings::list("Review", self.typed.key, |stroke, pending| match stroke {
-            Stroke::Char { ch, ctrl: false } => self.describe_plain(ch, self.typed.count, pending),
-            Stroke::Char { ch, ctrl: true } => self.describe_ctrl(ch, self.typed.count),
-            stroke => self.describe_named(stroke, self.typed.count),
-        })
+        if let Some(typed) = self.search.typed() {
+            return crate::cmdline::simple::help("Review search", typed);
+        }
+        crate::vim::shortcuts::context("Review", &self.keys, Mode::Normal, &ReviewKeys)
     }
 }

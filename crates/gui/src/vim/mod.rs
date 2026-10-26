@@ -10,6 +10,7 @@
 
 mod command;
 mod grammar;
+pub(crate) mod list;
 pub(crate) mod shortcuts;
 mod stroke;
 

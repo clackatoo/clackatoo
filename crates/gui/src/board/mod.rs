@@ -9,15 +9,14 @@
 //!
 //! | Key | Does |
 //! |---|---|
-//! | `j` `k`, `gg` `G`, Ctrl+D Ctrl+U | Moves between entries, with a count |
+//! | `j` `k`, `gg` `G`, `H` `M` `L`, Ctrl+D Ctrl+U Ctrl+F Ctrl+E Ctrl+Y, `zt` `zz` `zb` | Moves between entries, with a count, as every list does (see [`list`]) |
+//! | `/` `?` `n` `N` | Searches the entries, with the editor's patterns |
 //! | `i`, `o`, Enter | Posts a note, typed in the bar |
 //! | `r` | Posts a result |
 //! | `e` | Edits the entry at the cursor |
 //! | `x` | Releases the claim at the cursor, whoever holds it |
 //! | `A` | Archives the board, or unarchives it |
 //! | `q` | Closes the pane: the board stays |
-
-use crate::shortcuts::bindings::Hint;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,8 +27,11 @@ use clackatoo_protocol::{
 use clackatoo_term::{Row, RowBuilder};
 
 use crate::colors;
+use crate::motion::Motion;
+use crate::options::{Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
-use crate::vim::Stroke;
+use crate::vim::list::{self, ListRows, ListSearch};
+use crate::vim::{Action, Command, Dialect, Keys, Mode, Paging, Parsed, Read, Reader, Stroke};
 
 #[cfg(test)]
 mod tests;
@@ -93,8 +95,14 @@ pub(crate) struct BoardPane {
     /// epoch: how long ago things were, and how long claims have left,
     /// are said as of then.
     laid_at: u64,
-    /// A count typed, and `g`, waiting for the key after.
-    typed: crate::vim::HalfTyped,
+    /// The keys of a command half typed.
+    keys: Keys,
+    /// How far its scrolling keys go.
+    paging: Paging,
+    /// The search being typed, and the last.
+    search: ListSearch,
+    /// How a search matches case, as the editor's do.
+    case: Case,
     prompt: Option<Prompt>,
     cursorline: bool,
     /// What to ask the daemon, oldest first.
@@ -106,7 +114,7 @@ pub(crate) struct BoardPane {
 }
 
 impl BoardPane {
-    pub(crate) fn new(board: BoardId, cursorline: bool) -> Self {
+    pub(crate) fn new(board: BoardId, options: &Options) -> Self {
         Self {
             board,
             summary: None,
@@ -125,9 +133,12 @@ impl BoardPane {
             cursor_rows: 0..0,
             stale: true,
             laid_at: 0,
-            typed: crate::vim::HalfTyped::default(),
+            keys: Keys::default(),
+            paging: Paging::default(),
+            search: ListSearch::default(),
+            case: Case::of(options),
             prompt: None,
-            cursorline,
+            cursorline: options.cursorline,
             outbox: Vec::new(),
             asks: Vec::new(),
             message: None,
@@ -138,27 +149,40 @@ impl BoardPane {
         self.board
     }
 
-    pub(crate) fn set_cursorline(&mut self, cursorline: bool) {
-        self.cursorline = cursorline;
+    /// Takes in the options, as they've changed.
+    pub(crate) fn set_options(&mut self, options: &Options) {
+        self.cursorline = options.cursorline;
+        self.case = Case::of(options);
     }
 
     pub(crate) fn resize(&mut self, size: Size) {
         let (width, height) = (usize::from(size.cols()), usize::from(size.rows()));
         if (width, height) != (self.width, self.height) {
             self.stale |= width != self.width;
+            if height != self.height {
+                self.paging.resized();
+            }
             self.width = width;
             self.height = height;
         }
     }
 
-    /// Whether an entry is being typed, in the bar.
+    /// Whether an entry, or a search, is being typed, in the bar.
     pub(crate) fn prompting(&self) -> bool {
-        self.prompt.is_some()
+        self.prompt.is_some() || self.search.typing()
     }
 
     /// Whether a key is half typed, as `g` or a count is.
     pub(crate) fn pending(&self) -> bool {
-        self.typed.pending()
+        self.keys.pending()
+    }
+
+    /// Ends what was half done as the focus leaves the board: a command
+    /// half typed, and a search being typed. An entry being typed stays,
+    /// to finish.
+    pub(crate) fn leave(&mut self) {
+        self.keys.clear();
+        self.search.give_up();
     }
 
     /// What the window's title says: "Board:" and the board's name, as
@@ -167,9 +191,12 @@ impl BoardPane {
         &self.title
     }
 
-    /// What the bar says: what's being typed, a message, or the board and
-    /// the keys.
+    /// What the bar says: what's being typed, or the keys of a command
+    /// half typed, then a message, or the board and the keys.
     pub(crate) fn label(&self) -> String {
+        if let Some(label) = self.search.label() {
+            return label;
+        }
         match &self.prompt {
             Some(Prompt::Post { kind, text }) => {
                 let what = if *kind == PostKind::Result {
@@ -182,6 +209,12 @@ impl BoardPane {
             Some(Prompt::Edit { entry, text }) => return format!("edit #{entry}: {text}▏"),
             None => {}
         }
+        list::showing(&self.keys, self.place_label())
+    }
+
+    /// What the bar says but for what's typed: a message, or the board and
+    /// the keys.
+    fn place_label(&self) -> String {
         if let Some(message) = &self.message {
             return message.clone();
         }
@@ -253,119 +286,78 @@ impl BoardPane {
             self.prompt_stroke(stroke);
             return true;
         }
-        let count = self.typed.count.take();
-        let pending = self.typed.key.take();
-        let Stroke::Char { ch, ctrl: false } = stroke else {
-            return self.special(stroke, count);
+        if self.search.typing() {
+            if self.search.key(stroke) == list::Typed::Done {
+                self.search_again(false, 1);
+            }
+            return true;
+        }
+        let was_pending = self.keys.pending();
+        match self.keys.read(stroke, false, &BoardKeys) {
+            Parsed::Incomplete => true,
+            Parsed::Nothing => was_pending,
+            Parsed::Command(command) => {
+                self.execute(command);
+                true
+            }
+        }
+    }
+
+    /// Does `command`, read whole.
+    fn execute(&mut self, command: Command<BoardKey>) {
+        let mut paging = self.paging;
+        let moved = list::go(self, &mut paging, &command);
+        self.paging = paging;
+        if moved {
+            return;
+        }
+        let own = match command.action {
+            Action::Search { backward } => return self.search.start(backward),
+            Action::SearchAgain { reverse } => {
+                return self.search_again(reverse, command.times());
+            }
+            Action::Own(own) => own,
+            // Nothing else is taken (see `BoardKeys::takes`).
+            _ => return,
         };
-        self.plain(ch, count, pending)
+        match own {
+            BoardKey::Go(motion) => {
+                let mut paging = self.paging;
+                list::go_own(self, &mut paging, motion, command.count);
+                self.paging = paging;
+            }
+            BoardKey::Post(kind) => self.ask_post(kind),
+            BoardKey::Edit => self.ask_edit(),
+            BoardKey::Release => self.release(),
+            BoardKey::Archive => {
+                if let Some(summary) = &self.summary {
+                    self.outbox.push(BoardAction::Archive(!summary.archived));
+                }
+            }
+            BoardKey::Close => self.asks.push(Ask::Close),
+        }
     }
 
-    crate::shortcuts::bindings::described_keys! {
-        fn special / describe_special(&mut self, stroke: Stroke, count: Option<usize>) -> bool;
-        match stroke => {
-            Stroke::Char {
-                ch: 'd' | 'f',
-                ctrl: true,
-            } =>
-                Hint::Action("Move down several entries"),
-                self.move_by(count.unwrap_or(1) * (self.list_height() / 6).max(1), true);
-            Stroke::Char {
-                ch: 'u' | 'b',
-                ctrl: true,
-            } =>
-                Hint::Action("Move up several entries"),
-                self.move_by(count.unwrap_or(1) * (self.list_height() / 6).max(1), false);
-            Stroke::Char {
-                ch: 'n',
-                ctrl: true,
+    /// `n`, or `N` if `reverse`: to the `count`th entry the last search
+    /// matches, the way it went, round the ends.
+    fn search_again(&mut self, reverse: bool, count: usize) {
+        let pattern = match self.search.pattern(self.case) {
+            None => return,
+            Some(Err(why)) => {
+                self.message = Some(why);
+                return;
             }
-            | Stroke::Down =>
-                Hint::Action("Next item"),
-                self.move_by(count.unwrap_or(1), true);
-            Stroke::Char {
-                ch: 'p',
-                ctrl: true,
-            }
-            | Stroke::Up =>
-                Hint::Action("Previous item"),
-                self.move_by(count.unwrap_or(1), false);
-            Stroke::Home =>
-                Hint::Action("First item"),
-                self.go_to(0);
-            Stroke::End =>
-                Hint::Action("Last item"),
-                self.go_to(usize::MAX);
-            Stroke::Enter =>
-                Hint::Action("Post a note"),
-                self.ask_post(PostKind::Note);
-            _ =>
-                Hint::None,
-                return false;
+            Some(Ok(pattern)) => pattern,
+        };
+        let matches = |at: usize| pattern.find_at(&self.entries[at].text, 0).is_some();
+        if let Some(at) =
+            (self.search).again(reverse, count, self.entries.len(), self.cursor, matches)
+        {
+            self.go_to(at);
+        } else {
+            let query = self.search.query().unwrap_or_default();
+            self.message = Some(format!("no entry matches {query}"));
         }
-        then true
-    }
-
-    crate::shortcuts::bindings::described_keys! {
-        fn plain / describe_plain(&mut self, ch: char, count: Option<usize>, pending: Option<char>) -> bool;
-        match (pending, ch) => {
-            (None, '0'..='9') if ch != '0' || count.is_some() =>
-                Hint::Count,
-                {
-                    let digit = ch.to_digit(10).expect("a digit") as usize;
-                    let count = count.unwrap_or(0).saturating_mul(10).saturating_add(digit);
-                    self.typed.count = Some(count.min(1_000_000));
-                    return false;
-                };
-            (Some('g'), 'g') =>
-                Hint::Action("First item or item given by count"),
-                self.go_to(count.map_or(0, |count| count - 1));
-            (Some(_), _) =>
-                Hint::None,
-                {};
-            (None, 'g') =>
-                Hint::Prefix,
-                {
-                    self.typed.count = count;
-                    self.typed.key = Some('g');
-                    return false;
-                };
-            (None, 'j') =>
-                Hint::Action("Next item"),
-                self.move_by(count.unwrap_or(1), true);
-            (None, 'k') =>
-                Hint::Action("Previous item"),
-                self.move_by(count.unwrap_or(1), false);
-            (None, 'G') =>
-                Hint::Action("Last item or item given by count"),
-                self.go_to(count.map_or(usize::MAX, |count| count - 1));
-            (None, 'i' | 'o' | 'a') =>
-                Hint::Action("Post a note"),
-                self.ask_post(PostKind::Note);
-            (None, 'r') =>
-                Hint::Action("Post a result"),
-                self.ask_post(PostKind::Result);
-            (None, 'e') =>
-                Hint::Action("Edit entry"),
-                self.ask_edit();
-            (None, 'x') =>
-                Hint::Action("Release claim"),
-                self.release();
-            (None, 'A') =>
-                Hint::Action("Archive or unarchive board"),
-                {
-                    if let Some(summary) = &self.summary {
-                        self.outbox.push(BoardAction::Archive(!summary.archived));
-                    }
-                };
-            (None, 'q') =>
-                Hint::Action("Close pane"),
-                self.asks.push(Ask::Close);
-            _ =>
-                Hint::None,
-                return false;
-        }
-        then true
     }
 
     /// Starts typing an entry of `kind` to post, unless the board can't
@@ -431,17 +423,6 @@ impl BoardPane {
             crate::cmdline::simple::Outcome::Cancel => self.prompt = None,
             _ => {}
         }
-    }
-
-    /// Moves the cursor `by` entries down, or up.
-    fn move_by(&mut self, by: usize, down: bool) {
-        let last = self.entries.len().saturating_sub(1);
-        self.cursor = if down {
-            self.cursor.saturating_add(by).min(last)
-        } else {
-            self.cursor.saturating_sub(by)
-        };
-        self.at_end = self.cursor == last;
     }
 
     /// Puts the cursor on entry `index`, from 0, or the last.
@@ -806,17 +787,158 @@ fn now() -> u64 {
         })
 }
 
-impl crate::vim::ListPane for BoardPane {
-    fn half_typed(&self) -> &crate::vim::HalfTyped {
-        &self.typed
+/// A command of a board's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BoardKey {
+    /// Home, End, Ctrl+N and Ctrl+P (see [`list::own_move`]).
+    Go(Motion),
+    /// `i`, `o`, `a` and Enter post a note, `r` a result.
+    Post(PostKind),
+    /// `e`: edit the entry at the cursor.
+    Edit,
+    /// `x`: release the claim at the cursor.
+    Release,
+    /// `A`: archive the board, or unarchive it.
+    Archive,
+    /// `q`: close the pane.
+    Close,
+}
+
+/// How a board reads keys: a list's (see [`list`]), with its own for
+/// posting and the like, and `/` `?` `n` `N` searching its entries.
+struct BoardKeys;
+
+impl Dialect for BoardKeys {
+    type Own = BoardKey;
+
+    fn describe(&self, action: BoardKey) -> String {
+        match action {
+            BoardKey::Go(motion) => return list::describe_move(motion),
+            BoardKey::Post(PostKind::Result) => "Post a result",
+            BoardKey::Post(_) => "Post a note",
+            BoardKey::Edit => "Edit entry",
+            BoardKey::Release => "Release claim",
+            BoardKey::Archive => "Archive or unarchive board",
+            BoardKey::Close => "Close pane",
+        }
+        .into()
     }
 
-    fn half_typed_mut(&mut self) -> &mut crate::vim::HalfTyped {
-        &mut self.typed
+    fn own(&self, stroke: Stroke, _keys: &mut Reader<'_>, _visual: bool) -> Option<Read<BoardKey>> {
+        if let Some(motion) = list::own_move(stroke) {
+            return Some(Read::Yes(BoardKey::Go(motion)));
+        }
+        let key = match stroke {
+            Stroke::Enter => BoardKey::Post(PostKind::Note),
+            Stroke::Char { ch, ctrl: false } => match ch {
+                'i' | 'o' | 'a' => BoardKey::Post(PostKind::Note),
+                'r' => BoardKey::Post(PostKind::Result),
+                'e' => BoardKey::Edit,
+                'x' => BoardKey::Release,
+                'A' => BoardKey::Archive,
+                'q' => BoardKey::Close,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(Read::Yes(key))
+    }
+
+    fn takes(&self, command: &Command<BoardKey>) -> bool {
+        command.register.is_none()
+            && (list::moves(command)
+                || matches!(
+                    command.action,
+                    Action::Own(_) | Action::Search { .. } | Action::SearchAgain { .. }
+                ))
+    }
+}
+
+impl BoardPane {
+    /// The lines laid out of entry `entry`, by its index.
+    fn lines_of(&self, entry: usize) -> Option<std::ops::Range<usize>> {
+        let first = (self.lines.iter()).position(|line| line.entry == Some(entry))?;
+        let after = (self.lines[first..].iter())
+            .position(|line| line.entry != Some(entry))
+            .map_or(self.lines.len(), |past| first + past);
+        Some(first..after)
+    }
+}
+
+/// A board is a list of its entries, each as many lines as it's laid out
+/// in, as of the last settle.
+impl ListRows for BoardPane {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    fn set_cursor(&mut self, item: usize) {
+        self.go_to(item);
+    }
+
+    fn top(&self) -> usize {
+        (self.lines.get(self.top..).unwrap_or_default().iter())
+            .find_map(|line| line.entry)
+            .unwrap_or(self.cursor)
+    }
+
+    fn set_top(&mut self, item: usize) {
+        if let Some(lines) = self.lines_of(item) {
+            self.top = lines.start;
+        }
+    }
+
+    fn shown(&self) -> std::ops::Range<usize> {
+        let end = (self.top + self.list_height()).min(self.lines.len());
+        let top = self.top.min(end);
+        let shown = &self.lines[top..end];
+        // Entries starting in view, then those of them ending in it too.
+        let first = shown.iter().enumerate().find_map(|(at, line)| {
+            let entry = line.entry?;
+            let starts = top + at == 0 || self.lines[top + at - 1].entry != Some(entry);
+            starts.then_some(entry)
+        });
+        let last = shown.iter().enumerate().rev().find_map(|(at, line)| {
+            let entry = line.entry?;
+            let ends = self
+                .lines
+                .get(top + at + 1)
+                .is_none_or(|next| next.entry != Some(entry));
+            ends.then_some(entry)
+        });
+        if let Some((first, last)) = first.zip(last).filter(|(first, last)| first <= last) {
+            first..last + 1
+        } else {
+            // One entry taller than the view.
+            let at = ListRows::top(self);
+            at..at + 1
+        }
+    }
+}
+
+impl crate::vim::KeyState for BoardPane {
+    fn mode(&self) -> Mode {
+        Mode::Normal
     }
 
     fn prompting(&self) -> bool {
         BoardPane::prompting(self)
+    }
+
+    fn pending(&self) -> bool {
+        self.keys.pending()
+    }
+
+    fn counting(&self) -> Option<usize> {
+        self.keys.counting()
+    }
+
+    fn forget_count(&mut self) {
+        self.keys.clear();
     }
 }
 
@@ -828,9 +950,9 @@ impl BoardPane {
             };
             return crate::cmdline::simple::help("Board entry", text);
         }
-        crate::shortcuts::bindings::list("Board", self.typed.key, |stroke, pending| match stroke {
-            Stroke::Char { ch, ctrl: false } => self.describe_plain(ch, self.typed.count, pending),
-            stroke => self.describe_special(stroke, self.typed.count),
-        })
+        if let Some(typed) = self.search.typed() {
+            return crate::cmdline::simple::help("Board search", typed);
+        }
+        crate::vim::shortcuts::context("Board", &self.keys, Mode::Normal, &BoardKeys)
     }
 }
