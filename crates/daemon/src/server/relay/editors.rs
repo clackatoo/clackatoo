@@ -266,6 +266,15 @@ impl Asked {
             .collect()
     }
 
+    /// Forgets everything asked, returning who asked each, and their own
+    /// numbers for it.
+    pub(in crate::server) fn take_all(&mut self) -> Vec<(Token, u64)> {
+        let asked = std::mem::take(&mut self.clients).into_values().collect();
+        self.numbers.clear();
+        self.given.clear();
+        asked
+    }
+
     /// Forgets everything the client at `token` asked, as it has gone.
     pub(in crate::server) fn forget_client(&mut self, token: Token) {
         self.clients.retain(|_, (asker, _)| *asker != token);

@@ -164,6 +164,20 @@ impl Daemon {
         self.send_event(token, Event::Sessions { id, sessions });
     }
 
+    /// The connection at `at` has gone, or its daemon has restarted: no
+    /// answer comes to the listings asked of it, so each client that asked
+    /// is told so.
+    pub(super) fn sessions_lost(&mut self, at: usize) {
+        let linked = &mut self.links.list[at];
+        let host = linked.remote.host.clone();
+        let asked = linked.relayed.sessions.numbers.take_all();
+        linked.relayed.sessions.cwds.clear();
+        for (token, id) in asked {
+            let sessions = Err(format!("the connection to {host} was lost"));
+            self.send_event(token, Event::Sessions { id, sessions });
+        }
+    }
+
     /// Forgets the client at `token`, gone: what other daemons list for it
     /// goes nowhere.
     pub(super) fn forget_sessions_client(&mut self, token: Token) {
@@ -196,6 +210,47 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A listing asked of a daemon whose connection is lost, or which
+    /// restarts, is answered here: the start page never waits for ever.
+    #[test]
+    fn a_listing_whose_connection_is_lost_or_restarts_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there) = linked(dir.path());
+        let (window, mut from_daemon) = client(&mut daemon);
+        let ask = |id| ClientMessage::ListSessions {
+            id,
+            agent: "claude".into(),
+            cwd: "/src".into(),
+            on: Some(desk().id),
+        };
+        assert!(daemon.route_message(window, ask(1)).is_none());
+        heard(&mut there);
+        let again = clackatoo_protocol::Machine {
+            run: desk().run + 1,
+            ..desk()
+        };
+        say(
+            &mut there,
+            &ServerMessage::Event(Event::Workspaces(clackatoo_protocol::Workspaces {
+                machine: Some(again),
+                ..clackatoo_protocol::Workspaces::default()
+            })),
+        );
+        daemon.read_reached(link, Reading::Look);
+        assert_eq!(
+            told(&mut from_daemon),
+            [(1, Err("the connection to desk was lost".to_owned()))]
+        );
+        assert!(daemon.route_message(window, ask(2)).is_none());
+        heard(&mut there);
+        daemon.end_connection(0);
+        assert_eq!(
+            told(&mut from_daemon),
+            [(2, Err("the connection to desk was lost".to_owned()))]
+        );
+        assert!(daemon.links.list[0].relayed.sessions.cwds.is_empty());
     }
 
     #[test]

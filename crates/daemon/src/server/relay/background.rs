@@ -165,13 +165,16 @@ impl Daemon {
             {
                 continue;
             }
-            // Asked already, the answer on its way is told this client too.
-            let asked = !self.links.list[at].relayed.ports_waiting.is_empty();
+            // Asked already, the answer on its way is told this client too;
+            // but one long since asked, it may never send: it's asked again.
+            let asked = (self.links.list[at].relayed.ports_asked)
+                .is_some_and(|asked| asked.elapsed() < super::LONGEST_ANSWER);
             if !asked {
                 let ports = ClientMessage::Request(Request::Background(BackgroundAction::Ports));
                 if self.send_upstream(at, &ports, Expect::Nothing).is_err() {
                     continue;
                 }
+                self.links.list[at].relayed.ports_asked = Some(std::time::Instant::now());
             }
             let waiting = &mut self.links.list[at].relayed.ports_waiting;
             if !waiting.contains(&token) {
@@ -186,7 +189,20 @@ impl Daemon {
     pub(super) fn ports_lost(&mut self, at: usize) {
         let relayed = &mut self.links.list[at].relayed;
         relayed.ports.clear();
-        relayed.ports_waiting.clear();
+        relayed.ports_asked = None;
+        // Those waiting are told what's known: this daemon's own.
+        let waiting = std::mem::take(&mut relayed.ports_waiting);
+        self.tell_ports(waiting);
+    }
+
+    /// Forgets the client at `token`, gone: it waits for no ports.
+    pub(super) fn forget_ports_client(&mut self, token: Token) {
+        for linked in &mut self.links.list {
+            linked
+                .relayed
+                .ports_waiting
+                .retain(|&waiting| waiting != token);
+        }
     }
 
     /// Takes in `listening`, the ports the background tabs of the daemon
@@ -223,6 +239,7 @@ impl Daemon {
         }
         let relayed = &mut self.links.list[at].relayed;
         relayed.ports = taken;
+        relayed.ports_asked = None;
         let waiting = std::mem::take(&mut relayed.ports_waiting);
         self.tell_ports(waiting);
     }
@@ -543,6 +560,70 @@ mod tests {
         assert_eq!(heard(&mut there), [ClientMessage::Request(ports)]);
         daemon.ports_lost(0);
         assert!(daemon.links.list[0].relayed.ports_waiting.is_empty());
+    }
+
+    /// A daemon that answers but never says the ports is asked again once
+    /// it has had as long as any answer; and a window waiting for them as
+    /// the connection is lost, or the daemon there restarts, is told this
+    /// daemon's own at once.
+    #[test]
+    fn ports_never_told_are_asked_again_and_a_lost_connection_tells_those_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there) = with_background(dir.path());
+        let (window, mut from_daemon) = client(&mut daemon);
+        let ports = Request::Background(BackgroundAction::Ports);
+        daemon.route_request(window, ports.clone());
+        assert_eq!(heard(&mut there), [ClientMessage::Request(ports.clone())]);
+        say(&mut there, &ServerMessage::Response(Response::Done));
+        daemon.read_reached(link, Reading::Look);
+        daemon.route_request(window, ports.clone());
+        assert_eq!(heard(&mut there), [], "asked twice at once");
+        let relayed = &mut daemon.links.list[0].relayed;
+        let asked = relayed.ports_asked.as_mut().expect("asked");
+        *asked -= super::super::LONGEST_ANSWER + Duration::from_secs(1);
+        daemon.route_request(window, ports.clone());
+        assert_eq!(heard(&mut there), [ClientMessage::Request(ports.clone())]);
+
+        let listening = |stream: &mut UnixStream| {
+            (read::<ServerMessage>(stream).into_iter())
+                .filter(|message| matches!(message, ServerMessage::Event(Event::Listening(_))))
+                .count()
+        };
+        let _ = listening(&mut from_daemon);
+        daemon.end_connection(0);
+        assert!(daemon.links.list[0].relayed.ports_waiting.is_empty());
+        assert_eq!(listening(&mut from_daemon), 1, "the window waits for ever");
+    }
+
+    /// The daemon there restarting loses what it said of its ports, and
+    /// tells a window waiting for them what this daemon knows.
+    #[test]
+    fn ports_go_with_a_restart_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there) = with_background(dir.path());
+        let (window, _window_end) = client(&mut daemon);
+        let ports = Request::Background(BackgroundAction::Ports);
+        daemon.route_request(window, ports.clone());
+        heard(&mut there);
+        daemon.links.list[0].relayed.ports = vec![Listening {
+            tab: TabId(999),
+            ports: Vec::new(),
+        }];
+        let again = clackatoo_protocol::Machine {
+            run: desk().run + 1,
+            ..desk()
+        };
+        say(
+            &mut there,
+            &ServerMessage::Event(Event::Workspaces(Workspaces {
+                list: Vec::new(),
+                machine: Some(again),
+                ..Workspaces::default()
+            })),
+        );
+        daemon.read_reached(link, Reading::Look);
+        let relayed = &daemon.links.list[0].relayed;
+        assert!(relayed.ports.is_empty() && relayed.ports_waiting.is_empty());
     }
 
     /// The ports another machine's background tabs listen on are asked of

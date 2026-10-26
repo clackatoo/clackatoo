@@ -194,17 +194,11 @@ impl World {
             daemon.restore_workspaces();
         }
         let shutdown = daemon.shutdown_handle();
-        let task = std::sync::Arc::new(std::sync::OnceLock::new());
-        let its_task = std::sync::Arc::clone(&task);
-        let thread = std::thread::spawn(move || {
-            let _ = its_task.set(std::fs::read_link("/proc/thread-self").ok());
-            drop(daemon.run().expect("daemon failed"));
-        });
+        let thread = std::thread::spawn(move || drop(daemon.run().expect("daemon failed")));
         TestDaemon {
             socket,
             shutdown,
             thread: Some(thread),
-            task,
         }
     }
 
@@ -224,8 +218,6 @@ struct TestDaemon {
     socket: PathBuf,
     shutdown: ShutdownHandle,
     thread: Option<JoinHandle<()>>,
-    /// Its thread, under `/proc`, as `/proc/thread-self` names it there.
-    task: std::sync::Arc<std::sync::OnceLock<Option<PathBuf>>>,
 }
 
 impl TestDaemon {
@@ -233,18 +225,6 @@ impl TestDaemon {
         let mut client = Client::connect(&self.socket).expect("connect");
         client.set_read_timeout(Some(PATIENCE)).unwrap();
         client
-    }
-
-    /// How long its loop's thread has run, in clock ticks, as `/proc`
-    /// counts them, user and system together.
-    fn ticks(&self) -> u64 {
-        let task = (self.task.get().cloned().flatten()).expect("its thread is known");
-        let stat = std::fs::read_to_string(Path::new("/proc").join(task).join("stat")).unwrap();
-        let after = stat.rsplit_once(") ").expect("a stat").1;
-        let fields: Vec<&str> = after.split_whitespace().collect();
-        // utime and stime, the 14th and 15th fields, the 12th and 13th
-        // after the program's name.
-        fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
     }
 
     /// Which machine it is.
@@ -5784,8 +5764,16 @@ fn another_machines_agents_past_sessions_are_listed_through_this_daemon() {
     let cwd_said = cwd.display().to_string();
     assert!(listed.iter().all(|session| session.cwd == cwd_said));
     // Desk's own agent, asked of desk, has none of laptop's.
+    let theirs = (listed.iter())
+        .find(|session| session.chat == Some(chat))
+        .map(|session| session.session.clone())
+        .unwrap();
     let own = sessions_on(&mut pair.window, 2, &cwd, None).unwrap();
-    assert!(own.iter().all(|session| session.chat.is_none()), "{own:#?}");
+    assert!(
+        own.iter()
+            .all(|session| session.session != theirs && session.chat.is_none()),
+        "{own:#?}"
+    );
     // A machine not connected says so.
     let refused = sessions_on(&mut pair.window, 3, &cwd, Some(MachineId([0x77; 16])));
     assert!(
@@ -5827,23 +5815,29 @@ fn daemons_connected_both_ways_ask_each_other_for_ports_once() {
             theirs(shown, theirs_named).is_some_and(|w| !w.background.is_empty())
         });
     }
-    let before = desk.ticks() + laptop.ticks();
+    let listening = |client: &mut Client| {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            assert!(Instant::now() < deadline, "the ports never came");
+            let event = (client.next_event())
+                .expect("the ports never came: are the daemons asking each other for ever?");
+            if let Event::Listening(listening) = event {
+                return listening;
+            }
+        }
+    };
     let asked = window.request(&Request::Background(BackgroundAction::Ports));
     assert_eq!(asked.unwrap(), Response::Done);
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        assert!(Instant::now() < deadline, "the ports never came");
-        let event = (window.next_event())
-            .expect("the ports never came: are the daemons asking each other for ever?");
-        if let Event::Listening(listening) = event
-            && listening.len() == 2
-        {
-            break;
-        }
-    }
-    std::thread::sleep(Duration::from_secs(2));
-    let spent = desk.ticks() + laptop.ticks() - before;
-    // Asking back and on for ever keeps both loops busy: some 400 ticks in
-    // two seconds. Asked once, they're idle.
-    assert!(spent < 100, "the daemons' loops ran {spent} ticks");
+    while listening(&mut window).len() < 2 {}
+    // Had laptop asked desk on for desk, it would know desk's ports now:
+    // a window there asking while desk can't answer would be told them.
+    std::thread::sleep(Duration::from_millis(500));
+    let bridge = pid(&world, "ssh.desk.pid");
+    signal(&bridge, "-STOP");
+    std::thread::sleep(Duration::from_millis(3500));
+    let asked = at_laptop.request(&Request::Background(BackgroundAction::Ports));
+    assert_eq!(asked.unwrap(), Response::Done);
+    let told = listening(&mut at_laptop);
+    signal(&bridge, "-CONT");
+    assert_eq!(told.len(), 1, "laptop asked desk for desk: {told:?}");
 }

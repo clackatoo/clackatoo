@@ -194,6 +194,8 @@ pub(super) struct Relayed {
     /// The clients waiting for it to say the ports its background tabs
     /// listen on.
     ports_waiting: Vec<Token>,
+    /// When it was last asked for the ports, while its answer is awaited.
+    ports_asked: Option<Instant>,
 }
 
 impl Relayed {
@@ -1911,6 +1913,7 @@ impl Daemon {
         self.forget_files_client(token);
         self.forget_finds_client(token);
         self.forget_sessions_client(token);
+        self.forget_ports_client(token);
         self.forget_shown_client(token);
         self.forget_forwards_client(token);
         for linked in &mut self.links.list {
@@ -2059,6 +2062,7 @@ impl Daemon {
         self.buffers_lost(at);
         self.forwards_lost(at);
         self.ports_lost(at);
+        self.sessions_lost(at);
         for followed in self.links.list[at].relayed.followed.values_mut() {
             followed.upstream = false;
             followed.owed = false;
@@ -2184,8 +2188,10 @@ impl Daemon {
             for local in gone {
                 self.finish_relayed_streams(local);
             }
-            // So are its background tabs, and their ports.
+            // So are its background tabs, and their ports, and the
+            // listings asked of it.
             self.ports_lost(at);
+            self.sessions_lost(at);
         }
         if taken.changed {
             self.tell_workspaces();
@@ -2273,6 +2279,15 @@ impl Daemon {
                             reached.host,
                             payload.len()
                         );
+                    }
+                    // A listing of sessions too big is still an answer.
+                    if head.event_kind() == Some(SESSIONS)
+                        && let Some([_, _, number]) = frame::leading::<3>(&payload)
+                        && let Some(at) = self.reached_at(token).map(|(at, _)| at)
+                    {
+                        let host = self.links.list[at].remote.host.clone();
+                        let why = format!("{host} listed more sessions than are taken in");
+                        self.take_relayed_sessions(at, number, Err(why));
                     }
                     continue;
                 }
