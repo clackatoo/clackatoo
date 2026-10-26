@@ -392,7 +392,15 @@ impl ChatView {
         }
         let visual = self.visual().is_some();
         let mut redraw = false;
-        for stroke in crate::vim::strokes(press, false) {
+        // Ctrl with Shift is Ctrl in a chat, as Ctrl+Shift+E scrolls as
+        // Ctrl+E does: no program's there to tell them apart for.
+        let strokes = crate::vim::strokes(press, false)
+            .into_iter()
+            .map(|stroke| match stroke {
+                Stroke::Char { ch, ctrl: true } => Stroke::ctrl(ch.to_ascii_lowercase()),
+                stroke => stroke,
+            });
+        for stroke in strokes {
             let was_pending = self.keys.pending();
             match self.keys.read(stroke, visual, &ChatKeys) {
                 Parsed::Incomplete => redraw = true,
@@ -1664,6 +1672,26 @@ mod tests {
             chat.line_height,
             chat.max_scroll
         );
+    }
+
+    #[test]
+    fn ctrl_with_shift_scrolls_as_ctrl_does() {
+        let (mut chat, mut fonts) = reading(crate::chat::fixtures::long_chat(12));
+        read(&mut chat, "gg");
+        paint(&mut chat, &mut fonts);
+        let top = chat.scroll;
+        chat.read_key(&crate::input::KeyPress {
+            key: &winit::keyboard::Key::Character("E".into()),
+            text: None,
+            location: winit::keyboard::KeyLocation::Standard,
+            code: None,
+            modifiers: crate::input::Modifiers {
+                ctrl: true,
+                shift: true,
+                ..crate::input::Modifiers::default()
+            },
+        });
+        assert!(chat.scroll > top, "a line down");
     }
 
     #[test]
