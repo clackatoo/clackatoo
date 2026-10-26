@@ -338,7 +338,7 @@ impl<A: Clone + Eq> History<A> {
             };
             work += (own + theirs.weight()) as u64;
             if work > most {
-                self.count(work);
+                self.count(work + piece_work);
                 return Err(HistoryError::TooFar(base));
             }
             (edit, _) = transform(&edit, theirs)?;
