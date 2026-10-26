@@ -957,7 +957,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "chat-yank",
         date: "2026-10-26",
         lesson: "agents",
-        what: "y in a chat is Vim's yank: yw, yy, yiw, \"ay, into the registers; yic yanks a block of code, yim a message",
+        what: "y in a chat is Vim's yank: yw, yy, yiw, \"ay, into the registers; yix yanks a block of code, yim a message",
     },
     News {
         id: "chat-search",

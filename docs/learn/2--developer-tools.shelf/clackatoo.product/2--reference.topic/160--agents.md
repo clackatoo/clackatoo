@@ -193,12 +193,12 @@ The mouse wheel scrolls in either mode. While you're at the end, the view follow
 
 | Object | Is |
 |---|---|
-| `ic` | The block of code the cursor's in. |
-| `ac` | The same with its fence and language, as Markdown writes it. |
+| `ix` | The block of code the cursor's in. |
+| `ax` | The same with its fence and language, as Markdown writes it. |
 | `im` | The message, answer or card the cursor's in, as it came: an answer as its Markdown. |
 | `am` | Its whole turn: the message, and all the agent said and did for it. |
 
-All four are whole lines. The cursor goes to the start of what's yanked.
+All four are whole lines. `ic` and `ac` are a class, as in an editor, which a chat hasn't got, so they do nothing. The cursor goes to the start of what's yanked.
 
 What's yanked goes into the window's registers as an editor's yank does: into the register named before it, with `"ayy`, or onto its end, with `"Ayy`; `"_` keeps nothing. With no register named, it goes into the unnamed register and `"0`, and onto the clipboard if the `clipboard` option says. `p` in an editor puts it, lines as lines. Keys typed after a yank or a search, by a macro, a binding or quickly by hand, wait for it, so `nn` goes twice and `/x<CR>yiw` yanks the word found.
 

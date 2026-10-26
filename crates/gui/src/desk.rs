@@ -9367,13 +9367,13 @@ mod tests {
         desk.settle_chats(&mut fonts);
         assert_eq!(register(&mut desk, '+').as_deref(), Some("draft"));
         assert_eq!(desk.take_yanked(), [("draft".to_owned(), Copy::Clipboard)]);
-        // In normal mode, `yic` on a block of code: the cursor starts on
+        // In normal mode, `yix` on a block of code: the cursor starts on
         // the last line in view, which is the code's. It's a yank, as an
         // editor's: the unnamed register, `"0` and, as `clipboard` says,
         // the clipboard hold it, as lines.
         normal_mode(&mut desk);
         paint_chat(&mut desk, &mut fonts);
-        type_text(&mut desk, "yic");
+        type_text(&mut desk, "yix");
         desk.settle_chats(&mut fonts);
         for name in ['+', '0', '"'] {
             assert_eq!(register(&mut desk, name).as_deref(), Some("cargo test\n"));
@@ -9386,7 +9386,7 @@ mod tests {
         // A register named before it, and its capital adds to it.
         type_text(&mut desk, "\"ayiw");
         desk.settle_chats(&mut fonts);
-        type_text(&mut desk, "\"Ayic");
+        type_text(&mut desk, "\"Ayix");
         desk.settle_chats(&mut fonts);
         assert_eq!(
             register(&mut desk, 'a').as_deref(),

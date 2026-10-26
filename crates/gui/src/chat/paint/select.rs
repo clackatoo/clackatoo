@@ -1024,13 +1024,13 @@ mod tests {
         chat.press(inside, 1, false);
         chat.release();
         chat.settle(&mut fonts);
-        read(&mut chat, "yic");
+        read(&mut chat, "yix");
         assert_eq!(
             yanked(&mut chat, &mut fonts),
             [lines("cargo test\ncargo build\n")]
         );
         // With its fence, as the Markdown writes it.
-        read(&mut chat, "yac");
+        read(&mut chat, "yax");
         assert_eq!(
             yanked(&mut chat, &mut fonts),
             [lines("```sh\ncargo test\ncargo build\n```\n")]

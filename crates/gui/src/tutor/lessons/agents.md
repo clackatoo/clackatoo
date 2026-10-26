@@ -113,9 +113,9 @@ Ctrl+; puts the chat in normal mode, with a solid cursor on the last line in vie
 
 ## Yanking in a chat
 
-`y` in a chat's normal mode is Vim's yank: `yw` takes a word, `y$` the rest of the line, `yy` the line, `yj` it and the next, with a count as `3yy`, and `yiw`, `yi(` and `yip` Vim's objects in the block of text the cursor's in. Two objects are a chat's own: `yic` yanks the block of code the cursor's in, and `yac` the block with its fence; `yim` yanks the message, answer or card, as it came, and `yam` its whole turn. A chat's lines are each block's own, not the rows they wrap onto.
+`y` in a chat's normal mode is Vim's yank: `yw` takes a word, `y$` the rest of the line, `yy` the line, `yj` it and the next, with a count as `3yy`, and `yiw`, `yi(` and `yip` Vim's objects in the block of text the cursor's in. Two objects are a chat's own: `yix` yanks the block of code the cursor's in, and `yax` the block with its fence; `yim` yanks the message, answer or card, as it came, and `yam` its whole turn. A chat's lines are each block's own, not the rows they wrap onto.
 
-What's yanked goes into the registers, as an editor's yank does: `"ayy` into `a`, `"Ayy` onto its end, and with no register named, the unnamed one and `"0`, and the clipboard as the `clipboard` option says, so `p` in an editor puts it, lines as lines. Try `yic` on a block of code in a chat, then `p` in an editor.
+What's yanked goes into the registers, as an editor's yank does: `"ayy` into `a`, `"Ayy` onto its end, and with no register named, the unnamed one and `"0`, and the clipboard as the `clipboard` option says, so `p` in an editor puts it, lines as lines. Try `yix` on a block of code in a chat, then `p` in an editor.
 
 ## Searching a chat
 

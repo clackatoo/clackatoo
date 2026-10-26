@@ -26,10 +26,11 @@
 //! and `aa` an argument with its comma and `ia` the argument. Only the
 //! daemon has the syntax tree, so the editor asks it for those too.
 //!
-//! A chat names two of its own instead (see [`crate::vim::Dialect::object`]):
-//! `ic` is the block of code the cursor's in and `ac` the block with its
-//! fence, and `im` is the message, answer or card it's in and `am` its
-//! whole turn. The chat finds those itself.
+//! A chat names two of its own (see [`crate::vim::Dialect::object`]): `ix`
+//! is the block of code the cursor's in and `ax` the block with its fence,
+//! and `im` is the message, answer or card it's in and `am` its whole
+//! turn. The chat finds those itself. Its `ic` is a class, as anywhere,
+//! which a chat hasn't got, so it's refused.
 
 use clackatoo_text::Construct;
 
@@ -76,7 +77,7 @@ pub(crate) enum Object {
     Block,
     /// `f`, `c` or `a`: a piece of code.
     Code(Construct),
-    /// A chat's `c`: the block of code the cursor's in, `ac` with its
+    /// A chat's `x`: the block of code the cursor's in, `ax` with its
     /// fence.
     CodeBlock,
     /// A chat's `m`: the message, answer or card the cursor's in, or `am`

@@ -15,8 +15,8 @@
 //!
 //! Objects within a block are Vim's, found in its text by the objects
 //! every pane has (see [`crate::objects`]): `iw`, `aW`, `is`, `ip`, `i"`,
-//! `a(`, `it`. A chat names two of its own: `ic` is the block of code the
-//! cursor's in and `ac` the same with its fence, as Markdown writes it,
+//! `a(`, `it`. A chat names two of its own: `ix` is the block of code the
+//! cursor's in and `ax` the same with its fence, as Markdown writes it,
 //! and `im` is the message, answer or card it's in, as it came, as its
 //! Copy button copies it, and `am` its whole turn. All four are lines.
 //!
@@ -375,7 +375,7 @@ impl ChatView {
         }
     }
 
-    /// `ic`: the block of code `key` is, or with `ac`, the block with its
+    /// `ix`: the block of code `key` is, or with `ax`, the block with its
     /// fence and its language, as Markdown writes it, with a fence longer
     /// than any run of backticks in it.
     fn code_block(&self, key: TextKey, inner: bool) -> Result<String, &'static str> {
@@ -686,7 +686,7 @@ mod tests {
     #[test]
     fn ic_needs_a_block_of_code_and_the_bar_says_so() {
         let (mut chat, mut fonts) = reading(talk(&[("one", "no code here")]));
-        read(&mut chat, "yic");
+        read(&mut chat, "yix");
         assert!(yanked(&mut chat, &mut fonts).is_empty());
         assert_eq!(chat.label().as_deref(), Some("no block of code here"));
     }
@@ -712,8 +712,12 @@ mod tests {
         // After `y`: the chat's own objects among Vim's.
         read(&mut chat, "y");
         let after = rows(&chat);
-        assert!(has(&after, "ic", "Inner code block"), "{after:?}");
-        assert!(has(&after, "ac", "Whole code block"), "{after:?}");
+        assert!(has(&after, "ix", "Inner code block"), "{after:?}");
+        assert!(
+            !has(&after, "ic", "") && !has(&after, "ac", ""),
+            "a chat has no classes"
+        );
+        assert!(has(&after, "ax", "Whole code block"), "{after:?}");
         assert!(has(&after, "im", "Message, answer or card"), "{after:?}");
         assert!(has(&after, "am", "Whole turn"), "{after:?}");
         assert!(has(&after, "iw", "Inner word") && has(&after, "y", "whole lines"));

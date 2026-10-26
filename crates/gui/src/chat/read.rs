@@ -25,7 +25,7 @@
 //! | `gg` `G` | To the start of the chat, or its end |
 //! | Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y, Ctrl+F and the pages | Scroll as far as in any pane, the cursor kept in view |
 //! | `v` `V` | Select characters, or lines; `o` goes to the other end |
-//! | `y` and a motion or object, `yy` `Y` | Yank what it moves over, or the object, into the registers: `yic` a block of code, `yim` a message or card, `yam` a turn |
+//! | `y` and a motion or object, `yy` `Y` | Yank what it moves over, or the object, into the registers: `yix` a block of code, `yim` a message or card, `yam` a turn |
 //! | `"a`, before `y` | Yank into register `a`, or onto its end with `"A` |
 //! | `v` then `y`, `Y` | Yank what's selected, or its lines |
 //! | `/` `?`, `n` `N` | Search the chat's text forward or back, and again |
@@ -91,7 +91,7 @@ pub(crate) enum ChatKey {
 /// `;` `,` on a line, `v` `V` `o`, the scrolling keys as far as in any
 /// pane, and the keys into insert mode, which type a message; `y` as
 /// Vim's operator, with any of those motions or the objects it finds,
-/// `ic` and `im` among them, and a register before it; `/`, `?`, `n` and
+/// `ix` and `im` among them, and a register before it; `/`, `?`, `n` and
 /// `N`; and its own: Enter, `K`, `u` and Ctrl+R for turns, and `z` for
 /// folding and tables. It takes no mark, edit or other operator, and no
 /// register before anything but a yank: a chat's text isn't the user's
@@ -183,7 +183,9 @@ impl Dialect for ChatKeys {
 
     fn object(&self, key: char) -> Option<Object> {
         match key {
-            'c' => Some(Object::CodeBlock),
+            // `x` for code, as `ic` is a class, as anywhere, which a chat
+            // hasn't got.
+            'x' => Some(Object::CodeBlock),
             'm' => Some(Object::Message),
             // As in Vim: `b` is `(`, and `B` is `{`.
             'b' => Some(Object::Bracket {
