@@ -1933,10 +1933,13 @@ impl App {
             }
             Action::CancelActivity(index) => self.state.cancel_activity(index),
             Action::Usage | Action::Settings => self.toggle_sheet(action),
-            Action::Filter(filter) => {
-                self.state.home_filter = filter;
-                self.state.dirty.home = true;
+            Action::Filter(filter) => self.state.filter(filter),
+            Action::Bring(tab) => {
+                if let Some(terminal) = self.state.bring_back(tab) {
+                    self.go(&format!("#term/{terminal}"));
+                }
             }
+            Action::Dismiss(tab) => self.state.dismiss(tab),
             Action::OlderChat => {
                 self.state.older_chat();
             }

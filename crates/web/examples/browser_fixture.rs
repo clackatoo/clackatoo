@@ -11,7 +11,9 @@ use std::fmt::Write as _;
 use std::io::{self, BufRead as _, Write as _};
 
 use clackatoo_protocol::{
-    ChatPreview, GridNode, GridState, Line, Run, Size, Style, TerminalInfo, TerminalStatus,
+    Background, BackgroundAction, BackgroundState, ChatPreview, Content, GridNode, GridState, Kept,
+    Layout, Line, Listening, ListeningPort, Pane, PaneId, Run, Size, Style, Tab, TerminalInfo,
+    TerminalStatus,
 };
 
 fn terminal_info() -> TerminalInfo {
@@ -26,6 +28,10 @@ fn terminal_info() -> TerminalInfo {
     }
 }
 fn terminal_snapshot(size: Size) {
+    shell_snapshot(TerminalId(5), size);
+}
+
+fn shell_snapshot(terminal: TerminalId, size: Size) {
     let mut lines = vec![Line::default(); usize::from(size.rows())];
     for (row, text) in [
         "~/projects/clackatoo > cargo check",
@@ -47,7 +53,7 @@ fn terminal_snapshot(size: Size) {
         };
     }
     reply(&ServerMessage::Event(Event::View {
-        terminal: TerminalId(5),
+        terminal,
         update: ViewUpdate::Snapshot(View {
             title: "Development shell".into(),
             cwd: None,
@@ -83,7 +89,25 @@ fn reply(message: &ServerMessage) {
 }
 
 fn workspaces() -> Workspaces {
-    Workspaces {
+    // Background tabs: a dev server, a test watcher that failed, and a
+    // docs server kept running.
+    let background = |id: u32, name: &str, state, failed| Background {
+        tab: Tab {
+            id: TabId(id),
+            layout: Layout::Pane(Pane {
+                id: PaneId(id + 10),
+                content: Content::Terminal(TerminalId(id + 20)),
+                home: None,
+                key: None,
+            }),
+            focused: PaneId(id + 10),
+            name: None,
+        },
+        state,
+        failed,
+        name: name.into(),
+    };
+    let mut workspaces = Workspaces {
         list: ["Clackatoo", "Website"]
             .into_iter()
             .enumerate()
@@ -98,7 +122,97 @@ fn workspaces() -> Workspaces {
             })
             .collect(),
         ..Workspaces::default()
-    }
+    };
+    workspaces.list[0].background = vec![
+        background(21, "pnpm dev", BackgroundState::Running, None),
+        background(
+            22,
+            "cargo watch -x test",
+            BackgroundState::Ended(TerminalStatus::Exited(101)),
+            Some(101),
+        ),
+    ];
+    workspaces.list[1].background =
+        vec![background(23, "trail serve", BackgroundState::Idle, None)];
+    workspaces.kept = vec![Kept {
+        pane: PaneId(33),
+        command: "trail serve".into(),
+        always: true,
+        given_up: false,
+        paused: false,
+    }];
+    workspaces
+}
+
+/// The ports the background tabs listen on.
+fn listening() -> Vec<Listening> {
+    let port = |port, program: &str| ListeningPort {
+        port,
+        program: program.into(),
+    };
+    vec![
+        Listening {
+            tab: TabId(21),
+            ports: vec![port(5173, "node"), port(24678, "node")],
+        },
+        Listening {
+            tab: TabId(22),
+            ports: vec![],
+        },
+        Listening {
+            tab: TabId(23),
+            ports: vec![port(8080, "trail")],
+        },
+    ]
+}
+
+/// What a background action does to `workspaces`, answered as the daemon
+/// would answer it.
+fn background_action(workspaces: &mut Workspaces, action: &BackgroundAction) {
+    eprintln!("Background {action:?}");
+    let take = |workspaces: &mut Workspaces, tab: TabId| {
+        workspaces.list.iter_mut().find_map(|workspace| {
+            let at = (workspace.background.iter()).position(|b| b.tab.id == tab)?;
+            Some((workspace.id, workspace.background.remove(at)))
+        })
+    };
+    let response = match *action {
+        BackgroundAction::Ports => {
+            reply(&ServerMessage::Response(Response::Done));
+            reply(&ServerMessage::Event(Event::Listening(listening())));
+            return;
+        }
+        BackgroundAction::Bring { tab } => {
+            let Some((workspace, background)) = take(workspaces, tab) else {
+                return reply(&ServerMessage::Response(Response::Error(Error::NoSuchTab(
+                    tab,
+                ))));
+            };
+            let pane = background.tab.focused;
+            let workspace = (workspaces.list.iter_mut()).find(|w| w.id == workspace);
+            workspace.unwrap().tabs.push(background.tab);
+            Response::PaneCreated(pane)
+        }
+        BackgroundAction::Dismiss { tab } => {
+            if take(workspaces, tab).is_none() {
+                return reply(&ServerMessage::Response(Response::Error(Error::NoSuchTab(
+                    tab,
+                ))));
+            }
+            Response::Done
+        }
+        BackgroundAction::Seen { workspace } => {
+            for w in workspaces.list.iter_mut().filter(|w| w.id == workspace) {
+                for background in &mut w.background {
+                    background.failed = None;
+                }
+            }
+            Response::Done
+        }
+        _ => Response::Error(Error::Other("not in this fixture".into())),
+    };
+    reply(&ServerMessage::Event(Event::Workspaces(workspaces.clone())));
+    reply(&ServerMessage::Response(response));
 }
 
 fn chats() -> Vec<ChatSummary> {
@@ -305,6 +419,7 @@ fn main() {
     let mut decoder = FrameDecoder::new();
     let mut nodes = std::collections::BTreeMap::new();
     let mut starts = std::collections::BTreeMap::new();
+    let mut shown = workspaces();
     for line in io::stdin().lock().lines() {
         let line = line.unwrap();
         let bytes: Vec<_> = line
@@ -345,7 +460,14 @@ fn main() {
                     }
 
                     Request::WatchWorkspaces => {
-                        reply(&ServerMessage::Response(Response::Workspaces(workspaces())));
+                        reply(&ServerMessage::Response(Response::Workspaces(
+                            shown.clone(),
+                        )));
+                    }
+                    Request::Background(action) => background_action(&mut shown, &action),
+                    Request::Attach { terminal } if (41..=43).contains(&terminal.0) => {
+                        reply(&ServerMessage::Response(Response::Done));
+                        shell_snapshot(terminal, terminal_info().size);
                     }
                     Request::WatchChats => {
                         reply(&ServerMessage::Response(Response::Chats(chats())));

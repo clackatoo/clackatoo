@@ -14,7 +14,9 @@ use clackatoo_protocol::{
 use crate::keys::{self, Key, Modifiers};
 use crate::term::{Fit, OpenTerminal};
 
+mod background;
 mod images;
+pub use background::DISMISS_FOR;
 pub use images::Attachment;
 
 /// How long what was last sent may go unanswered, in milliseconds,
@@ -193,6 +195,14 @@ pub struct State {
     here: bool,
     /// The terminals are being listed.
     listing: bool,
+    /// The ports background tabs listen on, as the daemon last said.
+    pub ports: Vec<clackatoo_protocol::Listening>,
+    /// The background tab tapped to dismiss while still running, and when:
+    /// a second tap soon after dismisses it.
+    pub dismissing: Option<(clackatoo_protocol::TabId, f64)>,
+    /// The failures of background tabs the list said were seen, which it
+    /// goes on saying while it's shown.
+    pub seen_failures: Vec<(clackatoo_protocol::TabId, i32)>,
 }
 
 /// What came of a message from the daemon.
@@ -228,6 +238,9 @@ impl Default for State {
             outbox: Vec::new(),
             here: true,
             listing: false,
+            ports: Vec::new(),
+            dismissing: None,
+            seen_failures: Vec::new(),
         }
     }
 }
@@ -454,6 +467,7 @@ impl State {
                 self.dirty.header = true;
             }
             Event::View { terminal, update } => self.view_changed(terminal, update),
+            Event::Listening(listening) => self.listening(listening),
             _ => {}
         }
     }
@@ -679,7 +693,9 @@ impl State {
                 .filter_map(info)
                 .collect();
         }
-        let shown: Vec<TerminalId> = self.workspaces.list.iter().flat_map(in_panes).collect();
+        // Those of background tabs are listed with them.
+        let mut shown: Vec<TerminalId> = self.workspaces.list.iter().flat_map(in_panes).collect();
+        shown.extend(self.background_terminals());
         (self.terminals.iter())
             .filter(|info| !chat(info.id) && !shown.contains(&info.id))
             .collect()

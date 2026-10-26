@@ -2,7 +2,7 @@
 //! `data-action`, so one listener on the page handles every tap, and no
 //! element needs a closure of its own that would have to be freed.
 
-use clackatoo_protocol::TerminalId;
+use clackatoo_protocol::{TabId, TerminalId};
 
 use crate::keys::{Key, Modifiers};
 use crate::state::HomeFilter;
@@ -63,6 +63,11 @@ pub enum Action {
     Steer,
     RemoveQueued(u64),
     SendQueued(u64),
+    /// Brings a background tab back as a tab of its workspace, showing its
+    /// terminal.
+    Bring(TabId),
+    /// Dismisses a background tab: a second tap for one still running.
+    Dismiss(TabId),
 }
 
 /// The keys on the row above the phone's keyboard: those a phone's
@@ -211,6 +216,8 @@ impl Action {
             Self::Steer => "steer".to_owned(),
             Self::RemoveQueued(id) => format!("remove-queued:{id}"),
             Self::SendQueued(id) => format!("send-queued:{id}"),
+            Self::Bring(tab) => format!("bring:{tab}"),
+            Self::Dismiss(tab) => format!("dismiss:{tab}"),
         }
     }
 
@@ -261,6 +268,8 @@ impl Action {
             ("steer", "") => Self::Steer,
             ("remove-queued", id) => Self::RemoveQueued(id.parse().ok()?),
             ("send-queued", id) => Self::SendQueued(id.parse().ok()?),
+            ("bring", tab) => Self::Bring(TabId(tab.parse().ok()?)),
+            ("dismiss", tab) => Self::Dismiss(TabId(tab.parse().ok()?)),
             _ => return None,
         })
     }
@@ -332,6 +341,8 @@ mod tests {
             Action::Again,
             Action::PairHere,
             Action::OpenTerminal(TerminalId(3)),
+            Action::Bring(TabId(4)),
+            Action::Dismiss(TabId(5)),
             Action::Fit,
             Action::Unfit,
             Action::Type,

@@ -22,7 +22,8 @@ path of its `index.mjs`. `CHROMIUM_EXECUTABLE` can select an existing Chromium.
 The checks cover dashboard filtering and search, per-chat drafts across navigation
 and reload, rejected and unconfirmed delivery, native steering, queued controls,
 global model search, saved favorites, permissions and usage panels, approvals,
-desktop sidebar navigation, scroll retention and Latest, and 320px,
+desktop sidebar navigation, scroll retention and Latest, background tabs (the
+heading's count, the list, a second tap to stop one, bringing one back), and 320px,
 390px, landscape, reduced keyboard-sized and desktop viewports. Pure Rust tests cover state
 transitions and the absence of automatic message replay after connection loss.
 

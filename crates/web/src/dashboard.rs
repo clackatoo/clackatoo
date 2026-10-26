@@ -1,6 +1,8 @@
 //! Agent-first remote overview. Filters are local view state; the daemon
 //! remains the authority for status, attention and workspace membership.
-use clackatoo_protocol::{ChatState, WorkspaceId};
+use std::fmt::Write as _;
+
+use clackatoo_protocol::{Background, BackgroundState, ChatState, TerminalStatus, WorkspaceId};
 
 use crate::action::Action;
 use crate::state::{HomeFilter, State};
@@ -96,6 +98,14 @@ pub(crate) fn results(state: &State, notifications: Notifications, now: u64) -> 
                     })
                     .map(view::terminal_row),
             );
+            // Its background tabs, after its terminals.
+            let background = id.and_then(|id| state.workspaces.get(id));
+            rows.extend(
+                (background.into_iter())
+                    .flat_map(|workspace| &workspace.background)
+                    .filter(|background| matches(&format!("{name} {}", background.name)))
+                    .map(|background| background_row(state, background)),
+            );
         } else {
             let mut chats: Vec<_> = state
                 .chats
@@ -125,14 +135,16 @@ pub(crate) fn results(state: &State, notifications: Notifications, now: u64) -> 
             continue;
         }
         any = true;
+        let mut heading = el("h2")
+            .text(name)
+            .child(el("span").class("count").text(rows.len().to_string()));
+        if let Some(pill) = id.and_then(|id| background_pill(state, id)) {
+            heading = heading.child(pill);
+        }
         sections = sections.child(
             el("section")
                 .class("workspace")
-                .child(
-                    el("h2")
-                        .text(name)
-                        .child(el("span").class("count").text(rows.len().to_string())),
-                )
+                .child(heading)
                 .child(el("ul").class("chats").children(rows)),
         );
     }
@@ -154,11 +166,16 @@ fn filters(state: &State) -> Element {
         .iter()
         .filter(|c| HomeFilter::Working.matches(c))
         .count();
+    // Background tabs count once each, rather than by their terminals.
+    let background = state.background_terminals();
     let terminals = state
         .terminals
         .iter()
-        .filter(|t| !state.chats.iter().any(|c| c.chat == t.id))
-        .count();
+        .filter(|t| !state.chats.iter().any(|c| c.chat == t.id) && !background.contains(&t.id))
+        .count()
+        + (state.workspaces.list.iter())
+            .map(|workspace| workspace.background.len())
+            .sum::<usize>();
     let counts = [state.chats.len(), attention, working, terminals];
     el("div").child(
         el("nav")
@@ -191,6 +208,127 @@ fn notification_banner(result: Element, notifications: Notifications) -> Element
         Notifications::Unsupported { ios: true } => result.child(el("p").class("notification-note").text("For notifications on iPhone: Share → Add to Home Screen, then open and pair the app there.")),
         _ => result,
     }
+}
+
+/// What a workspace's heading says of its background tabs, as a window's
+/// icon after its tabs does: how many are running, and how one failed
+/// that's not been seen, as `⚙ 2` or `⚙ 2 ✗ 1`. Tapping it lists them, with
+/// the terminals. Nothing while none runs or failed.
+fn background_pill(state: &State, workspace: WorkspaceId) -> Option<Element> {
+    let workspace = state.workspaces.get(workspace)?;
+    let running = workspace.background_running();
+    let failed = workspace.background_failed();
+    let text = match failed {
+        Some(code) if running > 0 => format!("⚙ {running} ✗ {code}"),
+        Some(code) => format!("⚙ ✗ {code}"),
+        None if running > 0 => format!("⚙ {running}"),
+        None => return None,
+    };
+    let mut said = format!("{running} running in the background");
+    if let Some(code) = failed {
+        let _ = write!(said, ", one failed with exit {code}");
+    }
+    Some(
+        el("button")
+            .class("background-pill")
+            .class_if(failed.is_some(), "failed")
+            .action(&Action::Filter(HomeFilter::Terminals))
+            .attr("aria-label", said)
+            .text(text),
+    )
+}
+
+/// A background tab, as a row of the list of terminals: how it's getting
+/// on, what it's called, and the ports it listens on, opening its terminal
+/// as it's tapped; and beside it, bringing it back and dismissing it.
+pub(crate) fn background_row(state: &State, background: &Background) -> Element {
+    let tab = background.tab.id;
+    let name = match background.name.trim() {
+        "" => format!("Background tab {tab}"),
+        name => name.to_owned(),
+    };
+    let (status, mut label) = match (background.state, state.background_failed(background)) {
+        (BackgroundState::Ended(_), Some(code)) => ("error", format!("Failed · exit {code}")),
+        (BackgroundState::Running, Some(code)) => {
+            ("error", format!("Running · a command failed, exit {code}"))
+        }
+        (BackgroundState::Idle, Some(code)) => ("error", format!("Idle · failed, exit {code}")),
+        (BackgroundState::Running, None) => ("running", "Running".to_owned()),
+        (BackgroundState::Idle, None) => ("idle", "Idle".to_owned()),
+        (BackgroundState::Ended(TerminalStatus::Exited(0)), None) => ("ended", "Ended".to_owned()),
+        (BackgroundState::Ended(status), None) => ("ended", format!("Ended · {status}")),
+    };
+    let ports: Vec<String> = (state.ports_of(tab).iter())
+        .map(|port| format!(":{}", port.port))
+        .collect();
+    if !ports.is_empty() {
+        label = format!("{label} · {}", ports.join(" "));
+    }
+    let kept = (background.tab.layout.panes().iter()).any(|pane| {
+        state
+            .workspaces
+            .kept
+            .iter()
+            .any(|kept| kept.pane == pane.id)
+    });
+    if kept {
+        label.push_str(" · ↻");
+    }
+    let mut open = el("button")
+        .class("background-open")
+        .attr("aria-label", format!("Open {name}"));
+    if let Some(terminal) = state.background_terminal(tab) {
+        open = open.action(&Action::OpenTerminal(terminal));
+    }
+    let confirming = state.confirming(tab);
+    el("li")
+        .class("chat background")
+        .class(status)
+        .child(
+            open.child(
+                el("span")
+                    .class("session-status")
+                    .class(status)
+                    .attr("aria-hidden", "true"),
+            )
+            .child(
+                el("span")
+                    .class("session-body")
+                    .child(el("span").class("title").text(name.clone()))
+                    .child(
+                        el("span")
+                            .class("meta")
+                            .child(el("span").class("session-provider").text("Background"))
+                            .child(el("span").class("session-state").text(label)),
+                    ),
+            ),
+        )
+        .child(
+            el("span")
+                .class("background-actions")
+                .child(
+                    el("button")
+                        .class("quiet bring")
+                        .action(&Action::Bring(tab))
+                        .attr("aria-label", format!("Bring {name} back as a tab"))
+                        .text("Bring back"),
+                )
+                .child(
+                    el("button")
+                        .class("quiet dismiss")
+                        .class_if(confirming, "confirm")
+                        .action(&Action::Dismiss(tab))
+                        .attr(
+                            "aria-label",
+                            if confirming {
+                                format!("Tap again to stop and dismiss {name}")
+                            } else {
+                                format!("Dismiss {name}")
+                            },
+                        )
+                        .text(if confirming { "Stop?" } else { "✕" }),
+                ),
+        )
 }
 
 fn empty(filter: HomeFilter, searching: bool) -> Element {

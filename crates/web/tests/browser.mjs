@@ -399,7 +399,43 @@ try {
   await page.getByRole('button',{name:'Hide keyboard',exact:true}).click();
   const sentKeys=actions.slice(beforeKeys).filter(a=>a.startsWith('TerminalInput'));
   assert.deepEqual(sentKeys,['TerminalInput 6563686f2068656c6c6f','TerminalInput 0d','TerminalInput 03','TerminalInput 1b5b44'],'terminal input changed or accessory touch sent a duplicate');
+
+  // Background tabs: the workspace heading's count, the list with the
+  // terminals, a failure kept on screen once seen, a second tap to stop a
+  // running one, and bringing one back to its terminal.
+  await page.setViewportSize({width:390,height:844});
+  // A fresh fixture: the terminals listed above said its failure was seen.
+  await page.goto(base);
+  await page.getByRole('button',{name:/^Agents/}).click();
+  const pill=page.locator('.background-pill.failed');
+  await pill.waitFor();
+  assert.equal((await pill.textContent()).trim(),'⚙ 1 ✗ 101');
+  await page.screenshot({path:`${output}/phone-background-count.png`});
+  await pill.click();
+  await page.getByText(':5173 :24678',{exact:false}).waitFor();
+  assert(actions.some(a=>a.startsWith('Background Seen')),'listing should say failures were seen');
+  assert(actions.some(a=>a==='Background Ports'),'listing should ask for ports');
+  const failedRow=page.locator('.chat.background').filter({hasText:'cargo watch -x test'});
+  await failedRow.getByText('Failed · exit 101',{exact:false}).waitFor();
+  await page.locator('.chat.background').filter({hasText:'trail serve'}).getByText('↻',{exact:false}).waitFor();
+  await noOverflow();
+  await page.screenshot({path:`${output}/phone-background.png`,fullPage:true});
+  const running=page.locator('.chat.background').filter({hasText:'pnpm dev'});
+  await running.getByRole('button',{name:'Dismiss pnpm dev',exact:true}).click();
+  await running.getByRole('button',{name:/Tap again to stop/}).waitFor();
+  assert(!actions.some(a=>a.includes('Dismiss')),'one tap must not stop a running background tab');
+  await page.screenshot({path:`${output}/phone-background-dismiss.png`});
+  await running.getByRole('button',{name:/Tap again to stop/}).click();
+  await running.waitFor({state:'detached'});
+  assert(actions.some(a=>a.includes('Dismiss { tab: TabId(21) }')));
+  await page.setViewportSize({width:320,height:568});
+  await noOverflow();
+  await page.screenshot({path:`${output}/small-phone-background.png`});
+  await page.setViewportSize({width:390,height:844});
+  await page.locator('.chat.background').filter({hasText:'trail serve'}).getByRole('button',{name:/Bring trail serve back/}).click();
+  await page.locator('.grid').getByText('Checking clackatoo-web',{exact:false}).waitFor();
+  assert(actions.some(a=>a.includes('Bring { tab: TabId(23) }')));
   assert.deepEqual(errors,[]);
-  console.log('PASS: dashboard filters/search; navigation and reload drafts; photo picker/PNG normalization/removal/image-only send/rejection/async navigation; native steering; global models/favorites/permissions/usage; paged history/anchors/reconnect; scroll/latest; delayed acknowledgments; 320px/390px/keyboard/landscape/desktop layout; approvals; image pixels; terminal Fit, text sizing, keyboard controls and single-send touch input.');
+  console.log('PASS: dashboard filters/search; navigation and reload drafts; photo picker/PNG normalization/removal/image-only send/rejection/async navigation; native steering; global models/favorites/permissions/usage; paged history/anchors/reconnect; scroll/latest; delayed acknowledgments; 320px/390px/keyboard/landscape/desktop layout; approvals; image pixels; terminal Fit, text sizing, keyboard controls and single-send touch input; background tabs listed, dismissed and brought back.');
   await context.close();
 } finally { await browser.close(); server.close(); }
