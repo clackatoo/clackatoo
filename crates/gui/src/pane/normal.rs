@@ -76,10 +76,11 @@ pub(super) enum TerminalAction {
 }
 
 /// How a terminal reads keys: every motion, as a move and as what `y`
-/// takes, with `y` its only operator and `i` its only way into insert
-/// mode, but nothing that changes text, as it has none to change, and no
-/// register, mark, `f` and its kin, `*` or `#` yet. Esc, `gx`, `[[` and
-/// `]]` are its own.
+/// takes, `f` and its kin with `;` and `,` too, with `y` its only
+/// operator and `i` its only way into insert mode; a register only before
+/// a yank, which keeps its text there; but nothing that changes text, as
+/// it has none to change, and no mark, `*` or `#` yet. Esc, `gx`, `[[`
+/// and `]]` are its own.
 pub(super) struct TerminalKeys;
 
 impl Dialect for TerminalKeys {
