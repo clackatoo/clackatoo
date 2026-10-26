@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026.10.84 (2026-10-26)
+
+### Features
+
+- **gui:** one last f, t, F or T for the whole window (CLACKA-166) (6a04d59)
+- **gui:** a terminal's yanks go into the registers (CLACKA-166) (596b9dc)
+- **term:** a paste not bracketed drops the newline that ends it (CLACKA-166) (1bec2fe)
+
+### Fixes
+
+- **gui:** Ctrl+Shift+C copies a terminal's text as shown, by characters (CLACKA-166) (a42c940)
+- **gui:** a terminal's yank into "_, or of nothing, is neither lit up nor said (CLACKA-166) (d14d08f)
+- **gui:** a register or count waits with a mouse selection for y (CLACKA-166) (5992488)
+- **term:** a paste not bracketed drops every line break that ends it (CLACKA-166) (624df06)
+- **web:** count only the pasted lines that run, before the last (CLACKA-166) (d74bfad)
+- **gui:** a search being typed keeps its keys from a mouse selection (CLACKA-166) (5c04671)
+- **gui:** a paste that types nothing sends nothing; a mouse yank clears the bar (CLACKA-166) (79d6dd1)
+- **daemon:** a command an agent types as a paste can't end the paste early (CLACKA-166) (eb2f765)
+
 ## 2026.10.83 (2026-10-26)
 
 ### Fixes
