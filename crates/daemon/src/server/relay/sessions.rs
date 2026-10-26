@@ -212,6 +212,51 @@ mod tests {
             .collect()
     }
 
+    /// A listing too big to take in is still answered, with an error: the
+    /// start page never waits for ever.
+    #[test]
+    fn a_listing_too_big_to_take_in_is_answered_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there) = linked(dir.path());
+        let (window, mut from_daemon) = client(&mut daemon);
+        let ask = ClientMessage::ListSessions {
+            id: 7,
+            agent: "claude".into(),
+            cwd: "/src".into(),
+            on: Some(desk().id),
+        };
+        assert!(daemon.route_message(window, ask).is_none());
+        let [ClientMessage::ListSessions { id: number, .. }] = &heard(&mut there)[..] else {
+            panic!("not asked there");
+        };
+        let huge = AgentSession {
+            session: "s1".into(),
+            title: "t".repeat(5 * 1024 * 1024),
+            cwd: "/src".into(),
+            updated: None,
+            chat: None,
+        };
+        let answer = ServerMessage::Event(Event::Sessions {
+            id: *number,
+            sessions: Ok(vec![huge]),
+        });
+        let mut writer = there.try_clone().unwrap();
+        writer.set_nonblocking(false).unwrap();
+        let sending = std::thread::spawn(move || say(&mut writer, &answer));
+        let mut answered = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while answered.is_empty() {
+            assert!(std::time::Instant::now() < deadline, "never answered");
+            daemon.read_reached(link, Reading::Last);
+            answered.extend(told(&mut from_daemon));
+        }
+        sending.join().unwrap();
+        let [(7, Err(why))] = &answered[..] else {
+            panic!("{answered:?}");
+        };
+        assert!(why.contains("more sessions than are taken in"), "{why}");
+    }
+
     /// A listing asked of a daemon whose connection is lost, or which
     /// restarts, is answered here: the start page never waits for ever.
     #[test]
