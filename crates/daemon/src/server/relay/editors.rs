@@ -759,8 +759,8 @@ impl Daemon {
         let followed = relayed.buffers.get(&local)?;
         let kind = head.get(3)?;
         let need = match kind {
-            // Resumed, Acked, Edited, NoChange, Agents and Reversed.
-            1..=4 | 15 | 19 => Need::Decode,
+            // Resumed, Acked, Edited, NoChange, Agents, Reattach and Reversed.
+            1..=4 | 15 | 18 | 19 => Need::Decode,
             _ => {
                 let mut wires: Vec<u32> = (followed.viewers.iter())
                     .filter_map(|viewer| self.client_wire(viewer.token))
@@ -1020,6 +1020,7 @@ impl Daemon {
                 edit,
                 state,
             } => self.relay_reversed(at, local, (version, seq), edit, state),
+            BufferUpdate::Reattach => self.relay_reattach(at, local),
             BufferUpdate::Resumed {
                 daemon,
                 path,
@@ -1149,6 +1150,20 @@ impl Daemon {
         if mine.is_some() {
             self.pump(at, local);
         }
+    }
+
+    /// Takes in that the daemon there couldn't make the change on its way
+    /// to this daemon's buffer `local` of the connection at `at`, made to a
+    /// version too far back for it: the client whose it was attaches again
+    /// and brings it up to date itself, as that daemon's own windows do.
+    fn relay_reattach(&mut self, at: usize, local: BufferId) {
+        let sent = (self.links.list[at].relayed.buffers.get_mut(&local))
+            .and_then(|followed| followed.sent.take_if(|sent| !sent.lost));
+        match sent {
+            Some(sent) => self.reattach(at, local, &[sent.made.token]),
+            None => log::warn!("buffer {local}: told to attach again, with no change sent"),
+        }
+        self.pump(at, local);
     }
 
     /// Takes in this daemon's undo or redo, numbered `seq`, of buffer
@@ -2788,6 +2803,32 @@ mod tests {
                     ..
                 }]
             ),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn an_edit_too_far_back_there_has_its_client_attach_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there, local) = with_buffer(dir.path());
+        let (a, mut to_a) = client(&mut daemon);
+        let (b, mut to_b) = client(&mut daemon);
+        attach(&mut daemon, (link, &mut there), a, local, 1);
+        attach(&mut daemon, (link, &mut there), b, local, 2);
+        updates(&mut to_a);
+        updates(&mut to_b);
+        change(&mut daemon, a, local, 41, insert(0, "a", 10));
+        change(&mut daemon, b, local, 7, insert(6, "b", 10));
+        assert_eq!(asked_of_buffers(&mut there).len(), 1, "one at a time");
+        // The daemon there can't bring a's edit up to date: a attaches
+        // again itself, and b's change goes on.
+        say(&mut there, &buffer(BufferUpdate::Reattach));
+        daemon.read_reached(link, Reading::Look);
+        assert_eq!(updates(&mut to_a), [(local, BufferUpdate::Reattach)]);
+        assert!(updates(&mut to_b).is_empty());
+        let sent = asked_of_buffers(&mut there);
+        assert!(
+            matches!(&sent[..], [ClientMessage::Edit { change, .. }] if *change == insert(6, "b", 10)),
             "{sent:?}"
         );
     }

@@ -508,12 +508,58 @@ impl Daemon {
     /// that far are turned into changes to its file, as they are when it
     /// closes.
     pub(super) fn history_trimming(&mut self, id: BufferId, version: u64) {
-        self.keep_texts(id, version);
+        let Some(slot) = self.buffers.get(&id) else {
+            return;
+        };
+        let buffer = &slot.buffer;
+        let mut chats = Vec::new();
+        for (chat, file) in self.agent_files.log.changes_to(id) {
+            // Only the changes that reach back that far, each as the edit
+            // the history has for it and the text it made, which shares
+            // what it has in common with the text now.
+            let reaching: Vec<u64> = (file.changes.iter())
+                .filter_map(|change| match change {
+                    Change::Buffer {
+                        buffer: of,
+                        version: made,
+                        ..
+                    } if *of == id && *made <= version => Some(*made),
+                    _ => None,
+                })
+                .collect();
+            if reaching.is_empty() {
+                continue;
+            }
+            let made: Option<Vec<(Rope, Edit)>> = (buffer.texts_at(&reaching)).and_then(|texts| {
+                (texts.into_iter().zip(&reaching))
+                    .map(|(after, &made)| Some((after, buffer.edit_made(made)?)))
+                    .collect()
+            });
+            if let Some(made) = made {
+                let mut made = made.into_iter();
+                for change in &mut file.changes {
+                    if matches!(change, Change::Buffer { buffer: of, version: v, .. }
+                        if *of == id && *v <= version)
+                        && let Some((after, edit)) = made.next()
+                    {
+                        *change = Change::Text { after, edit };
+                    }
+                }
+            } else {
+                file.known = false;
+                file.changes.clear();
+            }
+            chats.push(chat);
+        }
+        chats.dedup();
+        for chat in chats {
+            let dropped = self.agent_files.log.trim(chat);
+            self.refresh_files(chat, dropped);
+        }
     }
 
-    /// Turns the log's changes to buffer `id` that reach back to `version`
-    /// or before into changes to its file, with the texts before and after
-    /// each.
+    /// Turns the log's changes to buffer `id` into changes to its file,
+    /// with the texts before and after each.
     fn keep_texts(&mut self, id: BufferId, version: u64) {
         let Some(slot) = self.buffers.get(&id) else {
             return;
@@ -958,6 +1004,37 @@ pub(in crate::server) mod tests {
         assert!(
             buffer.edits_since(1).is_none(),
             "the turn's edit was let go"
+        );
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: a.txt.");
+        assert_eq!(world.text(id), "one\ntwo\n");
+    }
+
+    #[test]
+    fn letting_edits_go_keeps_texts_only_for_the_changes_that_reach_back_that_far() {
+        let mut world = World::new();
+        std::fs::write(world.path("a.txt"), "one\ntwo\n").unwrap();
+        let id = world.open("a.txt");
+        // Two writes in one turn, with typing between them.
+        world.write("a.txt", "ONE\ntwo\n");
+        let big = "x".repeat(4 << 20);
+        for _ in 0..3 {
+            world.type_in(id, 8, "", &big);
+            world.type_in(id, 8, &big, "");
+        }
+        world.write("a.txt", "ONE\nTWO\n");
+        world.end_turn();
+        world.type_in(id, 8, "", &big);
+        world.type_in(id, 8, &big, "");
+        let buffer = &world.daemon.buffers[&id].buffer;
+        assert!(
+            buffer.edits_since(1).is_none(),
+            "the first write was let go"
+        );
+        let log = &world.daemon.agent_files.log;
+        let changes = log.turn(world.chat, 0).unwrap().files[0].changes.clone();
+        assert!(
+            matches!(changes[..], [Change::Text { .. }, Change::Buffer { .. }]),
+            "only the first, which reached back, is a text"
         );
         assert_eq!(world.undo(0, false, false), "Undid turn 1: a.txt.");
         assert_eq!(world.text(id), "one\ntwo\n");
