@@ -27,8 +27,8 @@ use clackatoo_protocol::{
     InlayHint, MachineId, Query, Resume, ServerFeatures, Use,
 };
 use clackatoo_text::{
-    AgentHunk, AgentHunks, Bias, Diagnostic, Diagnostics, Highlights, Hunk, Hunks, Rope, Span,
-    compose, line_start_through, transform,
+    AgentHunk, AgentHunks, Bias, Diagnostic, Diagnostics, Highlights, Hunk, Hunks, MOST_PIECES,
+    Rope, Span, compose, line_start_through, transform,
 };
 
 use super::hints::Hints;
@@ -1505,6 +1505,24 @@ impl BufferCopy {
 
     /// Sends the first change waiting, if none is on its way, and the
     /// queries before it, which aren't waited on.
+    /// Makes the first change waiting, if it's an edit of more pieces than
+    /// the daemon takes, as `:%s` over a big file can make, the same change
+    /// in fewer (see [`Edit::coarsened`]).
+    fn coarsen_first(&mut self) {
+        let long = matches!(self.waiting.front(),
+            Some(Waiting::Edit { edit, .. }) if edit.ops().len() > MOST_PIECES);
+        if !long {
+            return;
+        }
+        // The text the first was made to, which every edit waiting was.
+        let Some(base) = self.base() else {
+            return;
+        };
+        if let Some(Waiting::Edit { edit, .. }) = self.waiting.front_mut() {
+            *edit = Rc::new(edit.coarsened(&base, MOST_PIECES));
+        }
+    }
+
     fn send_next(&mut self) {
         if self.sent.is_some()
             || !self.loaded
@@ -1543,6 +1561,7 @@ impl BufferCopy {
             };
             self.send(message);
         }
+        self.coarsen_first();
         let Some(first) = self.waiting.front() else {
             return;
         };
@@ -1626,7 +1645,7 @@ pub(super) mod tests {
     use clackatoo_protocol::{
         Author, BufferSnapshot, FileLocation, LineIndent, Piece, Symbol, UseKind,
     };
-    use clackatoo_text::History;
+    use clackatoo_text::{History, HistoryError, Limits};
 
     use super::*;
 
@@ -1647,9 +1666,13 @@ pub(super) mod tests {
 
     impl Daemon {
         pub(crate) fn new(text: &str) -> Self {
+            Self::with_limits(text, Limits::default())
+        }
+
+        pub(crate) fn with_limits(text: &str, limits: Limits) -> Self {
             Self {
                 text: Rope::from_str(text),
-                history: History::new(0),
+                history: History::with_limits(0, limits),
                 applied: None,
                 id: 1,
                 landed: None,
@@ -1687,6 +1710,7 @@ pub(super) mod tests {
             let ClientMessage::Edit { seq, change, .. } = message else {
                 panic!("an edit");
             };
+            let before = (self.applied, self.landed);
             self.applied = Some(seq);
             self.landed = None;
             if std::mem::take(&mut self.refuse) {
@@ -1695,7 +1719,16 @@ pub(super) mod tests {
             }
             match change {
                 Change::Edit { edit, base, step } => {
-                    let edit = self.history.rebase(edit, base).unwrap();
+                    let edit = match self.history.rebase(edit, base) {
+                        Ok(edit) => edit,
+                        // Too far back: not dealt with, and the window is
+                        // to attach again.
+                        Err(HistoryError::TooFar(_) | HistoryError::Forgotten(_)) => {
+                            (self.applied, self.landed) = before;
+                            return (BufferUpdate::Reattach, None);
+                        }
+                        Err(err) => panic!("{err}"),
+                    };
                     edit.apply(&mut self.text).unwrap();
                     let version = self
                         .history
@@ -1832,6 +1865,65 @@ pub(super) mod tests {
         assert_eq!(copy.text().to_string(), "b\n");
         settle(&mut copy, &mut daemon);
         assert_eq!(daemon.text.to_string(), "b\n");
+    }
+
+    #[test]
+    fn an_edit_too_far_back_is_brought_up_to_date_by_the_window_and_sent_again() {
+        let limits = Limits {
+            rebase_work: 4,
+            ..Limits::default()
+        };
+        let mut daemon = Daemon::with_limits("abc\n", limits);
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        assert!(copy.edit(Edit::replace(4, 4, "", "1"), true));
+        // Agents' edits, too many to bring the window's past.
+        for _ in 0..3 {
+            daemon.agent(0, "X");
+        }
+        let sent = copy.take_outbox();
+        let (answer, _) = daemon.take(sent.into_iter().next().unwrap());
+        assert_eq!(answer, BufferUpdate::Reattach);
+        // As the desk takes it: attaching again, from what the copy knew.
+        assert_eq!(copy.update(answer), Heard::Nothing);
+        assert!(copy.missed());
+        let resume = copy.resume().expect("loaded, so it resumes");
+        copy.update(daemon.resumed(resume.version));
+        assert_eq!(copy.text().to_string(), "XXXabc\n1");
+        settle(&mut copy, &mut daemon);
+        assert_eq!(daemon.text.to_string(), "XXXabc\n1", "made once");
+    }
+
+    #[test]
+    fn an_edit_of_more_pieces_than_the_daemon_takes_goes_coarsened() {
+        let pieces = clackatoo_text::MOST_PIECES;
+        let text = "ab".repeat(pieces);
+        let mut daemon = Daemon::new(&text);
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        // As `:%s/b/B/g` makes it.
+        let mut edit = Edit::new();
+        for _ in 0..pieces {
+            edit.retain(1).delete("b").insert("B");
+        }
+        assert!(copy.edit(edit, true));
+        let sent = copy.take_outbox();
+        let [
+            ClientMessage::Edit {
+                change: Change::Edit { edit, .. },
+                ..
+            },
+        ] = &sent[..]
+        else {
+            panic!("one edit sent");
+        };
+        assert!(edit.ops().len() <= pieces, "{}", edit.ops().len());
+        for message in sent {
+            let (answer, _) = daemon.take(message);
+            copy.update(answer);
+        }
+        assert_eq!(daemon.text.to_string(), "aB".repeat(pieces));
+        assert_eq!(copy.text().to_string(), "aB".repeat(pieces));
     }
 
     #[test]
