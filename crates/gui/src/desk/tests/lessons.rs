@@ -1468,3 +1468,49 @@ fn the_explorer_lessons_e_alone_opens_the_explorer_beside_a_blank_file_which_w_n
     desk.settle_lesson();
     assert_eq!(step(&desk), start + 2);
 }
+
+#[test]
+fn the_explorer_lessons_search_step_is_done_by_searching_the_names() {
+    use clackatoo_protocol::{FilesId, FilesUpdate};
+    let mut desk = one_terminal(Some(seen_everything()));
+    open(&mut desk, "explorer", file_pane(2, 7));
+    let dir = format!("{SCRATCH}/explorer");
+    load(
+        &mut desk,
+        7,
+        &format!("{dir}/notes.txt"),
+        "Notes for the explorer lesson.\n",
+    );
+    let layout = side_by_side(vec![files_pane(4, 1), file_pane(3, 8), file_pane(2, 7)]);
+    desk.workspaces_changed(workspaces(vec![with_lesson(layout, vec![], 2)]));
+    answer_all(&mut desk);
+    let root = FilesUpdate::Root {
+        path: dir.clone(),
+        name: "explorer".to_owned(),
+    };
+    desk.files_changed(FilesId(1), root);
+    let file = |name: &str| clackatoo_protocol::Entry {
+        name: name.to_owned(),
+        kind: clackatoo_protocol::EntryKind::File { executable: false },
+        ignored: false,
+        stamp: None,
+    };
+    let listed = FilesUpdate::Listed {
+        dir,
+        entries: vec![file("notes.txt"), file("todo.txt")],
+        cut_short: false,
+    };
+    desk.files_changed(FilesId(1), listed);
+    let lesson = tutor::lesson("explorer").unwrap();
+    let search = (lesson.steps.iter())
+        .position(|step| step.title == "Move and search as in Vim")
+        .expect("the step");
+    desk.tutor.open.as_mut().unwrap().step = search;
+    desk.show_pane(PaneId(4));
+    desk.settle_lesson();
+    assert_eq!(step(&desk), search, "not done before it's started");
+    type_keys(&mut desk, "/todo");
+    enter(&mut desk);
+    desk.settle_lesson();
+    assert_eq!(step(&desk), search + 1);
+}

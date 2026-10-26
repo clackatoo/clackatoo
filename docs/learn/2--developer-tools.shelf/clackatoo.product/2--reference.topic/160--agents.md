@@ -249,7 +249,9 @@ Lines an agent changed that you haven't looked at yet get a bar of their own bes
 
 | Key | Does |
 |---|---|
-| `]h` `[h`, `]f` `[f` | The next change or the one before, the next file or the one before |
+| `j` `k`, `gg` `G`, `H` `M` `L`, Ctrl+D Ctrl+U Ctrl+F, `zt` | Moves, with a count, as every [list](~clackatoo/reference/window#lists) does |
+| `]h` `[h`, `]f` `[f` | The next change or the one before, the next file or the one before; a count goes that many |
+| `/` `?` `n` `N` | Searches the lines, the files' names and the comments |
 | Enter | Goes to the line in the editor |
 | `a`, `A` | Keeps the change, or every change in its file: its colour goes |
 | `x`, `X` | Rejects the change, or every change in its file |

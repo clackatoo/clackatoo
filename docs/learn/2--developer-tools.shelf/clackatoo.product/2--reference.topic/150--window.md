@@ -457,6 +457,22 @@ A search ignores case unless the text has a capital letter in it, as the [`ignor
 
 Copying and searching both happen in the daemon, which holds all of history, so neither waits for the window to fetch the lines involved.
 
+### Lists
+
+An [explorer](~clackatoo/reference/explorer), a [board](~clackatoo/reference/boards) and a [review](~clackatoo/reference/agents#reviewing-its-changes) read keys as terminals and editors do, with the cursor on an item, a file, an entry or a line, rather than a character. They share these, and add their own:
+
+| Keys | Does |
+|---|---|
+| `j` `k`, Down Up, Ctrl+N Ctrl+P | The next item or the one before; a count goes that many. |
+| `gg` `G`, Home End | The first item or the last; with a count before `gg` or `G`, the item numbered so, counting from 1. |
+| `H` `M` `L` | The top, middle and bottom items in view; `3H` and `3L` count from the view's top and bottom. |
+| Ctrl+E Ctrl+Y | The view an item down or up, the cursor kept in it. |
+| Ctrl+D Ctrl+U, Ctrl+F, Page Down Page Up | Half the items in view, view and cursor together, or a page, as far as in a terminal or an editor. Ctrl+B is [the window's](#ctrl-b). |
+| `zt` `zz` `zb` | The cursor's item at the view's top, middle or bottom. |
+| `/` `?` `n` `N` | Searches forward or back, with the editor's patterns and case options, round from the end to the start: the names shown, a board's entries, a review's lines, files and comments. A count before `n` goes round no more than once. |
+
+A command half typed, as `3` or `g`, shows at the start of the bar, and leaving the pane forgets it. A key they don't take, as `d` or `"`, waits for the rest of its command, then does nothing. Ctrl+? lists the keys of the pane you're in, read from how it reads them.
+
 ## The cursor
 
 In insert mode, the cursor has the shape the program asks for: a block, an underline or a bar, which Vim and shells in vi mode switch between. If the program hasn't asked, it's a bar. In normal mode it's always clackatoo's yellow block. In panes without the focus, and while the window isn't focused, either cursor is drawn as an outline.

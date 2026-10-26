@@ -1172,7 +1172,12 @@ impl Facts for DeskFacts<'_> {
     }
 
     fn cursor(&self) -> Option<(usize, String, usize)> {
-        let (editor, copy) = self.desk.focused_editor()?;
+        // An explorer's cursor is on a name, as its line; an editor showing
+        // a folder has one too, but its cursor is in its text.
+        let Some((editor, copy)) = self.desk.focused_editor() else {
+            let explorer = self.desk.focused_explorer()?;
+            return Some((0, explorer.cursor_name()?.to_owned(), 0));
+        };
         let text = copy.text();
         let byte = editor.cursor_byte(copy);
         let line = text.byte_to_line(byte);

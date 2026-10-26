@@ -39,7 +39,7 @@ Which folders are open, where the cursor is and what's scrolled to belong to the
 
 | Key | Does |
 |---|---|
-| `j` `k`, `gg` `G`, Ctrl+D Ctrl+U, Ctrl+F Ctrl+B | Moves, with a count, as in Vim |
+| `j` `k`, `gg` `G`, `H` `M` `L`, Ctrl+D Ctrl+U Ctrl+F Ctrl+E Ctrl+Y, `zt` `zz` `zb` | Moves, with a count, as every [list](~clackatoo/reference/window#lists) does |
 | `l`, Enter | Opens a file; opens a folder (Enter closes an open one); on `..`, goes up |
 | `h` | Closes a folder, or goes to the one it's in |
 | `-` | Goes up: the folder above the root becomes the root, as Enter on `..` does |

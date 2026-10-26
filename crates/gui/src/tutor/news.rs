@@ -881,6 +881,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "Readable web terminals, a compact typing row and text sizing under the options menu",
     },
+    News {
+        id: "listkeys",
+        date: "2026-10-26",
+        lesson: "explorer",
+        what: "Explorers, boards and reviews read Vim's keys: counts, H M L, Ctrl+E/Y/F, zt and / search",
+    },
 ];
 
 impl News {

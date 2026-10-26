@@ -26,6 +26,16 @@ Press `<Space>e` to go to the explorer.
 focused explorer
 ```
 
+## Move and search as in Vim
+
+The explorer reads keys as an editor does, a line a file: `j` and `k` move, with a count, `5G` goes to the fifth line, `H`, `M` and `L` to the top, middle and bottom of the view, Ctrl+E and Ctrl+Y scroll a line, Ctrl+D, Ctrl+U and Ctrl+F half a view or a page, and `zt`, `zz` and `zb` put the cursor's line at the top, middle or bottom. `/` searches the names shown, `?` back up, and `n` and `N` go to the next or the one before; a review and a board read their keys the same way. Ctrl+? lists them all.
+
+Type `/todo` and press Enter.
+
+```check
+at "todo.txt"
+```
+
 ## Open a file
 
 `j` and `k` move, as do `gg`, `G`, Ctrl+D and Ctrl+U. `l` or Enter opens a file in the editor of the tab you were last in, in place of its file, as `:e` would; Ctrl+V and Ctrl+S open it in a split, and Ctrl+T in a new tab. On a folder, `l` opens it, `h` closes it, and `-` goes up a folder, though a lesson's explorer stays in the lesson's folder.

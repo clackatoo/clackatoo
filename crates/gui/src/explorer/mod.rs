@@ -466,6 +466,14 @@ impl Explorer {
         self.search.give_up();
     }
 
+    /// The name at the cursor, as shown: `..` on the way up.
+    pub(crate) fn cursor_name(&self) -> Option<&str> {
+        if self.on_up() {
+            return Some("..");
+        }
+        self.line().map(|line| line.entry().name.as_str())
+    }
+
     /// Says `message` in the bar until the next key.
     pub(crate) fn say(&mut self, message: String) {
         self.message = Some(message);

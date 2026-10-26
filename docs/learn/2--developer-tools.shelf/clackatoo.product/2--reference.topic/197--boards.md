@@ -29,7 +29,8 @@ Each entry says what it is, who wrote it and how long ago, then what it says, an
 
 | Key | Does |
 |---|---|
-| `j` `k`, `gg` `G`, Ctrl+D Ctrl+U | Move between entries. |
+| `j` `k`, `gg` `G`, `H` `M` `L`, Ctrl+D Ctrl+U Ctrl+F Ctrl+E Ctrl+Y, `zt` `zz` `zb` | Move between entries, with a count, as every [list](~clackatoo/reference/window#lists) does. |
+| `/` `?` `n` `N` | Search the entries. |
 | `i`, `o`, Enter | Post a note, typed in the bar. |
 | `r` | Post a result. |
 | `e` | Edit the entry at the cursor. What it said is kept, the last 20 edits of it. |
