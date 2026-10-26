@@ -1734,6 +1734,20 @@ mod tests {
     }
 
     #[test]
+    fn a_turns_number_counts_the_turns_not_loaded_yet() {
+        let mut node = talk(&[("eleven", "a"), ("twelve", "b"), ("thirteen", "c")]);
+        node.first_message = 10;
+        let (mut chat, _fonts) = reading(node);
+        let turn = |chat: &ChatView| chat.cursor.unwrap().text.turn;
+        read(&mut chat, "12G");
+        assert_eq!(turn(&chat), 1, "the twelfth, the second loaded");
+        read(&mut chat, "3G");
+        assert_eq!(turn(&chat), 0, "before those loaded: the first");
+        read(&mut chat, "G11gg");
+        assert_eq!(turn(&chat), 0);
+    }
+
+    #[test]
     fn a_new_height_forgets_how_far_a_count_set_ctrl_d_to_go() {
         let (mut chat, mut fonts) = reading(crate::chat::fixtures::long_chat(12));
         let ctrl_d = |chat: &mut ChatView| {
