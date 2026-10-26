@@ -572,6 +572,17 @@ impl ChatView {
         }
     }
 
+    /// Takes the view's height, `height` pixels: one of another number of
+    /// lines forgets the half page a count set, as Vim's `scroll` is set
+    /// afresh when the window's height changes.
+    pub(super) fn set_view_height(&mut self, height: f32) {
+        let rows = |height: f32| (height / self.line_height.max(1.0)).floor();
+        if rows(height).to_bits() != rows(self.view_height).to_bits() {
+            self.paging.resized();
+        }
+        self.view_height = height;
+    }
+
     /// Ctrl+E, Ctrl+Y, Ctrl+D, Ctrl+U, Ctrl+F and the pages, `count`
     /// typed, as far as they go in any pane (see [`crate::vim::Paging`]).
     /// Returns whether the view moved.
@@ -1652,6 +1663,41 @@ mod tests {
             rows,
             chat.line_height,
             chat.max_scroll
+        );
+    }
+
+    #[test]
+    fn a_new_height_forgets_how_far_a_count_set_ctrl_d_to_go() {
+        let (mut chat, mut fonts) = reading(crate::chat::fixtures::long_chat(12));
+        let ctrl_d = |chat: &mut ChatView| {
+            chat.read_key(&crate::input::KeyPress {
+                key: &winit::keyboard::Key::Character("d".into()),
+                text: None,
+                location: winit::keyboard::KeyLocation::Standard,
+                code: None,
+                modifiers: crate::input::Modifiers {
+                    ctrl: true,
+                    ..crate::input::Modifiers::default()
+                },
+            })
+        };
+        read(&mut chat, "gg");
+        paint(&mut chat, &mut fonts);
+        let before = chat.scroll;
+        read(&mut chat, "2");
+        ctrl_d(&mut chat);
+        let two = chat.scroll - before;
+        assert!((two - 2.0 * chat.line_height).abs() < 0.5, "two lines");
+        // Kept, as Vim's `scroll` is, until the view's height changes.
+        let before = chat.scroll;
+        ctrl_d(&mut chat);
+        assert!((chat.scroll - before - two).abs() < 0.5);
+        chat.paint(&mut fonts, [0.0; 2], [900.0, 700.0], true);
+        let before = chat.scroll;
+        ctrl_d(&mut chat);
+        assert!(
+            chat.scroll - before > 4.0 * chat.line_height,
+            "half the view again"
         );
     }
 

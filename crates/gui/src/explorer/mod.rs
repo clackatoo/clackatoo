@@ -1998,25 +1998,17 @@ impl ListRows for Explorer {
     }
 }
 
-impl crate::vim::KeyState for Explorer {
-    fn mode(&self) -> crate::vim::Mode {
-        crate::vim::Mode::Normal
+impl crate::vim::ListKeys for Explorer {
+    fn keys(&self) -> &Keys {
+        &self.keys
+    }
+
+    fn keys_mut(&mut self) -> &mut Keys {
+        &mut self.keys
     }
 
     fn prompting(&self) -> bool {
         Explorer::prompting(self)
-    }
-
-    fn pending(&self) -> bool {
-        self.keys.pending()
-    }
-
-    fn counting(&self) -> Option<usize> {
-        self.keys.counting()
-    }
-
-    fn forget_count(&mut self) {
-        self.keys.clear();
     }
 }
 

@@ -272,7 +272,7 @@ impl ChatView {
         self.draw_above_box((&mut paint, fonts), m, (origin, size), row, (status, now));
 
         // The conversation: the turns in view are laid out, and drawn.
-        self.view_height = view_height;
+        self.set_view_height(view_height);
         self.scroll_past_edge();
         self.arrange(fonts, m, column);
         let shown = in_view(&self.cache.bounds, self.scroll, self.scroll + view_height);

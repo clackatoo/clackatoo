@@ -11117,6 +11117,31 @@ mod tests {
         assert!(!answer_all(&mut desk).contains(&Request::ClosePane { pane: PaneId(2) }));
     }
 
+    #[test]
+    fn a_dead_key_and_space_type_into_a_reviews_search_as_into_any_prompt() {
+        let review = Layout::Pane(LayoutPane {
+            id: PaneId(2),
+            content: Content::Review(clackatoo_protocol::ReviewId(1)),
+            home: None,
+            key: None,
+        });
+        let mut desk = super::tests::desk(one_tab(side_by_side(vec![review, file_pane(1, 7)])));
+        load(&mut desk, 7, "/p/b.txt", "b\n");
+        answer_all(&mut desk);
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        type_keys(&mut desk, "/");
+        // `'` then Space, composed: Space typing `'`.
+        desk.key(&KeyPress {
+            key: &Key::Named(NamedKey::Space),
+            text: Some("'"),
+            location: KeyLocation::Standard,
+            code: None,
+            modifiers: Modifiers::default(),
+        });
+        let label = desk.focused_review().map(crate::review::Review::label);
+        assert_eq!(label.as_deref(), Some("/'▏"));
+    }
+
     // --- Folders edited as text --------------------------------------------
 
     /// What a step on a file listed with no stamp expects.

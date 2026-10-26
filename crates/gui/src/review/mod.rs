@@ -235,6 +235,11 @@ impl Review {
         self.width = usize::from(size.cols());
     }
 
+    /// Whether a search is being typed, in the bar.
+    pub(crate) fn prompting(&self) -> bool {
+        self.search.typing()
+    }
+
     /// What the window's title says.
     pub(crate) fn title(&self) -> &str {
         &self.title
@@ -1123,25 +1128,17 @@ impl ListRows for Review {
     }
 }
 
-impl crate::vim::KeyState for Review {
-    fn mode(&self) -> Mode {
-        Mode::Normal
+impl crate::vim::ListKeys for Review {
+    fn keys(&self) -> &Keys {
+        &self.keys
+    }
+
+    fn keys_mut(&mut self) -> &mut Keys {
+        &mut self.keys
     }
 
     fn prompting(&self) -> bool {
-        self.search.typing()
-    }
-
-    fn pending(&self) -> bool {
-        self.keys.pending()
-    }
-
-    fn counting(&self) -> Option<usize> {
-        self.keys.counting()
-    }
-
-    fn forget_count(&mut self) {
-        self.keys.clear();
+        Review::prompting(self)
     }
 }
 

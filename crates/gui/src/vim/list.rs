@@ -128,7 +128,9 @@ pub(crate) fn wheel(list: &mut impl ListRows, lines: i64) -> bool {
     }
     let shown = list.shown();
     let bottom = shown.end.saturating_sub(1).max(shown.start);
-    list.set_cursor(list.cursor().clamp(shown.start, bottom).min(final_item));
+    // In order, not clamped: a view not yet laid out again may start past
+    // the list's end.
+    list.set_cursor(list.cursor().max(shown.start).min(bottom).min(final_item));
     true
 }
 
@@ -178,7 +180,9 @@ fn scrolled(list: &mut impl ListRows, paging: &mut Paging, scroll: Scroll, count
         Scroll::Page { .. } if down => first,
         Scroll::Page { .. } => bottom,
     };
-    list.set_cursor(cursor.clamp(first, bottom.min(final_item)).min(final_item));
+    // In order, not clamped: a view not yet laid out again, as after the
+    // list shrank, may start past its end.
+    list.set_cursor(cursor.max(first).min(bottom).min(final_item));
 }
 
 /// What a list's search is: being typed in the bar, and the last one
@@ -547,6 +551,51 @@ mod tests {
         let word = command(None, Action::Move(Motion::WordStart));
         assert!(!go(&mut list, &mut Paging::default(), &word));
         assert_eq!((list.cursor, list.top), (3, 0));
+    }
+
+    /// A list whose view, laid out before it shrank, starts past its end.
+    struct Stale;
+
+    impl ListRows for Stale {
+        fn len(&self) -> usize {
+            3
+        }
+        fn cursor(&self) -> usize {
+            2
+        }
+        fn set_cursor(&mut self, item: usize) {
+            assert!(item < 3, "{item}");
+        }
+        fn top(&self) -> usize {
+            8
+        }
+        fn set_top(&mut self, _item: usize) {}
+        fn shown(&self) -> Range<usize> {
+            8..12
+        }
+    }
+
+    #[test]
+    fn a_view_left_past_the_lists_end_never_puts_the_cursor_past_it() {
+        for scroll in [
+            Scroll::Line { down: true },
+            Scroll::HalfPage { down: true },
+            Scroll::HalfPage { down: false },
+            Scroll::Page { down: true },
+            Scroll::Page { down: false },
+        ] {
+            go(
+                &mut Stale,
+                &mut Paging::default(),
+                &command(None, Action::Scroll(scroll)),
+            );
+        }
+        go(
+            &mut Stale,
+            &mut Paging::default(),
+            &command(None, Action::Move(Motion::ViewTop)),
+        );
+        wheel(&mut Stale, 2);
     }
 
     fn searched(text: &str) -> ListSearch {

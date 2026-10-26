@@ -56,6 +56,37 @@ pub(crate) trait KeyState {
     fn forget_count(&mut self);
 }
 
+/// A pane of a list, such as an explorer, a board or a review (see
+/// [`list`]): no insert mode, and its keys half typed kept as [`Keys`].
+pub(crate) trait ListKeys {
+    fn keys(&self) -> &Keys;
+    fn keys_mut(&mut self) -> &mut Keys;
+    /// Whether something's typed in a prompt of its own, as a search.
+    fn prompting(&self) -> bool;
+}
+
+impl<T: ListKeys> KeyState for T {
+    fn mode(&self) -> Mode {
+        Mode::Normal
+    }
+
+    fn prompting(&self) -> bool {
+        ListKeys::prompting(self)
+    }
+
+    fn pending(&self) -> bool {
+        self.keys().pending()
+    }
+
+    fn counting(&self) -> Option<usize> {
+        self.keys().counting()
+    }
+
+    fn forget_count(&mut self) {
+        self.keys_mut().clear();
+    }
+}
+
 /// Whether keys go to the program or drive clackatoo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {

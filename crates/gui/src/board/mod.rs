@@ -915,25 +915,17 @@ impl ListRows for BoardPane {
     }
 }
 
-impl crate::vim::KeyState for BoardPane {
-    fn mode(&self) -> Mode {
-        Mode::Normal
+impl crate::vim::ListKeys for BoardPane {
+    fn keys(&self) -> &Keys {
+        &self.keys
+    }
+
+    fn keys_mut(&mut self) -> &mut Keys {
+        &mut self.keys
     }
 
     fn prompting(&self) -> bool {
         BoardPane::prompting(self)
-    }
-
-    fn pending(&self) -> bool {
-        self.keys.pending()
-    }
-
-    fn counting(&self) -> Option<usize> {
-        self.keys.counting()
-    }
-
-    fn forget_count(&mut self) {
-        self.keys.clear();
     }
 }
 
