@@ -1132,15 +1132,7 @@ impl DeskFacts<'_> {
 
     fn kind(&self, pane: &clackatoo_protocol::Pane) -> Kind {
         match pane.content {
-            Content::Terminal(terminal)
-                if self
-                    .desk
-                    .panes
-                    .get(&terminal)
-                    .is_some_and(crate::pane::Pane::is_chat) =>
-            {
-                Kind::Chat
-            }
+            Content::Terminal(terminal) if self.desk.chats.contains_key(&terminal) => Kind::Chat,
             Content::Terminal(_) => Kind::Terminal,
             Content::Buffer(buffer)
                 if (self.desk.buffer_copy(buffer)).is_some_and(BufferCopy::is_blank) =>
@@ -1201,7 +1193,7 @@ impl Facts for DeskFacts<'_> {
         } else if self.desk.focused_explorer().is_some() {
             Mode::Normal
         } else {
-            self.desk.panes.get(&self.desk.focused_terminal()?)?.mode
+            self.desk.focused_terminal_mode()?
         };
         Some(match mode {
             Mode::Normal => check::Mode::Normal,

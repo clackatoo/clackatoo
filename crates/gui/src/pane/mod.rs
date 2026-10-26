@@ -15,13 +15,11 @@ use std::ops::Range;
 use std::time::Instant;
 
 use clackatoo_protocol::{
-    ChatAction, ClientMessage, CursorShape, Match, Request, Response, Size, TerminalId, ViewUpdate,
+    ClientMessage, CursorShape, Match, Request, Response, Size, TerminalId, ViewUpdate,
 };
 use clackatoo_term::{Row, RowBuilder, Underline};
 use winit::keyboard::{Key, NamedKey};
 
-use crate::chat::{ChatView, TextPaint};
-use crate::fonts::Fonts;
 use crate::history::History;
 use crate::input::{self, KeyPress};
 use crate::motion::{Block, Cursor, Lines, Motion, Point, RowAt, View};
@@ -72,11 +70,6 @@ enum Pending {
     Input(u64),
     /// Anything answered with just "done" or an error.
     Other,
-    /// Original requested by one particular opening of the image viewer.
-    Original(u64),
-    Handoff,
-    ChatControl,
-    ChatHistory(u32),
 }
 
 /// The guesses at the echo of what's typed, drawn over a line of the
@@ -99,8 +92,6 @@ pub(crate) struct Pane {
     /// The size last asked of the daemon.
     requested_size: Option<Size>,
     screen: Option<Screen>,
-    /// For a chat with an agent, which has no screen, its view.
-    chat: Option<Box<ChatView>>,
     history: History,
     /// How many lines up from the live screen the view is: 0 shows the
     /// screen as the program draws it.
@@ -132,17 +123,12 @@ pub(crate) struct Pane {
     /// Which finished commands are marked at the end of their prompt's
     /// line, as the options say.
     blockmarks: BlockMarks,
-    /// About the most of the conversation, in tokens, the chat it shows
-    /// tells an agent it moves to, as the options say.
-    carryover: u32,
     /// The last match found, highlighted until Esc.
     found: Option<Match>,
     /// A short message for the label, until the next key.
     status: Option<String>,
     /// Text copied, and where the window is to put it.
     yanked: Option<(String, Copy)>,
-    /// Text the chat it shows copied, and where to put it, oldest first.
-    chat_copies: Vec<(String, Copy)>,
     /// Text selected with the mouse.
     mouse_selection: Option<mouse::MouseSelection>,
     /// Text just copied to the clipboard.
@@ -176,7 +162,6 @@ impl Pane {
             requests: Requests::new(terminal),
             requested_size: None,
             screen: None,
-            chat: None,
             history: History::default(),
             scroll: 0,
             mode: Mode::Insert,
@@ -191,11 +176,9 @@ impl Pane {
             finds: vim::Finds::default(),
             unplaced: normal::Unplacements::default(),
             blockmarks: Options::default().blockmarks,
-            carryover: Options::default().carryover,
             found: None,
             status: None,
             yanked: None,
-            chat_copies: Vec::new(),
             mouse_selection: None,
             flash: None,
             keys: vim::Keys::default(),
@@ -215,7 +198,6 @@ impl Pane {
         self.case = Case::of(options);
         self.startofline = options.startofline;
         self.blockmarks = options.blockmarks;
-        self.carryover = options.carryover;
         self.predictor.set_choice(options.predictecho);
         self.refresh_overlay();
     }
@@ -257,10 +239,6 @@ impl Pane {
         changed
     }
 
-    pub(crate) fn first_chat_turn(&self) -> Option<u32> {
-        self.chat.as_ref().map(|chat| chat.first_turn())
-    }
-
     pub(crate) fn screen(&self) -> Option<&Screen> {
         self.screen.as_ref()
     }
@@ -272,273 +250,27 @@ impl Pane {
         Some(self.history_end() + self.height())
     }
 
-    /// Whether the pane shows a chat, rather than a terminal's screen.
-    pub(crate) fn is_chat(&self) -> bool {
-        self.chat.is_some()
+    /// What it sent the daemon and is waiting for, and its mode, for a
+    /// chat's pane to take over, as its view turns out to be a chat's
+    /// (see [`crate::chat::ChatPane::taking_over`]).
+    pub(crate) fn handed_over(self) -> (Requests<()>, Mode) {
+        (self.requests.handed_over(|_| ()), self.mode)
     }
 
-    /// Whether a local image modal owns the chat input.
-    pub(crate) fn chat_viewing_modal(&self) -> bool {
-        self.chat.as_deref().is_some_and(ChatView::viewing_modal)
-    }
-
-    pub(crate) fn chat_searching_models(&self) -> bool {
-        self.chat
-            .as_ref()
-            .is_some_and(|chat| chat.searching_models())
-    }
-
-    /// The text the chat drew last (see [`ChatView::shown_text`]).
-    pub(crate) fn native_controls(&self) -> Vec<(String, [f32; 4])> {
-        self.chat
-            .as_ref()
-            .map_or_else(Vec::new, |chat| chat.native_controls())
-    }
-
-    pub(crate) fn chat_text(&self) -> Option<String> {
-        self.chat.as_ref().map(|chat| chat.shown_text())
-    }
-
-    /// Tells the chat the pane shows, if any, that the daemon has gone out
-    /// of reach, if `offline`, or come back.
-    pub(crate) fn chat_offline(&mut self, offline: bool) {
-        if let Some(chat) = &mut self.chat {
-            chat.set_offline(offline);
-        }
-    }
-
-    /// Whether the pane shows a chat whose agent is at work.
-    pub(crate) fn chat_working(&self) -> bool {
-        self.chat.as_ref().is_some_and(|chat| chat.working())
-    }
-
-    /// Asks the daemon to undo what turn `turn` of the chat the pane shows
-    /// changed in files, or with `redo` to make it again: or, with no
-    /// turn, the last that can be undone, or the first that can be
-    /// redone, as `u` and Ctrl+R do. `force` does what can be done though
-    /// some files can't be. Says why not, if it can't be asked.
-    pub(crate) fn undo_turn(
-        &mut self,
-        turn: Option<usize>,
-        redo: bool,
-        force: bool,
-    ) -> Result<(), String> {
-        let chat = self
-            .chat
-            .as_ref()
-            .ok_or("that's for a chat with an agent")?;
-        let undo = if redo { "redo" } else { "undo" };
-        // Asked for by its number, which doesn't count where the chat
-        // moved to another agent.
-        let turn = match turn {
-            Some(turn) => {
-                let local = turn
-                    .checked_sub(chat.node.first_message as usize)
-                    .ok_or("Scroll up to load that turn before undoing it")?;
-                clackatoo_protocol::turn_numbered(&chat.node.turns, local + 1)
-                    .ok_or(format!("there's no turn {}", turn + 1))?
-            }
-            None => (chat.turn_to_undo(redo)).ok_or(format!("no turn has files to {undo}"))?,
-        };
-        let turn = u32::try_from(turn)
-            .unwrap_or(u32::MAX)
-            .saturating_add(chat.first_turn());
-        let action = if redo {
-            ChatAction::Redo { turn, force }
-        } else {
-            ChatAction::Undo { turn, force }
-        };
-        let terminal = self.terminal();
-        self.request(Request::Chat { terminal, action }, Pending::Other);
-        Ok(())
-    }
-
-    /// The title its program set, or its chat has.
+    /// The title its program set.
     pub(crate) fn title(&self) -> Option<&str> {
-        match (&self.screen, &self.chat) {
-            (Some(screen), _) => Some(&screen.title),
-            (None, Some(chat)) => Some(&chat.title),
-            (None, None) => None,
-        }
+        self.screen.as_ref().map(|screen| screen.title.as_str())
     }
 
-    /// What a tab showing it is named: the title its program set, or its
-    /// chat has, or else the name of the folder its shell last said it's
-    /// in, `~` for `home`.
+    /// What a tab showing it is named: the title its program set, or else
+    /// the name of the folder its shell last said it's in, `~` for `home`.
     pub(crate) fn name(&self, home: Option<&str>) -> Option<&str> {
-        let title = self.title()?;
-        if !title.trim().is_empty() || self.chat.is_some() {
-            return Some(title);
+        let screen = self.screen.as_ref()?;
+        let title = screen.title.as_str();
+        match screen.cwd.as_deref() {
+            Some(cwd) if title.trim().is_empty() => Some(folder_name(cwd, home)),
+            _ => Some(title),
         }
-        let Some(cwd) = self
-            .screen
-            .as_ref()
-            .and_then(|screen| screen.cwd.as_deref())
-        else {
-            return Some(title);
-        };
-        Some(folder_name(cwd, home))
-    }
-
-    /// Lays out and draws the chat it shows, if it shows one, in a pane
-    /// `size` pixels with its top left at `origin`. `caret` draws the
-    /// cursor in the message being typed.
-    pub(crate) fn paint_chat(
-        &mut self,
-        fonts: &mut Fonts,
-        origin: [f32; 2],
-        size: [f32; 2],
-        caret: bool,
-    ) -> Option<TextPaint> {
-        self.chat.as_ref()?;
-        self.settle_chat(fonts);
-        let reading = self.mode != Mode::Insert;
-        let chat = self.chat.as_mut()?;
-        chat.reading = reading;
-        let paint = chat.paint(fonts, origin, size, caret);
-        if let Some(before) = chat.older_request() {
-            self.request(
-                Request::ChatHistory {
-                    terminal: self.terminal(),
-                    before,
-                },
-                Pending::ChatHistory(before),
-            );
-        }
-        Some(paint)
-    }
-
-    /// Carries out what was typed or clicked in the chat it shows, if it
-    /// shows one: for that, the fonts are needed. Returns whether the pane
-    /// must be redrawn.
-    pub(crate) fn settle_chat(&mut self, fonts: &mut Fonts) -> bool {
-        let Some(chat) = self.chat.as_mut().filter(|chat| chat.unsettled()) else {
-            return false;
-        };
-        let settled = chat.settle(fonts);
-        let original = chat.take_original_request();
-        let first_turn = chat.first_turn();
-        for id in settled.cancel_activities {
-            self.request(
-                Request::CancelActivity {
-                    terminal: self.terminal(),
-                    id,
-                },
-                Pending::Other,
-            );
-        }
-        for mut action in settled.actions {
-            if let ChatAction::Undo { turn, .. } | ChatAction::Redo { turn, .. } = &mut action {
-                *turn += first_turn;
-            }
-            if let ChatAction::Switch { budget, .. } | ChatAction::SendTo { budget, .. } =
-                &mut action
-            {
-                *budget = self.carryover;
-            }
-            if let ChatAction::Submit {
-                target: Some(target),
-                ..
-            } = &mut action
-            {
-                target.budget = self.carryover;
-            }
-            let pending = if matches!(
-                action,
-                ChatAction::SendTo { .. } | ChatAction::Submit { .. }
-            ) {
-                Pending::Handoff
-            } else if matches!(
-                action,
-                ChatAction::RemoveQueued { .. } | ChatAction::SendQueued { .. }
-            ) {
-                Pending::ChatControl
-            } else {
-                Pending::Other
-            };
-            self.request(
-                Request::Chat {
-                    terminal: self.terminal(),
-                    action,
-                },
-                pending,
-            );
-        }
-        if let Some((serial, original)) = original {
-            self.request(
-                Request::ChatOriginal {
-                    terminal: self.terminal(),
-                    original,
-                },
-                Pending::Original(serial),
-            );
-        }
-        self.chat_copies.extend(settled.copied);
-        settled.redraw
-    }
-
-    /// Takes what the chat it shows copied, oldest first.
-    pub(crate) fn take_chat_copies(&mut self) -> Vec<(String, Copy)> {
-        std::mem::take(&mut self.chat_copies)
-    }
-
-    /// When the chat it shows must be drawn again, for a turn still going
-    /// to count on a second.
-    pub(crate) fn chat_live(&self) -> Option<Instant> {
-        self.chat
-            .as_ref()?
-            .live()
-            .filter(|&live| live > Instant::now())
-    }
-
-    /// How the mouse pointer looks at `at`, from the pane's top left, if it
-    /// shows a chat.
-    pub(crate) fn chat_pointer(&self, at: [f32; 2]) -> Option<crate::chat::Pointer> {
-        Some(self.chat.as_ref()?.pointer(at))
-    }
-
-    /// Shows what an input method is composing in the chat's box, if it
-    /// shows a chat being typed in. Returns whether it does.
-    pub(crate) fn compose_in_chat(
-        &mut self,
-        composing: Option<(String, Option<(usize, usize)>)>,
-    ) -> bool {
-        match &mut self.chat {
-            Some(chat) if self.mode == Mode::Insert => {
-                chat.compose(composing);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// A key in a chat: in insert mode, it edits the message, and in
-    /// normal or visual mode, it reads the conversation (see
-    /// [`ChatView::read_key`]), where an answer's number, pressed twice
-    /// or with Enter, answers what the agent asks. Esc goes to normal
-    /// mode, as there's no program to need it, unless the agent is asking
-    /// something.
-    fn chat_key(&mut self, press: &KeyPress<'_>) -> bool {
-        let Some(chat) = self.chat.as_mut() else {
-            return false;
-        };
-        if self.mode == Mode::Insert {
-            if chat.leaves_composer(press) {
-                self.mode = Mode::Normal;
-                return true;
-            }
-            chat.key(press);
-            return true;
-        }
-        let (redraw, insert) = chat.read_key(press);
-        let mode = if insert {
-            Mode::Insert
-        } else {
-            chat.visual().map_or(Mode::Normal, Mode::Visual)
-        };
-        let changed = mode != self.mode;
-        self.mode = mode;
-        redraw || changed
     }
 
     /// Whether a search is being typed, which takes every key.
@@ -551,25 +283,19 @@ impl Pane {
     /// Ctrl+\ waiting to be pressed again isn't: any other key does what
     /// it would.
     pub(crate) fn pending(&self) -> bool {
-        self.keys.pending() || self.chat.as_ref().is_some_and(|chat| chat.keys().pending())
+        self.keys.pending()
     }
 
     /// The count typed, if that's all that's waiting: a key the pane
-    /// doesn't take after it is the window's, as `:` is. A chat's, in it.
+    /// doesn't take after it is the window's, as `:` is.
     pub(crate) fn counting(&self) -> Option<usize> {
-        if let Some(chat) = &self.chat {
-            return chat.keys().counting();
-        }
         self.keys.counting()
     }
 
-    /// Forgets a count typed, a chat's too, as a binding of the window's
-    /// took the key after it.
+    /// Forgets a count typed, as a binding of the window's took the key
+    /// after it.
     pub(crate) fn forget_count(&mut self) {
         self.keys.clear();
-        if let Some(chat) = &mut self.chat {
-            chat.forget_keys();
-        }
     }
 
     /// Switches to normal mode, if in insert mode, as when the focus
@@ -580,77 +306,20 @@ impl Pane {
         }
     }
 
-    /// The focus has arrived at the pane: a chat asking something waits
-    /// a moment before keys answer it (see [`ChatView::arrived`]).
-    pub(crate) fn arrived(&mut self) {
-        if let Some(chat) = &mut self.chat {
-            chat.arrived();
-        }
-    }
-
-    /// Drops the answer its chat armed, if one did, as the window losing
-    /// the focus does.
-    pub(crate) fn disarm(&mut self) {
-        if let Some(chat) = &mut self.chat {
-            chat.disarm();
-        }
-    }
-
-    /// The chat it shows, if it shows one.
-    pub(crate) fn chat_wheel_metrics(&self) -> Option<(f32, f32, f32)> {
-        self.chat.as_ref()?.wheel_metrics()
-    }
-
-    pub(crate) fn chat_mut(&mut self) -> Option<&mut ChatView> {
-        self.chat.as_deref_mut()
-    }
-
-    /// Whether `press` is one of the keys that answer the question its
-    /// chat asks, if it asks one: a number, Enter or Esc. Held down, such
-    /// a key repeats, and its repeats are dropped, so one held can't wait
-    /// out the pause after the question comes, or arm and give an answer.
-    pub(crate) fn answers_question(&self, press: &KeyPress<'_>) -> bool {
-        let answer_key = match press.key {
-            Key::Named(NamedKey::Enter | NamedKey::Escape) => true,
-            Key::Character(text) => {
-                text.len() == 1
-                    && text.as_str() != "0"
-                    && text.chars().all(|ch| ch.is_ascii_digit())
-            }
-            _ => false,
-        };
-        answer_key && self.asking()
-    }
-
-    /// Whether it shows a chat whose agent is asking something, which
-    /// keys in insert mode would answer.
-    pub(crate) fn asking(&self) -> bool {
-        (self.chat.as_ref()).is_some_and(|chat| chat.node.question.is_some())
-    }
-
     /// Switches to insert mode, if it's not in it, as when the focus
-    /// arrives while the window is in insert mode: a terminal goes back to
-    /// the live screen, as `i` does, and a chat to the message being
-    /// typed. A terminal in insert mode already stays where the wheel
-    /// scrolled it, until a key is typed.
+    /// arrives while the window is in insert mode: it goes back to the
+    /// live screen, as `i` does. In insert mode already, it stays where
+    /// the wheel scrolled it, until a key is typed.
     pub(crate) fn enter_insert_mode(&mut self) {
-        if self.mode == Mode::Insert {
-            return;
+        if self.mode != Mode::Insert {
+            self.insert();
         }
-        if self.chat.is_some() {
-            self.mode = Mode::Insert;
-            return;
-        }
-        self.insert();
     }
 
     /// Ends what was half done here as the focus leaves: a visual
     /// selection, which leaves normal mode, a two-key command half typed,
     /// or a search being typed. Where the view and the cursor are stays.
     pub(crate) fn leave(&mut self) {
-        if let Some(chat) = &mut self.chat {
-            chat.leave();
-        }
         self.leave_visual();
         self.keys.clear();
         self.after_ctrl_backslash = false;
@@ -691,19 +360,6 @@ impl Pane {
 
     /// Applies a view update. Returns whether the pane must be redrawn.
     pub(crate) fn view_changed(&mut self, update: &ViewUpdate) -> bool {
-        if let ViewUpdate::Snapshot(view) = update
-            && let Some(node) = view.chat()
-            && self.chat.is_none()
-        {
-            self.chat = Some(Box::new(ChatView::of_view(view, node)));
-            self.requests.changed();
-            return true;
-        }
-        if let Some(chat) = &mut self.chat {
-            chat.apply(update);
-            self.requests.changed();
-            return true;
-        }
         let old_end = self.screen.as_ref().map(|screen| screen.state.history_end);
         let snapshot = matches!(update, ViewUpdate::Snapshot(_));
         match (&mut self.screen, update) {
@@ -767,30 +423,6 @@ impl Pane {
             return self.refresh_overlay();
         }
         match (pending, response) {
-            (Some(Pending::ChatHistory(before)), response) => {
-                if let Some(chat) = &mut self.chat {
-                    chat.history_answer(before, response);
-                }
-                true
-            }
-            (Some(Pending::ChatControl), response) => {
-                if let Some(chat) = &mut self.chat {
-                    chat.queue_answer(response);
-                }
-                true
-            }
-            (Some(Pending::Handoff), response) => {
-                if let Some(chat) = &mut self.chat {
-                    chat.handoff_answer(response);
-                }
-                true
-            }
-            (Some(Pending::Original(serial)), response) => {
-                if let Some(chat) = &mut self.chat {
-                    chat.original_answer(serial, response);
-                }
-                true
-            }
             (_, Response::Error(err)) => {
                 log::warn!("the daemon refused a request: {err}");
                 false
@@ -838,9 +470,6 @@ impl Pane {
 
     /// Handles a key press. Returns whether the pane must be redrawn.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> bool {
-        if self.chat.is_some() {
-            return self.chat_key(press);
-        }
         let modifiers = press.modifiers;
         let ctrl_backslash = is_ctrl_backslash(press);
         let to_normal = enters_normal_mode(press);
@@ -893,10 +522,6 @@ impl Pane {
 
     /// Sends pasted text, marked as a paste if the program asked for that.
     pub(crate) fn paste(&mut self, text: &str) {
-        if let Some(chat) = &mut self.chat {
-            chat.paste(text);
-            return;
-        }
         let Some(screen) = &self.screen else {
             return;
         };
@@ -907,33 +532,14 @@ impl Pane {
     }
 
     /// Scrolls `lines` up (or down, if negative), as from the mouse wheel
-    /// turned with the pointer at `at`, a cell of the view, and a pixel
-    /// from the pane's top left. A program that asked for mouse reports
+    /// turned with the pointer at `at`, a cell of the view. A program that asked for mouse reports
     /// gets the wheel instead (see [`mouse`](self::mouse)). On the
     /// alternate screen, which has no history, other programs get arrow
     /// keys in insert mode, as other terminals send them; in normal mode,
     /// which keeps input from the program, normal mode's cursor moves
-    /// instead, as `k` and `j` move it. In a chat, with Shift over a table
-    /// too wide for it, the table scrolls sideways. Returns whether the
-    /// pane must be redrawn.
-    pub(crate) fn wheel(
-        &mut self,
-        lines: i64,
-        (at, pixel): ([i64; 2], [f32; 2]),
-        modifiers: input::Modifiers,
-    ) -> bool {
-        if let Some(chat) = &mut self.chat {
-            // The wheel drops an answer armed, as a key does.
-            let disarmed = chat.disarm();
-            #[allow(clippy::cast_precision_loss)]
-            let lines = lines as f32 * 3.0;
-            if modifiers.shift
-                && let Some(moved) = chat.wheel_sideways(pixel, lines)
-            {
-                return moved || disarmed;
-            }
-            return chat.scroll_lines(lines) || disarmed;
-        }
+    /// instead, as `k` and `j` move it. Returns whether the pane must be
+    /// redrawn.
+    pub(crate) fn wheel(&mut self, lines: i64, at: [i64; 2], modifiers: input::Modifiers) -> bool {
         if self.reports_mouse(modifiers.shift) {
             let button = if lines > 0 {
                 clackatoo_term::mouse::MouseButton::WheelUp
@@ -1170,9 +776,6 @@ impl Pane {
     /// The note for the bottom bar: a search being typed, or a message,
     /// with how far up the view is scrolled.
     pub(crate) fn label(&self) -> Option<String> {
-        if let Some(chat) = &self.chat {
-            return chat.label();
-        }
         if let Some(prompt) = &self.prompt {
             let slash = if prompt.backward { '?' } else { '/' };
             return Some(format!("{slash}{}", prompt.line.shown()));
@@ -1658,37 +1261,6 @@ mod tests {
     }
 
     #[test]
-    fn paged_chat_undo_targets_the_absolute_turn_and_rejects_unloaded_numbers() {
-        use clackatoo_protocol::{Node, TurnFiles, TurnFilesState, View};
-        let mut node = crate::chat::fixtures::talk(&[("visible", "answer")]);
-        node.first_turn = 10;
-        node.first_message = 8;
-        node.turns[0].files = Some(TurnFiles {
-            count: 1,
-            state: TurnFilesState::Made,
-        });
-        let mut pane = Pane::new(TerminalId(1));
-        pane.view_changed(&ViewUpdate::Snapshot(View {
-            title: "paged".into(),
-            cwd: None,
-            root: Node::Chat(Box::new(node)),
-        }));
-        pane.take_outbox();
-        assert!(pane.undo_turn(Some(0), false, false).is_err());
-        pane.undo_turn(Some(8), false, false).unwrap();
-        assert!(
-            pane.take_outbox()
-                .contains(&ClientMessage::Request(Request::Chat {
-                    terminal: TerminalId(1),
-                    action: ChatAction::Undo {
-                        turn: 10,
-                        force: false
-                    }
-                }))
-        );
-    }
-
-    #[test]
     fn a_bracketed_paste_cant_end_itself_early() {
         // The program asked for bracketed paste.
         let mut pane = pane(&terminal("\x1b[?2004h"));
@@ -2139,13 +1711,13 @@ mod tests {
         let terminal = wide(5);
         let mut pane = pane(&terminal);
         assert_eq!(pane.pill(true), None, "at the live screen");
-        pane.wheel(1, ([0, 0], [0.0, 0.0]), Modifiers::default());
+        pane.wheel(1, [0, 0], Modifiers::default());
         assert_eq!(
             pane.pill(true).as_deref(),
             Some("↓ 1 line · type to return")
         );
         assert_eq!(pane.label(), None, "the pill says it");
-        pane.wheel(2, ([0, 0], [0.0, 0.0]), Modifiers::default());
+        pane.wheel(2, [0, 0], Modifiers::default());
         assert_eq!(
             pane.pill(true).as_deref(),
             Some("↓ 3 lines · type to return")
@@ -2163,11 +1735,11 @@ mod tests {
 
         // Too short a pane, or too narrow, and the bar says it.
         let mut short = self::pane(&wide(3));
-        short.wheel(2, ([0, 0], [0.0, 0.0]), Modifiers::default());
+        short.wheel(2, [0, 0], Modifiers::default());
         assert_eq!(short.pill(true), None);
         assert_eq!(short.label().as_deref(), Some("↑2"));
         let mut narrow = self::pane(&self::terminal(&output));
-        narrow.wheel(2, ([0, 0], [0.0, 0.0]), Modifiers::default());
+        narrow.wheel(2, [0, 0], Modifiers::default());
         assert_eq!(narrow.pill(true), None);
         assert_eq!(narrow.label().as_deref(), Some("↑2"));
     }
@@ -3532,7 +3104,7 @@ mod mouse_tests {
             input(&mut pane),
             "\x1b[<0;3;2M\x1b[<32;4;2M\x1b[<32;12;5M\x1b[<0;12;5m"
         );
-        pane.wheel(2, ([0, 0], [0.0; 2]), Modifiers::default());
+        pane.wheel(2, [0, 0], Modifiers::default());
         assert_eq!(input(&mut pane), "\x1b[<64;1;1M\x1b[<64;1;1M");
         // Shift keeps the mouse clackatoo's.
         let shift = Modifiers {
@@ -3556,7 +3128,7 @@ mod mouse_tests {
     }
 
     fn wheel(pane: &mut Pane, lines: i64) -> bool {
-        pane.wheel(lines, ([0, 0], [0.0; 2]), Modifiers::default())
+        pane.wheel(lines, [0, 0], Modifiers::default())
     }
 
     #[test]
@@ -3757,15 +3329,8 @@ mod mouse_tests {
 }
 
 impl Pane {
-    pub(crate) fn exclusive_shortcuts(&self) -> Option<crate::shortcuts::Context> {
-        self.chat.as_ref()?.exclusive_shortcuts()
-    }
-
     pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
         use crate::shortcuts::Context;
-        if let Some(chat) = &self.chat {
-            return chat.shortcut_context(self.mode);
-        }
         if let Some(prompt) = &self.prompt {
             return crate::shortcuts::prompt("Terminal search", &prompt.line, true);
         }

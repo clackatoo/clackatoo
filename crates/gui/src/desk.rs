@@ -23,6 +23,7 @@ use clackatoo_term::mouse::{MouseAction, MouseButton};
 use winit::keyboard::{Key, NamedKey};
 
 use crate::browser::BrowserPane;
+use crate::chat::ChatPane;
 use crate::chrome::{ModeName, NoteKind, Status, WorkspaceName};
 use crate::cmdline;
 use crate::command::{Command, Kind, Place};
@@ -165,6 +166,7 @@ mod badges;
 mod bindings;
 mod boards;
 mod browsers;
+mod chats;
 mod clipboard;
 mod colours;
 mod connecting;
@@ -304,6 +306,9 @@ pub(crate) struct Desk {
     /// Panes by the terminal each shows: those of the workspace shown, and
     /// of others shown before.
     panes: HashMap<TerminalId, Pane>,
+    /// Panes showing chats, by the terminal the daemon hosts each as:
+    /// never one in `panes` too (see [`chats`]).
+    chats: HashMap<TerminalId, ChatPane>,
     /// Whether there's a connection to send messages on.
     connected: bool,
     /// Whether the daemon is on another machine, which makes terminals
@@ -517,9 +522,9 @@ impl Desk {
             };
             controls.push(serde_json::json!({"role":"pane","id":id.0,"content":format!("{:?}", pane.content),"bounds":[tile.rect.x,tile.rect.y,tile.rect.width,tile.rect.height]}));
             if let Content::Terminal(terminal) = pane.content
-                && let Some(view) = self.panes.get(&terminal)
+                && let Some(chat) = self.chats.get(&terminal)
             {
-                for (label, [x, y, w, h]) in view.native_controls() {
+                for (label, [x, y, w, h]) in chat.view().native_controls() {
                     controls.push(serde_json::json!({"role":"control","label":label,"bounds":[tile.origin[0]+x,tile.origin[1]+y,w,h]}));
                 }
             }
@@ -533,52 +538,6 @@ impl Desk {
 
     pub(crate) fn pane(&self, terminal: TerminalId) -> Option<&Pane> {
         self.panes.get(&terminal)
-    }
-
-    pub(crate) fn pane_mut(&mut self, terminal: TerminalId) -> Option<&mut Pane> {
-        self.panes.get_mut(&terminal)
-    }
-
-    /// How the mouse pointer looks at `point`, if it's over a chat, which
-    /// says by what it drew there.
-    pub(crate) fn chat_pointer(&self, point: [f32; 2]) -> Option<crate::chat::Pointer> {
-        let (terminal, _, pixel) = self.cell_at(point, None)?;
-        self.panes.get(&terminal)?.chat_pointer(pixel)
-    }
-
-    /// Passes what an input method is composing to the focused pane, if
-    /// it's a chat being typed in, which shows it in its box. Returns
-    /// whether it was: the window shows it over a terminal itself.
-    pub(crate) fn compose_in_chat(
-        &mut self,
-        composing: Option<(String, Option<(usize, usize)>)>,
-    ) -> bool {
-        self.focused_pane()
-            .is_some_and(|pane| pane.compose_in_chat(composing))
-    }
-
-    /// Carries out what was typed or clicked in chats, which needs the
-    /// fonts, and takes what they copied, as other copies are taken: `"+`
-    /// or `"*` holds it, and the window puts it on the clipboard. Returns
-    /// whether the window must be redrawn.
-    pub(crate) fn settle_chats(&mut self, fonts: &mut crate::fonts::Fonts) -> bool {
-        let mut redraw = false;
-        let mut copied = Vec::new();
-        for pane in self.panes.values_mut() {
-            redraw |= pane.settle_chat(fonts);
-            copied.extend(pane.take_chat_copies());
-        }
-        for (text, to) in copied {
-            self.copied(text, to);
-        }
-        redraw
-    }
-
-    /// When a chat must be drawn again by itself, as for its agent's
-    /// seconds to count or an image to finish decoding: the soonest.
-    /// Chats suppress agent timers while offline; local image work can finish.
-    pub(crate) fn chat_wakes(&self) -> Option<std::time::Instant> {
-        self.panes.values().filter_map(Pane::chat_live).min()
     }
 
     /// Where typed text goes now, if keys type text rather than being
@@ -606,11 +565,14 @@ impl Desk {
         if self.focused_browser().is_some() {
             return None;
         }
+        if let Some(chat) = self.focused_chat() {
+            return chat.takes_text().then_some(TextTarget::Pane);
+        }
         let pane = self.pane(self.focused_terminal()?)?;
         if pane.prompting() {
             Some(TextTarget::Bar)
         } else {
-            (pane.mode == Mode::Insert || pane.chat_searching_models()).then_some(TextTarget::Pane)
+            (pane.mode == Mode::Insert).then_some(TextTarget::Pane)
         }
     }
 
@@ -686,18 +648,6 @@ impl Desk {
             .is_some_and(|(_, _, pane)| matches!(pane.content, Content::Buffer(_)))
     }
 
-    /// Whether `press` would go to the focused chat's question, as one of
-    /// the keys that answer it (see [`Pane::answers_question`]), which a
-    /// key held down mustn't repeat.
-    pub(crate) fn answers_question(&self, press: &KeyPress<'_>) -> bool {
-        if self.input.is_some() || self.finder.is_some() || self.start.is_some() {
-            return false;
-        }
-        (self.focused_terminal())
-            .and_then(|terminal| self.panes.get(&terminal))
-            .is_some_and(|pane| pane.answers_question(press))
-    }
-
     /// Turns down a key that can't reach the daemon in time: says so, and
     /// lights the focused pane up for a moment.
     pub(crate) fn refuse_offline(&mut self) {
@@ -710,6 +660,15 @@ impl Desk {
     fn focused_pane(&mut self) -> Option<&mut Pane> {
         let terminal = self.focused_terminal()?;
         self.panes.get_mut(&terminal)
+    }
+
+    /// The mode of the focused pane's terminal, or chat.
+    pub(super) fn focused_terminal_mode(&self) -> Option<Mode> {
+        let terminal = self.focused_terminal()?;
+        match self.chats.get(&terminal) {
+            Some(chat) => Some(chat.mode()),
+            None => Some(self.panes.get(&terminal)?.mode),
+        }
     }
 
     /// The tab shown.
@@ -755,7 +714,10 @@ impl Desk {
             return Some(browser.title());
         }
         let terminal = self.focused_terminal()?;
-        let title = self.panes.get(&terminal)?.title()?;
+        let title = match self.chats.get(&terminal) {
+            Some(chat) => chat.title(),
+            None => self.panes.get(&terminal)?.title()?,
+        };
         (!title.is_empty()).then_some(title)
     }
 
@@ -858,9 +820,7 @@ impl Desk {
         let mode = match self.focused_editor() {
             Some((editor, _)) => Some(editor_mode_name(editor)),
             None if self.panel_label().is_some() => Some(ModeName::Normal),
-            None => (self.focused_terminal())
-                .and_then(|terminal| self.panes.get(&terminal))
-                .map(|pane| mode_name(pane.mode)),
+            None => self.focused_terminal_mode().map(mode_name),
         };
         let (note, kind) = self.note(None, None);
         Status::Tabs {
@@ -920,26 +880,29 @@ impl Desk {
                 panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
             };
         }
-        let pane = self
-            .focused_terminal()
-            .and_then(|terminal| self.panes.get(&terminal));
-        if let Some(pane) = pane
-            && pane.prompting()
-            && let Some(prompt) = pane.label()
-        {
-            return Status::Typing {
-                label: None,
-                text: prompt,
-                choices: Vec::new(),
-                selected: None,
-                under: None,
-            };
-        }
-        let mode = pane.map(|pane| mode_name(pane.mode));
-        let label = pane.and_then(Pane::label).or_else(|| self.notice());
-        let (note, kind) = self.note(None, label);
+        let (mode, label) = if let Some(chat) = self.focused_chat() {
+            (Some(chat.mode()), chat.label())
+        } else {
+            let pane = self
+                .focused_terminal()
+                .and_then(|terminal| self.panes.get(&terminal));
+            if let Some(pane) = pane
+                && pane.prompting()
+                && let Some(prompt) = pane.label()
+            {
+                return Status::Typing {
+                    label: None,
+                    text: prompt,
+                    choices: Vec::new(),
+                    selected: None,
+                    under: None,
+                };
+            }
+            (pane.map(|pane| pane.mode), pane.and_then(Pane::label))
+        };
+        let (note, kind) = self.note(None, label.or_else(|| self.notice()));
         Status::Tabs {
-            mode,
+            mode: mode.map(mode_name),
             note,
             kind,
             panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
@@ -1010,7 +973,10 @@ impl Desk {
         self.workspaces
             .find_pane(tab.focused)
             .and_then(|(_, _, pane)| match pane.content {
-                Content::Terminal(terminal) => self.panes.get(&terminal)?.name(self.home()),
+                Content::Terminal(terminal) => match self.chats.get(&terminal) {
+                    Some(chat) => Some(chat.title()),
+                    None => self.panes.get(&terminal)?.name(self.home()),
+                },
                 Content::Buffer(_) => self.editor_title(pane.id),
                 Content::Files(_) | Content::Folder(_) => {
                     self.explorer(pane.id).map(crate::explorer::Explorer::title)
@@ -1276,8 +1242,12 @@ impl Desk {
             .iter()
             .flat_map(clackatoo_protocol::Workspace::terminals)
             .collect();
+        self.chats.retain(|terminal, _| anywhere.contains(terminal));
         self.panes.retain(|terminal, _| anywhere.contains(terminal));
         for &terminal in &shown {
+            if self.chats.contains_key(&terminal) {
+                continue;
+            }
             self.panes.entry(terminal).or_insert_with(|| {
                 let mut pane = Pane::new(terminal);
                 pane.set_options(&self.options);
@@ -1305,7 +1275,7 @@ impl Desk {
         let new: Vec<TerminalId> = shown.difference(&self.attached).copied().collect();
         for terminal in new {
             self.attached.insert(terminal);
-            let first = self.panes.get(&terminal).and_then(Pane::first_chat_turn);
+            let first = self.first_chat_turn(terminal);
             self.request(Request::AttachRecent { terminal, first }, Asked::Quiet);
         }
     }
@@ -1417,10 +1387,12 @@ impl Desk {
                     continue;
                 }
             };
-            if let (Some(pane), Ok(size)) = (
-                self.panes.get_mut(&terminal),
-                Size::new(tile.cols, tile.rows),
-            ) {
+            let Ok(size) = Size::new(tile.cols, tile.rows) else {
+                continue;
+            };
+            if let Some(chat) = self.chats.get_mut(&terminal) {
+                chat.resize(size);
+            } else if let Some(pane) = self.panes.get_mut(&terminal) {
                 pane.resize(size);
             }
         }
@@ -1441,8 +1413,11 @@ impl Desk {
         for pane in self.panes.values_mut() {
             pane.reconnected();
             pane.set_remote(remote);
-            pane.chat_offline(false);
         }
+        for chat in self.chats.values_mut() {
+            chat.reconnected();
+        }
+        self.chats_offline(false);
         self.workspaces_changed(workspaces);
         self.watch_chats();
         self.connect_config_hosts();
@@ -1461,9 +1436,7 @@ impl Desk {
         self.forget_asked();
         // A chat's agent may have long finished by the time it's back:
         // none says it's working, nor counts, meanwhile.
-        for pane in self.panes.values_mut() {
-            pane.chat_offline(true);
-        }
+        self.chats_offline(true);
         // A macro can't go on without the daemon, nor wait for it.
         if self.macro_waiting() {
             self.stop_macro(Some(
@@ -1544,7 +1517,7 @@ impl Desk {
             self.reattaching.remove(&terminal);
         }
         if self.ask_again(Missed::View(terminal)) && self.reattaching.insert(terminal) {
-            let first = self.panes.get(&terminal).and_then(Pane::first_chat_turn);
+            let first = self.first_chat_turn(terminal);
             self.request(
                 Request::AttachRecent { terminal, first },
                 Asked::Reattached(terminal),
@@ -1594,16 +1567,23 @@ impl Desk {
         if matches!(update, ViewUpdate::Snapshot(_)) {
             self.reattaching.remove(&terminal);
         }
-        let Some(pane) = self.panes.get_mut(&terminal) else {
-            return false;
-        };
-        let doing = (pane.chat_working(), pane.asking());
-        if !pane.view_changed(update) {
-            return false;
-        }
         // A chat starting or stopping work, or asking, changes its tab's
         // name, shown or not.
-        let flipped = (pane.chat_working(), pane.asking()) != doing;
+        let flipped = if let Some(chat) = self.chats.get_mut(&terminal) {
+            let doing = (chat.working(), chat.asking());
+            chat.view_changed(update);
+            (chat.working(), chat.asking()) != doing
+        } else if let Some(chat) = self.take_over_chat(terminal, update) {
+            chat.working() || chat.asking()
+        } else {
+            let Some(pane) = self.panes.get_mut(&terminal) else {
+                return false;
+            };
+            if !pane.view_changed(update) {
+                return false;
+            }
+            false
+        };
         self.lesson_view_changed(terminal);
         self.settle_lesson();
         // Tabs not shown wait, undrawn, until they are.
@@ -1651,6 +1631,11 @@ impl Desk {
         }
         match self.asked.pop_front() {
             Some(Asker::Pane(terminal)) => {
+                // Asked by a terminal's pane that has since turned out to
+                // show a chat, too.
+                if let Some(chat) = self.chats.get_mut(&terminal) {
+                    return chat.answered(response);
+                }
                 let Some(pane) = self.panes.get_mut(&terminal) else {
                     return false;
                 };
@@ -1826,7 +1811,9 @@ impl Desk {
     /// update.
     pub(crate) fn drawn(&mut self, terminals: &[TerminalId]) {
         for terminal in terminals {
-            if let Some(pane) = self.panes.get_mut(terminal) {
+            if let Some(chat) = self.chats.get_mut(terminal) {
+                chat.drawn();
+            } else if let Some(pane) = self.panes.get_mut(terminal) {
                 pane.drawn();
             }
         }
@@ -1853,8 +1840,12 @@ impl Desk {
         let mut messages = std::mem::take(&mut self.outbox);
         let blocks = self.daemon_has(wire::BLOCKS);
         let mut copied_across = false;
-        for (&terminal, pane) in &mut self.panes {
-            for mut message in pane.take_outbox() {
+        let terminals =
+            (self.panes.iter_mut()).map(|(&terminal, pane)| (terminal, pane.take_outbox()));
+        let chats = (self.chats.iter_mut()).map(|(&terminal, chat)| (terminal, chat.take_outbox()));
+        let outboxes: Vec<(TerminalId, Vec<ClientMessage>)> = terminals.chain(chats).collect();
+        for (terminal, outbox) in outboxes {
+            for mut message in outbox {
                 if !self.connected {
                     continue;
                 }
@@ -1974,9 +1965,8 @@ impl Desk {
             }
             self.close_finder();
         } else if self
-            .focused_pane()
-            .and_then(Pane::chat_mut)
-            .is_some_and(|chat| chat.menu_press(press))
+            .focused_chat_mut()
+            .is_some_and(|chat| chat.view_mut().menu_press(press))
         {
             return true;
         } else if let Some(chord) = Chord::of(press) {
@@ -2075,6 +2065,9 @@ impl Desk {
         if self.ran_key(press) {
             return true;
         }
+        if let Some(chat) = self.focused_chat_mut() {
+            return chat.key(press) || had_message;
+        }
         let redraw = self.focused_pane().is_some_and(|pane| pane.key(press));
         if let Some(terminal) = self.focused_terminal() {
             self.open_pane_link(terminal);
@@ -2089,31 +2082,9 @@ impl Desk {
         let ctrl_v = press.modifiers.ctrl
             && !press.modifiers.shift
             && matches!(press.key, Key::Character(text) if text.eq_ignore_ascii_case("v"));
-        let terminal = self.focused_pane().is_some_and(|pane| {
-            !pane.is_chat() && matches!(pane.mode, Mode::Normal | Mode::Visual(_))
-        });
+        let terminal = (self.focused_pane())
+            .is_some_and(|pane| matches!(pane.mode, Mode::Normal | Mode::Visual(_)));
         ctrl_v && terminal && !self.needs_daemon("block selection", wire::BLOCKS)
-    }
-
-    /// Drops the answer the focused chat armed, if it did, as a key that
-    /// doesn't reach it is had elsewhere: only the number again, or Enter,
-    /// in the chat, may give it.
-    fn disarm_focused_chat(&mut self) {
-        if let Some(pane) = self.focused_pane() {
-            pane.disarm();
-        }
-    }
-
-    /// `:agentundo` and `:agentredo`: the focused chat undoes turn `turn`,
-    /// or redoes it if `redo`, `force`d with `!`.
-    fn agent_undo(&mut self, turn: Option<usize>, redo: bool, force: bool) {
-        let asked = (self.focused_pane()).map_or_else(
-            || Err("that's for a chat with an agent".to_owned()),
-            |pane| pane.undo_turn(turn, redo, force),
-        );
-        if let Err(why) = asked {
-            self.refuse(why);
-        }
     }
 
     /// Hands `press` to the focused explorer, board, review or browser,
@@ -2137,56 +2108,6 @@ impl Desk {
         )
     }
 
-    /// Local image viewing owns input even when the daemon is offline.
-    pub(crate) fn chat_modal_key(&mut self, press: &KeyPress<'_>) -> bool {
-        self.focused_pane()
-            .and_then(Pane::chat_mut)
-            .is_some_and(|chat| chat.chat_modal_key(press))
-    }
-
-    /// The chat an explicit clipboard paste goes to, unless a prompt owns input.
-    pub(crate) fn image_paste_target(&self) -> Option<TerminalId> {
-        if self.input.is_some() || self.finding() {
-            return None;
-        }
-        let id = self.focused_terminal()?;
-        self.panes
-            .get(&id)
-            .filter(|pane| {
-                pane.is_chat() && !pane.chat_searching_models() && !pane.chat_viewing_modal()
-            })
-            .map(|_| id)
-    }
-
-    pub(crate) fn begin_image_paste(&mut self, id: TerminalId) -> bool {
-        let Some(chat) = self.panes.get_mut(&id).and_then(|pane| pane.chat_mut()) else {
-            return false;
-        };
-        if chat.pasting || chat.viewing_modal() {
-            return false;
-        }
-        chat.begin_paste();
-        true
-    }
-
-    pub(crate) fn finish_image_paste(
-        &mut self,
-        id: TerminalId,
-        result: Result<crate::clipboard_image::Pasted, String>,
-    ) {
-        let supported = self.daemon_has(wire::CHAT_IMAGES);
-        let Some(chat) = self.panes.get_mut(&id).and_then(|pane| pane.chat_mut()) else {
-            return;
-        };
-        let result = if !supported && matches!(result, Ok(crate::clipboard_image::Pasted::Image(_)))
-        {
-            Err("Update the daemon to paste images into chats.".into())
-        } else {
-            result
-        };
-        chat.finish_paste(result);
-    }
-
     /// Pastes `text` into the command line, if it's open, or else the focused pane.
     pub(crate) fn paste(&mut self, text: &str) {
         if self
@@ -2201,11 +2122,12 @@ impl Desk {
             self.suggest_completion();
         } else if self.finding() {
             self.paste_into_finder(text);
-        } else if !self.paste_into_editor(text)
-            && !self.paste_into_list(text)
-            && let Some(pane) = self.focused_pane()
-        {
-            pane.paste(text);
+        } else if !self.paste_into_editor(text) && !self.paste_into_list(text) {
+            if let Some(chat) = self.focused_chat_mut() {
+                chat.paste(text);
+            } else if let Some(pane) = self.focused_pane() {
+                pane.paste(text);
+            }
         }
     }
 
@@ -2247,9 +2169,12 @@ impl Desk {
         else {
             return false;
         };
+        if let Some(chat) = self.chats.get_mut(&terminal) {
+            return chat.wheel(lines, pixel, modifiers);
+        }
         self.panes
             .get_mut(&terminal)
-            .is_some_and(|pane| pane.wheel(lines, (cell, pixel), modifiers))
+            .is_some_and(|pane| pane.wheel(lines, cell, modifiers))
     }
 
     // --- The mouse --------------------------------------------------------
@@ -2354,7 +2279,7 @@ impl Desk {
             // Motion is passed on once per cell, with the button held.
             // A chat follows the mouse by the pixel.
             MouseAction::Motion(_) => {
-                let chat = self.panes.get(&terminal).is_some_and(Pane::is_chat);
+                let chat = self.chats.contains_key(&terminal);
                 if self.mouse_cell == Some((terminal, cell)) && !chat {
                     return outcome;
                 }
@@ -2368,17 +2293,6 @@ impl Desk {
             outcome.redraw |= self.mouse_left();
         }
         self.mouse_cell = Some((terminal, cell));
-        let block = modifiers.alt && self.daemon_has(wire::BLOCKS);
-        let Some(pane) = self.panes.get_mut(&terminal) else {
-            return outcome;
-        };
-        // A middle click pastes the primary selection, unless the program
-        // gets the mouse.
-        if action == MouseAction::Press(MouseButton::Middle) && !pane.reports_mouse(modifiers.shift)
-        {
-            outcome.paste_primary = true;
-            return outcome;
-        }
         let event = PaneMouse {
             action,
             line: cell[0],
@@ -2386,8 +2300,26 @@ impl Desk {
             pixel,
             clicks,
             modifiers,
-            block,
+            block: modifiers.alt && self.daemon_has(wire::BLOCKS),
         };
+        // A middle click pastes the primary selection, unless the program
+        // gets the mouse.
+        let middle = action == MouseAction::Press(MouseButton::Middle);
+        if let Some(chat) = self.chats.get_mut(&terminal) {
+            if middle {
+                outcome.paste_primary = true;
+            } else {
+                outcome.redraw |= chat.mouse(&event);
+            }
+            return outcome;
+        }
+        let Some(pane) = self.panes.get_mut(&terminal) else {
+            return outcome;
+        };
+        if middle && !pane.reports_mouse(modifiers.shift) {
+            outcome.paste_primary = true;
+            return outcome;
+        }
         outcome.redraw |= pane.mouse(&event);
         self.open_pane_link(terminal);
         outcome
@@ -2399,6 +2331,10 @@ impl Desk {
         let Some((terminal, _)) = self.mouse_cell.take() else {
             return false;
         };
+        // Gone from a chat, the mouse takes away what it showed there.
+        if let Some(chat) = self.chats.get_mut(&terminal) {
+            return chat.unhover();
+        }
         self.panes
             .get_mut(&terminal)
             .is_some_and(|pane| pane.hover(None))
@@ -2571,18 +2507,16 @@ impl Desk {
         self.see_shown();
         if !focused
             && let Some((terminal, _)) = self.dragging.take()
-            && let Some(pane) = self.panes.get_mut(&terminal)
+            && let Some(chat) = self.chats.get_mut(&terminal)
         {
-            pane.drag_lost();
+            chat.drag_lost();
         }
         if !focused {
             self.editor_drag_lost();
+            // An answer armed in a chat waits for no one away.
+            self.disarm_focused_chat();
         }
         if let Some(pane) = self.focused_pane() {
-            // An answer armed in a chat waits for no one away.
-            if !focused {
-                pane.disarm();
-            }
             pane.focus_changed(focused);
         }
     }
@@ -2813,8 +2747,7 @@ impl Desk {
                 if let Some(chat) = if access == clackatoo_protocol::NativeAccess::Off {
                     Some(TerminalId(0))
                 } else {
-                    self.focused_terminal()
-                        .filter(|id| self.panes.get(id).is_some_and(Pane::is_chat))
+                    self.focused_chat().map(ChatPane::terminal)
                 } {
                     self.outbox
                         .push(ClientMessage::NativeGrant { chat, access });
@@ -3162,7 +3095,10 @@ mod tests {
     }
 
     fn mode(desk: &Desk, terminal: u32) -> Mode {
-        desk.pane(TerminalId(terminal)).expect("a pane").mode
+        let terminal = TerminalId(terminal);
+        (desk.chat(terminal).map(ChatPane::mode))
+            .or_else(|| desk.pane(terminal).map(|pane| pane.mode))
+            .expect("a pane")
     }
 
     fn shown_pane(desk: &Desk) -> PaneId {
@@ -3722,14 +3658,14 @@ mod tests {
         assert!(!desk.tab_names()[1].1.contains(Mark::Working.suffix()));
         paint_chat_two(&mut desk, &mut fonts);
         assert!(desk.chat_wakes().is_none());
-        let pane = desk.pane_mut(TerminalId(2)).expect("the chat's pane");
-        assert!(!pane.chat_working());
+        let chat = desk.chat(TerminalId(2)).expect("the chat's pane");
+        assert!(!chat.working());
     }
 
     /// Draws the chat in terminal 2 of [`working_chat_desk`].
     fn paint_chat_two(desk: &mut Desk, fonts: &mut crate::fonts::Fonts) {
-        let pane = desk.pane_mut(TerminalId(2)).expect("the chat's pane");
-        pane.paint_chat(fonts, [0.0; 2], [900.0, 1000.0], true);
+        let pane = desk.chat_mut(TerminalId(2)).expect("the chat's pane");
+        pane.paint(fonts, [0.0; 2], [900.0, 1000.0], true);
     }
 
     #[test]
@@ -3754,18 +3690,10 @@ mod tests {
         let mut fonts =
             crate::fonts::Fonts::load(&crate::fonts::FontOptions::default(), 1.0).unwrap();
         desk.settle_chats(&mut fonts);
-        assert!(
-            !desk
-                .panes
-                .get_mut(&chat)
-                .unwrap()
-                .chat_mut()
-                .unwrap()
-                .pasting
-        );
+        assert!(!desk.chat(chat).unwrap().view().pasting);
         // The worker delivers to its original pane, not the terminal now focused.
         let send = |desk: &mut Desk, fonts: &mut crate::fonts::Fonts| {
-            let view = desk.panes.get_mut(&chat).unwrap().chat_mut().unwrap();
+            let view = desk.chat_mut(chat).unwrap().view_mut();
             view.node.turns.clear();
             view.key(&KeyPress {
                 key: &Key::Named(NamedKey::Enter),
@@ -3793,15 +3721,7 @@ mod tests {
                 height: 3,
             })),
         );
-        assert!(
-            !desk
-                .panes
-                .get_mut(&chat)
-                .unwrap()
-                .chat_mut()
-                .unwrap()
-                .pasting
-        );
+        assert!(!desk.chat(chat).unwrap().view().pasting);
         assert_eq!(
             send(&mut desk, &mut fonts),
             [clackatoo_protocol::ChatAction::Send("still text".into())]
@@ -9365,8 +9285,8 @@ mod tests {
         );
         let mut fonts = crate::chat::fixtures::fonts();
         let paint = |desk: &mut Desk, fonts: &mut crate::fonts::Fonts| {
-            let pane = desk.pane_mut(TerminalId(1)).expect("the chat's pane");
-            pane.paint_chat(fonts, [0.0; 2], [900.0, 1000.0], true);
+            let pane = desk.chat_mut(TerminalId(1)).expect("the chat's pane");
+            pane.paint(fonts, [0.0; 2], [900.0, 1000.0], true);
         };
         paint(&mut desk, &mut fonts);
         // In the box: what's typed, selected and copied.

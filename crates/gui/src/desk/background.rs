@@ -106,9 +106,7 @@ impl Desk {
         let Some((_, _, found)) = self.workspaces.find_pane(pane) else {
             return false;
         };
-        (found.content.terminal())
-            .and_then(|terminal| self.panes.get(&terminal))
-            .is_some_and(crate::pane::Pane::is_chat)
+        (found.content.terminal()).is_some_and(|terminal| self.chats.contains_key(&terminal))
     }
 
     /// What a tab or a background tab laid out as `layout` is marked with

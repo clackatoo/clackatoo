@@ -1268,11 +1268,11 @@ fn a_chat_pane_sends_what_is_typed_and_esc_leaves_insert_mode() {
     };
     use winit::keyboard::{Key, KeyLocation, NamedKey};
 
+    use crate::chat::ChatPane;
     use crate::input::{KeyPress, Modifiers};
-    use crate::pane::Pane;
     use crate::vim::Mode;
 
-    let press = |pane: &mut Pane, key: Key, text: Option<&str>| {
+    let press = |pane: &mut ChatPane, key: Key, text: Option<&str>| {
         pane.key(&KeyPress {
             key: &key,
             text,
@@ -1281,23 +1281,24 @@ fn a_chat_pane_sends_what_is_typed_and_esc_leaves_insert_mode() {
             modifiers: Modifiers::default(),
         })
     };
-    let mut pane = Pane::new(TerminalId(3));
-    pane.view_changed(&ViewUpdate::Snapshot(View {
-        title: "agent".into(),
-        cwd: None,
-        root: Node::Chat(Box::new(ChatNode {
-            state: ChatState::Ready,
-            ..ChatNode::default()
-        })),
-    }));
-    assert!(pane.is_chat());
+    let mut pane = ChatPane::of_snapshot(
+        TerminalId(3),
+        &ViewUpdate::Snapshot(View {
+            title: "agent".into(),
+            cwd: None,
+            root: Node::Chat(Box::new(ChatNode {
+                state: ChatState::Ready,
+                ..ChatNode::default()
+            })),
+        }),
+    );
     for ch in ["h", "i"] {
         press(&mut pane, Key::Character(ch.into()), Some(ch));
     }
     press(&mut pane, Key::Named(NamedKey::Enter), Some("\r"));
     // Nothing goes until the window settles it, with the fonts.
     assert!(pane.take_outbox().is_empty());
-    assert!(pane.settle_chat(&mut fonts(1.0)));
+    assert!(pane.settle(&mut fonts(1.0)));
     let sent = pane.take_outbox();
     assert!(
         sent.contains(&ClientMessage::Request(Request::Chat {
@@ -1307,9 +1308,9 @@ fn a_chat_pane_sends_what_is_typed_and_esc_leaves_insert_mode() {
         "{sent:?}"
     );
     press(&mut pane, Key::Named(NamedKey::Escape), None);
-    assert_eq!(pane.mode, Mode::Normal);
+    assert_eq!(pane.mode(), Mode::Normal);
     press(&mut pane, Key::Character("i".into()), Some("i"));
-    assert_eq!(pane.mode, Mode::Insert);
+    assert_eq!(pane.mode(), Mode::Insert);
 }
 
 #[test]
@@ -1320,10 +1321,10 @@ fn u_in_a_chat_undoes_the_last_turn_or_says_theres_none() {
     };
     use winit::keyboard::{Key, KeyLocation};
 
+    use crate::chat::ChatPane;
     use crate::input::{KeyPress, Modifiers};
-    use crate::pane::Pane;
 
-    let press = |pane: &mut Pane, ch: &str| {
+    let press = |pane: &mut ChatPane, ch: &str| {
         pane.key(&KeyPress {
             key: &Key::Character(ch.into()),
             text: Some(ch),
@@ -1355,8 +1356,7 @@ fn u_in_a_chat_undoes_the_last_turn_or_says_theres_none() {
             })),
         })
     };
-    let mut pane = Pane::new(TerminalId(3));
-    pane.view_changed(&chat(None));
+    let mut pane = ChatPane::of_snapshot(TerminalId(3), &chat(None));
     pane.enter_normal_mode();
     // Nothing to undo: the bar says so, until the next key.
     assert!(press(&mut pane, "u"));
@@ -1372,7 +1372,7 @@ fn u_in_a_chat_undoes_the_last_turn_or_says_theres_none() {
     pane.view_changed(&chat(Some(made)));
     press(&mut pane, "u");
     // It goes once the chat's settled, with the fonts.
-    pane.settle_chat(&mut fonts(1.0));
+    pane.settle(&mut fonts(1.0));
     let undo = ClientMessage::Request(Request::Chat {
         terminal: TerminalId(3),
         action: ChatAction::Undo {
@@ -2485,14 +2485,16 @@ fn renders_a_lesson_with_a_tick_by_a_step_done_and_its_code_on_a_background() {
 fn a_turn_is_undone_by_its_number_which_skips_where_the_chat_moved() {
     use clackatoo_protocol::{ChatAction, ClientMessage, Node, Request, ViewUpdate};
 
-    use crate::pane::Pane;
+    use crate::chat::ChatPane;
 
-    let mut pane = Pane::new(TerminalId(3));
-    pane.view_changed(&ViewUpdate::Snapshot(View {
-        title: "agent".into(),
-        cwd: None,
-        root: Node::Chat(Box::new(moved_chat_node())),
-    }));
+    let mut pane = ChatPane::of_snapshot(
+        TerminalId(3),
+        &ViewUpdate::Snapshot(View {
+            title: "agent".into(),
+            cwd: None,
+            root: Node::Chat(Box::new(moved_chat_node())),
+        }),
+    );
     // Turn 2 is the third: the second shows the move.
     pane.undo_turn(Some(1), false, false).unwrap();
     assert!(

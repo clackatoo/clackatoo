@@ -391,6 +391,7 @@ enum WithKeys {
     Explorer,
     Board,
     Review,
+    Chat(TerminalId),
     Terminal(TerminalId),
 }
 
@@ -548,6 +549,8 @@ impl Desk {
             WithKeys::Board
         } else if self.focused_review().is_some() {
             WithKeys::Review
+        } else if let Some(chat) = self.focused_chat() {
+            WithKeys::Chat(chat.terminal())
         } else {
             WithKeys::Terminal(self.focused_terminal()?)
         })
@@ -561,6 +564,7 @@ impl Desk {
             WithKeys::Explorer => self.focused_explorer()?,
             WithKeys::Board => self.focused_board()?,
             WithKeys::Review => self.focused_review()?,
+            WithKeys::Chat(terminal) => self.chats.get(&terminal)?,
             WithKeys::Terminal(terminal) => self.panes.get(&terminal)?,
         })
     }
@@ -572,6 +576,7 @@ impl Desk {
             WithKeys::Explorer => self.focused_explorer_mut()?,
             WithKeys::Board => self.focused_board_mut()?,
             WithKeys::Review => self.focused_review_mut()?,
+            WithKeys::Chat(terminal) => self.chats.get_mut(&terminal)?,
             WithKeys::Terminal(terminal) => self.panes.get_mut(&terminal)?,
         })
     }

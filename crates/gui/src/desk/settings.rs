@@ -178,6 +178,9 @@ impl Desk {
         for pane in self.panes.values_mut() {
             pane.set_options(&self.options);
         }
+        for chat in self.chats.values_mut() {
+            chat.set_options(&self.options);
+        }
     }
 
     /// Puts the options back as they start, as a config run again from

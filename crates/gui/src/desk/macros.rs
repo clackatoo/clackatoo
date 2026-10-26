@@ -489,9 +489,7 @@ impl Desk {
         if self.recording().is_none() || Chord::of(press) != Some(crate::vim::RECORD_STOP.chord()) {
             return false;
         }
-        let chat = (self.focused_terminal())
-            .and_then(|terminal| self.panes.get(&terminal))
-            .is_some_and(crate::pane::Pane::is_chat);
+        let chat = self.focused_chat().is_some();
         let normal = !chat
             && self.focused_editor().is_none()
             && self.focused_key_state().is_some_and(|keys| {

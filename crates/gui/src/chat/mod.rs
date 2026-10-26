@@ -19,6 +19,7 @@ pub(crate) mod fixtures;
 mod handoff;
 mod images;
 mod paint;
+mod pane;
 mod picker;
 mod queue;
 mod read;
@@ -42,6 +43,7 @@ use paint::{How, Picked, Position, Shown, TextKey};
 use picker::{Row, Spot};
 
 pub(crate) use crate::markdown::layout::{Brush, TextPaint, Tone, warm_fonts};
+pub(crate) use pane::ChatPane;
 
 /// Something done to the chat that waits for the fonts.
 #[derive(Debug)]

@@ -102,7 +102,7 @@ impl Desk {
         if self.focused_explorer().is_some() {
             return None;
         }
-        let mode = self.pane(self.focused_terminal()?)?.mode;
+        let mode = self.focused_terminal_mode()?;
         if self.held_normal == Some(pane) && mode != Mode::Insert {
             return None;
         }
@@ -140,11 +140,8 @@ impl Desk {
     /// A key is pressed: a chat kept in normal mode as it asked something
     /// that's since gone to insert mode has its mode the window's again.
     pub(super) fn key_coming(&mut self) {
-        let insert = |desk: &Self| {
-            let terminal = desk.focused_terminal()?;
-            Some(desk.pane(terminal)?.mode == Mode::Insert)
-        };
-        if self.held_normal == self.shown.map(|shown| shown.pane) && insert(self) == Some(true) {
+        let insert = self.focused_terminal_mode() == Some(Mode::Insert);
+        if self.held_normal == self.shown.map(|shown| shown.pane) && insert {
             self.held_normal = None;
         }
     }
@@ -271,7 +268,9 @@ impl Desk {
         }
         let terminal =
             (self.workspaces.find_pane(pane)).and_then(|(_, _, found)| found.content.terminal());
-        if let Some(found) = terminal.and_then(|terminal| self.panes.get_mut(&terminal)) {
+        if let Some(chat) = terminal.and_then(|terminal| self.chats.get_mut(&terminal)) {
+            chat.leave();
+        } else if let Some(found) = terminal.and_then(|terminal| self.panes.get_mut(&terminal)) {
             found.leave();
         }
     }
@@ -294,18 +293,25 @@ impl Desk {
         } else {
             self.editor_to_mode(pane, insert);
         }
-        let Some(found) = (content.terminal()).and_then(|terminal| self.panes.get_mut(&terminal))
-        else {
+        let Some(terminal) = content.terminal() else {
             return;
         };
-        found.arrived();
-        if insert && found.asking() {
-            found.enter_normal_mode();
-            self.held_normal = Some(pane);
-        } else if insert {
-            found.enter_insert_mode();
-        } else {
-            found.enter_normal_mode();
+        if let Some(chat) = self.chats.get_mut(&terminal) {
+            chat.arrived();
+            if insert && chat.asking() {
+                chat.enter_normal_mode();
+                self.held_normal = Some(pane);
+            } else if insert {
+                chat.enter_insert_mode();
+            } else {
+                chat.enter_normal_mode();
+            }
+        } else if let Some(found) = self.panes.get_mut(&terminal) {
+            if insert {
+                found.enter_insert_mode();
+            } else {
+                found.enter_normal_mode();
+            }
         }
     }
 

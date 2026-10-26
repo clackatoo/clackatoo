@@ -35,7 +35,8 @@ pub(crate) struct PaneMouse {
     /// The cell's column, from 0 at the left; off the view to either side
     /// while dragging.
     pub(crate) col: i64,
-    /// Where it is from the pane's top left, in pixels, as a chat needs.
+    /// Where it is from the pane's top left, in pixels, as a chat's pane
+    /// needs.
     pub(crate) pixel: [f32; 2],
     /// 1 for a click, 2 for a double click and 3 for a triple.
     pub(crate) clicks: u8,
@@ -84,23 +85,6 @@ impl Pane {
 
     /// Handles a mouse event. Returns whether the pane must be redrawn.
     pub(crate) fn mouse(&mut self, event: &PaneMouse) -> bool {
-        if let Some(chat) = &mut self.chat {
-            match event.action {
-                MouseAction::Press(MouseButton::Left) => {
-                    chat.press(event.pixel, event.clicks, event.modifiers.shift);
-                    // The mouse selects in its own way: visual mode's
-                    // selection goes.
-                    if matches!(self.mode, Mode::Visual(_)) {
-                        self.mode = Mode::Normal;
-                    }
-                }
-                MouseAction::Motion(Some(MouseButton::Left)) => chat.drag(event.pixel),
-                MouseAction::Motion(None) => return chat.hover(event.pixel),
-                MouseAction::Release(_) => chat.release(),
-                _ => return false,
-            }
-            return true;
-        }
         let relit = self.hover(Some((event.line, event.col, event.modifiers)));
         if event.action == MouseAction::Press(MouseButton::Left)
             && self.link_opens(event.modifiers)
@@ -141,14 +125,6 @@ impl Pane {
         let modes = screen.state.modes;
         if let Some(bytes) = mouse::encode(&report, modes.mouse_tracking, modes.mouse_encoding) {
             self.send_input(bytes);
-        }
-    }
-
-    /// The window lost the focus during a drag in the pane: a chat ends
-    /// it, as if let go.
-    pub(crate) fn drag_lost(&mut self) {
-        if let Some(chat) = &mut self.chat {
-            chat.drag_lost();
         }
     }
 

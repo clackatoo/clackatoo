@@ -186,7 +186,7 @@ impl Desk {
             return false;
         };
         let normal = (self.panes.get(&terminal)).is_some_and(|shown| {
-            shown.mode == Mode::Normal && !shown.is_chat() && !shown.prompting() && !shown.pending()
+            shown.mode == Mode::Normal && !shown.prompting() && !shown.pending()
         });
         if !normal || press.modifiers.ctrl || press.modifiers.alt {
             return false;

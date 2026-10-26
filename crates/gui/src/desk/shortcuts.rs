@@ -25,8 +25,8 @@ impl Desk {
             crate::shortcuts::bindings::paste(&mut context, "Paste into query");
             return context;
         }
-        let pane = self.focused_terminal().and_then(|id| self.pane(id));
-        if let Some(context) = pane.and_then(crate::pane::Pane::exclusive_shortcuts) {
+        let chat = self.focused_chat();
+        if let Some(context) = chat.and_then(crate::chat::ChatPane::exclusive_shortcuts) {
             return context;
         }
         if !self.keymap.waiting().is_empty() {
@@ -50,7 +50,9 @@ impl Desk {
             review.shortcut_context()
         } else if let Some(browser) = self.focused_browser() {
             browser.shortcut_context()
-        } else if let Some(pane) = pane {
+        } else if let Some(chat) = chat {
+            chat.shortcut_context()
+        } else if let Some(pane) = self.focused_terminal().and_then(|id| self.pane(id)) {
             pane.shortcut_context()
         } else {
             Context::new("Window", &[])

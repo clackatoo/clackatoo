@@ -608,11 +608,8 @@ impl Window {
             }
         }
         for pane in &panes {
-            if let Some(chat) = (pane.content.terminal())
-                .and_then(|terminal| desk.pane(terminal))
-                .and_then(crate::pane::Pane::chat_text)
-            {
-                text.push_str(&chat);
+            if let Some(chat) = (pane.content.terminal()).and_then(|terminal| desk.chat(terminal)) {
+                text.push_str(&chat.view().shown_text());
                 text.push('\n');
             }
         }

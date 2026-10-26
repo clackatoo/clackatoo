@@ -193,14 +193,7 @@ impl Desk {
         let Some(shown) = self.shown else { return };
         let chat =
             (self.workspaces.find_pane(shown.pane)).and_then(|(_, _, pane)| match pane.content {
-                Content::Terminal(terminal)
-                    if self
-                        .panes
-                        .get(&terminal)
-                        .is_some_and(crate::pane::Pane::is_chat) =>
-                {
-                    Some(terminal)
-                }
+                Content::Terminal(terminal) if self.chats.contains_key(&terminal) => Some(terminal),
                 Content::Browser(chat) => Some(chat),
                 _ => None,
             });

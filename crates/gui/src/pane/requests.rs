@@ -1,6 +1,6 @@
-//! What a pane showing a terminal's view says to the daemon: messages
-//! waiting to be sent, the requests not answered yet, and whether the last
-//! update drawn has been acknowledged.
+//! What a pane showing a terminal's view, its screen or its chat, says to
+//! the daemon: messages waiting to be sent, the requests not answered yet,
+//! and whether the last update drawn has been acknowledged.
 //!
 //! Answers come in the order requests were sent, so each pending request
 //! is noted, as `P`, in that order, for its answer to be taken by.
@@ -60,6 +60,12 @@ impl<P> Requests<P> {
         self.pending.pop_front()
     }
 
+    /// How many requests wait for their answers.
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> usize {
+        self.pending.len()
+    }
+
     /// Notes a view update applied, to acknowledge once it's drawn.
     pub(crate) fn changed(&mut self) {
         self.unacknowledged = true;
@@ -79,5 +85,17 @@ impl<P> Requests<P> {
         self.outbox.clear();
         self.pending.clear();
         self.unacknowledged = false;
+    }
+
+    /// The same messages and requests, each request waiting noted as
+    /// `other` now: as a terminal's pane, its view come, turns out to
+    /// show a chat, which takes them over.
+    pub(crate) fn handed_over<Q>(self, other: impl FnMut(P) -> Q) -> Requests<Q> {
+        Requests {
+            terminal: self.terminal,
+            outbox: self.outbox,
+            pending: self.pending.into_iter().map(other).collect(),
+            unacknowledged: self.unacknowledged,
+        }
     }
 }

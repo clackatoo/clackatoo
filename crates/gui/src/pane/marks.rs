@@ -288,7 +288,7 @@ mod tests {
     fn prompts_in_history_are_marked_as_it_comes() {
         let terminal = terminal(20, 3, &(ran("false", "1\r\n2\r\n3\r\n", 1) + PROMPT));
         let mut pane = pane(&terminal);
-        assert!(pane.wheel(4, ([0, 0], [0.0, 0.0]), Modifiers::default()));
+        assert!(pane.wheel(4, [0, 0], Modifiers::default()));
         serve(&mut pane, &terminal);
         assert_eq!(marked(&pane, 3), [(0, "$ false  ✗ 1".to_owned())]);
     }

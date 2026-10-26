@@ -276,7 +276,7 @@ impl Desk {
         let chat_of = |pane: PaneId| -> Option<TerminalId> {
             let (_, _, found) = self.workspaces.find_pane(pane)?;
             let terminal = found.content.terminal()?;
-            self.panes.get(&terminal)?.is_chat().then_some(terminal)
+            self.chats.contains_key(&terminal).then_some(terminal)
         };
         if let Some(chat) = chat_of(shown.pane) {
             return Some(chat);

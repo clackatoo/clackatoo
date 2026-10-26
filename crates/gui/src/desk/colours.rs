@@ -36,10 +36,8 @@ impl Desk {
                 finder.colours_asked(None, ask, now);
             }
         }
-        for (&terminal, pane) in &mut self.panes {
-            let Some(chat) = pane.chat_mut() else {
-                continue;
-            };
+        for (&terminal, chat) in &mut self.chats {
+            let chat = chat.view_mut();
             for code in chat.take_colour_asks() {
                 if !colours {
                     chat.colours_asked(None, code);
@@ -75,9 +73,7 @@ impl Desk {
         let Some(terminal) = self.colour_asks.remove(&id) else {
             return false;
         };
-        (self.panes.get_mut(&terminal))
-            .and_then(|pane| pane.chat_mut())
-            .is_some_and(|chat| chat.coloured(id, spans))
+        (self.chats.get_mut(&terminal)).is_some_and(|chat| chat.view_mut().coloured(id, spans))
     }
 
     /// Forgets the asks for colours not yet answered, as the connection's

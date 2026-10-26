@@ -106,12 +106,16 @@ impl Desk {
         if self.script.lua.is_none() {
             return;
         }
-        let panes = (self.panes.iter())
-            .filter_map(|(&terminal, pane)| {
+        let terminals =
+            (self.panes.iter()).map(|(&terminal, pane)| (terminal, false, pane.title()));
+        let chats =
+            (self.chats.iter()).map(|(&terminal, chat)| (terminal, true, Some(chat.title())));
+        let panes = (terminals.chain(chats))
+            .filter_map(|(terminal, chat, title)| {
                 let id = self.workspaces.pane_showing(terminal)?;
                 let info = PaneInfo {
-                    chat: pane.is_chat(),
-                    title: pane.title().map(str::to_owned),
+                    chat,
+                    title: title.map(str::to_owned),
                 };
                 Some((id, info))
             })
@@ -245,6 +249,8 @@ impl Desk {
             let press = press.press();
             if self.focused_editor().is_some() {
                 self.editor_key(&press);
+            } else if let Some(chat) = self.focused_chat_mut() {
+                chat.key(&press);
             } else if let Some(pane) = self.focused_pane() {
                 pane.key(&press);
             }

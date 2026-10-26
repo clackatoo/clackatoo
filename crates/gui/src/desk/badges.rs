@@ -27,8 +27,8 @@ use std::collections::{HashMap, HashSet};
 use clackatoo_protocol::{ChatState, ChatSummary, Request, Response, Tab, TerminalId, WorkspaceId};
 
 use super::{Asked, Desk};
+use crate::chat::ChatPane;
 use crate::chrome::Mark;
-use crate::pane::Pane;
 
 /// The chats as the window watches them.
 #[derive(Debug, Default)]
@@ -154,10 +154,10 @@ impl Desk {
         (tab.layout.panes().iter())
             .filter_map(|pane| pane.content.terminal())
             .filter_map(|terminal| {
-                let pane = self.panes.get(&terminal);
-                if self.connected && pane.is_some_and(Pane::asking) {
+                let chat = self.chats.get(&terminal);
+                if self.connected && chat.is_some_and(ChatPane::asking) {
                     Some(Mark::Asking)
-                } else if pane.is_some_and(Pane::chat_working) {
+                } else if chat.is_some_and(ChatPane::working) {
                     Some(Mark::Working)
                 } else {
                     self.watched

@@ -584,8 +584,8 @@ fn leaving_a_chat_ends_its_selection_and_arrives_at_its_box_in_insert_mode() {
     );
     let mut fonts = crate::chat::fixtures::fonts();
     let paint = |desk: &mut Desk, fonts: &mut crate::fonts::Fonts| {
-        let pane = desk.pane_mut(TerminalId(1)).expect("the chat's pane");
-        pane.paint_chat(fonts, [0.0; 2], [900.0, 1000.0], true);
+        let pane = desk.chat_mut(TerminalId(1)).expect("the chat's pane");
+        pane.paint(fonts, [0.0; 2], [900.0, 1000.0], true);
     };
     paint(&mut desk, &mut fonts);
     normal_mode(&mut desk);
@@ -1257,8 +1257,8 @@ fn a_chat_asking_something_is_answered_from_normal_mode_once_its_arrived() {
             .count()
     };
     let set_clock = |desk: &mut Desk, now| {
-        let pane = desk.pane_mut(TerminalId(1)).unwrap();
-        pane.chat_mut().unwrap().set_clock(now);
+        let chat = desk.chat_mut(TerminalId(1)).unwrap();
+        chat.view_mut().set_clock(now);
     };
     // Asked long since, but only now arrived at.
     let later = u64::MAX / 2;
@@ -1356,8 +1356,8 @@ fn an_answer_armed_is_dropped_when_the_command_line_or_a_binding_has_the_next_ke
             .count()
     };
     let set_clock = |desk: &mut Desk, now| {
-        let pane = desk.pane_mut(TerminalId(1)).unwrap();
-        pane.chat_mut().unwrap().set_clock(now);
+        let chat = desk.chat_mut(TerminalId(1)).unwrap();
+        chat.view_mut().set_clock(now);
     };
     let later = u64::MAX / 2;
     set_clock(&mut desk, later);
@@ -1419,7 +1419,7 @@ fn a_count_typed_in_a_chat_is_the_windows_with_a_binding_and_shows_in_the_bar() 
     );
     desk.show_pane(PaneId(1));
     normal_mode(&mut desk);
-    assert!(desk.focused_pane().is_some_and(|pane| pane.is_chat()));
+    assert!(desk.focused_chat().is_some());
     let key = |desk: &mut Desk, text: &str| {
         for ch in text.chars() {
             press(
@@ -1461,7 +1461,7 @@ fn a_count_typed_in_a_chat_reaches_a_lua_binding() {
     answer_all(&mut desk);
     desk.show_pane(PaneId(1));
     normal_mode(&mut desk);
-    assert!(desk.focused_pane().is_some_and(|pane| pane.is_chat()));
+    assert!(desk.focused_chat().is_some());
     let shifted = Modifiers {
         shift: true,
         ..Modifiers::default()

@@ -2406,30 +2406,28 @@ impl App {
         let prompting =
             self.desk.prompt_has_keys() || self.picker.is_some() || self.shortcut_help.is_some();
         for (terminal, tile, focused) in tiles {
-            let Some(pane) = self.desk.pane_mut(terminal).filter(|pane| pane.is_chat()) else {
+            let Some(chat) = self.desk.chat_mut(terminal) else {
                 continue;
             };
-            if let Some(chat) = pane.chat_mut() {
-                chat.set_quoted(quoted);
-                chat.handoff_supported = handoff;
-                chat.queue_supported = queue;
-                chat.usage_supported = usage;
-            }
+            let view = chat.view_mut();
+            view.set_quoted(quoted);
+            view.handoff_supported = handoff;
+            view.queue_supported = queue;
+            view.usage_supported = usage;
             // In insert mode, the cursor is in the box; in normal mode, in
             // the conversation; and while a prompt has the keys, nowhere.
             let caret = focused && self.focused && !prompting;
             let size = tile.cells_size(cell);
-            if let Some(paint) = pane.paint_chat(&mut frame.fonts, tile.origin, size, caret) {
-                all.images.extend(paint.images);
-                all.fills.extend(paint.fills);
-                all.glyphs.extend(paint.glyphs);
-                all.over.extend(paint.over);
-                all.over_glyphs.extend(paint.over_glyphs);
-                if focused {
-                    all.ime = paint.ime;
-                }
-                chats.push(terminal);
+            let paint = chat.paint(&mut frame.fonts, tile.origin, size, caret);
+            all.images.extend(paint.images);
+            all.fills.extend(paint.fills);
+            all.glyphs.extend(paint.glyphs);
+            all.over.extend(paint.over);
+            all.over_glyphs.extend(paint.over_glyphs);
+            if focused {
+                all.ime = paint.ime;
             }
+            chats.push(terminal);
         }
         // Editors showing their Markdown rendered, which is laid out as a
         // chat's words are.

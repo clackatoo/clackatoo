@@ -36,7 +36,7 @@ impl Desk {
         let (kind, room, unit) = self.scroll_target(pane, lines > 0.0, modifiers)?;
         let mut disarmed = false;
         if let Kind::Chat(terminal) = kind
-            && let Some(chat) = self.panes.get_mut(&terminal).and_then(|p| p.chat_mut())
+            && let Some(chat) = self.chats.get_mut(&terminal)
         {
             disarmed = chat.disarm();
         }
@@ -102,12 +102,11 @@ impl Desk {
         }
         let (_, _, layout) = self.workspaces.find_pane(pane)?;
         let terminal = layout.content.terminal()?;
-        let state = self.panes.get(&terminal)?;
-        if state.is_chat() {
+        if let Some(chat) = self.chats.get(&terminal) {
             if modifiers.shift {
                 return None;
             }
-            let (at, end, line) = state.chat_wheel_metrics()?;
+            let (at, end, line) = chat.view().wheel_metrics()?;
             return Some((
                 Kind::Chat(terminal),
                 if up { at > 0.0 } else { at < end },
@@ -116,7 +115,9 @@ impl Desk {
         }
         Some((
             Kind::Rows,
-            state.native_scroll_room(up, modifiers.shift)?,
+            self.panes
+                .get(&terminal)?
+                .native_scroll_room(up, modifiers.shift)?,
             1.0,
         ))
     }
@@ -187,9 +188,9 @@ impl Desk {
                 }
                 Kind::Chat(terminal) => {
                     let moved = self
-                        .panes
+                        .chats
                         .get_mut(&terminal)
-                        .and_then(|p| p.chat_mut())
+                        .map(crate::chat::ChatPane::view_mut)
                         .map_or(0.0, |chat| {
                             let Some((before, _, _)) = chat.wheel_metrics() else {
                                 return 0.0;
