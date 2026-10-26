@@ -11,9 +11,7 @@ use clackatoo_protocol::{
     OpenFile, OpenFiles, PROTOCOL_VERSION, PaneId, Response, Resume, ServerMessage, frame, wire,
 };
 use clackatoo_syntax::{Found, Highlighted, Syntax, pack};
-use clackatoo_text::{
-    AgentHunks, EditError, Highlights, HistoryError, Hunks, MOST_PIECES, Maker, Rope, Span,
-};
+use clackatoo_text::{AgentHunks, Highlights, HistoryError, Hunks, Maker, Rope, Span};
 use mio::Token;
 
 use super::language::Opened;
@@ -71,11 +69,6 @@ pub(super) struct BufferSlot {
 /// Makes `change`, which a window sent buffer `buffer`, as the user's.
 fn serve_change(buffer: &mut Buffer, change: Change) -> Result<Served, HistoryError> {
     match change {
-        // More than the daemon brings up to date or keeps: a window
-        // coarsens one first, so it's from one older than that.
-        Change::Edit { edit, .. } | Change::Step { edit, .. } if edit.ops().len() > MOST_PIECES => {
-            Err(HistoryError::Edit(EditError::TooLong))
-        }
         Change::Edit { edit, base, step } => buffer
             .edit(edit, base, step, Author::User)
             .map(|made| Served::Made(made, Answered::Acked)),
@@ -634,14 +627,19 @@ impl Daemon {
 
     /// Whether the client at `token` attaches to a buffer again when told
     /// to ([`BufferUpdate::Reattach`]), bringing what it has waiting up to
-    /// date itself: a window of protocol 92 or later. A daemon relaying
-    /// for its own clients is told its change failed instead, as one
-    /// waits for an answer to it before sending more.
+    /// date itself: a window of protocol 92 or later, or a daemon relaying
+    /// for its own clients of 106 or later, which has the window whose
+    /// change it was attach again. An older relaying daemon is told its
+    /// change failed instead, as it waits for an answer to it before
+    /// sending more.
     fn reattaches(&self, token: Token) -> bool {
-        !self.relays(token)
-            && self
-                .client_wire(token)
-                .is_some_and(|wire| wire >= wire::RELAY)
+        let wire = self.client_wire(token).unwrap_or(0);
+        let least = if self.relays(token) {
+            wire::UNDO_STATE
+        } else {
+            wire::RELAY
+        };
+        wire >= least
     }
 
     /// Answers [`Request::Save`](clackatoo_protocol::Request::Save).

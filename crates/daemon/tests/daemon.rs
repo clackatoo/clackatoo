@@ -19626,7 +19626,7 @@ fn an_edit_too_far_back_to_bring_up_to_date_has_its_window_attach_again() {
 }
 
 #[test]
-fn an_edit_of_too_many_pieces_is_refused_as_one_that_cant_be_made() {
+fn an_edit_of_too_many_pieces_from_a_window_that_sends_them_whole_is_made() {
     let daemon = TestDaemon::start();
     let dir = daemon.dir.path();
     let len = 300_000;
@@ -19640,24 +19640,30 @@ fn an_edit_of_too_many_pieces_is_refused_as_one_that_cant_be_made() {
             break snapshot;
         }
     };
-    // Sent again as it is, it would be refused again: so it's not to be
-    // attached again for, but failed, and the window starts again.
+    // As a window from before windows coarsened sends `:%s` over a big
+    // file: made, and kept coarsened, rather than refused, which would
+    // have the window send it again and again.
     let pieces = clackatoo_text::MOST_PIECES / 2 + 1;
-    send_change(
-        &mut client,
-        buffer,
-        3,
-        spread(pieces, len, snapshot.version),
-    );
-    let failed = loop {
+    let change = spread(pieces, len, snapshot.version);
+    let Change::Edit { edit, .. } = &change else {
+        unreachable!("an edit");
+    };
+    let made = edit.apply_to(&"a".repeat(len)).unwrap();
+    send_change(&mut client, buffer, 3, change);
+    let mut other = daemon.client();
+    loop {
         match next_buffer_update(&mut client) {
-            BufferUpdate::Snapshot(failed) => break failed,
-            BufferUpdate::Reattach => panic!("told to attach again"),
+            BufferUpdate::Acked { seq: 3, version } => {
+                assert_eq!(version, snapshot.version + 1);
+                break;
+            }
+            update @ (BufferUpdate::Snapshot(_) | BufferUpdate::Reattach) => {
+                panic!("refused: {update:?}")
+            }
             _ => {}
         }
-    };
-    assert_eq!((failed.applied, failed.landed), (Some(3), None));
-    assert_eq!(failed.version, snapshot.version);
+    }
+    assert_eq!(attach_buffer(&mut other, buffer).text, made);
 }
 
 #[test]
@@ -19850,4 +19856,43 @@ fn a_step_that_changes_nothing_is_undone_alone_and_older_windows_pass_it_over() 
         panic!("the x not undone");
     };
     assert_eq!(attach_buffer(&mut daemon.client(), buffer).text, "abc\n");
+}
+
+#[test]
+fn a_relaying_daemon_is_told_to_have_its_window_attach_again_for_an_edit_too_far_back() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let len = 200_000;
+    std::fs::write(dir.join("big.txt"), "a".repeat(len)).unwrap();
+    let mut other = daemon.client();
+    let buffer = open_attached(&mut other, dir, "big.txt");
+    // A daemon relaying for windows of its own, as on another machine.
+    let mut relay = daemon.client();
+    assert_eq!(relay.request(&Request::Relay).unwrap(), Response::Done);
+    let snapshot = attach_buffer(&mut relay, buffer);
+    let pieces = (clackatoo_text::MOST_PIECES - 1) / 2;
+    let mut version = snapshot.version;
+    for seq in 0..5 {
+        let len = len + pieces * usize::try_from(seq).unwrap();
+        send_change(&mut other, buffer, seq, spread(pieces, len, version));
+        version = acked(&mut other, seq);
+    }
+    send_change(
+        &mut relay,
+        buffer,
+        7,
+        insert(len, 0, "late ", snapshot.version),
+    );
+    loop {
+        match next_buffer_update(&mut relay) {
+            BufferUpdate::Reattach => break,
+            update @ (BufferUpdate::Snapshot(_)
+            | BufferUpdate::Edited {
+                answers: Some(_), ..
+            }) => {
+                panic!("expected to attach again, got {update:?}")
+            }
+            _ => {}
+        }
+    }
 }

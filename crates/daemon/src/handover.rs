@@ -248,14 +248,16 @@ pub(crate) struct BufferUndo {
     pub(crate) authors: Vec<AuthorUndo>,
 }
 
-/// What an author's undo and redo steps keep, as many of each as
-/// [`AuthorSteps`] has, and whether older steps were let go. A step whose
-/// edit keeps its text changes nothing. Since version 34.
-#[derive(Debug, Serialize, Deserialize)]
+/// What an author's undo and redo steps keep, and which change nothing,
+/// as many of each as [`AuthorSteps`] has, and whether older steps were
+/// let go. Since version 34.
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct AuthorUndo {
     pub(crate) undo: Vec<Option<UndoState>>,
     pub(crate) redo: Vec<Option<UndoState>>,
     pub(crate) forgot: bool,
+    pub(crate) undo_empty: Vec<bool>,
+    pub(crate) redo_empty: Vec<bool>,
 }
 
 /// What one undo step keeps. Since version 34.
@@ -3784,6 +3786,8 @@ mod tests {
                     ],
                     redo: Vec::new(),
                     forgot: true,
+                    undo_empty: vec![false, true],
+                    redo_empty: Vec::new(),
                 }],
             }],
             chat_continuations: vec![ChatContinuation {
@@ -4063,6 +4067,7 @@ mod tests {
         let visual = state.visual.unwrap();
         assert_eq!((visual.start, visual.end, visual.kind), ((4, 0), (9, 3), 1));
         assert!(author.undo[1].is_none());
+        assert_eq!(author.undo_empty, [false, true]);
         assert!(author.redo.is_empty());
     }
 

@@ -137,6 +137,11 @@ pub(crate) enum Refused {
     Failed(Error),
 }
 
+/// The most undo steps an agent keeps in a buffer, and the most bytes they
+/// may take up (see [`Buffer::edit_keeping`]).
+const AGENT_STEPS: usize = 16;
+const AGENT_STEP_BYTES: usize = 1 << 20;
+
 /// An edit made to a buffer.
 #[derive(Debug)]
 pub(crate) struct Made {
@@ -289,14 +294,22 @@ impl Buffer {
         author: Author,
     ) -> Result<Made, HistoryError> {
         let mut edit = self.history.rebase(edit, base)?;
+        // Before it's coarsened, which reads the text it takes away: a
+        // window's may not fit.
+        edit.check(&self.text)?;
         let state = state.and_then(|state| self.brought_up(state, base));
         if edit.ops().len() > MOST_PIECES {
             edit = edit.coarsened(&self.text, MOST_PIECES);
         }
         edit.apply(&mut self.text)?;
-        let version = self
-            .history
-            .record_with(edit.clone(), author, step, state)?;
+        let version = (self.history).record_with(edit.clone(), author, step, state)?;
+        // An agent's own edits are undone by turn, from the edit log, not
+        // step by step: it keeps only its last few, as each chat's agent is
+        // an author of its own, and there may be many.
+        if matches!(author, Author::Agent(_)) {
+            self.history
+                .keep_last(&author, AGENT_STEPS, AGENT_STEP_BYTES);
+        }
         Ok(Made { version, edit })
     }
 
@@ -376,6 +389,11 @@ impl Buffer {
             version: self.history.version(),
             edit,
         }))
+    }
+
+    /// The edit that made `version`, if the history still has it.
+    pub(crate) fn edit_made(&self, version: u64) -> Option<Edit> {
+        self.history.edit(version).map(|(edit, _)| edit.clone())
     }
 
     /// Whether `author` has had undo steps let go, the oldest first (see
@@ -711,6 +729,7 @@ impl Buffer {
         let kept = (snapshot.steps.iter()).any(|steps| {
             steps.forgot
                 || (steps.undo_states.iter().chain(&steps.redo_states)).any(Option::is_some)
+                || (steps.undo_empty.iter().chain(&steps.redo_empty)).any(|&empty| empty)
         });
         kept.then(|| handover::BufferUndo {
             buffer: id,
@@ -722,6 +741,8 @@ impl Buffer {
                     redo: (steps.redo_states.iter())
                         .map(|state| hand_over_state(state.as_ref()))
                         .collect(),
+                    undo_empty: steps.undo_empty,
+                    redo_empty: steps.redo_empty,
                     forgot: steps.forgot,
                 })
                 .collect(),
@@ -755,18 +776,16 @@ impl Buffer {
                             .chain(std::iter::repeat_with(|| None)),
                     )
                     .map(|(steps, kept)| {
-                        let (undo_states, redo_states, forgot) = kept.map_or_else(
-                            || (Vec::new(), Vec::new(), false),
-                            |kept| {
-                                let resume = |states: Vec<Option<handover::UndoState>>| {
-                                    states
-                                        .into_iter()
-                                        .map(|state| state.map(resume_state))
-                                        .collect()
-                                };
-                                (resume(kept.undo), resume(kept.redo), kept.forgot)
-                            },
-                        );
+                        let kept = kept.unwrap_or_default();
+                        let resume = |states: Vec<Option<handover::UndoState>>| {
+                            states
+                                .into_iter()
+                                .map(|state| state.map(resume_state))
+                                .collect()
+                        };
+                        let (undo_states, redo_states, forgot) =
+                            (resume(kept.undo), resume(kept.redo), kept.forgot);
+                        let (undo_empty, redo_empty) = (kept.undo_empty, kept.redo_empty);
                         Steps {
                             author: resume_author(steps.author),
                             version: steps.version,
@@ -774,6 +793,8 @@ impl Buffer {
                             redo: steps.redo.into_iter().map(resume_edit).collect(),
                             undo_states,
                             redo_states,
+                            undo_empty,
+                            redo_empty,
                             forgot,
                         }
                     })
@@ -1324,6 +1345,46 @@ mod tests {
         assert!(resumed.modified());
         resumed.reverse(Author::User, false).unwrap().unwrap();
         assert_eq!(resumed.snapshot().text, "");
+    }
+
+    #[test]
+    fn a_late_edit_that_doesnt_fit_once_brought_up_to_date_is_refused_not_coarsened() {
+        // Brought past an agent's edit, a window's edit of fewer pieces
+        // than the most has more, and takes away text that isn't there:
+        // coarsening it would read the text off a character's boundary.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a");
+        fs::write(&path, "é".repeat(24_000)).unwrap();
+        let mut buffer = Buffer::open(path, dir.path().to_owned()).unwrap();
+        let mut agents = Edit::new();
+        let mut late = Edit::new();
+        for _ in 0..6000 {
+            agents.retain(4).insert("y").retain(4);
+            late.retain(3).delete("abcd").retain(1);
+        }
+        let agent = Author::Agent(TerminalId(1));
+        buffer.edit(agents, 0, true, agent).unwrap();
+        let refused = buffer.edit(late, 0, true, Author::User);
+        assert!(refused.is_err(), "{refused:?}");
+        assert_eq!(buffer.version(), 1);
+    }
+
+    #[test]
+    fn an_agent_keeps_only_its_last_few_undo_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut buffer = Buffer::open(dir.path().join("a"), dir.path().to_owned()).unwrap();
+        let agent = Author::Agent(TerminalId(1));
+        for at in 0..AGENT_STEPS + 4 {
+            let edit = Edit::replace(at, at, "", "x");
+            let version = buffer.version();
+            buffer.edit(edit, version, true, agent).unwrap();
+        }
+        let mut undone = 0;
+        while buffer.reverse(agent, false).unwrap().is_some() {
+            undone += 1;
+        }
+        assert_eq!(undone, AGENT_STEPS);
+        assert!(buffer.forgot(agent));
     }
 
     #[test]
