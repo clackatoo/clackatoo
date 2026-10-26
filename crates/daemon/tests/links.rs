@@ -6046,6 +6046,20 @@ fn a_background_tab_another_machine_lends_is_kept_through_reconnecting_and_resta
     let background = background_named(&mut window, "sleep 600");
     assert!(!background.state.ended(), "{background:?}");
     assert_eq!(lent_by(&mut laptop.client()), lent);
+    // Still lent as a background tab: its new shell ending leaves it, as
+    // ended, rather than closing it.
+    let pane = background.tab.layout.panes()[0].id;
+    let terminal = background.tab.layout.panes()[0].content.terminal().unwrap();
+    attach_when_reached(&mut window, terminal);
+    window.send_input(terminal, b"exit 5\r").unwrap();
+    wait_for_workspaces(&mut window, |shown| {
+        background_of(shown, pane).is_some_and(|background| {
+            background.state
+                == clackatoo_protocol::BackgroundState::Ended(
+                    clackatoo_protocol::TerminalStatus::Exited(5),
+                )
+        })
+    });
 }
 
 /// A shell laptop lends desk as a background tab is dismissed here while
