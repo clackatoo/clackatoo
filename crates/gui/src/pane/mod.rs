@@ -1875,6 +1875,22 @@ mod tests {
     }
 
     #[test]
+    fn a_yank_into_the_black_hole_is_neither_lit_up_nor_said() {
+        let terminal = terminal("one two");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let copied = |pane: &Pane| {
+            (pane.highlights(5).iter()).any(|highlight| highlight.kind == HighlightKind::Copied)
+        };
+        keys(&mut pane, "\"_yy");
+        assert!(!copied(&pane));
+        serve(&mut pane, &terminal);
+        assert_eq!(pane.label(), None);
+        keys(&mut pane, "yy");
+        assert!(copied(&pane), "but a yank is");
+    }
+
+    #[test]
     fn counts_repeat_motions_and_go_to_lines() {
         let terminal = terminal(&numbered_lines("line "));
         let mut pane = pane(&terminal);

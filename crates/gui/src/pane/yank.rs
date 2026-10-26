@@ -36,6 +36,15 @@ pub(crate) enum CopyTo {
     Primary,
 }
 
+impl CopyTo {
+    /// Whether a copy here is lit up and said: not one for the primary
+    /// selection, which selecting with the mouse makes all the time, nor
+    /// one thrown away into `"_`.
+    fn shown(self) -> bool {
+        !matches!(self, Self::Primary | Self::Register(Some('_')))
+    }
+}
+
 /// Text a terminal copied, for the window to keep where it goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Yanked {
@@ -60,7 +69,7 @@ impl Pane {
     /// yanked is highlighted for a moment, to show what went. A block goes
     /// from its top left corner, `start`, to its bottom right, `end`.
     pub(super) fn copy(&mut self, start: Point, end: Point, kind: Selection, to: CopyTo) {
-        if to != CopyTo::Primary {
+        if to.shown() {
             self.flash = Some(super::Flash {
                 start,
                 end,
@@ -96,23 +105,12 @@ impl Pane {
     /// Takes in the text the daemon answered a copy with. What was asked
     /// for was cut short by the daemon if it was over [`MOST_LINES`] or
     /// [`MOST_TEXT`], as it cuts any copy, and that's said, wherever it
-    /// went.
+    /// went, but for `"_`. Nothing copied, as `yl` on an empty line copies,
+    /// keeps nothing, so it's neither lit up nor said; an empty line
+    /// copied whole is a line.
     pub(super) fn copied(&mut self, text: String, copying: Copying) {
         let lines = text.lines().count().max(1);
         let cut = copying.lines > MOST_LINES || text.len() + 4 > MOST_TEXT;
-        // Selecting with the mouse copies to the primary selection all the
-        // time, which isn't worth a message.
-        if cut {
-            self.status = Some(format!(
-                "copied {lines} lines, cut short: a copy stops at {MOST_LINES} lines or 4 MiB"
-            ));
-        } else if copying.to != CopyTo::Primary {
-            self.status = Some(if lines == 1 {
-                "copied".into()
-            } else {
-                format!("copied {lines} lines")
-            });
-        }
         let register = match (copying.to, copying.kind) {
             // The primary selection takes the text as it is, as other
             // terminals put it there.
@@ -133,6 +131,19 @@ impl Pane {
                 Register::block(&rows, width)
             }
         };
+        if register.text.is_empty() {
+            self.flash = None;
+        } else if cut && copying.to != CopyTo::Register(Some('_')) {
+            self.status = Some(format!(
+                "copied {lines} lines, cut short: a copy stops at {MOST_LINES} lines or 4 MiB"
+            ));
+        } else if !cut && copying.to.shown() {
+            self.status = Some(if lines == 1 {
+                "copied".into()
+            } else {
+                format!("copied {lines} lines")
+            });
+        }
         self.yanked = Some(Yanked {
             register,
             to: copying.to,
@@ -212,5 +223,21 @@ mod tests {
         let yank = copying(CopyTo::Register(None), Selection::Characters, None, 1);
         pane.copied("x".into(), yank);
         assert_eq!(pane.label().as_deref(), Some("copied"));
+    }
+
+    #[test]
+    fn nothing_copied_or_thrown_away_says_nothing_but_an_empty_line_is_a_line() {
+        let says = |text: &str, to, kind| {
+            let mut pane = Pane::new(TerminalId(1));
+            pane.copied(text.into(), copying(to, kind, None, 1));
+            pane.label()
+        };
+        let yank = CopyTo::Register(None);
+        assert_eq!(says("", yank, Selection::Characters), None);
+        assert_eq!(
+            says("x", CopyTo::Register(Some('_')), Selection::Lines),
+            None
+        );
+        assert_eq!(says("", yank, Selection::Lines).as_deref(), Some("copied"));
     }
 }
