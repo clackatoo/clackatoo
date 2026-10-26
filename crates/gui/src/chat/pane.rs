@@ -414,7 +414,8 @@ impl ChatPane {
             }
             _ => false,
         };
-        answer_key && self.asking()
+        // Typed into a search, a key is the search's.
+        answer_key && self.asking() && !self.prompting()
     }
 
     /// Pastes `text` into the message.
@@ -603,6 +604,39 @@ mod tests {
             cwd: None,
             root: Node::Chat(Box::new(node)),
         })
+    }
+
+    #[test]
+    fn keys_typed_into_a_search_never_answer_a_question() {
+        use clackatoo_protocol::{Choice, ChoiceKind, Question};
+        use winit::keyboard::{Key, KeyLocation};
+
+        let mut node = crate::chat::fixtures::talk(&[("hi", "hello")]);
+        node.question = Some(Question {
+            id: 1,
+            title: "run ls".into(),
+            choices: vec![Choice {
+                id: "yes".into(),
+                name: "yes".into(),
+                kind: ChoiceKind::AllowOnce,
+            }],
+            own: false,
+        });
+        let mut pane = ChatPane::of_snapshot(TerminalId(1), &snapshot(node));
+        pane.enter_normal_mode();
+        let (one, slash) = (Key::Character("1".into()), Key::Character("/".into()));
+        let press = |key| crate::input::KeyPress {
+            key,
+            text: None,
+            location: KeyLocation::Standard,
+            code: None,
+            modifiers: crate::input::Modifiers::default(),
+        };
+        assert!(pane.answers_question(&press(&one)));
+        pane.key(&press(&slash));
+        assert!(pane.prompting());
+        // Held down, a number repeats into the search.
+        assert!(!pane.answers_question(&press(&one)));
     }
 
     #[test]
