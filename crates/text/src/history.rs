@@ -8,7 +8,7 @@ use crate::edit::{Edit, EditError, compose, transform};
 /// How far a history reaches, and how much work it does at once.
 ///
 /// Work is counted in steps through edits' pieces (see [`Edit::weight`]),
-/// each about 14 ns, so the defaults hold the daemon's loop for a few
+/// 15 to 60 ns each, so the defaults hold the daemon's loop for a few
 /// milliseconds at most.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
@@ -40,9 +40,9 @@ impl Default for Limits {
             kept_bytes: 32 << 20,
             undo_steps: 1000,
             undo_bytes: 64 << 20,
-            rebase_work: 1 << 18,
-            sync_work: 1 << 18,
-            lag_work: 1 << 16,
+            rebase_work: 1 << 16,
+            sync_work: 1 << 16,
+            lag_work: 1 << 14,
         }
     }
 }

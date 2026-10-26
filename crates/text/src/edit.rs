@@ -12,11 +12,11 @@ const PIECE_BYTES: usize = 64;
 
 /// The most pieces an edit sent to the daemon, or kept in a buffer's
 /// history, may have. Bringing an edit up to date costs as many steps as
-/// it and each edit it goes past have pieces, about 14 ns each, so an edit
+/// it and each edit it goes past have pieces, 15 to 60 ns each, so an edit
 /// this long goes past another in about a millisecond. A window sends an
 /// edit longer than this [`coarsened`](Edit::coarsened), as `:%s` over a
 /// big file could make one; the daemon refuses one that isn't.
-pub const MOST_PIECES: usize = 1 << 16;
+pub const MOST_PIECES: usize = 1 << 14;
 
 /// One piece of an [`Edit`], which goes through the text from its start.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1245,6 +1245,6 @@ mod tests {
         assert!(coarse.ops().len() <= 100, "{}", coarse.ops().len());
         assert_eq!(coarse.apply_to(&text).unwrap(), "aB".repeat(10_000));
         // Short enough already: as it is.
-        assert_eq!(many.coarsened(&Rope::from_str(&text), MOST_PIECES), many);
+        assert_eq!(many.coarsened(&Rope::from_str(&text), 30_000), many);
     }
 }
