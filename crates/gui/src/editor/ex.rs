@@ -197,8 +197,16 @@ impl Editor {
         self.status = None;
         self.replaying = replaying;
         self.new_step = true;
+        // What the undo step it starts keeps, as for a key's command.
+        self.step_cursor = None;
+        self.step_visual = shared.marks.step_visual(copy.file(), copy.text());
+        self.saved = None;
+        self.edits_before = copy.edits_counted();
         let from = self.cursor.at;
         let done = self.run(line, copy, shared);
+        if self.mode != Mode::Insert {
+            self.end_saved(copy);
+        }
         self.replaying = false;
         if self.mode != Mode::Insert {
             self.normal_cursor(copy);
@@ -273,6 +281,13 @@ impl Editor {
             Name::Delete | Name::Yank => {
                 let (register, lines) = self.register_and_count(after, lines, copy)?;
                 if name == Name::Delete {
+                    // As Vim's `ex_operators()` puts the cursor before it
+                    // changes anything, for the undo step to keep.
+                    let text = self.text(copy);
+                    let mut cursor = self.cursor;
+                    cursor.onto_line(lines.first, self.startofline, &text);
+                    drop(text);
+                    self.step_cursor = Some(cursor.at);
                     self.delete_lines(lines, register, copy, shared);
                 } else {
                     self.yank_lines(lines, register, copy, shared);
@@ -796,6 +811,13 @@ impl Editor {
         if replaced.count == 0 || compiled.gave_up() {
             return none(flags.quiet || self.in_global);
         }
+        // As Vim's `do_sub()` puts the cursor before its first change, for
+        // the undo step to keep: a step though it changes nothing.
+        if let Some((at, _, _)) = replaced.edit.changes().next() {
+            let line = self.text(copy).point_of(at).line;
+            self.step_cursor = Some(Point { line, col: 0 });
+        }
+        self.save_step(copy);
         self.make(replaced.edit, copy);
         if let Some(end) = replaced.last_end {
             self.cursor_to_line_of(end, copy);

@@ -314,6 +314,9 @@ impl Desk {
         let machines: Vec<_> = (shown.iter())
             .map(|&(pane, _)| self.pane_machine(pane))
             .collect();
+        // Undo steps that keep where the cursor was, and steps that change
+        // nothing, as Vim's do, need a daemon that keeps them.
+        let keeps = self.daemon_has(clackatoo_protocol::wire::UNDO_STATE);
         let (editors, options) = (&mut self.editors, &self.options);
         for (&(pane, buffer), machine) in shown.iter().zip(machines) {
             if let std::collections::hash_map::Entry::Vacant(entry) = editors.panes.entry(pane) {
@@ -331,6 +334,11 @@ impl Desk {
                 .entry(buffer)
                 .or_insert_with(|| BufferCopy::new(buffer))
                 .set_machine(machine);
+            if let Some(copy) = editors.buffers.get_mut(&buffer)
+                && !copy.is_scratch()
+            {
+                copy.set_keeps_steps(keeps);
+            }
         }
         let wanted: HashSet<BufferId> = editors.panes.values().map(Editor::buffer).collect();
         editors.buffers.retain(|buffer, _| wanted.contains(buffer));
@@ -739,14 +747,21 @@ impl Desk {
         };
         let marks = &mut editors.shared.marks;
         match &heard {
-            Heard::Edited(edit) | Heard::Reversed(edit) => {
-                let came = if matches!(heard, Heard::Reversed(_)) {
-                    Came::Undone
-                } else {
-                    Came::Elsewhere
+            Heard::Edited(edit) | Heard::Reversed { edit, .. } => {
+                let (came, state) = match &heard {
+                    Heard::Reversed { state, .. } => (Came::Undone, *state),
+                    _ => (Came::Elsewhere, None),
                 };
+                // What the step kept says what its undo puts back, not
+                // the window's last edit.
+                if state.is_some() {
+                    marks.forget_undoable(copy.file());
+                }
                 let made = std::slice::from_ref(edit);
                 follow_places(&mut self.jumps, marks, copy, made, came);
+                if let Some(visual) = state.and_then(|state| state.visual) {
+                    marks.put_back(copy.file(), copy.text(), visual);
+                }
                 // Moved too, while disconnected.
                 if copy.path() != was {
                     self.jumps.moved(copy.machine(), &was, copy.path());

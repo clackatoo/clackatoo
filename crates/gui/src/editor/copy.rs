@@ -28,7 +28,7 @@ use clackatoo_protocol::{
 };
 use clackatoo_text::{
     AgentHunk, AgentHunks, Bias, Diagnostic, Diagnostics, Highlights, Hunk, Hunks, MOST_PIECES,
-    Rope, Span, compose, line_start_through, transform,
+    Rope, Span, StepState, StepVisual, compose, line_start_through, transform,
 };
 
 use super::hints::Hints;
@@ -49,27 +49,26 @@ enum Waiting {
     Edit {
         edit: Rc<Edit>,
         step: bool,
+        /// What the undo step it starts keeps, its places in the text the
+        /// edit is made to, if it starts one and the daemon keeps them.
+        state: Option<StepState>,
     },
-    Undo,
-    Redo,
+    /// An undo step that changes nothing, keeping this, its places in the
+    /// copy's text as it was then.
+    Empty { state: StepState },
+    /// An undo, or a redo if `redo`, and the window's last selection then,
+    /// for the step to keep, its places in the copy's text then.
+    Reverse {
+        redo: bool,
+        visual: Option<StepVisual>,
+    },
     /// A question for the language server about byte `at`, sent once the
     /// changes before it have been made, so the daemon has the same text.
-    Query {
-        id: u64,
-        at: usize,
-        query: Query,
-    },
+    Query { id: u64, at: usize, query: Query },
     /// A rename of what's at byte `at` to `name`, sent as a query is.
-    Rename {
-        id: u64,
-        at: usize,
-        name: String,
-    },
+    Rename { id: u64, at: usize, name: String },
     /// A stage of the hunk at byte `at`, sent as a query is.
-    Stage {
-        id: u64,
-        at: usize,
-    },
+    Stage { id: u64, at: usize },
 }
 
 /// What an update from the daemon did to the copy, for the panes showing
@@ -82,10 +81,15 @@ pub(crate) enum Heard {
     Replaced,
     /// Someone else's edit was made to it.
     Edited(Edit),
-    /// An undo or a redo the window asked for was made: this edit. The
-    /// daemon keeps one undo history for a buffer's user, which every
-    /// window editing it shares.
-    Reversed(Edit),
+    /// An undo or a redo the window asked for was made: this edit, which
+    /// keeps the text for a step that changes nothing, and what the step
+    /// kept, its places in the copy's text, if it kept anything. The daemon
+    /// keeps one undo history for a buffer's user, which every window
+    /// editing it shares.
+    Reversed {
+        edit: Edit,
+        state: Option<StepState>,
+    },
     /// The window's undo or redo found nothing to do: an undo if `undo`.
     NothingToReverse { undo: bool },
     /// The language server answered the query numbered `id`.
@@ -202,6 +206,14 @@ pub(crate) struct BufferCopy {
     /// The edits of a batch being made, while one is, and how many changes
     /// were waiting when it began.
     batch: Option<(Vec<Edit>, usize)>,
+    /// What the undo step a batch being made starts keeps, as its first
+    /// edit said, in the text before it.
+    batch_state: Option<StepState>,
+    /// The daemon keeps what undo steps keep, and steps that change
+    /// nothing: protocol 106 or later.
+    keeps: bool,
+    /// How many edits have been made here, ever, batches as one.
+    edited: u64,
     /// The copy has gone astray from the daemon's text, as a batch whose
     /// edits couldn't be sent leaves it: a fresh snapshot is wanted.
     astray: bool,
@@ -248,6 +260,9 @@ impl BufferCopy {
             macro_edited: false,
             steps: 0,
             batch: None,
+            batch_state: None,
+            keeps: false,
+            edited: 0,
             astray: false,
             reattaching: false,
             missed: false,
@@ -276,6 +291,8 @@ impl BufferCopy {
         let mut copy = Self::new(id);
         copy.replace(scratch.snapshot());
         copy.scratch = Some(Box::new(scratch));
+        // It keeps what undo steps keep, as the daemon does.
+        copy.keeps = true;
         copy
     }
 
@@ -494,10 +511,37 @@ impl BufferCopy {
     /// `step`, or joins the last. Returns whether it could be made: an edit
     /// that doesn't fit the text is a mistake, and dropped.
     pub(crate) fn edit(&mut self, edit: Edit, step: bool) -> bool {
+        self.edit_keeping(edit, step, None)
+    }
+
+    /// Says whether the daemon keeps what undo steps keep: one of protocol
+    /// 106 or later does.
+    pub(crate) fn set_keeps_steps(&mut self, keeps: bool) {
+        self.keeps = keeps;
+    }
+
+    /// Makes `edit` as [`edit`](Self::edit) does, and if it starts an undo
+    /// step, has the step keep `state`, its places in the text before the
+    /// edit, if the daemon keeps them.
+    pub(crate) fn edit_keeping(
+        &mut self,
+        edit: Edit,
+        step: bool,
+        state: Option<StepState>,
+    ) -> bool {
         if edit.is_noop() {
             return true;
         }
+        let state = state.filter(|_| self.keeps);
         if self.batch.is_some() {
+            // The first edit's is the batch's, in the text before it.
+            if self
+                .batch
+                .as_ref()
+                .is_some_and(|(edits, _)| edits.is_empty())
+            {
+                self.batch_state = state;
+            }
             if let Err(err) = self.change(&edit) {
                 log::error!("buffer {}: an edit didn't fit: {err}", self.id);
                 return false;
@@ -526,8 +570,29 @@ impl BufferCopy {
         {
             *last = Rc::new(both);
         } else {
-            self.waiting.push_back(Waiting::Edit { edit, step });
+            let state = state.filter(|_| step);
+            self.waiting.push_back(Waiting::Edit { edit, step, state });
         }
+        self.edited += 1;
+        self.send_next();
+        true
+    }
+
+    /// How many edits have been made here, a batch's as one: one made
+    /// since a count was taken changes it.
+    pub(crate) fn edits_counted(&self) -> u64 {
+        self.edited
+    }
+
+    /// Starts an undo step that changes nothing, as Vim's `3J` on the last
+    /// line does, keeping `state`, its places in the copy's text, if the
+    /// daemon keeps such steps. Returns whether it does.
+    pub(crate) fn empty_step(&mut self, state: StepState) -> bool {
+        if !self.keeps || self.batch.is_some() {
+            return false;
+        }
+        self.steps += 1;
+        self.waiting.push_back(Waiting::Empty { state });
         self.send_next();
         true
     }
@@ -548,7 +613,7 @@ impl BufferCopy {
     /// been answered yet. Only the last: a macro waits for its own before
     /// its next key, and so asks for nothing after it meanwhile.
     pub(crate) fn reversing(&self) -> bool {
-        matches!(self.waiting.back(), Some(Waiting::Undo | Waiting::Redo))
+        matches!(self.waiting.back(), Some(Waiting::Reverse { .. }))
     }
 
     /// Starts a batch of edits, which [`edit`](Self::edit) makes to the
@@ -556,6 +621,7 @@ impl BufferCopy {
     pub(crate) fn begin_batch(&mut self) {
         if self.batch.is_none() {
             self.batch = Some((Vec::new(), self.waiting.len()));
+            self.batch_state = None;
         }
     }
 
@@ -571,6 +637,7 @@ impl BufferCopy {
         let Some((edits, at)) = self.batch.take() else {
             return;
         };
+        let state = self.batch_state.take().filter(|_| step);
         let Some(edit) = compose_all(edits) else {
             // The text has them, and the daemon won't: until a snapshot
             // comes, nothing more is sent, as it would be made to the
@@ -592,16 +659,22 @@ impl BufferCopy {
         self.steps += u64::from(step);
         let edit = Rc::new(edit);
         self.made.push(Rc::clone(&edit));
-        self.waiting.insert(at, Waiting::Edit { edit, step });
+        self.waiting.insert(at, Waiting::Edit { edit, step, state });
+        self.edited += 1;
         self.send_next();
     }
 
     /// Asks the daemon to undo the user's last step, or redo the last
-    /// undone.
-    pub(crate) fn reverse(&mut self, undo: bool) {
+    /// undone. `visual` is the window's last selection in the file, its
+    /// places in the copy's text, which the step keeps in place of its own
+    /// for the other way (see [`Change::Reverse`]).
+    pub(crate) fn reverse(&mut self, undo: bool, visual: Option<StepVisual>) {
         self.steps += 1;
-        self.waiting
-            .push_back(if undo { Waiting::Undo } else { Waiting::Redo });
+        let visual = visual.filter(|_| self.keeps);
+        self.waiting.push_back(Waiting::Reverse {
+            redo: !undo,
+            visual,
+        });
         self.send_next();
     }
 
@@ -661,7 +734,7 @@ impl BufferCopy {
         let changes = (self.waiting.iter()).any(|waiting| {
             matches!(
                 waiting,
-                Waiting::Edit { .. } | Waiting::Undo | Waiting::Redo
+                Waiting::Edit { .. } | Waiting::Empty { .. } | Waiting::Reverse { .. }
             )
         });
         // The edit on its way was dealt with, and made nothing: it couldn't
@@ -803,6 +876,7 @@ impl BufferCopy {
             self.waiting.push_back(Waiting::Edit {
                 edit: Rc::new(edit),
                 step: true,
+                state: None,
             });
         }
         self.send_next();
@@ -873,9 +947,13 @@ impl BufferCopy {
             self.version = version;
             theirs.push(edit);
         }
-        // Dealt with, and made nothing: an undo or redo with nothing to do.
+        // Dealt with, and made nothing: an undo or redo with nothing to do,
+        // or a step that changes nothing, or an undo or redo of one.
         if on_its_way == Some(None)
-            && matches!(self.waiting.front(), Some(Waiting::Undo | Waiting::Redo))
+            && matches!(
+                self.waiting.front(),
+                Some(Waiting::Reverse { .. } | Waiting::Empty { .. })
+            )
         {
             self.waiting.pop_front();
         }
@@ -1033,20 +1111,18 @@ impl BufferCopy {
                 self.version = version;
                 self.send_next();
                 if reversal {
-                    Heard::Reversed(edit)
+                    Heard::Reversed { edit, state: None }
                 } else {
                     Heard::Edited(edit)
                 }
             }
-            BufferUpdate::NoChange(seq) => {
-                if self.sent != Some(seq) {
-                    return Heard::Nothing;
-                }
-                let undo = matches!(self.waiting.pop_front(), Some(Waiting::Undo));
-                self.sent = None;
-                self.send_next();
-                Heard::NothingToReverse { undo }
-            }
+            BufferUpdate::Reversed {
+                version,
+                seq,
+                edit,
+                state,
+            } => self.reversed(version, seq, edit, state),
+            BufferUpdate::NoChange(seq) => self.no_change(seq),
             BufferUpdate::Modified(modified) => {
                 self.modified = modified;
                 Heard::Nothing
@@ -1337,6 +1413,50 @@ impl BufferCopy {
         Heard::Nothing
     }
 
+    /// Takes in that the window's change numbered `seq` made nothing: an
+    /// undo or redo with nothing to do, or a step that changes nothing.
+    fn no_change(&mut self, seq: u64) -> Heard {
+        if self.sent != Some(seq) {
+            return Heard::Nothing;
+        }
+        let first = self.waiting.pop_front();
+        self.sent = None;
+        self.send_next();
+        match first {
+            Some(Waiting::Reverse { redo, .. }) => Heard::NothingToReverse { undo: !redo },
+            _ => Heard::Nothing,
+        }
+    }
+
+    /// Takes in the daemon's answer to the window's undo or redo numbered
+    /// `seq`: `edit`, which made `version`, and what the step kept.
+    fn reversed(&mut self, version: u64, seq: u64, edit: Edit, state: Option<StepState>) -> Heard {
+        if self.sent != Some(seq) {
+            return Heard::Nothing;
+        }
+        self.waiting.pop_front();
+        self.sent = None;
+        let Some(edit) = self.bring_past_waiting(edit) else {
+            return Heard::Nothing;
+        };
+        if !edit.is_noop() && !self.apply(&edit, "the daemon's") {
+            return Heard::Nothing;
+        }
+        // Its places are in the daemon's text, under the changes still
+        // waiting.
+        let state = state.map(|mut state| {
+            for waiting in &self.waiting {
+                if let Waiting::Edit { edit, .. } = waiting {
+                    state.map(edit);
+                }
+            }
+            state.within(self.text.len_bytes())
+        });
+        self.version = version;
+        self.send_next();
+        Heard::Reversed { edit, state }
+    }
+
     /// Takes highlights for bytes `start` to `end` of the daemon's text at
     /// `version`, moving them past the window's edits waiting.
     fn recolour(&mut self, version: u64, start: usize, end: usize, spans: Vec<Span>) {
@@ -1348,8 +1468,8 @@ impl BufferCopy {
         }
         let waiting = (self.waiting.iter()).filter_map(|waiting| match waiting {
             Waiting::Edit { edit, .. } => Some(&**edit),
-            Waiting::Undo
-            | Waiting::Redo
+            Waiting::Empty { .. }
+            | Waiting::Reverse { .. }
             | Waiting::Query { .. }
             | Waiting::Rename { .. }
             | Waiting::Stage { .. } => None,
@@ -1409,8 +1529,9 @@ impl BufferCopy {
         if self.sent.is_some_and(|sent| snapshot.applied >= Some(sent)) {
             match self.waiting.front() {
                 // An undo or redo dealt with is in the snapshot, made or
-                // not, and nowhere else.
-                Some(Waiting::Undo | Waiting::Redo) => {
+                // not, and nowhere else; and so is a step that changes
+                // nothing.
+                Some(Waiting::Reverse { .. } | Waiting::Empty { .. }) => {
                     self.waiting.pop_front();
                 }
                 // An edit made is in the snapshot, as in the copy.
@@ -1452,7 +1573,26 @@ impl BufferCopy {
     fn bring_past_waiting(&mut self, mut edit: Edit) -> Option<Edit> {
         for waiting in &mut self.waiting {
             let mine = match waiting {
-                Waiting::Edit { edit: mine, .. } => mine,
+                Waiting::Edit {
+                    edit: mine, state, ..
+                } => {
+                    // Its places are in the text it's made to, as the
+                    // daemon's edit is.
+                    if let Some(state) = state {
+                        state.map(&edit);
+                    }
+                    mine
+                }
+                Waiting::Empty { state } => {
+                    state.map(&edit);
+                    continue;
+                }
+                Waiting::Reverse { visual, .. } => {
+                    if let Some(visual) = visual {
+                        visual.map(&edit);
+                    }
+                    continue;
+                }
                 // A place asked about moves with the text around it, as
                 // does the end of what's asked about from it.
                 Waiting::Query {
@@ -1487,7 +1627,6 @@ impl BufferCopy {
                     *at = edit.map(*at, Bias::Before);
                     continue;
                 }
-                Waiting::Undo | Waiting::Redo => continue,
             };
             match transform(mine, &edit) {
                 Ok((mine_after, edit_after)) => {
@@ -1565,14 +1704,28 @@ impl BufferCopy {
         let Some(first) = self.waiting.front() else {
             return;
         };
+        let base = self.version;
         let change = match first {
-            Waiting::Edit { edit, step } => Change::Edit {
+            Waiting::Edit {
+                edit,
+                step: true,
+                state: Some(state),
+            } if self.keeps => Change::Step {
                 edit: Edit::clone(edit),
-                base: self.version,
+                base,
+                state: *state,
+            },
+            Waiting::Edit { edit, step, .. } => Change::Edit {
+                edit: Edit::clone(edit),
+                base,
                 step: *step,
             },
-            Waiting::Undo => Change::Undo,
-            Waiting::Redo => Change::Redo,
+            &Waiting::Empty { state } => Change::Empty { base, state },
+            &Waiting::Reverse { redo, visual } if self.keeps => {
+                Change::Reverse { redo, base, visual }
+            }
+            Waiting::Reverse { redo: false, .. } => Change::Undo,
+            Waiting::Reverse { redo: true, .. } => Change::Redo,
             Waiting::Query { .. } | Waiting::Rename { .. } | Waiting::Stage { .. } => {
                 unreachable!("sent above")
             }
@@ -1717,8 +1870,32 @@ pub(super) mod tests {
                 // As the daemon starts the window's copy again.
                 return (self.snapshot(), None);
             }
+            let (change, state) = match change {
+                Change::Step { edit, base, state } => (
+                    Change::Edit {
+                        edit,
+                        base,
+                        step: true,
+                    },
+                    Some(state),
+                ),
+                Change::Empty { base, state } => {
+                    let state = self.brought_up(state, base);
+                    let len = self.text.len_bytes();
+                    (self.history.empty_step(&Author::User, len, state)).unwrap();
+                    return (BufferUpdate::NoChange(seq), None);
+                }
+                Change::Reverse { redo, base, visual } => {
+                    return self.reverse_keeping(seq, redo, base, visual);
+                }
+                change => (change, None),
+            };
             match change {
+                Change::Step { .. } | Change::Empty { .. } | Change::Reverse { .. } => {
+                    unreachable!("seen to above")
+                }
                 Change::Edit { edit, base, step } => {
+                    let state = state.and_then(|state| self.brought_up(state, base));
                     let edit = match self.history.rebase(edit, base) {
                         Ok(edit) => edit,
                         // Too far back: not dealt with, and the window is
@@ -1730,9 +1907,8 @@ pub(super) mod tests {
                         Err(err) => panic!("{err}"),
                     };
                     edit.apply(&mut self.text).unwrap();
-                    let version = self
-                        .history
-                        .record(edit.clone(), Author::User, step)
+                    let version = (self.history)
+                        .record_with(edit.clone(), Author::User, step, state)
                         .unwrap();
                     self.landed = Some(version);
                     let others = BufferUpdate::Edited {
@@ -1770,6 +1946,57 @@ pub(super) mod tests {
                     (answer, Some(others))
                 }
             }
+        }
+
+        /// Makes the window's undo, or redo if `redo`, numbered `seq`, as
+        /// the daemon does one that gives back what its step kept.
+        fn reverse_keeping(
+            &mut self,
+            seq: u64,
+            redo: bool,
+            base: u64,
+            visual: Option<StepVisual>,
+        ) -> (BufferUpdate, Option<BufferUpdate>) {
+            let visual = visual.and_then(|visual| {
+                let state = StepState {
+                    visual: Some(visual),
+                    ..StepState::default()
+                };
+                self.brought_up(state, base)?.visual
+            });
+            let reversal = (self.history)
+                .reverse(&Author::User, !redo, visual, false)
+                .unwrap();
+            let Some(reversal) = reversal else {
+                return (BufferUpdate::NoChange(seq), None);
+            };
+            reversal.edit.apply(&mut self.text).unwrap();
+            let version = self.history.version();
+            let others = (!reversal.empty).then(|| {
+                self.landed = Some(version);
+                BufferUpdate::Edited {
+                    version,
+                    edit: reversal.edit.clone(),
+                    author: Author::User,
+                    answers: None,
+                }
+            });
+            let answer = BufferUpdate::Reversed {
+                version,
+                seq,
+                edit: reversal.edit,
+                state: reversal.state,
+            };
+            (answer, others)
+        }
+
+        /// `state`, its places in the text at `base`, in the text now, as
+        /// the daemon brings them up to date.
+        fn brought_up(&self, mut state: StepState, base: u64) -> Option<StepState> {
+            for edit in self.history.since_within(base).ok()? {
+                state.map(edit);
+            }
+            Some(state.within(self.text.len_bytes()))
         }
 
         /// What a window attaching again, which knew `version`, is sent:
@@ -1927,6 +2154,109 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn what_a_waiting_step_keeps_moves_with_others_edits_before_it_goes() {
+        let mut daemon = Daemon::new("one\ntwo\n");
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        copy.set_keeps_steps(true);
+        let kept = |line| StepState {
+            cursor: clackatoo_text::StepPlace { line, col: 1 },
+            taken: false,
+            visual: None,
+        };
+        // One edit on its way, and a step on "two" waiting behind it.
+        assert!(copy.edit_keeping(Edit::replace(8, 0, "", ">"), true, Some(kept(0))));
+        assert!(copy.edit_keeping(Edit::replace(9, 8, "", "!"), true, Some(kept(5))));
+        let first = copy.take_outbox();
+        // An agent puts a line in above "two" meanwhile.
+        let agents = daemon.agent(4, "new\n");
+        for message in first {
+            let (answer, _) = daemon.take(message);
+            copy.update(agents.clone());
+            copy.update(answer);
+        }
+        let sent = copy.take_outbox();
+        let [
+            ClientMessage::Edit {
+                change: Change::Step { state, .. },
+                ..
+            },
+        ] = &sent[..]
+        else {
+            panic!("the step: {sent:?}");
+        };
+        // Its place, made in the text before the agent's line, is in the
+        // text the daemon brings the edit up from: still on "two".
+        let text = copy.text().to_string();
+        assert_eq!(text, ">one\nnew\ntwo!\n");
+        assert_eq!(state.cursor.line, 9);
+        // Without a daemon that keeps steps, none is sent.
+        copy.set_keeps_steps(false);
+        assert!(copy.edit_keeping(Edit::replace(14, 0, "", "x"), true, Some(kept(0))));
+        settle(&mut copy, &mut daemon);
+        assert!(!copy.empty_step(kept(0)));
+    }
+
+    #[test]
+    fn an_undo_that_keeps_its_step_gives_back_its_places_in_the_copys_text() {
+        let mut daemon = Daemon::new("one\ntwo\n");
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        copy.set_keeps_steps(true);
+        let kept = StepState {
+            cursor: clackatoo_text::StepPlace { line: 4, col: 2 },
+            taken: true,
+            visual: None,
+        };
+        assert!(copy.edit_keeping(Edit::replace(8, 4, "two", "2"), true, Some(kept)));
+        settle(&mut copy, &mut daemon);
+        // Undone, with an edit typed after asking, still waiting.
+        copy.reverse(true, None);
+        let asked = copy.take_outbox();
+        assert!(copy.edit(Edit::replace(6, 0, "", "zero\n"), true));
+        let mut heard = Vec::new();
+        for message in asked {
+            let (answer, _) = daemon.take(message);
+            heard.push(copy.update(answer));
+        }
+        let [
+            Heard::Reversed {
+                state: Some(state), ..
+            },
+        ] = &heard[..]
+        else {
+            panic!("{heard:?}");
+        };
+        // On "two" in the copy's text, below the line typed.
+        assert_eq!(copy.text().to_string(), "zero\none\ntwo\n");
+        assert_eq!(
+            (state.cursor.line, state.cursor.col, state.taken),
+            (9, 2, true)
+        );
+        // A step that changes nothing, undone: nothing changes, and it
+        // gives back what it kept.
+        settle(&mut copy, &mut daemon);
+        assert!(copy.empty_step(kept));
+        settle(&mut copy, &mut daemon);
+        copy.reverse(true, None);
+        let asked = copy.take_outbox();
+        let heard: Vec<Heard> = (asked.into_iter())
+            .map(|message| copy.update(daemon.take(message).0))
+            .collect();
+        let [
+            Heard::Reversed {
+                edit,
+                state: Some(_),
+            },
+        ] = &heard[..]
+        else {
+            panic!("{heard:?}");
+        };
+        assert!(edit.is_noop());
+        assert_eq!(copy.text().to_string(), "zero\none\ntwo\n");
+    }
+
+    #[test]
     fn the_windows_own_change_among_the_edits_since_answers_it() {
         let mut daemon = Daemon::new("abc\n");
         let mut copy = BufferCopy::new(BufferId(1));
@@ -1954,7 +2284,7 @@ pub(super) mod tests {
         settle(&mut first, &mut daemon);
         // Its last change was dealt with and made nothing: a redo with
         // nothing to redo.
-        first.reverse(false);
+        first.reverse(false, None);
         settle(&mut first, &mut daemon);
         // Closed, and opened again: a new copy, whose first change is lost.
         // Were it numbered as the first copy's, the daemon's word that it
@@ -2223,7 +2553,7 @@ pub(super) mod tests {
         copy.update(daemon.snapshot());
         copy.edit(Edit::replace(4, 0, "", "1"), true);
         settle(&mut copy, &mut daemon);
-        copy.reverse(true);
+        copy.reverse(true, None);
         for message in copy.take_outbox() {
             daemon.take(message);
         }
@@ -2245,7 +2575,7 @@ pub(super) mod tests {
         // Not arrived: it goes again.
         copy.edit(Edit::replace(4, 0, "", "1"), true);
         settle(&mut copy, &mut daemon);
-        copy.reverse(true);
+        copy.reverse(true, None);
         assert_eq!(copy.take_outbox().len(), 1, "lost");
         copy.reconnected();
         copy.update(daemon.snapshot());
@@ -2739,7 +3069,7 @@ pub(super) mod tests {
         let mut copy = BufferCopy::new(BufferId(1));
         copy.update(daemon.snapshot());
         typed(&mut copy, 1, "b", true);
-        copy.reverse(true);
+        copy.reverse(true, None);
         // The undo waits for the edit to be answered.
         let mut messages = copy.take_outbox();
         assert_eq!(messages.len(), 1);
@@ -2749,22 +3079,22 @@ pub(super) mod tests {
         // Typing while the undo is on its way.
         typed(&mut copy, 2, "c", true);
         let (answer, _) = daemon.take(undo);
-        assert!(matches!(copy.update(answer), Heard::Reversed(_)));
+        assert!(matches!(copy.update(answer), Heard::Reversed { .. }));
         assert_eq!(copy.text.to_string(), "ac");
         for message in copy.take_outbox() {
             let (ack, _) = daemon.take(message);
             copy.update(ack);
         }
         assert_eq!(daemon.text.to_string(), "ac");
-        copy.reverse(true);
-        copy.reverse(true);
+        copy.reverse(true, None);
+        copy.reverse(true, None);
         for _ in 0..2 {
             let message = copy.take_outbox().remove(0);
             let (answer, _) = daemon.take(message);
             copy.update(answer);
         }
         assert_eq!(copy.text.to_string(), "a");
-        copy.reverse(true);
+        copy.reverse(true, None);
         let (answer, _) = daemon.take(copy.take_outbox().remove(0));
         assert_eq!(copy.update(answer), Heard::NothingToReverse { undo: true });
     }

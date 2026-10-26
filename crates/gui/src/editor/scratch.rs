@@ -61,33 +61,84 @@ impl Scratch {
 
     /// Makes `change`, as the user's, as the daemon makes a window's
     /// change: an edit made to version `base` is brought up to date first.
-    /// Returns the version it made and the edit made, `None` if there was
-    /// nothing to undo or redo, or why it couldn't be made.
-    fn make(&mut self, change: Change) -> Result<Option<(u64, Edit)>, String> {
+    /// Returns how the copy is told what it made, or why it couldn't be.
+    fn make(&mut self, change: Change, seq: u64) -> Result<BufferUpdate, String> {
+        let text = |err: clackatoo_text::HistoryError| err.to_string();
         let made = match change {
-            Change::Edit { edit, base, step } => {
-                let edit = (self.history.rebase(edit, base)).map_err(|err| err.to_string())?;
-                edit.apply(&mut self.text).map_err(|err| err.to_string())?;
-                let version = (self.history.record(edit.clone(), Author::User, step))
-                    .map_err(|err| err.to_string())?;
-                Some((version, edit))
-            }
+            Change::Edit { edit, base, step } => self.edit(edit, base, step, None),
+            Change::Step { edit, base, state } => self.edit(edit, base, true, Some(state)),
             Change::Undo | Change::Redo => {
                 let reversed = if change == Change::Undo {
                     self.history.undo(&Author::User)
                 } else {
                     self.history.redo(&Author::User)
                 };
-                match reversed.map_err(|err| err.to_string())? {
+                match reversed.map_err(text)? {
                     Some(edit) => {
                         edit.apply(&mut self.text).map_err(|err| err.to_string())?;
-                        Some((self.history.version(), edit))
+                        BufferUpdate::Edited {
+                            version: self.history.version(),
+                            edit,
+                            author: Author::User,
+                            answers: Some(seq),
+                        }
                     }
-                    None => None,
+                    None => BufferUpdate::NoChange(seq),
+                }
+            }
+            // Only its own copy edits it, so places are in the text now.
+            Change::Empty { state, .. } => {
+                let len = self.text.len_bytes();
+                (self.history.empty_step(&Author::User, len, Some(state))).map_err(text)?;
+                BufferUpdate::NoChange(seq)
+            }
+            Change::Reverse { redo, visual, .. } => {
+                let reversed = self.history.reverse(&Author::User, !redo, visual, false);
+                match reversed.map_err(text)? {
+                    Some(reversal) => {
+                        (reversal.edit.apply(&mut self.text)).map_err(|err| err.to_string())?;
+                        BufferUpdate::Reversed {
+                            version: self.history.version(),
+                            seq,
+                            edit: reversal.edit,
+                            state: reversal.state,
+                        }
+                    }
+                    None => BufferUpdate::NoChange(seq),
                 }
             }
         };
-        Ok(made)
+        Ok(match made {
+            BufferUpdate::Acked { version, .. } => BufferUpdate::Acked { version, seq },
+            made => made,
+        })
+    }
+
+    /// Makes `edit`, made to version `base`, starting a step that keeps
+    /// what `step` says, or joining the last.
+    fn edit(
+        &mut self,
+        edit: Edit,
+        base: u64,
+        step: bool,
+        state: Option<clackatoo_text::StepState>,
+    ) -> BufferUpdate {
+        let made = (self.history.rebase(edit, base))
+            .map_err(|err| err.to_string())
+            .and_then(|edit| {
+                edit.apply(&mut self.text).map_err(|err| err.to_string())?;
+                (self.history.record_with(edit, Author::User, step, state))
+                    .map_err(|err| err.to_string())
+            });
+        match made {
+            Ok(version) => BufferUpdate::Acked { version, seq: 0 },
+            Err(err) => {
+                // Never so, as only its own copy edits it; but if it were,
+                // the copy starts afresh from the text.
+                log::error!("a scratch buffer's change didn't fit: {err}");
+                BufferUpdate::Snapshot(self.snapshot())
+            }
+        }
     }
 
     /// Answers `message`, which a copy of `buffer` would send the daemon,
@@ -100,25 +151,15 @@ impl Scratch {
             answer: Answer::Nothing,
         };
         let mut answers = match message {
-            ClientMessage::Edit { seq, change, .. } => {
-                let edit = matches!(change, Change::Edit { .. });
-                match self.make(change) {
-                    Ok(Some((version, _))) if edit => vec![BufferUpdate::Acked { version, seq }],
-                    Ok(Some((version, edit))) => vec![BufferUpdate::Edited {
-                        version,
-                        edit,
-                        author: Author::User,
-                        answers: Some(seq),
-                    }],
-                    Ok(None) => vec![BufferUpdate::NoChange(seq)],
-                    Err(err) => {
-                        // Never so, as only its own copy edits it; but if
-                        // it were, the copy starts afresh from the text.
-                        log::error!("scratch buffer {buffer}: a change didn't fit: {err}");
-                        vec![BufferUpdate::Snapshot(self.snapshot())]
-                    }
+            ClientMessage::Edit { seq, change, .. } => match self.make(change, seq) {
+                Ok(answer) => vec![answer],
+                Err(err) => {
+                    // Never so, as only its own copy edits it; but if it
+                    // were, the copy starts afresh from the text.
+                    log::error!("scratch buffer {buffer}: a change didn't fit: {err}");
+                    vec![BufferUpdate::Snapshot(self.snapshot())]
                 }
-            }
+            },
             ClientMessage::Query { id, .. }
             | ClientMessage::Rename { id, .. }
             | ClientMessage::Stage { id, .. } => vec![nothing(id)],
@@ -165,15 +206,12 @@ mod tests {
         assert_eq!(copy.text().to_string(), "xy\nb\n");
         assert!(copy.modified());
         // Undone as one step, and the copy's told it was its own undo.
-        copy.reverse(true);
+        copy.reverse(true, None);
         let answers = copy.take_answers();
         assert!(matches!(
             answers.as_slice(),
             [
-                BufferUpdate::Edited {
-                    answers: Some(_),
-                    ..
-                },
+                BufferUpdate::Reversed { state: None, .. },
                 BufferUpdate::Modified(false)
             ]
         ));
@@ -182,7 +220,7 @@ mod tests {
         }
         assert_eq!(copy.text().to_string(), "a\nb\n");
         assert!(!copy.modified());
-        copy.reverse(true);
+        copy.reverse(true, None);
         let heard: Vec<_> = (copy.take_answers().into_iter())
             .map(|answer| copy.update(answer))
             .collect();
@@ -190,7 +228,7 @@ mod tests {
             heard,
             [crate::editor::Heard::NothingToReverse { undo: true }]
         );
-        copy.reverse(false);
+        copy.reverse(false, None);
         answer_all(&mut copy);
         assert_eq!(copy.text().to_string(), "xy\nb\n");
         // A question for a language server: there's nothing to say.

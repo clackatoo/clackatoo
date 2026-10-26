@@ -74,7 +74,7 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{Answer, BufferId, Edit, FileLocation, Query, Size, Trigger};
 use clackatoo_term::{Row, RowBuilder, Style};
-use clackatoo_text::{Bias, Diagnostic, Hunk};
+use clackatoo_text::{Bias, Diagnostic, Hunk, StepPlace, StepState, StepVisual};
 
 use actions::{ActionMenu, MenuKey, MenuStroke};
 pub use bench::EditorBench;
@@ -497,6 +497,22 @@ pub(crate) struct Editor {
     word_run: usize,
     /// The change being made, while insert mode goes on after it.
     changing: Option<Change>,
+    /// Where an operator, or a command on what's selected, puts the cursor
+    /// before it changes the text, as Vim's `do_pending()` does, for the
+    /// undo step it starts to keep (see [`StepState`]).
+    step_cursor: Option<Point>,
+    /// The file's last selection as the command being done began, for the
+    /// undo step it starts to keep.
+    step_visual: Option<StepVisual>,
+    /// The undo step the command being done has started, as Vim's
+    /// `u_save()` starts one before it changes anything, and what it keeps:
+    /// while no edit has been made into it. If the command, or the insert
+    /// mode it starts, ends without one, it's a step that changes nothing,
+    /// as Vim's is.
+    saved: Option<StepState>,
+    /// How many edits the copy had made as the command being done began
+    /// (see [`BufferCopy::edits_counted`]).
+    edits_before: u64,
     /// The count the change just made goes by for `.`, if it cut the one
     /// typed short, as a count of `J` past the last line is.
     cut_count: Option<usize>,
@@ -768,6 +784,10 @@ impl Editor {
             new_step: true,
             word_run: 0,
             changing: None,
+            step_cursor: None,
+            step_visual: None,
+            saved: None,
+            edits_before: 0,
             cut_count: None,
             last_change: None,
             insert_times: 1,
@@ -1631,6 +1651,28 @@ impl Editor {
         if self.waits_for_grammar(command, copy, &shared.marks) {
             return Done::default();
         }
+        // In visual mode, where Vim's `do_pending()` puts the cursor before
+        // acting on what's selected; and the selection, which Vim's undo
+        // step keeps.
+        self.step_cursor = self.selection_start();
+        self.step_visual = shared.marks.step_visual(copy.file(), copy.text());
+        self.saved = None;
+        self.edits_before = copy.edits_counted();
+        let done = self.execute_command(command, copy, shared, again);
+        if self.mode != Mode::Insert {
+            self.end_saved(copy);
+        }
+        done
+    }
+
+    /// Does `command`, as [`execute`](Self::execute) does.
+    fn execute_command(
+        &mut self,
+        command: Command,
+        copy: &mut BufferCopy,
+        shared: &mut Shared,
+        again: bool,
+    ) -> Done {
         let done = Done::REDRAW;
         let visual = matches!(self.mode, Mode::Visual(_));
         self.cut_count = None;
@@ -1680,8 +1722,9 @@ impl Editor {
             // No more steps than Vim's `undolevels` keeps, so a huge
             // count doesn't queue millions.
             Action::Undo | Action::Redo => {
+                let visual = shared.marks.step_visual(copy.file(), copy.text());
                 for _ in 0..times.min(MOST_UNDOS) {
-                    copy.reverse(command.action == Action::Undo);
+                    copy.reverse(command.action == Action::Undo, visual);
                 }
             }
             Action::Repeat => return self.repeat(command.count, copy, shared),
@@ -2140,6 +2183,42 @@ impl Editor {
         acted
     }
 
+    /// Where Vim's `do_pending()` puts the cursor before an operator acts
+    /// on `span`, the start of what it takes, which its undo puts back: an
+    /// object's start; the selection's start, or by lines the first line's
+    /// start if that's where the selection started; or the cursor or
+    /// where the motion went, whichever is first, in its column.
+    fn operator_start(&self, target: Target, span: &Span, copy: &BufferCopy) -> Point {
+        let at = self.cursor.at;
+        match target {
+            Target::Object { .. } => self.text(copy).point_of(span.start()),
+            Target::Selection => self.selection_start().unwrap_or(at),
+            _ => span.moved.map_or(at, |went| went.at.min(at)),
+        }
+    }
+
+    /// Where Vim's `do_pending()` puts the cursor before acting on what's
+    /// selected: its start, or by lines, the other end's line's start if
+    /// that's first, or a block's top left corner.
+    fn selection_start(&self) -> Option<Point> {
+        let anchor = self
+            .anchor
+            .filter(|_| matches!(self.mode, Mode::Visual(_)))?;
+        let at = self.cursor.at;
+        Some(match self.mode {
+            Mode::Visual(Selection::Lines) => {
+                let start = Point { col: 0, ..anchor };
+                if start < at { start } else { at }
+            }
+            // A block's top left corner.
+            Mode::Visual(Selection::Block) => Point {
+                line: anchor.line.min(at.line),
+                col: anchor.col.min(at.col),
+            },
+            _ => anchor.min(at),
+        })
+    }
+
     /// [`operate`](Self::operate), but for where the cursor aims after.
     fn operate_on(
         &mut self,
@@ -2151,6 +2230,7 @@ impl Editor {
         (registers, name): (&mut Registers, Option<char>),
     ) -> bool {
         if operator == Operator::Reindent {
+            self.save_step(copy);
             // As the grammar answered, for the lines it found.
             return self.reindent(copy);
         }
@@ -2170,6 +2250,10 @@ impl Editor {
             self.changing = None;
             return false;
         };
+        self.step_cursor = Some(self.operator_start(target, &span, copy));
+        if operator != Operator::Yank {
+            self.save_step(copy);
+        }
         // Nothing to delete in an empty text, as Vim's `op_delete()` finds
         // an empty buffer: the register keeps what it had.
         if operator == Operator::Delete && copy.text().len_bytes() == 0 {
@@ -2674,6 +2758,14 @@ impl Editor {
         };
         let line_start = text.line_start(at.line);
         let here = laid.byte_at(at.col);
+        drop(text);
+        // Vim's `x` and `X` are `dl` and `dh`, whose step starts whatever
+        // they take, nothing at a line's end or start included.
+        self.save_step(copy);
+        let text = self.text(copy);
+        let Some(laid) = text.laid(at.line) else {
+            return;
+        };
         let (start, end) = if before {
             let mut start = here;
             for _ in 0..times {
@@ -2698,6 +2790,11 @@ impl Editor {
         }
         let removed = laid.text()[start..end].to_owned();
         let edit = Edit::replace(text.rope().len_bytes(), line_start + start, &removed, "");
+        // As `dh`, which `X` is to Vim, from where it takes.
+        if before && let Some(saved) = &mut self.saved {
+            saved.cursor.col = u32::try_from(start).unwrap_or(u32::MAX);
+            saved.taken = true;
+        }
         drop(text);
         let small = Wrote::Delete {
             small: true,
@@ -2927,11 +3024,13 @@ impl Editor {
         // `nv_join()` cuts it, and `.` joins as many again: on the last
         // line, just it, which Vim's `do_join()` leaves with the cursor at
         // its start. Vim makes that an undo step that changes nothing,
-        // which `u` puts back; the daemon's undo has no such steps.
+        // which `u` puts back, and so is this.
         let there = text.last_line().saturating_sub(line);
         if times > 1 && times as u64 > there {
             self.cut_count = usize::try_from(there + 1).ok();
             if there == 0 {
+                drop(text);
+                self.save_step(copy);
                 self.cursor = Cursor::new(Point { line, col: 0 });
                 return;
             }
@@ -3081,6 +3180,10 @@ impl Editor {
         // Aiming for where it is in insert mode, on a tab its first cell,
         // as Vim's `edit()` works it out again there.
         self.cursor = Cursor::new(self.cursor.at);
+        // What's typed starts its undo step where it's typed, as Vim's
+        // starts one as the first key is typed, unless the command that
+        // began insert mode started one already, as `c` does.
+        self.step_cursor = None;
         self.seen = None;
         self.mode = Mode::Insert;
         self.anchor = None;
@@ -3119,6 +3222,7 @@ impl Editor {
         if let Some(change) = self.changing.take() {
             self.last_change = Some(change);
         }
+        self.end_saved(copy);
         self.new_step = true;
         // As in Vim, the cursor steps back onto the character before.
         let mut cursor = self.cursor;
@@ -3390,6 +3494,10 @@ impl Editor {
 
     /// Makes `edit` to the buffer, as part of the change being made.
     fn make(&mut self, edit: Edit, copy: &mut BufferCopy) {
+        // Nothing, which starts no step: a step begun stays as it is.
+        if edit.is_noop() {
+            return;
+        }
         let grows = self.grows(copy);
         self.edited(&edit, grows);
         if let Some(spread) = &mut self.blocks.spread {
@@ -3402,8 +3510,128 @@ impl Editor {
         } else {
             self.new_step
         };
-        copy.edit(edit, step);
+        let saved = self.saved.take();
+        let state = step.then(|| saved.unwrap_or_else(|| self.step_state(copy)));
+        copy.edit_keeping(edit, step, state);
         self.new_step = false;
+    }
+
+    /// Where an undo or a redo, `edit`, which made the text it has now,
+    /// puts the cursor, as Vim's `u_undoredo()` does with what the step
+    /// kept, `state`: where the cursor was as the step began, if that was
+    /// in the lines the edit changed or next to them, or the start of what
+    /// an operator took; or else on the first of them, at the column it
+    /// aims for, or with `startofline` at its first non-blank. A step that
+    /// changes nothing leaves the cursor's line, but for Vim's last rules:
+    /// on the line after the step's, it goes up to it, and on the step's
+    /// line, to its column. With nothing kept, as from a daemon too old to
+    /// keep it, it's at the edit's start.
+    fn undone_to(
+        &self,
+        edit: &Edit,
+        state: Option<&StepState>,
+        copy: &BufferCopy,
+    ) -> Option<usize> {
+        let first_change = edit.changes().next();
+        let Some(state) = state else {
+            return first_change.map(|(at, _, _)| at);
+        };
+        let text = self.text(copy);
+        let rope = copy.text();
+        let place_line = |place: StepPlace| {
+            let byte = usize::try_from(place.line)
+                .unwrap_or(usize::MAX)
+                .min(rope.len_bytes());
+            text.point_of(byte).line
+        };
+        let kept_line = place_line(state.cursor);
+        let kept = |line: u64| {
+            let start = text.line_start(line);
+            let col = usize::try_from(state.cursor.col).unwrap_or(usize::MAX);
+            start + col.min(text.line_end(line) - start)
+        };
+        let line = match first_change {
+            Some((at, taken, put)) => {
+                // By lines, as Vim's are: lines put or taken after a line's
+                // end start on the next, and a line's break ends the line
+                // it's on.
+                let point = text.point_of(at);
+                let first = point.line
+                    + u64::from(
+                        point.col > 0 && (taken.starts_with('\n') || put.starts_with('\n')),
+                    );
+                let end = (edit.changes().last())
+                    .map_or(at, |(at, taken, _)| edit.map(at + taken.len(), Bias::After));
+                let last = text.point_of(end.saturating_sub(1).max(at)).line;
+                // The start of what an operator acted on, or what was
+                // selected, is in the lines Vim's step kept, which are all
+                // it acted on, though fewer changed.
+                if state.taken || (kept_line + 1 >= first && kept_line <= last + 1) {
+                    return Some(kept(kept_line));
+                }
+                first
+            }
+            // As Vim's step keeps the lines its command would change,
+            // which hold where it began.
+            None => return Some(kept(kept_line)),
+        };
+        // Only off by one line, as after `o`: where it was.
+        let line = if kept_line + 1 == line && line > 0 {
+            line - 1
+        } else {
+            line
+        };
+        if line > text.last_line() {
+            return Some(text.line_start(text.last_line()));
+        }
+        if kept_line == line {
+            return Some(kept(line));
+        }
+        let want = self.cursor.aim(&text);
+        let mut cursor = Cursor::wanting(Point { line, col: 0 }, want);
+        cursor.onto_line(line, self.startofline, &text);
+        Some(text.byte_at(cursor.at))
+    }
+
+    /// What the undo step a change starts now keeps, as Vim's undo header
+    /// does: where the cursor is, or where an operator put it, at the start
+    /// of what it acts on (see `step_cursor`), and the file's last
+    /// selection as the command began.
+    fn step_state(&mut self, copy: &BufferCopy) -> StepState {
+        let start = self.step_cursor.take();
+        let point = start.unwrap_or(self.cursor.at);
+        let text = self.text(copy);
+        let line = text.line_start(point.line);
+        let col = text.byte_at(point).saturating_sub(line);
+        StepState {
+            cursor: StepPlace {
+                line: line as u64,
+                col: u32::try_from(col).unwrap_or(u32::MAX),
+            },
+            taken: start.is_some(),
+            visual: self.step_visual,
+        }
+    }
+
+    /// Starts the undo step a command that changes the text makes, before
+    /// it changes anything, as Vim's `u_save()` does: one that changes
+    /// nothing, if the command ends without an edit (see `saved`). Not in
+    /// a macro, whose edits are one step, nor once a step has begun.
+    fn save_step(&mut self, copy: &BufferCopy) {
+        if self.new_step && !self.replaying && self.saved.is_none() {
+            self.saved = Some(self.step_state(copy));
+        }
+    }
+
+    /// The command, or the insert mode it began, is done: a step it
+    /// started that no edit was made into is one that changes nothing.
+    fn end_saved(&mut self, copy: &mut BufferCopy) {
+        if let Some(state) = self.saved.take()
+            && copy.edits_counted() == self.edits_before
+        {
+            copy.empty_step(state);
+        }
+        self.step_cursor = None;
     }
 
     /// Moves the word being completed, the places its items are at, and
@@ -4786,10 +5014,10 @@ impl Editor {
         match heard {
             Heard::Replaced => self.replaced(copy),
             Heard::Edited(edit) => self.follow_edit(edit, copy),
-            Heard::Reversed(edit) => {
+            Heard::Reversed { edit, state } => {
                 if jump {
                     // To where the step undone or redone was, as in Vim.
-                    let at = edit.changes().next().map(|(at, _, _)| at);
+                    let at = self.undone_to(edit, state.as_ref(), copy);
                     if let (Some(at), Some((cursor, _))) = (at, &mut self.held) {
                         *cursor = at;
                     }
@@ -4864,7 +5092,7 @@ impl Editor {
         }
         // A new text, or the window's own undo, closes the panel, as an
         // edit typed does, and the menu.
-        if matches!(heard, Heard::Replaced | Heard::Reversed(_)) {
+        if matches!(heard, Heard::Replaced | Heard::Reversed { .. }) {
             self.panel = None;
             self.actions = None;
             self.close_completion();
@@ -5205,6 +5433,11 @@ impl Editor {
             self.fail();
             return;
         }
+        // A step though nothing's changed, as a digit's case isn't, as
+        // Vim's `n_swapchar()` saves the line first.
+        drop(text);
+        self.save_step(copy);
+        let text = self.text(copy);
         let line_start = text.line_start(line);
         // How long the text is once changed, which can be more bytes or
         // fewer, as `ß` to `ẞ` is.

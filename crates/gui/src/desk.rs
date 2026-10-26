@@ -5466,14 +5466,32 @@ mod tests {
         }
     }
 
-    /// The changes to buffers waiting to go to the daemon.
+    /// The changes to buffers waiting to go to the daemon, as an older
+    /// daemon takes them (see [`plain`]).
     fn buffer_changes(desk: &mut Desk) -> Vec<(u64, clackatoo_protocol::Change)> {
         (desk.take_outbox().into_iter())
             .filter_map(|message| match message {
-                ClientMessage::Edit { seq, change, .. } => Some((seq, change)),
+                ClientMessage::Edit { seq, change, .. } => Some((seq, plain(change))),
                 _ => None,
             })
             .collect()
+    }
+
+    /// `change` without what an undo step keeps, as a daemon before
+    /// protocol 106 takes it: an edit that starts a step is an edit, and an
+    /// undo or redo is one.
+    fn plain(change: clackatoo_protocol::Change) -> clackatoo_protocol::Change {
+        use clackatoo_protocol::Change;
+        match change {
+            Change::Step { edit, base, .. } => Change::Edit {
+                edit,
+                base,
+                step: true,
+            },
+            Change::Reverse { redo: false, .. } => Change::Undo,
+            Change::Reverse { redo: true, .. } => Change::Redo,
+            change => change,
+        }
     }
 
     #[test]
@@ -6032,7 +6050,7 @@ mod tests {
             match message {
                 ClientMessage::Edit { change, .. } => {
                     assert!(save.is_none(), "an edit after the save");
-                    edits.push(change);
+                    edits.push(plain(change));
                 }
                 ClientMessage::Request(Request::Save { force, .. }) => save = Some(force),
                 _ => {}
@@ -9364,8 +9382,8 @@ mod tests {
                     continue;
                 };
                 let buffer = *buffer;
-                if let clackatoo_protocol::Change::Edit { step, .. } = change {
-                    steps.push((buffer, *step));
+                if let clackatoo_protocol::Change::Edit { step, .. } = plain(change.clone()) {
+                    steps.push((buffer, step));
                 }
                 let daemon = daemons.get_mut(&buffer).expect("a daemon for the buffer");
                 let (answer, _) = daemon.take(message);

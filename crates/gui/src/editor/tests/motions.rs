@@ -1340,7 +1340,9 @@ fn an_undo_or_a_redo_goes_to_where_its_text_changes() {
     let lines = "a1 x\na2 x\na3 x\na4 x\na5 x\na6 x\na7 x\na8 x\na9 x\n";
     assert_eq!(at(lines, (2, 0), "ddP6jdduuu"), (2, 0));
     assert_eq!(at(lines, (2, 0), "xP7jxuuu"), (2, 0));
-    // After a copy, an ex command's undo goes to its own change.
+    // After a copy, an ex command's undo goes to where it began, as
+    // Vim's `ex_operators()` puts the cursor: its first line, in the
+    // column the cursor aims for.
     let mut setup = Setup::new(lines);
     setup.editor.cursor = Cursor::new(Point { line: 0, col: 2 });
     setup.keys("yy");
@@ -1350,7 +1352,7 @@ fn an_undo_or_a_redo_goes_to_where_its_text_changes() {
     setup.follow_marks();
     setup.serve();
     setup.keys("u");
-    assert_eq!(setup.cursor(), (6, 0));
+    assert_eq!(setup.cursor(), (6, 2));
 }
 
 #[test]
@@ -1397,8 +1399,8 @@ fn an_undo_of_a_line_opened_above_and_typed_on_goes_to_the_line_after() {
         ("\nabc\n\ndef\n".into(), (3, 0))
     );
     assert_eq!(at("\nabc\n\ndef\n", (3, 0), "Ox<Esc>u<C-r>").1, (3, 0));
-    // `o`, as the release's, goes back to the line it opened below.
-    assert_eq!(at("abc\nxy\n", (1, 1), "ox<Esc>u").1, (1, 2));
+    // `o` goes back to where the cursor was as it began, as Neovim's.
+    assert_eq!(at("abc\nxy\n", (1, 1), "ox<Esc>u").1, (1, 1));
 }
 
 #[test]
@@ -1744,4 +1746,94 @@ fn a_pattern_with_word_edges_is_compiled_for_fancy_regex_only_when_a_text_needs_
     let before = compiles();
     assert_eq!(in_cells("abc 日本 abc\n", (1, 0), "*n").1, (1, 0));
     assert_eq!(compiles() - before, 1);
+}
+
+#[test]
+fn an_undo_puts_the_cursor_where_its_step_began_as_vims() {
+    // The text, where the cursor starts, the keys, and the text and the
+    // cursor after, or no text for the text made.
+    type Case<'a> = (&'a str, (u64, usize), &'a str, (&'a str, (u64, usize)));
+    // Each checked against Neovim 0.11, typed into a fresh one: Vim's undo
+    // header keeps where the cursor was (`uh_cursor`), and its steps that
+    // change nothing, which the daemon now keeps too.
+    let lines = "a1 x\na2 x\na3 x\na4 x\na5 x\na6 x\na7 x\na8 x\na9 x\n";
+    let cases: [Case<'_>; 11] = [
+        // `3J` on the last line, and `X` at a line's start: steps that
+        // change nothing, undone on their own.
+        ("abc\ndef\n", (2, 2), "x3J3Juu", ("abc\nde\n", (2, 1))),
+        ("abc\ndef\n", (2, 2), "3Jkxuu", ("abc\ndef\n", (2, 2))),
+        (
+            "abc\ndef\nghi\n",
+            (1, 0),
+            "lxj0Xu",
+            ("ac\ndef\nghi\n", (2, 0)),
+        ),
+        // `~` on a character with no case.
+        (lines, (3, 1), "~5j~uu<C-r>", (lines, (3, 1))),
+        // Where an operator began.
+        (
+            "abcd\nefgh\nijkl\n",
+            (2, 2),
+            "dku",
+            ("abcd\nefgh\nijkl\n", (1, 2)),
+        ),
+        (
+            "abcd\nefgh\nijkl\n",
+            (2, 2),
+            ">ku",
+            ("abcd\nefgh\nijkl\n", (1, 2)),
+        ),
+        (
+            "ab cd\nefgh\nijkl\n",
+            (2, 2),
+            "yyjpu",
+            ("ab cd\nefgh\nijkl\n", (3, 2)),
+        ),
+        ("a\n  b\nc\n", (2, 2), "Ox<Esc>u", ("a\n  b\nc\n", (2, 2))),
+        // A redo goes where its own step began.
+        (lines, (3, 0), "yyp5jpuu<C-r>", ("", (3, 0))),
+        // The selection kept with the step comes back with its undo.
+        (
+            "a1 x\na2 x\na3 x\na4 x\na5 x\na6 x\n",
+            (1, 1),
+            "vl<Esc>xjVj<Esc>ugv",
+            ("a1 x\na2 x\na3 x\na4 x\na5 x\na6 x\n", (1, 2)),
+        ),
+        (lines, (2, 0), "Vj<Esc>ddP5jVd3ugv<Esc>", (lines, (3, 0))),
+    ];
+    for (text, from, keys, (after, at)) in cases {
+        let (made, cursor) = in_cells(text, from, keys);
+        if !after.is_empty() {
+            assert_eq!(made, after, "{keys} on {text:?}");
+        }
+        assert_eq!(cursor, at, "{keys} on {text:?}");
+    }
+}
+
+#[test]
+fn where_an_undo_step_began_keeps_to_its_line_through_an_agents_edit() {
+    let mut setup = Setup::new("top\nabcd\nefgh\nijkl\n");
+    setup.editor.cursor = Cursor::new(Point { line: 2, col: 2 });
+    setup.keys("dk");
+    // An agent puts two lines in above meanwhile.
+    let update = setup.daemon.agent(0, "x\ny\n");
+    setup.editor.hold(&setup.copy);
+    let mut heard = setup.copy.update(update);
+    setup.heard_marks(&heard);
+    setup.editor.heard(&mut heard, false, &mut setup.copy);
+    setup.keys("u");
+    assert_eq!(setup.text(), "x\ny\ntop\nabcd\nefgh\nijkl\n");
+    assert_eq!(setup.cursor(), (3, 2), "where `dk` began, two lines down");
+}
+
+#[test]
+fn with_a_daemon_too_old_to_keep_them_an_undo_goes_to_its_change() {
+    let mut setup = Setup::new("abcd\nefgh\nijkl\n");
+    setup.copy.set_keeps_steps(false);
+    setup.editor.cursor = Cursor::new(Point { line: 1, col: 2 });
+    setup.keys("dku");
+    assert_eq!(setup.cursor(), (0, 0), "as before: the change's start");
+    // And no step that changes nothing is sent for it to refuse.
+    setup.keys("x3J3Juu");
+    assert_eq!(setup.text(), "abcd\nefgh\nijkl\n");
 }

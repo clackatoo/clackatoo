@@ -679,7 +679,16 @@ fn the_text_objects_lesson_is_done_from_start_to_end_with_the_grammar_answering(
     go_to_line(&mut desk, "fn double");
     type_keys(&mut desk, "5lvjY");
     serve_lesson(&mut desk, &mut daemon);
-    assert_eq!(step(&desk), lesson.steps.len());
+    assert_eq!(step(&desk), 10);
+
+    // `u` puts the cursor back where `dk` began, a line up.
+    serve_lesson(&mut desk, &mut daemon);
+    type_keys(&mut desk, "f:dk");
+    serve_lesson(&mut desk, &mut daemon);
+    assert_eq!(step(&desk), 10, "{}", editor_text(&desk));
+    type_keys(&mut desk, "u");
+    serve_lesson(&mut desk, &mut daemon);
+    assert_eq!(step(&desk), lesson.steps.len(), "{}", editor_text(&desk));
     assert_eq!(daemon.text().to_string(), editor_text(&desk));
 }
 

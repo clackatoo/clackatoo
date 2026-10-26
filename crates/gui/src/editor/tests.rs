@@ -54,6 +54,8 @@ impl Setup {
         let daemon = Daemon::new(text);
         let mut copy = BufferCopy::new(BufferId(1));
         copy.update(daemon.snapshot());
+        // A daemon that keeps what undo steps keep.
+        copy.set_keeps_steps(true);
         // Without signs, which tests of them turn on, so the columns of
         // the rest are counted from the line numbers.
         let options = Options {
@@ -119,13 +121,18 @@ impl Setup {
     fn heard_marks(&mut self, heard: &super::Heard) {
         let (file, text) = (self.copy.file(), self.copy.text());
         match heard {
-            super::Heard::Edited(edit) | super::Heard::Reversed(edit) => {
-                let came = if matches!(heard, super::Heard::Reversed(_)) {
-                    super::Came::Undone
-                } else {
-                    super::Came::Elsewhere
+            super::Heard::Edited(edit) | super::Heard::Reversed { edit, .. } => {
+                let (came, state) = match heard {
+                    super::Heard::Reversed { state, .. } => (super::Came::Undone, *state),
+                    _ => (super::Came::Elsewhere, None),
                 };
+                if state.is_some() {
+                    self.shared.marks.forget_undoable(file);
+                }
                 (self.shared.marks).edited(file, std::slice::from_ref(edit), text, came);
+                if let Some(visual) = state.and_then(|state| state.visual) {
+                    self.shared.marks.put_back(file, text, visual);
+                }
             }
             super::Heard::Replaced => self.shared.marks.replaced(file, text),
             _ => {}

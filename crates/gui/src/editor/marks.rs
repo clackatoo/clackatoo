@@ -28,7 +28,7 @@
 use std::borrow::Borrow;
 
 use clackatoo_protocol::MachineId;
-use clackatoo_text::{Bias, Edit, Moved, Rope, compose};
+use clackatoo_text::{Bias, Edit, Moved, Rope, StepPlace, StepSelection, StepVisual, compose};
 
 use crate::vim::Selection;
 
@@ -757,6 +757,76 @@ impl Marks {
                 last.place(text, bytes, shape);
             }
             None => kept.last = Some(Selected::new(file, text, bytes, shape)),
+        }
+    }
+
+    /// The last selection in `file`, as an undo step keeps it (see
+    /// [`StepVisual`]), its places in `text`, if it's had one.
+    pub(crate) fn step_visual(&self, file: File<'_>, text: &Rope) -> Option<StepVisual> {
+        let selected = self.selected(file)?;
+        let place = |line: u64, col: usize| {
+            let line = usize::try_from(line).unwrap_or(usize::MAX);
+            let start = if line < text.len_lines() {
+                text.line_to_byte(line)
+            } else {
+                text.len_bytes()
+            };
+            StepPlace {
+                line: start as u64,
+                col: u32::try_from(col).unwrap_or(u32::MAX),
+            }
+        };
+        let [(line, col), (last_line, last_col)] = selected.ends();
+        Some(StepVisual {
+            start: place(line, col),
+            end: place(last_line, last_col),
+            kind: match selected.shape.kind {
+                Selection::Characters => StepSelection::Characters,
+                Selection::Lines => StepSelection::Lines,
+                Selection::Block => StepSelection::Block,
+            },
+            backward: selected.shape.backward,
+            to_end: selected.shape.to_end,
+        })
+    }
+
+    /// Puts back the last selection in `file` as an undo step kept it,
+    /// `visual`, its places in `text`, as Vim's undo puts back `'<` and
+    /// `'>`.
+    pub(crate) fn put_back(&mut self, file: File<'_>, text: &Rope, visual: StepVisual) {
+        let point = |place: StepPlace| {
+            let byte = usize::try_from(place.line)
+                .unwrap_or(usize::MAX)
+                .min(text.len_bytes());
+            (text.byte_to_line(byte) as u64, place.col as usize)
+        };
+        let shape = Shape {
+            kind: match visual.kind {
+                StepSelection::Characters => Selection::Characters,
+                StepSelection::Lines => Selection::Lines,
+                StepSelection::Block => Selection::Block,
+            },
+            backward: visual.backward,
+            to_end: visual.to_end,
+        };
+        let (start, last) = (point(visual.start), point(visual.end));
+        let kept = self.selections_of(file);
+        kept.undoable = None;
+        let selected = kept
+            .last
+            .get_or_insert_with(|| Selected::new(file, text, (0, 0), shape));
+        (selected.start.line, selected.start.col) = start;
+        (selected.last.line, selected.last.col) = last;
+        selected.shape = shape;
+        selected.settle(text);
+    }
+
+    /// Forgets the window's last edit to `file`, whose undo would put its
+    /// selection back as it was before (see [`Undoable`]): an undo step
+    /// that keeps the selection says itself.
+    pub(crate) fn forget_undoable(&mut self, file: File<'_>) {
+        if let Some(kept) = self.selections.iter_mut().find(|kept| kept.is_of(file)) {
+            kept.undoable = None;
         }
     }
 

@@ -917,6 +917,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "substitute",
         what: "Huge :%s and long undo histories stay fast; undo says when older changes were let go",
     },
+    News {
+        id: "undosteps",
+        date: "2026-10-26",
+        lesson: "text-objects",
+        what: "u puts the cursor back where the change began, and the selection for gv, as Vim's undo does",
+    },
 ];
 
 impl News {

@@ -131,3 +131,26 @@ Put the cursor in the middle of `fn double`'s first line, and type `vjY`.
 ```check
 register 0 "fn double(width: u32) -> u32 {\n    width * 3\n"
 ```
+
+## Undo goes back to where you were
+
+`u` puts the cursor back where it was as the change began, as Vim's does: where an operator began, such as the start of what `dk` took. The last selection comes back as it was then, for `gv`. A command that changes nothing where Vim's makes a step all the same, such as `3J` on the last line, is a step of its own, which `u` undoes alone. Every window editing the file shares the steps, and what they keep follows other windows' and agents' edits.
+
+```practice shapes.rs
+struct Point {
+    x: f64,
+    y: f64,
+}
+```
+
+```setup
+cursor 3
+```
+
+Put the cursor on the `:` of `y: f64`, delete that line and the one above with `dk`, then press `u`.
+
+```check
+has "    x: f64,\n    y: f64,"
+line 2
+at ": f64,"
+```
