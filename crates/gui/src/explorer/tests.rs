@@ -1319,3 +1319,13 @@ fn a_paste_goes_into_a_search_or_a_name_being_typed() {
     keys(&mut explorer, "<CR>");
     assert_eq!(at(&mut explorer), "/p/beta.md");
 }
+
+#[test]
+fn a_key_that_does_nothing_still_clears_a_message_and_redraws() {
+    let mut explorer = explorer(10);
+    rooted(&mut explorer, vec![file("alpha.rs")]);
+    keys(&mut explorer, "/zzz<CR>");
+    assert_eq!(explorer.label(), "no name shown matches zzz");
+    assert!(explorer.stroke(Stroke::Escape), "drawn again");
+    assert_ne!(explorer.label(), "no name shown matches zzz");
+}

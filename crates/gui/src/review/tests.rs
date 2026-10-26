@@ -348,3 +348,12 @@ fn its_keys_help_comes_from_how_it_reads_them() {
     assert!(after.title.contains("after ]"), "{}", after.title);
     assert!(has(&after.rows, "f", "Next file"));
 }
+
+#[test]
+fn a_key_that_does_nothing_still_clears_a_message_and_redraws() {
+    let mut review = review();
+    keys(&mut review, "/nowhere<CR>");
+    assert_eq!(review.label(), "no line matches nowhere");
+    assert!(review.stroke(Stroke::Escape), "drawn again");
+    assert_ne!(review.label(), "no line matches nowhere");
+}

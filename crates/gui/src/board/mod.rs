@@ -288,7 +288,7 @@ impl BoardPane {
 
     /// Does what `stroke` does. Returns whether it should be drawn again.
     pub(crate) fn stroke(&mut self, stroke: Stroke) -> bool {
-        self.message = None;
+        let had_message = self.message.take().is_some();
         if self.prompt.is_some() {
             self.prompt_stroke(stroke);
             return true;
@@ -302,7 +302,7 @@ impl BoardPane {
         let was_pending = self.keys.pending();
         match self.keys.read(stroke, false, &BoardKeys) {
             Parsed::Incomplete => true,
-            Parsed::Nothing => was_pending,
+            Parsed::Nothing => was_pending || had_message,
             Parsed::Command(command) => {
                 self.execute(command);
                 true

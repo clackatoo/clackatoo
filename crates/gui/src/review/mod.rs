@@ -434,7 +434,7 @@ impl Review {
 
     /// Does what `stroke` does. Returns whether it should be drawn again.
     pub(crate) fn stroke(&mut self, stroke: Stroke) -> bool {
-        self.message = None;
+        let had_message = self.message.take().is_some();
         if self.search.typing() {
             if self.search.key(stroke) == list::Typed::Done {
                 self.search_again(false, 1);
@@ -444,7 +444,7 @@ impl Review {
         let was_pending = self.keys.pending();
         match self.keys.read(stroke, false, &ReviewKeys) {
             Parsed::Incomplete => true,
-            Parsed::Nothing => was_pending,
+            Parsed::Nothing => was_pending || had_message,
             Parsed::Command(command) => {
                 self.execute(command);
                 true

@@ -989,7 +989,7 @@ impl Explorer {
 
     /// Does what `stroke` does, leaving the tree to be flattened.
     fn typed(&mut self, stroke: Stroke) -> bool {
-        self.message = None;
+        let had_message = self.message.take().is_some();
         // Where a view kept put the cursor is forgotten once it's moved.
         self.view.cursor = None;
         self.view.up = false;
@@ -1011,7 +1011,7 @@ impl Explorer {
         let was_pending = self.keys.pending();
         match self.keys.read(stroke, false, &ExplorerKeys) {
             Parsed::Incomplete => true,
-            Parsed::Nothing => was_pending,
+            Parsed::Nothing => was_pending || had_message,
             Parsed::Command(command) => {
                 self.execute(command);
                 true

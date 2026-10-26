@@ -337,3 +337,12 @@ fn a_paste_goes_into_what_is_typed_in_the_bar() {
     assert!(pane.paste("a\tb"));
     assert_eq!(pane.label(), "post a note: a b▏");
 }
+
+#[test]
+fn a_key_that_does_nothing_still_clears_a_message_and_redraws() {
+    let mut pane = ten();
+    keys(&mut pane, "/nothing<CR>");
+    assert_eq!(pane.label(), "no entry matches nothing");
+    assert!(pane.stroke(Stroke::Escape), "drawn again");
+    assert_ne!(pane.label(), "no entry matches nothing");
+}
