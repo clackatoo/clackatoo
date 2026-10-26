@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026.10.81 (2026-10-26)
+
+### Features
+
+- **text:** weigh edits and coarsen one of too many pieces (CLACKA-129) (8e0cb76)
+- **text:** undo steps keep what their author said and can change nothing (CLACKA-130) (44279f8)
+- **protocol:** undo steps that keep the cursor and selection (CLACKA-130) (93aeb30)
+- **daemon:** keep and give back what undo steps keep (CLACKA-130) (b887f4b)
+- **gui:** undo puts back Vim's cursor and selection, and steps that change nothing (CLACKA-130) (7ee5212)
+
+### Fixes
+
+- **text:** bound history's work and how far it reaches (CLACKA-129) (d248873)
+- **gui:** send an edit of too many pieces coarsened (CLACKA-129) (04c0af8)
+- **daemon:** bound edits' rebase and trim buffer history (CLACKA-129) (338ce7a)
+- **text:** lower the edit and work limits to a few milliseconds (CLACKA-129) (2833c74)
+- **text:** bound catching up, keep no steps for some authors, check before coarsening (CLACKA-130) (635d315)
+- **protocol:** send undo steps to an older daemon as it takes them (CLACKA-130) (39902cc)
+- **text:** an author keeps as few undo steps as it's told (CLACKA-130) (0000a46)
+- **daemon:** check late edits, take long ones, and let relays reattach (CLACKA-130) (4de1101)
+- **daemon:** relays have the window attach again, and trims keep fewer texts (CLACKA-130) (fd28e7e)
+- **text:** count the text an edit copies at each step it goes past (CLACKA-130) (5f1fd86)
+- **daemon:** take long edits from older windows past others' edits (CLACKA-130) (d7d664b)
+- **daemon:** don't tell a relaying daemon before 106 to reattach (CLACKA-130) (0f2af8d)
+- **text:** cap the work of an edit of any length's own pieces (CLACKA-130) (ca10883)
+- **text:** count an edit's own pieces when its rebase runs out of work (CLACKA-130) (5dbe287)
+
 ## 2026.10.80 (2026-10-26)
 
 ### Features
