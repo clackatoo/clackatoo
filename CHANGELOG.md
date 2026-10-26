@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026.10.80 (2026-10-26)
+
+### Features
+
+- add permissioned native access and durable agent activities (35167d4)
+- **web:** attach photos and screenshots to agent messages (3d01828)
+- **web:** combine composer settings in the model selector (3020530)
+- **web:** simplify terminal controls and improve phone readability (43c081d)
+- **gui:** let a pane add keys after z to the grammar (CLACKA-127) (ca6c2ac)
+- **gui:** put reviews and boards on the shared Vim grammar (CLACKA-127) (6662a79)
+- **gui:** put the explorer on the shared Vim grammar (CLACKA-127) (757d030)
+- **gui:** sentences, tag blocks and visual Y, as Vim's (CLACKA-127) (d6593f3)
+- **gui:** read a chat's keys with the shared Vim grammar (CLACKA-127) (32605d6)
+
+### Fixes
+
+- **web:** keep the composer within the iPhone keyboard viewport (c2abe5b)
+- **web:** reduce the composer gap above the home indicator (8a53fdb)
+- **web:** distinguish Home Screen insets from keyboard height (19bd3d7)
+- **web:** keep the composer inside the drawable iOS viewport (26b2f91)
+- **gui:** keep list cursors in bounds, type into a review's search, share ListKeys (CLACKA-127) (5e6f94f)
+- **gui:** IME text and pastes reach a list pane's bar (CLACKA-127) (a4fa8cc)
+- **gui:** bound all of it/at to one budget; a line read once by sentences (CLACKA-127) (17fcfe5)
+- **gui:** a key that does nothing in a list still clears its message (CLACKA-127) (b932061)
+- **gui:** Ctrl+Shift with a letter is Ctrl's in a chat again (CLACKA-127) (88f4903)
+- **gui:** a chat's count reaches Lua bindings and G; tidy (CLACKA-127) (48dad16)
+- **gui:** it/at find nothing when the budget runs out; tags with no end cost once (CLACKA-127) (95d1a70)
+- **gui:** a paste in a folder shown as text is the text's; \r in a list's bar (CLACKA-127) (8a912b4)
+
 ## 2026.10.79 (2026-10-25)
 
 ### Features
