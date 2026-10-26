@@ -325,3 +325,15 @@ fn a_boards_keys_help_comes_from_how_it_reads_them() {
     assert!(has("n", "Repeat search"));
     assert!(!rows.iter().any(|(key, _)| key == "p"), "nothing to put");
 }
+
+#[test]
+fn a_paste_goes_into_what_is_typed_in_the_bar() {
+    let mut pane = ten();
+    assert!(!pane.paste("x"), "nothing typed");
+    keys(&mut pane, "/entry");
+    assert!(pane.paste(" 7\n"));
+    assert_eq!(pane.label(), "/entry 7 ▏");
+    keys(&mut pane, "<Esc>i");
+    assert!(pane.paste("a\tb"));
+    assert_eq!(pane.label(), "post a note: a b▏");
+}

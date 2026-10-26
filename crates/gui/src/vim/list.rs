@@ -254,6 +254,16 @@ impl ListSearch {
         }
     }
 
+    /// Pastes `text` into the search being typed, if one is, its line
+    /// breaks as spaces, as the bar is one line. Returns whether one was.
+    pub(crate) fn paste(&mut self, text: &str) -> bool {
+        let Some((query, _)) = &mut self.typing else {
+            return false;
+        };
+        paste_into(query, text);
+        true
+    }
+
     /// Forgets the search being typed, as leaving the pane does.
     pub(crate) fn give_up(&mut self) {
         self.typing = None;
@@ -288,6 +298,16 @@ impl ListSearch {
         let backward = self.last.as_ref().is_some_and(|(_, backward)| *backward) != reverse;
         round(len, at, count, backward, matches)
     }
+}
+
+/// Puts `text` at the end of what's typed in a list's bar, `typed`: its
+/// line breaks as spaces, and nothing else that isn't printed.
+pub(crate) fn paste_into(typed: &mut String, text: &str) {
+    typed.extend(
+        text.chars()
+            .map(|ch| if ch == '\n' || ch == '\t' { ' ' } else { ch })
+            .filter(|ch| !ch.is_control()),
+    );
 }
 
 /// The `count`th of `len` items that `matches` after item `at`, or

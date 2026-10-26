@@ -172,6 +172,18 @@ impl BoardPane {
         self.prompt.is_some() || self.search.typing()
     }
 
+    /// Pastes `text` into what's typed in the bar, an entry or a search,
+    /// if anything is. Returns whether it was.
+    pub(crate) fn paste(&mut self, text: &str) -> bool {
+        match &mut self.prompt {
+            Some(Prompt::Post { text: typed, .. } | Prompt::Edit { text: typed, .. }) => {
+                list::paste_into(typed, text);
+                true
+            }
+            None => self.search.paste(text),
+        }
+    }
+
     /// Ends what was half done as the focus leaves the board: a command
     /// half typed, and a search being typed. An entry being typed stays,
     /// to finish.

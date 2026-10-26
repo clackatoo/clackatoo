@@ -458,6 +458,19 @@ impl Explorer {
         self.prompt.is_some() || self.search.typing()
     }
 
+    /// Pastes `text` into what's typed in the bar, a name or a search, if
+    /// anything is. Returns whether it was.
+    pub(crate) fn paste(&mut self, text: &str) -> bool {
+        match &mut self.prompt {
+            Some(Prompt::Add { name, .. } | Prompt::Rename { name, .. }) => {
+                list::paste_into(name, text);
+                true
+            }
+            Some(Prompt::Confirm { .. }) => false,
+            None => self.search.paste(text),
+        }
+    }
+
     /// Ends what was half done as the focus leaves the explorer: a command
     /// half typed, and a search being typed. A name or an answer being
     /// typed stays, to finish.

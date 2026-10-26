@@ -600,6 +600,9 @@ impl Desk {
         if let Some(board) = self.focused_board() {
             return board.prompting().then_some(TextTarget::Bar);
         }
+        if let Some(review) = self.focused_review() {
+            return review.prompting().then_some(TextTarget::Bar);
+        }
         if self.focused_browser().is_some() {
             return None;
         }
@@ -2200,11 +2203,31 @@ impl Desk {
             self.suggest_completion();
         } else if self.finding() {
             self.paste_into_finder(text);
-        } else if !self.paste_into_editor(text)
+        } else if !self.paste_into_list(text)
+            && !self.paste_into_editor(text)
             && let Some(pane) = self.focused_pane()
         {
             pane.paste(text);
         }
+    }
+
+    /// Pastes `text` into what's typed in the focused explorer's, board's
+    /// or review's bar, if it's one of them. Returns whether it was: a
+    /// list pane with nothing typed takes no paste.
+    fn paste_into_list(&mut self, text: &str) -> bool {
+        if let Some(explorer) = self.focused_explorer_mut() {
+            explorer.paste(text);
+            return true;
+        }
+        if let Some(board) = self.focused_board_mut() {
+            board.paste(text);
+            return true;
+        }
+        if let Some(review) = self.focused_review_mut() {
+            review.paste(text);
+            return true;
+        }
+        false
     }
 
     /// Scrolls the pane at `point` `lines` up, or down if negative, as the
@@ -11129,7 +11152,10 @@ mod tests {
         load(&mut desk, 7, "/p/b.txt", "b\n");
         answer_all(&mut desk);
         assert_eq!(shown_pane(&desk), PaneId(2));
+        assert_eq!(desk.text_goes_to(), None);
         type_keys(&mut desk, "/");
+        // The input method's text goes to the bar, as for any prompt.
+        assert_eq!(desk.text_goes_to(), Some(TextTarget::Bar));
         // `'` then Space, composed: Space typing `'`.
         desk.key(&KeyPress {
             key: &Key::Named(NamedKey::Space),
@@ -11140,6 +11166,10 @@ mod tests {
         });
         let label = desk.focused_review().map(crate::review::Review::label);
         assert_eq!(label.as_deref(), Some("/'▏"));
+        // A paste goes there too, on one line.
+        desk.paste("ab\ncd");
+        let label = desk.focused_review().map(crate::review::Review::label);
+        assert_eq!(label.as_deref(), Some("/'ab cd▏"));
     }
 
     // --- Folders edited as text --------------------------------------------

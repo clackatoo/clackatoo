@@ -240,6 +240,12 @@ impl Review {
         self.search.typing()
     }
 
+    /// Pastes `text` into the search being typed, if one is. Returns
+    /// whether one was.
+    pub(crate) fn paste(&mut self, text: &str) -> bool {
+        self.search.paste(text)
+    }
+
     /// What the window's title says.
     pub(crate) fn title(&self) -> &str {
         &self.title

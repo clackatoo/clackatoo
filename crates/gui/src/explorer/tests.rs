@@ -1308,3 +1308,14 @@ fn an_explorer_takes_every_lists_move_and_its_keys_help_comes_from_its_dialect()
     assert!(has("Ctrl+V", "Open in right split"));
     assert!(has("H", "Top of view"));
 }
+
+#[test]
+fn a_paste_goes_into_a_search_or_a_name_being_typed() {
+    let mut explorer = explorer(10);
+    rooted(&mut explorer, vec![file("alpha.rs"), file("beta.md")]);
+    assert!(!explorer.paste("x"), "nothing typed");
+    keys(&mut explorer, "/");
+    assert!(explorer.paste("beta"));
+    keys(&mut explorer, "<CR>");
+    assert_eq!(at(&mut explorer), "/p/beta.md");
+}
