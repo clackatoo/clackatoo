@@ -43,9 +43,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use clackatoo_protocol::{
-    BoardId, BufferId, ChatState, ChatSummary, Content, FilesId, Kept as KeptRunning, Layout,
-    Machine, MachineId, OtherMachine, Pane, PaneId, PaneKind, Restored, ReviewId, Tab, TabId,
-    TerminalId, Workspace, WorkspaceId, Workspaces,
+    Background, BoardId, BufferId, ChatState, ChatSummary, Content, FilesId, Kept as KeptRunning,
+    Layout, Machine, MachineId, OtherMachine, Pane, PaneId, PaneKind, Restored, ReviewId, Tab,
+    TabId, TerminalId, Workspace, WorkspaceId, Workspaces,
 };
 
 use crate::server::restore::kept_command;
@@ -82,6 +82,14 @@ pub(crate) const MOST_HUNKS: usize = 1 << 16;
 /// The longest name of another daemon's kept, in characters: a workspace's,
 /// a tab's, or a chat's title.
 const LONGEST_NAME: usize = 256;
+
+/// The most of a workspace's background tabs taken in from another
+/// daemon: as many as one here may have.
+const MOST_BACKGROUND: usize = crate::workspaces::MOST_BACKGROUND;
+
+/// The longest name of another daemon's background tab kept, in
+/// characters: as long as one here may be called.
+const LONGEST_BACKGROUND_NAME: usize = 100;
 
 /// The longest reason another daemon's chat gives for not starting that's
 /// kept, in characters.
@@ -345,7 +353,11 @@ impl Mirror {
             .iter()
             .filter(|workspace| workspace.home.is_none() && workspace.lent.is_none())
         {
-            let count: usize = (workspace.tabs.iter())
+            // Its background tabs' panes count too, as many as are shown.
+            let background = (workspace.background.iter())
+                .take(MOST_BACKGROUND)
+                .map(|background| &background.tab);
+            let count: usize = (workspace.tabs.iter().chain(background))
                 .map(|tab| tab.layout.panes().len())
                 .sum();
             if workspaces.len() == MOST_WORKSPACES || panes + count > MOST_PANES {
@@ -515,8 +527,13 @@ impl Mirror {
         if remote.restored.is_empty() && remote.kept.is_empty() {
             return (Vec::new(), Vec::new());
         }
+        // Background tabs' panes too: kept running, or offering to run
+        // again once one is brought back.
         let shown: BTreeSet<PaneId> = (workspaces.iter())
-            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|workspace| {
+                let background = workspace.background.iter().map(|one| &one.tab);
+                workspace.tabs.iter().chain(background)
+            })
             .flat_map(|tab| tab.layout.panes())
             .map(|pane| pane.id)
             .filter(|pane| !self.held.contains_key(pane))
@@ -569,33 +586,16 @@ impl Mirror {
         let mut tabs = Vec::new();
         let mut active_tab = None;
         for tab in &workspace.tabs {
-            if kept.tabs.contains(&tab.id.0) {
-                continue;
-            }
-            let Some(layout) = self.renumber_layout(&tab.layout, shown, fresh, kept) else {
+            let Some(renumbered) = self.renumber_tab(tab, shown, fresh, kept) else {
                 continue;
             };
-            kept.tabs.insert(tab.id.0);
-            let id = TabId(self.tab_numbers.local_or_fresh(tab.id.0, || fresh.tab()));
-            let panes = layout.panes();
-            // The pane it says has the focus, or else its first.
-            let focused = (self.pane_numbers.local(tab.focused.0))
-                .map(clackatoo_protocol::PaneId)
-                .filter(|&focused| panes.iter().any(|pane| pane.id == focused))
-                .unwrap_or(panes[0].id);
             if tab.id == workspace.active_tab {
-                active_tab = Some(id);
+                active_tab = Some(renumbered.id);
             }
-            tabs.push(Tab {
-                id,
-                layout,
-                focused,
-                name: (tab.name.as_deref())
-                    .map(shown_name)
-                    .filter(|name| !name.is_empty()),
-            });
+            tabs.push(renumbered);
         }
         let first = tabs.first()?.id;
+        let background = self.renumber_background(&workspace.background, shown, fresh, kept);
         kept.workspaces.insert(workspace.id.0);
         let id = self
             .workspace_numbers
@@ -612,10 +612,81 @@ impl Mirror {
             active_tab: active_tab.unwrap_or(first),
             home: Some(machine.id),
             lent: None,
-            // What another machine keeps in the background is its own, not
-            // shown here: its numbers aren't renumbered (CLACKA-121).
-            background: Vec::new(),
+            background,
         })
+    }
+
+    /// `tab`, one of the other daemon's, renumbered, as `shown` says,
+    /// noting the numbers it used in `kept`; or `None` if it was said
+    /// already, or nothing of it can be shown.
+    fn renumber_tab(
+        &mut self,
+        tab: &Tab,
+        shown: Shown<'_>,
+        fresh: &mut dyn Fresh,
+        kept: &mut Kept,
+    ) -> Option<Tab> {
+        if kept.tabs.contains(&tab.id.0) {
+            return None;
+        }
+        let layout = self.renumber_layout(&tab.layout, shown, fresh, kept)?;
+        kept.tabs.insert(tab.id.0);
+        let id = TabId(self.tab_numbers.local_or_fresh(tab.id.0, || fresh.tab()));
+        let panes = layout.panes();
+        // The pane it says has the focus, or else its first.
+        let focused = (self.pane_numbers.local(tab.focused.0))
+            .map(PaneId)
+            .filter(|&focused| panes.iter().any(|pane| pane.id == focused))
+            .unwrap_or(panes[0].id);
+        Some(Tab {
+            id,
+            layout,
+            focused,
+            name: (tab.name.as_deref())
+                .map(shown_name)
+                .filter(|name| !name.is_empty()),
+        })
+    }
+
+    /// `background`, a workspace's background tabs, of the other daemon's,
+    /// renumbered as `shown` says, noting the numbers they used in `kept`
+    /// (CLACKA-122). As many as a workspace here may have are taken in,
+    /// and only those holding terminals of the daemon's own, as any
+    /// daemon's do: one holding anything else is left out, as is one whose
+    /// number it said already.
+    fn renumber_background(
+        &mut self,
+        background: &[Background],
+        shown: Shown<'_>,
+        fresh: &mut dyn Fresh,
+        kept: &mut Kept,
+    ) -> Vec<Background> {
+        let mut renumbered = Vec::new();
+        for one in background {
+            if renumbered.len() == MOST_BACKGROUND {
+                break;
+            }
+            let own_terminals = (one.tab.layout.panes().iter()).all(|pane| {
+                matches!(pane.content, Content::Terminal(_))
+                    && pane.home.is_none()
+                    && pane.key.is_none()
+            });
+            if !own_terminals {
+                continue;
+            }
+            let Some(tab) = self.renumber_tab(&one.tab, shown, fresh, kept) else {
+                continue;
+            };
+            renumbered.push(Background {
+                tab,
+                state: one.state,
+                failed: one.failed,
+                name: (shown_name(&one.name).chars())
+                    .take(LONGEST_BACKGROUND_NAME)
+                    .collect(),
+            });
+        }
+        renumbered
     }
 
     /// `layout`, of the other daemon's, renumbered, and tidied: a split's
@@ -1132,6 +1203,153 @@ mod tests {
         remote.kept.clear();
         assert!(take(&mut mirror, &mut fresh, &remote).changed);
         assert!(mirror.kept.is_empty());
+    }
+
+    /// A background tab of another daemon's.
+    fn background(id: u32, layout: Layout, focused: u32, name: &str) -> Background {
+        Background {
+            tab: Tab {
+                id: TabId(id),
+                layout,
+                focused: PaneId(focused),
+                name: None,
+            },
+            state: clackatoo_protocol::BackgroundState::Running,
+            failed: Some(1),
+            name: name.to_owned(),
+        }
+    }
+
+    /// Another daemon's background tabs are shown, renumbered, with their
+    /// kept marks and offers (CLACKA-122): only those holding terminals of
+    /// its own, as many as a workspace here may have, their names made
+    /// safe; and their numbers outlast what's shown changing.
+    #[test]
+    fn another_daemons_background_tabs_are_renumbered_with_their_marks() {
+        let mut mirror = Mirror::default();
+        let mut fresh = Counters::default();
+        let mut work = workspace(1, "main", pane(1, Content::Terminal(TerminalId(1))), 1);
+        let split = Layout::Split {
+            axis: Axis::LeftToRight,
+            parts: vec![
+                pane(2, Content::Terminal(TerminalId(2))),
+                pane(3, Content::Terminal(TerminalId(3))),
+            ],
+            shares: vec![1, 1],
+        };
+        work.background = vec![
+            background(2, split, 3, "trail serve\u{202e}\n"),
+            // Neither an editor, nor a pane of another machine's, nor a
+            // tab said already, is a background tab of its own.
+            background(3, pane(4, Content::Buffer(BufferId(1))), 4, "editor"),
+            background(4, held(5, MachineId([7; 16]), 5), 5, "lent"),
+            background(1, pane(6, Content::Terminal(TerminalId(6))), 6, "again"),
+            background(
+                5,
+                pane(7, Content::Terminal(TerminalId(7))),
+                7,
+                "x".repeat(300).as_str(),
+            ),
+        ];
+        let mut remote = workspaces(vec![work]);
+        remote.kept = vec![KeptRunning {
+            pane: PaneId(3),
+            command: "trail serve".to_owned(),
+            always: true,
+            given_up: false,
+            paused: false,
+        }];
+        remote.restored = vec![Restored {
+            pane: PaneId(7),
+            ran: Some("cargo watch".to_owned()),
+            place: None,
+        }];
+        let take = |mirror: &mut Mirror, fresh: &mut Counters, remote: &Workspaces| {
+            mirror.take(remote, &machine(5), HERE, fresh, &following(&[]), true)
+        };
+        assert!(take(&mut mirror, &mut fresh, &remote).changed);
+        let shown = &mirror.workspaces[0].background;
+        assert_eq!(shown.len(), 2, "{shown:#?}");
+        let first = &shown[0];
+        assert_eq!(first.tab.id, TabId(202));
+        assert_eq!(first.tab.focused, PaneId(303));
+        assert_eq!(first.name, "trail serve");
+        assert_eq!(first.failed, Some(1));
+        let terminals: Vec<Content> = (first.tab.layout.panes().iter())
+            .map(|pane| pane.content)
+            .collect();
+        assert_eq!(
+            terminals,
+            [
+                Content::Terminal(TerminalId(402)),
+                Content::Terminal(TerminalId(403))
+            ]
+        );
+        assert_eq!(shown[1].name.chars().count(), 100);
+        // Its mark and its offer, by the numbers here.
+        let kept: Vec<PaneId> = mirror.kept.iter().map(|kept| kept.pane).collect();
+        assert_eq!(kept, [PaneId(303)]);
+        let offered: Vec<PaneId> = (mirror.restored.iter()).map(|one| one.pane).collect();
+        let last = shown[1].tab.layout.panes()[0].id;
+        assert_eq!(offered, [last]);
+        // Asked of the daemon there by its own numbers.
+        assert_eq!(mirror.tab_numbers.remote(202), Some(2));
+        assert_eq!(mirror.pane_numbers.remote(303), Some(3));
+        assert_eq!(mirror.terminal_numbers.remote(403), Some(3));
+        assert!(!take(&mut mirror, &mut fresh, &remote).changed);
+
+        // Brought back, it's a tab, by the same numbers.
+        let brought = remote.list[0].background.remove(0);
+        remote.list[0].tabs.push(brought.tab);
+        assert!(take(&mut mirror, &mut fresh, &remote).changed);
+        let tabs = &mirror.workspaces[0].tabs;
+        assert_eq!(tabs[1].id, TabId(202));
+        assert_eq!(mirror.workspaces[0].background.len(), 1);
+    }
+
+    /// No more of a workspace's background tabs are taken in than one here
+    /// may have, and their panes count toward those of all its workspaces.
+    #[test]
+    fn only_so_many_background_tabs_are_taken() {
+        let mut mirror = Mirror::default();
+        let mut fresh = Counters::default();
+        let mut work = workspace(1, "main", pane(1, Content::Terminal(TerminalId(1))), 1);
+        work.background = (2..2 + 2 * MOST_BACKGROUND as u32)
+            .map(|id| background(id, pane(id, Content::Terminal(TerminalId(id))), id, "srv"))
+            .collect();
+        let mut many = vec![work];
+        // As many panes in all as are shown, but for those background tabs
+        // taken in: the workspace after them is left out.
+        let first = 1000;
+        let rest = MOST_PANES - 1 - MOST_BACKGROUND;
+        let parts = (0..rest as u32)
+            .map(|n| pane(first + n, Content::Terminal(TerminalId(first + n))))
+            .collect();
+        let shares = vec![1; rest];
+        let split = Layout::Split {
+            axis: Axis::LeftToRight,
+            parts,
+            shares,
+        };
+        many.push(workspace(500, "full", split, first));
+        many.push(workspace(
+            501,
+            "past",
+            pane(9999, Content::Terminal(TerminalId(9999))),
+            9999,
+        ));
+        let remote = workspaces(many);
+        let taken = mirror.take(
+            &remote,
+            &machine(5),
+            HERE,
+            &mut fresh,
+            &following(&[]),
+            true,
+        );
+        assert!(taken.cut);
+        assert_eq!(mirror.workspaces.len(), 2);
+        assert_eq!(mirror.workspaces[0].background.len(), MOST_BACKGROUND);
     }
 
     #[test]

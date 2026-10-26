@@ -4931,13 +4931,10 @@ fn another_machines_offer_to_run_a_command_again_is_shown_and_dismissed_through_
 }
 
 /// jack's report (2026-10-23), the other half: desk's background tabs
-/// aren't shown in its workspace on laptop, so neither the icon after the
-/// tabs nor the list of background tabs has them. CLACKA-121 left this
-/// out on purpose (the window reference: a workspace on another machine
-/// "keeps its background tabs to itself for now"): this test is what
-/// showing them would pass.
+/// weren't shown in its workspace on laptop, so neither the icon after the
+/// tabs nor the list of background tabs had them (CLACKA-122). They are,
+/// with the offer to run again what the background tab's shell ran.
 #[test]
-#[ignore = "CLACKA-122"]
 fn another_machines_background_tabs_are_shown_through_this_daemon() {
     let world = World::new();
     kept_with_offer_and_background(&world, "desk");
@@ -4955,6 +4952,13 @@ fn another_machines_background_tabs_are_shown_through_this_daemon() {
         agents.background.len(),
         1,
         "desk's background tab isn't shown here: {agents:#?}"
+    );
+    let pane = agents.background[0].tab.layout.panes()[0].id;
+    assert_eq!(
+        offered(&shown, pane),
+        Some("trail serve"),
+        "{:?}",
+        shown.restored
     );
 }
 
