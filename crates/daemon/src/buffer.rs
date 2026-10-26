@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use clackatoo_protocol::{Author, BufferSnapshot, Edit, Error, Op, TerminalId};
-use clackatoo_text::{History, HistoryError, HistorySnapshot, Merged, Rope, Steps, merge};
+use clackatoo_text::{
+    History, HistoryError, HistorySnapshot, MOST_PIECES, Merged, Rope, Steps, merge,
+};
 
 use crate::handover;
 
@@ -246,7 +248,11 @@ impl Buffer {
     }
 
     /// Makes `edit`, which `author` made to version `base`, bringing it up
-    /// to date first. `step` starts a new undo step.
+    /// to date first. `step` starts a new undo step. One of more than
+    /// [`MOST_PIECES`] pieces, as the daemon makes of a language server's
+    /// formatting or an agent's write, is made coarsened, so every edit
+    /// kept is quick to bring others past: a window's never is, as the
+    /// daemon refuses those first.
     pub(crate) fn edit(
         &mut self,
         edit: Edit,
@@ -254,7 +260,10 @@ impl Buffer {
         step: bool,
         author: Author,
     ) -> Result<Made, HistoryError> {
-        let edit = self.history.rebase(edit, base)?;
+        let mut edit = self.history.rebase(edit, base)?;
+        if edit.ops().len() > MOST_PIECES {
+            edit = edit.coarsened(&self.text, MOST_PIECES);
+        }
         edit.apply(&mut self.text)?;
         let version = self.history.record(edit.clone(), author, step)?;
         Ok(Made { version, edit })
@@ -280,6 +289,30 @@ impl Buffer {
             version: self.history.version(),
             edit,
         }))
+    }
+
+    /// Whether `author` has had undo steps let go, the oldest first (see
+    /// [`History::forgot`]).
+    pub(crate) fn forgot(&self, author: Author) -> bool {
+        self.history.forgot(&author)
+    }
+
+    /// The version the edits kept would start from once trimmed, if
+    /// they've grown too big (see [`History::trim_due`]).
+    pub(crate) fn trim_due(&self) -> Option<u64> {
+        self.history.trim_due()
+    }
+
+    /// Lets go of the edits made before `version`. What needs to read the
+    /// text at an older version, such as an agent's turn to be undone,
+    /// takes it first.
+    pub(crate) fn trim(&mut self, version: u64) {
+        if let Err(err) = self.history.trim(version) {
+            log::error!(
+                "{}: its history couldn't be trimmed: {err}",
+                self.path.display()
+            );
+        }
     }
 
     /// Notes whether the text is as it was last read or written, after a
@@ -1066,6 +1099,24 @@ mod tests {
         assert_eq!(buffer.check_modified(), Some(false));
         buffer.reverse(Author::User, true).unwrap().unwrap();
         assert_eq!(buffer.check_modified(), Some(true));
+    }
+
+    #[test]
+    fn an_edit_the_daemon_makes_of_too_many_pieces_is_kept_coarsened() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a");
+        fs::write(&path, "ab".repeat(MOST_PIECES)).unwrap();
+        let mut buffer = Buffer::open(path, dir.path().to_owned()).unwrap();
+        // As a formatter's edit, changing every other character.
+        let mut edit = Edit::new();
+        for _ in 0..MOST_PIECES {
+            edit.retain(1).delete("b").insert("B");
+        }
+        let made = buffer.edit(edit, 0, true, Author::User).unwrap();
+        assert!(made.edit.ops().len() <= MOST_PIECES);
+        assert_eq!(buffer.text().to_string(), "aB".repeat(MOST_PIECES));
+        buffer.reverse(Author::User, false).unwrap().unwrap();
+        assert_eq!(buffer.text().to_string(), "ab".repeat(MOST_PIECES));
     }
 
     #[test]

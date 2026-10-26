@@ -19517,3 +19517,183 @@ fn native_access_defaults_off_and_inspect_cannot_control() {
     assert!(words.contains("revoked"), "{words}");
     assert!(!words.contains("wrong window") && !words.contains("late reply"));
 }
+
+/// An edit of `pieces` single-byte insertions spread through a text `len`
+/// bytes long, made to version `base`.
+fn spread(pieces: usize, len: usize, base: u64) -> Change {
+    let mut edit = Edit::new();
+    let gap = len / pieces;
+    for _ in 0..pieces {
+        edit.retain(gap).insert("x");
+    }
+    edit.retain(len - gap * pieces);
+    Change::Edit {
+        edit,
+        base,
+        step: true,
+    }
+}
+
+/// Waits for the client's change numbered `seq` to be acked, returning
+/// the version it made.
+fn acked(client: &mut Client, seq: u64) -> u64 {
+    loop {
+        if let BufferUpdate::Acked {
+            version,
+            seq: answers,
+        } = next_buffer_update(client)
+            && answers == seq
+        {
+            return version;
+        }
+    }
+}
+
+#[test]
+fn an_edit_too_far_back_to_bring_up_to_date_has_its_window_attach_again() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let len = 200_000;
+    std::fs::write(dir.join("big.txt"), "a".repeat(len)).unwrap();
+    let mut other = daemon.client();
+    let buffer = open_attached(&mut other, dir, "big.txt");
+    let window = clackatoo_daemon::random_window();
+    let mut late = daemon.client();
+    late.attach_buffer_as(buffer, window).unwrap();
+    let snapshot = loop {
+        if let BufferUpdate::Snapshot(snapshot) = next_buffer_update(&mut late) {
+            break snapshot;
+        }
+    };
+    // Another window's edits, each of as many pieces as an edit may have
+    // (as `:%s` makes): bringing an edit past them all is more work than
+    // the daemon does at once.
+    let pieces = (clackatoo_text::MOST_PIECES - 1) / 2;
+    let mut version = snapshot.version;
+    for seq in 0..5 {
+        let len = len + pieces * usize::try_from(seq).unwrap();
+        send_change(&mut other, buffer, seq, spread(pieces, len, version));
+        version = acked(&mut other, seq);
+    }
+    // The late window's edit, from before them, isn't made: it's told to
+    // attach again...
+    send_change(
+        &mut late,
+        buffer,
+        7,
+        insert(len, 0, "late ", snapshot.version),
+    );
+    loop {
+        match next_buffer_update(&mut late) {
+            BufferUpdate::Reattach => break,
+            update @ (BufferUpdate::Acked { .. } | BufferUpdate::Snapshot(_)) => {
+                panic!("expected to attach again, got {update:?}")
+            }
+            _ => {}
+        }
+    }
+    // ...and attaching again, hears its change wasn't dealt with, and the
+    // edits since, to bring it past itself.
+    late.request(&Request::AttachBuffer {
+        buffer,
+        window,
+        resume: Some(Resume {
+            daemon: snapshot.daemon,
+            version: snapshot.version,
+        }),
+    })
+    .unwrap();
+    match next_buffer_update(&mut late) {
+        BufferUpdate::Resumed { edits, applied, .. } => {
+            assert_eq!(edits.len(), 5);
+            assert_eq!(applied, None);
+        }
+        update => panic!("expected the edits since, got {update:?}"),
+    }
+    // Sent again, brought up to date, it's made.
+    send_change(
+        &mut late,
+        buffer,
+        8,
+        insert(len + 5 * pieces, 0, "late ", version),
+    );
+    assert_eq!(acked(&mut late, 8), version + 1);
+    assert!(
+        attach_buffer(&mut daemon.client(), buffer)
+            .text
+            .starts_with("late a")
+    );
+}
+
+#[test]
+fn an_edit_of_too_many_pieces_is_refused_as_one_that_cant_be_made() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let len = 300_000;
+    std::fs::write(dir.join("big.txt"), "a".repeat(len)).unwrap();
+    let window = clackatoo_daemon::random_window();
+    let mut client = daemon.client();
+    let buffer = open_attached(&mut client, dir, "big.txt");
+    client.attach_buffer_as(buffer, window).unwrap();
+    let snapshot = loop {
+        if let BufferUpdate::Snapshot(snapshot) = next_buffer_update(&mut client) {
+            break snapshot;
+        }
+    };
+    // Sent again as it is, it would be refused again: so it's not to be
+    // attached again for, but failed, and the window starts again.
+    let pieces = clackatoo_text::MOST_PIECES / 2 + 1;
+    send_change(
+        &mut client,
+        buffer,
+        3,
+        spread(pieces, len, snapshot.version),
+    );
+    let failed = loop {
+        match next_buffer_update(&mut client) {
+            BufferUpdate::Snapshot(failed) => break failed,
+            BufferUpdate::Reattach => panic!("told to attach again"),
+            _ => {}
+        }
+    };
+    assert_eq!((failed.applied, failed.landed), (Some(3), None));
+    assert_eq!(failed.version, snapshot.version);
+}
+
+#[test]
+fn undoing_past_the_steps_kept_says_older_ones_were_let_go() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("notes.txt"), "").unwrap();
+    let mut client = daemon.client();
+    let buffer = open_attached(&mut client, dir, "notes.txt");
+    let kept = clackatoo_text::Limits::default().undo_steps;
+    let steps = u64::try_from(kept).unwrap() + 1;
+    for seq in 0..steps {
+        let at = usize::try_from(seq).unwrap();
+        send_change(&mut client, buffer, seq, insert(at, at, "x", seq));
+    }
+    for seq in steps..2 * steps {
+        send_change(&mut client, buffer, seq, Change::Undo);
+    }
+    let mut undone = 0;
+    let last = 2 * steps - 1;
+    loop {
+        match next_buffer_update(&mut client) {
+            BufferUpdate::Edited {
+                answers: Some(_), ..
+            } => undone += 1,
+            BufferUpdate::NoChange(seq) => {
+                assert_eq!(seq, last);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(undone, kept);
+    assert_eq!(
+        next_notice(&mut client),
+        "already at the oldest change kept: older ones were let go"
+    );
+    assert_eq!(attach_buffer(&mut client, buffer).text, "x");
+}

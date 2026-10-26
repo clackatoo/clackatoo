@@ -47,7 +47,7 @@ pub(super) enum Target {
     Buffer { id: BufferId, edit: Edit },
     /// On disk alone, as `file`, opened for the moment, holds it: `text`
     /// is the text it gets.
-    File { file: Buffer, text: String },
+    File { file: Box<Buffer>, text: String },
 }
 
 /// What becomes of a file on disk.
@@ -295,7 +295,10 @@ impl Daemon {
             Ok(Plan {
                 index,
                 path: file.path.clone(),
-                target: Target::File { file: opened, text },
+                target: Target::File {
+                    file: Box::new(opened),
+                    text,
+                },
                 disk,
             })
         }
@@ -497,12 +500,36 @@ impl Daemon {
     /// changes to its file, with the texts before and after each, as its
     /// history goes with it.
     pub(super) fn buffer_closing(&mut self, id: BufferId) {
+        self.keep_texts(id, u64::MAX);
+    }
+
+    /// Buffer `id`'s history is about to let go of the edits that made
+    /// `version` and those before: the log's changes to it that reach back
+    /// that far are turned into changes to its file, as they are when it
+    /// closes.
+    pub(super) fn history_trimming(&mut self, id: BufferId, version: u64) {
+        self.keep_texts(id, version);
+    }
+
+    /// Turns the log's changes to buffer `id` that reach back to `version`
+    /// or before into changes to its file, with the texts before and after
+    /// each.
+    fn keep_texts(&mut self, id: BufferId, version: u64) {
         let Some(slot) = self.buffers.get(&id) else {
             return;
         };
         let buffer = &slot.buffer;
         let mut chats = Vec::new();
+        let reaching = |file: &FileEdits| {
+            (file.changes.iter()).any(|change| {
+                matches!(change, Change::Buffer { buffer, version: made, .. }
+                    if *buffer == id && *made <= version)
+            })
+        };
         for (chat, file) in self.agent_files.log.changes_to(id) {
+            if !reaching(file) {
+                continue;
+            }
             if let Some(pairs) = pairs(Some((id, buffer)), &file.changes) {
                 file.changes = (pairs.into_iter())
                     .map(|(after, before)| Change::Text {
@@ -910,6 +937,30 @@ pub(in crate::server) mod tests {
         assert!(matches!(file.changes[..], [Change::Text { .. }]));
         assert_eq!(world.undo(0, false, false), "Undid turn 1: a.txt.");
         assert_eq!(world.disk("a.txt").as_deref(), Some("one\ntwo\n"));
+    }
+
+    #[test]
+    fn a_turn_whose_edits_a_buffer_lets_go_of_can_still_be_undone() {
+        let mut world = World::new();
+        std::fs::write(world.path("a.txt"), "one\ntwo\n").unwrap();
+        let id = world.open("a.txt");
+        world.write("a.txt", "ONE\ntwo\n");
+        world.end_turn();
+        // Typed and taken out again, as big pastes are, until the history
+        // has grown past what it keeps.
+        let big = "x".repeat(4 << 20);
+        let kept = clackatoo_text::Limits::default().kept_bytes;
+        for _ in 0..=kept / big.len() / 2 {
+            world.type_in(id, 8, "", &big);
+            world.type_in(id, 8, &big, "");
+        }
+        let buffer = &world.daemon.buffers[&id].buffer;
+        assert!(
+            buffer.edits_since(1).is_none(),
+            "the turn's edit was let go"
+        );
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: a.txt.");
+        assert_eq!(world.text(id), "one\ntwo\n");
     }
 
     /// What Claude Code's adapter says of tool `e1` writing `name` itself:

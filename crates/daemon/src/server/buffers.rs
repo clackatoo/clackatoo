@@ -11,7 +11,9 @@ use clackatoo_protocol::{
     OpenFile, OpenFiles, PROTOCOL_VERSION, PaneId, Response, Resume, ServerMessage, frame, wire,
 };
 use clackatoo_syntax::{Found, Highlighted, Syntax, pack};
-use clackatoo_text::{AgentHunks, Highlights, Hunks, Maker, Rope, Span};
+use clackatoo_text::{
+    AgentHunks, EditError, Highlights, HistoryError, Hunks, MOST_PIECES, Maker, Rope, Span,
+};
 use mio::Token;
 
 use super::language::Opened;
@@ -490,12 +492,16 @@ impl Daemon {
             Some(Source::Client(client)) => client.window,
             _ => None,
         };
-        if let Some(window) = window {
-            slot.applied
-                .insert(window, WindowChange { seq, landed: None });
-        }
+        let before = window
+            .and_then(|window| (slot.applied).insert(window, WindowChange { seq, landed: None }));
         let buffer = &mut slot.buffer;
+        let undo = change == Change::Undo;
         let made = match change {
+            // More than the daemon brings up to date or keeps: a window
+            // coarsens one first, so it's from one older than that.
+            Change::Edit { edit, .. } if edit.ops().len() > MOST_PIECES => {
+                Err(HistoryError::Edit(EditError::TooLong))
+            }
             Change::Edit { edit, base, step } => buffer
                 .edit(edit, base, step, Author::User)
                 .map(|made| (Some(made), true)),
@@ -534,13 +540,48 @@ impl Daemon {
                 self.tell_viewers(id, Some(token), &others);
                 self.note_modified(id);
             }
-            Ok((None, _)) => self.tell(token, id, BufferUpdate::NoChange(seq)),
+            Ok((None, _)) => {
+                self.tell(token, id, BufferUpdate::NoChange(seq));
+                let forgot =
+                    (self.buffers.get(&id)).is_some_and(|slot| slot.buffer.forgot(Author::User));
+                if undo && forgot {
+                    let notice = "already at the oldest change kept: older ones were let go";
+                    self.tell(token, id, BufferUpdate::Notice(notice.into()));
+                }
+            }
+            Err(HistoryError::Forgotten(base) | HistoryError::TooFar(base))
+                if self.reattaches(token) =>
+            {
+                // Made to a version too far back to bring up to date here:
+                // the window does that itself, attaching again from it, and
+                // sends the edit again. It wasn't dealt with.
+                log::info!("buffer {id}: an edit from version {base} is too far back");
+                if let (Some(window), Some(slot)) = (window, self.buffers.get_mut(&id)) {
+                    match before {
+                        Some(before) => slot.applied.insert(window, before),
+                        None => slot.applied.remove(&window),
+                    };
+                }
+                self.tell(token, id, BufferUpdate::Reattach);
+            }
             Err(err) => {
                 // The client's copy is wrong somehow: start it again.
                 log::warn!("buffer {id}: an edit couldn't be made: {err}");
                 self.send_snapshot(token, id, None);
             }
         }
+    }
+
+    /// Whether the client at `token` attaches to a buffer again when told
+    /// to ([`BufferUpdate::Reattach`]), bringing what it has waiting up to
+    /// date itself: a window of protocol 92 or later. A daemon relaying
+    /// for its own clients is told its change failed instead, as one
+    /// waits for an answer to it before sending more.
+    fn reattaches(&self, token: Token) -> bool {
+        !self.relays(token)
+            && self
+                .client_wire(token)
+                .is_some_and(|wire| wire >= wire::RELAY)
     }
 
     /// Answers [`Request::Save`](clackatoo_protocol::Request::Save).
@@ -844,6 +885,7 @@ impl Daemon {
     /// compared again. An agent's own change, as `agent` says, makes agent
     /// hunks; any other edit moves them.
     fn edited(&mut self, id: BufferId, version: u64, edit: &Edit, agent: Option<Maker>) {
+        self.trim_history(id);
         self.edited_in_server(id, version, edit);
         self.edited_in_git(id, edit);
         match agent {
@@ -859,6 +901,20 @@ impl Daemon {
         slot.highlights.map(edit);
         if let Some(syntax) = &self.syntax {
             syntax.edit(key(id), version, edit.clone(), slot.buffer.text().clone());
+        }
+    }
+
+    /// Lets go of the oldest edits kept in buffer `id`'s history, if it's
+    /// grown too big: an agent's turn whose changes reach back past them
+    /// keeps its texts, as when the buffer closes, so it can still be
+    /// undone.
+    fn trim_history(&mut self, id: BufferId) {
+        let Some(version) = (self.buffers.get(&id)).and_then(|slot| slot.buffer.trim_due()) else {
+            return;
+        };
+        self.history_trimming(id, version);
+        if let Some(slot) = self.buffers.get_mut(&id) {
+            slot.buffer.trim(version);
         }
     }
 

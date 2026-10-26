@@ -331,7 +331,12 @@ pub enum BufferUpdate {
     /// about the buffer until then. A daemon relaying another's buffer
     /// says so when it can't bring the window up to date itself, as when
     /// its connection to the other was lost and the edits made meanwhile
-    /// are too many, or gone. Only to a client of protocol 92 or later.
+    /// are too many, or gone. And the daemon says so in answer to an edit
+    /// made to a version too far back for it to bring up to date: the edit
+    /// isn't made, or counted as dealt with, and the window brings it up
+    /// to date itself, as it does what it has waiting, and sends it again.
+    /// Only to a client of protocol 92 or later, and never to a daemon
+    /// relaying, which is told such an edit failed.
     Reattach,
 }
 

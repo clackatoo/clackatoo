@@ -1000,7 +1000,10 @@ impl Daemon {
                     index,
                     path: path.clone(),
                     disk: Disk::Write(text.clone()),
-                    target: Target::File { file, text },
+                    target: Target::File {
+                        file: Box::new(file),
+                        text,
+                    },
                 };
                 Ok((
                     plan,
