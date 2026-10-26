@@ -147,7 +147,12 @@ pub(crate) trait Lines {
     /// Whether line `line` is empty, as a paragraph ends at. A terminal's
     /// line can't tell blanks typed from none, so it's empty if blank.
     fn empty(&self, line: u64) -> bool {
-        text_end(self.row(line).as_deref()) == 0
+        self.empty_in(line, self.row(line).as_deref())
+    }
+
+    /// The same, of line `line` whose row, fetched already, is `row`.
+    fn empty_in(&self, _line: u64, row: Option<&Self::Line>) -> bool {
+        text_end(row) == 0
     }
 
     /// The screen rows line `line` is drawn on, in order: one, unless it
@@ -159,7 +164,13 @@ pub(crate) trait Lines {
     /// The column of line `line`'s last character, as `$` goes to, or 0 for
     /// a blank line.
     fn last_cell(&self, line: u64) -> usize {
-        last_char(self.row(line).as_deref())
+        self.last_cell_in(line, self.row(line).as_deref())
+    }
+
+    /// The same, of line `line` whose row, fetched already, is `row`: an
+    /// editor's line is laid out each time it's asked for.
+    fn last_cell_in(&self, _line: u64, row: Option<&Self::Line>) -> usize {
+        last_char(row)
     }
 
     /// The cells a screen row has, where lines wrap: `None` where they
@@ -1754,11 +1765,16 @@ impl<'a, L: Lines> Walk<'a, L> {
 /// is empty. Space and Backspace stop there when an operator takes them,
 /// so the line break counts as a character.
 pub(crate) fn line_end(line: u64, lines: &impl Lines) -> usize {
-    if lines.empty(line) {
+    line_end_in(line, lines.row(line).as_deref(), lines)
+}
+
+/// The same, of line `line` whose row, fetched already, is `row`.
+pub(crate) fn line_end_in<L: Lines>(line: u64, row: Option<&L::Line>, lines: &L) -> usize {
+    if lines.empty_in(line, row) {
         return 0;
     }
-    let last = lines.last_cell(line);
-    lines.row(line).map_or(last, |row| row.extent(last).1) + 1
+    let last = lines.last_cell_in(line, row);
+    row.map_or(last, |row| row.extent(last).1) + 1
 }
 
 /// How many characters on from `from` `to` is, on its line.

@@ -219,3 +219,38 @@ pub(crate) fn forward_by<L: Lines>(
         at_start = !at_start;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+    use crate::motion::tests::Text;
+
+    /// `Text` that counts the rows asked for.
+    struct Counted(Text, Cell<usize>);
+
+    impl Lines for Counted {
+        type Line = clackatoo_term::Row;
+        type Row<'a> = &'a clackatoo_term::Row;
+
+        fn row(&self, line: u64) -> Option<&clackatoo_term::Row> {
+            self.1.set(self.1.get() + 1);
+            self.0.row(line)
+        }
+
+        fn bounds(&self) -> (u64, u64) {
+            self.0.bounds()
+        }
+    }
+
+    #[test]
+    fn a_sentence_over_many_lines_asks_for_each_line_once() {
+        let lines = vec!["no end on this line"; 1000];
+        let text = Counted(Text::new(&lines), Cell::new(0));
+        let steps = Steps::new(&text);
+        let found = find(&steps, Point { line: 0, col: 0 }, true, 1);
+        assert_eq!(found.map(|at| at.line), Some(999), "to the text's end");
+        assert!(text.1.get() <= 1000 + 2, "{} rows asked for", text.1.get());
+    }
+}

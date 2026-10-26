@@ -8,14 +8,16 @@
 //! - the opening tag's own name going on, `<name\>\%(\_s\_[^>]\{-}\_[^/]>\|\_s\?>\)`,
 //!   paired with `</name>`, either case.
 //!
-//! A line's end is a `\n` to them. Each search looks at no more than
-//! [`SEARCH`] places, so a file of no tags costs a bounded look.
+//! A line's end is a `\n` to them. All of `it` or `at`, every search and
+//! every try again, takes no more than [`WORK`] steps between them:
+//! past that it finds nothing, as Vim's does when there's no tag, so no
+//! text, however many tags or `<`s it has, freezes the window.
 
 use crate::motion::steps::{NUL, Step, Steps, white};
 use crate::motion::{Lines, Point, Words};
 
-/// How many places a search for a tag looks at, at most.
-const SEARCH: usize = 1_000_000;
+/// How many steps through the text all of `it` or `at` takes, at most.
+pub(super) const WORK: usize = 1_000_000;
 
 /// The character at `at` as the patterns read it: a line's end a `\n`.
 fn ch<L: Lines>(steps: &Steps<'_, L>, at: Point) -> char {
@@ -51,7 +53,7 @@ fn opening_rest<L: Lines>(steps: &Steps<'_, L>, at: Point, breaks: bool, eol: bo
     }
     // On to the first `>`, at least one character after the blank.
     let mut before = ch(steps, pos);
-    for _ in 0..SEARCH {
+    loop {
         if steps.inc(&mut pos).stuck() {
             return false;
         }
@@ -61,7 +63,6 @@ fn opening_rest<L: Lines>(steps: &Steps<'_, L>, at: Point, breaks: bool, eol: bo
         }
         before = here;
     }
-    false
 }
 
 /// Whether an opening tag of any name starts at `at`.
@@ -145,7 +146,7 @@ fn closes<L: Lines>(steps: &Steps<'_, L>, at: Point, name: &[char]) -> bool {
 fn opening_before<L: Lines>(steps: &Steps<'_, L>, from: Point) -> Option<Point> {
     let mut pos = from;
     let mut nest = 0usize;
-    for _ in 0..SEARCH {
+    loop {
         if steps.dec(&mut pos).stuck() {
             return None;
         }
@@ -158,7 +159,6 @@ fn opening_before<L: Lines>(steps: &Steps<'_, L>, from: Point) -> Option<Point> 
             nest += 1;
         }
     }
-    None
 }
 
 /// The closing tag named `name` after `from` that pairs with the opening
@@ -167,7 +167,7 @@ fn closing_after<L: Lines>(steps: &Steps<'_, L>, from: Point, name: &[char]) -> 
     let words = steps.lines().words();
     let mut pos = from;
     let mut nest = 0usize;
-    for _ in 0..SEARCH {
+    loop {
         if steps.inc(&mut pos).stuck() {
             return None;
         }
@@ -180,7 +180,6 @@ fn closing_after<L: Lines>(steps: &Steps<'_, L>, from: Point, name: &[char]) -> 
             }
         }
     }
-    None
 }
 
 /// Whether the cursor at `at` is in a tag, as Vim's `in_html_tag()`: a
@@ -193,9 +192,9 @@ fn in_tag<L: Lines>(steps: &Steps<'_, L>, at: Point, closing: bool) -> bool {
         if steps.char(p) == '<' {
             break;
         }
-        let mut back = p;
-        steps.dec(&mut back);
-        p = back;
+        if steps.dec(&mut p).stuck() {
+            break;
+        }
         if steps.char(p) == '>' {
             break;
         }
@@ -214,7 +213,7 @@ fn in_tag<L: Lines>(steps: &Steps<'_, L>, at: Point, closing: bool) -> bool {
     }
     let mut pos = p;
     let mut last = NUL;
-    for _ in 0..SEARCH {
+    loop {
         if steps.inc(&mut pos).stuck() {
             return false;
         }
@@ -224,7 +223,6 @@ fn in_tag<L: Lines>(steps: &Steps<'_, L>, at: Point, closing: bool) -> bool {
         }
         last = here;
     }
-    false
 }
 
 /// Whether `at` is in its line's indent, as Vim's `inindent(1)`.
@@ -388,8 +386,17 @@ pub(super) fn current<L: Lines>(
     include: bool,
     count: usize,
 ) -> Option<(Point, Point, bool)> {
-    let steps = Steps::new(lines);
-    let (start, end, inclusive) = tag_block(&steps, at, None, include, count)?;
+    current_in(&Steps::budgeted(lines, WORK), at, include, count)
+}
+
+/// [`current`], stepping with `steps`.
+fn current_in<L: Lines>(
+    steps: &Steps<'_, L>,
+    at: Point,
+    include: bool,
+    count: usize,
+) -> Option<(Point, Point, bool)> {
+    let (start, end, inclusive) = tag_block(steps, at, None, include, count)?;
     if end < start {
         return Some((start, start, false));
     }
@@ -419,7 +426,69 @@ pub(super) fn select<L: Lines>(
     include: bool,
     count: usize,
 ) -> Option<(Point, Point)> {
-    let steps = Steps::new(lines);
+    let steps = Steps::budgeted(lines, WORK);
     let (start, end, _) = tag_block(&steps, cursor, Some(anchor), include, count)?;
     Some((start, if end < start { start } else { end }))
+}
+
+#[cfg(test)]
+mod tests {
+    use clackatoo_term::{Row, RowBuilder, Style};
+
+    use super::*;
+
+    /// Lines of text, each a row as wide as it is.
+    struct Plain(Vec<Row>);
+
+    impl Plain {
+        fn new(text: &str) -> Self {
+            Self(
+                text.split('\n')
+                    .map(|line| {
+                        let mut builder = RowBuilder::new(line.len().max(1));
+                        builder.push(line, &Style::DEFAULT, false);
+                        builder.finish(false)
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    impl Lines for Plain {
+        type Line = Row;
+        type Row<'a> = &'a Row;
+
+        fn row(&self, line: u64) -> Option<&Row> {
+            self.0.get(usize::try_from(line).ok()?)
+        }
+
+        fn bounds(&self) -> (u64, u64) {
+            (0, self.0.len() as u64 - 1)
+        }
+    }
+
+    /// The steps `it` takes from the last line of `text`, and what it
+    /// finds.
+    fn work(text: &str) -> (usize, Option<(Point, Point, bool)>) {
+        let lines = Plain::new(text);
+        let steps = Steps::budgeted(&lines, WORK);
+        let last = lines.bounds().1;
+        let found = current_in(&steps, Point { line: last, col: 1 }, false, 1);
+        (steps.asked(), found)
+    }
+
+    #[test]
+    fn no_text_takes_more_than_the_budget_however_many_tags_or_angles() {
+        // Each `<br>` an opening tag with no end, tried again and again.
+        let (asked, found) = work(&"<br>\n".repeat(2000));
+        assert_eq!(found, None, "nothing found, as Vim's");
+        assert!(asked <= WORK + 100, "{asked}");
+        let (asked, found) = work(&format!("{}\nx", "<".repeat(1000)));
+        assert_eq!(found, None);
+        assert!(asked <= WORK + 100, "{asked}");
+        // A tag found takes what finding it does.
+        let (asked, found) = work("<p>\na\n</p>");
+        assert!(found.is_some());
+        assert!(asked < 100, "{asked}");
+    }
 }

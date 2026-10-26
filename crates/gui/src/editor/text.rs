@@ -1148,11 +1148,14 @@ impl Lines for Text<'_> {
         self.line_len(line) == 0
     }
 
+    fn empty_in(&self, line: u64, _row: Option<&Laid>) -> bool {
+        self.empty(line)
+    }
+
     /// The line's last character, blank or not, as a file's line has its
     /// blanks at the end, where a terminal's row can't tell them from none.
-    fn last_cell(&self, line: u64) -> usize {
-        self.laid(line)
-            .and_then(|laid| Some(laid.extent(laid.cells().checked_sub(1)?).0))
+    fn last_cell_in(&self, _line: u64, row: Option<&Laid>) -> usize {
+        row.and_then(|laid| Some(laid.extent(laid.cells().checked_sub(1)?).0))
             .unwrap_or(0)
     }
 

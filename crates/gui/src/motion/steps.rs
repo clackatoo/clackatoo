@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 
-use super::{Cells, Lines, Point, line_end, next_cell, previous_cell};
+use super::{Cells, Lines, Point, line_end_in, next_cell, previous_cell};
 
 /// What a step did, as Vim's `inc()` and `dec()` say it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,18 +39,47 @@ struct Kept<R> {
     end: usize,
 }
 
-/// Steps through `lines` as Vim's position functions do.
+/// Steps through `lines` as Vim's position functions do, as many as
+/// a budget allows: past it, every step is [`Step::Stuck`], as at the
+/// text's ends, so a search walking with them fails there.
 pub(crate) struct Steps<'a, L: Lines> {
     lines: &'a L,
     kept: RefCell<Option<Kept<L::Row<'a>>>>,
+    left: std::cell::Cell<usize>,
+    /// Every step asked for, past the budget too.
+    #[cfg(test)]
+    asked: std::cell::Cell<usize>,
 }
 
 impl<'a, L: Lines> Steps<'a, L> {
     pub(crate) fn new(lines: &'a L) -> Self {
+        Self::budgeted(lines, usize::MAX)
+    }
+
+    /// Steps through `lines`, no more than `steps` of them.
+    pub(crate) fn budgeted(lines: &'a L, steps: usize) -> Self {
         Self {
             lines,
             kept: RefCell::new(None),
+            left: std::cell::Cell::new(steps),
+            #[cfg(test)]
+            asked: std::cell::Cell::new(0),
         }
+    }
+
+    /// Spends a step of the budget: false if there's none left.
+    fn spend(&self) -> bool {
+        #[cfg(test)]
+        self.asked.set(self.asked.get() + 1);
+        let left = self.left.get();
+        self.left.set(left.saturating_sub(1));
+        left > 0
+    }
+
+    /// How many steps were asked for, past the budget too.
+    #[cfg(test)]
+    pub(crate) fn asked(&self) -> usize {
+        self.asked.get()
     }
 
     pub(crate) fn lines(&self) -> &'a L {
@@ -61,11 +90,9 @@ impl<'a, L: Lines> Steps<'a, L> {
     fn on<T>(&self, line: u64, f: impl FnOnce(Option<&L::Line>, usize) -> T) -> T {
         let mut kept = self.kept.borrow_mut();
         if kept.as_ref().is_none_or(|kept| kept.line != line) {
-            *kept = Some(Kept {
-                line,
-                row: self.lines.row(line),
-                end: line_end(line, self.lines),
-            });
+            let row = self.lines.row(line);
+            let end = line_end_in(line, row.as_deref(), self.lines);
+            *kept = Some(Kept { line, row, end });
         }
         let kept = kept.as_ref().expect("just kept");
         f(kept.row.as_deref(), kept.end)
@@ -97,6 +124,9 @@ impl<'a, L: Lines> Steps<'a, L> {
     /// Vim's `inc()`: on a character, or to the line's end, or from it to
     /// the next line's start.
     pub(crate) fn inc(&self, at: &mut Point) -> Step {
+        if !self.spend() {
+            return Step::Stuck;
+        }
         let (end, next) = self.on(at.line, |row, end| (end, next_cell(row, at.col)));
         if at.col < end {
             at.col = next.unwrap_or(end).min(end);
@@ -129,6 +159,9 @@ impl<'a, L: Lines> Steps<'a, L> {
     /// Vim's `dec()`: back a character, or from a line's start to the end
     /// of the line before.
     pub(crate) fn dec(&self, at: &mut Point) -> Step {
+        if !self.spend() {
+            return Step::Stuck;
+        }
         if at.col > 0 {
             let back = self.on(at.line, |row, end| previous_cell(row, at.col.min(end)));
             at.col = back.unwrap_or(0);
