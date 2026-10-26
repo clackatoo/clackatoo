@@ -495,6 +495,7 @@ impl Daemon {
     pub(super) fn lends_known(&mut self, at: usize) {
         self.links.list[at].relayed.lends_known = true;
         self.borrowed_taken(at, false);
+        self.borrowed_backgrounds_taken(at);
     }
 
     /// Tells the daemons on other machines that lent this one panes no

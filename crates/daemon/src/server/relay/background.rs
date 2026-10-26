@@ -240,8 +240,28 @@ impl Daemon {
                 .filter_map(|(&key, lent)| Some((key, lent.background?)))
                 .collect();
         let mut changed = false;
-        for (key, said) in said {
+        let mut brought = Vec::new();
+        for &(key, said) in &said {
             changed |= self.workspaces.set_borrowed_background(machine, key, said);
+            // Brought back here, but not there, as when it couldn't be told:
+            // it's told again, once a connection.
+            let in_a_tab = (self.workspaces.borrowed_as(machine, key))
+                .is_some_and(|pane| self.workspaces.get().find_pane(pane).is_some());
+            if in_a_tab {
+                brought.push(key);
+            }
+        }
+        let relayed = &mut self.links.list[at].relayed;
+        relayed
+            .bringing
+            .retain(|key| said.iter().any(|&(lent, _)| lent == *key));
+        brought.retain(|&key| relayed.bringing.insert(key));
+        for key in brought {
+            let bring = Request::LentBackground {
+                key,
+                action: clackatoo_protocol::LentBackgroundAction::Bring,
+            };
+            let _ = self.send_upstream(at, &ClientMessage::Request(bring), Expect::Nothing);
         }
         if changed {
             self.workspaces_changed();
@@ -720,6 +740,70 @@ mod tests {
         daemon.read_reached(link, Reading::Look);
         let relayed = &daemon.links.list[0].relayed;
         assert!(relayed.ports.is_empty() && relayed.ports_waiting.is_empty());
+    }
+
+    /// A shell lent as a background tab that was brought back here, but
+    /// that the daemon lending it still says is one, as when telling it
+    /// failed, is brought back there too: once a connection.
+    #[test]
+    fn a_lent_background_shell_brought_back_here_is_brought_back_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there) = linked(dir.path());
+        let own = daemon.machine.id;
+        let first = (daemon.workspaces).new_workspace("w".into(), TerminalId(99));
+        let workspace = daemon.workspaces.get().find_pane(first).unwrap().0.id;
+        let borrowed = crate::workspaces::Borrowed {
+            machine: desk().id,
+            key: 9,
+            kind: clackatoo_protocol::PaneKind::new("terminal"),
+            placed: false,
+        };
+        let (tab, _) = (daemon.workspaces)
+            .new_borrowed_background(workspace, borrowed, "trail serve".into())
+            .unwrap();
+        daemon.workspaces.bring_back(tab).unwrap();
+        let lent = Workspace {
+            id: WorkspaceId(5),
+            name: String::new(),
+            tabs: vec![Tab {
+                id: TabId(5),
+                layout: Layout::Pane(Pane {
+                    id: PaneId(6),
+                    content: Content::Terminal(TerminalId(8)),
+                    home: None,
+                    key: None,
+                }),
+                focused: PaneId(6),
+                name: None,
+            }],
+            active_tab: TabId(5),
+            home: None,
+            lent: Some(clackatoo_protocol::Lent {
+                to: own,
+                key: 9,
+                placed: false,
+                background: Some(clackatoo_protocol::LentBackground {
+                    state: BackgroundState::Running,
+                    failed: None,
+                }),
+            }),
+            background: Vec::new(),
+        };
+        let shown = ServerMessage::Event(Event::Workspaces(Workspaces {
+            list: vec![lent],
+            machine: Some(desk()),
+            ..Workspaces::default()
+        }));
+        say(&mut there, &shown);
+        daemon.read_reached(link, Reading::Look);
+        let bring = ClientMessage::Request(Request::LentBackground {
+            key: 9,
+            action: clackatoo_protocol::LentBackgroundAction::Bring,
+        });
+        assert_eq!(heard(&mut there), [bring]);
+        // Said again, it isn't asked again on this connection.
+        daemon.lends_known(0);
+        assert_eq!(heard(&mut there), []);
     }
 
     /// A shell lent as a background tab gets its command typed at its

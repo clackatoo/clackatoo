@@ -196,6 +196,10 @@ pub(super) struct Relayed {
     ports_waiting: Vec<Token>,
     /// When it was last asked for the ports, while its answer is awaited.
     ports_asked: Option<Instant>,
+    /// The shells it lends this daemon as background tabs, by the number
+    /// this daemon gave each, it was told again on this connection had
+    /// been brought back here.
+    bringing: BTreeSet<u64>,
 }
 
 impl Relayed {
@@ -2070,6 +2074,7 @@ impl Daemon {
         self.forwards_lost(at);
         self.ports_lost(at);
         self.sessions_lost(at);
+        self.links.list[at].relayed.bringing.clear();
         for followed in self.links.list[at].relayed.followed.values_mut() {
             followed.upstream = false;
             followed.owed = false;
