@@ -3331,6 +3331,24 @@ mod mouse_tests {
     }
 
     #[test]
+    fn a_search_being_typed_keeps_its_keys_from_a_mouse_selection() {
+        let terminal = terminal("hello world\r\nsecond");
+        let mut pane = pane(&terminal);
+        pane.enter_normal_mode();
+        key(&mut pane, "/");
+        mouse(&mut pane, MouseAction::Press(LEFT), [0, 6], 1);
+        mouse(&mut pane, MouseAction::Motion(Some(LEFT)), [1, 2], 1);
+        mouse(&mut pane, MouseAction::Release(LEFT), [1, 2], 1);
+        copied(&mut pane, &terminal);
+        for typed in ["2", "\"", "y"] {
+            key(&mut pane, typed);
+        }
+        let prompt = pane.prompt.as_ref().expect("still searching");
+        assert_eq!(prompt.line.text(), "2\"y");
+        assert_eq!(copied(&mut pane, &terminal), None);
+    }
+
+    #[test]
     fn a_register_or_count_waits_with_the_mouses_selection_for_y() {
         let terminal = terminal("hello world\r\nsecond");
         let mut pane = pane(&terminal);

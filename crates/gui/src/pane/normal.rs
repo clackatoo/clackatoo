@@ -501,8 +501,9 @@ impl Pane {
     /// pane's, and forgets the selection.
     pub(super) fn mouse_selection_key(&mut self, press: &KeyPress<'_>) -> Option<bool> {
         // An operator typed before, as `y` waiting for its motion, has the
-        // key, as it did before the drag.
+        // key, as it did before the drag; and a search being typed has it.
         if self.mode != Mode::Normal
+            || self.prompt.is_some()
             || self.mouse_selected().is_none()
             || !only_count_and_register(self.keys.so_far())
         {
