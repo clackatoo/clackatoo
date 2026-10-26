@@ -59,6 +59,17 @@ pub(crate) trait Dialect {
         None
     }
 
+    /// The same, for the key after `z`, before the grammar's `zt`, `zz`
+    /// and `zb`: an explorer's `zo`, a chat's `za`.
+    fn after_z(
+        &self,
+        _stroke: Stroke,
+        _keys: &mut Reader<'_>,
+        _visual: bool,
+    ) -> Option<Read<Self::Own>> {
+        None
+    }
+
     /// The same, for the key after `]`, or `[` if `backward`: the grammar
     /// has no such keys of its own.
     fn after_bracket(
@@ -472,13 +483,16 @@ impl Reader<'_> {
                     'z' => ViewAt::Middle,
                     _ => ViewAt::Bottom,
                 };
-                let view = match self.next() {
-                    None => Read::More,
-                    Some(key) => key
-                        .plain()
-                        .filter(|key| matches!(key, 't' | 'z' | 'b'))
-                        .map_or(Read::No, |key| Read::Yes(at(key))),
+                let Some(next) = self.next() else {
+                    return Parsed::Incomplete;
                 };
+                if let Some(own) = dialect.after_z(next, self, visual) {
+                    return self.made(first, own.map(Action::Own));
+                }
+                let view = next
+                    .plain()
+                    .filter(|key| matches!(key, 't' | 'z' | 'b'))
+                    .map_or(Read::No, |key| Read::Yes(at(key)));
                 return self.made(first, view.map(Action::View));
             }
             ']' | '[' => {
@@ -1028,6 +1042,16 @@ mod tests {
             }
         }
 
+        fn after_z(
+            &self,
+            stroke: Stroke,
+            _keys: &mut Reader<'_>,
+            _visual: bool,
+        ) -> Option<Read<char>> {
+            // `zo`, before the grammar's `z` keys.
+            (stroke.plain()? == 'o').then_some(Read::Yes('o'))
+        }
+
         fn after_bracket(
             &self,
             backward: bool,
@@ -1062,6 +1086,10 @@ mod tests {
         // The grammar's own `g` keys are still there.
         assert_eq!(read("gg"), made(None, Action::Move(Motion::First)));
         assert_eq!(read("]]"), made(None, Action::Own(']')));
+        assert_eq!(read("z"), Parsed::Incomplete);
+        assert_eq!(read("3zo"), made(Some(3), Action::Own('o')));
+        assert_eq!(read("zt"), made(None, Action::View(ViewAt::Top)));
+        assert_eq!(read("zq"), Parsed::Nothing);
         assert_eq!(read("[x"), Parsed::Nothing);
         // `d` waits for what it acts on, and then the whole command is
         // refused, its keys spent.
