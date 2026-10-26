@@ -498,7 +498,10 @@ impl Desk {
                 ReviewKey::Comment => self.comment_here(),
             },
             Action::SendCtrlB => {
-                if let Some(pane) = self.focused_pane() {
+                // A chat has no program to pass Ctrl+B on to.
+                if self.focused_chat().is_some() {
+                    self.refuse("that's for a terminal".to_owned());
+                } else if let Some(pane) = self.focused_pane() {
                     pane.send_bytes(vec![0x02]);
                 }
             }

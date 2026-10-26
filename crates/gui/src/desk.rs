@@ -4642,6 +4642,23 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_b_twice_in_a_chat_says_its_for_a_terminal_and_sends_nothing() {
+        let (mut desk, _) = working_chat_desk();
+        desk.show_pane(PaneId(2));
+        answer_all(&mut desk);
+        ctrl_b(&mut desk, "");
+        ctrl(&mut desk, "b");
+        let sent = answer_all(&mut desk);
+        assert!(
+            !sent
+                .iter()
+                .any(|request| matches!(request, Request::SendInput { .. })),
+            "{sent:?}"
+        );
+        assert_eq!(note_of(&desk), "that's for a terminal");
+    }
+
+    #[test]
     fn the_configs_handlers_and_bindings_come_before_the_pane() {
         let mut desk = three_tabs();
         snapshot(&mut desk, 1);
