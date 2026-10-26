@@ -282,7 +282,28 @@ impl<A: Clone + Eq> History<A> {
     /// If the history doesn't reach back to `base`, bringing the edit
     /// from there would be more work than [`Limits::rebase_work`], or the
     /// edit doesn't fit it.
-    pub fn rebase(&self, mut edit: Edit, base: u64) -> Result<Edit, HistoryError> {
+    pub fn rebase(&self, edit: Edit, base: u64) -> Result<Edit, HistoryError> {
+        self.rebase_counting(edit, base, true)
+    }
+
+    /// `edit` brought up to date as [`rebase`](Self::rebase) does, but its
+    /// own pieces not counted, only the text it copies at each step and the
+    /// edits since: for an edit from a window that can't send it in fewer
+    /// pieces, which, refused, would only send it again.
+    ///
+    /// # Errors
+    ///
+    /// As [`rebase`](Self::rebase).
+    pub fn rebase_any_length(&self, edit: Edit, base: u64) -> Result<Edit, HistoryError> {
+        self.rebase_counting(edit, base, false)
+    }
+
+    fn rebase_counting(
+        &self,
+        mut edit: Edit,
+        base: u64,
+        pieces: bool,
+    ) -> Result<Edit, HistoryError> {
         let since = self.since(base)?;
         let most = self.limits.rebase_work as u64;
         // Each edit since costs at least its own work: too much of that,
@@ -290,12 +311,16 @@ impl<A: Clone + Eq> History<A> {
         if self.work_since(base) > most {
             return Err(HistoryError::TooFar(base));
         }
-        // The text the edit itself puts in and takes away is copied at
-        // each step, but cheaply, as whole strings: it's counted once, and
-        // its pieces at each step.
-        let mut work = (edit.weight() - edit.ops().len()) as u64;
+        // The text the edit puts in and takes away is copied at each step,
+        // as its pieces are gone through.
+        let mut work = 0;
         for (theirs, _) in since {
-            work += (edit.ops().len() + theirs.weight()) as u64;
+            let own = if pieces {
+                edit.weight()
+            } else {
+                edit.weight() - edit.ops().len()
+            };
+            work += (own + theirs.weight()) as u64;
             if work > most {
                 self.count(work);
                 return Err(HistoryError::TooFar(base));
@@ -1724,15 +1749,47 @@ mod tests {
     }
 
     #[test]
-    fn a_big_paste_from_a_little_behind_is_brought_up_to_date() {
-        // Its text is copied whole at each step, as one string: counted
-        // once, not for each edit it goes past.
+    fn a_big_paste_is_brought_up_to_date_from_a_little_behind_but_not_far() {
+        // Its text is copied at each step: counted at each.
         let mut doc = Doc::new("start\n");
-        for _ in 0..100 {
+        for _ in 0..16_000 {
             doc.edit(Who::Agent, true, 0, "", "a");
         }
-        let paste = Edit::replace(6, 6, "", &"x".repeat(1 << 20));
-        assert!(doc.history.rebase(paste, 0).is_ok());
+        let paste = |len| Edit::replace(len, len, "", &"x".repeat(4 << 20));
+        assert!(doc.history.rebase(paste(16_005), 15_999).is_ok());
+        let before = doc.history.work();
+        assert_eq!(
+            doc.history.rebase(paste(6), 0),
+            Err(HistoryError::TooFar(0))
+        );
+        let most = doc.history.limits().rebase_work as u64;
+        let step = paste(6).weight() as u64 + 1;
+        assert!(doc.history.work() - before <= most + step);
+        // Nor from a window that sends every piece whole: its text is
+        // still copied.
+        assert!(doc.history.rebase_any_length(paste(6), 0).is_err());
+        // A megabyte is copied as many times as there are edits since: a
+        // few it goes past, but not ten, each a step's work and more.
+        let mega = |len| Edit::replace(len, len, "", &"x".repeat(1 << 20));
+        assert!(doc.history.rebase(mega(16_002), 15_996).is_ok());
+        assert!(doc.history.rebase(mega(15_996), 15_990).is_err());
+    }
+
+    #[test]
+    fn an_edit_of_any_length_is_brought_up_to_date_for_its_text_and_others_alone() {
+        let mut doc = Doc::new(&"a".repeat(1 << 18));
+        for _ in 0..4 {
+            doc.edit(Who::Agent, true, 0, "", "b");
+        }
+        let mut long = Edit::new();
+        for _ in 0..(1 << 17) {
+            long.retain(1).insert("c");
+        }
+        long.retain(1 << 17);
+        // Too many pieces for the work a rebase may do...
+        assert!(doc.history.rebase(long.clone(), 0).is_err());
+        // ...but not too much text.
+        assert!(doc.history.rebase_any_length(long, 0).is_ok());
     }
 
     #[test]
