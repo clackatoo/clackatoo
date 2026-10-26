@@ -201,8 +201,8 @@ mod tests {
                 .iter()
                 .any(|(key, _)| key == "gZ!")
         );
-        keys.push(Stroke::char('g'));
-        keys.push(Stroke::char('Z'));
+        keys.read(Stroke::char('g'), false, &enabled);
+        keys.read(Stroke::char('Z'), false, &enabled);
         assert!(
             context("Test", &keys, Mode::Normal, &enabled)
                 .rows

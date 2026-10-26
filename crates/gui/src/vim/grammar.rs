@@ -207,17 +207,6 @@ impl Keys {
         (!self.0.is_empty()).then(|| self.0.iter().map(|stroke| stroke.shown()).collect())
     }
 
-    /// Keeps `stroke` as typed, unread: for a view that reads its keys its
-    /// own way, as the editor's rendered Markdown does.
-    pub(crate) fn push(&mut self, stroke: Stroke) {
-        self.0.push(stroke);
-    }
-
-    /// The keys typed so far, forgotten here.
-    pub(crate) fn take(&mut self) -> Vec<Stroke> {
-        std::mem::take(&mut self.0)
-    }
-
     pub(crate) fn clear(&mut self) {
         self.0.clear();
     }

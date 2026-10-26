@@ -17,12 +17,14 @@
 //! half a millisecond for a README of a few thousand lines.
 //!
 //! It's for reading, as a pager: the focus arriving at it in insert mode
-//! leaves it in normal mode. `j`, `k`, `gj`, `gk`, Ctrl+E and Ctrl+Y scroll
-//! it a line, or as many as a count says; Ctrl+D and Ctrl+U half a view,
-//! Ctrl+F and Ctrl+B nearly a whole one; `gg` to the top and `G` to the end,
-//! or either with a count, to the block holding that line; and so does the
-//! mouse's wheel. A count, or `g`, waits in the editor's keys, as one typed
-//! in the text does. Any other key, such as `i`, `dd` or `/`, or a paste,
+//! leaves it in normal mode. Its keys are read by the grammar every pane
+//! reads them with, taking only those that scroll it (see [`PagerKeys`]):
+//! `j`, `k`, `gj`, `gk`, Ctrl+E and Ctrl+Y scroll it a line, or as many as
+//! a count says; Ctrl+D and Ctrl+U half a view, Ctrl+F and the pages nearly
+//! a whole one; `gg` to the top and `G` to the end, or either with a count,
+//! to the block holding that line; and so does the mouse's wheel. A count,
+//! or `g`, waits in the editor's keys, as one typed in the text does. Any
+//! other key, such as `i`, `dd` or `/`, or a paste,
 //! is the text's: the text comes back, with the cursor at the start of the
 //! line the top block starts on, and the key does there what it does. The
 //! command line's commands, as `:w` and `:q`, are the same in both.
@@ -44,6 +46,7 @@ use crate::markdown::layout::{
 };
 use crate::markdown::tables::Cells;
 use crate::markdown::{self, BlockKind};
+use crate::motion::Motion;
 use crate::vim::Mode;
 use crate::vim::{self, Stroke};
 
@@ -142,62 +145,62 @@ impl Rendered {
     }
 
     /// Does what `stroke` does, if it's one of the view's keys, in a text
-    /// that's `text`, after `typed`, the keys of a command typed before it:
-    /// a count, or `g`. The editor keeps them, as it keeps its own, so its
-    /// bar shows them, and leaving the pane forgets them.
+    /// that's `text`, after `typed`, the keys of a command typed before it,
+    /// read by the grammar every pane reads keys with, as [`PagerKeys`]
+    /// says the view reads them. The editor keeps them, as it keeps its
+    /// own, so its bar shows them, and leaving the pane forgets them.
     pub(super) fn key(&mut self, stroke: Stroke, typed: &mut vim::Keys, text: &Rope) -> Keyed {
-        let g = Stroke::char('g');
-        let after_g = typed.so_far().last() == Some(&g);
-        let count: Option<usize> = (typed.so_far().iter())
-            .filter_map(|&typed| digit(typed))
-            .collect::<String>()
-            .parse()
-            .ok();
-        let counting = digit(stroke).is_some_and(|digit| digit != '0' || count.is_some());
-        let command = reading(stroke, after_g, counting).0;
-        if matches!(command, Reading::Prefix) {
-            typed.push(stroke);
+        // Esc forgets what's half typed, and stays.
+        if stroke == Stroke::Escape {
+            typed.clear();
             return Keyed::Took;
         }
-        let before = typed.take();
-        match command {
-            Reading::Top | Reading::End => match count {
-                Some(count) => {
-                    self.go_to =
-                        Some(text.line_to_byte(count.saturating_sub(1).min(text.len_lines() - 1)));
-                }
-                None if matches!(command, Reading::Top) => self.scroll_to_top(),
-                None => {
-                    self.go_to = None;
-                    self.scroll = self.most;
-                }
-            },
-            Reading::Scroll => {
-                let lines = self
-                    .lines_for(stroke, count)
-                    .expect("reading accepted a scroll key");
-                self.scroll_by(lines * self.line_height);
+        let before = typed.so_far().to_vec();
+        let command = match typed.read(stroke, false, &PagerKeys) {
+            vim::Parsed::Incomplete => return Keyed::Took,
+            vim::Parsed::Nothing => return Keyed::Text(before),
+            vim::Parsed::Command(command) => command,
+        };
+        let count = command.count;
+        let line = |count: usize| {
+            text.line_to_byte(
+                count
+                    .saturating_sub(1)
+                    .min(text.len_lines().saturating_sub(1)),
+            )
+        };
+        match command.action {
+            vim::Action::Move(Motion::First | Motion::Last) if count.is_some() => {
+                self.go_to = count.map(line);
             }
-            Reading::Escape => {}
-            Reading::Text => return Keyed::Text(before),
-            Reading::Prefix => unreachable!("handled above"),
+            vim::Action::Move(Motion::First) => self.scroll_to_top(),
+            vim::Action::Move(Motion::Last) => {
+                self.go_to = None;
+                self.scroll = self.most;
+            }
+            vim::Action::Move(Motion::Down(_) | Motion::RowDown(_)) => {
+                self.scroll_rows(vim::Scroll::Line { down: true }, count);
+            }
+            vim::Action::Move(Motion::Up(_) | Motion::RowUp(_)) => {
+                self.scroll_rows(vim::Scroll::Line { down: false }, count);
+            }
+            vim::Action::Scroll(scroll) => self.scroll_rows(scroll, count),
+            // Nothing else is taken (see `PagerKeys::takes`).
+            _ => return Keyed::Text(before),
         }
         Keyed::Took
     }
 
-    /// How many lines `stroke` scrolls the view down, or up if fewer than
-    /// none, with `count` typed, if it's one of the keys that scroll: `j`
-    /// and `k` a line a time, and the scrolling keys as far as they go in
-    /// any pane (see [`vim::Paging`]).
-    fn lines_for(&mut self, stroke: Stroke, count: Option<usize>) -> Option<f32> {
-        let scroll = scroll_key(stroke)?;
+    /// Scrolls the view as `scroll` does, `count` typed, as far as the
+    /// scrolling keys go in any pane (see [`vim::Paging`]).
+    fn scroll_rows(&mut self, scroll: vim::Scroll, count: Option<usize>) {
         let (vim::Scroll::Line { down }
         | vim::Scroll::HalfPage { down }
         | vim::Scroll::Page { down }) = scroll;
         let view = self.view_rows();
         #[allow(clippy::cast_precision_loss, reason = "rows in view")]
         let rows = self.paging.rows(scroll, count, view) as f32;
-        Some(if down { rows } else { -rows })
+        self.scroll_by(if down { rows } else { -rows } * self.line_height);
     }
 
     /// How many lines of its text the view shows, as drawn last.
@@ -513,14 +516,6 @@ fn found_again(laid: &Laid, index: usize, key: u64) -> Option<f32> {
         .map(|block| block.top)
 }
 
-/// The digit `stroke` types, if it types one.
-fn digit(stroke: Stroke) -> Option<char> {
-    match stroke {
-        Stroke::Char { ch, ctrl: false } if ch.is_ascii_digit() => Some(ch),
-        _ => None,
-    }
-}
-
 /// What GitHub names a heading of `text` for links to it: its words in
 /// lowercase, without punctuation but `-` and `_`, a `-` for each space.
 pub(super) fn slug(text: &str) -> String {
@@ -762,92 +757,54 @@ impl Editor {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Reading {
-    Prefix,
-    Top,
-    End,
-    Scroll,
-    Escape,
-    Text,
-}
+/// How the view reads keys: the editor's grammar, but taking only what
+/// scrolls it, `j` `k` `gj` `gk` and the arrows a line, the scrolling
+/// keys as far as in any pane, `gg` and `G` to the top and the end, or
+/// with a count to the block holding that line. Any other key is
+/// refused at once, so it goes to the text, which comes back to have it.
+struct PagerKeys;
 
-fn scroll_key(stroke: Stroke) -> Option<vim::Scroll> {
-    const KEYS: &[(Stroke, vim::Scroll)] = &[
-        (Stroke::Down, vim::Scroll::Line { down: true }),
-        (Stroke::char('j'), vim::Scroll::Line { down: true }),
-        (Stroke::ctrl('e'), vim::Scroll::Line { down: true }),
-        (Stroke::Up, vim::Scroll::Line { down: false }),
-        (Stroke::char('k'), vim::Scroll::Line { down: false }),
-        (Stroke::ctrl('y'), vim::Scroll::Line { down: false }),
-        (Stroke::ctrl('d'), vim::Scroll::HalfPage { down: true }),
-        (Stroke::ctrl('u'), vim::Scroll::HalfPage { down: false }),
-        (Stroke::ctrl('f'), vim::Scroll::Page { down: true }),
-        (Stroke::PageDown, vim::Scroll::Page { down: true }),
-        (Stroke::ShiftDown, vim::Scroll::Page { down: true }),
-        (Stroke::PageUp, vim::Scroll::Page { down: false }),
-        (Stroke::ShiftUp, vim::Scroll::Page { down: false }),
-    ];
-    KEYS.iter()
-        .find(|(key, _)| *key == stroke)
-        .map(|(_, scroll)| *scroll)
-}
+impl vim::Dialect for PagerKeys {
+    type Own = ();
 
-fn reading(
-    stroke: Stroke,
-    after_g: bool,
-    counting: bool,
-) -> (Reading, crate::shortcuts::bindings::Hint) {
-    use crate::shortcuts::bindings::Hint;
-    if !after_g && counting {
-        return (Reading::Prefix, Hint::Count);
+    fn own(
+        &self,
+        stroke: Stroke,
+        _keys: &mut vim::Reader<'_>,
+        _visual: bool,
+    ) -> Option<vim::Read<()>> {
+        let scrolls = match stroke {
+            Stroke::Char { ch, ctrl: false } => matches!(ch, 'j' | 'k' | 'g' | 'G'),
+            Stroke::Char { ch, ctrl: true } => matches!(ch, 'd' | 'u' | 'e' | 'y' | 'f'),
+            Stroke::Up
+            | Stroke::Down
+            | Stroke::PageUp
+            | Stroke::PageDown
+            | Stroke::ShiftUp
+            | Stroke::ShiftDown => true,
+            _ => false,
+        };
+        (!scrolls).then_some(vim::Read::No)
     }
-    if !after_g && stroke == Stroke::char('g') {
-        return (Reading::Prefix, Hint::Prefix);
+
+    fn takes(&self, command: &vim::Command<()>) -> bool {
+        command.register.is_none()
+            && matches!(
+                command.action,
+                vim::Action::Move(
+                    Motion::Up(_)
+                        | Motion::Down(_)
+                        | Motion::RowUp(_)
+                        | Motion::RowDown(_)
+                        | Motion::First
+                        | Motion::Last
+                ) | vim::Action::Scroll(_)
+            )
     }
-    let rows = matches!(
-        stroke,
-        Stroke::Char {
-            ch: 'j' | 'k',
-            ctrl: false
-        }
-    );
-    if after_g && stroke != Stroke::char('g') && !rows {
-        return (Reading::Text, Hint::None);
-    }
-    if after_g && !rows {
-        return (
-            Reading::Top,
-            Hint::Action("Start of document or counted line"),
-        );
-    }
-    if stroke == Stroke::char('G') {
-        return (
-            Reading::End,
-            Hint::Action("End of document or counted line"),
-        );
-    }
-    if let Some(scroll) = scroll_key(stroke) {
-        return (Reading::Scroll, Hint::Action(scroll.description()));
-    }
-    if stroke == Stroke::Escape {
-        return (Reading::Escape, Hint::Action("Cancel pending command"));
-    }
-    (Reading::Text, Hint::None)
 }
 
 pub(super) fn shortcuts(keys: &vim::Keys) -> crate::shortcuts::Context {
-    let pending = keys
-        .so_far()
-        .last()
-        .filter(|s| **s == Stroke::char('g'))
-        .map(|_| 'g');
-    let mut context =
-        crate::shortcuts::bindings::list("Rendered Markdown", pending, |stroke, prefix| {
-            let counting =
-                digit(stroke).is_some_and(|digit| digit != '0' || keys.counting().is_some());
-            reading(stroke, prefix.is_some(), counting).1
-        });
+    let mut context = vim::shortcuts::context("Rendered Markdown", keys, Mode::Normal, &PagerKeys);
     context.add(&[(
         "Other editor keys",
         "Show the source and apply the key there",

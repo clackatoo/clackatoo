@@ -65,7 +65,6 @@ use crate::vim::Stroke;
 pub(crate) enum Hint {
     Action(&'static str),
     Prefix,
-    Count,
     Text(&'static str),
     None,
 }
@@ -123,10 +122,6 @@ pub(crate) fn list(
 pub(crate) fn add(context: &mut Context, key: String, hint: Hint) {
     let (key, description) = match hint {
         Hint::Action(description) => (key, description),
-        Hint::Count => (
-            "1–9, then digits".into(),
-            "Repeat the following command that many times",
-        ),
         Hint::Text(description) => ("Type".into(), description),
         Hint::None | Hint::Prefix => return,
     };

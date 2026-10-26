@@ -466,3 +466,34 @@ fn renamed_to_something_that_isnt_markdown_it_shows_its_text() {
     setup.editor.settle(&setup.copy);
     assert!(!setup.editor.rendered());
 }
+
+#[test]
+fn the_views_keys_are_read_by_the_grammar_and_its_help_comes_from_it() {
+    let mut fonts = crate::chat::fixtures::fonts();
+    let mut setup = markdown(&document(60));
+    toggle(&mut setup);
+    paint(&mut setup, &mut fonts);
+    // Ctrl+E with a count, as in any pane.
+    setup.keys("5<C-e>");
+    paint(&mut setup, &mut fonts);
+    assert!(shown_lines(&setup).0 > 0, "scrolled");
+    assert!(setup.editor.rendered());
+    // `g` and Esc forgets it, and stays.
+    setup.keys("g<Esc>");
+    assert!(setup.editor.rendered() && !setup.editor.pending());
+    let rows = super::super::rendered::shortcuts(&setup.editor.keys).rows;
+    let has = |key: &str| rows.iter().any(|(k, _)| k == key);
+    assert!(
+        has("j") && has("gg") && has("Ctrl+D") && has("G"),
+        "{rows:?}"
+    );
+    assert!(!has("w") && !has("dd"), "the text's keys aren't the view's");
+    assert!(has("Other editor keys"));
+    // A register is the text's: it comes back, to have it.
+    setup.keys("\"a");
+    assert!(setup.editor.rendered(), "waiting for the rest");
+    setup.keys("yy");
+    assert!(!setup.editor.rendered());
+    // At the line the top block starts on.
+    assert_eq!(setup.held('a').as_deref(), Some("## Part 1\n"));
+}

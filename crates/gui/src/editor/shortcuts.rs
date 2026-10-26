@@ -99,10 +99,12 @@ mod tests {
 
     fn help(pending: &str, mode: Mode) -> Context {
         let mut keys = Keys::default();
+        let dialect = EditorKeys { tildeop: false };
+        let visual = matches!(mode, Mode::Visual(_));
         for stroke in to_strokes(pending) {
-            keys.push(stroke);
+            keys.read(stroke, visual, &dialect);
         }
-        context("Editor", &keys, mode, &EditorKeys { tildeop: false })
+        context("Editor", &keys, mode, &dialect)
     }
     fn has(context: &Context, key: &str) -> bool {
         context.rows.iter().any(|(label, _)| label == key)
