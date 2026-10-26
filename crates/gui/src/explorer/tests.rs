@@ -215,7 +215,11 @@ fn keys_move_with_counts_and_pages_and_the_view_follows_the_cursor() {
     assert!(explorer.on_up());
     keys(&mut explorer, "<C-f>");
     assert_eq!(at(&mut explorer), "/p/f007");
-    keys(&mut explorer, "<C-b>k");
+    // Ctrl+B is the window's prefix, never the pane's: Page Up pages up,
+    // the cursor to the view's bottom, as Neovim's.
+    keys(&mut explorer, "<PageUp>");
+    assert_eq!(at(&mut explorer), "/p/f008");
+    keys(&mut explorer, "ggk");
     assert!(explorer.on_up(), "k stops at ..");
     keys(&mut explorer, "<Home>j<Up>");
     assert!(explorer.on_up());
@@ -1263,4 +1267,44 @@ fn paths_are_said_from_the_root_only_if_theyre_in_it() {
     });
     assert_eq!(explorer.relative("/"), "");
     assert_eq!(explorer.relative("/etc/hosts"), "etc/hosts");
+}
+
+#[test]
+fn an_explorer_takes_every_lists_move_and_its_keys_help_comes_from_its_dialect() {
+    let mut explorer = explorer(11);
+    let entries = (0..100).map(|n| file(&format!("f{n:03}"))).collect();
+    rooted(&mut explorer, entries);
+    keys(&mut explorer, "20G");
+    shown(&mut explorer);
+    keys(&mut explorer, "zt");
+    shown(&mut explorer);
+    keys(&mut explorer, "L");
+    assert_eq!(at(&mut explorer), "/p/f027", "the view's bottom");
+    keys(&mut explorer, "3H");
+    assert_eq!(at(&mut explorer), "/p/f020");
+    keys(&mut explorer, "M");
+    assert_eq!(at(&mut explorer), "/p/f022");
+    keys(&mut explorer, "<C-e><C-e>");
+    assert_eq!(at(&mut explorer), "/p/f022");
+    keys(&mut explorer, "5<C-n>");
+    assert_eq!(at(&mut explorer), "/p/f027");
+    // `/` with a count as big as there is goes round once, at once.
+    keys(&mut explorer, "/f00[0-2]<CR>");
+    assert_eq!(at(&mut explorer), "/p/f000");
+    keys(&mut explorer, "99999999n");
+    assert_eq!(at(&mut explorer), "/p/f000");
+    keys(&mut explorer, "2n");
+    assert_eq!(at(&mut explorer), "/p/f002");
+    // A count and `z` half typed show in the bar; leaving forgets them.
+    keys(&mut explorer, "2z");
+    assert!(explorer.label().starts_with("2z  "), "{}", explorer.label());
+    explorer.leave();
+    assert!(!explorer.label().starts_with("2z"));
+    let rows = explorer.shortcut_context().rows;
+    let has = |key: &str, said: &str| rows.iter().any(|(k, d)| k == key && d == said);
+    assert!(has("zo", "Expand directory"), "{rows:?}");
+    assert!(has("zt", "Cursor line at top"));
+    assert!(has("g.", "Show or hide hidden files"));
+    assert!(has("Ctrl+V", "Open in right split"));
+    assert!(has("H", "Top of view"));
 }

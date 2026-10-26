@@ -480,16 +480,20 @@ impl Desk {
         true
     }
 
-    /// `q` in a terminal's normal mode stops the macro being recorded, as
-    /// it does in an editor's. Returns whether it did.
-    pub(super) fn stop_recording_in_terminal(&mut self, press: &KeyPress<'_>) -> bool {
+    /// `q` in normal mode, with nothing half typed or being typed, stops
+    /// the macro being recorded, as it does in an editor's, in a terminal
+    /// and in an explorer, a board or a review, rather than closing it.
+    /// An editor reads its own `q`; a chat's isn't one. Returns whether it
+    /// did.
+    pub(super) fn stop_recording_in_pane(&mut self, press: &KeyPress<'_>) -> bool {
         if self.recording().is_none() || Chord::of(press) != Some(crate::vim::RECORD_STOP.chord()) {
             return false;
         }
-        let terminal = (self.focused_terminal())
+        let chat = (self.focused_terminal())
             .and_then(|terminal| self.panes.get(&terminal))
-            .is_some_and(|pane| !pane.is_chat());
-        let normal = terminal
+            .is_some_and(crate::pane::Pane::is_chat);
+        let normal = !chat
+            && self.focused_editor().is_none()
             && self.focused_key_state().is_some_and(|keys| {
                 keys.mode() == crate::vim::Mode::Normal && !keys.prompting() && !keys.pending()
             });

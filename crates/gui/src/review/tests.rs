@@ -3,6 +3,7 @@
 use clackatoo_protocol::{Made, ReviewComment};
 
 use super::*;
+use crate::vim::KeyState;
 
 const CHAT: TerminalId = TerminalId(4);
 

@@ -183,20 +183,6 @@ impl Desk {
         redraw
     }
 
-    /// Stops the macro being recorded, if `press` is `q` in the focused
-    /// board pane and one is, rather than closing the pane. Returns
-    /// whether it did.
-    pub(super) fn stop_recording_in_board(&mut self, press: &KeyPress<'_>) -> bool {
-        let quiet =
-            (self.focused_board()).is_some_and(|board| !board.prompting() && !board.pending());
-        let q = crate::keymap::Chord::of(press) == Some(crate::keymap::Chord::typed('q'));
-        if quiet && q && self.recording().is_some() {
-            self.shared_mut().registers.stop_recording();
-            return true;
-        }
-        false
-    }
-
     /// A click at `cell` of the board pane `pane`: the cursor goes to the
     /// entry there. Returns whether the window must be redrawn.
     pub(super) fn board_click(&mut self, pane: PaneId, cell: [i64; 2]) -> bool {

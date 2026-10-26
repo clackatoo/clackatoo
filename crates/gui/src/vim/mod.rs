@@ -56,53 +56,6 @@ pub(crate) trait KeyState {
     fn forget_count(&mut self);
 }
 
-/// A count and a key half typed, as a pane of a list keeps them for keys
-/// of its own: the `5` of `5j`, the `g` of `gg`.
-#[derive(Debug, Default)]
-pub(crate) struct HalfTyped {
-    pub(crate) count: Option<usize>,
-    pub(crate) key: Option<char>,
-}
-
-impl HalfTyped {
-    /// Whether anything's half typed.
-    pub(crate) fn pending(&self) -> bool {
-        self.count.is_some() || self.key.is_some()
-    }
-}
-
-/// A pane of a list, such as an explorer, a board or a review: no insert
-/// mode, and its keys half typed kept as a [`HalfTyped`].
-pub(crate) trait ListPane {
-    fn half_typed(&self) -> &HalfTyped;
-    fn half_typed_mut(&mut self) -> &mut HalfTyped;
-    /// Whether something's typed in a prompt of its own.
-    fn prompting(&self) -> bool;
-}
-
-impl<T: ListPane> KeyState for T {
-    fn mode(&self) -> Mode {
-        Mode::Normal
-    }
-
-    fn prompting(&self) -> bool {
-        ListPane::prompting(self)
-    }
-
-    fn pending(&self) -> bool {
-        self.half_typed().pending()
-    }
-
-    fn counting(&self) -> Option<usize> {
-        let typed = self.half_typed();
-        typed.count.filter(|_| typed.key.is_none())
-    }
-
-    fn forget_count(&mut self) {
-        self.half_typed_mut().count = None;
-    }
-}
-
 /// Whether keys go to the program or drive clackatoo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {

@@ -60,6 +60,12 @@ pub(crate) fn moves<O>(command: &Command<O>) -> bool {
 /// Does `command` in `list`, if it's one of those [`moves`] says a list
 /// takes, scrolling as far as `paging` says: returns whether it was.
 pub(crate) fn go<O>(list: &mut impl ListRows, paging: &mut Paging, command: &Command<O>) -> bool {
+    if !moves(command) {
+        return false;
+    }
+    // The view as it's drawn, with the cursor in it, as a pane settles it
+    // only when it's drawn: keys typed in one go come before that.
+    follow(list);
     let final_item = list.len().saturating_sub(1);
     let count = command.count;
     let times = command.times();
@@ -104,6 +110,37 @@ pub(crate) fn go<O>(list: &mut impl ListRows, paging: &mut Paging, command: &Com
         _ => return false,
     }
     true
+}
+
+/// Scrolls `list` `lines` items down, or up if fewer than none, as the
+/// wheel does, the cursor kept in view. Returns whether the view moved.
+pub(crate) fn wheel(list: &mut impl ListRows, lines: i64) -> bool {
+    let top = list.top();
+    let by = usize::try_from(lines.unsigned_abs()).unwrap_or(usize::MAX);
+    let final_item = list.len().saturating_sub(1);
+    list.set_top(if lines < 0 {
+        top.saturating_sub(by)
+    } else {
+        top.saturating_add(by).min(final_item)
+    });
+    if list.top() == top {
+        return false;
+    }
+    let shown = list.shown();
+    let bottom = shown.end.saturating_sub(1).max(shown.start);
+    list.set_cursor(list.cursor().clamp(shown.start, bottom).min(final_item));
+    true
+}
+
+/// Scrolls `list` as little as puts the cursor's item in view.
+fn follow(list: &mut impl ListRows) {
+    let shown = list.shown();
+    let cursor = list.cursor();
+    if cursor < shown.start {
+        list.set_top(cursor);
+    } else if cursor >= shown.end {
+        list.set_top(shown.start + (cursor + 1 - shown.end));
+    }
 }
 
 /// Scrolls `list` as `scroll` does, `count` typed: the view a line, the
@@ -471,6 +508,9 @@ mod tests {
         let half = scroll(Scroll::HalfPage { down: true });
         assert_eq!(moved(&mut rows(22, 20), None, half), (27, 25));
         assert_eq!(moved(&mut rows(91, 90), None, half), (96, 90));
+        // A view not yet moved to the cursor, as keys typed in one go
+        // leave it, is first.
+        assert_eq!(moved(&mut rows(0, 2), None, half), (5, 5));
         let half_up = scroll(Scroll::HalfPage { down: false });
         assert_eq!(moved(&mut rows(27, 25), None, half_up), (22, 20));
         assert_eq!(moved(&mut rows(4, 0), None, half_up), (0, 0));

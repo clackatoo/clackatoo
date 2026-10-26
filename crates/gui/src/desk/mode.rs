@@ -266,6 +266,9 @@ impl Desk {
         if let Some(board) = self.boards.panes.get_mut(&pane) {
             board.leave();
         }
+        if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
+            explorer.leave();
+        }
         let terminal =
             (self.workspaces.find_pane(pane)).and_then(|(_, _, found)| found.content.terminal());
         if let Some(found) = terminal.and_then(|terminal| self.panes.get_mut(&terminal)) {

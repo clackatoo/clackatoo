@@ -400,34 +400,6 @@ impl Desk {
         redraw
     }
 
-    /// Stops the macro being recorded, if `press` is `q` in the focused
-    /// review and one is, as in an explorer. Returns whether it did.
-    pub(super) fn stop_recording_in_review(&mut self, press: &KeyPress<'_>) -> bool {
-        let quiet = self
-            .focused_review()
-            .is_some_and(|review| !review.pending());
-        let q = crate::keymap::Chord::of(press) == Some(crate::keymap::Chord::typed('q'));
-        if quiet && q && self.recording().is_some() {
-            self.shared_mut().registers.stop_recording();
-            return true;
-        }
-        false
-    }
-
-    /// Stops the macro being recorded, if `press` is `q` in the focused
-    /// explorer and one is, as `q` does in an editor: rather than closing
-    /// the explorer. Returns whether it did.
-    pub(super) fn stop_recording_in_explorer(&mut self, press: &KeyPress<'_>) -> bool {
-        let quiet = (self.focused_explorer())
-            .is_some_and(|explorer| !explorer.prompting() && !explorer.pending());
-        let q = crate::keymap::Chord::of(press) == Some(crate::keymap::Chord::typed('q'));
-        if quiet && q && self.recording().is_some() {
-            self.shared_mut().registers.stop_recording();
-            return true;
-        }
-        false
-    }
-
     /// A click at `cell` of the explorer `pane`, a double one if `clicks`
     /// is 2: the cursor goes to the line clicked, which a double click
     /// opens, as Enter does. Returns whether the window must be redrawn.

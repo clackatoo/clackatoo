@@ -235,11 +235,6 @@ impl Review {
         self.width = usize::from(size.cols());
     }
 
-    /// Whether a key is half typed, as `g` or a count is.
-    pub(crate) fn pending(&self) -> bool {
-        self.keys.pending()
-    }
-
     /// What the window's title says.
     pub(crate) fn title(&self) -> &str {
         &self.title
@@ -644,20 +639,7 @@ impl Review {
     /// Scrolls `lines` down, or up if negative, as the wheel does, the
     /// cursor staying in view.
     pub(crate) fn scroll(&mut self, lines: i64) -> bool {
-        let by = usize::try_from(lines.unsigned_abs()).unwrap_or(usize::MAX);
-        let last = self.lines.len().saturating_sub(1);
-        let top = if lines < 0 {
-            self.top.saturating_sub(by)
-        } else {
-            self.top.saturating_add(by).min(last)
-        };
-        if top == self.top {
-            return false;
-        }
-        self.top = top;
-        let bottom = top + self.height.max(1) - 1;
-        self.cursor = self.cursor.clamp(top, bottom.max(top)).min(last);
-        true
+        list::wheel(self, lines)
     }
 
     pub(crate) fn scroll_region(&self) -> std::ops::Range<usize> {

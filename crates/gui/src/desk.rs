@@ -2064,7 +2064,7 @@ impl Desk {
         if let Some(redraw) = self.acting_from_list(|desk| desk.list_key(press)) {
             return redraw || had_message;
         }
-        if self.stop_recording_in_terminal(press) {
+        if self.stop_recording_in_pane(press) {
             return true;
         }
         if self.block_needs_daemon(press) {
@@ -2115,23 +2115,25 @@ impl Desk {
         }
     }
 
-    /// Hands `press` to the focused explorer, board or review, unless it
-    /// stops a macro being recorded. Returns whether the window must be
-    /// redrawn, or `None` if the focused pane is none of them.
+    /// Hands `press` to the focused explorer, board, review or browser,
+    /// unless it stops a macro being recorded. Returns whether the window
+    /// must be redrawn, or `None` if the focused pane is none of them.
     fn list_key(&mut self, press: &KeyPress<'_>) -> Option<bool> {
-        if self.focused_explorer().is_some() || self.focused_board().is_some() {
-            if self.stop_recording_in_explorer(press) || self.stop_recording_in_board(press) {
-                return Some(true);
-            }
-            return Some(self.explorer_key(press) || self.board_key(press));
-        }
         if self.focused_browser().is_some() {
             return Some(self.browser_key(press));
         }
-        if self.focused_review().is_some() {
-            return Some(self.stop_recording_in_review(press) || self.review_key(press));
+        let list = self.focused_explorer().is_some()
+            || self.focused_board().is_some()
+            || self.focused_review().is_some();
+        if !list {
+            return None;
         }
-        None
+        Some(
+            self.stop_recording_in_pane(press)
+                || self.explorer_key(press)
+                || self.board_key(press)
+                || self.review_key(press),
+        )
     }
 
     /// Local image viewing owns input even when the daemon is offline.
@@ -11086,6 +11088,30 @@ mod tests {
         assert_eq!(desk.recording(), Some('a'));
         ctrl(&mut desk, "h");
         answer_all(&mut desk);
+        type_keys(&mut desk, "q");
+        assert_eq!(desk.recording(), None);
+        assert!(!answer_all(&mut desk).contains(&Request::ClosePane { pane: PaneId(2) }));
+    }
+
+    #[test]
+    fn q_in_a_review_stops_recording_rather_than_closing_it_unless_keys_wait() {
+        let review = Layout::Pane(LayoutPane {
+            id: PaneId(2),
+            content: Content::Review(clackatoo_protocol::ReviewId(1)),
+            home: None,
+            key: None,
+        });
+        let layout = side_by_side(vec![review, file_pane(1, 7)]);
+        let mut desk = super::tests::desk(one_tab(layout));
+        load(&mut desk, 7, "/p/b.txt", "b\n");
+        ctrl(&mut desk, "l");
+        type_keys(&mut desk, "qa");
+        assert_eq!(desk.recording(), Some('a'));
+        ctrl(&mut desk, "h");
+        answer_all(&mut desk);
+        // A key half typed takes the `q`, as in a terminal.
+        type_keys(&mut desk, "]q");
+        assert_eq!(desk.recording(), Some('a'));
         type_keys(&mut desk, "q");
         assert_eq!(desk.recording(), None);
         assert!(!answer_all(&mut desk).contains(&Request::ClosePane { pane: PaneId(2) }));

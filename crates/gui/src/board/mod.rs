@@ -172,11 +172,6 @@ impl BoardPane {
         self.prompt.is_some() || self.search.typing()
     }
 
-    /// Whether a key is half typed, as `g` or a count is.
-    pub(crate) fn pending(&self) -> bool {
-        self.keys.pending()
-    }
-
     /// Ends what was half done as the focus leaves the board: a command
     /// half typed, and a search being typed. An entry being typed stays,
     /// to finish.

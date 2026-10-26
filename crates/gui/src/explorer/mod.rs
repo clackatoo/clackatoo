@@ -22,7 +22,7 @@
 //!
 //! | Key | Does |
 //! |---|---|
-//! | `j` `k`, `gg` `G`, Ctrl+D Ctrl+U, Ctrl+F Ctrl+B | Moves, with a count |
+//! | `j` `k`, `gg` `G`, `H` `M` `L`, Ctrl+D Ctrl+U Ctrl+F Ctrl+E Ctrl+Y, `zt` `zz` `zb` | Moves, with a count, as every list does (see [`list`]) |
 //! | `l`, Enter | Opens a file; expands a directory (Enter collapses one too); goes up on `..` |
 //! | `h` | Collapses a directory, or goes to the one it's in |
 //! | `-` | Goes up, making the directory above the root the root |
@@ -61,11 +61,11 @@ use clackatoo_protocol::{
 use clackatoo_term::{Row, RowBuilder};
 
 use crate::colors;
-use crate::editor::{Matching, Pattern};
-use crate::motion::Words;
+use crate::motion::Motion;
 use crate::options::{Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
-use crate::vim::Stroke;
+use crate::vim::list::{self, ListRows, ListSearch};
+use crate::vim::{Action, Command, Dialect, Keys, Paging, Parsed, Read, Reader, Stroke};
 
 mod editing;
 pub(crate) mod listing;
@@ -172,11 +172,9 @@ impl Line {
     }
 }
 
-/// What's being typed in the bar.
+/// What's being typed in the bar, but for a search.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Prompt {
-    /// A search, backward if `backward`.
-    Search { query: String, backward: bool },
     /// The name of something to make in `dir`.
     Add { dir: String, name: String },
     /// The new name of what's at `from`.
@@ -227,11 +225,13 @@ pub(crate) struct Explorer {
     cursor_cell: Option<(usize, usize)>,
     /// Where each line's name starts, in cells, as of the last settle.
     name_cols: Vec<usize>,
-    /// A count typed, and `g` or `z`, waiting for the key after.
-    typed: crate::vim::HalfTyped,
+    /// The keys of a command half typed.
+    keys: Keys,
+    /// How far its scrolling keys go.
+    paging: Paging,
     prompt: Option<Prompt>,
-    /// The last search, and whether it went backward.
-    search: Option<(String, bool)>,
+    /// The search being typed, and the last.
+    search: ListSearch,
     case: Case,
     cursorline: bool,
     /// A path to put the cursor on once it shows, expanding what it's in.
@@ -302,9 +302,10 @@ impl Explorer {
             rows: Vec::new(),
             cursor_cell: None,
             name_cols: Vec::new(),
-            typed: crate::vim::HalfTyped::default(),
+            keys: Keys::default(),
+            paging: Paging::default(),
             prompt: None,
-            search: None,
+            search: ListSearch::default(),
             case: Case::of(options),
             cursorline: options.cursorline,
             reveal: None,
@@ -454,13 +455,15 @@ impl Explorer {
 
     /// Whether a search, a name or an answer is being typed, in the bar.
     pub(crate) fn prompting(&self) -> bool {
-        self.prompt.is_some()
+        self.prompt.is_some() || self.search.typing()
     }
 
-    /// Whether a key is half typed, as `g` or a count is, which the next
-    /// key finishes.
-    pub(crate) fn pending(&self) -> bool {
-        self.typed.pending()
+    /// Ends what was half done as the focus leaves the explorer: a command
+    /// half typed, and a search being typed. A name or an answer being
+    /// typed stays, to finish.
+    pub(crate) fn leave(&mut self) {
+        self.keys.clear();
+        self.search.give_up();
     }
 
     /// Says `message` in the bar until the next key.
@@ -474,10 +477,10 @@ impl Explorer {
         if let Some(label) = self.plan_label() {
             return label;
         }
+        if let Some(label) = self.search.label() {
+            return label;
+        }
         match &self.prompt {
-            Some(Prompt::Search { query, backward }) => {
-                return format!("{}{query}▏", if *backward { '?' } else { '/' });
-            }
             Some(Prompt::Add { dir, name }) => {
                 return format!(
                     "new file in {}/ (end with / for a directory): {name}▏",
@@ -500,11 +503,12 @@ impl Explorer {
         };
         // How to see the keys, as the board's bar lists its own, until
         // they're shown.
-        if self.help || self.folder {
+        let label = if self.help || self.folder {
             label
         } else {
             format!("{label}  g? keys")
-        }
+        };
+        list::showing(&self.keys, label)
     }
 
     /// What the window's title says: the root.
@@ -977,246 +981,111 @@ impl Explorer {
             self.prompt_stroke(stroke);
             return true;
         }
-        let count = self.typed.count.take();
-        let pending = self.typed.key.take();
-        let Stroke::Char { ch, ctrl } = stroke else {
-            return self.named(stroke, count);
-        };
-        if ctrl {
-            return self.ctrl(ch, count);
+        if self.search.typing() {
+            if self.search.key(stroke) == list::Typed::Done {
+                self.search_again(false, 1);
+            }
+            return true;
         }
-        self.plain(ch, count, pending)
+        let was_pending = self.keys.pending();
+        match self.keys.read(stroke, false, &ExplorerKeys) {
+            Parsed::Incomplete => true,
+            Parsed::Nothing => was_pending,
+            Parsed::Command(command) => {
+                self.execute(command);
+                true
+            }
+        }
     }
 
-    crate::shortcuts::bindings::described_keys! {
-        fn plain / describe_plain(&mut self, ch: char, count: Option<usize>, pending: Option<char>) -> bool;
-        match (pending, ch) => {
-            (None, '0'..='9') if ch != '0' || count.is_some() =>
-                Hint::Count,
-                {
-                    let digit = ch.to_digit(10).expect("a digit") as usize;
-                    let count = count.unwrap_or(0).saturating_mul(10).saturating_add(digit);
-                    self.typed.count = Some(count.min(1_000_000));
-                    return false;
-                };
-            (Some('g'), 'g') =>
-                Hint::Action("First item or item given by count"),
-                self.go_to(count.map_or(0, |count| count - 1));
-            (Some('g') | None, '.') =>
-                Hint::Action("Show or hide hidden files"),
-                self.toggle_hidden();
-            (Some('z'), 'o') =>
-                Hint::Action("Expand directory"),
-                {
+    /// Does `command`, read whole.
+    fn execute(&mut self, command: Command<ExplorerKey>) {
+        let mut paging = self.paging;
+        let moved = list::go(self, &mut paging, &command);
+        self.paging = paging;
+        if moved {
+            return;
+        }
+        let own = match command.action {
+            Action::Search { backward } => return self.search.start(backward),
+            Action::SearchAgain { reverse } => {
+                return self.search_again(reverse, command.times());
+            }
+            Action::Own(own) => own,
+            // Nothing else is taken (see `ExplorerKeys::takes`).
+            _ => return,
+        };
+        match own {
+            ExplorerKey::Go(motion) => {
+                let mut paging = self.paging;
+                list::go_own(self, &mut paging, motion, command.count);
+                self.paging = paging;
+            }
+            ExplorerKey::Enter => self.enter(),
+            ExplorerKey::Open(Opening::Here) => self.open_or_enter(),
+            ExplorerKey::Open(how) => self.open(how),
+            ExplorerKey::Leave => self.close_or_leave(),
+            ExplorerKey::Up => self.go_up(),
+            ExplorerKey::Hidden => self.toggle_hidden(),
+            ExplorerKey::Fold(fold) => match fold {
+                Fold::Open => {
                     if let Some(path) = self.dir_at_cursor() {
                         self.expand(path);
                     }
-                };
-            (Some('z'), 'c') =>
-                Hint::Action("Collapse directory"),
-                self.close_fold();
-            (Some('z'), 'a') =>
-                Hint::Action("Toggle directory"),
-                self.toggle_at_cursor();
-            (Some('z'), 'R') =>
-                Hint::Action("Expand all shown directories"),
-                self.expand_all_shown();
-            (Some('z'), 'M') =>
-                Hint::Action("Collapse all directories"),
-                self.collapse_all();
-            (Some('g'), '?') =>
-                Hint::Action("Toggle inline help"),
-                self.help = !self.help;
-            (Some(_), _) =>
-                Hint::None,
-                {};
-            (None, 'g' | 'z') =>
-                Hint::Prefix,
-                {
-                    self.typed.count = count;
-                    self.typed.key = Some(ch);
-                    return false;
-                };
-            (None, 'j') =>
-                Hint::Action("Next item"),
-                self.move_by(count.unwrap_or(1), true);
-            (None, 'k') =>
-                Hint::Action("Previous item"),
-                self.move_by(count.unwrap_or(1), false);
-            (None, 'G') =>
-                Hint::Action("Last item or item given by count"),
-                self.go_to(count.map_or(usize::MAX, |count| count - 1));
-            (None, 'l') =>
-                Hint::Action("Open or enter"),
-                self.open_or_enter();
-            (None, 'h') =>
-                Hint::Action("Close or leave directory"),
-                self.close_or_leave();
-            (None, '-') =>
-                Hint::Action("Parent directory"),
-                self.go_up();
-            (None, '/' | '?') =>
-                Hint::Action(if ch == '/' {
-                    "Search forward"
-                } else {
-                    "Search backward"
-                }),
-                {
-                    self.prompt = Some(Prompt::Search {
-                        query: String::new(),
-                        backward: ch == '?',
-                    });
-                };
-            (None, 'n' | 'N') =>
-                Hint::Action(if ch == 'n' {
-                    "Repeat search"
-                } else {
-                    "Reverse search"
-                }),
-                self.search_again(ch == 'N', count.unwrap_or(1));
-            (None, 'R') =>
-                Hint::Action("Refresh"),
-                self.refresh();
-            (None, 'q') =>
-                Hint::Action("Close pane"),
-                self.asks.push(Ask::Close);
-            (None, 'a') =>
-                Hint::Action("Create file or directory"),
-                self.ask_add();
-            (None, 'r') =>
-                Hint::Action("Rename"),
-                self.ask_rename();
-            (None, 'd') =>
-                Hint::Action("Delete"),
-                self.ask_delete();
-            (None, 'e') =>
-                Hint::Action("Edit directory"),
-                self.edit_here();
-            (None, 'x' | 'y') =>
-                Hint::Action(if ch == 'x' { "Cut" } else { "Copy" }),
-                self.keep(ch == 'x');
-            (None, 'p') =>
-                Hint::Action("Paste"),
-                {
-                    if let Some(dir) = self.dir_here() {
-                        self.asks.push(Ask::Paste { dir });
-                    }
-                };
-            _ =>
-                Hint::None,
-                return false;
+                }
+                Fold::Close => self.close_fold(),
+                Fold::Toggle => self.toggle_at_cursor(),
+                Fold::OpenAll => self.expand_all_shown(),
+                Fold::CloseAll => self.collapse_all(),
+            },
+            ExplorerKey::Help => self.help = !self.help,
+            ExplorerKey::Refresh => self.refresh(),
+            ExplorerKey::Close => self.asks.push(Ask::Close),
+            ExplorerKey::Add => self.ask_add(),
+            ExplorerKey::Rename => self.ask_rename(),
+            ExplorerKey::Delete => self.ask_delete(),
+            ExplorerKey::Edit => self.edit_here(),
+            ExplorerKey::Keep { cut } => self.keep(cut),
+            ExplorerKey::Paste => {
+                if let Some(dir) = self.dir_here() {
+                    self.asks.push(Ask::Paste { dir });
+                }
+            }
         }
-        then true
     }
 
-    // Does what a key that types no character does.
-    crate::shortcuts::bindings::described_keys! {
-        fn named / describe_named(&mut self, stroke: Stroke, count: Option<usize>) -> bool;
-        match stroke => {
-            Stroke::Down =>
-                Hint::Action("Next item"),
-                self.move_by(count.unwrap_or(1), true);
-            Stroke::Up =>
-                Hint::Action("Previous item"),
-                self.move_by(count.unwrap_or(1), false);
-            Stroke::Enter =>
-                Hint::Action("Open the file or toggle the directory"),
-                match self.line() {
-                    Some(line) if line.entry().kind.expands() => self.toggle_at_cursor(),
-                    Some(_) => self.open(Opening::Here),
-                    None if self.on_up() => self.go_up(),
-                    None => {}
-                };
-            Stroke::Right =>
-                Hint::Action("Open or enter"),
-                self.open_or_enter();
-            Stroke::Left =>
-                Hint::Action("Close or leave directory"),
-                self.close_or_leave();
-            Stroke::Home =>
-                Hint::Action("First item"),
-                self.go_to(0);
-            Stroke::End =>
-                Hint::Action("Last item"),
-                self.go_to(usize::MAX);
-            Stroke::PageDown =>
-                Hint::Action("Page down"),
-                self.page(count.unwrap_or(1), true, false);
-            Stroke::PageUp =>
-                Hint::Action("Page up"),
-                self.page(count.unwrap_or(1), false, false);
-            Stroke::Escape =>
-                Hint::Action("Cancel pending command"),
-                {};
-            _ =>
-                Hint::None,
-                return false;
+    /// Enter, or a double click: opens the file at the cursor, or expands
+    /// or collapses the directory, or goes up from `..`.
+    fn enter(&mut self) {
+        match self.line() {
+            Some(line) if line.entry().kind.expands() => self.toggle_at_cursor(),
+            Some(_) => self.open(Opening::Here),
+            None if self.on_up() => self.go_up(),
+            None => {}
         }
-        then true
-    }
-
-    // Does what a key with Ctrl does.
-    crate::shortcuts::bindings::described_keys! {
-        fn ctrl / describe_ctrl(&mut self, ch: char, count: Option<usize>) -> bool;
-        match ch => {
-            'd' =>
-                Hint::Action("Half page down"),
-                self.page(count.unwrap_or(1), true, true);
-            'u' =>
-                Hint::Action("Half page up"),
-                self.page(count.unwrap_or(1), false, true);
-            'f' =>
-                Hint::Action("Page down"),
-                self.page(count.unwrap_or(1), true, false);
-            'b' =>
-                Hint::Action("Page up"),
-                self.page(count.unwrap_or(1), false, false);
-            'n' =>
-                Hint::Action("Next item"),
-                self.move_by(count.unwrap_or(1), true);
-            'p' =>
-                Hint::Action("Previous item"),
-                self.move_by(count.unwrap_or(1), false);
-            'v' =>
-                Hint::Action("Open in right split"),
-                self.open(Opening::Split(Side::Right));
-            's' =>
-                Hint::Action("Open in split below"),
-                self.open(Opening::Split(Side::Below));
-            't' =>
-                Hint::Action("Open in new tab"),
-                self.open(Opening::Tab);
-            _ =>
-                Hint::None,
-                return false;
-        }
-        then true
     }
 
     /// Takes `stroke` for what's being typed in the bar.
     fn prompt_stroke(&mut self, stroke: Stroke) {
-        if let Some(Prompt::Confirm { op, .. }) = &self.prompt {
-            let yes = confirmation(stroke).0;
-            if yes {
-                self.asks.push(Ask::Op(op.clone()));
-            } else {
-                self.message = Some("nothing was done".to_owned());
+        let name = match &mut self.prompt {
+            Some(Prompt::Confirm { op, .. }) => {
+                let op = op.clone();
+                if confirmation(stroke).0 {
+                    self.asks.push(Ask::Op(op));
+                } else {
+                    self.message = Some("nothing was done".to_owned());
+                }
+                self.prompt = None;
+                return;
             }
-            self.prompt = None;
-            return;
-        }
-        let Some(prompt) = &mut self.prompt else {
-            return;
+            Some(Prompt::Add { name, .. } | Prompt::Rename { name, .. }) => name,
+            None => return,
         };
-        let text = match prompt {
-            Prompt::Search { query, .. } => query,
-            Prompt::Add { name, .. } | Prompt::Rename { name, .. } => name,
-            Prompt::Confirm { .. } => unreachable!("answered above"),
-        };
-        match crate::cmdline::simple::key(text, stroke) {
+        match crate::cmdline::simple::key(name, stroke) {
             crate::cmdline::simple::Outcome::Accept => {
-                let prompt = self.prompt.take().expect("a prompt");
-                self.prompted(prompt);
+                if let Some(prompt) = self.prompt.take() {
+                    self.prompted(prompt);
+                }
             }
             crate::cmdline::simple::Outcome::Cancel => self.prompt = None,
             _ => {}
@@ -1226,18 +1095,6 @@ impl Explorer {
     /// Does what was typed in the bar, now Enter has been pressed.
     fn prompted(&mut self, prompt: Prompt) {
         match prompt {
-            Prompt::Search { query, backward } => {
-                let query = if query.is_empty() {
-                    match &self.search {
-                        Some((query, _)) => query.clone(),
-                        None => return,
-                    }
-                } else {
-                    query
-                };
-                self.search = Some((query, backward));
-                self.search_again(false, 1);
-            }
             Prompt::Add { dir, name } => {
                 let name = name.trim();
                 if name.is_empty() || name == "/" {
@@ -1266,41 +1123,6 @@ impl Explorer {
             }
             Prompt::Confirm { .. } => {}
         }
-    }
-
-    /// Moves the cursor `by` lines down, or up, `..` being one.
-    fn move_by(&mut self, by: usize, down: bool) {
-        let last = self.rows_len().saturating_sub(1);
-        let row = if down {
-            self.row().saturating_add(by).min(last)
-        } else {
-            self.row().saturating_sub(by)
-        };
-        self.go_to_row(row);
-    }
-
-    /// Puts the cursor on line `line`, from 0, or the last, `..` being the
-    /// first if it shows.
-    fn go_to(&mut self, line: usize) {
-        self.go_to_row(line.min(self.rows_len().saturating_sub(1)));
-    }
-
-    /// Scrolls `count` pages down, or up, or half pages if `half`, the
-    /// cursor going with them.
-    fn page(&mut self, count: usize, down: bool, half: bool) {
-        let page = if half {
-            (self.list_height() / 2).max(1)
-        } else {
-            self.list_height().saturating_sub(2).max(1)
-        };
-        let by = page.saturating_mul(count);
-        let last = self.rows_len().saturating_sub(1);
-        if down {
-            self.top = self.top.saturating_add(by).min(last);
-        } else {
-            self.top = self.top.saturating_sub(by);
-        }
-        self.move_by(by, down);
     }
 
     /// The directory at the cursor, if it's on one.
@@ -1542,56 +1364,30 @@ impl Explorer {
         if dir { " and everything in it" } else { "" }
     }
 
-    /// The pattern of the last search, if it's one the editor's patterns
-    /// can match, saying why not if it isn't.
-    fn pattern(&mut self) -> Option<Pattern> {
-        let (query, _) = self.search.as_ref()?;
-        match Pattern::new(query, Matching::Typed(self.case), "", Words::NONE) {
-            Ok(pattern) => Some(pattern),
-            Err(why) => {
-                self.message = Some(why);
-                None
-            }
-        }
-    }
-
     /// `n`: goes to the `count`th name shown the last search matches,
     /// after the cursor, or before it if it went backward, or the other
     /// way if `reverse`, round from the end to the start.
     fn search_again(&mut self, reverse: bool, count: usize) {
-        let Some(pattern) = self.pattern() else {
-            return;
+        let pattern = match self.search.pattern(self.case) {
+            None => return,
+            Some(Err(why)) => {
+                self.message = Some(why);
+                return;
+            }
+            Some(Ok(pattern)) => pattern,
         };
-        let backward = self.search.as_ref().is_some_and(|(_, backward)| *backward) != reverse;
         // Rows, of which `..`, having no name, is passed over.
-        let lead = self.lead();
-        let len = self.lines.len() + lead;
-        if len == 0 {
-            return;
-        }
         let matches = |row: usize| {
-            (row.checked_sub(lead).and_then(|line| self.lines.get(line)))
+            self.line_at(row)
                 .is_some_and(|line| pattern.find_at(&line.entry().name, 0).is_some())
         };
-        let mut at = self.row();
-        for _ in 0..count {
-            let found = (1..=len)
-                .map(|step| {
-                    if backward {
-                        (at + len - step % len) % len
-                    } else {
-                        (at + step) % len
-                    }
-                })
-                .find(|&row| matches(row));
-            let Some(index) = found else {
-                let query = self.search.as_ref().map_or("", |(query, _)| query.as_str());
-                self.message = Some(format!("no name shown matches {query}"));
-                return;
-            };
-            at = index;
+        let found = (self.search).again(reverse, count, self.rows_len(), self.row(), matches);
+        if let Some(row) = found {
+            self.go_to_row(row);
+        } else {
+            let query = self.search.query().unwrap_or_default();
+            self.message = Some(format!("no name shown matches {query}"));
         }
-        self.go_to_row(at);
     }
 
     // --- The mouse ----------------------------------------------------------
@@ -1609,14 +1405,14 @@ impl Explorer {
         else {
             return false;
         };
-        if row >= self.rows_len() || self.prompt.is_some() || self.editing.is_some() {
+        if row >= self.rows_len() || self.prompting() || self.editing.is_some() {
             return false;
         }
         self.go_to_row(row);
         self.view.cursor = None;
         self.view.up = false;
         if double {
-            self.named(Stroke::Enter, None);
+            self.enter();
             self.flatten_if_stale();
         }
         true
@@ -1629,20 +1425,7 @@ impl Explorer {
             return false;
         }
         self.flatten_if_stale();
-        let by = usize::try_from(lines.unsigned_abs()).unwrap_or(usize::MAX);
-        let last = self.rows_len().saturating_sub(1);
-        let top = if lines < 0 {
-            self.top.saturating_sub(by)
-        } else {
-            self.top.saturating_add(by).min(last)
-        };
-        if top == self.top {
-            return false;
-        }
-        self.top = top;
-        let bottom = top + self.list_height() - 1;
-        self.go_to_row(self.row().clamp(top, bottom.max(top)).min(last));
-        true
+        list::wheel(self, lines)
     }
 
     pub(crate) fn scroll_region(&self) -> std::ops::Range<usize> {
@@ -1872,9 +1655,7 @@ impl Explorer {
                 kind: HighlightKind::CursorLine,
             });
         }
-        let pattern = (self.search.as_ref()).and_then(|(query, _)| {
-            Pattern::new(query, Matching::Typed(self.case), "", Words::NONE).ok()
-        });
+        let pattern = self.search.pattern(self.case).and_then(Result::ok);
         if let Some(pattern) = pattern {
             for (index, &col) in self.name_cols.iter().enumerate() {
                 let Some(line) = self.line_at(self.top + index) else {
@@ -2007,17 +1788,227 @@ fn under(path: &str, root: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-impl crate::vim::ListPane for Explorer {
-    fn half_typed(&self) -> &crate::vim::HalfTyped {
-        &self.typed
+/// What `z` and a key do to the directories shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Fold {
+    /// `zo`: expand the directory at the cursor.
+    Open,
+    /// `zc`: collapse it, or the one it's in.
+    Close,
+    /// `za`: expand it, or collapse it.
+    Toggle,
+    /// `zR`: expand every directory shown.
+    OpenAll,
+    /// `zM`: collapse them all.
+    CloseAll,
+}
+
+/// A command of an explorer's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExplorerKey {
+    /// Home, End, Ctrl+N and Ctrl+P (see [`list::own_move`]).
+    Go(Motion),
+    /// Enter: open the file, or expand or collapse the directory, or go up
+    /// from `..`.
+    Enter,
+    /// `l` and Right: open the file, or go into the directory; Ctrl+V,
+    /// Ctrl+S and Ctrl+T: open it in a split or a tab.
+    Open(Opening),
+    /// `h` and Left: collapse the directory, or go to the one it's in.
+    Leave,
+    /// `-`: up, the directory above the root the root.
+    Up,
+    /// `.` and `g.`: show hidden files, or hide them.
+    Hidden,
+    Fold(Fold),
+    /// `g?`: list the keys at the foot, or stop.
+    Help,
+    /// `R`: list everything shown again.
+    Refresh,
+    /// `q`: close the explorer.
+    Close,
+    /// `a`: make a file, or a directory.
+    Add,
+    /// `r`: rename or move what's at the cursor.
+    Rename,
+    /// `d`: delete it, to the trash.
+    Delete,
+    /// `e`: edit the folder at the cursor as text.
+    Edit,
+    /// `x`, or `y` if not `cut`: keep what's at the cursor to put.
+    Keep {
+        cut: bool,
+    },
+    /// `p`: put what was kept where the cursor is.
+    Paste,
+}
+
+/// How an explorer reads keys: a list's (see [`list`]), with its own for
+/// files, as netrw's and nvim-tree's are, and `/` `?` `n` `N` searching
+/// the names shown.
+struct ExplorerKeys;
+
+impl Dialect for ExplorerKeys {
+    type Own = ExplorerKey;
+
+    fn describe(&self, action: ExplorerKey) -> String {
+        match action {
+            ExplorerKey::Go(motion) => return list::describe_move(motion),
+            ExplorerKey::Enter => "Open the file or toggle the directory",
+            ExplorerKey::Open(Opening::Here) => "Open or enter",
+            ExplorerKey::Open(Opening::Split(Side::Below)) => "Open in split below",
+            ExplorerKey::Open(Opening::Split(_)) => "Open in right split",
+            ExplorerKey::Open(Opening::Tab) => "Open in new tab",
+            ExplorerKey::Leave => "Close or leave directory",
+            ExplorerKey::Up => "Parent directory",
+            ExplorerKey::Hidden => "Show or hide hidden files",
+            ExplorerKey::Fold(Fold::Open) => "Expand directory",
+            ExplorerKey::Fold(Fold::Close) => "Collapse directory",
+            ExplorerKey::Fold(Fold::Toggle) => "Toggle directory",
+            ExplorerKey::Fold(Fold::OpenAll) => "Expand all shown directories",
+            ExplorerKey::Fold(Fold::CloseAll) => "Collapse all directories",
+            ExplorerKey::Help => "Toggle inline help",
+            ExplorerKey::Refresh => "Refresh",
+            ExplorerKey::Close => "Close pane",
+            ExplorerKey::Add => "Create file or directory",
+            ExplorerKey::Rename => "Rename",
+            ExplorerKey::Delete => "Delete",
+            ExplorerKey::Edit => "Edit directory",
+            ExplorerKey::Keep { cut: true } => "Cut",
+            ExplorerKey::Keep { cut: false } => "Copy",
+            ExplorerKey::Paste => "Paste",
+        }
+        .into()
     }
 
-    fn half_typed_mut(&mut self) -> &mut crate::vim::HalfTyped {
-        &mut self.typed
+    fn own(
+        &self,
+        stroke: Stroke,
+        _keys: &mut Reader<'_>,
+        _visual: bool,
+    ) -> Option<Read<ExplorerKey>> {
+        if let Some(motion) = list::own_move(stroke) {
+            return Some(Read::Yes(ExplorerKey::Go(motion)));
+        }
+        let key = match stroke {
+            Stroke::Enter => ExplorerKey::Enter,
+            Stroke::Right => ExplorerKey::Open(Opening::Here),
+            Stroke::Left => ExplorerKey::Leave,
+            Stroke::Char { ch, ctrl: true } => match ch {
+                'v' => ExplorerKey::Open(Opening::Split(Side::Right)),
+                's' => ExplorerKey::Open(Opening::Split(Side::Below)),
+                't' => ExplorerKey::Open(Opening::Tab),
+                _ => return None,
+            },
+            Stroke::Char { ch, ctrl: false } => match ch {
+                'l' => ExplorerKey::Open(Opening::Here),
+                'h' => ExplorerKey::Leave,
+                '-' => ExplorerKey::Up,
+                '.' => ExplorerKey::Hidden,
+                'R' => ExplorerKey::Refresh,
+                'q' => ExplorerKey::Close,
+                'a' => ExplorerKey::Add,
+                'r' => ExplorerKey::Rename,
+                'd' => ExplorerKey::Delete,
+                'e' => ExplorerKey::Edit,
+                'x' => ExplorerKey::Keep { cut: true },
+                'y' => ExplorerKey::Keep { cut: false },
+                'p' => ExplorerKey::Paste,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(Read::Yes(key))
+    }
+
+    fn after_g(
+        &self,
+        stroke: Stroke,
+        _keys: &mut Reader<'_>,
+        _visual: bool,
+    ) -> Option<Read<ExplorerKey>> {
+        Some(Read::Yes(match stroke.plain()? {
+            '.' => ExplorerKey::Hidden,
+            '?' => ExplorerKey::Help,
+            _ => return None,
+        }))
+    }
+
+    fn after_z(
+        &self,
+        stroke: Stroke,
+        _keys: &mut Reader<'_>,
+        _visual: bool,
+    ) -> Option<Read<ExplorerKey>> {
+        let fold = match stroke.plain()? {
+            'o' => Fold::Open,
+            'c' => Fold::Close,
+            'a' => Fold::Toggle,
+            'R' => Fold::OpenAll,
+            'M' => Fold::CloseAll,
+            _ => return None,
+        };
+        Some(Read::Yes(ExplorerKey::Fold(fold)))
+    }
+
+    fn takes(&self, command: &Command<ExplorerKey>) -> bool {
+        command.register.is_none()
+            && (list::moves(command)
+                || matches!(
+                    command.action,
+                    Action::Own(_) | Action::Search { .. } | Action::SearchAgain { .. }
+                ))
+    }
+}
+
+/// An explorer is a list of its rows: `..`'s, if it shows, then the
+/// tree's lines.
+impl ListRows for Explorer {
+    fn len(&self) -> usize {
+        self.rows_len()
+    }
+
+    fn cursor(&self) -> usize {
+        self.row()
+    }
+
+    fn set_cursor(&mut self, item: usize) {
+        self.go_to_row(item);
+    }
+
+    fn top(&self) -> usize {
+        self.top
+    }
+
+    fn set_top(&mut self, item: usize) {
+        self.top = item.min(self.rows_len().saturating_sub(1));
+    }
+
+    fn shown(&self) -> std::ops::Range<usize> {
+        let end = (self.top + self.list_height()).min(self.rows_len());
+        self.top..end.max(self.top + 1)
+    }
+}
+
+impl crate::vim::KeyState for Explorer {
+    fn mode(&self) -> crate::vim::Mode {
+        crate::vim::Mode::Normal
     }
 
     fn prompting(&self) -> bool {
         Explorer::prompting(self)
+    }
+
+    fn pending(&self) -> bool {
+        self.keys.pending()
+    }
+
+    fn counting(&self) -> Option<usize> {
+        self.keys.counting()
+    }
+
+    fn forget_count(&mut self) {
+        self.keys.clear();
     }
 }
 
@@ -2026,28 +2017,24 @@ impl Explorer {
         if let Some(context) = self.plan_shortcuts() {
             return context;
         }
-        if let Some(prompt) = &self.prompt {
-            return if matches!(prompt, Prompt::Confirm { .. }) {
-                crate::shortcuts::bindings::list("Confirm file operation", None, |stroke, _| {
-                    confirmation(stroke).1
-                })
-            } else {
-                crate::cmdline::simple::help(
-                    "File explorer prompt",
-                    match prompt {
-                        Prompt::Search { query, .. } => query,
-                        Prompt::Add { name, .. } | Prompt::Rename { name, .. } => name,
-                        Prompt::Confirm { .. } => unreachable!(),
-                    },
-                )
-            };
+        match &self.prompt {
+            Some(Prompt::Confirm { .. }) => {
+                return crate::shortcuts::bindings::list(
+                    "Confirm file operation",
+                    None,
+                    |stroke, _| confirmation(stroke).1,
+                );
+            }
+            Some(Prompt::Add { name, .. } | Prompt::Rename { name, .. }) => {
+                return crate::cmdline::simple::help("File explorer prompt", name);
+            }
+            None => {}
         }
-        crate::shortcuts::bindings::list("Explorer", self.typed.key, |stroke, pending| match stroke
-        {
-            Stroke::Char { ch, ctrl: false } => self.describe_plain(ch, self.typed.count, pending),
-            Stroke::Char { ch, ctrl: true } => self.describe_ctrl(ch, self.typed.count),
-            stroke => self.describe_named(stroke, self.typed.count),
-        })
+        if let Some(typed) = self.search.typed() {
+            return crate::cmdline::simple::help("File explorer search", typed);
+        }
+        let mode = crate::vim::Mode::Normal;
+        crate::vim::shortcuts::context("Explorer", &self.keys, mode, &ExplorerKeys)
     }
 }
 
