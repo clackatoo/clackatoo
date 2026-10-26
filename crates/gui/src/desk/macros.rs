@@ -340,7 +340,7 @@ impl Desk {
         let mut redraw = self.give_up_off_focus();
         self.macros.handing = Some(Handing::Held);
         loop {
-            if self.editors_wait_for_grammar() {
+            if self.editors_wait_for_grammar() || self.chat_waits_to_settle() {
                 self.macros.waiting_in = self.shown.map(|shown| shown.pane);
                 break;
             }

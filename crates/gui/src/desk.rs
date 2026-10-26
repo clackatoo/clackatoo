@@ -9401,6 +9401,34 @@ mod tests {
     }
 
     #[test]
+    fn keys_after_a_chats_search_or_yank_wait_for_it_to_settle() {
+        let (mut desk, mut fonts) = chat_with_code();
+        desk.lua_from(r#"client.keys.map("n", "<Space>s", "/test<CR>yiw")"#);
+        normal_mode(&mut desk);
+        paint_chat(&mut desk, &mut fonts);
+        // Keys a binding types, as a macro's are: `yiw` waits for the
+        // search to move the cursor, and yanks the word it found.
+        type_text(&mut desk, "gg");
+        type_text(&mut desk, " s");
+        desk.settle_chats(&mut fonts);
+        assert_eq!(register(&mut desk, '0').as_deref(), Some("test"));
+        // Keys pressed: `nn` goes on twice from where the search went,
+        // each `n` from where the one before it left the cursor.
+        type_text(&mut desk, "gg/t");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        type_text(&mut desk, "nn");
+        desk.settle_chats(&mut fonts);
+        let chat = desk.chat_mut(TerminalId(1)).expect("the chat");
+        assert_eq!(chat.view().cursor_byte(), Some("cargo tes".len()));
+        assert!(!desk.holding(), "nothing left waiting");
+    }
+
+    #[test]
     fn a_chats_search_is_typed_in_the_bar_with_its_history_and_registers() {
         let (mut desk, mut fonts) = chat_with_code();
         normal_mode(&mut desk);

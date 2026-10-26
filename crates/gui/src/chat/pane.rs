@@ -267,6 +267,11 @@ impl ChatPane {
         std::mem::take(&mut self.copies)
     }
 
+    /// Whether a yank or a search waits for the fonts, to be settled.
+    pub(crate) fn reading_unsettled(&self) -> bool {
+        self.view.reading_unsettled()
+    }
+
     /// Takes what it yanked, oldest first, for the registers.
     pub(crate) fn take_yanks(&mut self) -> Vec<Yanked> {
         std::mem::take(&mut self.yanks)

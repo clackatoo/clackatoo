@@ -459,6 +459,17 @@ impl ChatView {
         (redraw, false)
     }
 
+    /// Whether a yank or a search normal or visual mode queued waits for
+    /// the fonts.
+    pub(crate) fn reading_unsettled(&self) -> bool {
+        (self.queued.iter()).any(|input| {
+            matches!(
+                input,
+                Input::Yank { .. } | Input::YankText(_) | Input::Search { .. }
+            )
+        })
+    }
+
     /// Carries out `input`, a yank or a search normal or visual mode
     /// queued, now that the fonts are at hand to lay out what it needs.
     pub(super) fn settle_reading(

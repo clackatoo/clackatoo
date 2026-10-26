@@ -889,6 +889,14 @@ impl Desk {
                 None => return Some(false),
             }
         }
+        // A chat's yank or search waits for the fonts, which the window
+        // settles it with before it draws: keys wait with it, so the next
+        // sees where it left the cursor, and what it yanked.
+        if self.chat_waits_to_settle() {
+            let held = given_back.or_else(|| unmade.map(|make| make()));
+            self.editors.held.extend(held);
+            return Some(false);
+        }
         let now = std::time::Instant::now();
         if let Some(editor) =
             (self.editors.panes.values_mut()).find(|editor| editor.waiting_for_grammar())

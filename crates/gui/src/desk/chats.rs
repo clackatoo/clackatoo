@@ -94,22 +94,45 @@ impl Desk {
     /// fonts, and takes what they copied, as other copies are taken: `"+`
     /// or `"*` holds it, and the window puts it on the clipboard. Returns
     /// whether the window must be redrawn.
+    ///
+    /// Keys typed after a chat's yank or search waited for it (see
+    /// [`chat_waits_to_settle`](Self::chat_waits_to_settle)): they go on
+    /// now, and if one yanks or searches again, it's settled in turn.
     pub(crate) fn settle_chats(&mut self, fonts: &mut crate::fonts::Fonts) -> bool {
         let mut redraw = false;
-        let (mut copied, mut yanked) = (Vec::new(), Vec::new());
-        for chat in self.chats.values_mut() {
-            redraw |= chat.settle(fonts);
-            copied.extend(chat.take_copies());
-            yanked.extend(chat.take_yanks());
-        }
-        for (text, to) in copied {
-            self.copied(text, to);
-        }
-        // Into the registers, as a terminal's yanks go.
-        for yank in yanked {
-            self.pane_yanked(yank);
+        loop {
+            let (mut copied, mut yanked) = (Vec::new(), Vec::new());
+            for chat in self.chats.values_mut() {
+                redraw |= chat.settle(fonts);
+                copied.extend(chat.take_copies());
+                yanked.extend(chat.take_yanks());
+            }
+            for (text, to) in copied {
+                self.copied(text, to);
+            }
+            // Into the registers, as a terminal's yanks go.
+            for yank in yanked {
+                self.pane_yanked(yank);
+            }
+            if !self.holding() && !self.frames_typing() {
+                break;
+            }
+            // Each time round takes at least the key that waits, so this
+            // ends.
+            redraw |= self.type_macros();
+            if !self.chat_waits_to_settle() {
+                break;
+            }
         }
         redraw
+    }
+
+    /// Whether the focused chat has a yank or a search waiting for the
+    /// fonts to be carried out, which moves its cursor or fills a
+    /// register: the keys after it wait for it, as they wait for an
+    /// editor's grammar.
+    pub(super) fn chat_waits_to_settle(&self) -> bool {
+        self.focused_chat().is_some_and(ChatPane::reading_unsettled)
     }
 
     /// When a chat must be drawn again by itself, as for its agent's
