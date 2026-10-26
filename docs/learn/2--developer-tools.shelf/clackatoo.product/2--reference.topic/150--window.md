@@ -349,7 +349,7 @@ Clicking a pane focuses it. What else the mouse does depends on the program in t
 - A triple click selects whole lines.
 - With Alt held, or Ctrl and Alt, dragging selects a block of columns. Over a program that takes the mouse, add Shift.
 
-Letting go copies the selection to the primary selection, and a middle click pastes it, as elsewhere on Linux. Ctrl+Shift+C, or `y` in normal mode with nothing typed before it, copies it to the clipboard. The selection stays highlighted until the next key or click. In normal mode, a click also moves the cursor there.
+Letting go copies the selection to the primary selection, `"*`, and a middle click pastes it, as elsewhere on Linux. Only there: as Vim puts a mouse selection in `"*` and leaves the unnamed register as it was, so `p` in an editor still puts what you last yanked. Ctrl+Shift+C copies it to the clipboard, as `"+y` does, and `y` in normal mode with nothing typed before it yanks it, as `y` yanks anything, into the [registers](#selecting-and-copying). The selection stays highlighted until the next key or click. In normal mode, a click also moves the cursor there.
 
 **Programs that take the mouse.** Programs such as Neovim, htop and less can ask for clicks, drags and the wheel, and get them while their pane is in insert mode on the live screen. The pointer is then an arrow rather than a text cursor. Hold Shift to select text anyway. A drag stays with the pane it started in, even when the pointer leaves it.
 
@@ -374,7 +374,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 | `gj` `gk` `g0` `g$` | As `j`, `k`, `0` and `$`: a terminal's lines don't wrap. |
 | `gg` `G` | The oldest line of history, the screen's last line, or with a count, that line, keeping the column, as Neovim's do; at its first character that isn't blank with the [option](~clackatoo/reference/config#options) `startofline`. |
 | `gx` | Opens the link under the cursor, as Ctrl+click does. |
-| `f` `t` `F` `T`, `;` `,` | To the next of the character typed after them on the line, or just before it, or back to the one before, or just after it; `;` finds it again, and `,` the other way, as Vim's do; each pane keeps its own last find, where Vim keeps one for every window. With `y`, they take to it: `yt)`. |
+| `f` `t` `F` `T`, `;` `,` | To the next of the character typed after them on the line, or just before it, or back to the one before, or just after it; `;` finds it again, and `,` the other way, as Vim's do. The window keeps one last find, as Vim does, so `;` finds again what `f` found in an editor, a chat or another terminal. With `y`, they take to it: `yt)`. |
 | `%` `{` `}` | The bracket that pairs with the one under the cursor, or with a count, the line that far through, `50%` half way; the blank line before or after the paragraph. |
 | `(` `)` | The start of this sentence or the one before, or of the next, as Vim's go: a sentence ends at `.`, `!` or `?` before a blank or a line's end, and at an empty line. |
 | `H` `M` `L` | The top, middle and bottom lines in view, keeping the column as `gg` does. |
@@ -386,7 +386,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 
 Moving past the top of the view scrolls into history. In normal mode the view holds still while output arrives, so the cursor stays on its text. On the alternate screen the cursor moves over the screen only.
 
-The keys are read as an editor reads them, so a command half typed, as `y3` or `"a`, shows at the start of the bar until it's done, as Vim's `showcmd` shows it. A command a terminal doesn't take, as `dw`, `x`, `"ayy` or `ma`, does nothing, all its keys spent, as in a file Vim won't change: so after `d`, the next key is the command's too, `:` included. Esc after keys half typed only forgets them, as in Vim: `vg` or `vi` and Esc is still in visual mode, and a second Esc leaves it. Esc after only a count or a register, as `v3` or `v"a`, does what Esc alone does, and leaves visual mode.
+The keys are read as an editor reads them, so a command half typed, as `y3` or `"a`, shows at the start of the bar until it's done, as Vim's `showcmd` shows it. A command a terminal doesn't take, as `dw`, `x`, `"ap` or `ma`, does nothing, all its keys spent, as in a file Vim won't change: so after `d`, the next key is the command's too, `:` included. Esc after keys half typed only forgets them, as in Vim: `vg` or `vi` and Esc is still in visual mode, and a second Esc leaves it. Esc after only a count or a register, as `v3` or `v"a`, does what Esc alone does, and leaves visual mode.
 
 ### Selecting and copying
 
@@ -396,15 +396,18 @@ The keys are read as an editor reads them, so a command half typed, as `y3` or `
 | `V` | Selects whole lines. |
 | Ctrl+V | Selects a block of columns. `$` takes every line to its end, and `O` goes to the other corner on the same line. |
 | `o` | Moves the other end of the selection. |
-| `y`, Ctrl+Shift+C | Copies the selection to the clipboard, and returns to normal mode. |
+| `y`, Ctrl+Shift+C | Yanks the selection into the registers, or with Ctrl+Shift+C, as `"+y`, onto the clipboard, and returns to normal mode. |
 | `yy`, `Y` | Copies the cursor's line, or with a count, as many lines from it: `3yy`. `y2w` and `2yj` take counts too. |
 | `y` and a motion | Copies what the motion moves over: `yw` to the next word, `y$` to the line's end, `yj` this line and the next, `ygg` up to the top, `yH` up to the view's top. |
 | `y` and a [text object](#text-objects) | Copies the object around the cursor: `yiw` the word, `yi"` what's in the quotes, `yib` a command's output. |
+| `"a` and any of these | Keeps what's copied in the register named, as in an editor: `"ayy`, `"Ayw` adds to `"a`, `"+yib` puts a command's output on the clipboard. A register before anything else does nothing. |
 | Esc | Drops the selection. |
 
 A selection by characters lights each line to a cell past its text, which is what `y` copies; `V` lights whole lines, the pane's width. `y` on a block copies a line for each row, without the blanks at their ends, and never joins a wrapped line to the next. A copy stops at 100,000 lines or 4 MiB, and says so. A daemon too old to copy blocks copies from corner to corner, and says so.
 
-Any motion extends a selection, including `gg`, `G` and searches. What you copy to the clipboard lights up for a moment, so you can see what went. Copied text is what the program printed: a line that wrapped only because it reached the window's edge comes out as one line, blanks at the ends of lines are left out, and there is no newline after the last line, so pasting it into a shell never runs it.
+Any motion extends a selection, including `gg`, `G` and searches. What you copy lights up for a moment, so you can see what went. Copied text is what the program printed: a line that wrapped only because it reached the window's edge comes out as one line, and blanks at the ends of lines are left out.
+
+What `y` copies goes into the [registers](~clackatoo/reference/editor#registers) exactly as an editor's yank does: into the unnamed register, which `p` in an editor puts, and `"0`, or into the register named before it; and, as the [option](~clackatoo/reference/config#options) `clipboard` says, onto the clipboard, as it is unless you change it, or the primary selection. With `clipboard=none` it stays in the window's registers, and `"+y` or Ctrl+Shift+C puts it on the clipboard. It keeps its kind, so `p` puts lines copied by lines as lines below the cursor's, and a block as a block. Lines copied by lines end with a newline, as an editor's do and as Vim's `"+yy` does; a shell that takes bracketed paste, as bash, zsh and fish do, still doesn't run a line pasted into it until you press Enter.
 
 ### Text objects
 

@@ -216,6 +216,8 @@ What's yanked and deleted is kept in registers, as in Vim. `"` and a register's 
 | `"_` | Nothing: what goes to it is thrown away, and the others keep theirs. |
 | `"+` `"*` | The clipboard, and the primary selection that a middle click pastes. |
 
+A terminal's normal mode yanks into the same registers, `"a` before `y` too, so `p` puts a line copied from a terminal as a line. Text selected with the mouse there goes only to `"*`, as in Vim.
+
 A block is kept as one, its rows a line each, and `p` and `P` put it back as one: a row on each line from the cursor's, padded with spaces where text follows, and on new lines past the end. `:Registers` marks it `b`.
 
 As the option `clipboard` says, the unnamed register goes along with the clipboard by default, as Neovim's `unnamedplus` does: what's yanked or deleted can be pasted anywhere, and `p` puts what was last copied anywhere. Deleting nothing, as `D` on an empty line, leaves them alone. The window reads the clipboard and the primary selection when it gets the focus, off to one side, so a program slow to answer for them never holds it up. In visual mode, `p` and `P` put in place of what's selected; `p` keeps what was selected, as a delete, and `P` doesn't. `:Registers` lists them by the cursor.
@@ -419,7 +421,7 @@ An editor in a window of its own starts in normal mode, as in Vim. One you go to
 | `{` `}` | The empty line before the paragraph, or after it; or the file's first line, or the end of its last. A count goes that many paragraphs, or nowhere if there aren't so many, as Vim's. With an operator, from a line's start, they take whole lines, so `d}` deletes the paragraph. |
 | `(` `)` | The start of this sentence or the one before, or of the next, as Vim's go: a sentence ends at `.`, `!` or `?`, with any of `)` `]` `"` `'` after it, before a space, a tab or a line's end, and at an empty line. A count goes that many, or nowhere if there aren't so many. At the text's end, `)` goes to its last character, which an operator takes too. They're jumps. |
 | `*` `#` | Searches for the word under the cursor, or the next on its line, as a whole word: forward, or back. `n` and `N` go on. Case is ignored as `ignorecase` says, whatever `smartcase` says, as in Vim. |
-| `f` `t` `F` `T` and a character | The next one on the line, or the character before it with `t`; back with `F` and `T`. `;` does it again, and `,` back, after an operator too, as `d;`; each pane keeps its own last find, where Vim keeps one for every window. A tab is one character to them: `f<Tab>` finds it. |
+| `f` `t` `F` `T` and a character | The next one on the line, or the character before it with `t`; back with `F` and `T`. `;` does it again, and `,` back, after an operator too, as `d;`. The window keeps one last find, as Vim does, so `;` finds again what `f` found in another editor, a terminal's normal mode or a chat. A tab is one character to them: `f<Tab>` finds it. |
 | `/` `?` | Searches forward or back for a pattern, written as Vim writes it (see [Substituting](#substituting)). `n` and `N` find the next and previous match, going round the file's ends. Case is ignored unless the search has a capital letter, as `ignorecase` and `smartcase` start. |
 | `gj` `gk` | The next or previous screen row, where lines wrap; a count moves that many. With `nowrap`, as `j` and `k`. |
 | `g0` `g$` | The screen row's first or last character; with `nowrap`, the first or last in view. |
