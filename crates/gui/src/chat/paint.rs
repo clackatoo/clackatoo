@@ -7,7 +7,7 @@
 //! the turn being answered does, or are opened or folded.
 
 mod agents;
-mod cards;
+pub(super) mod cards;
 mod divider;
 mod edge;
 mod files;

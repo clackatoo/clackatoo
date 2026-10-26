@@ -11,9 +11,9 @@ use crate::fonts::Fonts;
 use crate::render::{Fill, Paint};
 
 /// How many lines of what a card shows it shows folded.
-const FOLDED: usize = 8;
+pub(in crate::chat) const FOLDED: usize = 8;
 /// The most lines it shows open.
-const MOST: usize = 1000;
+pub(in crate::chat) const MOST: usize = 1000;
 /// The space round a card's text, in ems.
 const PAD: f32 = 0.8;
 

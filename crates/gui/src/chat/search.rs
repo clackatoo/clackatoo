@@ -110,10 +110,15 @@ impl<'p> Spent<'p> {
 
     /// Notes a turn holding `bytes` laid out. Returns whether that's
     /// within bounds.
+    /// The first a step lays out always is, however much it holds, so a
+    /// turn too big for the bounds can still be searched.
     fn lay_out(&mut self, bytes: usize) -> bool {
+        let first = self.laid == 0;
         self.laid += 1;
         self.laid_bytes += bytes;
-        self.ran_out |= self.laid > MOST_LAID || self.laid_bytes > MOST_LAID_BYTES;
+        if !first {
+            self.ran_out |= self.laid > MOST_LAID || self.laid_bytes > MOST_LAID_BYTES;
+        }
         !self.ran_out
     }
 }
@@ -517,19 +522,24 @@ impl ChatView {
     /// The text of `piece` of turn `turn` as the chat holds it, as it
     /// shows: a message as typed, words' blocks without their Markdown,
     /// and a card's lines, as open.
-    fn held_text(&self, turn: usize, piece: usize, activities: &[Tool]) -> Option<String> {
+    fn held_text<'a>(
+        &'a self,
+        turn: usize,
+        piece: usize,
+        activities: &[Tool],
+    ) -> Option<std::borrow::Cow<'a, str>> {
+        use std::borrow::Cow;
         let at = self.node.turns.get(turn)?;
         if piece == super::paint::PROMPT {
-            return Some(at.prompt.clone());
+            return Some(Cow::Borrowed(&at.prompt));
         }
         let index = piece.checked_sub(ITEMS)?;
-        match at.items.get(index) {
-            Some(Item::Words(text) | Item::Thought(text) | Item::Other(text)) => {
-                Some(blocks_text(text))
-            }
-            Some(Item::Tool(tool)) => Some(card_text(tool)),
-            None => activities.get(index - at.items.len()).map(card_text),
-        }
+        let owned = match at.items.get(index) {
+            Some(Item::Words(text) | Item::Thought(text) | Item::Other(text)) => blocks_text(text),
+            Some(Item::Tool(tool)) => card_text(tool),
+            None => card_text(activities.get(index - at.items.len())?),
+        };
+        Some(Cow::Owned(owned))
     }
 
     /// Whether `piece` of turn `turn` is a tool's card.
@@ -541,31 +551,50 @@ impl ChatView {
         index >= at.items.len() || matches!(at.items.get(index), Some(Item::Tool(_)))
     }
 
-    /// About how much turn `turn` holds, what laying it out costs: its
-    /// message, its words and its tools' text, as the chat holds them.
+    /// About how much of turn `turn` shows, what laying it out costs: its
+    /// message, the words its work's fold leaves, and each card's head,
+    /// and for a card open, or a failed one, as many lines of its output
+    /// or its change as it shows.
     fn turn_bytes(&self, turn: usize) -> usize {
-        use clackatoo_protocol::ToolContent;
+        use super::paint::cards::{FOLDED, MOST};
+        use clackatoo_protocol::{ToolContent, ToolStatus};
         let Some(at) = self.node.turns.get(turn) else {
             return 0;
         };
-        let item = |item: &Item| match item {
-            Item::Words(text) | Item::Thought(text) | Item::Other(text) => text.len(),
-            Item::Tool(tool) => {
-                tool.title.len()
-                    + (tool.content.iter())
-                        .map(|content| match content {
-                            ToolContent::Text(text)
-                            | ToolContent::Output(text)
-                            | ToolContent::Other(text) => text.len(),
-                            ToolContent::Diff(diff) => {
-                                diff.old.as_ref().map_or(0, String::len) + diff.new.len()
-                            }
-                            ToolContent::Image(_) => 0,
-                        })
-                        .sum::<usize>()
-            }
+        let shape = self.shape(turn, at);
+        let tool = |tool: &Tool| {
+            let lines = if self.open_cards.contains(&tool.id) {
+                MOST
+            } else if tool.status == ToolStatus::Failed {
+                FOLDED
+            } else {
+                0
+            };
+            let shown = (tool.content.iter())
+                .map(|content| match content {
+                    // A command's output shows its last lines.
+                    ToolContent::Text(text)
+                    | ToolContent::Output(text)
+                    | ToolContent::Other(text) => lines_bytes(text, lines, true),
+                    // A change, its first.
+                    ToolContent::Diff(diff) => {
+                        let old = diff.old.as_deref().unwrap_or_default();
+                        lines_bytes(old, lines, false) + lines_bytes(&diff.new, lines, false)
+                    }
+                    ToolContent::Image(_) => 0,
+                })
+                .sum::<usize>();
+            tool.title.len() + shown
         };
-        at.prompt.len() + at.items.iter().map(item).sum::<usize>()
+        let items = (at.items.iter().enumerate())
+            .filter(|&(index, item)| !folded_away(shape, index, item))
+            .map(|(_, item)| match item {
+                Item::Words(text) | Item::Thought(text) | Item::Other(text) => text.len(),
+                Item::Tool(found) => tool(found),
+            })
+            .sum::<usize>();
+        let activities = self.activities_of(turn).iter().map(tool).sum::<usize>();
+        at.prompt.len() + items + activities
     }
 
     /// The cards of the activities turn `turn` started, as it shows them,
@@ -578,6 +607,24 @@ impl ChatView {
             .map(clackatoo_protocol::Activity::card)
             .collect()
     }
+}
+
+/// How many bytes the first `lines` lines of `text` take, or the last if
+/// `last`, without reading further than they go.
+fn lines_bytes(text: &str, lines: usize, last: bool) -> usize {
+    if lines == 0 {
+        return 0;
+    }
+    let found = if last {
+        (text.trim_end_matches('\n').rmatch_indices('\n'))
+            .nth(lines - 1)
+            .map(|(at, _)| text.len() - at - 1)
+    } else {
+        text.match_indices('\n')
+            .nth(lines - 1)
+            .map(|(at, _)| at + 1)
+    };
+    found.unwrap_or(text.len())
 }
 
 /// `tool`'s card as a search reads it, as it shows open: its head, a
@@ -866,6 +913,50 @@ mod tests {
             "{} {scroll}",
             chat.scroll
         );
+    }
+
+    #[test]
+    fn a_turn_holding_more_than_the_bounds_is_still_searched_as_it_shows() {
+        // 5 MiB of output in a folded card, in a turn's folded work: what
+        // shows is the message.
+        let output = "x\n".repeat(5 << 19);
+        let mut node = turn_of(vec![command(
+            "big",
+            "make",
+            vec![ToolContent::Output(output)],
+        )]);
+        node.turns[0].prompt = "find the needle".into();
+        let (mut chat, mut fonts) = reading(node);
+        chat.cache.turns[0].stale = true;
+        read(&mut chat, "G");
+        search(&mut chat, &mut fonts, "/needle");
+        assert_eq!(at(&chat), (0, PROMPT, "find the ".len()));
+        assert!(chat.turn_bytes(0) < 100, "{}", chat.turn_bytes(0));
+        // Open, in its turn's work opened, its last 1000 lines.
+        chat.set_fold(0, true);
+        chat.open_cards.insert("big".into());
+        assert_eq!(
+            chat.turn_bytes(0),
+            "find the needle".len() + "make".len() + 2000
+        );
+    }
+
+    #[test]
+    fn the_first_layout_of_a_step_is_always_allowed() {
+        let pattern = crate::editor::Pattern::new(
+            "x",
+            crate::editor::Matching::Exact,
+            "",
+            crate::motion::Words::NONE,
+        )
+        .unwrap();
+        let mut spent = super::Spent::new(&pattern);
+        assert!(spent.lay_out(super::MOST_LAID_BYTES * 2));
+        assert!(!spent.lay_out(1));
+        assert_eq!(super::lines_bytes("a\nbb\nccc\n", 2, false), 5);
+        assert_eq!(super::lines_bytes("a\nbb\nccc\n", 2, true), 7);
+        assert_eq!(super::lines_bytes("a\nbb", 9, true), 4);
+        assert_eq!(super::lines_bytes("a\nbb", 0, true), 0);
     }
 
     #[test]
