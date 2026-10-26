@@ -177,8 +177,9 @@ pub enum Change {
     },
     /// An undo step that changes nothing, as Vim's `3J` on the last line
     /// makes one, keeping `state`, its places in the text at `base`. It's
-    /// answered with [`BufferUpdate::Acked`], and ends the chance to redo.
-    /// Only to a daemon of protocol 106 or later.
+    /// answered with [`BufferUpdate::NoChange`], as it makes no version,
+    /// and ends the chance to redo. Only to a daemon of protocol 106 or
+    /// later.
     Empty {
         /// The version of the text its places are in.
         base: u64,

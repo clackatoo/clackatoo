@@ -247,9 +247,11 @@ pub(crate) struct Shape {
 /// away leaves it at that line number, its column as it was; a line
 /// joined onto the one before takes it along, its column moved with the
 /// line's text, less the indent `J` takes away; lines `:m` moves take it
-/// with them; and an edit within its line leaves it at its column. The
-/// window's undo or redo of its own last edit puts it back as it was
-/// before that edit (see [`Undoable`]).
+/// with them; and an edit within its line leaves it at its column. An
+/// undo or redo puts it back as its step kept it (see
+/// [`put_back`](Marks::put_back)); with a daemon from before protocol 106,
+/// which keeps nothing with steps, the window's undo or redo of its own
+/// last edit puts it back as it was before that edit (see [`Undoable`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Selected {
     /// Its first end, where `<` is...
@@ -279,7 +281,9 @@ pub(crate) enum Came {
 /// daemon tells, puts the selection back as it was, as Vim's undo puts
 /// back the one kept with its step (`uh_visual`): an edit that only looks
 /// like its undo, as `P` after `dd` or another's edit can, doesn't. Any
-/// other edit, or a selection made, forgets it.
+/// other edit, or a selection made, forgets it. Only for a daemon from
+/// before protocol 106: a newer one's undo says what its step kept, which
+/// puts the selection back itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Undoable {
     edit: Edit,

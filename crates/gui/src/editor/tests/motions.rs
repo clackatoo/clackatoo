@@ -1757,10 +1757,12 @@ fn an_undo_puts_the_cursor_where_its_step_began_as_vims() {
     // header keeps where the cursor was (`uh_cursor`), and its steps that
     // change nothing, which the daemon now keeps too.
     let lines = "a1 x\na2 x\na3 x\na4 x\na5 x\na6 x\na7 x\na8 x\na9 x\n";
-    let cases: [Case<'_>; 11] = [
+    let cases: [Case<'_>; 12] = [
         // `3J` on the last line, and `X` at a line's start: steps that
-        // change nothing, undone on their own.
+        // change nothing, undone on their own, and ending the chance to
+        // redo.
         ("abc\ndef\n", (2, 2), "x3J3Juu", ("abc\nde\n", (2, 1))),
+        ("abc\ndef\n", (2, 2), "xu3J<C-r>", ("abc\ndef\n", (2, 0))),
         ("abc\ndef\n", (2, 2), "3Jkxuu", ("abc\ndef\n", (2, 2))),
         (
             "abc\ndef\nghi\n",
