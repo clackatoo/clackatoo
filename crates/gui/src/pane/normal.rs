@@ -494,6 +494,44 @@ impl Pane {
         true
     }
 
+    /// A key in normal mode while text selected with the mouse shows, which
+    /// is read as Vim reads a key in visual mode: a count or a register
+    /// waits with the selection, and `y` after them, or alone, yanks it,
+    /// into the register named. `None` for any other key, which is the
+    /// pane's, and forgets the selection.
+    pub(super) fn mouse_selection_key(&mut self, press: &KeyPress<'_>) -> Option<bool> {
+        // An operator typed before, as `y` waiting for its motion, has the
+        // key, as it did before the drag.
+        if self.mode != Mode::Normal
+            || self.mouse_selected().is_none()
+            || !only_count_and_register(self.keys.so_far())
+        {
+            return None;
+        }
+        let [stroke] = strokes(press, false)[..] else {
+            return None;
+        };
+        let mut typed = self.keys.so_far().to_vec();
+        typed.push(stroke);
+        match crate::vim::parse(&typed, true, &TerminalKeys) {
+            Parsed::Command(Command {
+                action: Action::Operate(Operator::Yank, Target::Selection),
+                register,
+                ..
+            }) => {
+                self.keys.clear();
+                self.copy_mouse_selection(CopyTo::Register(register));
+                self.mouse_selection = None;
+                Some(true)
+            }
+            Parsed::Incomplete if only_count_and_register(&typed) => {
+                self.keys.read(stroke, false, &TerminalKeys);
+                Some(true)
+            }
+            _ => None,
+        }
+    }
+
     /// Copies the selection and returns to normal mode, with the cursor at
     /// the selection's start.
     fn yank_selection(&mut self, to: CopyTo) -> bool {
@@ -838,6 +876,40 @@ pub(super) fn position(point: Point) -> Position {
     Position {
         line: point.line,
         col: point.col,
+    }
+}
+
+/// Whether `typed`, which the grammar reads as incomplete, is only counts
+/// and registers, as `3`, `"a` or `"a2`, and not the start of a command.
+/// (`0` alone is a motion, so not incomplete.)
+fn only_count_and_register(typed: &[Stroke]) -> bool {
+    let mut rest = typed;
+    loop {
+        rest = match rest {
+            [] => return true,
+            [
+                Stroke::Char {
+                    ch: '"',
+                    ctrl: false,
+                },
+            ] => &[],
+            [
+                Stroke::Char {
+                    ch: '"',
+                    ctrl: false,
+                },
+                _,
+                more @ ..,
+            ]
+            | [
+                Stroke::Char {
+                    ch: '0'..='9',
+                    ctrl: false,
+                },
+                more @ ..,
+            ] => more,
+            _ => return false,
+        };
     }
 }
 

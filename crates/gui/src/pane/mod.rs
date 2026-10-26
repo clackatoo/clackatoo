@@ -481,24 +481,18 @@ impl Pane {
         let ctrl_backslash = is_ctrl_backslash(press);
         let to_normal = enters_normal_mode(press);
         let after_ctrl_backslash = std::mem::take(&mut self.after_ctrl_backslash);
-        // Text selected with the mouse is copied by Ctrl+Shift+C, as `"+y`,
-        // or yanked by `y` in normal mode with nothing typed, and any other
-        // key forgets it.
+        // Text selected with the mouse is copied by Ctrl+Shift+C, and in
+        // normal mode is a visual selection to Vim: `y` yanks it, after a
+        // count or a register, which wait with it. Any other key forgets it.
         let ctrl_shift_c =
             modifiers.ctrl && matches!(press.key, Key::Character(text) if text == "C");
-        let y = self.mode == Mode::Normal
-            && !modifiers.ctrl
-            && !modifiers.alt
-            && !self.keys.pending()
-            && matches!(press.key, Key::Character(text) if text == "y");
-        let to = if ctrl_shift_c {
-            CopyTo::Clipboard
-        } else {
-            CopyTo::Register(None)
-        };
-        if (ctrl_shift_c || y) && self.copy_mouse_selection(to) {
+        if ctrl_shift_c && self.copy_mouse_selection(CopyTo::Clipboard) {
+            self.keys.clear();
             self.mouse_selection = None;
             return true;
+        }
+        if let Some(redraw) = self.mouse_selection_key(press) {
+            return redraw;
         }
         let forgot_selection = self.mouse_selection.take().is_some();
         if ctrl_shift_c && self.mode == Mode::Insert {
@@ -3331,6 +3325,46 @@ mod mouse_tests {
                 .iter()
                 .all(|highlight| highlight.kind == HighlightKind::Copied)
         );
+    }
+
+    #[test]
+    fn a_register_or_count_waits_with_the_mouses_selection_for_y() {
+        let terminal = terminal("hello world\r\nsecond");
+        let mut pane = pane(&terminal);
+        pane.enter_normal_mode();
+        let select = |pane: &mut Pane| {
+            mouse(pane, MouseAction::Press(LEFT), [0, 6], 1);
+            mouse(pane, MouseAction::Motion(Some(LEFT)), [1, 2], 1);
+            mouse(pane, MouseAction::Release(LEFT), [1, 2], 1);
+            copied(pane, &terminal);
+        };
+        select(&mut pane);
+        key(&mut pane, "\"");
+        key(&mut pane, "a");
+        assert!(pane.mouse_selected().is_some(), "still selected");
+        key(&mut pane, "y");
+        let into = |name| CopyTo::Register(Some(name));
+        assert_eq!(
+            copied(&mut pane, &terminal),
+            Some(("world\nsec".to_owned(), into('a')))
+        );
+        assert!(pane.mouse_selected().is_none());
+        // A count too, and a register after it.
+        select(&mut pane);
+        for typed in ["2", "\"", "b", "y"] {
+            key(&mut pane, typed);
+        }
+        assert_eq!(
+            copied(&mut pane, &terminal),
+            Some(("world\nsec".to_owned(), into('b')))
+        );
+        // Anything else forgets it, and is the pane's.
+        select(&mut pane);
+        key(&mut pane, "\"");
+        key(&mut pane, "a");
+        key(&mut pane, "j");
+        assert!(pane.mouse_selected().is_none());
+        assert_eq!(copied(&mut pane, &terminal), None);
     }
 
     #[test]
