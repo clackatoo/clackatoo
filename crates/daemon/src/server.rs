@@ -2858,7 +2858,12 @@ impl Daemon {
             ClientMessage::Files { files, action } => self.serve_files(token, files, action),
             ClientMessage::FileOp { id, op, pane: _ } => self.serve_file_op(token, id, op),
             ClientMessage::Board { board, action } => self.serve_board(token, board, action),
-            ClientMessage::ListSessions { id, agent, cwd } => {
+            ClientMessage::ListSessions {
+                id,
+                agent,
+                cwd,
+                on: _,
+            } => {
                 self.list_sessions(token, id, &agent, &cwd);
             }
             ClientMessage::Colour { id, code } => self.colour_code(token, id, code),

@@ -929,6 +929,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "background",
         what: "Background tabs and :keep on :connect'ed machines' workspaces, and on the phone",
     },
+    News {
+        id: "sessions-elsewhere",
+        date: "2026-10-26",
+        lesson: "agents",
+        what: ":Agent's start page lists another machine's past sessions, to go on with one there",
+    },
 ];
 
 impl News {

@@ -24,7 +24,7 @@ Until its first message, a chat says which agent it has and the folder it works 
 
 ### The start page
 
-Its first row is a new chat, with its agent, model and folder. They start as the last chat started from the page had them; before that, the agent is the `agent` option's, the model the agent's own choice, and the folder the focused pane's. Under it are chats to go on with instead: this workspace's chats in no pane, such as those agents started in the background, then the sessions the agent keeps for the folder, its own and clackatoo's, newest first.
+Its first row is a new chat, with its agent, model and folder. They start as the last chat started from the page had them; before that, the agent is the `agent` option's, the model the agent's own choice, and the folder the focused pane's. Under it are chats to go on with instead: this workspace's chats in no pane, such as those agents started in the background, then the sessions the agent keeps for the folder, its own and clackatoo's, newest first. For a pane on [another machine](~clackatoo/reference/remote#another-machine-s-workspaces-in-your-bar), or a page opened with `@host`, they're the sessions that machine's agent keeps in its folder, and going on with one makes the chat there; this needs a daemon here of protocol 107 or later, and says so otherwise.
 
 | Key | Does |
 |---|---|

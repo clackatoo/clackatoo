@@ -5713,3 +5713,63 @@ fn a_chat_on_a_machine_passed_on_goes_on_with_its_session_after_it_restarts() {
     assert!(last_words(&node).contains("haiku"), "{node:#?}");
     drop(server);
 }
+
+/// The sessions `client`'s daemon lists for the agent on machine `on`,
+/// in `cwd`, as the start page asks for them, numbered `id`.
+fn sessions_on(
+    client: &mut Client,
+    id: u64,
+    cwd: &Path,
+    on: Option<MachineId>,
+) -> Result<Vec<clackatoo_protocol::AgentSession>, String> {
+    client
+        .list_sessions_on(id, "claude", &cwd.to_string_lossy(), on)
+        .unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(Instant::now() < deadline, "no sessions came");
+        match client.next_event().unwrap() {
+            Event::Sessions {
+                id: listed,
+                sessions,
+            } if listed == id => return sessions,
+            Event::View { terminal, .. } => client.frame_done(terminal).unwrap(),
+            _ => {}
+        }
+    }
+}
+
+/// The start page of a pane in laptop's workspace, shown through desk,
+/// lists the sessions laptop's agent kept, for a chat to go on with there,
+/// rather than desk's own agent's: the one laptop's chat has open among
+/// them, by desk's number for that chat (CLACKA-163).
+#[test]
+fn another_machines_agents_past_sessions_are_listed_through_this_daemon() {
+    let mut pair = Pair::new();
+    let laptop = pair.laptop().machine().id;
+    let cwd = pair.world.host("laptop");
+    let pane = pair.window.new_tab(pair.work.id, chat()).unwrap();
+    let shown = pair.window.watch_workspaces().unwrap();
+    let chat = terminal_of(found(&shown, pane).1.content);
+    attach_to(&mut pair.window, chat);
+    wait_for_chat(&mut pair.window, chat, |node| {
+        node.state == clackatoo_protocol::ChatState::Ready
+    });
+    let listed = sessions_on(&mut pair.window, 1, &cwd, Some(laptop)).unwrap();
+    assert!(
+        listed.iter().any(|session| session.chat == Some(chat)),
+        "laptop's chat's session isn't listed: {listed:#?}"
+    );
+    assert!(listed.iter().any(|session| session.session == "past-1"));
+    let cwd_said = cwd.display().to_string();
+    assert!(listed.iter().all(|session| session.cwd == cwd_said));
+    // Desk's own agent, asked of desk, has none of laptop's.
+    let own = sessions_on(&mut pair.window, 2, &cwd, None).unwrap();
+    assert!(own.iter().all(|session| session.chat.is_none()), "{own:#?}");
+    // A machine not connected says so.
+    let refused = sessions_on(&mut pair.window, 3, &cwd, Some(MachineId([0x77; 16])));
+    assert!(
+        matches!(&refused, Err(why) if why.contains("isn't connected")),
+        "{refused:?}"
+    );
+}

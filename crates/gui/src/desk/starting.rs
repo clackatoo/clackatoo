@@ -101,23 +101,28 @@ impl Desk {
             Outcome::List { agent, cwd } => {
                 self.searches += 1;
                 let id = self.searches;
-                // An agent's past sessions on another machine are listed
-                // there, which isn't relayed yet.
+                // An agent's past sessions on another machine are that
+                // machine's agent's, which the daemon asks (CLACKA-163).
                 let own = self.workspaces.machine.as_ref().map(|own| own.id);
-                let elsewhere = match self.start_on {
-                    Some(on) if Some(on) != own => Some(self.elsewhere_on(on)),
+                let on = match self.start_on {
+                    Some(on) if Some(on) != own => Some(on),
                     Some(_) => None,
-                    None => self.shown_elsewhere(),
+                    None => (self.shown).and_then(|shown| self.pane_machine(shown.pane)),
                 };
+                let old =
+                    on.is_some() && !self.daemon_has(clackatoo_protocol::wire::SESSIONS_ELSEWHERE);
+                let host = on.map(|on| self.elsewhere_on(on).host);
                 if let Some(page) = &mut self.start {
                     page.listing(id);
-                    if let Some(elsewhere) = elsewhere {
-                        let why = format!("past sessions on {}: coming soon", elsewhere.host);
+                    if old && let Some(host) = host {
+                        let why = format!(
+                            "past sessions on {host} need a newer clackatoo daemon here: update it"
+                        );
                         page.listed(id, Err(why));
                         return;
                     }
                 }
-                (self.outbox).push(ClientMessage::ListSessions { id, agent, cwd });
+                (self.outbox).push(ClientMessage::ListSessions { id, agent, cwd, on });
             }
             Outcome::Start(new) => {
                 let Some(place) = self.start.take().map(|page| page.place()) else {

@@ -79,6 +79,8 @@ The separate **Gemini CLI** provider remains available for existing API-key setu
 
 Under it are chats to go on with: this workspace's chats in no pane, such as those agents started in the background, then the sessions the agent keeps for the folder, its own and clackatoo's, newest first. `j` and `k` move, and Enter shows the chat, or goes on with the session in a new chat, with its conversation so far shown as its turns where the agent can tell it. Type to filter them, as in the finder; `/` first types a letter that's a key. Esc closes it.
 
+In a workspace of another machine you've `:connect`ed to, or with `:Agent@host`, the sessions are that machine's agent's, and going on with one starts the chat there.
+
 Open the start page with `:|Agent`, look around, then press Esc.
 
 ```check

@@ -253,6 +253,10 @@ gates! {
     /// `BufferUpdate::Reversed`. And `Change::Undo` and `Change::Redo`
     /// pass over steps that change nothing.
     UNDO_STATE = 106,
+    /// Listing an agent's past sessions on another machine the daemon is
+    /// connected to, for the start page of a pane there:
+    /// `ClientMessage::ListSessions`' `on`.
+    SESSIONS_ELSEWHERE = 107,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

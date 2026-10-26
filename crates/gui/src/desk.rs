@@ -3243,7 +3243,12 @@ mod tests {
         for message in desk.take_outbox() {
             match message {
                 ClientMessage::Request(request) => requests.push(request),
-                ClientMessage::ListSessions { id, agent, cwd } => {
+                ClientMessage::ListSessions {
+                    id,
+                    agent,
+                    cwd,
+                    on: None,
+                } => {
                     assert_eq!((agent.as_str(), cwd.as_str()), ("claude", "/home/me/x"));
                     listings.push(id);
                 }
@@ -3263,6 +3268,58 @@ mod tests {
             }
         }
         (requests, listings)
+    }
+
+    /// In a workspace of another machine's, the start page asks for the
+    /// past sessions of that machine's agent, naming it; a daemon too old
+    /// to ask it is never sent that, and the page says so (CLACKA-163).
+    #[test]
+    fn the_start_page_lists_another_machines_past_sessions_there() {
+        use clackatoo_protocol::{ChatChoices, MachineId, Provider, ProviderModels};
+        let desk_machine = MachineId([9; 16]);
+        let mut theirs = workspace(1, "work", vec![tab(1, pane(1))]);
+        theirs.home = Some(desk_machine);
+        let choices = ChatChoices {
+            agents: vec![Provider {
+                agent: "claude".to_owned(),
+                title: "Claude Code".to_owned(),
+                models: ProviderModels::Unknown,
+            }],
+            default: "claude".to_owned(),
+            cwd: "/home/me/x".to_owned(),
+            home: "/home/me".to_owned(),
+            unshown: Vec::new(),
+        };
+        let asked = |daemon: Option<u32>| {
+            let mut desk = desk(workspaces(vec![theirs.clone()]));
+            if let Some(wire) = daemon {
+                desk.daemon_is(wire, None);
+            }
+            snapshot(&mut desk, 1);
+            normal_mode(&mut desk);
+            command(&mut desk, "|Agent");
+            for message in desk.take_outbox() {
+                if let ClientMessage::Request(_) = message {
+                    desk.answered(Response::ChatChoices(choices.clone()));
+                }
+            }
+            let listed: Vec<Option<MachineId>> = (desk.take_outbox().into_iter())
+                .filter_map(|message| match message {
+                    ClientMessage::ListSessions { on, .. } => Some(on),
+                    _ => None,
+                })
+                .collect();
+            (desk, listed)
+        };
+        let (_, listed) = asked(None);
+        assert_eq!(listed, [Some(desk_machine)]);
+        let (desk, listed) = asked(Some(clackatoo_protocol::wire::SESSIONS_ELSEWHERE - 1));
+        assert!(listed.is_empty(), "{listed:?}");
+        let page = format!("{:?}", desk.start);
+        assert!(
+            page.contains("need a newer clackatoo daemon here"),
+            "{page}"
+        );
     }
 
     #[test]

@@ -63,6 +63,7 @@ pub(super) mod finds;
 pub(super) mod forwards;
 pub(super) mod held;
 pub(super) mod mirror;
+pub(super) mod sessions;
 pub(super) mod shown;
 pub(super) mod unpack;
 
@@ -114,6 +115,9 @@ const FILES: u32 = 7;
 /// The number of `Event::FileOp` among the events.
 const FILE_OP: u32 = 8;
 
+/// The number of `Event::Sessions` among the events.
+const SESSIONS: u32 = 15;
+
 /// The number of `Event::Listening` among the events.
 const LISTENING: u32 = 22;
 
@@ -153,6 +157,8 @@ pub(super) struct Relayed {
     ops: editors::Asked,
     /// The searches asked of it, numbered for the connection.
     finds: editors::Asked,
+    /// The listings of its agents' sessions asked of it (see [`sessions`]).
+    sessions: sessions::Listings,
     /// Its boards followed by this daemon's clients.
     boards: shown::Viewers<BoardId>,
     /// Its reviews followed by this daemon's clients.
@@ -683,6 +689,11 @@ impl Daemon {
             ClientMessage::Find { id, pane, search } => (!self
                 .route_find(token, id, pane, &search))
             .then_some(ClientMessage::Find { id, pane, search }),
+            ClientMessage::ListSessions { id, agent, cwd, on } => {
+                let asked = (agent.clone(), cwd.clone());
+                (!self.route_list_sessions(token, id, asked, on))
+                    .then_some(ClientMessage::ListSessions { id, agent, cwd, on })
+            }
             ClientMessage::StopFinding { id } => {
                 (!self.route_stop_finding(token, id)).then_some(ClientMessage::StopFinding { id })
             }
@@ -1895,6 +1906,7 @@ impl Daemon {
         self.forget_buffer_client(token);
         self.forget_files_client(token);
         self.forget_finds_client(token);
+        self.forget_sessions_client(token);
         self.forget_shown_client(token);
         self.forget_forwards_client(token);
         for linked in &mut self.links.list {
@@ -2245,7 +2257,7 @@ impl Daemon {
             } else if head.is_workspaces()
                 || head.is_chats()
                 || head.is_small_event()
-                || matches!(head.event_kind(), Some(INSTALLED | LISTENING))
+                || matches!(head.event_kind(), Some(INSTALLED | LISTENING | SESSIONS))
             {
                 if payload.len() > MOST_SMALL && !head.is_workspaces() {
                     if let Some(Source::Reached(reached)) = self.sources.get(token.0) {
@@ -2640,6 +2652,7 @@ impl Daemon {
             Event::Workspaces(workspaces) => self.relay_workspaces(at, &workspaces),
             Event::Chats(chats) => self.take_relayed_chats(at, &chats),
             Event::Listening(listening) => self.take_relayed_ports(at, listening),
+            Event::Sessions { id, sessions } => self.take_relayed_sessions(at, id, sessions),
             Event::Installed { language, outcome } => {
                 let relayed = &mut self.links.list[at].relayed;
                 let mut told = Vec::new();

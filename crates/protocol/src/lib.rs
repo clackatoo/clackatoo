@@ -128,7 +128,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 106;
+pub const PROTOCOL_VERSION: u32 = 107;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -319,6 +319,15 @@ pub enum ClientMessage {
         agent: String,
         /// The directory.
         cwd: String,
+        /// The machine whose agent is asked, and whose directory `cwd`
+        /// is, for a chat to go on with one there: another the daemon is
+        /// connected to, which it asks, or else its own. `None` for its
+        /// own, and from a client older than protocol 107.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::SESSIONS_ELSEWHERE }, _>",
+            deserialize_with = "wire::since::<{ wire::SESSIONS_ELSEWHERE }, _, _>"
+        )]
+        on: Option<MachineId>,
     },
     /// Asks how the code in an agent's words is coloured, as its
     /// language's grammar reads it, as hovers' code is: each block of it,

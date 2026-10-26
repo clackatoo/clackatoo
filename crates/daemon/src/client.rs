@@ -622,10 +622,27 @@ impl Client {
     ///
     /// If the connection fails.
     pub fn list_sessions(&mut self, id: u64, agent: &str, cwd: &str) -> Result<(), ClientError> {
+        self.list_sessions_on(id, agent, cwd, None)
+    }
+
+    /// As [`list_sessions`](Self::list_sessions), of the agent on machine
+    /// `on`, another the daemon is connected to, or its own with `None`.
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn list_sessions_on(
+        &mut self,
+        id: u64,
+        agent: &str,
+        cwd: &str,
+        on: Option<clackatoo_protocol::MachineId>,
+    ) -> Result<(), ClientError> {
         self.send(&ClientMessage::ListSessions {
             id,
             agent: agent.to_owned(),
             cwd: cwd.to_owned(),
+            on,
         })
     }
 

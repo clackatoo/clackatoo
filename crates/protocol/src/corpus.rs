@@ -1270,6 +1270,16 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             .into_iter()
             .map(|sample| (crate::wire::UNDO_STATE, sample)),
     );
+    // An agent's past sessions on another machine (CLACKA-163).
+    samples.push((
+        crate::wire::SESSIONS_ELSEWHERE,
+        Client(ClientMessage::ListSessions {
+            id: 4,
+            agent: "claude".into(),
+            cwd: "/src".into(),
+            on: Some(crate::MachineId([9; 16])),
+        }),
+    ));
     samples
 }
 
@@ -2058,6 +2068,7 @@ fn more() -> Vec<Sample> {
             id: 3,
             agent: "claude".into(),
             cwd: "/src".into(),
+            on: None,
         }),
         Client(ClientMessage::Upgrade {
             protocol_version: 72,
