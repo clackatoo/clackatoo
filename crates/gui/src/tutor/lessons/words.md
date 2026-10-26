@@ -91,6 +91,6 @@ cursor 2
 On the first `margin-top` line, type `fp` to find the `p` of `top`. Then type `:|Editor sizes.txt` and press Enter, to open `sizes.txt` beside it, and there type `;`: it finds the next `p` on that line, though you never typed `fp` there.
 
 ```check
-file sizes.txt
+file "sizes.txt"
 at "gap"
 ```
