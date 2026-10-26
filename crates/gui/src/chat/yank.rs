@@ -76,16 +76,30 @@ impl ChatView {
         let Some(start) = self.cursor_or_default() else {
             return;
         };
-        let goal = self.goal;
+        // Moved to see where the motion goes, and put back: the view
+        // doesn't follow it, nor the chat's end, as `G` would have it.
+        let (goal, follow, reveal) = (self.goal, self.follow, self.reveal);
         self.moved(motion, count);
         let moved = self.cursor.unwrap_or(start);
         let moved_goal = self.goal;
         self.cursor = Some(start);
-        self.goal = goal;
+        (self.goal, self.follow, self.reveal) = (goal, follow, reveal);
         // A find that found nothing takes nothing.
         if matches!(motion, Motion::Find { .. }) && moved == start {
             return;
         }
+        // `w` from the chat's last word goes nowhere, and takes the rest
+        // of its block, as Vim's from a file's last word takes the rest of
+        // its line.
+        let moved = match motion {
+            Motion::WordStart | Motion::BigWordStart if moved == start => {
+                let end = self
+                    .text(start.text)
+                    .map_or(start.byte, |text| text.text.len());
+                Position { byte: end, ..start }
+            }
+            _ => moved,
+        };
         let (first, last) = if moved < start {
             (moved, start)
         } else {
@@ -443,9 +457,11 @@ mod tests {
         assert_eq!(yanked(&mut chat, &mut fonts), [chars("beta ")]);
         assert_eq!(byte(&chat), "alpha ".len());
         // `w` off the block's last word stops at its end, as Vim's at a
-        // line's.
+        // line's, and off the chat's last word too.
         read(&mut chat, "0wwyw");
         assert_eq!(yanked(&mut chat, &mut fonts), [chars("gamma")]);
+        read(&mut chat, "Gwyw");
+        assert_eq!(yanked(&mut chat, &mut fonts), [chars("epsilon")]);
     }
 
     #[test]
@@ -481,6 +497,24 @@ mod tests {
             [lines("one\n\nfirst line\n")]
         );
         assert_eq!(chat.cursor.unwrap().text.piece, PROMPT);
+    }
+
+    #[test]
+    fn a_yank_to_the_chats_end_leaves_the_view_where_it_was() {
+        let (mut chat, mut fonts) = reading(crate::chat::fixtures::long_chat(12));
+        read(&mut chat, "gg");
+        paint(&mut chat, &mut fonts);
+        let (scroll, cursor) = (chat.scroll, chat.cursor);
+        read(&mut chat, "yG");
+        assert_eq!(chat.cursor, cursor);
+        assert!(!chat.follow, "not following the chat's end");
+        assert_eq!(yanked(&mut chat, &mut fonts).len(), 1);
+        paint(&mut chat, &mut fonts);
+        assert!(
+            (chat.scroll - scroll).abs() < 0.5,
+            "{} {scroll}",
+            chat.scroll
+        );
     }
 
     #[test]
