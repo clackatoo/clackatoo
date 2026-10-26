@@ -911,6 +911,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "A chat reads keys as every pane does: counts, W B E, f t ; , and Ctrl+F, shown as typed",
     },
+    News {
+        id: "boundedundo",
+        date: "2026-10-26",
+        lesson: "substitute",
+        what: "Huge :%s and long undo histories stay fast; undo says when older changes were let go",
+    },
 ];
 
 impl News {

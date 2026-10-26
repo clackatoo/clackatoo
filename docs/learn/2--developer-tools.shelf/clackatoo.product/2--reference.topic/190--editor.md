@@ -58,6 +58,8 @@ The daemon keeps each buffer, as it keeps terminals:
 
 Each command in normal mode is one undo step, as is each go of insert mode, with the command that started it, such as `cw`.
 
+Undo keeps your last 1000 steps in each file, or as many as fit in 64 MB. Past that the oldest are let go, and `u` past the oldest one kept says so in the bar. The daemon also keeps the last 32 MB of edits made to each file, to bring up to date an edit a window made before it heard of others'. A window that has fallen further behind than that, or so far that bringing its edit up to date would hold up the daemon for more than a few milliseconds, catches up itself and sends its edit again. You don't see this happen. An edit of more than 16,384 pieces, as `:%s` over a big file can make, is sent with neighbouring changes joined into one, so marks between them move as if the text between had been typed again.
+
 A file whose lines end with CRLF, as Windows ends them, is edited with plain line ends, and written with CRLF again, as its first line says; a file that mixes the two is written all one way. Its git signs compare it line by line, but it's staged a change at a time in a terminal, not here.
 
 A buffer closes with its last pane, unless it has changes that aren't written. `:q` won't close that pane, and `:q!` throws the changes away. A pane closed another way, such as with Ctrl+B `x` or by closing its tab, keeps the buffer's changes, unseen: opening the file again shows them.
