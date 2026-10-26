@@ -384,6 +384,11 @@ impl Desk {
             redraw |= self.key_with(&keys[index].press(), true);
             self.macros.handing = Some(Handing::Held);
             self.script.typing = was;
+            // A chat's yank that failed stops it, as Vim's failing
+            // command does; its search fails once settled.
+            if self.take_chat_failed() {
+                self.stop_macro(None);
+            }
         }
         self.macros.handing = None;
         redraw

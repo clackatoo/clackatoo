@@ -357,6 +357,9 @@ pub(crate) struct ChatView {
     /// The search being typed in the bar, and the last one, for `n` and
     /// `N`.
     search: search::Searching,
+    /// A yank or search failed, as Vim beeps, which stops a macro or a
+    /// binding typing keys, until the window takes it.
+    failed: bool,
     /// The block of code under the mouse, which shows a button to copy it.
     hovered_code: Option<TextKey>,
     /// The block of code just copied with its button, which says so.
@@ -513,6 +516,7 @@ impl ChatView {
             finds: crate::vim::Finds::default(),
             paging: crate::vim::Paging::default(),
             search: search::Searching::default(),
+            failed: false,
             hovered_code: None,
             copied_code: None,
             copied_answer: None,

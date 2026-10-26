@@ -277,6 +277,11 @@ impl ChatPane {
         std::mem::take(&mut self.copies)
     }
 
+    /// Whether a yank or search failed since this was last asked.
+    pub(crate) fn take_failed(&mut self) -> bool {
+        self.view.take_failed()
+    }
+
     /// Whether a yank or a search waits for the fonts, to be settled.
     pub(crate) fn reading_unsettled(&self) -> bool {
         self.view.reading_unsettled()

@@ -219,6 +219,7 @@ impl ChatView {
     pub(super) fn search_again(&mut self, reverse: bool, count: Option<usize>) {
         let Some((_, backward)) = self.search.last else {
             self.say("no search yet".to_owned());
+            self.failed = true;
             return;
         };
         let Some(from) = self.cursor_or_default() else {
@@ -250,6 +251,7 @@ impl ChatView {
             Ok(pattern) => pattern,
             Err(why) => {
                 self.say(why);
+                self.failed = true;
                 return;
             }
         };
@@ -276,6 +278,7 @@ impl ChatView {
             found = Some(position);
         }
         let Some(position) = found else {
+            self.failed = true;
             let older = self.node.first_turn > 0;
             self.say(if spent.ran_out {
                 "the chat is too long to search all of: search stopped".to_owned()

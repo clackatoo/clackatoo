@@ -9432,6 +9432,31 @@ mod tests {
     }
 
     #[test]
+    fn a_chats_failed_search_or_yank_stops_the_keys_a_binding_types() {
+        let (mut desk, mut fonts) = chat_with_code();
+        desk.lua_from(
+            r#"
+            client.keys.map("n", "<Space>s", "/nowhere<CR>yy")
+            client.keys.map("n", "<Space>y", "yy")
+            client.keys.map("n", "<Space>u", "yfZyy")
+            "#,
+        );
+        normal_mode(&mut desk);
+        paint_chat(&mut desk, &mut fonts);
+        type_text(&mut desk, " s");
+        desk.settle_chats(&mut fonts);
+        assert_eq!(register(&mut desk, '0'), None, "stopped at the search");
+        // A failed yank stops it at once.
+        type_text(&mut desk, " u");
+        desk.settle_chats(&mut fonts);
+        assert_eq!(register(&mut desk, '0'), None, "stopped at the yank");
+        // Nothing failed: it goes on.
+        type_text(&mut desk, " y");
+        desk.settle_chats(&mut fonts);
+        assert!(register(&mut desk, '0').is_some());
+    }
+
+    #[test]
     fn keys_waiting_behind_a_chats_paste_neither_hang_the_window_nor_get_lost() {
         use crate::clipboard_image::Pasted;
         let (mut desk, mut fonts) = chat_with_code();

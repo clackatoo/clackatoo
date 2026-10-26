@@ -127,6 +127,11 @@ impl Desk {
             for yank in yanked {
                 self.pane_yanked(yank);
             }
+            // A search that found nothing stops a macro or a binding, as
+            // Vim's stops on a failing command.
+            if self.take_chat_failed() && self.frames_typing() {
+                self.stop_macro(None);
+            }
             // Still waiting, as behind a paste reading the clipboard: the
             // keys stay held, for the settling once it's read.
             if self.chat_waits_to_settle() {
@@ -144,6 +149,11 @@ impl Desk {
             }
         }
         redraw
+    }
+
+    /// Whether a chat's yank or search failed since this was last asked.
+    pub(super) fn take_chat_failed(&mut self) -> bool {
+        (self.chats.values_mut()).fold(false, |failed, chat| chat.take_failed() | failed)
     }
 
     /// Whether the focused chat has a yank or a search waiting for the

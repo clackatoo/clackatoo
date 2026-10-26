@@ -482,6 +482,12 @@ impl ChatView {
         (redraw, false)
     }
 
+    /// Whether a yank or search failed since this was last asked, as Vim
+    /// beeps: a macro or a binding typing keys stops.
+    pub(crate) fn take_failed(&mut self) -> bool {
+        std::mem::take(&mut self.failed)
+    }
+
     /// Whether a yank or a search normal or visual mode queued waits for
     /// the fonts.
     pub(crate) fn reading_unsettled(&self) -> bool {

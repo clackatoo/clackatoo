@@ -83,8 +83,10 @@ impl ChatView {
         let moved_goal = self.goal;
         self.cursor = Some(start);
         (self.goal, self.follow, self.reveal) = (goal, follow, reveal);
-        // A find that found nothing takes nothing, as `j` on the last line.
+        // A find that found nothing takes nothing, as `j` on the last line,
+        // and fails; `y$` on an empty line takes nothing, failing nothing.
         let Some(moved) = moved else {
+            self.failed |= !matches!(motion, Motion::LineEnd);
             return;
         };
         let (first, last) = if moved < start {
@@ -368,6 +370,7 @@ impl ChatView {
             }
             Err(why) => {
                 self.say(why.to_owned());
+                self.failed = true;
             }
         }
     }
@@ -432,12 +435,14 @@ impl ChatView {
                 let byte = lines.byte_at(moved);
                 self.cursor = Some(Position { byte, ..cursor });
                 self.goal = None;
+                self.failed = true;
                 return;
             }
             Err(None) => None,
         };
         let Some(found) = found else {
             self.say("nothing there".to_owned());
+            self.failed = true;
             return;
         };
         let (start, end) = if found.lines() {
