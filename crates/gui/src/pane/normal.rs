@@ -521,6 +521,7 @@ impl Pane {
                 ..
             }) => {
                 self.keys.clear();
+                self.status = None;
                 self.copy_mouse_selection(CopyTo::Register(register));
                 self.mouse_selection = None;
                 Some(true)

@@ -533,8 +533,12 @@ impl Pane {
             return;
         };
         // Bracketed, it can't end itself early; otherwise its newlines
-        // are Enter.
-        self.send_keyed(clackatoo_term::paste(text, screen.state.modes));
+        // are Enter, but for those ending it. Nothing left sends nothing.
+        let bytes = clackatoo_term::paste(text, screen.state.modes);
+        if bytes.is_empty() {
+            return;
+        }
+        self.send_keyed(bytes);
         self.scroll = 0;
     }
 
@@ -1300,6 +1304,11 @@ mod tests {
         // With the blank line under it too, as `yj` copies them.
         plain.paste("make deploy\n\n");
         assert_eq!(sent(&mut plain), [b"make deploy".to_vec()]);
+        // Nothing left is nothing sent, and no key reached the program.
+        let mut blank = pane(&terminal("$ "));
+        blank.paste("\n\n");
+        assert!(sent(&mut blank).is_empty());
+        assert_eq!(blank.keyed, None);
         // Bracketed, the program takes it as text, newline and all.
         let mut bracketed = pane(&terminal("\x1b[?2004h$ "));
         bracketed.paste("make test\n");
