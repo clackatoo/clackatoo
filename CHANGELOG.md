@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026.10.82 (2026-10-26)
+
+### Features
+
+- **daemon:** show another machine's background tabs through :connect (CLACKA-122) (4edeb7e)
+- **daemon:** route background tabs, ports and :keep to another machine (CLACKA-122) (82eab36)
+- **web:** list background tabs on the phone, bring them back and dismiss them (CLACKA-122) (ac19aeb)
+- list another machine's agent sessions on the start page (CLACKA-163) (1c90930)
+- run :bg CMD beside a borrowed pane on its machine, in a background tab here (CLACKA-122) (c5c421c)
+
+### Fixes
+
+- **gui:** forward another machine's background tab ports from that machine (CLACKA-122) (0f1a706)
+- **daemon:** ask another daemon for ports once, never back for ever (CLACKA-122) (67fcfbb)
+- **daemon:** count the background tabs taken against the panes shown (CLACKA-122) (c1b5ea5)
+- **web:** redraw a background tab's dismiss button as its second tap's time runs out (CLACKA-122) (b146f45)
+- **daemon:** ask for ports again, and answer listings, when another daemon never will (CLACKA-122) (c33cd48)
+- forward a lent background shell's ports from its machine, and harden link tests (CLACKA-122) (dfd9459)
+- **daemon:** lend a background shell only to type its command at, and say what a command may be (CLACKA-122) (cb65b41)
+- **daemon:** dismiss a lent background shell while its machine can't be reached (CLACKA-122) (549d307)
+- **daemon:** bring a lent background shell back there once it's reached, if telling it was lost (CLACKA-122) (b9b34e7)
+
 ## 2026.10.81 (2026-10-26)
 
 ### Features
