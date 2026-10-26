@@ -1417,7 +1417,9 @@ fn a_count_typed_in_a_chat_is_the_windows_with_a_binding_and_shows_in_the_bar() 
             root: Node::Chat(Box::new(crate::chat::fixtures::talk(&[("one", "first")]))),
         }),
     );
+    desk.show_pane(PaneId(1));
     normal_mode(&mut desk);
+    assert!(desk.focused_pane().is_some_and(|pane| pane.is_chat()));
     let key = |desk: &mut Desk, text: &str| {
         for ch in text.chars() {
             press(
@@ -1436,4 +1438,40 @@ fn a_count_typed_in_a_chat_is_the_windows_with_a_binding_and_shows_in_the_bar() 
     key(&mut desk, ":");
     assert!(desk.input.is_some(), "the command line opens after a count");
     assert!(!desk.pane_pending(), "the count went with it");
+}
+
+#[test]
+fn a_count_typed_in_a_chat_reaches_a_lua_binding() {
+    use clackatoo_protocol::Node;
+    let mut desk = desk(one_tab(side_by_side(vec![pane(2), pane(1)])));
+    snapshot(&mut desk, 2);
+    desk.view_changed(
+        TerminalId(1),
+        &ViewUpdate::Snapshot(View {
+            title: "chat".into(),
+            cwd: None,
+            root: Node::Chat(Box::new(crate::chat::fixtures::talk(&[("one", "first")]))),
+        }),
+    );
+    desk.lua_from(
+        r#"
+        client.keys.map("n", "Q", function(ev) client.opt.shiftwidth = ev.count end)
+        "#,
+    );
+    answer_all(&mut desk);
+    desk.show_pane(PaneId(1));
+    normal_mode(&mut desk);
+    assert!(desk.focused_pane().is_some_and(|pane| pane.is_chat()));
+    let shifted = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    press(
+        &mut desk,
+        Key::Character("7".into()),
+        None,
+        Modifiers::default(),
+    );
+    press(&mut desk, Key::Character("Q".into()), None, shifted);
+    assert_eq!(desk.options().shiftwidth, 7, "the chat's count");
 }

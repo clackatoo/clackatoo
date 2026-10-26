@@ -420,14 +420,13 @@ impl ChatView {
     /// Does `command`, read whole. Returns whether the chat must be
     /// redrawn, and whether it goes to insert mode, to type a message.
     fn execute(&mut self, command: Command<ChatKey>) -> (bool, bool) {
-        let times = command.times();
         match command.action {
             Action::Move(motion) => {
                 let motion = self.finds.remember(motion);
-                self.moved(motion, times);
+                self.moved(motion, command.count);
             }
             Action::FindAgain { reverse } => match self.finds.again(reverse) {
-                Some(motion) => self.moved(motion, times),
+                Some(motion) => self.moved(motion, command.count),
                 None => return (false, false),
             },
             Action::Scroll(scroll) => {
@@ -515,7 +514,8 @@ impl ChatView {
 
     /// Moves the cursor by `motion`, `times` times, or until it goes no
     /// further, so a count as big as there is costs no more than the chat.
-    fn moved(&mut self, motion: Motion, times: usize) {
+    fn moved(&mut self, motion: Motion, count: Option<usize>) {
+        let times = count.unwrap_or(1);
         if let Motion::Find {
             ch,
             forward,
@@ -524,6 +524,10 @@ impl ChatView {
         } = motion
         {
             self.find((ch, forward, till, again), times);
+            return;
+        }
+        if let (Motion::First | Motion::Last, Some(number)) = (motion, count) {
+            self.go_to_turn_numbered(number);
             return;
         }
         for _ in 0..times {
@@ -1161,7 +1165,30 @@ impl ChatView {
         let Some(last) = self.node.turns.len().checked_sub(1) else {
             return;
         };
-        let turn = if way == Way::Back { 0 } else { last };
+        self.go_to_turn(if way == Way::Back { 0 } else { last }, way);
+    }
+
+    /// `5gg` or `5G`: the start of the turn numbered so, as the chat
+    /// numbers them, counting from 1, or the first loaded if it's before
+    /// those loaded, or the last if there aren't so many: a chat's turns
+    /// are what a file's lines are to `G`.
+    fn go_to_turn_numbered(&mut self, number: usize) {
+        let Some(last) = self.node.turns.len().checked_sub(1) else {
+            return;
+        };
+        let first = self.node.first_message as usize;
+        let turn = if number <= first {
+            0
+        } else {
+            clackatoo_protocol::turn_numbered(&self.node.turns, number - first).unwrap_or(last)
+        };
+        self.go_to_turn(turn, Way::Back);
+    }
+
+    /// To the start of turn `turn`, or the start of its last line if
+    /// `way` is on, as `gg` and `G` go to the chat's ends.
+    fn go_to_turn(&mut self, turn: usize, way: Way) {
+        let last = self.node.turns.len().saturating_sub(1);
         let texts = self.turn_texts(turn);
         let key = match way {
             Way::Back => texts.first(),
@@ -1199,7 +1226,7 @@ impl ChatView {
         };
         self.go(position);
         self.goal = None;
-        if way == Way::On {
+        if way == Way::On && turn == last {
             self.follow = true;
         }
     }
@@ -1692,6 +1719,18 @@ mod tests {
             },
         });
         assert!(chat.scroll > top, "a line down");
+    }
+
+    #[test]
+    fn a_count_before_gg_or_g_goes_to_that_turn() {
+        let (mut chat, _fonts) = reading(talk(&[("one", "a"), ("two", "b"), ("three", "c")]));
+        let turn = |chat: &ChatView| chat.cursor.unwrap().text.turn;
+        read(&mut chat, "2G");
+        assert_eq!(chat.cursor.map(|cursor| cursor.text), Some(key(1, PROMPT)));
+        read(&mut chat, "1gg");
+        assert_eq!(turn(&chat), 0);
+        read(&mut chat, "9G");
+        assert_eq!(turn(&chat), 2, "the last, with no ninth");
     }
 
     #[test]

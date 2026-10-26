@@ -171,7 +171,7 @@ In normal mode, a solid cursor moves through the conversation's text, and the vi
 | `f` `t` `F` `T`, `;` `,` | To a character on the line, or just before it, back with `F` and `T`; `;` again, `,` the other way. |
 | `0` `^` `$` | The start of the line, its first word, its end. |
 | `{` `}` | The block before or after. |
-| `gg` `G` | The start or end of the chat. |
+| `gg` `G` | The start or end of the chat; with a count, the start of that turn, as `3G`. |
 | Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y, Ctrl+F, Page Down Page Up | Scroll half a view, a line, or a page of the view less two lines, as far as in any pane, with a count. The cursor stays in view. |
 | `v` `V` | Select characters, or lines. `o` goes to the other end, Esc stops. |
 | `y` | Copies what's selected to the clipboard, or else what the cursor's in: a block of code, a message, an answer as its Markdown, a card, or on a "Worked for" line, the whole turn. |

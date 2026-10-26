@@ -1836,9 +1836,6 @@ impl Editor {
         }
     }
 
-    /// Does `command`, which keeps text in a register or puts it from one:
-    /// an operator, `x`, `D`, `s` or `p` and their kin. Fails if there's
-    /// nothing to act on.
     /// `target`, but the lines selected (`Y` in visual mode) as what's
     /// selected once it's by lines, as Vim's `v_Y` makes it, a block
     /// staying a block.
@@ -1852,6 +1849,9 @@ impl Editor {
         Target::Selection
     }
 
+    /// Does `command`, which keeps text in a register or puts it from one:
+    /// an operator, `x`, `D`, `s` or `p` and their kin. Fails if there's
+    /// nothing to act on.
     fn keep_or_put(&mut self, command: Command, copy: &mut BufferCopy, shared: &mut Shared) {
         let (times, name) = (command.times(), command.register);
         let registers = (&mut shared.registers, name);

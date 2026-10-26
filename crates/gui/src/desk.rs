@@ -1993,8 +1993,8 @@ impl Desk {
             let mode = self.key_mode();
             // A key a half-typed command in the pane waits for is the
             // pane's, as `d<Space>`'s Space is, not a binding's first.
-            // But a count alone is the bindings' too, and a chat's half
-            // typed `g` or `z`: `5:` is still `:`.
+            // But a count alone is the bindings' too, in a chat as in any
+            // pane on the grammar: `5:` is still `:`.
             // And `0` after a count is the count's, as Vim never maps it
             // then: `10j` is ten, whatever `0` is bound to.
             let counting = self.pane_counting().is_some();
@@ -2026,9 +2026,7 @@ impl Desk {
                 }
                 Pressed::Bound(Binding::Lua(binding)) => {
                     self.message = None;
-                    // A chat's half-typed `g` or `z` is no count.
-                    let chat = self.focused_pane().is_some_and(|pane| pane.is_chat());
-                    let count = self.take_pane_count().filter(|_| !chat);
+                    let count = self.take_pane_count();
                     self.run_lua_binding(binding, count, chord, press);
                     return true;
                 }
