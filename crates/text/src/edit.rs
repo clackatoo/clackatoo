@@ -10,6 +10,14 @@ use ropey::Rope;
 const REWRITE_PIECES: usize = 64;
 const PIECE_BYTES: usize = 64;
 
+/// The most pieces an edit sent to the daemon, or kept in a buffer's
+/// history, may have. Bringing an edit up to date costs as many steps as
+/// it and each edit it goes past have pieces, about 14 ns each, so an edit
+/// this long goes past another in about a millisecond. A window sends an
+/// edit longer than this [`coarsened`](Edit::coarsened), as `:%s` over a
+/// big file could make one; the daemon refuses one that isn't.
+pub const MOST_PIECES: usize = 1 << 16;
+
 /// One piece of an [`Edit`], which goes through the text from its start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -40,6 +48,8 @@ pub struct Edit {
     ops: Vec<Op>,
     base_len: usize,
     target_len: usize,
+    /// How many bytes it takes away and puts in, all told.
+    changed: usize,
 }
 
 /// Why an edit can't be made, or reconciled with another.
@@ -128,6 +138,7 @@ impl Edit {
             return self;
         }
         self.target_len += text.len();
+        self.changed += text.len();
         match self.ops.as_mut_slice() {
             [.., Op::Insert(last)] | [.., Op::Insert(last), Op::Delete(_)] => last.push_str(text),
             [.., Op::Delete(_)] => {
@@ -145,6 +156,7 @@ impl Edit {
             return self;
         }
         self.base_len += text.len();
+        self.changed += text.len();
         if let Some(Op::Delete(last)) = self.ops.last_mut() {
             last.push_str(text);
         } else {
@@ -169,6 +181,20 @@ impl Edit {
     #[must_use]
     pub fn target_len(&self) -> usize {
         self.target_len
+    }
+
+    /// How much work going through it costs, as bringing another edit
+    /// past it does: a step for each piece, and one for each 128 bytes it
+    /// takes away or puts in, which are copied.
+    #[must_use]
+    pub fn weight(&self) -> usize {
+        self.ops.len() + self.changed / 128
+    }
+
+    /// Roughly how many bytes it takes up.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        std::mem::size_of::<Self>() + self.ops.len() * std::mem::size_of::<Op>() + self.changed
     }
 
     /// Whether it changes nothing.
@@ -361,6 +387,44 @@ impl Edit {
             changes: self.walk().peekable(),
             moved: 0,
         }
+    }
+
+    /// The same change to `base`, the text it's made to, in at most `most`
+    /// pieces (and never fewer than four): neighbouring changes are made
+    /// one, taking away and putting back the text kept between them. Places
+    /// in that text then move as places in text replaced do, so it's only
+    /// for edits too long to send as they are (see [`MOST_PIECES`]). Itself
+    /// if it's short enough, or isn't for a text as long as `base`.
+    #[must_use]
+    pub fn coarsened(&self, base: &Rope, most: usize) -> Self {
+        let most = most.max(4);
+        if self.ops.len() <= most || base.len_bytes() != self.base_len {
+            return self.clone();
+        }
+        let changes: Vec<(usize, &str, &str)> = self.walk().collect();
+        // Each change takes at most three pieces, and one more keeps the
+        // rest of the text.
+        let groups = (most - 1) / 3;
+        let size = changes.len().div_ceil(groups);
+        let mut coarse = Self::new();
+        let mut done = 0;
+        for group in changes.chunks(size) {
+            let (start, _, _) = group[0];
+            let (last, removed, _) = group[group.len() - 1];
+            let end = last + removed.len();
+            let mut put = String::new();
+            for (index, &(at, removed, inserted)) in group.iter().enumerate() {
+                put.push_str(inserted);
+                if let Some(&(next, _, _)) = group.get(index + 1) {
+                    put.extend(base.byte_slice(at + removed.len()..next).chunks());
+                }
+            }
+            let taken: String = base.byte_slice(start..end).chunks().collect();
+            coarse.retain(start - done).delete(&taken).insert(&put);
+            done = end;
+        }
+        coarse.retain(self.base_len - done);
+        coarse
     }
 
     /// [`changes`](Self::changes), as a type that can be kept.
@@ -1156,5 +1220,31 @@ mod tests {
             }
             prop_assert_eq!(made, a.apply_to(&text).unwrap());
         }
+
+        #[test]
+        fn a_coarsened_edit_makes_the_same_text_in_fewer_pieces(
+            (text, a) in text().prop_flat_map(edit_of),
+            most in 0..12usize,
+        ) {
+            let coarse = a.coarsened(&Rope::from_str(&text), most);
+            prop_assert!(coarse.ops().len() <= most.max(4) || coarse == a);
+            prop_assert!(coarse.ops().len() <= a.ops().len());
+            prop_assert_eq!(coarse.apply_to(&text).unwrap(), a.apply_to(&text).unwrap());
+        }
+    }
+
+    #[test]
+    fn an_edit_of_many_pieces_is_coarsened_to_the_most() {
+        let text = "ab".repeat(10_000);
+        let mut many = Edit::new();
+        for _ in 0..10_000 {
+            many.retain(1).delete("b").insert("B");
+        }
+        assert_eq!(many.ops().len(), 30_000);
+        let coarse = many.coarsened(&Rope::from_str(&text), 100);
+        assert!(coarse.ops().len() <= 100, "{}", coarse.ops().len());
+        assert_eq!(coarse.apply_to(&text).unwrap(), "aB".repeat(10_000));
+        // Short enough already: as it is.
+        assert_eq!(many.coarsened(&Rope::from_str(&text), MOST_PIECES), many);
     }
 }

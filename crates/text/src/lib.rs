@@ -49,7 +49,7 @@ mod snippet;
 
 pub use agents::{Added, AgentHunk, AgentHunks, Maker};
 pub use diagnostics::{Diagnostic, Diagnostics, Severity};
-pub use edit::{Bias, Edit, EditError, Moved, Op, Untouched, compose, transform};
+pub use edit::{Bias, Edit, EditError, MOST_PIECES, Moved, Op, Untouched, compose, transform};
 pub use highlights::{Highlights, Kind, Span};
 pub use history::{History, HistoryError, HistorySnapshot, Steps};
 pub use hunks::{Difference, Hunk, HunkKind, Hunks, Sign, diff, line_starts};
