@@ -1645,7 +1645,7 @@ impl Desk {
                 };
                 let redraw = pane.answered(response);
                 if let Some(yanked) = pane.take_yanked() {
-                    self.terminal_yanked(yanked);
+                    self.pane_yanked(yanked);
                 }
                 redraw
             }
@@ -9297,7 +9297,7 @@ mod tests {
     }
 
     #[test]
-    fn what_a_chat_copies_goes_to_the_clipboard_and_plus_holds_it() {
+    fn a_chats_copies_and_yanks_go_to_the_registers() {
         use clackatoo_protocol::{ChatNode, ChatState, Item, Node, Outcome, Turn, TurnEnd};
 
         let mut desk = desk(two_side_by_side());
@@ -9339,17 +9339,40 @@ mod tests {
         desk.settle_chats(&mut fonts);
         assert_eq!(register(&mut desk, '+').as_deref(), Some("draft"));
         assert_eq!(desk.take_yanked(), [("draft".to_owned(), Copy::Clipboard)]);
-        // In normal mode, `y` on a block of code: the cursor starts on the
-        // last line in view, which is the code's.
+        // In normal mode, `yic` on a block of code: the cursor starts on
+        // the last line in view, which is the code's. It's a yank, as an
+        // editor's: the unnamed register, `"0` and, as `clipboard` says,
+        // the clipboard hold it, as lines.
         normal_mode(&mut desk);
         paint(&mut desk, &mut fonts);
-        type_text(&mut desk, "y");
+        type_text(&mut desk, "yic");
         desk.settle_chats(&mut fonts);
-        assert_eq!(register(&mut desk, '+').as_deref(), Some("cargo test"));
+        for name in ['+', '0', '"'] {
+            assert_eq!(register(&mut desk, name).as_deref(), Some("cargo test\n"));
+        }
+        assert!(desk.shared_mut().registers.get(Some('0')).unwrap().lines);
         assert_eq!(
             desk.take_yanked(),
-            [("cargo test".to_owned(), Copy::Clipboard)]
+            [("cargo test\n".to_owned(), Copy::Clipboard)]
         );
+        // A register named before it, and its capital adds to it.
+        type_text(&mut desk, "\"ayiw");
+        desk.settle_chats(&mut fonts);
+        type_text(&mut desk, "\"Ayic");
+        desk.settle_chats(&mut fonts);
+        assert_eq!(
+            register(&mut desk, 'a').as_deref(),
+            Some("cargo\ncargo test\n")
+        );
+        assert_eq!(register(&mut desk, '0').as_deref(), Some("cargo test\n"));
+        // `"_` keeps nothing.
+        type_text(&mut desk, "\"_yy");
+        desk.settle_chats(&mut fonts);
+        assert_eq!(
+            register(&mut desk, 'a').as_deref(),
+            Some("cargo\ncargo test\n")
+        );
+        assert_eq!(register(&mut desk, '0').as_deref(), Some("cargo test\n"));
     }
 
     #[test]

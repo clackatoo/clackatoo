@@ -71,6 +71,12 @@ impl Motion {
 
 impl Object {
     pub(crate) fn description(self, inner: bool) -> String {
+        // A chat's `am` is more than a message: its whole turn.
+        match (self, inner) {
+            (Self::Message, true) => return "Message, answer or card".into(),
+            (Self::Message, false) => return "Whole turn".into(),
+            _ => {}
+        }
         let name = match self {
             Self::Word => "word",
             Self::BigWord => "whitespace-delimited word",
@@ -88,6 +94,8 @@ impl Object {
             Self::Code(clackatoo_protocol::Construct::Function) => "function",
             Self::Code(clackatoo_protocol::Construct::Class) => "class",
             Self::Code(clackatoo_protocol::Construct::Argument) => "argument",
+            Self::CodeBlock => "code block",
+            Self::Message => "message",
         };
         format!("{} {name}", if inner { "Inner" } else { "Whole" })
     }

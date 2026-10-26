@@ -25,6 +25,7 @@ mod queue;
 mod read;
 mod shortcuts;
 mod viewer;
+mod yank;
 
 use crate::shortcuts::bindings::Hint;
 
@@ -38,7 +39,7 @@ use winit::keyboard::{Key, NamedKey};
 use crate::fonts::Fonts;
 use crate::input::{KeyPress, Modifiers};
 use crate::markdown::{self, colours};
-use crate::pane::Copy;
+use crate::pane::{Copy, CopyTo, Yanked};
 use paint::{How, Picked, Position, Shown, TextKey};
 use picker::{Row, Spot};
 
@@ -70,10 +71,16 @@ enum Input {
     /// The input method is composing this text, with its cursor over this
     /// stretch of it, or has stopped.
     Compose(Option<(String, Option<(usize, usize)>)>),
-    /// Copies the conversation's text from one place to another.
-    CopyRange(Position, Position, Copy),
-    /// Copies this to the clipboard.
-    CopyText(String),
+    /// Yanks the conversation's text from one place to another, whole
+    /// lines if `lines`, `to` the registers (see [`yank`]).
+    Yank {
+        start: Position,
+        end: Position,
+        lines: bool,
+        to: CopyTo,
+    },
+    /// Yanks this, which the chat has whole already, as a message.
+    YankText(Yanked),
     /// Asks this of the daemon.
     Act(ChatAction),
     /// Answers the question numbered so, if it's still the one asked.
@@ -94,6 +101,9 @@ pub(crate) struct Settled {
     /// Text to put on the clipboard, or the primary selection, oldest
     /// first.
     pub(crate) copied: Vec<(String, Copy)>,
+    /// What normal and visual mode yanked, for the registers, as a
+    /// terminal's yanks go there, oldest first.
+    pub(crate) yanks: Vec<Yanked>,
 }
 
 /// Something in the chat that does something when clicked.
@@ -600,9 +610,9 @@ impl ChatView {
         }
         for input in &mut self.queued {
             match input {
-                Input::CopyRange(a, b, _) => {
-                    a.text.turn += count;
-                    b.text.turn += count;
+                Input::Yank { start, end, .. } => {
+                    start.text.turn += count;
+                    end.text.turn += count;
                 }
                 Input::Act(ChatAction::Undo { turn, .. } | ChatAction::Redo { turn, .. }) => {
                     *turn = turn.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
@@ -1302,11 +1312,9 @@ impl ChatView {
                         }
                     }
                 }
-                Input::CopyRange(start, end, to) => {
-                    let text = self.text_between(fonts, start, end);
-                    settled.copied.push((text, to));
+                input @ (Input::Yank { .. } | Input::YankText(_)) => {
+                    self.settle_reading(fonts, input, &mut settled);
                 }
-                Input::CopyText(text) => settled.copied.push((text, Copy::Clipboard)),
                 Input::Answer { question, pick } => self.pick(question, pick, &mut settled),
                 Input::Act(action) => settled.actions.push(action),
                 Input::Compose(_) if self.searching_models() => {}

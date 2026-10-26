@@ -82,6 +82,13 @@ pub(crate) trait Dialect {
         None
     }
 
+    /// The text object `key` names after `i` or `a`: Vim's, as
+    /// [`Object::of_key`] has them, unless the pane names its own, as a
+    /// chat's `c` is a block of code where an editor's is a class.
+    fn object(&self, key: char) -> Option<Object> {
+        Object::of_key(key)
+    }
+
     /// Whether the pane takes `command`, read whole: one it doesn't is no
     /// command, and its keys are spent.
     fn takes(&self, _command: &Command<Self::Own>) -> bool {
@@ -369,7 +376,7 @@ impl Reader<'_> {
                     Read::Yes(Action::Operate(operator, Target::Selection)),
                 );
             }
-            return self.target(first, operator, key);
+            return self.target(first, operator, key, dialect);
         }
         if next.plain() == Some('v') {
             return self.made(first, Read::Yes(Action::Reselect));
@@ -401,7 +408,7 @@ impl Reader<'_> {
                     _ => Operator::Dedent,
                 };
                 if !visual {
-                    return self.target(first, operator, ch);
+                    return self.target(first, operator, ch, dialect);
                 }
                 Action::Operate(operator, Target::Selection)
             }
@@ -411,12 +418,12 @@ impl Reader<'_> {
             'u' if visual => Action::Operate(Operator::Recase(Recase::Lower), Target::Selection),
             'U' if visual => Action::Operate(Operator::Recase(Recase::Upper), Target::Selection),
             '~' if self.tildeop => {
-                return self.target(first, Operator::Recase(Recase::Toggle), '~');
+                return self.target(first, Operator::Recase(Recase::Toggle), '~', dialect);
             }
             '~' => Action::Tilde,
             's' if visual => Action::Operate(Operator::Change, Target::Selection),
             'i' | 'a' if visual => {
-                let select = self.object().map(|object| Action::Select {
+                let select = self.object(dialect).map(|object| Action::Select {
                     object,
                     inner: ch == 'i',
                 });
@@ -499,13 +506,14 @@ impl Reader<'_> {
         self.made(first, Read::Yes(action))
     }
 
-    /// The object the next key names, after `i` or `a`.
-    fn object(&mut self) -> Read<Object> {
+    /// The object the next key names, after `i` or `a`, as `dialect`
+    /// names them.
+    fn object<D: Dialect>(&mut self, dialect: &D) -> Read<Object> {
         match self.next() {
             None => Read::More,
             Some(next) => next
                 .plain()
-                .and_then(Object::of_key)
+                .and_then(|key| dialect.object(key))
                 .map_or(Read::No, Read::Yes),
         }
     }
@@ -599,7 +607,13 @@ impl Reader<'_> {
 
     /// What an operator typed as `key` acts on: a motion or an object, or
     /// `key` again for lines.
-    fn target<O>(&mut self, first: Option<usize>, operator: Operator, key: char) -> Parsed<O> {
+    fn target<D: Dialect>(
+        &mut self,
+        first: Option<usize>,
+        operator: Operator,
+        key: char,
+        dialect: &D,
+    ) -> Parsed<D::Own> {
         let count = multiplied(first, self.count());
         let operate = |target| Read::Yes(Action::Operate(operator, target));
         let Some(stroke) = self.next() else {
@@ -625,7 +639,7 @@ impl Reader<'_> {
             return self.made(count, mark.map(|mark| Action::Operate(operator, mark)));
         }
         if let Some(kind @ ('i' | 'a')) = stroke.plain() {
-            let target = self.object().map(|object| Target::Object {
+            let target = self.object(dialect).map(|object| Target::Object {
                 object,
                 inner: kind == 'i',
             });

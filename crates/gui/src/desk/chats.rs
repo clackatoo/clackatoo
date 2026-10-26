@@ -96,13 +96,18 @@ impl Desk {
     /// whether the window must be redrawn.
     pub(crate) fn settle_chats(&mut self, fonts: &mut crate::fonts::Fonts) -> bool {
         let mut redraw = false;
-        let mut copied = Vec::new();
+        let (mut copied, mut yanked) = (Vec::new(), Vec::new());
         for chat in self.chats.values_mut() {
             redraw |= chat.settle(fonts);
             copied.extend(chat.take_copies());
+            yanked.extend(chat.take_yanks());
         }
         for (text, to) in copied {
             self.copied(text, to);
+        }
+        // Into the registers, as a terminal's yanks go.
+        for yank in yanked {
+            self.pane_yanked(yank);
         }
         redraw
     }

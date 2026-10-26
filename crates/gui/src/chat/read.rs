@@ -1,6 +1,6 @@
 //! Reading a chat in normal mode: a cursor in the conversation's text,
-//! moved as in Vim, visual mode to select, `y` to copy, and `z` to open
-//! and fold turns' work.
+//! moved as in Vim, visual mode to select, `y` to yank (see
+//! [`super::yank`]), and `z` to open and fold turns' work.
 //!
 //! The text is laid out in proportional fonts, so the cursor isn't on a
 //! grid of cells, as the cursor of terminals and editors is (see
@@ -24,7 +24,9 @@
 //! | `gg` `G` | To the start of the chat, or its end |
 //! | Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y, Ctrl+F and the pages | Scroll as far as in any pane, the cursor kept in view |
 //! | `v` `V` | Select characters, or lines; `o` goes to the other end |
-//! | `y` | Copy what's selected, or the block of code, message or card under the cursor |
+//! | `y` and a motion or object, `yy` `Y` | Yank what it moves over, or the object, into the registers: `yic` a block of code, `yim` a message or card, `yam` a turn |
+//! | `"a`, before `y` | Yank into register `a`, or onto its end with `"A` |
+//! | `v` then `y`, `Y` | Yank what's selected, or its lines |
 //! | `za` `zo` `zc`, Enter | Open or fold the tool, turn's work, or subagents under the cursor; `zR` and `zM` all turns and subagents |
 //! | `zl` `zh`, `zL` `zH` | Scroll the table the cursor's in sideways, a little or half the column; Shift and the wheel do too |
 //! | `u`, Ctrl+R | Undo what the turn changed in files, or redo it; with nothing there, the last turn's, or the first's undone |
@@ -40,8 +42,10 @@ use super::paint::{AGENTS, FOLD, How, ITEMS, PROMPT, Picked, Position, TextKey, 
 use super::{ChatView, Input};
 use crate::input::KeyPress;
 use crate::motion::Motion;
-use crate::pane::Copy;
-use crate::vim::{Action, Command, Dialect, Parsed, Read, Reader, Scroll, Selection, Stroke};
+use crate::objects::Object;
+use crate::vim::{
+    Action, Command, Dialect, Operator, Parsed, Read, Reader, Scroll, Selection, Stroke, Target,
+};
 
 /// What `z` and a key fold or open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,9 +69,6 @@ pub(crate) enum ChatKey {
     Enter,
     /// Esc: stop selecting.
     Escape,
-    /// `y`: copy what's selected, or the block, message or card under the
-    /// cursor, whole.
-    Copy,
     /// `K`: the chat's context and limits, shown or hidden.
     Detail,
     /// `u`, or Ctrl+R if `redo`: the turn's changes to files.
@@ -86,10 +87,12 @@ pub(crate) enum ChatKey {
 /// How a chat reads keys in normal and visual mode: the moves it has, by
 /// its lines laid out in proportional fonts, with counts, `f` `t` `F` `T`
 /// `;` `,` on a line, `v` `V` `o`, the scrolling keys as far as in any
-/// pane, and the keys into insert mode, which type a message; and its own:
-/// Enter, `y`, `K`, `u` and Ctrl+R for turns, and `z` for folding and
-/// tables. It takes no register, mark, edit or operator: a chat's text
-/// isn't the user's to change.
+/// pane, and the keys into insert mode, which type a message; `y` as
+/// Vim's operator, with any of those motions or the objects it finds,
+/// `ic` and `im` among them, and a register before it; and its own: Enter, `K`, `u` and Ctrl+R for turns, and `z` for
+/// folding and tables. It takes no mark, edit or other operator, and no
+/// register before anything but a yank: a chat's text isn't the user's
+/// to change.
 pub(crate) struct ChatKeys;
 
 impl Dialect for ChatKeys {
@@ -100,7 +103,6 @@ impl Dialect for ChatKeys {
             ChatKey::Compose => "Compose a message",
             ChatKey::Enter => "Open or fold item; otherwise compose",
             ChatKey::Escape => "Clear selection",
-            ChatKey::Copy => "Copy selection or item at cursor",
             ChatKey::Detail => "Open context and usage limits",
             ChatKey::Undo { redo: false } => "Undo turn file changes",
             ChatKey::Undo { redo: true } => "Redo turn file changes",
@@ -142,7 +144,6 @@ impl Dialect for ChatKeys {
                 // In visual mode, `o` goes to the selection's other end.
                 'o' if !visual => ChatKey::Compose,
                 'O' if !visual => return Some(Read::No),
-                'y' => ChatKey::Copy,
                 'u' => ChatKey::Undo { redo: false },
                 'K' if !visual => ChatKey::Detail,
                 'K' => return Some(Read::No),
@@ -177,37 +178,27 @@ impl Dialect for ChatKeys {
         Some(Read::Yes(key))
     }
 
-    fn takes(&self, command: &Command<ChatKey>) -> bool {
-        if command.register.is_some() {
-            return false;
+    fn object(&self, key: char) -> Option<Object> {
+        match key {
+            'c' => Some(Object::CodeBlock),
+            'm' => Some(Object::Message),
+            key => Object::of_key(key),
         }
+    }
+
+    fn takes(&self, command: &Command<ChatKey>) -> bool {
         match command.action {
-            Action::Move(motion) => matches!(
-                motion,
-                Motion::Down(_)
-                    | Motion::Up(_)
-                    | Motion::RowDown(_)
-                    | Motion::RowUp(_)
-                    | Motion::Left
-                    | Motion::Right
-                    | Motion::LeftOver
-                    | Motion::RightOver
-                    | Motion::WordStart
-                    | Motion::WordEnd
-                    | Motion::WordBack
-                    | Motion::BigWordStart
-                    | Motion::BigWordEnd
-                    | Motion::BigWordBack
-                    | Motion::LineStart
-                    | Motion::FirstNonBlank
-                    | Motion::LineEnd
-                    | Motion::NextLine
-                    | Motion::PreviousLine
-                    | Motion::Paragraph { .. }
-                    | Motion::First
-                    | Motion::Last
-                    | Motion::Find { .. }
-            ),
+            Action::Operate(Operator::Yank, target) => match target {
+                Target::Motion(motion) => {
+                    moves(motion) || matches!(motion, Motion::FindAgain { .. })
+                }
+                Target::Object { object, .. } => !matches!(object, Object::Block | Object::Code(_)),
+                Target::Lines | Target::Selection | Target::SelectedLines => true,
+                Target::Mark { .. } => false,
+            },
+            // A register is for a yank alone.
+            _ if command.register.is_some() => false,
+            Action::Move(motion) => moves(motion),
             Action::FindAgain { .. }
             | Action::Scroll(_)
             | Action::Visual { .. }
@@ -219,9 +210,40 @@ impl Dialect for ChatKeys {
     }
 }
 
+/// Whether a chat moves by `motion`, as its cursor moves through its
+/// lines laid out in proportional fonts (see [`ChatView::moved`]).
+fn moves(motion: Motion) -> bool {
+    matches!(
+        motion,
+        Motion::Down(_)
+            | Motion::Up(_)
+            | Motion::RowDown(_)
+            | Motion::RowUp(_)
+            | Motion::Left
+            | Motion::Right
+            | Motion::LeftOver
+            | Motion::RightOver
+            | Motion::WordStart
+            | Motion::WordEnd
+            | Motion::WordBack
+            | Motion::BigWordStart
+            | Motion::BigWordEnd
+            | Motion::BigWordBack
+            | Motion::LineStart
+            | Motion::FirstNonBlank
+            | Motion::LineEnd
+            | Motion::NextLine
+            | Motion::PreviousLine
+            | Motion::Paragraph { .. }
+            | Motion::First
+            | Motion::Last
+            | Motion::Find { .. }
+    )
+}
+
 /// Which way to move.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Way {
+pub(super) enum Way {
     Back,
     On,
 }
@@ -387,7 +409,7 @@ impl ChatView {
             && matches!(press.key, Key::Character(text) if text.eq_ignore_ascii_case("c"))
         {
             self.keys.clear();
-            self.copy_picked(Copy::Clipboard);
+            self.yank_to_clipboard();
             return (true, false);
         }
         let visual = self.visual().is_some();
@@ -402,6 +424,16 @@ impl ChatView {
             });
         for stroke in strokes {
             let was_pending = self.keys.pending();
+            // Text selected with the mouse is a visual selection to Vim:
+            // `y` yanks it, after a count or a register.
+            let mouse = matches!(
+                self.picked,
+                Some(Picked {
+                    how: How::Mouse,
+                    ..
+                })
+            );
+            let visual = visual || (mouse && stroke == Stroke::char('y'));
             match self.keys.read(stroke, visual, &ChatKeys) {
                 Parsed::Incomplete => redraw = true,
                 Parsed::Nothing => redraw |= was_pending,
@@ -415,6 +447,30 @@ impl ChatView {
             }
         }
         (redraw, false)
+    }
+
+    /// Carries out `input`, a yank normal or visual mode queued, now that the fonts are at hand to lay out what it needs.
+    pub(super) fn settle_reading(
+        &mut self,
+        fonts: &mut crate::fonts::Fonts,
+        input: Input,
+        settled: &mut super::Settled,
+    ) {
+        match input {
+            Input::Yank {
+                start,
+                end,
+                lines,
+                to,
+            } => {
+                let text = self.text_between(fonts, start, end);
+                self.yanked(text, lines, to, settled);
+            }
+            Input::YankText(crate::pane::Yanked { register, to }) => {
+                self.yanked(register.text, register.lines, to, settled);
+            }
+            _ => {}
+        }
     }
 
     /// Does `command`, read whole. Returns whether the chat must be
@@ -453,6 +509,10 @@ impl ChatView {
                 self.leave_visual();
                 return (true, true);
             }
+            Action::Operate(Operator::Yank, target) => {
+                self.yank(target, command.count, command.register);
+            }
+
             Action::Own(own) => return self.own(own),
             // Nothing else is taken (see `ChatKeys::takes`).
             _ => return (false, false),
@@ -481,7 +541,6 @@ impl ChatView {
                 }
             }
             ChatKey::Escape => self.picked = None,
-            ChatKey::Copy => self.yank(),
             ChatKey::Detail => {
                 if !self.toggle_detail() {
                     self.say("the agent hasn't said how much context the chat fills".to_owned());
@@ -504,7 +563,7 @@ impl ChatView {
     }
 
     /// Visual mode's selection follows the cursor.
-    fn follow_selection(&mut self) {
+    pub(super) fn follow_selection(&mut self) {
         if let (Some(picked), Some(cursor)) = (&mut self.picked, self.cursor)
             && matches!(picked.how, How::Visual(_))
         {
@@ -514,7 +573,7 @@ impl ChatView {
 
     /// Moves the cursor by `motion`, `times` times, or until it goes no
     /// further, so a count as big as there is costs no more than the chat.
-    fn moved(&mut self, motion: Motion, count: Option<usize>) {
+    pub(super) fn moved(&mut self, motion: Motion, count: Option<usize>) {
         let times = count.unwrap_or(1);
         if let Motion::Find {
             ch,
@@ -785,38 +844,6 @@ impl ChatView {
         }
     }
 
-    /// `y`: copies what's selected, to the clipboard, or else what the
-    /// cursor's in: a block of code, or a message, an answer or a card
-    /// whole.
-    fn yank(&mut self) {
-        if self.picked_range().is_some() {
-            self.copy_picked(Copy::Clipboard);
-            return;
-        }
-        let Some(cursor) = self.cursor_or_default() else {
-            return;
-        };
-        if let Some(text) = self.text(cursor.text)
-            && text.code()
-        {
-            let code = text.text.to_owned();
-            self.queued.push(Input::CopyText(code));
-            return;
-        }
-        if let Some(whole) = self.piece_text(cursor.text) {
-            self.queued.push(Input::CopyText(whole));
-        }
-    }
-
-    /// Copies what's selected to `to`, once the fonts are at hand, and
-    /// stops selecting.
-    pub(super) fn copy_picked(&mut self, to: Copy) {
-        if let Some((start, end)) = self.picked_range() {
-            self.queued.push(Input::CopyRange(start, end, to));
-        }
-        self.picked = None;
-    }
-
     /// The whole of the piece text `key` is in, as it's copied: a message
     /// as it was typed, the agent's words as the Markdown they came as, a
     /// command and its output, a change as a diff, or for the line a
@@ -844,7 +871,7 @@ impl ChatView {
 
     /// The cursor, or if there's none yet, one at the start of the last
     /// line in view.
-    fn cursor_or_default(&mut self) -> Option<Position> {
+    pub(super) fn cursor_or_default(&mut self) -> Option<Position> {
         if self.cursor.is_none() {
             self.cursor = self.default_cursor();
         }
@@ -923,7 +950,7 @@ impl ChatView {
     }
 
     /// Puts the cursor at `position`, and scrolls to it.
-    fn go(&mut self, position: Position) {
+    pub(super) fn go(&mut self, position: Position) {
         self.cursor = Some(position);
         self.reveal = true;
     }
@@ -931,7 +958,7 @@ impl ChatView {
     /// The block of text after `key`, or before, as the conversation shows
     /// them. A turn not laid out gives the start of it, which is laid out
     /// as the view goes to it.
-    fn next_text(&self, key: TextKey, way: Way) -> Option<TextKey> {
+    pub(super) fn next_text(&self, key: TextKey, way: Way) -> Option<TextKey> {
         let mut turn = key.turn;
         loop {
             let texts = self.turn_texts(turn);
@@ -1401,9 +1428,8 @@ mod tests {
 
     use super::{big_class, class, next_word_start, word_end, word_start_before};
     use crate::chat::ChatView;
-    use crate::chat::fixtures::{fonts, paint, read, read_named, talk};
+    use crate::chat::fixtures::{chars, fonts, lines, paint, read, read_named, talk, yanked};
     use crate::chat::paint::{FOLD, ITEMS, PROMPT, TextKey};
-    use crate::pane::Copy;
     use crate::vim::Selection;
 
     impl ChatView {
@@ -1518,15 +1544,15 @@ mod tests {
         assert_eq!(read(&mut chat, "y"), (true, false));
         assert_eq!(chat.visual(), None);
         assert_eq!(
-            chat.settle(&mut fonts).copied,
-            [("one\n\nfirst answer".to_owned(), Copy::Clipboard)]
+            yanked(&mut chat, &mut fonts),
+            [lines("one\n\nfirst answer\n")]
         );
         // Characters: the cursor's own included.
         read(&mut chat, "gg}wvly");
-        assert_eq!(
-            chat.settle(&mut fonts).copied,
-            [("an".to_owned(), Copy::Clipboard)]
-        );
+        assert_eq!(yanked(&mut chat, &mut fonts), [chars("an")]);
+        // `Y` takes the lines.
+        read(&mut chat, "gg}wvlY");
+        assert_eq!(yanked(&mut chat, &mut fonts), [lines("first answer\n")]);
         // `o` goes to the other end, and Esc stops selecting.
         read(&mut chat, "vho");
         read_named(&mut chat, NamedKey::Escape);
@@ -1566,17 +1592,17 @@ mod tests {
     }
 
     #[test]
-    fn y_copies_a_message_or_an_answer_whole() {
+    fn yim_yanks_a_message_or_an_answer_whole_and_yam_its_turn() {
         let (mut chat, mut fonts) = reading(talk(&[("one", "**bold** answer")]));
-        read(&mut chat, "y");
-        assert_eq!(
-            chat.settle(&mut fonts).copied,
-            [("**bold** answer".to_owned(), Copy::Clipboard)]
-        );
-        read(&mut chat, "ggy");
-        assert_eq!(
-            chat.settle(&mut fonts).copied,
-            [("one".to_owned(), Copy::Clipboard)]
+        read(&mut chat, "yim");
+        assert_eq!(yanked(&mut chat, &mut fonts), [lines("**bold** answer\n")]);
+        read(&mut chat, "ggyim");
+        assert_eq!(yanked(&mut chat, &mut fonts), [lines("one\n")]);
+        read(&mut chat, "yam");
+        let turn = yanked(&mut chat, &mut fonts).remove(0).0;
+        assert!(
+            turn.contains("one") && turn.contains("**bold** answer"),
+            "{turn}"
         );
     }
 

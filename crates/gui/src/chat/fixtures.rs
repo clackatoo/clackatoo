@@ -65,6 +65,24 @@ pub(crate) fn read(chat: &mut ChatView, keys: &str) -> (bool, bool) {
     last
 }
 
+/// What `chat` yanked, once settled: each text, and whether it's lines,
+/// for the unnamed register, or the one named.
+pub(crate) fn yanked(chat: &mut ChatView, fonts: &mut Fonts) -> Vec<(String, bool)> {
+    (chat.settle(fonts).yanks.into_iter())
+        .map(|yank| (yank.register.text, yank.register.lines))
+        .collect()
+}
+
+/// `text` yanked by characters, as [`yanked`] has it.
+pub(crate) fn chars(text: &str) -> (String, bool) {
+    (text.to_owned(), false)
+}
+
+/// `text` yanked as lines, as [`yanked`] has it.
+pub(crate) fn lines(text: &str) -> (String, bool) {
+    (text.to_owned(), true)
+}
+
 /// Presses `named` in normal mode.
 pub(crate) fn read_named(chat: &mut ChatView, named: NamedKey) -> (bool, bool) {
     chat.read_key(&KeyPress {

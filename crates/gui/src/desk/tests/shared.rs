@@ -164,8 +164,8 @@ fn a_mouse_selection_goes_on_the_primary_selection_alone_as_vims_goes_in_star() 
         register: Register::chars(text.into()),
         to,
     };
-    desk.terminal_yanked(yank("kept", CopyTo::Register(None)));
-    desk.terminal_yanked(yank("selected", CopyTo::Primary));
+    desk.pane_yanked(yank("kept", CopyTo::Register(None)));
+    desk.pane_yanked(yank("selected", CopyTo::Primary));
     assert_eq!(register(&mut desk, '*').as_deref(), Some("selected"));
     assert_eq!(
         register(&mut desk, '"').as_deref(),

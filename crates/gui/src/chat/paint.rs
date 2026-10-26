@@ -47,7 +47,8 @@ use crate::markdown::{
     tables::Cells,
 };
 pub(super) use select::{
-    How, Picked, Position, Shown, TextKey, after, before, line_middle, line_of, within, x_of,
+    How, Picked, Position, Shown, TextKey, after, before, hard_line, line_middle, line_of, within,
+    x_of,
 };
 pub(super) use usage::Detail;
 #[cfg(test)]

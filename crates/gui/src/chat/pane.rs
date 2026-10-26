@@ -23,7 +23,7 @@ use super::{ChatView, Pointer, TextPaint};
 use crate::fonts::Fonts;
 use crate::input::{self, KeyPress};
 use crate::options::Options;
-use crate::pane::{Copy, Pane, PaneMouse, Requests};
+use crate::pane::{Copy, Pane, PaneMouse, Requests, Yanked};
 use crate::vim::{self, Mode};
 use clackatoo_term::mouse::{MouseAction, MouseButton};
 
@@ -54,6 +54,8 @@ pub(crate) struct ChatPane {
     carryover: u32,
     /// Text the chat copied, and where to put it, oldest first.
     copies: Vec<(String, Copy)>,
+    /// What it yanked, for the registers, oldest first.
+    yanks: Vec<Yanked>,
 }
 
 impl ChatPane {
@@ -72,6 +74,7 @@ impl ChatPane {
             },
             carryover: Options::default().carryover,
             copies: Vec::new(),
+            yanks: Vec::new(),
         };
         chat.requests.changed();
         chat
@@ -248,6 +251,7 @@ impl ChatPane {
             );
         }
         self.copies.extend(settled.copied);
+        self.yanks.extend(settled.yanks);
         settled.redraw
     }
 
@@ -260,6 +264,11 @@ impl ChatPane {
     /// Takes what it copied, oldest first.
     pub(crate) fn take_copies(&mut self) -> Vec<(String, Copy)> {
         std::mem::take(&mut self.copies)
+    }
+
+    /// Takes what it yanked, oldest first, for the registers.
+    pub(crate) fn take_yanks(&mut self) -> Vec<Yanked> {
+        std::mem::take(&mut self.yanks)
     }
 
     /// When it must be drawn again, for a turn still going to count on a

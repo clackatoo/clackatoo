@@ -102,7 +102,8 @@ pub(crate) use registers::{Register, Registers};
 use rendered::Rendered;
 use span::Span;
 pub(crate) use text::Stretch;
-use text::{Text, Underlines, tab_end};
+pub(crate) use text::Text;
+use text::{Underlines, tab_end};
 #[cfg(test)]
 pub(crate) use uses::USES_WAIT;
 use visual::Again;

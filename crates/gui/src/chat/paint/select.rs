@@ -88,13 +88,6 @@ pub(in crate::chat) struct TextAt<'a> {
     pub(in crate::chat) kind: Option<&'a BlockKind>,
 }
 
-impl TextAt<'_> {
-    /// Whether it's a block of code.
-    pub(in crate::chat) fn code(&self) -> bool {
-        self.kind.is_some_and(BlockKind::code)
-    }
-}
-
 /// `byte` in `text`, moved back to the start of the character it's in,
 /// and kept inside it, as text that's been replaced may need.
 pub(in crate::chat) fn within(text: &str, byte: usize) -> usize {
@@ -325,7 +318,13 @@ impl ChatView {
     /// Where the selection starts, and where it ends, past its last
     /// character.
     pub(in crate::chat) fn picked_range(&self) -> Option<(Position, Position)> {
-        let picked = self.picked?;
+        self.range_of(self.picked?)
+    }
+
+    /// Where `picked` would select from, and to, past its last character,
+    /// as [`picked_range`](Self::picked_range) says of the selection: what
+    /// an operator takes from one place to another, too.
+    pub(in crate::chat) fn range_of(&self, picked: Picked) -> Option<(Position, Position)> {
         let (start, end) = if picked.anchor <= picked.head {
             (picked.anchor, picked.head)
         } else {
@@ -372,16 +371,8 @@ impl ChatView {
         start: Position,
         end: Position,
     ) -> String {
-        // Turns above the view that find their heights move what's in it
-        // down as far: the view goes as far, to keep it where it was.
-        let m = Measures::of(self.cache.size);
-        self.update_bounds(m);
-        let first = super::in_view(&self.cache.bounds, self.scroll, self.scroll).start;
         for turn in [start.text.turn, end.text.turn] {
-            let grew = self.lay_out_for_copy(fonts, turn);
-            if turn < first && !self.follow {
-                self.scroll += grew;
-            }
+            self.lay_out_keeping_view(fonts, turn);
         }
         let mut copied = self.laid_text_between(start, end, start.text.turn);
         if start.text.turn < end.text.turn {
@@ -399,6 +390,19 @@ impl ChatView {
             }
         }
         copied
+    }
+
+    /// Lays out turn `turn` if it isn't, as it is, for its text to be
+    /// copied or searched, keeping what's in view where it was: a turn
+    /// above the view that finds its height moves what's in it down as
+    /// far.
+    pub(in crate::chat) fn lay_out_keeping_view(&mut self, fonts: &mut Fonts, turn: usize) {
+        self.update_bounds(Measures::of(self.cache.size));
+        let first = super::in_view(&self.cache.bounds, self.scroll, self.scroll).start;
+        let grew = self.lay_out_for_copy(fonts, turn);
+        if turn < first && !self.follow {
+            self.scroll += grew;
+        }
     }
 
     /// Turn `index` as it's copied whole: its message, and what of the
@@ -728,7 +732,7 @@ mod tests {
 
     use super::super::{ITEMS, PROMPT};
     use super::{Shown, TextKey};
-    use crate::chat::fixtures::{fonts, paint, read, talk};
+    use crate::chat::fixtures::{fonts, lines, paint, read, talk, yanked};
     use crate::chat::{ChatView, Hit, Pointer};
     use crate::input::{KeyPress, Modifiers};
     use crate::pane::Copy;
@@ -886,18 +890,25 @@ mod tests {
         chat.press([answer.at[0] + 2.0, answer.at[1] + 4.0], 2, false);
         chat.release();
         chat.reading = true;
-        // Let go of, the word goes to the primary selection; and `y`,
-        // typed before the chat's settled, copies the answer the cursor's
-        // in to the clipboard. Both go.
-        read(&mut chat, "y");
-        let copied = chat.settle(&mut fonts).copied;
+        // Let go of, the word goes to the primary selection; and `yy`,
+        // typed before the chat's settled, yanks the line the cursor's on
+        // into the registers. Both go.
+        read(&mut chat, "yy");
+        let settled = chat.settle(&mut fonts);
+        assert_eq!(settled.copied, [("alpha".to_owned(), Copy::Primary)]);
+        assert_eq!(settled.yanks.len(), 1);
+        assert_eq!(settled.yanks[0].register.text, "alpha beta\n");
+        // Selected with the mouse, `y` yanks what's selected, as Vim takes
+        // a mouse selection as a visual one, after a register too.
+        read(&mut chat, "\"ay");
+        let settled = chat.settle(&mut fonts);
+        assert_eq!(settled.yanks.len(), 1);
+        assert_eq!(settled.yanks[0].register.text, "alpha");
         assert_eq!(
-            copied,
-            [
-                ("alpha".to_owned(), Copy::Primary),
-                ("alpha beta".to_owned(), Copy::Clipboard)
-            ]
+            settled.yanks[0].to,
+            crate::pane::CopyTo::Register(Some('a'))
         );
+        assert!(chat.picked.is_none(), "yanked, it's no longer selected");
     }
 
     #[test]
@@ -913,7 +924,7 @@ mod tests {
         read(&mut chat, "VG");
         assert!(chat.cache.turns[30].laid.is_none());
         read(&mut chat, "y");
-        let copied = chat.settle(&mut fonts).copied.remove(0).0;
+        let copied = yanked(&mut chat, &mut fonts).remove(0).0;
         assert!(copied.starts_with("Turn 0: why"), "{copied}");
         assert!(copied.contains("Turn 30: why"), "{copied}");
         assert!(copied.contains("Turn 59: why"), "{copied}");
@@ -955,10 +966,16 @@ mod tests {
         chat.press(inside, 1, false);
         chat.release();
         chat.settle(&mut fonts);
-        read(&mut chat, "y");
+        read(&mut chat, "yic");
         assert_eq!(
-            chat.settle(&mut fonts).copied,
-            [("cargo test\ncargo build".to_owned(), Copy::Clipboard)]
+            yanked(&mut chat, &mut fonts),
+            [lines("cargo test\ncargo build\n")]
+        );
+        // With its fence, as the Markdown writes it.
+        read(&mut chat, "yac");
+        assert_eq!(
+            yanked(&mut chat, &mut fonts),
+            [lines("```sh\ncargo test\ncargo build\n```\n")]
         );
         // The mouse over it shows a button, which copies it, and says so.
         assert!(chat.hover(inside));
@@ -987,7 +1004,7 @@ mod tests {
         chat.reading = true;
         paint(&mut chat, &mut fonts);
         read(&mut chat, "ggVGy");
-        let copied = chat.settle(&mut fonts).copied.remove(0).0;
+        let copied = yanked(&mut chat, &mut fonts).remove(0).0;
         assert!(copied.starts_with("Turn 0: why"), "{copied}");
         assert!(copied.contains("The build fails on CI"), "{copied}");
         assert!(!copied.contains("Compiling"), "{copied}");
