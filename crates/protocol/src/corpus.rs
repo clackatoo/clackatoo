@@ -1265,7 +1265,92 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             })),
         ));
     }
+    samples.extend(
+        undo_state()
+            .into_iter()
+            .map(|sample| (crate::wire::UNDO_STATE, sample)),
+    );
     samples
+}
+
+/// Samples of protocol 106: undo steps that keep where the cursor was and
+/// the last selection, of every kind; one that changes nothing; and an
+/// undo and a redo that give them back.
+fn undo_state() -> Vec<Sample> {
+    use Sample::{Client, Server};
+    use clackatoo_text::{StepPlace, StepSelection, StepState, StepVisual};
+    let buffer = BufferId(3);
+    let visual = |kind| StepVisual {
+        start: StepPlace { line: 4, col: 1 },
+        end: StepPlace { line: 9, col: 3 },
+        kind,
+        backward: true,
+        to_end: false,
+    };
+    let state = |kind| StepState {
+        cursor: StepPlace { line: 4, col: 2 },
+        taken: true,
+        visual: Some(visual(kind)),
+    };
+    vec![
+        Client(ClientMessage::Edit {
+            buffer,
+            seq: 12,
+            change: Change::Step {
+                edit: Edit::replace(13, 3, "main", "start"),
+                base: 4,
+                state: state(StepSelection::Characters),
+            },
+        }),
+        Client(ClientMessage::Edit {
+            buffer,
+            seq: 13,
+            change: Change::Empty {
+                base: 5,
+                state: StepState {
+                    cursor: StepPlace { line: 0, col: 0 },
+                    taken: false,
+                    visual: None,
+                },
+            },
+        }),
+        Client(ClientMessage::Edit {
+            buffer,
+            seq: 14,
+            change: Change::Reverse {
+                redo: false,
+                base: 5,
+                visual: Some(visual(StepSelection::Lines)),
+            },
+        }),
+        Client(ClientMessage::Edit {
+            buffer,
+            seq: 15,
+            change: Change::Reverse {
+                redo: true,
+                base: 6,
+                visual: None,
+            },
+        }),
+        Server(ServerMessage::Event(Event::Buffer {
+            buffer,
+            update: BufferUpdate::Reversed {
+                version: 6,
+                seq: 14,
+                edit: Edit::replace(14, 3, "start", "main"),
+                state: Some(state(StepSelection::Block)),
+            },
+        })),
+        Server(ServerMessage::Event(Event::Buffer {
+            buffer,
+            update: BufferUpdate::Reversed {
+                version: 6,
+                seq: 15,
+                edit: Edit::keep(13),
+                state: None,
+            },
+        })),
+    ]
 }
 
 /// Samples of protocol 96: a workspace's background tabs, one running, one

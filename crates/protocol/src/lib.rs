@@ -101,6 +101,7 @@ pub use chat::{
 };
 pub use clackatoo_text::{
     AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
+    StepPlace, StepSelection, StepState, StepVisual,
 };
 pub use corpus::corpus;
 pub use devices::{Device, PairingAsk, PairingState};
@@ -127,7 +128,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 105;
+pub const PROTOCOL_VERSION: u32 = 106;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

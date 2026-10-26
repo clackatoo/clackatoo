@@ -45,7 +45,9 @@
 
 use std::fmt;
 
-use clackatoo_text::{AgentHunk, Construct, Diagnostic, Edit, Hunk, LineIndent, Piece, Span};
+use clackatoo_text::{
+    AgentHunk, Construct, Diagnostic, Edit, Hunk, LineIndent, Piece, Span, StepState, StepVisual,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{ChatName, TerminalId, wire};
@@ -154,10 +156,49 @@ pub enum Change {
         /// as each key typed in one go of insert mode does.
         step: bool,
     },
-    /// Undo the user's last step, wherever it was made.
+    /// Undo the user's last step, wherever it was made. Steps that change
+    /// nothing (see [`Change::Empty`]) are passed over.
     Undo,
-    /// Redo the step the user last undid.
+    /// Redo the step the user last undid, passing over steps that change
+    /// nothing.
     Redo,
+    /// An edit, which the window has already made to its copy, that starts
+    /// a new undo step, keeping `state` with it, as Vim's undo header
+    /// keeps where the cursor was and the last selection: its places are
+    /// in the text at `base`, before the edit. Only to a daemon of protocol
+    /// 106 or later.
+    Step {
+        /// The edit.
+        edit: Edit,
+        /// The version of the text it was made to.
+        base: u64,
+        /// What the step keeps.
+        state: StepState,
+    },
+    /// An undo step that changes nothing, as Vim's `3J` on the last line
+    /// makes one, keeping `state`, its places in the text at `base`. It's
+    /// answered with [`BufferUpdate::Acked`], and ends the chance to redo.
+    /// Only to a daemon of protocol 106 or later.
+    Empty {
+        /// The version of the text its places are in.
+        base: u64,
+        /// What the step keeps.
+        state: StepState,
+    },
+    /// Undo the user's last step, or with `redo`, redo the last undone,
+    /// steps that change nothing too, answered with
+    /// [`BufferUpdate::Reversed`], which gives back what the step kept.
+    /// `visual` is the window's last selection, its places in the text at
+    /// `base`, which the step keeps in place of its own, if it had one, as
+    /// Vim's undo swaps them. Only to a daemon of protocol 106 or later.
+    Reverse {
+        /// A redo, not an undo.
+        redo: bool,
+        /// The version of the text `visual` is in.
+        base: u64,
+        /// The window's last selection.
+        visual: Option<StepVisual>,
+    },
 }
 
 /// What the daemon tells a window about a buffer it attached to.
@@ -338,6 +379,23 @@ pub enum BufferUpdate {
     /// Only to a client of protocol 92 or later, and never to a daemon
     /// relaying, which is told such an edit failed.
     Reattach,
+    /// The client's [`Change::Reverse`] numbered `seq` was made: `edit`,
+    /// which made `version`, and what the step undone or redone kept, its
+    /// places in the text now. A step that changes nothing gives an edit
+    /// that keeps the text, and makes no version: `version` is the text's
+    /// as it is. Only to a client of protocol 106 or later, in answer to
+    /// that.
+    Reversed {
+        /// The version the edit made, or the text's, for a step that
+        /// changes nothing.
+        version: u64,
+        /// The client's number for the change.
+        seq: u64,
+        /// The edit.
+        edit: Edit,
+        /// What the step kept, if it kept anything.
+        state: Option<StepState>,
+    },
 }
 
 /// What a buffer's language server does as you type, as it said when it

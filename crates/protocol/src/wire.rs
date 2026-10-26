@@ -246,6 +246,13 @@ gates! {
     CHAT_HISTORY = 104,
     /// Managed agent activities and explicit window access.
     HARNESS = 105,
+    /// Undo steps that keep where the cursor was and the last selection,
+    /// and steps that change nothing, as Vim's undo header keeps them:
+    /// `Change::Step`, `Change::Empty` and `Change::Reverse`
+    /// (`StepState`, `StepPlace`, `StepVisual`, `StepSelection`), and
+    /// `BufferUpdate::Reversed`. And `Change::Undo` and `Change::Redo`
+    /// pass over steps that change nothing.
+    UNDO_STATE = 106,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -441,6 +448,7 @@ impl Since for BufferUpdate {
             Self::Coloured { .. } => HOVER,
             Self::Language { .. } => WORDS,
             Self::Reattach => RELAY,
+            Self::Reversed { .. } => UNDO_STATE,
         }
     }
 }
@@ -1112,12 +1120,17 @@ impl Downgrade for ServerMessage {
     /// `Event::Said`, which is only ever about a pane lent, which an
     /// older peer is never shown; and `Event::Listening`, which goes only
     /// to a client that asked for it, which an older one never does.
+    /// `BufferUpdate::Reversed` only answers a newer window's undo or redo,
+    /// and becomes the `Edited` an older one's is answered with.
     /// A new answer, or a new kind of thing found, only ever answers what
     /// a newer window asked; should one reach an older peer all the same,
     /// it's told its question failed, rather than wait for ever.
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
         if newest(self) <= wire {
             return Downgraded::AsIs;
+        }
+        if let Some(edited) = reversed_as_edited(self) {
+            return Downgraded::To(edited);
         }
         if wire < HARNESS
             && let Some(older) = without_optional_chat_updates(self, wire)
@@ -1211,6 +1224,30 @@ impl Downgrade for ServerMessage {
             _ => Downgraded::Refused,
         }
     }
+}
+
+/// `message`, if it's an undo or a redo that gives back what its step kept,
+/// as the edit an older window's undo or redo is answered with: it only
+/// ever answers a newer window's.
+fn reversed_as_edited(message: &ServerMessage) -> Option<ServerMessage> {
+    let ServerMessage::Event(Event::Buffer {
+        buffer,
+        update: BufferUpdate::Reversed {
+            version, seq, edit, ..
+        },
+    }) = message
+    else {
+        return None;
+    };
+    Some(ServerMessage::Event(Event::Buffer {
+        buffer: *buffer,
+        update: BufferUpdate::Edited {
+            version: *version,
+            edit: edit.clone(),
+            author: crate::Author::User,
+            answers: Some(*seq),
+        },
+    }))
 }
 
 #[cfg(test)]
@@ -1495,6 +1532,30 @@ mod tests {
         // A peer that has the variant gets it.
         let sent = frame::encode(NEW, &after(Shape::Square)).unwrap();
         assert_eq!(decode::<After>(NEW, &sent).shape, Shape::Square);
+    }
+
+    #[test]
+    fn an_undo_that_gives_back_what_its_step_kept_is_an_older_windows_edit() {
+        let reversed = ServerMessage::Event(Event::Buffer {
+            buffer: crate::BufferId(3),
+            update: BufferUpdate::Reversed {
+                version: 6,
+                seq: 14,
+                edit: crate::Edit::replace(3, 0, "abc", ""),
+                state: Some(crate::StepState::default()),
+            },
+        });
+        let edited = ServerMessage::Event(Event::Buffer {
+            buffer: crate::BufferId(3),
+            update: BufferUpdate::Edited {
+                version: 6,
+                edit: crate::Edit::replace(3, 0, "abc", ""),
+                author: crate::Author::User,
+                answers: Some(14),
+            },
+        });
+        assert_eq!(reversed.downgrade(UNDO_STATE - 1), Downgraded::To(edited));
+        assert_eq!(reversed.downgrade(UNDO_STATE), Downgraded::AsIs);
     }
 
     #[test]
