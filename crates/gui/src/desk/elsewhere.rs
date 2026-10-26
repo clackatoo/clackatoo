@@ -32,11 +32,15 @@ impl Desk {
     /// tab's pane is on its workspace's machine, as it holds a terminal of
     /// that machine's own.
     pub(crate) fn pane_machine(&self, pane: PaneId) -> Option<MachineId> {
-        let Some((workspace, _, pane)) = self.workspaces.find_pane(pane) else {
-            let (workspace, ..) = self.workspaces.find_background_pane(pane)?;
-            return workspace.home;
-        };
         let own = self.own_machine().map(|own| own.id);
+        let Some((workspace, _, pane)) = self.workspaces.find_pane(pane) else {
+            // A background tab's, as a shell another machine lends, too.
+            let (workspace, _, pane) = self.workspaces.find_background_pane(pane)?;
+            return match pane.home {
+                Some(home) if Some(home) == own => None,
+                home => home.or(workspace.home),
+            };
+        };
         match pane.home {
             Some(home) if Some(home) == own => None,
             home => home.or(workspace.home),

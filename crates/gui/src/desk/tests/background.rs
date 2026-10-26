@@ -393,6 +393,39 @@ fn ctrl_f_forwards_another_machines_background_tab_from_that_machine() {
     );
 }
 
+/// A background tab of this machine's workspace showing a shell another
+/// machine lends listens on that machine's ports, so Ctrl+F asks the
+/// daemon to forward them from there (CLACKA-122).
+#[test]
+fn ctrl_f_forwards_a_lent_background_shell_from_its_machine() {
+    use clackatoo_protocol::{Forwarding, Listening, ListeningPort, MachineId};
+    let mut lent = background(6, BackgroundState::Running, None, "dev server");
+    if let clackatoo_protocol::Layout::Pane(pane) = &mut lent.tab.layout {
+        pane.home = Some(MachineId([9; 16]));
+        pane.key = Some(42);
+    }
+    let mut desk = desk(with_background(vec![lent], Vec::new()));
+    normal_mode(&mut desk);
+    command(&mut desk, "Background");
+    answer_all(&mut desk);
+    assert!(desk.listening(vec![Listening {
+        tab: TabId(6),
+        ports: vec![ListeningPort {
+            port: 3000,
+            program: "node".into(),
+        }],
+    }]));
+    ctrl(&mut desk, "f");
+    assert!(desk.take_forwards_asked().is_empty(), "not this machine's");
+    assert!(matches!(
+        &answer_all(&mut desk)[..],
+        [Request::Forwards {
+            pane: PaneId(6),
+            forwarding: Forwarding::Add { port: 3000, .. },
+        }]
+    ));
+}
+
 #[test]
 fn keep_marks_the_focused_terminal_and_its_tab_says_so() {
     use clackatoo_protocol::{Keeping, Kept};

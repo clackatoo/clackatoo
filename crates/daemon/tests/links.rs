@@ -287,8 +287,38 @@ fn example(name: &str) -> PathBuf {
                     examples.display()
                 )
             },
-            |entry| entry.path(),
+            |entry| fresh(&entry.path()),
         )
+}
+
+/// `path`, an example, failing if a file it was built from has changed
+/// since, as cargo noted them beside it: `cargo test --test links` builds
+/// no examples, and a test would try a stale build, as one left over from
+/// breaking the code on purpose.
+fn fresh(path: &Path) -> PathBuf {
+    let modified = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+    };
+    let mut noted = path.to_path_buf().into_os_string();
+    noted.push(".d");
+    let built = modified(path).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let sources = std::fs::read_to_string(&noted).unwrap_or_default();
+    let sources =
+        (sources.split_once(": ").map_or("", |(_, sources)| sources)).replace("\\ ", "\0");
+    let changed = (sources.split_whitespace())
+        .map(|source| PathBuf::from(source.replace('\0', " ")))
+        .find(|source| modified(source).is_some_and(|changed| changed > built));
+    if let Some(changed) = changed {
+        panic!(
+            "{} has changed since {} was built: run `cargo build -p clackatoo-daemon --examples` \
+             first",
+            changed.display(),
+            path.display()
+        );
+    }
+    path.to_path_buf()
 }
 
 /// Asks the daemon `client` talks to to connect to `host`, running the
@@ -5362,6 +5392,26 @@ fn wait_for_chat(
     }
 }
 
+/// As [`ask_chat`], once the connection to the chat's machine holds: just
+/// after this daemon restarts, that machine turns it down for a few
+/// seconds (see [`attach_when_reached`]).
+fn ask_chat_when_reached(client: &mut Client, chat: TerminalId, text: &str) -> ChatNode {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        match client.chat(chat, ChatAction::Send(text.into())) {
+            Ok(()) => break,
+            Err(ClientError::Daemon(Error::Other(why))) if Instant::now() < deadline => {
+                assert!(why.contains("lost") || why.contains("isn't"), "{why}");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => panic!("asking: {err:?}"),
+        }
+    }
+    wait_for_chat(client, chat, |node| {
+        (node.turns.last()).is_some_and(|turn| turn.prompt == text && turn.end.is_some())
+    })
+}
+
 /// Sends `text` to `chat`, and waits for its answer to end.
 fn ask_chat(client: &mut Client, chat: TerminalId, text: &str) -> ChatNode {
     client.chat(chat, ChatAction::Send(text.into())).unwrap();
@@ -5465,7 +5515,7 @@ fn a_chat_in_another_machines_workspace_goes_on_with_its_session_after_either_re
     let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "work").is_some());
     let third = first_terminal(theirs(&shown, "work").unwrap());
     attach_when_reached(&mut window, third);
-    let node = ask_chat(&mut window, third, "cwd");
+    let node = ask_chat_when_reached(&mut window, third, "cwd");
     let project = project.display().to_string();
     assert!(last_words(&node).contains(&project), "{node:#?}");
     drop(laptop);
@@ -5528,7 +5578,7 @@ fn a_chat_borrowed_from_another_machine_goes_on_with_its_session_after_either_re
     let pane = home_now.tabs[1].layout.panes()[0].id;
     let third = terminal_of(wait_for_borrowed(&mut window, pane));
     attach_when_reached(&mut window, third);
-    let node = ask_chat(&mut window, third, "cwd");
+    let node = ask_chat_when_reached(&mut window, third, "cwd");
     let project = project.display().to_string();
     assert!(last_words(&node).contains(&project), "{node:#?}");
     drop(laptop);
