@@ -1314,7 +1314,7 @@ mod tests {
         let mut mirror = Mirror::default();
         let mut fresh = Counters::default();
         let mut work = workspace(1, "main", pane(1, Content::Terminal(TerminalId(1))), 1);
-        work.background = (2..2 + 2 * MOST_BACKGROUND as u32)
+        work.background = (2..2 + 2 * u32::try_from(MOST_BACKGROUND).unwrap())
             .map(|id| background(id, pane(id, Content::Terminal(TerminalId(id))), id, "srv"))
             .collect();
         let mut many = vec![work];
@@ -1322,7 +1322,7 @@ mod tests {
         // taken in: the workspace after them is left out.
         let first = 1000;
         let rest = MOST_PANES - 1 - MOST_BACKGROUND;
-        let parts = (0..rest as u32)
+        let parts = (0..u32::try_from(rest).unwrap())
             .map(|n| pane(first + n, Content::Terminal(TerminalId(first + n))))
             .collect();
         let shares = vec![1; rest];

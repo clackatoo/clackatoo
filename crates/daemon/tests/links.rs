@@ -4962,6 +4962,79 @@ fn another_machines_background_tabs_are_shown_through_this_daemon() {
     );
 }
 
+/// What's asked of desk's background tabs from laptop is done on desk, and
+/// laptop shows it done, by the same numbers: one brought back, sent to
+/// the background again, a command started in a new one, and one dismissed
+/// (CLACKA-122).
+#[test]
+fn another_machines_background_tabs_are_brought_back_sent_started_and_dismissed_from_here() {
+    use clackatoo_protocol::BackgroundAction;
+    let world = World::new();
+    kept_with_offer_and_background(&world, "desk");
+    let desk = world.start_with("desk", true);
+    let mut at_desk = desk.client();
+    at_desk.watch_workspaces().unwrap();
+    let laptop = world.start("laptop");
+    let mut window = laptop.client();
+    connect(&mut window, "desk");
+    let shown = wait_for_workspaces(&mut window, |shown| {
+        theirs(shown, "agents").is_some_and(|agents| agents.background.len() == 1)
+    });
+    let agents = theirs(&shown, "agents").unwrap().clone();
+    let tab = agents.background[0].tab.id;
+    let background_pane = agents.background[0].tab.layout.panes()[0].id;
+    let background = |action| Request::Background(action);
+
+    let brought = window.request(&background(BackgroundAction::Bring { tab }));
+    assert_eq!(brought.unwrap(), Response::PaneCreated(background_pane));
+    wait_for_workspaces(&mut at_desk, |own| {
+        own.list[0].background.is_empty() && own.list[0].tabs.len() == 2
+    });
+    wait_for_workspaces(&mut window, |shown| {
+        theirs(shown, "agents").is_some_and(|agents| {
+            agents.background.is_empty() && agents.tabs.iter().any(|shown| shown.id == tab)
+        })
+    });
+
+    let sent = window.request(&background(BackgroundAction::Tab { tab }));
+    assert_eq!(sent.unwrap(), Response::Done);
+    wait_for_workspaces(&mut window, |shown| {
+        theirs(shown, "agents").is_some_and(|agents| {
+            agents.background.len() == 1 && agents.background[0].tab.id == tab
+        })
+    });
+
+    let start = BackgroundAction::Start {
+        workspace: agents.id,
+        command: "sleep 600".into(),
+        cwd: None,
+        pane: Some(agents.tabs[0].layout.panes()[0].id),
+        size: Size::new(80, 24).unwrap(),
+    };
+    let Response::PaneCreated(started) = window.request(&background(start)).unwrap() else {
+        panic!("no pane made");
+    };
+    let shown = wait_for_workspaces(&mut window, |shown| {
+        theirs(shown, "agents").is_some_and(|agents| agents.background.len() == 2)
+    });
+    let agents = theirs(&shown, "agents").unwrap();
+    assert_eq!(
+        agents.background[1].tab.layout.panes()[0].id,
+        started,
+        "{agents:#?}"
+    );
+    wait_for_workspaces(&mut at_desk, |own| own.list[0].background.len() == 2);
+
+    let dismissed = window.request(&background(BackgroundAction::Dismiss { tab }));
+    assert_eq!(dismissed.unwrap(), Response::Done);
+    wait_for_workspaces(&mut at_desk, |own| own.list[0].background.len() == 1);
+    wait_for_workspaces(&mut window, |shown| {
+        theirs(shown, "agents").is_some_and(|agents| {
+            agents.background.len() == 1 && agents.background[0].tab.id != tab
+        })
+    });
+}
+
 /// Each tab's first pane, in `workspace`, and the terminal it shows.
 fn tab_terminals(workspace: &Workspace) -> Vec<(PaneId, TerminalId)> {
     (workspace.tabs.iter())

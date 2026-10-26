@@ -55,6 +55,7 @@ use mio::Token;
 use super::links::Reached;
 use super::{Broadcast, Daemon, Flood, Held, Link, Source, ViewStream};
 
+pub(super) mod background;
 pub(super) mod borrowed;
 pub(super) mod editors;
 pub(super) mod files;
@@ -112,6 +113,9 @@ const FILES: u32 = 7;
 
 /// The number of `Event::FileOp` among the events.
 const FILE_OP: u32 = 8;
+
+/// The number of `Event::Listening` among the events.
+const LISTENING: u32 = 22;
 
 /// What's relayed through one connection, kept while it's asked for,
 /// through the connection dropping.
@@ -178,6 +182,12 @@ pub(super) struct Relayed {
     /// The panes of this machine's its layouts name that it was asked to
     /// close, on this connection, as this daemon no longer has them.
     closing_there: BTreeSet<u64>,
+    /// The ports its background tabs listen on, as it last said, by this
+    /// daemon's numbers (see [`background`]).
+    ports: Vec<clackatoo_protocol::Listening>,
+    /// The clients waiting for it to say the ports its background tabs
+    /// listen on.
+    ports_waiting: Vec<Token>,
 }
 
 impl Relayed {
@@ -918,6 +928,12 @@ impl Daemon {
             | Request::NewTab { .. }
             | Request::Split { .. }
             | Request::SplitTab { .. }) => self.route_new_pane(token, request),
+            // Asked of every daemon whose background tabs are shown, as
+            // well as looked for here.
+            request @ Request::Background(BackgroundAction::Ports) => {
+                self.ask_ports_there(token);
+                Routed::Here(request)
+            }
             request => match self.route_shown(token, &request) {
                 Some(routed) => routed,
                 None => self.route_waited_for(token, request),
@@ -1258,25 +1274,11 @@ impl Daemon {
             &Request::AttachBrowser { chat, .. } => self
                 .relayed_terminal(chat)
                 .map(|(at, _)| (at, Err(self.not_yet(at, "a chat's browser")))),
-            // What another machine keeps running is its own to mark, for
-            // now (CLACKA-121).
-            &Request::Keep { pane, .. } => self
-                .relayed_pane(pane)
-                .map(|(at, _)| (at, Err(self.not_yet(at, "keeping a terminal running")))),
-            // Another machine's background tabs aren't shown here: what
-            // it keeps in the background is its own (CLACKA-121).
-            Request::Background(action) => match *action {
-                BackgroundAction::Tab { tab } => self.relayed_tab(tab).map(|(at, _)| at),
-                BackgroundAction::Pane { pane } => self.relayed_pane(pane).map(|(at, _)| at),
-                BackgroundAction::Seen { workspace }
-                | BackgroundAction::Start { workspace, .. } => {
-                    self.relayed_workspace(workspace).map(|(at, _)| at)
-                }
-                BackgroundAction::Bring { .. }
-                | BackgroundAction::Dismiss { .. }
-                | BackgroundAction::Ports => None,
-            }
-            .map(|at| (at, Err(self.not_yet(at, "background tabs")))),
+            &Request::Keep { pane, how } => self.relayed_pane(pane).map(|(at, remote)| {
+                let keep = (Request::Keep { pane: remote, how }, Then::Pass);
+                (at, self.keep_there(token, at, pane, keep))
+            }),
+            Request::Background(action) => self.route_background(action),
             _ => None,
         };
         match renumbered {
@@ -2243,7 +2245,7 @@ impl Daemon {
             } else if head.is_workspaces()
                 || head.is_chats()
                 || head.is_small_event()
-                || head.event_kind() == Some(INSTALLED)
+                || matches!(head.event_kind(), Some(INSTALLED | LISTENING))
             {
                 if payload.len() > MOST_SMALL && !head.is_workspaces() {
                     if let Some(Source::Reached(reached)) = self.sources.get(token.0) {
@@ -2637,6 +2639,7 @@ impl Daemon {
         match event {
             Event::Workspaces(workspaces) => self.relay_workspaces(at, &workspaces),
             Event::Chats(chats) => self.take_relayed_chats(at, &chats),
+            Event::Listening(listening) => self.take_relayed_ports(at, listening),
             Event::Installed { language, outcome } => {
                 let relayed = &mut self.links.list[at].relayed;
                 let mut told = Vec::new();

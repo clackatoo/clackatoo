@@ -32,13 +32,13 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    BackgroundAction, BackgroundState, Error, Event, Listening, ListeningPort, NewTerminal, PaneId,
+    BackgroundAction, BackgroundState, Error, Listening, ListeningPort, NewTerminal, PaneId,
     PaneTerminal, Response, Size, Tab, TabId, TerminalId, TerminalStatus, WorkspaceId,
 };
 use clackatoo_term::{Progress, Terminal};
 use mio::Token;
 
-use super::{Daemon, Source};
+use super::Daemon;
 
 /// The longest name a background tab is given, in characters.
 const LONGEST_NAME: usize = 100;
@@ -82,6 +82,8 @@ pub(super) struct Backgrounds {
     restated: Option<Instant>,
     /// When one waiting to be told is, if one is.
     pub(super) restate_due: Option<Instant>,
+    /// The ports this daemon's background tabs listen on, as last found.
+    pub(super) found: Vec<Listening>,
 }
 
 impl Daemon {
@@ -440,12 +442,10 @@ impl Daemon {
             }
             shown.ports.sort_by_key(|port| port.port);
         }
-        let event = Event::Listening(listening);
-        for token in std::mem::take(&mut self.background.waiting) {
-            if let Some(Source::Client(_)) = self.sources.get(token.0) {
-                self.send_event(token, event.clone());
-            }
-        }
+        // Told with what other machines last said of theirs (CLACKA-122).
+        self.background.found = listening;
+        let waiting = std::mem::take(&mut self.background.waiting);
+        self.tell_ports(waiting);
     }
 
     /// Starts looking at `tab`'s terminals' blocks for failures from
