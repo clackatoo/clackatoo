@@ -164,6 +164,12 @@ pub struct Steps<A> {
     pub undo_states: Vec<Option<StepState>>,
     /// What was kept with each step to redo, as `redo` lists them.
     pub redo_states: Vec<Option<StepState>>,
+    /// Which steps to undo change nothing, as `undo` lists them, as many as
+    /// there are steps; or none, for a history written down before steps
+    /// could change nothing.
+    pub undo_empty: Vec<bool>,
+    /// Which steps to redo change nothing, as `redo` lists them.
+    pub redo_empty: Vec<bool>,
     /// Whether steps have been let go, the oldest first (see
     /// [`History::forgot`]).
     pub forgot: bool,
@@ -284,9 +290,12 @@ impl<A: Clone + Eq> History<A> {
         if self.work_since(base) > most {
             return Err(HistoryError::TooFar(base));
         }
-        let mut work = 0;
+        // The text the edit itself puts in and takes away is copied at
+        // each step, but cheaply, as whole strings: it's counted once, and
+        // its pieces at each step.
+        let mut work = (edit.weight() - edit.ops().len()) as u64;
         for (theirs, _) in since {
-            work += (edit.weight() + theirs.weight()) as u64;
+            work += (edit.ops().len() + theirs.weight()) as u64;
             if work > most {
                 self.count(work);
                 return Err(HistoryError::TooFar(base));
@@ -361,8 +370,18 @@ impl<A: Clone + Eq> History<A> {
         self.limit_steps(index);
         let version = self.push(edit, author);
         self.authors[index].version = version;
-        self.catch_up()?;
+        self.catch_up();
         Ok(version)
+    }
+
+    /// Records `edit`, made by `author` to the text as it is now, keeping
+    /// no undo step for it: for an author that never undoes its edits, as
+    /// an agent, whose turns are undone another way. Others' steps are
+    /// brought past it as past any edit.
+    pub fn record_alone(&mut self, edit: Edit, author: A) -> u64 {
+        let version = self.push(edit, author);
+        self.catch_up();
+        version
     }
 
     /// Undoes `author`'s last step, recording the edit that does it, which
@@ -474,7 +493,7 @@ impl<A: Clone + Eq> History<A> {
         if !step.empty {
             let version = self.push(step.edit.clone(), author.clone());
             self.authors[index].version = version;
-            self.catch_up()?;
+            self.catch_up();
         }
         Ok(Some(Reversal {
             edit: step.edit,
@@ -553,8 +572,8 @@ impl<A: Clone + Eq> History<A> {
     pub fn snapshot(&self) -> HistorySnapshot<A> {
         let steps = (self.authors.iter())
             .map(|stacks| {
-                let (undo, undo_states) = settled(&stacks.undo);
-                let (redo, redo_states) = settled(&stacks.redo);
+                let (undo, undo_states, undo_empty) = settled(&stacks.undo);
+                let (redo, redo_states, redo_empty) = settled(&stacks.redo);
                 Steps {
                     author: stacks.author.clone(),
                     version: stacks.version,
@@ -562,6 +581,8 @@ impl<A: Clone + Eq> History<A> {
                     redo,
                     undo_states,
                     redo_states,
+                    undo_empty,
+                    redo_empty,
                     forgot: stacks.forgot,
                 }
             })
@@ -584,8 +605,8 @@ impl<A: Clone + Eq> History<A> {
             .map(|steps| Stacks {
                 author: steps.author,
                 version: steps.version,
-                undo: restored_steps(steps.undo, steps.undo_states),
-                redo: restored_steps(steps.redo, steps.redo_states),
+                undo: restored_steps(steps.undo, steps.undo_states, &steps.undo_empty),
+                redo: restored_steps(steps.redo, steps.redo_states, &steps.redo_empty),
                 forgot: steps.forgot,
             })
             .collect();
@@ -655,7 +676,14 @@ impl<A: Clone + Eq> History<A> {
     }
 
     /// Brings up to date the steps of every author fallen too far behind.
-    fn catch_up(&mut self) -> Result<(), HistoryError> {
+    ///
+    /// They share one [`Limits::sync_work`]: once it's spent, the rest wait
+    /// for a later edit, so many authors fallen behind at once are caught
+    /// up a few at a time. An author with no steps is let go instead,
+    /// costing nothing: its stacks are made again as it next needs them.
+    /// A step that won't go past others' edits is a history not kept
+    /// whole, which can't happen; it's let go, as the author's oldest.
+    fn catch_up(&mut self) {
         let version = self.version();
         let lag = self.limits.lag_work as u64;
         let behind: Vec<A> = (self.authors.iter())
@@ -664,16 +692,44 @@ impl<A: Clone + Eq> History<A> {
             })
             .map(|steps| steps.author.clone())
             .collect();
+        self.authors.retain(|steps| {
+            !(behind.contains(&steps.author)
+                && steps.undo.is_empty()
+                && steps.redo.is_empty()
+                && !steps.forgot)
+        });
+        let mut budget = self.limits.sync_work as u64;
         for author in &behind {
-            self.sync(author)?;
+            if budget == 0 {
+                break;
+            }
+            if !self.authors.iter().any(|steps| steps.author == *author) {
+                continue;
+            }
+            if self.sync_within(author, &mut budget).is_err()
+                && let Some(steps) = self
+                    .authors
+                    .iter_mut()
+                    .find(|steps| steps.author == *author)
+            {
+                steps.undo.clear();
+                steps.redo.clear();
+                steps.forgot = true;
+                steps.version = version;
+            }
         }
-        Ok(())
     }
 
     /// Brings `author`'s stacks up to date, sending the edits others have
     /// made since down through them, as far as [`Limits::sync_work`]
     /// allows, and returns where they are.
     fn sync(&mut self, author: &A) -> Result<usize, HistoryError> {
+        let mut budget = self.limits.sync_work as u64;
+        self.sync_within(author, &mut budget)
+    }
+
+    /// [`sync`](Self::sync), spending `budget`.
+    fn sync_within(&mut self, author: &A, budget: &mut u64) -> Result<usize, HistoryError> {
         let version = self.version();
         let Some(index) = self
             .authors
@@ -696,12 +752,13 @@ impl<A: Clone + Eq> History<A> {
         // Every edit since is someone else's: the author's own bring their
         // stacks up to date as they're made. One edit that makes them all
         // goes down each stack once.
+        let before = self.work.get();
         let others = compose_all(self.since(steps.version)?.map(|(edit, _)| edit), &self.work)?;
-        let mut budget = self.limits.sync_work as u64;
+        *budget = budget.saturating_sub(self.work.get() - before);
         let steps = &mut self.authors[index];
         if let Some(others) = others.filter(|others| !others.is_noop()) {
             for stack in [&mut steps.undo, &mut steps.redo] {
-                send_down(stack, others.clone(), &mut budget, &self.work)?;
+                send_down(stack, others.clone(), budget, &self.work)?;
             }
         }
         steps.version = version;
@@ -770,29 +827,30 @@ fn settle_top(stack: &mut [Step], work: &Cell<u64>) -> Result<(), EditError> {
 
 /// The edits of `stack`, and what was kept with each, with all that waits
 /// in them sent down.
-fn settled(stack: &[Step]) -> (Vec<Edit>, Vec<Option<StepState>>) {
+fn settled(stack: &[Step]) -> (Vec<Edit>, Vec<Option<StepState>>, Vec<bool>) {
     let mut stack = stack.to_vec();
     let mut budget = u64::MAX;
     let work = Cell::new(0);
     // A stack that's been kept whole always settles.
     let nothing = Edit::keep(top_len(&stack));
     let _ = send_down(&mut stack, nothing, &mut budget, &work);
-    (stack.into_iter())
-        .map(|step| {
-            // A step that changes nothing is written down as one that keeps
-            // its text, which is how it's read back.
-            (step.edit, step.state)
-        })
-        .unzip()
+    let mut written = (Vec::new(), Vec::new(), Vec::new());
+    for step in stack {
+        written.0.push(step.edit);
+        written.1.push(step.state);
+        written.2.push(step.empty);
+    }
+    written
 }
 
-/// Steps read back from `edits` and what was kept with each, `states`:
-/// those that keep their text are steps that change nothing.
-fn restored_steps(edits: Vec<Edit>, states: Vec<Option<StepState>>) -> Vec<Step> {
+/// Steps read back from `edits`, what was kept with each, `states`, and
+/// which change nothing, `empty`: with none said, as from before steps
+/// could, none do.
+fn restored_steps(edits: Vec<Edit>, states: Vec<Option<StepState>>, empty: &[bool]) -> Vec<Step> {
     let mut states = states.into_iter();
-    (edits.into_iter())
-        .map(|edit| Step {
-            empty: edit.is_noop(),
+    (edits.into_iter().enumerate())
+        .map(|(index, edit)| Step {
+            empty: empty.get(index).copied().unwrap_or(false),
             ..Step::new(edit, states.next().flatten())
         })
         .collect()
@@ -1653,5 +1711,90 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(reversal.edit.apply_to("bc\nx\n").unwrap(), "abc\nx\n");
+    }
+
+    #[test]
+    fn a_big_paste_from_a_little_behind_is_brought_up_to_date() {
+        // Its text is copied whole at each step, as one string: counted
+        // once, not for each edit it goes past.
+        let mut doc = Doc::new("start\n");
+        for _ in 0..100 {
+            doc.edit(Who::Agent, true, 0, "", "a");
+        }
+        let paste = Edit::replace(6, 6, "", &"x".repeat(1 << 20));
+        assert!(doc.history.rebase(paste, 0).is_ok());
+    }
+
+    #[test]
+    fn many_authors_fallen_behind_are_caught_up_a_few_at_a_time() {
+        let mut history: History<u32> = History::new(0);
+        let mut len = 0;
+        for author in 1..=40 {
+            for _ in 0..100 {
+                history
+                    .record(Edit::replace(len, 0, "", "a"), author, true)
+                    .unwrap();
+                len += 1;
+            }
+        }
+        // One long edit by someone else puts every one of them behind.
+        let mut long = Edit::new();
+        for _ in 0..len {
+            long.retain(1).insert("b");
+        }
+        long.insert(&"c".repeat(4 << 20));
+        let before = history.work();
+        history.record(long, 0, true).unwrap();
+        let work = history.work() - before;
+        let most = history.limits().sync_work as u64;
+        assert!(work < 5 * most, "{work}");
+        // Each still undoes.
+        for author in 1..=40 {
+            assert!(history.undo(&author).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn an_author_that_keeps_no_steps_is_never_caught_up() {
+        let mut doc = Doc::new("");
+        let alone = |doc: &mut Doc, text: &str| {
+            let edit = Edit::replace(doc.text.len(), 0, "", text);
+            doc.text = edit.apply_to(&doc.text).unwrap();
+            doc.history.record_alone(edit, Who::Agent);
+        };
+        alone(&mut doc, "a");
+        assert!(!doc.undo(Who::Agent), "no step kept");
+        // One with no steps is let go as it falls behind, and one with
+        // steps is kept.
+        assert!(!doc.undo(Who::Other));
+        doc.edit(Who::You, true, 0, "", "b");
+        for _ in 0..1100 {
+            alone(&mut doc, "c");
+        }
+        let authors: Vec<Who> = (doc.history.snapshot().steps.into_iter())
+            .map(|steps| steps.author)
+            .collect();
+        assert_eq!(authors, [Who::You]);
+        assert!(doc.undo(Who::You));
+    }
+
+    #[test]
+    fn a_step_others_edits_left_changing_nothing_isnt_one_that_never_did() {
+        let limits = Limits {
+            lag_work: 0,
+            ..Limits::default()
+        };
+        let mut doc = Doc::with_limits("ab", limits);
+        doc.edit(Who::You, true, 1, "", "x");
+        // The agent takes away what the step put in: undoing it changes
+        // nothing now, but it's an edit, not a step that never changed
+        // anything, read back as it was written.
+        doc.edit(Who::Agent, true, 1, "x", "");
+        let mut restored = History::restore(doc.history.snapshot());
+        let reversal = restored
+            .reverse(&Who::You, true, None, false)
+            .unwrap()
+            .unwrap();
+        assert!(!reversal.empty);
     }
 }

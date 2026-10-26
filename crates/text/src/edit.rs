@@ -398,7 +398,9 @@ impl Edit {
     #[must_use]
     pub fn coarsened(&self, base: &Rope, most: usize) -> Self {
         let most = most.max(4);
-        if self.ops.len() <= most || base.len_bytes() != self.base_len {
+        // Only for the text it's made to: what it takes away must be
+        // there, and each piece start on a character.
+        if self.ops.len() <= most || self.check(base).is_err() {
             return self.clone();
         }
         let changes: Vec<(usize, &str, &str)> = self.walk().collect();
@@ -1246,5 +1248,11 @@ mod tests {
         assert_eq!(coarse.apply_to(&text).unwrap(), "aB".repeat(10_000));
         // Short enough already: as it is.
         assert_eq!(many.coarsened(&Rope::from_str(&text), 30_000), many);
+        // Not for the text given, which it would take away the wrong text
+        // of, or split a character: as it is, for making it to refuse.
+        let wrong = "aé".repeat(10_000);
+        assert_eq!(many.coarsened(&Rope::from_str(&wrong), 100), many);
+        let other = "ac".repeat(10_000);
+        assert_eq!(many.coarsened(&Rope::from_str(&other), 100), many);
     }
 }
