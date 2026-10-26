@@ -4642,6 +4642,27 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_whose_screen_came_is_never_taken_over_by_a_chat() {
+        let mut desk = three_tabs();
+        snapshot(&mut desk, 1);
+        let chat = ViewUpdate::Snapshot(View {
+            title: "chat".into(),
+            cwd: None,
+            root: clackatoo_protocol::Node::Chat(Box::default()),
+        });
+        desk.view_changed(TerminalId(1), &chat);
+        assert!(desk.chat(TerminalId(1)).is_none());
+        assert!(
+            desk.pane(TerminalId(1))
+                .is_some_and(|pane| pane.screen().is_some())
+        );
+        // One whose first view is a chat's is.
+        desk.view_changed(TerminalId(2), &chat);
+        assert!(desk.chat(TerminalId(2)).is_some());
+        assert!(desk.pane(TerminalId(2)).is_none());
+    }
+
+    #[test]
     fn ctrl_b_twice_in_a_chat_says_its_for_a_terminal_and_sends_nothing() {
         let (mut desk, _) = working_chat_desk();
         desk.show_pane(PaneId(2));

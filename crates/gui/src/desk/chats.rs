@@ -53,6 +53,12 @@ impl Desk {
             return None;
         };
         let node = view.chat()?;
+        // A terminal is a chat or not for good: one whose screen has come
+        // stays a terminal, whatever a confused daemon says after.
+        if self.panes.get(&terminal)?.screen().is_some() {
+            log::warn!("terminal {terminal} sent a chat's view after a screen: ignored");
+            return None;
+        }
         let pane = self.panes.remove(&terminal)?;
         let mut chat = ChatPane::taking_over(pane, view, node);
         chat.set_options(&self.options);
