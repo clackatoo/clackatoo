@@ -353,10 +353,8 @@ impl Mirror {
             .iter()
             .filter(|workspace| workspace.home.is_none() && workspace.lent.is_none())
         {
-            // Its background tabs' panes count too, as many as are shown.
-            let background = (workspace.background.iter())
-                .take(MOST_BACKGROUND)
-                .map(|background| &background.tab);
+            // Its background tabs' panes count too: those it may show.
+            let background = background_shown(&workspace.background).map(|one| &one.tab);
             let count: usize = (workspace.tabs.iter().chain(background))
                 .map(|tab| tab.layout.panes().len())
                 .sum();
@@ -650,9 +648,7 @@ impl Mirror {
 
     /// `background`, a workspace's background tabs, of the other daemon's,
     /// renumbered as `shown` says, noting the numbers they used in `kept`
-    /// (CLACKA-122). As many as a workspace here may have are taken in,
-    /// and only those holding terminals of the daemon's own, as any
-    /// daemon's do: one holding anything else is left out, as is one whose
+    /// (CLACKA-122): those [`background_shown`] says, but for one whose
     /// number it said already.
     fn renumber_background(
         &mut self,
@@ -662,18 +658,7 @@ impl Mirror {
         kept: &mut Kept,
     ) -> Vec<Background> {
         let mut renumbered = Vec::new();
-        for one in background {
-            if renumbered.len() == MOST_BACKGROUND {
-                break;
-            }
-            let own_terminals = (one.tab.layout.panes().iter()).all(|pane| {
-                matches!(pane.content, Content::Terminal(_))
-                    && pane.home.is_none()
-                    && pane.key.is_none()
-            });
-            if !own_terminals {
-                continue;
-            }
+        for one in background_shown(background) {
             let Some(tab) = self.renumber_tab(&one.tab, shown, fresh, kept) else {
                 continue;
             };
@@ -897,6 +882,23 @@ impl Mirror {
             },
         }
     }
+}
+
+/// The background tabs of `background`, another daemon's workspace's, that
+/// may be shown: those holding terminals of its own alone, as any daemon's
+/// do, as many as a workspace here may have. What's counted against
+/// [`MOST_PANES`] and what's taken in are the same tabs, so none can come
+/// in uncounted behind others left out.
+fn background_shown(background: &[Background]) -> impl Iterator<Item = &Background> {
+    (background.iter())
+        .filter(|one| {
+            (one.tab.layout.panes().iter()).all(|pane| {
+                matches!(pane.content, Content::Terminal(_))
+                    && pane.home.is_none()
+                    && pane.key.is_none()
+            })
+        })
+        .take(MOST_BACKGROUND)
 }
 
 /// Keeps in `numbers` those of `kept`, the other daemon's, and of
@@ -1350,6 +1352,56 @@ mod tests {
         assert!(taken.cut);
         assert_eq!(mirror.workspaces.len(), 2);
         assert_eq!(mirror.workspaces[0].background.len(), MOST_BACKGROUND);
+    }
+
+    /// Background tabs left out, as they hold an editor, never make room
+    /// for more counted against the panes shown than are taken in: those
+    /// counted are those taken.
+    #[test]
+    fn background_tabs_left_out_never_let_others_in_uncounted() {
+        let mut mirror = Mirror::default();
+        let mut fresh = Counters::default();
+        let mut work = workspace(1, "main", pane(1, Content::Terminal(TerminalId(1))), 1);
+        let wide = |first: u32| Layout::Split {
+            axis: Axis::LeftToRight,
+            parts: (first..first + 100)
+                .map(|id| pane(id, Content::Terminal(TerminalId(id))))
+                .collect(),
+            shares: vec![1; 100],
+        };
+        let count = u32::try_from(MOST_BACKGROUND).unwrap();
+        // Editors first, which aren't taken, then tabs of a hundred panes.
+        work.background = (0..count)
+            .map(|n| {
+                background(
+                    10 + n,
+                    pane(10 + n, Content::Buffer(BufferId(n))),
+                    10 + n,
+                    "ed",
+                )
+            })
+            .chain((0..count).map(|n| {
+                let first = 1000 + n * 100;
+                background(500 + n, wide(first), first, "wide")
+            }))
+            .collect();
+        let taken = mirror.take(
+            &workspaces(vec![work]),
+            &machine(5),
+            HERE,
+            &mut fresh,
+            &following(&[]),
+            true,
+        );
+        let panes: usize = (mirror.workspaces.iter())
+            .flat_map(|workspace| {
+                let background = workspace.background.iter().map(|one| &one.tab);
+                workspace.tabs.iter().chain(background)
+            })
+            .map(|tab| tab.layout.panes().len())
+            .sum();
+        assert!(panes <= MOST_PANES, "{panes} panes shown");
+        assert!(taken.cut);
     }
 
     #[test]
