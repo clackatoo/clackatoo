@@ -935,6 +935,11 @@ pub trait Downgrade: Sized {
 /// daemon still: refuse image messages rather than dropping attachments.
 impl Downgrade for ClientMessage {
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
+        if wire < UNDO_STATE
+            && let Some(older) = change_as_older(self)
+        {
+            return older;
+        }
         if wire < HARNESS
             && matches!(
                 self,
@@ -1224,6 +1229,39 @@ impl Downgrade for ServerMessage {
             _ => Downgraded::Refused,
         }
     }
+}
+
+/// `message`, if it's a change to a buffer, as a daemon before undo steps
+/// kept anything takes it: an edit that starts a step as one that starts
+/// one, an undo or a redo as one, and a step that changes nothing not at
+/// all. `None` for anything else.
+fn change_as_older(message: &ClientMessage) -> Option<Downgraded<ClientMessage>> {
+    let ClientMessage::Edit {
+        buffer,
+        seq,
+        change,
+    } = message
+    else {
+        return None;
+    };
+    let older = match change {
+        crate::Change::Step { edit, base, .. } => crate::Change::Edit {
+            edit: edit.clone(),
+            base: *base,
+            step: true,
+        },
+        crate::Change::Reverse { redo: false, .. } => crate::Change::Undo,
+        crate::Change::Reverse { redo: true, .. } => crate::Change::Redo,
+        crate::Change::Empty { .. } => return Some(Downgraded::Dropped),
+        crate::Change::Edit { .. } | crate::Change::Undo | crate::Change::Redo => {
+            return Some(Downgraded::AsIs);
+        }
+    };
+    Some(Downgraded::To(ClientMessage::Edit {
+        buffer: *buffer,
+        seq: *seq,
+        change: older,
+    }))
 }
 
 /// `message`, if it's an undo or a redo that gives back what its step kept,
@@ -1532,6 +1570,42 @@ mod tests {
         // A peer that has the variant gets it.
         let sent = frame::encode(NEW, &after(Shape::Square)).unwrap();
         assert_eq!(decode::<After>(NEW, &sent).shape, Shape::Square);
+    }
+
+    #[test]
+    fn undo_steps_that_keep_anything_go_to_an_older_daemon_as_it_takes_them() {
+        let edit = |change| ClientMessage::Edit {
+            buffer: crate::BufferId(3),
+            seq: 9,
+            change,
+        };
+        let step = edit(crate::Change::Step {
+            edit: crate::Edit::replace(3, 0, "", "x"),
+            base: 4,
+            state: crate::StepState::default(),
+        });
+        let older = edit(crate::Change::Edit {
+            edit: crate::Edit::replace(3, 0, "", "x"),
+            base: 4,
+            step: true,
+        });
+        let old = UNDO_STATE - 1;
+        assert_eq!(step.downgrade(old), Downgraded::To(older));
+        let redo = edit(crate::Change::Reverse {
+            redo: true,
+            base: 4,
+            visual: None,
+        });
+        assert_eq!(
+            redo.downgrade(old),
+            Downgraded::To(edit(crate::Change::Redo))
+        );
+        let empty = edit(crate::Change::Empty {
+            base: 4,
+            state: crate::StepState::default(),
+        });
+        assert_eq!(empty.downgrade(old), Downgraded::Dropped);
+        assert_eq!(step.downgrade(UNDO_STATE), Downgraded::AsIs);
     }
 
     #[test]
