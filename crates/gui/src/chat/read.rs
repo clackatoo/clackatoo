@@ -185,6 +185,15 @@ impl Dialect for ChatKeys {
         match key {
             'c' => Some(Object::CodeBlock),
             'm' => Some(Object::Message),
+            // As in Vim: `b` is `(`, and `B` is `{`.
+            'b' => Some(Object::Bracket {
+                open: '(',
+                close: ')',
+            }),
+            'B' => Some(Object::Bracket {
+                open: '{',
+                close: '}',
+            }),
             key => Object::of_key(key),
         }
     }

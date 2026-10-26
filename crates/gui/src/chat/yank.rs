@@ -279,8 +279,16 @@ impl ChatView {
                 None => break,
             }
         }
-        if let Some((from, to)) = self.range_of(visual(start, end, Selection::Lines)) {
-            self.queue_yank(from, to, true, CopyTo::Register(name));
+        match self.range_of(visual(start, end, Selection::Lines)) {
+            Some((from, to)) => self.queue_yank(from, to, true, CopyTo::Register(name)),
+            // An empty line, as in a block of code, is a line still.
+            None if self.text(start.text).is_some() => {
+                self.queued.push(Input::YankText(Yanked {
+                    register: Register::new("\n".to_owned(), true),
+                    to: CopyTo::Register(name),
+                }));
+            }
+            None => {}
         }
     }
 
@@ -338,10 +346,19 @@ impl ChatView {
                     register: Register::new(text, true),
                     to: CopyTo::Register(name),
                 }));
-                // To the start of it, as Vim's yank goes.
-                if object == Object::CodeBlock {
-                    self.cursor = Some(Position { byte: 0, ..cursor });
+                // To the start of it, as Vim's yank goes: the block's, the
+                // piece's, or the turn's.
+                let start = match (object, inner) {
+                    (Object::CodeBlock, _) => Some(cursor.text),
+                    (_, true) => (self.turn_texts(cursor.text.turn).into_iter())
+                        .find(|key| key.piece == cursor.text.piece && !control(key.piece)),
+                    (_, false) => (self.turn_texts(cursor.text.turn).into_iter())
+                        .find(|key| !control(key.piece)),
+                };
+                if let Some(text) = start {
+                    self.cursor = Some(Position { text, byte: 0 });
                     self.goal = None;
+                    self.reveal = true;
                 }
             }
             Err(why) => {
@@ -690,8 +707,12 @@ mod tests {
         assert!(has(&after, "im", "Message, answer or card"), "{after:?}");
         assert!(has(&after, "am", "Whole turn"), "{after:?}");
         assert!(has(&after, "iw", "Inner word") && has(&after, "y", "whole lines"));
+        // `ib` is `i(`, as in Vim, not a terminal's shell block; an
+        // editor's code objects aren't a chat's.
+        assert!(has(&after, "ib", "Inner parentheses"), "{after:?}");
+        assert!(has(&after, "aB", "Whole braces"), "{after:?}");
         assert!(
-            !has(&after, "if", "") && !has(&after, "ib", ""),
+            !has(&after, "if", "") && !has(&after, "aa", ""),
             "{after:?}"
         );
     }
@@ -744,6 +765,35 @@ mod tests {
         let (mut chat, mut fonts) = reading(talk(&[("one", "alpha beta")]));
         read(&mut chat, "gg}y3w");
         assert_eq!(yanked(&mut chat, &mut fonts), [chars("alpha beta")]);
+    }
+
+    #[test]
+    fn an_empty_line_yanked_whole_is_a_line_and_ib_is_vims() {
+        let code = "```\nalpha\n\nend\n```";
+        let (mut chat, mut fonts) = reading(talk(&[("one", code)]));
+        read(&mut chat, "gg}jyy");
+        assert_eq!(yanked(&mut chat, &mut fonts), [lines("\n")]);
+        // `ib` is `i(`, and `aB` `a{`.
+        let (mut chat, mut fonts) = reading(talk(&[("one", "call(it {now}) here")]));
+        read(&mut chat, "gg}fiyib");
+        assert_eq!(yanked(&mut chat, &mut fonts), [chars("it {now}")]);
+        read(&mut chat, "fnyaB");
+        assert_eq!(yanked(&mut chat, &mut fonts), [chars("{now}")]);
+    }
+
+    #[test]
+    fn yim_and_yam_put_the_cursor_at_the_start_of_what_they_yank() {
+        let (mut chat, mut fonts) = reading(talk(&[("one", "first\n\nsecond block")]));
+        read(&mut chat, "G$yim");
+        yanked(&mut chat, &mut fonts);
+        let cursor = chat.cursor.unwrap();
+        assert_eq!(
+            (cursor.text.piece, cursor.text.part, cursor.byte),
+            (ITEMS, 0, 0)
+        );
+        read(&mut chat, "G$yam");
+        yanked(&mut chat, &mut fonts);
+        assert_eq!(chat.cursor.unwrap().text.piece, PROMPT);
     }
 
     #[test]
