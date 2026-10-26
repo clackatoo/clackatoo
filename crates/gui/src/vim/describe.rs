@@ -63,6 +63,8 @@ impl Motion {
             Self::Column => "Column given by count",
             Self::WordEndBack => "Previous word end",
             Self::BigWordEndBack => "Previous whitespace-delimited word end",
+            Self::Sentence { forward: true } => "Next sentence",
+            Self::Sentence { forward: false } => "Previous sentence",
         }
     }
 }
@@ -73,6 +75,8 @@ impl Object {
             Self::Word => "word",
             Self::BigWord => "whitespace-delimited word",
             Self::Paragraph => "paragraph",
+            Self::Sentence => "sentence",
+            Self::Tag => "tag block",
             Self::Block => "shell block",
             Self::Quote('"') => "double quotes",
             Self::Quote('\'') => "single quotes",
@@ -116,6 +120,7 @@ impl<O: Copy> Action<O> {
                     operator.description(),
                     match target {
                         Target::Selection => "the selection".into(),
+                        Target::SelectedLines => "the selected lines".into(),
                         Target::Lines => "whole lines".into(),
                         Target::Motion(motion) =>
                             format!("to {}", motion.description().to_lowercase()),

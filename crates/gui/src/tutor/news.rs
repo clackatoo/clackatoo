@@ -887,6 +887,24 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "explorer",
         what: "Explorers, boards and reviews read Vim's keys: counts, H M L, Ctrl+E/Y/F, zt and / search",
     },
+    News {
+        id: "sentences",
+        date: "2026-10-26",
+        lesson: "text-objects",
+        what: "( and ) go between sentences, and is and as take one, as Vim's do, in editors and terminals",
+    },
+    News {
+        id: "tagobjects",
+        date: "2026-10-26",
+        lesson: "text-objects",
+        what: "it and at take what's between HTML or XML tags, or the tags too; a count goes further out",
+    },
+    News {
+        id: "visualY",
+        date: "2026-10-26",
+        lesson: "text-objects",
+        what: "Y in visual mode copies the lines selected, whole, as Vim's does, not the cursor's line",
+    },
 ];
 
 impl News {

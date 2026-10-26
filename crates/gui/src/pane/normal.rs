@@ -148,7 +148,11 @@ impl Dialect for TerminalKeys {
             Action::Move(_)
             | Action::Operate(
                 Operator::Yank,
-                Target::Motion(_) | Target::Lines | Target::Object { .. } | Target::Selection,
+                Target::Motion(_)
+                | Target::Lines
+                | Target::Object { .. }
+                | Target::Selection
+                | Target::SelectedLines,
             )
             | Action::FindAgain { .. }
             | Action::Visual { .. }
@@ -228,6 +232,13 @@ impl Pane {
             },
             Action::Operate(Operator::Yank, Target::Lines) => self.yank_lines(command.times()),
             Action::Operate(Operator::Yank, Target::Selection) => self.yank_selection(),
+            // `Y` in visual mode: the lines selected, a block as it is.
+            Action::Operate(Operator::Yank, Target::SelectedLines) => {
+                if matches!(self.mode, Mode::Visual(kind) if kind != Selection::Block) {
+                    self.mode = Mode::Visual(Selection::Lines);
+                }
+                self.yank_selection()
+            }
             // Copied after `y`, selected in visual mode.
             Action::Operate(Operator::Yank, Target::Object { object, inner })
             | Action::Select { object, inner } => self.use_object(object, inner, command.times()),

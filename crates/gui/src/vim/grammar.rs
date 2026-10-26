@@ -417,6 +417,7 @@ impl Reader<'_> {
                 Action::Operate(operator, Target::Selection)
             }
             'x' if visual => Action::Operate(Operator::Delete, Target::Selection),
+            'Y' if visual => Action::Operate(Operator::Yank, Target::SelectedLines),
             '~' if visual => Action::Operate(Operator::Recase(Recase::Toggle), Target::Selection),
             'u' if visual => Action::Operate(Operator::Recase(Recase::Lower), Target::Selection),
             'U' if visual => Action::Operate(Operator::Recase(Recase::Upper), Target::Selection),
@@ -580,6 +581,8 @@ impl Reader<'_> {
                 '%' => Motion::Match,
                 '}' => Motion::Paragraph { forward: true },
                 '{' => Motion::Paragraph { forward: false },
+                ')' => Motion::Sentence { forward: true },
+                '(' => Motion::Sentence { forward: false },
                 'g' => {
                     return Some(match self.next() {
                         None => Read::More,
@@ -858,6 +861,30 @@ mod tests {
             command(None, Action::Move(Motion::TextEnd))
         );
         assert_eq!(read("Q"), Parsed::Nothing);
+        let sentence = |forward| Action::Move(Motion::Sentence { forward });
+        assert_eq!(read("2)"), command(Some(2), sentence(true)));
+        assert_eq!(read("("), command(None, sentence(false)));
+        let tag = Target::Object {
+            object: Object::Tag,
+            inner: true,
+        };
+        assert_eq!(
+            read("dit"),
+            command(None, Action::Operate(Operator::Delete, tag))
+        );
+        let sentences = Target::Object {
+            object: Object::Sentence,
+            inner: false,
+        };
+        assert_eq!(
+            read("yas"),
+            command(None, Action::Operate(Operator::Yank, sentences))
+        );
+        // `Y` in visual mode copies the lines selected, not the cursor's.
+        assert_eq!(
+            visual("Y"),
+            command(None, Action::Operate(Operator::Yank, Target::SelectedLines))
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Text objects
 
-Functions, classes and arguments as the language's grammar finds them: `af`, `if`, `ac` and `aa` after `d`, `c` or `y`, and `]f` and `[f` to move between functions. `ip` and `ap` take a paragraph as whole lines, as Vim's do, here and in a terminal.
+Functions, classes and arguments as the language's grammar finds them: `af`, `if`, `ac` and `aa` after `d`, `c` or `y`, and `]f` and `[f` to move between functions. `ip` and `ap` take a paragraph as whole lines, `is` and `as` a sentence, and `it` and `at` what's between HTML tags, as Vim's do, here and in a terminal.
 
 The practice file is Rust. If Rust's grammar isn't installed, the bottom bar asks to install it as the file opens: press `y`. Its language server needn't be.
 
@@ -14,6 +14,7 @@ fn first() {
     println!("delete me");
 }
 
+/// Doubles a width. Wider still.
 fn double(width: u32) -> u32 {
     width * 2
 }
@@ -23,7 +24,7 @@ fn area(width: u32, height: u32) -> u32 {
 }
 
 fn last() {
-    println!("the end");
+    println!("<b>the end</b>");
 }
 ```
 
@@ -98,4 +99,35 @@ Put the cursor in `fn area`, and type `dap`.
 ```check
 not has "fn area"
 has "fn last"
+```
+
+## Delete a sentence with das
+
+`is` is the sentence around the cursor, and `as` the sentence with the blanks after it, or before it if there are none after. A sentence ends at `.`, `!` or `?` before a space, a tab or a line's end, and at an empty line, as Vim's do. `)` goes to the next sentence's start and `(` to this one's, or the one before's; with a count, that many.
+
+Put the cursor on `Wider`, in the comment above `fn double`, and type `das`.
+
+```check
+not has "Wider"
+has "/// Doubles a width."
+```
+
+## Change between tags with cit
+
+`it` is what's between the HTML or XML tags around the cursor, and `at` the tags too, whatever the language. A count goes that many tags out; in visual mode, typed again, the selection grows to the tags around it.
+
+Put the cursor on `the end`, type `cit`, then `done`, and press Esc.
+
+```check
+has "<b>done</b>"
+```
+
+## Copy whole lines with Y in visual mode
+
+In visual mode, `Y` copies the lines the selection is on, whole, wherever on them it starts and ends, as `V` then `y` would; in a block, the block as it is.
+
+Put the cursor in the middle of `fn double`'s first line, and type `vjY`.
+
+```check
+register 0 "fn double(width: u32) -> u32 {\n    width * 3\n"
 ```

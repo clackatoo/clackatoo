@@ -1839,12 +1839,26 @@ impl Editor {
     /// Does `command`, which keeps text in a register or puts it from one:
     /// an operator, `x`, `D`, `s` or `p` and their kin. Fails if there's
     /// nothing to act on.
+    /// `target`, but the lines selected (`Y` in visual mode) as what's
+    /// selected once it's by lines, as Vim's `v_Y` makes it, a block
+    /// staying a block.
+    fn selecting_lines(&mut self, target: Target) -> Target {
+        if target != Target::SelectedLines {
+            return target;
+        }
+        if matches!(self.mode, Mode::Visual(kind) if kind != Selection::Block) {
+            self.mode = Mode::Visual(Selection::Lines);
+        }
+        Target::Selection
+    }
+
     fn keep_or_put(&mut self, command: Command, copy: &mut BufferCopy, shared: &mut Shared) {
         let (times, name) = (command.times(), command.register);
         let registers = (&mut shared.registers, name);
         match command.action {
             Action::Operate(operator, target) => {
                 let count = command.count;
+                let target = self.selecting_lines(target);
                 if !self.operate(operator, target, count, copy, &shared.marks, registers) {
                     self.fail();
                 }
@@ -2486,7 +2500,6 @@ impl Editor {
         let text = self.text(copy);
         let at = self.cursor.at;
         let lines = |first: u64, last: u64| Span::lines(&text, first, last);
-        let chars = |start: Point, last: Point| Span::chars(&text, start, last);
         match target {
             Target::Lines => {
                 let last = (at.line + times as u64 - 1).min(text.last_line());
@@ -2494,7 +2507,9 @@ impl Editor {
             }
             // Marks are the window's, which `mark_span` is given.
             Target::Mark { .. } => None,
-            Target::Selection => {
+            // The lines selected are a selection by lines by now (see
+            // `selecting_lines`).
+            Target::Selection | Target::SelectedLines => {
                 let anchor = self.anchor?;
                 let (start, last) = if anchor <= at {
                     (anchor, at)
@@ -2550,8 +2565,10 @@ impl Editor {
                     let span = exclusive(&text, start, last);
                     return Some(span.went(Cursor::new(start)));
                 }
+                // Up to a line's end, its line break too, as a tag's end
+                // before a closing tag at a line's start is.
                 if !found.lines() {
-                    return Some(chars(start, last));
+                    return Some(Span::chars_to_break(&text, start, last));
                 }
                 // Whole lines, the cursor to the first's start, as Vim's.
                 Some(lines(start.line, last.line).went(Cursor::new(start)))

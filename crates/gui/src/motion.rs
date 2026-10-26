@@ -13,6 +13,8 @@ use std::rc::Rc;
 use clackatoo_term::{Cell, Row};
 
 mod classes;
+pub(crate) mod sentences;
+pub(crate) mod steps;
 
 pub(crate) use classes::word_classes;
 
@@ -636,6 +638,11 @@ pub(crate) enum Motion {
     /// Backspace: left, and back from a line's start to the end of the
     /// line before, as Vim's does with `whichwrap` having `b`.
     LeftOver,
+    /// `)`: the next sentence's start, or `(` if not `forward`, this one's
+    /// or the one before's (see [`sentences`]).
+    Sentence {
+        forward: bool,
+    },
 }
 
 /// What an operator such as `y` takes when given a motion, as in Vim.
@@ -676,6 +683,20 @@ impl Motion {
             }
             // `50%` takes whole lines, as Vim's, the cursor's own too.
             Self::Match if count.is_some_and(|percent| percent <= 100) => Some(Reach::Lines),
+            // Onto a line's end, which the cursor can't stay on, it stays on
+            // the last character and takes it too, as Vim's
+            // `adjust_cursor()`, even from there.
+            Self::Sentence { forward } => {
+                let steps = steps::Steps::new(lines);
+                let found = sentences::find(&steps, from, forward, count.unwrap_or(1))?;
+                if found.col > 0 && steps.char(found) == steps::NUL {
+                    Some(Reach::Inclusive)
+                } else if from == to {
+                    None
+                } else {
+                    Some(Reach::Exclusive)
+                }
+            }
             Self::Match
             | Self::Find { .. }
             | Self::FindAgain { .. }
@@ -765,6 +786,7 @@ impl Motion {
             | Self::Column
             | Self::RightOver
             | Self::LeftOver
+            | Self::Sentence { .. }
             | Self::FindAgain { .. } => Reach::Exclusive,
             Self::Find { forward, .. } => {
                 if forward {
@@ -990,6 +1012,7 @@ impl Cursor {
                 self.want = None;
             }
             Motion::Find { .. } => self.find(motion, 1, lines),
+            Motion::Sentence { forward } => self.sentence(forward, 1, lines),
             Motion::NextLine
             | Motion::PreviousLine
             | Motion::LineFirstNonBlank
@@ -1285,6 +1308,8 @@ impl Cursor {
             Motion::RowUp(by) => self.apply(Motion::RowUp(by.saturating_mul(n)), lines),
             Motion::RowDown(by) => self.apply(Motion::RowDown(by.saturating_mul(n)), lines),
             Motion::Find { .. } => self.find(motion, times, lines),
+            // All or nothing, as Vim's.
+            Motion::Sentence { forward } => self.sentence(forward, times, lines),
             // Until it goes nowhere, so a count bigger than the text is
             // quick.
             _ => {
@@ -1551,6 +1576,23 @@ impl Cursor {
     fn settle(&mut self, at: Point) {
         self.at = at;
         self.want = None;
+    }
+
+    /// `)`, or `(` if not `forward`, `count` times, as Vim's `findsent()`
+    /// goes: nowhere if there aren't so many, and from a line's end, which
+    /// it can land on, back to the line's last character, as Vim's
+    /// `adjust_cursor()` puts it. The column wanted is where it is, failing
+    /// or not.
+    fn sentence(&mut self, forward: bool, count: usize, lines: &impl Lines) {
+        let steps = steps::Steps::new(lines);
+        self.want = None;
+        let Some(mut at) = sentences::find(&steps, self.at, forward, count) else {
+            return;
+        };
+        if at.col > 0 && steps.char(at) == steps::NUL {
+            steps.dec(&mut at);
+        }
+        self.settle(at);
     }
 }
 

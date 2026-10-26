@@ -75,6 +75,17 @@ local spaced = { '  one two.three', 'four  five', '', '  six seven  ', 'eight' }
 -- Two paragraphs, two blank lines, two more, for `ip` and `ap`.
 local para = { 'one', '  two', '', '', 'three', 'four', '', 'five' }
 
+-- Sentences, for `(`, `)`, `is` and `as`: ends with `.`, `!` and `?`,
+-- closing quotes and brackets after them, and a paragraph's end.
+local prose = { 'One. Two!  Three (four.)  Five', 'six? Seven "eight." Nine.', '', 'Ten. Last' }
+
+-- Tags, for `it` and `at`: nested, one with a `>` in quotes, a closing
+-- tag on a line of its own.
+local html = { '<div><p>Hi <b>bold</b> there</p>', '  <a href="x>y">link</a>', '</div>' }
+
+-- Four lines, for `Y` in visual mode.
+local four = { 'alpha beta', 'gamma delta', 'epsilon', 'zeta eta' }
+
 local cases = {
   -- CLACKA-127: a count before `gg`, or `G` as an operator's target, is a
   -- line number.
@@ -337,6 +348,29 @@ local cases = {
   { name = 'cip', lines = para, at = { 2, 3 }, keys = 'cipx<Esc>' },
   { name = 'y2ap', lines = para, at = { 5, 2 }, keys = 'y2ap' },
   { name = 'M with a line cut off', lines = long, at = { 3, 4 }, view = { height = 10, top = 2, columns = 20 }, keys = 'M' },
+  -- CLACKA-127: sentences, tags, and `Y` in visual mode.
+  { name = ')', lines = prose, at = { 1, 0 }, keys = ')' },
+  { name = '3)', lines = prose, at = { 1, 0 }, keys = '3)' },
+  { name = '( from Nine', lines = prose, at = { 2, 21 }, keys = '(' },
+  { name = '2( from Ten', lines = prose, at = { 4, 0 }, keys = '2(' },
+  { name = ') to the end', lines = prose, at = { 4, 6 }, keys = ')' },
+  { name = 'd) at Two', lines = prose, at = { 1, 5 }, keys = 'd)' },
+  { name = 'd) at the last word', lines = prose, at = { 4, 6 }, keys = 'd)' },
+  { name = 'dis in Three', lines = prose, at = { 1, 13 }, keys = 'dis' },
+  { name = 'das in Three', lines = prose, at = { 1, 13 }, keys = 'das' },
+  { name = 'yas over a line end', lines = prose, at = { 1, 27 }, keys = 'yas' },
+  { name = '2yis', lines = prose, at = { 1, 0 }, keys = '2yis' },
+  { name = 'vasas', lines = prose, at = { 1, 6 }, keys = 'vasasy' },
+  { name = 'cis', lines = prose, at = { 2, 8 }, keys = 'cisX<Esc>' },
+  { name = 'dit in bold', lines = html, at = { 1, 14 }, keys = 'dit' },
+  { name = 'dat in bold', lines = html, at = { 1, 14 }, keys = 'dat' },
+  { name = '2yit in bold', lines = html, at = { 1, 14 }, keys = '2yit' },
+  { name = 'yit with > in quotes', lines = html, at = { 2, 18 }, keys = 'yit' },
+  { name = 'dit over lines', lines = html, at = { 2, 4 }, keys = '3dit' },
+  { name = 'vitit', lines = html, at = { 1, 14 }, keys = 'vitity' },
+  { name = 'vY', lines = four, at = { 1, 3 }, keys = 'vY' },
+  { name = 'vjlY', lines = four, at = { 1, 6 }, keys = 'vjlY' },
+  { name = '<C-v>jlY', lines = four, at = { 1, 2 }, keys = '<C-v>jlY' },
   { name = 'M so=5 at the end', lines = sixty, at = { 56, 4 }, view = { height = 10, top = 51 }, keys = 'M', set = 'scrolloff=5' },
 }
 

@@ -72,6 +72,9 @@ pub(crate) enum Target {
     Lines,
     /// What's selected, in visual mode.
     Selection,
+    /// The lines selected, whole, in visual mode, as `V` selects them, or
+    /// a block as it is: `Y`, as Vim's `v_Y` takes them.
+    SelectedLines,
     /// To a mark: from line to line after `'`, or exactly, as an exclusive
     /// motion, after `` ` ``.
     Mark { mark: char, exact: bool },

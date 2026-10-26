@@ -1,5 +1,10 @@
-//! Text objects that go by lines and sentences, `ip` and `ap`, each case
-//! checked against Neovim 0.11 headless (`crates/gui/tests/nvim/check.lua`).
+//! Text objects that go by lines, sentences and tags, `ip` and `ap`, `is`
+//! and `as` with `(` and `)`, `it` and `at`, and `Y` in visual mode, each
+//! case checked against Neovim 0.11 headless
+//! (`crates/gui/tests/nvim/check.lua`). Neovim's text has a line more when
+//! everything on its last line is deleted, an empty one; here a text's
+//! last line ends with its line break, so the cursor goes to the line
+//! before.
 
 use super::Setup;
 use crate::vim::{Mode, Selection};
@@ -320,4 +325,148 @@ fn paragraphs_taken_on_keep_the_kind_of_selection() {
     assert_eq!(mode("Vjap"), Mode::Visual(Selection::Lines));
     // From a line, by lines, as Vim's.
     assert_eq!(mode("<C-v>ap"), Mode::Visual(Selection::Lines));
+}
+
+/// Sentences, as check.lua's `prose`.
+const PROSE: &str = "One. Two!  Three (four.)  Five\nsix? Seven \"eight.\" Nine.\n\nTen. Last";
+
+/// Where the cursor goes after `keys` from `at` in `PROSE`, the text left
+/// unchanged.
+fn moved(at: (u64, usize), keys: &str) -> (u64, usize) {
+    let (text, cursor, _, _) = after(PROSE, at, keys);
+    assert_eq!(text, PROSE, "{keys} changes nothing");
+    cursor
+}
+
+#[test]
+fn parentheses_go_between_sentences_as_vims_do() {
+    assert_eq!(moved((1, 0), ")"), (1, 5));
+    assert_eq!(moved((1, 0), "3)"), (1, 26));
+    assert_eq!(moved((2, 21), "("), (2, 20));
+    // Back over an empty line, a paragraph's end, which ends a sentence.
+    assert_eq!(moved((4, 0), "2("), (2, 20));
+    // At the text's end, onto its last character, which can't be left.
+    assert_eq!(moved((4, 6), ")"), (4, 8));
+    // Not so many: nowhere.
+    assert_eq!(moved((4, 6), "99)"), (4, 6));
+}
+
+#[test]
+fn operators_take_sentences_as_far_as_the_next() {
+    assert_eq!(
+        after(PROSE, (1, 5), "d)"),
+        (
+            PROSE.replacen("Two!  ", "", 1),
+            (1, 5),
+            "Two!  ".into(),
+            false
+        )
+    );
+    // To the text's end, its last character too, as Vim's cursor can't
+    // stay past it.
+    assert_eq!(
+        after(PROSE, (4, 6), "d)"),
+        (PROSE.replacen("Last", "L", 1), (4, 5), "ast".into(), false)
+    );
+}
+
+#[test]
+fn is_and_as_take_a_sentence_and_as_its_blanks() {
+    assert_eq!(
+        after(PROSE, (1, 13), "dis"),
+        (
+            PROSE.replacen("Three (four.)", "", 1),
+            (1, 11),
+            "Three (four.)".into(),
+            false
+        )
+    );
+    assert_eq!(
+        after(PROSE, (1, 13), "das"),
+        (
+            PROSE.replacen("Three (four.)  ", "", 1),
+            (1, 11),
+            "Three (four.)  ".into(),
+            false
+        )
+    );
+    // Over a line's end, which isn't one's end.
+    assert_eq!(after(PROSE, (1, 27), "yas").2, "Five\nsix? ");
+    // A count takes the blanks after as one.
+    assert_eq!(after(PROSE, (1, 0), "2yis").2, "One. ");
+    assert_eq!(
+        after(PROSE, (2, 8), "cisX<Esc>").0,
+        PROSE.replacen("Seven \"eight.\"", "X", 1)
+    );
+}
+
+#[test]
+fn as_again_in_visual_mode_takes_the_selection_on() {
+    assert_eq!(after(PROSE, (1, 6), "vasasy").2, "Two!  Three (four.)  ");
+    let mut setup = Setup::new(PROSE);
+    setup.keys("vis");
+    assert_eq!(setup.editor.mode, Mode::Visual(Selection::Characters));
+}
+
+/// Tags, as check.lua's `html`.
+const HTML: &str = "<div><p>Hi <b>bold</b> there</p>\n  <a href=\"x>y\">link</a>\n</div>";
+
+#[test]
+fn it_and_at_take_what_is_between_tags_and_the_tags() {
+    assert_eq!(
+        after(HTML, (1, 14), "dit"),
+        (HTML.replacen("bold", "", 1), (1, 14), "bold".into(), false)
+    );
+    assert_eq!(
+        after(HTML, (1, 14), "dat"),
+        (
+            HTML.replacen("<b>bold</b>", "", 1),
+            (1, 11),
+            "<b>bold</b>".into(),
+            false
+        )
+    );
+    // A count goes out, as far as there are.
+    assert_eq!(after(HTML, (1, 14), "2yit").2, "Hi <b>bold</b> there");
+    assert_eq!(after(HTML, (2, 4), "3dit").0, HTML);
+    // A `>` in quotes in the opening tag isn't its end.
+    assert_eq!(after(HTML, (2, 18), "yit").2, "link");
+    // In visual mode, again, the tags too.
+    assert_eq!(after(HTML, (1, 14), "vitity").2, "<b>bold</b>");
+}
+
+#[test]
+fn it_takes_the_line_break_before_a_closing_tag_on_a_line_of_its_own() {
+    let text = "<p>\ntext\n</p>";
+    assert_eq!(
+        after(text, (2, 2), "dit"),
+        ("<p></p>".into(), (1, 3), "\ntext\n".into(), false)
+    );
+}
+
+#[test]
+fn y_in_visual_mode_copies_the_lines_selected() {
+    let four = "alpha beta\ngamma delta\nepsilon\nzeta eta";
+    assert_eq!(
+        after(four, (1, 3), "vY"),
+        (four.into(), (1, 0), "alpha beta\n".into(), true)
+    );
+    assert_eq!(
+        after(four, (1, 6), "vjlY"),
+        (
+            four.into(),
+            (1, 0),
+            "alpha beta\ngamma delta\n".into(),
+            true
+        )
+    );
+    // A block, as it is.
+    let mut setup = Setup::new(four);
+    setup.keys("ll<C-v>jlY");
+    let register = setup.register();
+    assert_eq!(
+        (register.text.as_str(), register.block),
+        ("ph\nmm", Some(2))
+    );
+    assert_eq!(setup.cursor(), (0, 2));
 }

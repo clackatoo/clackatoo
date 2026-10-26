@@ -374,6 +374,7 @@ Normal mode has a cursor of its own, a yellow block, which moves through the ter
 | `gx` | Opens the link under the cursor, as Ctrl+click does. |
 | `f` `t` `F` `T`, `;` `,` | To the next of the character typed after them on the line, or just before it, or back to the one before, or just after it; `;` finds it again, and `,` the other way, as Vim's do; each pane keeps its own last find, where Vim keeps one for every window. With `y`, they take to it: `yt)`. |
 | `%` `{` `}` | The bracket that pairs with the one under the cursor, or with a count, the line that far through, `50%` half way; the blank line before or after the paragraph. |
+| `(` `)` | The start of this sentence or the one before, or of the next, as Vim's go: a sentence ends at `.`, `!` or `?` before a blank or a line's end, and at an empty line. |
 | `H` `M` `L` | The top, middle and bottom lines in view, keeping the column as `gg` does. |
 | `5k`, `3w`, `10G`, `2gg` | A count before a motion repeats it, as in Vim; before `G` or `gg`, it goes to that line, counting from the oldest line of history. `3H` and `3L` count from the view's top and bottom, no further than the other, but `y99L` takes to the oldest line, as Vim's does. |
 | Ctrl+D Ctrl+U | Half the view down or up, rounded down, view and cursor together. A count sets how far they go from then on, a whole view at most, as Vim's does. |
@@ -414,6 +415,8 @@ After `y`, or in visual mode, `i` or `a` and one more key pick out a piece of te
 | `i"` `a"`, `i'` `a'`, `` i` `` `` a` `` | What's between the quotes on the cursor's line, as Vim's pairs them: around a quote the cursor's on, or else from the quote before it to the next, or the next pair; with `a`, the quotes too, and the blanks after or before. In visual mode `i"` again takes the quotes, and `a"` again the next string too. |
 | `i(` `a(`, `i[` `a[`, `i{` `a{`, `i<` `a<` | What's between the brackets around the cursor, across lines, or with none around it the next pair after it, as Neovim's; with `a`, the brackets too. A count goes out that many pairs; in visual mode, typed again, they take the next pair out. The closing bracket works as well. |
 | `ip` `ap` | A paragraph, or the blank lines the cursor is on, as whole lines; with `a`, the blank lines after it too, or before it if there are none after, as Vim's. A count takes that many. |
+| `is` `as` | A sentence, as `(` and `)` find them; with `a`, the blanks after it too, or before it if there are none after, as Vim's. A count takes that many, a run of blanks counting as one with `is`; in visual mode, with more than a character selected, they take the selection on. |
+| `it` `at` | What's between the HTML or XML tags around the cursor, or with the cursor on a tag, its own; with `a`, the tags too, as Vim's. A count goes out that many tags; in visual mode, typed again, they take the tags too, then the next pair out. A closing tag on a line of its own leaves its line break to `it`, as in Vim. |
 | `ib` `ab` | A [command's](#commands) output; with `a`, its prompt and command line too. |
 
 In Vim, `b` is another name for `(`. Here it's the command, the more useful thing in a terminal, and `(` still means parentheses.

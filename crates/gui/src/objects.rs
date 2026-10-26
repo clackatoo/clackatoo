@@ -11,6 +11,12 @@
 //! prompt, command and output. Only the daemon knows where blocks are, so
 //! the pane asks it for those.
 //!
+//! `is` is the sentence around the cursor, and `as` the sentence with the
+//! blanks after it, or before it, as Vim's `current_sent()` takes them
+//! (see [`sentences`]); `it` is what's between the HTML or XML tags
+//! around the cursor and `at` the tags too, as its `current_tagblock()`
+//! (see [`tags`]). Each takes a count.
+//!
 //! `ip` is the paragraph around the cursor, or the run of blank lines it's
 //! in, and `ap` the paragraph with the blank lines after it, or before it
 //! if there are none after: whole lines, as Vim's take, a count that many.
@@ -28,6 +34,8 @@ use crate::motion::{Cells, Lines, Point, Walk, line_end, previous_cell, text_end
 
 mod found;
 mod quotes;
+mod sentences;
+mod tags;
 mod words;
 
 use words::{Pos, Step};
@@ -55,6 +63,10 @@ pub(crate) enum Object {
     Bracket { open: char, close: char },
     /// `p`: a paragraph, whole lines.
     Paragraph,
+    /// `s`: a sentence.
+    Sentence,
+    /// `t`: an HTML or XML tag's block.
+    Tag,
     /// `b`: the shell's block.
     Block,
     /// `f`, `c` or `a`: a piece of code.
@@ -74,6 +86,8 @@ impl Object {
             '{' | '}' => bracket('{', '}'),
             '<' | '>' => bracket('<', '>'),
             'p' => Some(Self::Paragraph),
+            's' => Some(Self::Sentence),
+            't' => Some(Self::Tag),
             'b' => Some(Self::Block),
             'f' => Some(Self::Code(Construct::Function)),
             'c' => Some(Self::Code(Construct::Class)),
@@ -120,6 +134,15 @@ impl Object {
                 let (first, last) = paragraph(lines, at.line, inner, count.max(1)).ok_or(None)?;
                 let at = |line| Point { line, col: 0 };
                 Ok(Found::new((at(first), at(last)), true, true))
+            }
+            Self::Sentence => {
+                let (start, end, inclusive) = sentences::current(lines, at, !inner, count.max(1));
+                Ok(Found::new((start, end), false, inclusive))
+            }
+            Self::Tag => {
+                let (start, end, inclusive) =
+                    tags::current(lines, at, !inner, count.max(1)).ok_or(None)?;
+                Ok(Found::new((start, end), false, inclusive))
             }
             Self::Block | Self::Code(_) => Err(None),
         }
@@ -207,6 +230,34 @@ impl Object {
                 anchor: point(found.anchor.unwrap_or(found.start)),
                 cursor: point(found.end),
                 lines: false,
+            });
+        }
+        // As Vim's `current_sent()` and `current_tagblock()`, by characters.
+        if let Self::Sentence | Self::Tag = self {
+            let (anchor, cursor, kept) = if self == Self::Sentence {
+                sentences::select(
+                    lines,
+                    selected.anchor,
+                    selected.cursor,
+                    !inner,
+                    count.max(1),
+                )
+            } else {
+                let (anchor, cursor) = tags::select(
+                    lines,
+                    selected.anchor,
+                    selected.cursor,
+                    !inner,
+                    count.max(1),
+                )
+                .ok_or(None)?;
+                (anchor, cursor, false)
+            };
+            // Taken on, a selection by lines stays one, as Vim's.
+            return Ok(Selected {
+                anchor,
+                cursor,
+                lines: kept && selected.lines,
             });
         }
         if self != Self::Paragraph {

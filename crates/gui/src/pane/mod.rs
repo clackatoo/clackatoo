@@ -3130,6 +3130,26 @@ mod tests {
     }
 
     #[test]
+    fn sentences_and_tags_are_motions_and_objects_in_a_terminal_too() {
+        let terminal = terminal("a. Bb! Cc.\r\n<b>x</b>");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let at = |pane: &mut Pane, keys_: &str| {
+            keys(pane, keys_);
+            serve(pane, &terminal);
+            cursor(pane).2
+        };
+        assert_eq!(at(&mut pane, "gg0)"), 3, "the next sentence's start");
+        assert_eq!(at(&mut pane, ")"), 7);
+        assert_eq!(at(&mut pane, "2("), 0);
+        let mut yank = |keys_: &str| yanked(&mut pane, &terminal, keys_);
+        assert_eq!(yank("gg04lyis").as_deref(), Some("Bb!"));
+        assert_eq!(yank("gg04lyas").as_deref(), Some("Bb! "));
+        assert_eq!(yank("ggj03lyit").as_deref(), Some("x"));
+        assert_eq!(yank("ggj03lyat").as_deref(), Some("<b>x</b>"));
+    }
+
+    #[test]
     fn commands_a_terminal_doesnt_take_are_nothing_and_spend_their_keys() {
         let terminal = terminal("one two six\r\nfour five");
         let mut pane = pane(&terminal);

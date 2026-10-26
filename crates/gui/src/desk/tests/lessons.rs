@@ -660,6 +660,25 @@ fn the_text_objects_lesson_is_done_from_start_to_end_with_the_grammar_answering(
     type_keys(&mut desk, "dap");
     serve_lesson(&mut desk, &mut daemon);
     assert!(!editor_text(&desk).contains("fn area"));
+    assert_eq!(step(&desk), 7);
+
+    go_to_line(&mut desk, "/// Doubles");
+    type_keys(&mut desk, "fWdas");
+    serve_lesson(&mut desk, &mut daemon);
+    assert!(editor_text(&desk).contains("/// Doubles a width.\n"));
+    assert_eq!(step(&desk), 8);
+
+    go_to_line(&mut desk, "    println!(\"<b>the end");
+    type_keys(&mut desk, "fecit");
+    serve_lesson(&mut desk, &mut daemon);
+    type_text(&mut desk, "done");
+    escape(&mut desk);
+    serve_lesson(&mut desk, &mut daemon);
+    assert_eq!(step(&desk), 9, "{}", editor_text(&desk));
+
+    go_to_line(&mut desk, "fn double");
+    type_keys(&mut desk, "5lvjY");
+    serve_lesson(&mut desk, &mut daemon);
     assert_eq!(step(&desk), lesson.steps.len());
     assert_eq!(daemon.text().to_string(), editor_text(&desk));
 }

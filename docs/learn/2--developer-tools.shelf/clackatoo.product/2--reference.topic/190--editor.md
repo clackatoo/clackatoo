@@ -415,6 +415,7 @@ An editor in a window of its own starts in normal mode, as in Vim. One you go to
 | `H` `M` `L` | `H` and `L` the view's first and last lines shown whole, `M` the line half its rows reach; `3H` and `3L` count that many lines from the top or bottom. They keep `scrolloff` screen rows from the view's edges, unless it's at the file's start or end, but an operator takes to the edges: `dL`, `yH`, and with a count past the view's other edge as far as the text goes, as Vim's does: `d99L` to the text's start. They keep the column as `gg` does. |
 | `%` | The bracket that pairs with the one under the cursor, or with the next on its line: `()`, `[]` or `{}`, across lines. With a count, the line that far through the file, `50%` half way, as Vim's: whole lines to an operator. |
 | `{` `}` | The empty line before the paragraph, or after it; or the file's first line, or the end of its last. A count goes that many paragraphs, or nowhere if there aren't so many, as Vim's. With an operator, from a line's start, they take whole lines, so `d}` deletes the paragraph. |
+| `(` `)` | The start of this sentence or the one before, or of the next, as Vim's go: a sentence ends at `.`, `!` or `?`, with any of `)` `]` `"` `'` after it, before a space, a tab or a line's end, and at an empty line. A count goes that many, or nowhere if there aren't so many. At the text's end, `)` goes to its last character, which an operator takes too. They're jumps. |
 | `*` `#` | Searches for the word under the cursor, or the next on its line, as a whole word: forward, or back. `n` and `N` go on. Case is ignored as `ignorecase` says, whatever `smartcase` says, as in Vim. |
 | `f` `t` `F` `T` and a character | The next one on the line, or the character before it with `t`; back with `F` and `T`. `;` does it again, and `,` back, after an operator too, as `d;`; each pane keeps its own last find, where Vim keeps one for every window. A tab is one character to them: `f<Tab>` finds it. |
 | `/` `?` | Searches forward or back for a pattern, written as Vim writes it (see [Substituting](#substituting)). `n` and `N` find the next and previous match, going round the file's ends. Case is ignored unless the search has a capital letter, as `ignorecase` and `smartcase` start. |
@@ -456,7 +457,7 @@ A jump from the line the last one left replaces it, so going back never stops tw
 | `==` | Indents the cursor's line as its language says. A count does that many lines. |
 | `=` and a motion or an object | Indents the lines it moves over as the language says, in one undo step: `=ip`, `gg=G`, `=af`. Blank lines are emptied, and lines the rules say to keep, such as those in a string, keep their indent. Keys typed while the daemon answers wait their turn, as for `af`. |
 | `x` `X` | Deletes the character under the cursor, or before it. |
-| `D` `C` `Y` | Deletes or changes to the line's end, or copies the line. |
+| `D` `C` `Y` | Deletes or changes to the line's end, or copies the line. In visual mode, `Y` copies the lines selected, whole, wherever on them the selection starts and ends, or a block as it is, as Vim's does. |
 | `s` `S` | Changes the character under the cursor, or the line. |
 | `r` and a character | Replaces the character under the cursor with it. |
 | `J` | Joins the next line onto the cursor's, with a space. |
@@ -520,5 +521,5 @@ A drag from insert mode selects in visual mode for a while, as Neovim's "(insert
 - `$` and `l` stop at a line's last character that isn't blank, as on a terminal's screen, so blanks at a line's end can be reached only with `A` and `D`.
 - `clackatoo edit` opens the tab, but the window doesn't switch to it.
 - `\1` inside a pattern, `\@` lookaround, `\&` and `\%V`; `\zs` and `\ze` inside a group; `:g` inside `:g`, or `:s` with `c` under `:g`; a `:g` that moves more than one line, as `:g/^/m0` does, leaves marks on them where they were, as its moves are made as one edit. There are no `'[` and `']` marks. Macros don't record pastes. A mark on deleted text stays where the text was, rather than going.
-- Sideways scrolling while dragging with `nowrap`. In visual mode, `D`, `X`, `C`, `S`, `R` and `Y` don't act on whole lines as Vim's do, `X`, `Y`, `R` and `S` don't act on a block as Vim's do, and `.` doesn't make `gq` again.
+- Sideways scrolling while dragging with `nowrap`. In visual mode, `D`, `X`, `C`, `S` and `R` don't act on whole lines as Vim's do, `X`, `R` and `S` don't act on a block as Vim's do, and `.` doesn't make `gq` again.
 - A change typed just as the connection to the daemon drops can be lost.

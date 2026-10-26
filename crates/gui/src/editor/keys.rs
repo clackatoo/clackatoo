@@ -237,7 +237,10 @@ impl Action {
     pub(crate) fn on_selection(self) -> bool {
         matches!(
             self,
-            Self::Operate(_, Target::Selection) | Self::Put { .. } | Self::Join | Self::Replace(_)
+            Self::Operate(_, Target::Selection | Target::SelectedLines)
+                | Self::Put { .. }
+                | Self::Join
+                | Self::Replace(_)
         )
     }
 
@@ -259,6 +262,7 @@ impl Action {
                     | Motion::ViewBottom
                     | Motion::Match
                     | Motion::Paragraph { .. }
+                    | Motion::Sentence { .. }
             ) | Self::SearchAgain { .. }
                 | Self::SearchWord { .. }
                 | Self::Own(
