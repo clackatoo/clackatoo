@@ -216,7 +216,7 @@ What's yanked and deleted is kept in registers, as in Vim. `"` and a register's 
 | `"_` | Nothing: what goes to it is thrown away, and the others keep theirs. |
 | `"+` `"*` | The clipboard, and the primary selection that a middle click pastes. |
 
-A terminal's normal mode yanks into the same registers, `"a` before `y` too, so `p` puts a line copied from a terminal as a line. Text selected with the mouse there goes only to `"*`, as in Vim.
+A terminal's normal mode yanks into the same registers, `"a` before `y` too, so `p` puts a line copied from a terminal as a line, and so does a chat's (see [Yanking](~clackatoo/reference/agents#yanking)). Text selected with the mouse there goes only to `"*`, as in Vim.
 
 A block is kept as one, its rows a line each, and `p` and `P` put it back as one: a row on each line from the cursor's, padded with spaces where text follows, and on new lines past the end. `:Registers` marks it `b`.
 

@@ -174,7 +174,9 @@ In normal mode, a solid cursor moves through the conversation's text, and the vi
 | `gg` `G` | The start or end of the chat; with a count, the start of that turn, as `3G`. |
 | Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y, Ctrl+F, Page Down Page Up | Scroll half a view, a line, or a page of the view less two lines, as far as in any pane, with a count. The cursor stays in view. |
 | `v` `V` | Select characters, or lines. `o` goes to the other end, Esc stops. |
-| `y` | Copies what's selected to the clipboard, or else what the cursor's in: a block of code, a message, an answer as its Markdown, a card, or on a "Worked for" line, the whole turn. |
+| `y` and a motion or object, `yy` `Y` | Yanks what the motion moves over, the object, or whole lines, into the registers (see [Yanking](#yanking)). In visual mode, `y` yanks what's selected and `Y` its lines. |
+| `"a` before `y` | Yanks into register `a`, or onto its end with `"A`. |
+| `/` `?`, `n` `N` | Searches the chat's text forward or back, and again (see [Searching](#searching)). |
 | `za` `zo` `zc`, Enter on a "Worked for" line | Opens or folds the turn's work, or on a subagents' line, their card. `zR` and `zM` open or fold every turn and every card. |
 | `j` `k` in a table | The cell below or above. |
 | `zl` `zh`, `zL` `zH` | Scroll the table the cursor's in sideways: a few characters, or half the column. |
@@ -184,6 +186,29 @@ In normal mode, a solid cursor moves through the conversation's text, and the vi
 | `i`, `a`, `o`, Enter | Back to insert mode. |
 
 The mouse wheel scrolls in either mode. While you're at the end, the view follows the answer as it grows. Scrolled up, it stays put, and the bottom bar says so.
+
+### Yanking
+
+`y` is Vim's yank operator. It takes any motion the chat moves by, with Vim's rules for what each takes: `yw` up to the next word, `ye` and `y$` to the word's or the line's end, `yfx` up to `x`, `yj`, `yk`, `ygg` and `yG` whole lines. `yy` and `Y` take the line, and a count takes more, as `3yy` or `y2w`. A chat's lines are each block's own lines, as it breaks them, not the rows they wrap onto. Text objects are Vim's, found in the block of text the cursor's in: `iw` `aw`, `iW` `aW`, `is` `as`, `ip` `ap`, `i"` `a"`, `i(` `a(` and their kin, and `it` `at`. Two are a chat's own:
+
+| Object | Is |
+|---|---|
+| `ic` | The block of code the cursor's in. |
+| `ac` | The same with its fence and language, as Markdown writes it. |
+| `im` | The message, answer or card the cursor's in, as it came: an answer as its Markdown. |
+| `am` | Its whole turn: the message, and all the agent said and did for it. |
+
+All four are whole lines. The cursor goes to the start of what's yanked.
+
+What's yanked goes into the window's registers as an editor's yank does: into the register named before it, with `"ayy`, or onto its end, with `"Ayy`; `"_` keeps nothing. With no register named, it goes into the unnamed register and `"0`, and onto the clipboard if the `clipboard` option says. `p` in an editor puts it, lines as lines.
+
+### Searching
+
+`/` types a search in the bottom bar, and Enter goes to the first match after the cursor; `?` searches back. Enter with nothing typed searches for the last search again. `n` searches again the same way and `N` the other way, round the chat's ends, and the bar says when it goes round; a count goes that many matches. The search is edited as the command line is: Up and Down bring back searches typed before, and Ctrl+R and a register's name puts in what the register holds. The pattern is Vim's, as an editor's search reads it, and its case follows the `ignorecase` and `smartcase` options.
+
+A search looks through the text the chat shows, block by block: messages, the agent's words and thinking without their Markdown, and the lines of cards. A match is never across two blocks. It looks in folded work too, as Vim's search opens folds: a match in a turn's folded work opens the work, and one in a tool's folded card opens the card. Only the turns the chat has loaded are searched; scroll up to load older ones. The cursor goes to the match, which isn't highlighted.
+
+A long chat isn't laid out to be searched: each turn is first looked through as the chat holds it, and only a turn that may match is laid out. One search reads at most 64 MiB of text and lays out at most 32 turns; if it would need more, it stops and says so.
 
 ## What the chat shows
 
@@ -214,7 +239,7 @@ While the agent works, a line just above the box says so, wherever the chat is s
 
 When you send a message more than half an hour after the turn before it ended, a line across the chat says when: `14:32` today, `Yesterday 09:10`, the day of the week for the six days before, such as `Monday 18:05`, and the date before that, such as `6 Oct 14:32`, with the year if it was another year. The time is your machine's, on a 24-hour clock.
 
-While the mouse is over a turn the agent has finished, `Copy` shows under its answer and copies the answer to the clipboard as the Markdown it came as, as `y` on it does in normal mode. It says `Copied` until the mouse leaves it. When the turn changed files, it shares the line with how many and the buttons that undo and redo them.
+While the mouse is over a turn the agent has finished, `Copy` shows under its answer and copies the answer to the clipboard as the Markdown it came as, as `yim` on it yanks it in normal mode. It says `Copied` until the mouse leaves it. When the turn changed files, it shares the line with how many and the buttons that undo and redo them.
 
 ### When the agent asks
 
@@ -229,7 +254,7 @@ What it asks about follows the agent's own settings. Claude Code reads its usual
 
 ### Selecting and copying
 
-Drag across the conversation to select its text, or double-click a word or triple-click a line. Letting go copies it to the primary selection, which a middle click pastes. Drag past the top or bottom of the conversation and it scrolls, faster the further past you go, selecting as it goes. Ctrl+Shift+C, `y` in normal mode, or Ctrl+C while the agent isn't answering copies it to the clipboard, where `"+` has it too. What's copied is the text as shown, without its Markdown. A turn's folded work isn't copied, only its message and its answer. Over a block of code, a Copy button copies the code.
+Drag across the conversation to select its text, or double-click a word or triple-click a line. Letting go copies it to the primary selection, which a middle click pastes. Drag past the top or bottom of the conversation and it scrolls, faster the further past you go, selecting as it goes. `y` in normal mode yanks it into the registers, as visual mode's does. Ctrl+Shift+C, or Ctrl+C while the agent isn't answering, copies it to the clipboard, where `"+` and the unnamed register have it too. What's copied is the text as shown, without its Markdown. A turn's folded work isn't copied, only its message and its answer. Over a block of code, a Copy button copies the code.
 ## The files it changes
 
 When the agent changes a file you have open, the change lands in the editor as the agent's own edit, in every window showing it, beside anything you've typed and not saved. `u` takes back your edits, never the agent's, and each of the agent's tool calls is one step of its own. A change to a line you've changed and not saved isn't made: the bar and the chat say so, the file keeps the agent's version, and `:e!` takes it or `:w!` keeps yours.

@@ -953,6 +953,18 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "y in a terminal yanks into the registers, \"x too, for p in editors; unbracketed pastes drop a last newline",
     },
+    News {
+        id: "chat-yank",
+        date: "2026-10-26",
+        lesson: "agents",
+        what: "y in a chat is Vim's yank: yw, yy, yiw, \"ay, into the registers; yic yanks a block of code, yim a message",
+    },
+    News {
+        id: "chat-search",
+        date: "2026-10-26",
+        lesson: "agents",
+        what: "/ and ? search a chat's text, n and N again; a match in folded work opens it",
+    },
 ];
 
 impl News {

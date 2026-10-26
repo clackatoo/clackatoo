@@ -109,11 +109,21 @@ A tab says what its chats are doing after its name: `⋯` while one is at work, 
 
 ## Reading in normal mode
 
-Ctrl+; puts the chat in normal mode, with a solid cursor on the last line in view, or where it was if that's still in view. `h`, `j`, `k`, `l`, `w`, `b`, `W`, `B`, `E`, `f` and `t` with `;` and `,`, `gg` and `G` move it as in an editor, with a count before them, as `3j`, and Ctrl+E, Ctrl+D and Ctrl+F scroll as far as in any pane; in a table, `j` and `k` go to the cell below and above. Ctrl+? lists every key. `v` and `V` select, and `y` copies. `za` opens or folds the turn's work under the cursor, and on the line of a turn's subagents, their card; `zR` opens all of them, and `zM` folds them.
+Ctrl+; puts the chat in normal mode, with a solid cursor on the last line in view, or where it was if that's still in view. `h`, `j`, `k`, `l`, `w`, `b`, `W`, `B`, `E`, `f` and `t` with `;` and `,`, `gg` and `G` move it as in an editor, with a count before them, as `3j`, and Ctrl+E, Ctrl+D and Ctrl+F scroll as far as in any pane; in a table, `j` and `k` go to the cell below and above. Ctrl+? lists every key. `v` and `V` select, and `y` yanks what's selected. `za` opens or folds the turn's work under the cursor, and on the line of a turn's subagents, their card; `zR` opens all of them, and `zM` folds them.
+
+## Yanking in a chat
+
+`y` in a chat's normal mode is Vim's yank: `yw` takes a word, `y$` the rest of the line, `yy` the line, `yj` it and the next, with a count as `3yy`, and `yiw`, `yi(` and `yip` Vim's objects in the block of text the cursor's in. Two objects are a chat's own: `yic` yanks the block of code the cursor's in, and `yac` the block with its fence; `yim` yanks the message, answer or card, as it came, and `yam` its whole turn. A chat's lines are each block's own, not the rows they wrap onto.
+
+What's yanked goes into the registers, as an editor's yank does: `"ayy` into `a`, `"Ayy` onto its end, and with no register named, the unnamed one and `"0`, and the clipboard as the `clipboard` option says, so `p` in an editor puts it, lines as lines. Try `yic` on a block of code in a chat, then `p` in an editor.
+
+## Searching a chat
+
+`/` in a chat's normal mode types a search in the bar, and Enter goes to it; `?` searches back. `n` searches again, and `N` back, round the chat's ends. The pattern is Vim's, as in an editor, and Up brings back searches typed before. It searches the text the chat shows, messages, the agent's words and cards' lines, and its folded work too: a match there opens the turn's work, or the tool's card, to show it. Only the turns loaded are searched; scroll up to load older ones.
 
 ## Copying, and when it was said
 
-Under each answer the agent has finished, while the mouse is over its turn, is `Copy`: click it to put the answer on the clipboard as the Markdown it came as, as `y` on the answer does in the chat's normal mode. A block of code shows its own Copy button while the mouse is over it.
+Under each answer the agent has finished, while the mouse is over its turn, is `Copy`: click it to put the answer on the clipboard as the Markdown it came as, as `yim` on the answer yanks it in the chat's normal mode. A block of code shows its own Copy button while the mouse is over it.
 
 Drag to select text and let go to copy it to the primary selection; drag past the chat's top or bottom and it scrolls, faster the further past you go, selecting as it goes.
 
