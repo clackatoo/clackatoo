@@ -46,15 +46,17 @@ mod indents;
 mod merge;
 mod pieces;
 mod snippet;
+mod step;
 
 pub use agents::{Added, AgentHunk, AgentHunks, Maker};
 pub use diagnostics::{Diagnostic, Diagnostics, Severity};
 pub use edit::{Bias, Edit, EditError, MOST_PIECES, Moved, Op, Untouched, compose, transform};
 pub use highlights::{Highlights, Kind, Span};
-pub use history::{History, HistoryError, HistorySnapshot, Limits, Steps};
+pub use history::{History, HistoryError, HistorySnapshot, Limits, Reversal, Steps};
 pub use hunks::{Difference, Hunk, HunkKind, Hunks, Sign, diff, line_starts};
 pub use indents::{LineIndent, line_start_through};
 pub use merge::{Merged, merge};
 pub use pieces::{Construct, Piece};
 pub use ropey::Rope;
 pub use snippet::{Expanded, Part, Snippet, Stop};
+pub use step::{StepPlace, StepSelection, StepState, StepVisual};

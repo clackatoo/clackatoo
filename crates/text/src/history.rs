@@ -4,6 +4,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 
 use crate::edit::{Edit, EditError, compose, transform};
+use crate::step::{StepState, StepVisual};
 
 /// How far a history reaches, and how much work it does at once.
 ///
@@ -73,6 +74,12 @@ const MOST_LAG: u64 = 1024;
 /// as [`Limits::sync_work`] allows at a time: the rest wait in the step
 /// they reached, and go on once it's undone or redone.
 ///
+/// A step keeps what its author said of it as it began (see
+/// [`StepState`]): where their cursor was, and their last selection. Its
+/// places are kept in the text undoing the step makes, and go along with
+/// others' edits as the step's edit does. A step can change nothing, as
+/// Vim's can: undoing it changes nothing but gives back what was kept.
+///
 /// The steps are kept apart from the edits: undo reaches back as far as
 /// [`Limits::undo_steps`] and [`Limits::undo_bytes`] allow, however far
 /// the edits kept do. Past that the oldest steps are let go, and
@@ -112,18 +119,24 @@ struct Stacks<A> {
     forgot: bool,
 }
 
-/// An edit that undoes or redoes a step, and the edits by others still to
-/// go down through it, which wait there (see [`Limits::sync_work`]).
+/// An edit that undoes or redoes a step, what its author kept with it, its
+/// places in the text the edit makes, and the edits by others still to go
+/// down through it, which wait there (see [`Limits::sync_work`]).
 #[derive(Clone, Debug)]
 struct Step {
     edit: Edit,
+    state: Option<StepState>,
+    /// It changes nothing.
+    empty: bool,
     waiting: Option<Edit>,
 }
 
 impl Step {
-    fn new(edit: Edit) -> Self {
+    fn new(edit: Edit, state: Option<StepState>) -> Self {
         Self {
             edit,
+            state,
+            empty: false,
             waiting: None,
         }
     }
@@ -145,6 +158,27 @@ pub struct Steps<A> {
     pub undo: Vec<Edit>,
     /// The edits that redo each step undone, the last undone's last.
     pub redo: Vec<Edit>,
+    /// What was kept with each step to undo, as `undo` lists them, its
+    /// places in the text undoing it makes. As many as there are steps, or
+    /// none for a history written down before steps kept anything.
+    pub undo_states: Vec<Option<StepState>>,
+    /// What was kept with each step to redo, as `redo` lists them.
+    pub redo_states: Vec<Option<StepState>>,
+    /// Whether steps have been let go, the oldest first (see
+    /// [`History::forgot`]).
+    pub forgot: bool,
+}
+
+/// An undo or a redo made (see [`History::reverse`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reversal {
+    /// The edit that makes it, which a step that changes nothing makes as
+    /// an edit that keeps the text as it is, and isn't recorded.
+    pub edit: Edit,
+    /// What its author kept with the step, its places in the text now.
+    pub state: Option<StepState>,
+    /// The step changes nothing.
+    pub empty: bool,
 }
 
 /// Why an edit can't be brought up to date, or undone.
@@ -263,6 +297,21 @@ impl<A: Clone + Eq> History<A> {
         Ok(edit)
     }
 
+    /// The edits made since `version`, oldest first, if going through them
+    /// is no more work than [`Limits::rebase_work`], as moving a place made
+    /// in the text then to the text now is.
+    ///
+    /// # Errors
+    ///
+    /// As [`rebase`](Self::rebase).
+    pub fn since_within(&self, version: u64) -> Result<impl Iterator<Item = &Edit>, HistoryError> {
+        let since = self.since(version)?;
+        if self.work_since(version) > self.limits.rebase_work as u64 {
+            return Err(HistoryError::TooFar(version));
+        }
+        Ok(since.map(|(edit, _)| edit))
+    }
+
     /// Records `edit`, made by `author` to the text as it is now. It starts
     /// a new undo step if `step`, or else joins the author's last one, as
     /// each key typed in one go of insert mode does.
@@ -272,6 +321,24 @@ impl<A: Clone + Eq> History<A> {
     /// If the edit doesn't fit the author's last step, which a history
     /// that's been kept whole never fails to do.
     pub fn record(&mut self, edit: Edit, author: A, step: bool) -> Result<u64, HistoryError> {
+        self.record_with(edit, author, step, None)
+    }
+
+    /// Records `edit`, made by `author` to the text as it is now, as
+    /// [`record`](Self::record) does, and if it starts a new undo step,
+    /// keeps `state` with it. The state's places are in the text as it is
+    /// now, before the edit, which undoing the step makes again.
+    ///
+    /// # Errors
+    ///
+    /// As [`record`](Self::record).
+    pub fn record_with(
+        &mut self,
+        edit: Edit,
+        author: A,
+        step: bool,
+        state: Option<StepState>,
+    ) -> Result<u64, HistoryError> {
         let index = self.sync(&author)?;
         let inverse = edit.invert();
         let steps = &mut self.authors[index];
@@ -287,8 +354,9 @@ impl<A: Clone + Eq> History<A> {
                 self.work
                     .set(self.work.get() + (inverse.weight() + last.edit.weight()) as u64);
                 last.edit = compose(&inverse, &last.edit)?;
+                last.empty = false;
             }
-            None => steps.undo.push(Step::new(inverse)),
+            None => steps.undo.push(Step::new(inverse, state)),
         }
         self.limit_steps(index);
         let version = self.push(edit, author);
@@ -305,7 +373,9 @@ impl<A: Clone + Eq> History<A> {
     ///
     /// As [`record`](Self::record).
     pub fn undo(&mut self, author: &A) -> Result<Option<Edit>, HistoryError> {
-        self.reverse(author, true)
+        Ok(self
+            .reverse(author, true, None, true)?
+            .map(|reversal| reversal.edit))
     }
 
     /// Redoes the step `author` last undid, recording the edit that does
@@ -315,7 +385,102 @@ impl<A: Clone + Eq> History<A> {
     ///
     /// As [`record`](Self::record).
     pub fn redo(&mut self, author: &A) -> Result<Option<Edit>, HistoryError> {
-        self.reverse(author, false)
+        Ok(self
+            .reverse(author, false, None, true)?
+            .map(|reversal| reversal.edit))
+    }
+
+    /// Starts a step for `author` that changes nothing, as Vim's `3J` on
+    /// the last line makes one, keeping `state` with it, its places in the
+    /// text as it is now, `len` bytes long. Undoing it changes nothing, and
+    /// gives back the state. It ends the chance to redo, as an edit does,
+    /// and no version is made.
+    ///
+    /// # Errors
+    ///
+    /// As [`record`](Self::record).
+    pub fn empty_step(
+        &mut self,
+        author: &A,
+        len: usize,
+        state: Option<StepState>,
+    ) -> Result<(), HistoryError> {
+        let index = self.sync(author)?;
+        let steps = &mut self.authors[index];
+        steps.redo.clear();
+        steps.undo.push(Step {
+            empty: true,
+            ..Step::new(Edit::keep(len), state)
+        });
+        self.limit_steps(index);
+        Ok(())
+    }
+
+    /// Undoes `author`'s last step, if `undo`, or redoes the last they
+    /// undid, recording the edit that does it unless the step changes
+    /// nothing, and gives back what was kept with the step (see
+    /// [`Reversal`]). `None` if there's nothing to.
+    ///
+    /// The step keeps its cursor to give back again, and its selection, if
+    /// it has one, is swapped for `visual`, the author's as the undo is
+    /// asked for, its places in the text as it is now, which the redo gives
+    /// back, as Vim's undo swaps them. With `pass_empty`, steps that change
+    /// nothing are passed over, as by an author that can't take them.
+    ///
+    /// # Errors
+    ///
+    /// As [`record`](Self::record).
+    pub fn reverse(
+        &mut self,
+        author: &A,
+        undo: bool,
+        visual: Option<StepVisual>,
+        pass_empty: bool,
+    ) -> Result<Option<Reversal>, HistoryError> {
+        let index = self.sync(author)?;
+        let steps = &mut self.authors[index];
+        let (from, to) = if undo {
+            (&mut steps.undo, &mut steps.redo)
+        } else {
+            (&mut steps.redo, &mut steps.undo)
+        };
+        let step = loop {
+            settle_top(from, &self.work)?;
+            let Some(step) = from.pop() else {
+                return Ok(None);
+            };
+            if pass_empty && step.empty {
+                to.push(step);
+                continue;
+            }
+            break step;
+        };
+        let inverse = step.edit.invert();
+        let mut kept = step.state.map(|state| StepState {
+            visual: state.visual.and(visual),
+            ..state
+        });
+        // The cursor stays on its line as Vim's stays at its line number:
+        // text put in at its line's start, as `P` puts a line, puts it on
+        // the line put in, not the one pushed down.
+        if let Some(kept) = &mut kept {
+            let line = usize::try_from(kept.cursor.line).unwrap_or(usize::MAX);
+            kept.cursor.line = inverse.map(line, crate::Bias::Before) as u64;
+        }
+        to.push(Step {
+            empty: step.empty,
+            ..Step::new(inverse, kept)
+        });
+        if !step.empty {
+            let version = self.push(step.edit.clone(), author.clone());
+            self.authors[index].version = version;
+            self.catch_up()?;
+        }
+        Ok(Some(Reversal {
+            edit: step.edit,
+            state: step.state,
+            empty: step.empty,
+        }))
     }
 
     /// Whether `author` has had steps let go, the oldest first, as undo
@@ -387,11 +552,18 @@ impl<A: Clone + Eq> History<A> {
     #[must_use]
     pub fn snapshot(&self) -> HistorySnapshot<A> {
         let steps = (self.authors.iter())
-            .map(|stacks| Steps {
-                author: stacks.author.clone(),
-                version: stacks.version,
-                undo: settled(&stacks.undo),
-                redo: settled(&stacks.redo),
+            .map(|stacks| {
+                let (undo, undo_states) = settled(&stacks.undo);
+                let (redo, redo_states) = settled(&stacks.redo);
+                Steps {
+                    author: stacks.author.clone(),
+                    version: stacks.version,
+                    undo,
+                    redo,
+                    undo_states,
+                    redo_states,
+                    forgot: stacks.forgot,
+                }
             })
             .collect();
         HistorySnapshot {
@@ -412,9 +584,9 @@ impl<A: Clone + Eq> History<A> {
             .map(|steps| Stacks {
                 author: steps.author,
                 version: steps.version,
-                undo: steps.undo.into_iter().map(Step::new).collect(),
-                redo: steps.redo.into_iter().map(Step::new).collect(),
-                forgot: false,
+                undo: restored_steps(steps.undo, steps.undo_states),
+                redo: restored_steps(steps.redo, steps.redo_states),
+                forgot: steps.forgot,
             })
             .collect();
         history
@@ -535,27 +707,6 @@ impl<A: Clone + Eq> History<A> {
         steps.version = version;
         Ok(index)
     }
-
-    /// Undoes `author`'s last step, or redoes the last they undid, and
-    /// keeps the edit that reverses that to go the other way.
-    fn reverse(&mut self, author: &A, undo: bool) -> Result<Option<Edit>, HistoryError> {
-        let index = self.sync(author)?;
-        let steps = &mut self.authors[index];
-        let (from, to) = if undo {
-            (&mut steps.undo, &mut steps.redo)
-        } else {
-            (&mut steps.redo, &mut steps.undo)
-        };
-        settle_top(from, &self.work)?;
-        let Some(step) = from.pop() else {
-            return Ok(None);
-        };
-        to.push(Step::new(step.edit.invert()));
-        let version = self.push(step.edit.clone(), author.clone());
-        self.authors[index].version = version;
-        self.catch_up()?;
-        Ok(Some(step.edit))
-    }
 }
 
 /// Sends `others`, edits made to the text the top of `stack` is made to,
@@ -581,6 +732,11 @@ fn send_down(
         *budget = budget.saturating_sub(cost);
         work.set(work.get() + cost);
         (step.edit, others) = transform(&step.edit, &others)?;
+        // Its places are in the text it makes, which others' edits, past
+        // it, are now made to.
+        if let Some(state) = &mut step.state {
+            state.map(&others);
+        }
     }
     Ok(())
 }
@@ -597,6 +753,9 @@ fn settle_top(stack: &mut [Step], work: &Cell<u64>) -> Result<(), EditError> {
     work.set(work.get() + (top.edit.weight() + waiting.weight()) as u64);
     let (edit, rest) = transform(&top.edit, &waiting)?;
     top.edit = edit;
+    if let Some(state) = &mut top.state {
+        state.map(&rest);
+    }
     if let Some(next) = below.last_mut() {
         next.waiting = Some(match next.waiting.take() {
             Some(before) => {
@@ -609,15 +768,34 @@ fn settle_top(stack: &mut [Step], work: &Cell<u64>) -> Result<(), EditError> {
     Ok(())
 }
 
-/// The edits of `stack` with all that waits in them sent down.
-fn settled(stack: &[Step]) -> Vec<Edit> {
+/// The edits of `stack`, and what was kept with each, with all that waits
+/// in them sent down.
+fn settled(stack: &[Step]) -> (Vec<Edit>, Vec<Option<StepState>>) {
     let mut stack = stack.to_vec();
     let mut budget = u64::MAX;
     let work = Cell::new(0);
     // A stack that's been kept whole always settles.
     let nothing = Edit::keep(top_len(&stack));
     let _ = send_down(&mut stack, nothing, &mut budget, &work);
-    stack.into_iter().map(|step| step.edit).collect()
+    (stack.into_iter())
+        .map(|step| {
+            // A step that changes nothing is written down as one that keeps
+            // its text, which is how it's read back.
+            (step.edit, step.state)
+        })
+        .unzip()
+}
+
+/// Steps read back from `edits` and what was kept with each, `states`:
+/// those that keep their text are steps that change nothing.
+fn restored_steps(edits: Vec<Edit>, states: Vec<Option<StepState>>) -> Vec<Step> {
+    let mut states = states.into_iter();
+    (edits.into_iter())
+        .map(|edit| Step {
+            empty: edit.is_noop(),
+            ..Step::new(edit, states.next().flatten())
+        })
+        .collect()
 }
 
 /// The length of the text the top of `stack` is made to.
@@ -1327,5 +1505,153 @@ mod tests {
         assert_eq!(undone, 1000);
         let agents = spread(20_000, 100_000).apply_to(&start).unwrap();
         assert_eq!(doc.text, agents);
+    }
+
+    /// A state whose cursor is on the line starting at byte `line`, `col`
+    /// bytes in, with a selection of that line if `visual`.
+    fn state(line: u64, col: u32, visual: bool) -> StepState {
+        let place = crate::StepPlace { line, col };
+        StepState {
+            cursor: place,
+            taken: false,
+            visual: visual.then_some(StepVisual {
+                start: place,
+                end: place,
+                kind: crate::StepSelection::Lines,
+                backward: false,
+                to_end: false,
+            }),
+        }
+    }
+
+    impl Doc {
+        /// Starts a step keeping `state`, replacing `removed` at `at` with
+        /// `inserted`.
+        fn step(&mut self, who: Who, state: StepState, at: usize, removed: &str, inserted: &str) {
+            let edit = Edit::replace(self.text.len(), at, removed, inserted);
+            self.text = edit.apply_to(&self.text).unwrap();
+            self.history
+                .record_with(edit, who, true, Some(state))
+                .unwrap();
+        }
+
+        /// Undoes or redoes as a window that keeps states does, with its
+        /// selection `visual`.
+        fn reverse_with(&mut self, undo: bool, visual: Option<StepVisual>) -> Option<Reversal> {
+            let reversal = self
+                .history
+                .reverse(&Who::You, undo, visual, false)
+                .unwrap()?;
+            self.text = reversal.edit.apply_to(&self.text).unwrap();
+            Some(reversal)
+        }
+    }
+
+    #[test]
+    fn a_step_that_changes_nothing_is_undone_on_its_own() {
+        // As Vim's `x3J3Juu`: the two empty steps are undone, not the `x`.
+        let mut doc = Doc::new("abc\ndef");
+        doc.step(Who::You, state(4, 0, false), 4, "d", "");
+        let version = doc.history.version();
+        doc.history
+            .empty_step(&Who::You, 6, Some(state(4, 2, false)))
+            .unwrap();
+        doc.history
+            .empty_step(&Who::You, 6, Some(state(4, 0, false)))
+            .unwrap();
+        for col in [0, 2] {
+            let reversal = doc.reverse_with(true, None).unwrap();
+            assert!(reversal.empty && reversal.edit.is_noop());
+            assert_eq!(reversal.state.unwrap().cursor.col, col);
+            assert_eq!(doc.history.version(), version, "nothing recorded");
+        }
+        assert_eq!(doc.text, "abc\nef");
+        let reversal = doc.reverse_with(true, None).unwrap();
+        assert!(!reversal.empty);
+        assert_eq!(doc.text, "abc\ndef");
+        // Redone in turn, the empty ones too.
+        assert!(!doc.reverse_with(false, None).unwrap().empty);
+        assert!(doc.reverse_with(false, None).unwrap().empty);
+        // An edit ends the chance to redo, an empty step's too.
+        doc.history.empty_step(&Who::You, 6, None).unwrap();
+        assert!(doc.reverse_with(false, None).is_none());
+        // Passed over by an author that can't take them.
+        assert!(doc.undo(Who::You));
+        assert_eq!(doc.text, "abc\ndef");
+        assert!(!doc.undo(Who::You));
+    }
+
+    #[test]
+    fn undo_gives_back_the_cursor_kept_and_swaps_the_selection() {
+        let mut doc = Doc::new("one\ntwo\n");
+        doc.step(Who::You, state(4, 1, true), 4, "two", "2");
+        let mine = state(4, 0, true).visual;
+        let undone = doc.reverse_with(true, mine).unwrap();
+        assert_eq!(undone.state, Some(state(4, 1, true)));
+        assert_eq!(doc.text, "one\ntwo\n");
+        // The redo gives back the same cursor, and the selection the undo
+        // was made with.
+        let redone = doc.reverse_with(false, None).unwrap();
+        let kept = redone.state.unwrap();
+        // At its line's start still, as Vim keeps its line number, though
+        // the redo puts text in there.
+        assert_eq!(kept.cursor, crate::StepPlace { line: 4, col: 1 });
+        assert_eq!(kept.visual, mine);
+        // A step with no selection kept swaps none.
+        let undone = doc.reverse_with(true, mine).unwrap();
+        assert_eq!(
+            undone.state.unwrap().visual,
+            None,
+            "the redo was made with none"
+        );
+    }
+
+    #[test]
+    fn places_kept_with_a_step_stay_on_their_line_through_others_edits() {
+        let mut doc = Doc::new("one\ntwo\nthree\n");
+        doc.step(Who::You, state(8, 2, true), 8, "three", "3");
+        // Lines put in above by an agent, before and after it.
+        doc.edit(Who::Agent, true, 0, "", "zero\n");
+        doc.edit(Who::Agent, true, 0, "", "a\nb\n");
+        let undone = doc.reverse_with(true, None).unwrap();
+        assert_eq!(doc.text, "a\nb\nzero\none\ntwo\nthree\n");
+        let kept = undone.state.unwrap();
+        assert_eq!((kept.cursor.line, kept.cursor.col), (17, 2));
+        assert_eq!(kept.visual.unwrap().start.line, 17);
+        // And when they wait in the step, as a step deep in the stack is
+        // reached only once it's undone.
+        let mut doc = Doc::with_limits("one\ntwo\nthree\n", tight());
+        doc.step(Who::You, state(8, 2, false), 8, "three", "3");
+        doc.step(Who::You, state(0, 0, false), 0, "o", "O");
+        doc.edit(Who::Agent, true, 0, "", "zero\n");
+        assert!(doc.reverse_with(true, None).is_some());
+        let undone = doc.reverse_with(true, None).unwrap();
+        assert_eq!(undone.state.unwrap().cursor.line, 13);
+    }
+
+    #[test]
+    fn what_steps_keep_reads_back_as_written() {
+        let mut doc = Doc::new("abc\n");
+        doc.step(Who::You, state(0, 1, true), 0, "a", "");
+        doc.history
+            .empty_step(&Who::You, 3, Some(state(0, 2, false)))
+            .unwrap();
+        doc.edit(Who::Agent, true, 3, "", "\nx");
+        let mut restored = History::restore(doc.history.snapshot());
+        assert_eq!(restored.snapshot(), doc.history.snapshot());
+        let reversal = restored
+            .reverse(&Who::You, true, None, false)
+            .unwrap()
+            .unwrap();
+        assert!(reversal.empty);
+        assert_eq!(
+            reversal.state.unwrap().cursor,
+            crate::StepPlace { line: 0, col: 2 }
+        );
+        let reversal = restored
+            .reverse(&Who::You, true, None, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reversal.edit.apply_to("bc\nx\n").unwrap(), "abc\nx\n");
     }
 }
