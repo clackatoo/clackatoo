@@ -1475,3 +1475,18 @@ fn a_count_typed_in_a_chat_reaches_a_lua_binding() {
     press(&mut desk, Key::Character("Q".into()), None, shifted);
     assert_eq!(desk.options().shiftwidth, 7, "the chat's count");
 }
+
+#[test]
+fn a_paste_into_a_folder_shown_as_text_is_the_texts() {
+    let layout = side_by_side(vec![pane(1), folder_pane(2, 1)]);
+    let mut desk = desk(one_tab(layout));
+    snapshot(&mut desk, 1);
+    ctrl_b(&mut desk, "l");
+    answer_all(&mut desk);
+    lists_p(&mut desk, 1);
+    escape(&mut desk);
+    key(&mut desk, "Go");
+    desk.paste("pasted.txt");
+    escape(&mut desk);
+    assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt", "pasted.txt"]);
+}

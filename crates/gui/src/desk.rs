@@ -2201,8 +2201,8 @@ impl Desk {
             self.suggest_completion();
         } else if self.finding() {
             self.paste_into_finder(text);
-        } else if !self.paste_into_list(text)
-            && !self.paste_into_editor(text)
+        } else if !self.paste_into_editor(text)
+            && !self.paste_into_list(text)
             && let Some(pane) = self.focused_pane()
         {
             pane.paste(text);
@@ -2210,20 +2210,17 @@ impl Desk {
     }
 
     /// Pastes `text` into what's typed in the focused explorer's, board's
-    /// or review's bar, if it's one of them. Returns whether it was: a
-    /// list pane with nothing typed takes no paste.
+    /// or review's bar. Returns whether it went there: not with nothing
+    /// typed, nor in a pane of none of them.
     fn paste_into_list(&mut self, text: &str) -> bool {
         if let Some(explorer) = self.focused_explorer_mut() {
-            explorer.paste(text);
-            return true;
+            return explorer.paste(text);
         }
         if let Some(board) = self.focused_board_mut() {
-            board.paste(text);
-            return true;
+            return board.paste(text);
         }
         if let Some(review) = self.focused_review_mut() {
-            review.paste(text);
-            return true;
+            return review.paste(text);
         }
         false
     }
@@ -11390,6 +11387,18 @@ mod tests {
     fn listing_line(desk: &Desk) -> usize {
         let (editor, copy) = desk.focused_editor().expect("an editor");
         copy.text().byte_to_line(editor.cursor_byte(copy))
+    }
+
+    #[test]
+    fn a_paste_into_a_folder_edited_as_text_in_an_explorer_is_the_texts() {
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        answer_all(&mut desk);
+        type_keys(&mut desk, "je");
+        type_keys(&mut desk, "o");
+        desk.paste("pasted.txt");
+        escape(&mut desk);
+        assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt", "pasted.txt"]);
     }
 
     #[test]

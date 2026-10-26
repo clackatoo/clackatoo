@@ -304,8 +304,15 @@ impl ListSearch {
 /// line breaks as spaces, and nothing else that isn't printed.
 pub(crate) fn paste_into(typed: &mut String, text: &str) {
     typed.extend(
-        text.chars()
-            .map(|ch| if ch == '\n' || ch == '\t' { ' ' } else { ch })
+        text.replace("\r\n", "\n")
+            .chars()
+            .map(|ch| {
+                if matches!(ch, '\n' | '\r' | '\t') {
+                    ' '
+                } else {
+                    ch
+                }
+            })
             .filter(|ch| !ch.is_control()),
     );
 }
@@ -650,6 +657,13 @@ mod tests {
         let mut fresh = ListSearch::default();
         fresh.start(false);
         assert_eq!(fresh.key(Stroke::Enter), Typed::Edited);
+    }
+
+    #[test]
+    fn a_paste_is_one_line_whatever_breaks_it() {
+        let mut typed = String::from(">");
+        paste_into(&mut typed, "a\r\nb\rc\nd\te\u{7}");
+        assert_eq!(typed, ">a b c d e");
     }
 
     #[test]
