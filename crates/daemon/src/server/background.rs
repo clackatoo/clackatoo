@@ -101,12 +101,7 @@ impl Daemon {
                 pane,
                 size,
             } => {
-                let command = command.trim_end();
-                if command.trim().is_empty() || command.len() > crate::mcp::MAX_SEND {
-                    return Err(Error::Other(
-                        "a background tab's command is one line or a few, and not empty".into(),
-                    ));
-                }
+                let command = super::lent_background::checked_command(command)?;
                 let (pane, terminal) =
                     self.start_background(workspace, (cwd.clone(), pane), size, command)?;
                 self.type_at_first_prompt(terminal, command.to_owned(), None, None);

@@ -722,6 +722,49 @@ mod tests {
         assert!(relayed.ports.is_empty() && relayed.ports_waiting.is_empty());
     }
 
+    /// A shell lent as a background tab gets its command typed at its
+    /// prompt: one asked for with a program in the shell's place, which
+    /// the command would be typed into, is refused.
+    #[test]
+    fn a_background_shell_is_lent_only_as_a_shell_to_type_its_command_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _, _there) = linked(dir.path());
+        let (borrower, _end) = client(&mut daemon);
+        if let Some(Source::Client(client)) = daemon.sources.get_mut(borrower.0) {
+            client.machine = Some(clackatoo_protocol::Machine {
+                id: clackatoo_protocol::MachineId([7; 16]),
+                name: "laptop".into(),
+                run: 1,
+            });
+        }
+        let shell = |command: Option<Vec<String>>| {
+            PaneTerminal::New(NewTerminal {
+                size: Size::new(80, 24).unwrap(),
+                command,
+                cwd: None,
+                record_to: None,
+            })
+        };
+        let refused = daemon.lend(
+            borrower,
+            1,
+            None,
+            shell(Some(vec!["cat".into()])),
+            Some("x"),
+        );
+        assert!(
+            matches!(&refused, Err(Error::Other(why)) if why.contains("only a new shell")),
+            "{refused:?}"
+        );
+        let Ok(Response::PaneCreated(pane)) =
+            daemon.lend(borrower, 2, None, shell(None), Some("x"))
+        else {
+            panic!("a shell isn't lent");
+        };
+        let lent = daemon.workspaces.lent_of_pane(pane).unwrap();
+        assert!(lent.background.is_some(), "{lent:?}");
+    }
+
     /// The ports another machine's background tabs listen on are asked of
     /// it as this daemon looks for its own, and told by this daemon's
     /// numbers, with its own: only those of the background tabs shown, and

@@ -184,7 +184,14 @@ impl Daemon {
         });
         // A command makes it a shell lent as a background tab.
         let command = match command {
-            Some(command) if matches!(content, PaneTerminal::New(_)) => {
+            // A new shell, for the command to be typed at: never into a
+            // program started in its place.
+            Some(command)
+                if matches!(
+                    content,
+                    PaneTerminal::New(clackatoo_protocol::NewTerminal { command: None, .. })
+                ) =>
+            {
                 Some(super::lent_background::checked_command(command)?)
             }
             Some(_) => {

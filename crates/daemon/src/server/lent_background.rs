@@ -183,15 +183,37 @@ impl Daemon {
     }
 }
 
-/// `command`, to start a lent background shell with, trimmed, if it's one
-/// line or a few and not empty: it's typed as the user would type it, so
-/// it's held to what an agent may have typed.
+/// `command`, to start a background tab with, here or lent, trimmed at
+/// its end, if it isn't empty, nor longer than an agent may type at once
+/// ([`MAX_SEND`](crate::mcp::MAX_SEND)): it's typed as the user would type
+/// it.
 pub(super) fn checked_command(command: &str) -> Result<&str, Error> {
     let command = command.trim_end();
     if command.trim().is_empty() || command.len() > crate::mcp::MAX_SEND {
-        return Err(Error::Other(
-            "a background tab's command is one line or a few, and not empty".into(),
-        ));
+        return Err(Error::Other(format!(
+            "a background tab's command can't be empty, nor longer than {} KiB",
+            crate::mcp::MAX_SEND / 1024
+        )));
     }
     Ok(command)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_command_is_refused_empty_or_too_long_saying_so() {
+        assert_eq!(checked_command("trail serve \n").unwrap(), "trail serve");
+        let long = "x".repeat(crate::mcp::MAX_SEND + 1);
+        for refused in ["", "  \n", long.as_str()] {
+            let Err(Error::Other(why)) = checked_command(refused) else {
+                panic!("{refused:?} isn't refused");
+            };
+            assert_eq!(
+                why,
+                "a background tab's command can't be empty, nor longer than 16 KiB"
+            );
+        }
+    }
 }
