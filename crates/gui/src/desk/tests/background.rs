@@ -356,6 +356,43 @@ fn the_list_says_the_ports_each_listens_on_and_ctrl_f_forwards_them() {
     assert_eq!(ports, [8080, 35729]);
 }
 
+/// A background tab of another machine's workspace listens on that
+/// machine's ports, so Ctrl+F asks the daemon to forward them from there,
+/// whichever workspace is shown (CLACKA-122).
+#[test]
+fn ctrl_f_forwards_another_machines_background_tab_from_that_machine() {
+    use clackatoo_protocol::{Forwarding, Listening, ListeningPort, MachineId};
+    let mut shown = with_background(
+        Vec::new(),
+        vec![background(6, BackgroundState::Running, None, "dev server")],
+    );
+    shown.list[1].home = Some(MachineId([9; 16]));
+    let mut desk = desk(shown);
+    normal_mode(&mut desk);
+    command(&mut desk, "Background");
+    answer_all(&mut desk);
+    assert!(desk.listening(vec![Listening {
+        tab: TabId(6),
+        ports: vec![ListeningPort {
+            port: 3000,
+            program: "node".into(),
+        }],
+    }]));
+    ctrl(&mut desk, "f");
+    assert!(desk.take_forwards_asked().is_empty(), "not this machine's");
+    assert_eq!(
+        answer_all(&mut desk),
+        [Request::Forwards {
+            pane: PaneId(6),
+            forwarding: Forwarding::Add {
+                local: 3000,
+                host: "localhost".into(),
+                port: 3000,
+            },
+        }]
+    );
+}
+
 #[test]
 fn keep_marks_the_focused_terminal_and_its_tab_says_so() {
     use clackatoo_protocol::{Keeping, Kept};

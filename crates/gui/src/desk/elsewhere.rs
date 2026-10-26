@@ -28,9 +28,14 @@ use crate::command::Command;
 impl Desk {
     /// The machine `pane` is on, if it's another than the daemon's: a
     /// pane of the daemon's own machine in a workspace of another's, which
-    /// that machine's daemon can't reach, is on the daemon's.
+    /// that machine's daemon can't reach, is on the daemon's. A background
+    /// tab's pane is on its workspace's machine, as it holds a terminal of
+    /// that machine's own.
     pub(crate) fn pane_machine(&self, pane: PaneId) -> Option<MachineId> {
-        let (workspace, _, pane) = self.workspaces.find_pane(pane)?;
+        let Some((workspace, _, pane)) = self.workspaces.find_pane(pane) else {
+            let (workspace, ..) = self.workspaces.find_background_pane(pane)?;
+            return workspace.home;
+        };
         let own = self.own_machine().map(|own| own.id);
         match pane.home {
             Some(home) if Some(home) == own => None,

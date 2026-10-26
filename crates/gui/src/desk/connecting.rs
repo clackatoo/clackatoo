@@ -404,8 +404,21 @@ impl Desk {
     /// machine, the daemon forwards them there, from its own machine, which
     /// is this window's.
     pub(super) fn port_forward(&mut self, forwarding: crate::command::Forwarding) {
+        let Some(pane) = self.shown.map(|shown| shown.pane) else {
+            return self.forwards_asked.push(forwarding);
+        };
+        self.port_forward_from(pane, forwarding);
+    }
+
+    /// As [`port_forward`](Self::port_forward), to the machine `pane` is
+    /// on, which may be a background tab's.
+    pub(super) fn port_forward_from(
+        &mut self,
+        pane: clackatoo_protocol::PaneId,
+        forwarding: crate::command::Forwarding,
+    ) {
         use crate::command::Forwarding as Typed;
-        let Some(elsewhere) = self.shown_elsewhere() else {
+        let Some(elsewhere) = self.pane_elsewhere(pane) else {
             return self.forwards_asked.push(forwarding);
         };
         let host = elsewhere.host;
@@ -424,9 +437,6 @@ impl Desk {
         if !self.needs_daemon(":portforward", wire::RELAY) {
             return;
         }
-        let Some(pane) = self.shown.map(|shown| shown.pane) else {
-            return;
-        };
         let forwarding = match forwarding {
             Typed::List => Forwarding::List,
             Typed::Add(spec) | Typed::Config(spec) => Forwarding::Add {

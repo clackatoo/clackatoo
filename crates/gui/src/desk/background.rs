@@ -155,9 +155,16 @@ impl Desk {
 
     /// Forwards here the ports the background tab the list's `path` names
     /// listens on, each to the same port, as `:portforward PORT` does: in
-    /// a window on another machine than the daemon.
+    /// a window on another machine than the daemon, or from a background
+    /// tab of another machine's workspace, whose ports are that machine's,
+    /// whichever workspace is shown (CLACKA-122).
     pub(super) fn forward_background(&mut self, path: &str) {
         let Ok(tab) = path.parse().map(TabId) else {
+            return;
+        };
+        let Some(pane) =
+            (self.workspaces.find_background(tab)).map(|(_, background)| background.tab.focused)
+        else {
             return;
         };
         let ports: Vec<u16> = self.ports_of(tab).iter().map(|port| port.port).collect();
@@ -172,7 +179,7 @@ impl Desk {
                 host: "localhost".to_owned(),
                 port,
             };
-            self.port_forward(crate::command::Forwarding::Add(spec));
+            self.port_forward_from(pane, crate::command::Forwarding::Add(spec));
         }
     }
 
