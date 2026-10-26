@@ -19,7 +19,7 @@ use mio::Token;
 use super::language::Opened;
 use super::recovery::Recovered;
 use super::{Daemon, Source};
-use crate::buffer::{Buffer, DiskStamp, Made, Restamp};
+use crate::buffer::{Buffer, DiskStamp, Made, Restamp, Reversed};
 
 /// A buffer, and the clients following it.
 #[derive(Debug)]
@@ -66,6 +66,62 @@ pub(super) struct BufferSlot {
     /// What came back to it from a recovery file as the daemon started,
     /// while that's still to be dealt with.
     pub(super) recovered: Recovered,
+}
+
+/// Makes `change`, which a window sent buffer `buffer`, as the user's.
+fn serve_change(buffer: &mut Buffer, change: Change) -> Result<Served, HistoryError> {
+    match change {
+        // More than the daemon brings up to date or keeps: a window
+        // coarsens one first, so it's from one older than that.
+        Change::Edit { edit, .. } | Change::Step { edit, .. } if edit.ops().len() > MOST_PIECES => {
+            Err(HistoryError::Edit(EditError::TooLong))
+        }
+        Change::Edit { edit, base, step } => buffer
+            .edit(edit, base, step, Author::User)
+            .map(|made| Served::Made(made, Answered::Acked)),
+        Change::Step { edit, base, state } => buffer
+            .edit_keeping(edit, base, (true, Some(state)), Author::User)
+            .map(|made| Served::Made(made, Answered::Acked)),
+        Change::Undo | Change::Redo => buffer
+            .reverse(Author::User, change == Change::Redo)
+            .map(|made| made.map_or(Served::Nothing, |made| Served::Made(made, Answered::Edited))),
+        Change::Empty { base, state } => buffer
+            .empty_step(base, state, Author::User)
+            .map(|()| Served::Nothing),
+        Change::Reverse { redo, base, visual } => buffer
+            .reverse_keeping(Author::User, redo, base, visual)
+            .map(|reversed| match reversed {
+                None => Served::Nothing,
+                Some(reversed) if reversed.empty => Served::Empty(reversed),
+                Some(Reversed {
+                    version,
+                    edit,
+                    state,
+                    ..
+                }) => Served::Made(Made { version, edit }, Answered::Reversed(state)),
+            }),
+    }
+}
+
+/// What came of a change a window sent.
+enum Served {
+    /// An edit was made, and is answered so.
+    Made(Made, Answered),
+    /// An undo or a redo of a step that changes nothing.
+    Empty(Reversed),
+    /// Nothing was made: nothing to undo or redo, or a step that changes
+    /// nothing was started.
+    Nothing,
+}
+
+/// How the window that sent a change is told the edit it made was.
+enum Answered {
+    /// That its edit was made, or, relaying for others, the edit.
+    Acked,
+    /// The edit, which it hasn't made.
+    Edited,
+    /// The edit, and what the step undone or redone kept.
+    Reversed(Option<clackatoo_text::StepState>),
 }
 
 /// The last change a window sent a buffer that the daemon dealt with.
@@ -495,22 +551,10 @@ impl Daemon {
         let before = window
             .and_then(|window| (slot.applied).insert(window, WindowChange { seq, landed: None }));
         let buffer = &mut slot.buffer;
-        let undo = change == Change::Undo;
-        let made = match change {
-            // More than the daemon brings up to date or keeps: a window
-            // coarsens one first, so it's from one older than that.
-            Change::Edit { edit, .. } if edit.ops().len() > MOST_PIECES => {
-                Err(HistoryError::Edit(EditError::TooLong))
-            }
-            Change::Edit { edit, base, step } => buffer
-                .edit(edit, base, step, Author::User)
-                .map(|made| (Some(made), true)),
-            Change::Undo | Change::Redo => buffer
-                .reverse(Author::User, change == Change::Redo)
-                .map(|made| (made, false)),
-        };
+        let undo = matches!(change, Change::Undo | Change::Reverse { redo: false, .. });
+        let made = serve_change(buffer, change);
         match made {
-            Ok((Some(Made { version, edit }), acked)) => {
+            Ok(Served::Made(Made { version, edit }, answered)) => {
                 if let Some(window) = window
                     && let Some(change) =
                         (self.buffers.get_mut(&id)).and_then(|slot| slot.applied.get_mut(&window))
@@ -520,15 +564,20 @@ impl Daemon {
                 self.edited(id, version, &edit, None);
                 // A daemon relaying for its own clients is told the edit
                 // too, for those of them that didn't make it.
-                let answer = if acked && !self.relays(token) {
-                    BufferUpdate::Acked { version, seq }
-                } else {
-                    BufferUpdate::Edited {
+                let answer = match answered {
+                    Answered::Acked if !self.relays(token) => BufferUpdate::Acked { version, seq },
+                    Answered::Reversed(state) => BufferUpdate::Reversed {
+                        version,
+                        seq,
+                        edit: edit.clone(),
+                        state,
+                    },
+                    Answered::Acked | Answered::Edited => BufferUpdate::Edited {
                         version,
                         edit: edit.clone(),
                         author: Author::User,
                         answers: Some(seq),
-                    }
+                    },
                 };
                 self.tell(token, id, answer);
                 let others = BufferUpdate::Edited {
@@ -540,7 +589,18 @@ impl Daemon {
                 self.tell_viewers(id, Some(token), &others);
                 self.note_modified(id);
             }
-            Ok((None, _)) => {
+            // A step that changes nothing, undone or redone: only the window
+            // that asked hears of it.
+            Ok(Served::Empty(reversed)) => {
+                let update = BufferUpdate::Reversed {
+                    version: reversed.version,
+                    seq,
+                    edit: reversed.edit,
+                    state: reversed.state,
+                };
+                self.tell(token, id, update);
+            }
+            Ok(Served::Nothing) => {
                 self.tell(token, id, BufferUpdate::NoChange(seq));
                 let forgot =
                     (self.buffers.get(&id)).is_some_and(|slot| slot.buffer.forgot(Author::User));

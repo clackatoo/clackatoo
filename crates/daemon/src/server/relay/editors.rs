@@ -444,7 +444,7 @@ impl Daemon {
             token,
             window: viewer.window,
             seq,
-            edit: matches!(change, Change::Edit { .. }),
+            edit: matches!(change, Change::Edit { .. } | Change::Step { .. }),
         };
         if let Some(followed) = followed {
             followed.queue.push_back(Queued::Change(made, change));
@@ -506,10 +506,32 @@ impl Daemon {
         made: Made,
         change: Change,
     ) {
+        // A daemon there older than undo steps that keep anything is sent
+        // the change as it takes it; a step that changes nothing it can't
+        // take, and it's answered as one that made nothing.
+        let wire = self.link_wire(at);
+        let sent = if wire >= clackatoo_protocol::wire::UNDO_STATE {
+            change.clone()
+        } else {
+            match change.clone() {
+                Change::Step { edit, base, .. } => Change::Edit {
+                    edit,
+                    base,
+                    step: true,
+                },
+                Change::Reverse { redo: false, .. } => Change::Undo,
+                Change::Reverse { redo: true, .. } => Change::Redo,
+                Change::Empty { .. } => {
+                    self.tell_relayed(made.token, local, BufferUpdate::NoChange(made.seq));
+                    return;
+                }
+                change @ (Change::Edit { .. } | Change::Undo | Change::Redo) => change,
+            }
+        };
         let edit = ClientMessage::Edit {
             buffer: remote,
             seq,
-            change: change.clone(),
+            change: sent,
         };
         if let Some(followed) = self.links.list[at].relayed.buffers.get_mut(&local) {
             followed.sent = Some(Sent {
@@ -737,8 +759,8 @@ impl Daemon {
         let followed = relayed.buffers.get(&local)?;
         let kind = head.get(3)?;
         let need = match kind {
-            // Resumed, Acked, Edited, NoChange and Agents.
-            1..=4 | 15 => Need::Decode,
+            // Resumed, Acked, Edited, NoChange, Agents and Reversed.
+            1..=4 | 15 | 19 => Need::Decode,
             _ => {
                 let mut wires: Vec<u32> = (followed.viewers.iter())
                     .filter_map(|viewer| self.client_wire(viewer.token))
@@ -992,6 +1014,12 @@ impl Daemon {
                 }
                 self.pump(at, local);
             }
+            BufferUpdate::Reversed {
+                version,
+                seq,
+                edit,
+                state,
+            } => self.relay_reversed(at, local, (version, seq), edit, state),
             BufferUpdate::Resumed {
                 daemon,
                 path,
@@ -1121,6 +1149,52 @@ impl Daemon {
         if mine.is_some() {
             self.pump(at, local);
         }
+    }
+
+    /// Takes in this daemon's undo or redo, numbered `seq`, of buffer
+    /// `local` of the connection at `at`, made there as `edit`, making
+    /// `version`, or changing nothing, as a step that changes nothing
+    /// does: the client that asked is told, with what the step kept, and
+    /// the others the edit, if it made one.
+    fn relay_reversed(
+        &mut self,
+        at: usize,
+        local: BufferId,
+        (version, seq): (u64, u64),
+        edit: clackatoo_protocol::Edit,
+        state: Option<clackatoo_protocol::StepState>,
+    ) {
+        let Some(followed) = self.links.list[at].relayed.buffers.get_mut(&local) else {
+            return;
+        };
+        let made = followed.version.is_none_or(|known| version > known);
+        if made {
+            followed.version = Some(version);
+        }
+        let mine = self.change_answered(at, local, seq, made.then_some(version));
+        if let Some(asked) = mine {
+            let answer = BufferUpdate::Reversed {
+                version,
+                seq: asked.seq,
+                edit: edit.clone(),
+                state,
+            };
+            self.tell_relayed(asked.token, local, answer);
+        }
+        if made {
+            let others = BufferUpdate::Edited {
+                version,
+                edit,
+                author: Author::User,
+                answers: None,
+            };
+            for token in self.buffer_recipients(at, local) {
+                if mine.is_none_or(|asked| asked.token != token) {
+                    self.tell_relayed(token, local, others.clone());
+                }
+            }
+        }
+        self.pump(at, local);
     }
 
     /// Notes that the change this connection numbered `seq`, on its way
@@ -2562,6 +2636,159 @@ mod tests {
                 })]
             ),
             "{asked:?}"
+        );
+    }
+
+    /// What an undo step keeps, its cursor at `line`, for tests.
+    fn kept(line: u64) -> clackatoo_protocol::StepState {
+        clackatoo_protocol::StepState {
+            cursor: clackatoo_protocol::StepPlace { line, col: 1 },
+            taken: false,
+            visual: None,
+        }
+    }
+
+    #[test]
+    fn an_undo_that_gives_back_what_its_step_kept_goes_to_the_client_that_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there, local) = with_buffer(dir.path());
+        let (a, mut to_a) = client(&mut daemon);
+        let (b, mut to_b) = client(&mut daemon);
+        attach(&mut daemon, (link, &mut there), a, local, 1);
+        attach(&mut daemon, (link, &mut there), b, local, 2);
+        updates(&mut to_a);
+        updates(&mut to_b);
+        let undo = Change::Reverse {
+            redo: false,
+            base: 10,
+            visual: None,
+        };
+        change(&mut daemon, a, local, 41, undo.clone());
+        let sent = asked_of_buffers(&mut there);
+        let [
+            ClientMessage::Edit {
+                seq, change: went, ..
+            },
+        ] = &sent[..]
+        else {
+            panic!("{sent:?}");
+        };
+        assert_eq!(*went, undo, "as it was sent");
+        let undone = Edit::replace(6, 0, "a", "");
+        let reversed = |version, seq, edit: &Edit, state| BufferUpdate::Reversed {
+            version,
+            seq,
+            edit: edit.clone(),
+            state,
+        };
+        say(
+            &mut there,
+            &buffer(reversed(11, *seq, &undone, Some(kept(0)))),
+        );
+        daemon.read_reached(link, Reading::Look);
+        // The client that asked hears what the step kept, under its own
+        // number; the other, the edit.
+        assert_eq!(
+            updates(&mut to_a),
+            [(local, reversed(11, 41, &undone, Some(kept(0))))]
+        );
+        let edited = BufferUpdate::Edited {
+            version: 11,
+            edit: undone,
+            author: Author::User,
+            answers: None,
+        };
+        assert_eq!(updates(&mut to_b), [(local, edited)]);
+        // An undo of a step that changes nothing makes no version: only
+        // the client that asked hears of it.
+        change(&mut daemon, a, local, 42, undo);
+        let seq = seq_of(&asked_of_buffers(&mut there)[0]);
+        let nothing = Edit::keep(5);
+        say(
+            &mut there,
+            &buffer(reversed(11, seq, &nothing, Some(kept(2)))),
+        );
+        daemon.read_reached(link, Reading::Look);
+        assert_eq!(
+            updates(&mut to_a),
+            [(local, reversed(11, 42, &nothing, Some(kept(2))))]
+        );
+        assert!(updates(&mut to_b).is_empty());
+        assert_eq!(
+            daemon.links.list[0].relayed.buffers[&local].version,
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn a_daemon_there_older_than_undo_steps_that_keep_anything_is_sent_changes_as_it_takes_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, link, mut there, local) = with_buffer(dir.path());
+        let (a, mut to_a) = client(&mut daemon);
+        attach(&mut daemon, (link, &mut there), a, local, 1);
+        updates(&mut to_a);
+        let Some(Source::Reached(reached)) = daemon.sources.get_mut(link.0) else {
+            panic!("connected");
+        };
+        reached.wire = clackatoo_protocol::wire::UNDO_STATE - 1;
+        // An edit that starts a step goes as an edit that starts one...
+        let step = Change::Step {
+            edit: Edit::replace(6, 0, "", "a"),
+            base: 10,
+            state: kept(0),
+        };
+        change(&mut daemon, a, local, 41, step);
+        let sent = asked_of_buffers(&mut there);
+        let [
+            ClientMessage::Edit {
+                seq, change: went, ..
+            },
+        ] = &sent[..]
+        else {
+            panic!("{sent:?}");
+        };
+        assert_eq!(*went, insert(0, "a", 10));
+        say(
+            &mut there,
+            &edited(11, &Edit::replace(6, 0, "", "a"), Some(*seq)),
+        );
+        daemon.read_reached(link, Reading::Look);
+        assert_eq!(
+            updates(&mut to_a),
+            [(
+                local,
+                BufferUpdate::Acked {
+                    version: 11,
+                    seq: 41
+                }
+            )]
+        );
+        // ...a step that changes nothing is answered here, as one that
+        // made nothing...
+        let empty = Change::Empty {
+            base: 11,
+            state: kept(0),
+        };
+        change(&mut daemon, a, local, 42, empty);
+        assert!(asked_of_buffers(&mut there).is_empty());
+        assert_eq!(updates(&mut to_a), [(local, BufferUpdate::NoChange(42))]);
+        // ...and an undo goes as one.
+        let undo = Change::Reverse {
+            redo: false,
+            base: 11,
+            visual: None,
+        };
+        change(&mut daemon, a, local, 43, undo);
+        let sent = asked_of_buffers(&mut there);
+        assert!(
+            matches!(
+                &sent[..],
+                [ClientMessage::Edit {
+                    change: Change::Undo,
+                    ..
+                }]
+            ),
+            "{sent:?}"
         );
     }
 }

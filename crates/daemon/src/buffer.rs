@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use clackatoo_protocol::{Author, BufferSnapshot, Edit, Error, Op, TerminalId};
 use clackatoo_text::{
-    History, HistoryError, HistorySnapshot, MOST_PIECES, Merged, Rope, Steps, merge,
+    History, HistoryError, HistorySnapshot, MOST_PIECES, Merged, Reversal, Rope, StepPlace,
+    StepSelection, StepState, StepVisual, Steps, merge,
 };
 
 use crate::handover;
@@ -145,6 +146,19 @@ pub(crate) struct Made {
     pub(crate) edit: Edit,
 }
 
+/// An undo or a redo made (see [`Buffer::reverse_keeping`]).
+#[derive(Debug)]
+pub(crate) struct Reversed {
+    /// The version it made, or the text's, if the step changes nothing.
+    pub(crate) version: u64,
+    /// The edit, which keeps the text if the step changes nothing.
+    pub(crate) edit: Edit,
+    /// What the step kept, its places in the text now.
+    pub(crate) state: Option<StepState>,
+    /// The step changes nothing, so no edit was made.
+    pub(crate) empty: bool,
+}
+
 impl Buffer {
     /// Opens the file at `path`, which is absolute, or a buffer for a new
     /// one there if there's none. Paths opened beside it are from `dir`.
@@ -260,13 +274,86 @@ impl Buffer {
         step: bool,
         author: Author,
     ) -> Result<Made, HistoryError> {
+        self.edit_keeping(edit, base, (step, None), author)
+    }
+
+    /// Makes `edit` as [`edit`](Self::edit) does, and if it starts a new
+    /// undo step, has the step keep `state`.
+    /// The state's places are in the text at `base`, and are brought up to
+    /// date with the edit; if that's too far back, the step keeps nothing.
+    pub(crate) fn edit_keeping(
+        &mut self,
+        edit: Edit,
+        base: u64,
+        (step, state): (bool, Option<StepState>),
+        author: Author,
+    ) -> Result<Made, HistoryError> {
         let mut edit = self.history.rebase(edit, base)?;
+        let state = state.and_then(|state| self.brought_up(state, base));
         if edit.ops().len() > MOST_PIECES {
             edit = edit.coarsened(&self.text, MOST_PIECES);
         }
         edit.apply(&mut self.text)?;
-        let version = self.history.record(edit.clone(), author, step)?;
+        let version = self
+            .history
+            .record_with(edit.clone(), author, step, state)?;
         Ok(Made { version, edit })
+    }
+
+    /// Starts an undo step for `author` that changes nothing, keeping
+    /// `state`, whose places are in the text at `base`.
+    pub(crate) fn empty_step(
+        &mut self,
+        base: u64,
+        state: StepState,
+        author: Author,
+    ) -> Result<(), HistoryError> {
+        let state = self.brought_up(state, base);
+        let len = self.text.len_bytes();
+        self.history.empty_step(&author, len, state)
+    }
+
+    /// Undoes `author`'s last step, or with `redo`, redoes the last undone,
+    /// steps that change nothing too, giving back what the step kept:
+    /// `visual`, the window's last selection in the text at `base`, is
+    /// kept in place of the step's (see [`History::reverse`]). `None` if
+    /// there's nothing to.
+    pub(crate) fn reverse_keeping(
+        &mut self,
+        author: Author,
+        redo: bool,
+        base: u64,
+        visual: Option<StepVisual>,
+    ) -> Result<Option<Reversed>, HistoryError> {
+        let visual = visual.and_then(|visual| {
+            let state = StepState {
+                visual: Some(visual),
+                ..StepState::default()
+            };
+            self.brought_up(state, base)?.visual
+        });
+        let Some(Reversal { edit, state, empty }) =
+            self.history.reverse(&author, !redo, visual, false)?
+        else {
+            return Ok(None);
+        };
+        edit.apply(&mut self.text)?;
+        let len = self.text.len_bytes();
+        Ok(Some(Reversed {
+            version: self.history.version(),
+            edit,
+            state: state.map(|state| state.within(len)),
+            empty,
+        }))
+    }
+
+    /// `state`, whose places are in the text at `base`, with them in the
+    /// text now, as far as it goes; `None` if `base` is too far back.
+    fn brought_up(&self, mut state: StepState, base: u64) -> Option<StepState> {
+        for edit in self.history.since_within(base).ok()? {
+            state.map(edit);
+        }
+        Some(state.within(self.text.len_bytes()))
     }
 
     /// Undoes `author`'s last step, or with `redo`, redoes the last they
@@ -617,8 +704,33 @@ impl Buffer {
         }
     }
 
-    /// A buffer the last build handed over.
-    pub(crate) fn resume(handed: handover::Buffer) -> Self {
+    /// What the buffer's undo steps keep, for the next build, if they
+    /// keep anything, or older steps were let go.
+    pub(crate) fn hand_over_undo(&self, id: u32) -> Option<handover::BufferUndo> {
+        let snapshot = self.history.snapshot();
+        let kept = (snapshot.steps.iter()).any(|steps| {
+            steps.forgot
+                || (steps.undo_states.iter().chain(&steps.redo_states)).any(Option::is_some)
+        });
+        kept.then(|| handover::BufferUndo {
+            buffer: id,
+            authors: (snapshot.steps.into_iter())
+                .map(|steps| handover::AuthorUndo {
+                    undo: (steps.undo_states.iter())
+                        .map(|state| hand_over_state(state.as_ref()))
+                        .collect(),
+                    redo: (steps.redo_states.iter())
+                        .map(|state| hand_over_state(state.as_ref()))
+                        .collect(),
+                    forgot: steps.forgot,
+                })
+                .collect(),
+        })
+    }
+
+    /// A buffer the last build handed over, with what its undo steps keep,
+    /// if they keep anything.
+    pub(crate) fn resume(handed: handover::Buffer, undo: Option<handover::BufferUndo>) -> Self {
         let text = Rope::from_str(&handed.text);
         let saved = handed
             .saved
@@ -635,11 +747,35 @@ impl Buffer {
                     .map(|(ops, author)| (resume_edit(ops), resume_author(author)))
                     .collect(),
                 steps: (history.steps.into_iter())
-                    .map(|steps| Steps {
-                        author: resume_author(steps.author),
-                        version: steps.version,
-                        undo: steps.undo.into_iter().map(resume_edit).collect(),
-                        redo: steps.redo.into_iter().map(resume_edit).collect(),
+                    .zip(
+                        undo.map(|undo| undo.authors)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(Some)
+                            .chain(std::iter::repeat_with(|| None)),
+                    )
+                    .map(|(steps, kept)| {
+                        let (undo_states, redo_states, forgot) = kept.map_or_else(
+                            || (Vec::new(), Vec::new(), false),
+                            |kept| {
+                                let resume = |states: Vec<Option<handover::UndoState>>| {
+                                    states
+                                        .into_iter()
+                                        .map(|state| state.map(resume_state))
+                                        .collect()
+                                };
+                                (resume(kept.undo), resume(kept.redo), kept.forgot)
+                            },
+                        );
+                        Steps {
+                            author: resume_author(steps.author),
+                            version: steps.version,
+                            undo: steps.undo.into_iter().map(resume_edit).collect(),
+                            redo: steps.redo.into_iter().map(resume_edit).collect(),
+                            undo_states,
+                            redo_states,
+                            forgot,
+                        }
                     })
                     .collect(),
             }),
@@ -899,6 +1035,46 @@ pub(crate) fn resume_edit(ops: Vec<handover::EditOp>) -> Edit {
         .unwrap_or_default()
 }
 
+/// What an undo step keeps, for the next build.
+fn hand_over_state(state: Option<&StepState>) -> Option<handover::UndoState> {
+    let place = |place: StepPlace| (place.line, place.col);
+    state.map(|state| handover::UndoState {
+        cursor: place(state.cursor),
+        taken: state.taken,
+        visual: state.visual.map(|visual| handover::UndoVisual {
+            start: place(visual.start),
+            end: place(visual.end),
+            kind: match visual.kind {
+                StepSelection::Characters => 0,
+                StepSelection::Lines => 1,
+                StepSelection::Block => 2,
+            },
+            backward: visual.backward,
+            to_end: visual.to_end,
+        }),
+    })
+}
+
+/// What an undo step keeps, as the last build handed it over.
+fn resume_state(state: handover::UndoState) -> StepState {
+    let place = |(line, col)| StepPlace { line, col };
+    StepState {
+        cursor: place(state.cursor),
+        taken: state.taken,
+        visual: state.visual.map(|visual| StepVisual {
+            start: place(visual.start),
+            end: place(visual.end),
+            kind: match visual.kind {
+                0 => StepSelection::Characters,
+                1 => StepSelection::Lines,
+                _ => StepSelection::Block,
+            },
+            backward: visual.backward,
+            to_end: visual.to_end,
+        }),
+    }
+}
+
 fn hand_over_author(author: Author) -> handover::Author {
     match author {
         Author::User => handover::Author::User,
@@ -1143,10 +1319,48 @@ mod tests {
         typed(&mut buffer, 0, "héllo", true);
         typed(&mut buffer, 6, "!", false);
         buffer.check_modified();
-        let mut resumed = Buffer::resume(buffer.hand_over(3));
+        let mut resumed = Buffer::resume(buffer.hand_over(3), buffer.hand_over_undo(3));
         assert_eq!(resumed.snapshot(), buffer.snapshot());
         assert!(resumed.modified());
         resumed.reverse(Author::User, false).unwrap().unwrap();
         assert_eq!(resumed.snapshot().text, "");
+    }
+
+    #[test]
+    fn what_undo_steps_keep_is_handed_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut buffer = Buffer::open(dir.path().join("a"), dir.path().to_owned()).unwrap();
+        assert!(buffer.hand_over_undo(3).is_none(), "nothing kept");
+        let state = |col| StepState {
+            cursor: StepPlace { line: 0, col },
+            taken: col > 0,
+            visual: Some(StepVisual {
+                start: StepPlace { line: 0, col: 1 },
+                end: StepPlace { line: 0, col },
+                kind: StepSelection::Block,
+                backward: true,
+                to_end: false,
+            }),
+        };
+        let edit = Edit::replace(0, 0, "", "abc");
+        buffer
+            .edit_keeping(edit, 0, (true, Some(state(0))), Author::User)
+            .unwrap();
+        buffer.empty_step(1, state(2), Author::User).unwrap();
+        let mut resumed = Buffer::resume(buffer.hand_over(3), buffer.hand_over_undo(3));
+        let first = resumed
+            .reverse_keeping(Author::User, false, 1, None)
+            .unwrap()
+            .unwrap();
+        assert!(first.empty);
+        assert_eq!(first.state, Some(state(2)));
+        let second = resumed
+            .reverse_keeping(Author::User, false, 1, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (second.state, resumed.text().to_string()),
+            (Some(state(0)), String::new())
+        );
     }
 }

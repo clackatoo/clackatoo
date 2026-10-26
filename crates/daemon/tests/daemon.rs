@@ -19697,3 +19697,157 @@ fn undoing_past_the_steps_kept_says_older_ones_were_let_go() {
     );
     assert_eq!(attach_buffer(&mut client, buffer).text, "x");
 }
+
+/// What an undo step keeps: the cursor on the line at byte `line`, `col`
+/// bytes in, and a selection of that line if `visual`.
+fn kept_state(line: u64, col: u32, visual: bool) -> clackatoo_protocol::StepState {
+    use clackatoo_protocol::{StepPlace, StepSelection, StepState, StepVisual};
+    let place = StepPlace { line, col };
+    StepState {
+        cursor: place,
+        taken: false,
+        visual: visual.then_some(StepVisual {
+            start: place,
+            end: place,
+            kind: StepSelection::Lines,
+            backward: false,
+            to_end: false,
+        }),
+    }
+}
+
+/// The answer to the client's change numbered `seq`, skipping the rest.
+fn change_answer(client: &mut Client, seq: u64) -> BufferUpdate {
+    loop {
+        match next_buffer_update(client) {
+            update @ (BufferUpdate::Acked { seq: answers, .. }
+            | BufferUpdate::NoChange(answers)
+            | BufferUpdate::Reversed { seq: answers, .. })
+                if answers == seq =>
+            {
+                return update;
+            }
+            update @ BufferUpdate::Edited {
+                answers: Some(answers),
+                ..
+            } if answers == seq => return update,
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn an_undo_step_gives_back_what_it_kept_brought_up_to_date() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("notes.txt"), "one\ntwo\n").unwrap();
+    let mut window = daemon.client();
+    let buffer = open_attached(&mut window, dir, "notes.txt");
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    // Another window puts a line in above, which this one hasn't heard of
+    // as it starts a step on "two", its cursor there.
+    send_change(&mut other, buffer, 1, insert(8, 0, "zero\n", 0));
+    assert!(matches!(
+        change_answer(&mut other, 1),
+        BufferUpdate::Acked { version: 1, .. }
+    ));
+    let step = Change::Step {
+        edit: Edit::replace(8, 4, "two", "2"),
+        base: 0,
+        state: kept_state(4, 1, true),
+    };
+    send_change(&mut window, buffer, 2, step);
+    assert!(matches!(
+        change_answer(&mut window, 2),
+        BufferUpdate::Acked { version: 2, .. }
+    ));
+    // Undone, it gives back its cursor, on its line still, and the
+    // selection it kept, keeping the window's in its place for the redo.
+    let mine = kept_state(9, 0, true).visual;
+    let undo = Change::Reverse {
+        redo: false,
+        base: 2,
+        visual: mine,
+    };
+    send_change(&mut window, buffer, 3, undo);
+    let BufferUpdate::Reversed {
+        version: 3, state, ..
+    } = change_answer(&mut window, 3)
+    else {
+        panic!("not reversed");
+    };
+    assert_eq!(state, Some(kept_state(9, 1, true)));
+    let redo = Change::Reverse {
+        redo: true,
+        base: 3,
+        visual: None,
+    };
+    send_change(&mut window, buffer, 4, redo);
+    let BufferUpdate::Reversed { state, .. } = change_answer(&mut window, 4) else {
+        panic!("not reversed");
+    };
+    let state = state.unwrap();
+    assert_eq!((state.cursor.col, state.visual), (1, mine));
+    assert_eq!(
+        attach_buffer(&mut daemon.client(), buffer).text,
+        "zero\none\n2\n"
+    );
+}
+
+#[test]
+fn a_step_that_changes_nothing_is_undone_alone_and_older_windows_pass_it_over() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("notes.txt"), "abc\n").unwrap();
+    let mut window = daemon.client();
+    let buffer = open_attached(&mut window, dir, "notes.txt");
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    send_change(&mut window, buffer, 1, insert(4, 0, "x", 0));
+    change_answer(&mut window, 1);
+    // As Vim's `3J` on the last line.
+    let empty = Change::Empty {
+        base: 1,
+        state: kept_state(0, 2, false),
+    };
+    send_change(&mut window, buffer, 2, empty);
+    assert_eq!(change_answer(&mut window, 2), BufferUpdate::NoChange(2));
+    // Undone, it changes nothing, makes no version, and gives back its
+    // cursor; no other window hears of it.
+    let undo = Change::Reverse {
+        redo: false,
+        base: 1,
+        visual: None,
+    };
+    send_change(&mut window, buffer, 3, undo.clone());
+    let BufferUpdate::Reversed {
+        version: 1,
+        edit,
+        state,
+        ..
+    } = change_answer(&mut window, 3)
+    else {
+        panic!("not reversed");
+    };
+    assert!(edit.is_noop());
+    assert_eq!(state, Some(kept_state(0, 2, false)));
+    // Redone, and undone by a window that can't take steps that change
+    // nothing: it passes over it, to the `x`.
+    send_change(
+        &mut window,
+        buffer,
+        4,
+        Change::Reverse {
+            redo: true,
+            base: 1,
+            visual: None,
+        },
+    );
+    change_answer(&mut window, 4);
+    send_change(&mut other, buffer, 5, Change::Undo);
+    let BufferUpdate::Edited { version: 2, .. } = change_answer(&mut other, 5) else {
+        panic!("the x not undone");
+    };
+    assert_eq!(attach_buffer(&mut daemon.client(), buffer).text, "abc\n");
+}

@@ -72,6 +72,10 @@
 //! 30. Retained original image data and references from prompt/tool thumbnails.
 //! 31. Pending user messages, restored paused after an upgrade.
 //! 32. Explicit continuations for turns interrupted by a planned upgrade.
+//! 33. Managed agent activities, as a versioned journal.
+//! 34. What buffers' undo steps keep, as Vim's undo header does: where the
+//!     cursor was and the last selection, for each step; which steps
+//!     change nothing; and whether older steps were let go.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -84,12 +88,12 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 33;
+pub(crate) const VERSION: u32 = 34;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-    27, 28, 29, 30, 31, 32, VERSION,
+    27, 28, 29, 30, 31, 32, 33, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -231,6 +235,47 @@ pub(crate) struct State {
     pub(crate) chat_continuations: Vec<ChatContinuation>,
     /// Versioned managed-operation records, since version 33.
     pub(crate) activities: Vec<u8>,
+    /// What the buffers' undo steps keep, since version 34; before, they
+    /// kept nothing, and none changed nothing.
+    pub(crate) undo_states: Vec<BufferUndo>,
+}
+
+/// What a buffer's undo steps keep (see [`clackatoo_text::StepState`]):
+/// for each author, in the order its history lists them. Since version 34.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BufferUndo {
+    pub(crate) buffer: u32,
+    pub(crate) authors: Vec<AuthorUndo>,
+}
+
+/// What an author's undo and redo steps keep, as many of each as
+/// [`AuthorSteps`] has, and whether older steps were let go. A step whose
+/// edit keeps its text changes nothing. Since version 34.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct AuthorUndo {
+    pub(crate) undo: Vec<Option<UndoState>>,
+    pub(crate) redo: Vec<Option<UndoState>>,
+    pub(crate) forgot: bool,
+}
+
+/// What one undo step keeps. Since version 34.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) struct UndoState {
+    /// The cursor: a byte on its line, and its column in bytes.
+    pub(crate) cursor: (u64, u32),
+    pub(crate) taken: bool,
+    pub(crate) visual: Option<UndoVisual>,
+}
+
+/// The last selection an undo step keeps. Since version 34.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) struct UndoVisual {
+    pub(crate) start: (u64, u32),
+    pub(crate) end: (u64, u32),
+    /// 0 by characters, 1 by lines, 2 a block.
+    pub(crate) kind: u8,
+    pub(crate) backward: bool,
+    pub(crate) to_end: bool,
 }
 
 /// Frozen originals, with handles attached by turn/tool/image position.
@@ -1050,6 +1095,7 @@ impl State {
             30 => Ok(postcard::from_bytes::<v30::State>(body)?.into()),
             31 => Ok(postcard::from_bytes::<v31::State>(body)?.into()),
             32 => Ok(postcard::from_bytes::<v32::State>(body)?.into()),
+            33 => Ok(postcard::from_bytes::<v33::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -1140,6 +1186,7 @@ mod v31 {
                 chat_queues: state.chat_queues,
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -1228,6 +1275,7 @@ mod v30 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -1315,6 +1363,7 @@ mod v29 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -1401,6 +1450,7 @@ mod v28 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -1485,6 +1535,7 @@ mod v27 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -1572,6 +1623,7 @@ mod v26 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -1656,6 +1708,7 @@ mod v25 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -1738,6 +1791,7 @@ mod v24 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -1818,6 +1872,7 @@ mod v23 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -1911,6 +1966,7 @@ mod v22 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -1987,6 +2043,7 @@ mod v21 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -2061,6 +2118,7 @@ mod v20 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -2131,6 +2189,7 @@ mod v19 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -2201,6 +2260,7 @@ mod v18 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -2736,6 +2796,7 @@ mod v7 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -2830,6 +2891,7 @@ mod v8 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -2894,6 +2956,7 @@ mod v9 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -2960,6 +3023,7 @@ mod v11 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -3075,6 +3139,7 @@ mod v15 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -3144,6 +3209,7 @@ mod v14 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -3211,6 +3277,7 @@ mod v13 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -3320,6 +3387,7 @@ mod v12 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -3427,6 +3495,7 @@ mod v10 {
                 chat_queues: Vec::new(),
                 chat_continuations: Vec::new(),
                 activities: Vec::new(),
+                undo_states: Vec::new(),
             }
         }
     }
@@ -3696,6 +3765,27 @@ mod tests {
                 ino: 1_234_567,
             }],
             activities: b"[1,[]]".to_vec(),
+            undo_states: vec![BufferUndo {
+                buffer: 1,
+                authors: vec![AuthorUndo {
+                    undo: vec![
+                        Some(UndoState {
+                            cursor: (4, 2),
+                            taken: true,
+                            visual: Some(UndoVisual {
+                                start: (4, 0),
+                                end: (9, 3),
+                                kind: 1,
+                                backward: false,
+                                to_end: false,
+                            }),
+                        }),
+                        None,
+                    ],
+                    redo: Vec::new(),
+                    forgot: true,
+                }],
+            }],
             chat_continuations: vec![ChatContinuation {
                 chat: 2,
                 turn: 0,
@@ -3959,6 +4049,24 @@ mod tests {
     }
 
     #[test]
+    fn version_34_keeps_what_undo_steps_keep() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v34.bin"))
+            .unwrap();
+        let read = State::read(&mut file).unwrap();
+        let undo = &read.undo_states[0];
+        assert_eq!(undo.buffer, 1);
+        let author = &undo.authors[0];
+        assert!(author.forgot);
+        let state = author.undo[0].unwrap();
+        assert_eq!((state.cursor, state.taken), ((4, 2), true));
+        let visual = state.visual.unwrap();
+        assert_eq!((visual.start, visual.end, visual.kind), ((4, 0), (9, 3), 1));
+        assert!(author.undo[1].is_none());
+        assert!(author.redo.is_empty());
+    }
+
+    #[test]
     fn version_33_keeps_the_operation_journal() {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v33.bin"))
@@ -3966,6 +4074,7 @@ mod tests {
         let read = State::read(&mut file).unwrap();
         assert_eq!(read.activities, b"[1,[]]");
         assert!(!read.chat_continuations.is_empty());
+        assert!(read.undo_states.is_empty(), "steps kept nothing");
     }
 
     #[test]
@@ -4325,11 +4434,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v33.bin"]
+    #[ignore = "writes tests/fixtures/handover-v34.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v33.bin"
+            "/tests/fixtures/handover-v34.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();
@@ -4871,6 +4980,161 @@ mod v32 {
                 chat_queues: state.chat_queues,
                 chat_continuations: state.chat_continuations,
                 activities: Vec::new(),
+                undo_states: Vec::new(),
+            }
+        }
+    }
+}
+
+/// Version 33, before undo steps kept anything. Keep this shape frozen.
+mod v33 {
+    use super::{
+        Applied, Background, Borrower, Buffer, Chat, ChatContinuation, ChatPreviews, ChatQueue,
+        Connection, Deserialize, EditLog, Exe, Files, ImageOriginals, Kept, Known, Lender, Lent,
+        Process, Restored, Reviews, Sharing, Shell, Terminal, ToolPreviews, Trusted, Workspaces,
+    };
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        /// The listening socket.
+        listener: u32,
+        /// The runtime directory's lock, set by whoever holds it.
+        lock: Option<u32>,
+        /// The ID the next terminal gets.
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        /// Chats with agents, which are terminals too: their IDs are
+        /// terminals' IDs.
+        chats: Vec<Chat>,
+        /// Closed terminals' programs that haven't exited yet, and agents that
+        /// were stopped.
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        /// The ID the next buffer gets.
+        next_buffer: u32,
+        /// Files being edited.
+        buffers: Vec<Buffer>,
+        /// The ID the next file explorer gets.
+        next_files: u32,
+        /// File explorers.
+        explorers: Vec<Files>,
+        /// What agents changed in files.
+        edits: EditLog,
+        /// The last change each window sent each buffer. Since version 14.
+        applied: Vec<Applied>,
+        /// The daemon's own number, chosen at random when it first started:
+        /// see [`BufferSnapshot::daemon`](clackatoo_protocol::BufferSnapshot).
+        /// Since version 14; 0 before, for the build reading it to choose one.
+        daemon: u64,
+        /// What agents changed that the user hasn't reviewed, and reviews.
+        reviews: Reviews,
+        /// The lock on the recovery files, if the daemon keeps them (see
+        /// `crate::recovery`). Since version 19.
+        recovery_lock: Option<u32>,
+        /// The secrets of the terminals' shells that have one. Since version
+        /// 20; before, no shell had one.
+        shells: Vec<Shell>,
+        /// Which machine the daemon is: its ID (see
+        /// [`MachineId`](clackatoo_protocol::MachineId)). Since version 21;
+        /// `None` before, for the build reading it to take the one its state
+        /// directory keeps.
+        machine: Option<[u8; 16]>,
+        /// The daemon's connections to the daemons on other machines. Since
+        /// version 21; before, there were none.
+        connections: Vec<Connection>,
+        /// The workspaces lent to the daemons on other machines. Since version
+        /// 22; before, there were none.
+        lent: Vec<Lent>,
+        /// The machines they're lent to. Since version 22.
+        borrowers: Vec<Borrower>,
+        /// What the machines the panes borrowed are on are called. Since
+        /// version 23; before, none were known.
+        lenders: Vec<Lender>,
+        /// Which of the connections aren't passed on, and the machine each
+        /// was last connected to, by host. Since version 24; before, every
+        /// one was passed on, and none's machine was known.
+        sharing: Vec<Sharing>,
+        /// The seed of the machine's identity key (see `crate::machine`).
+        /// Since version 24; before, the next build reads it from the
+        /// `machine` file, or chooses one.
+        key: Option<[u8; 32]>,
+        /// The identity keys of other machines the daemon knows. Since version
+        /// 24; before, none were known.
+        keys: Vec<Known>,
+        /// The workspaces' background tabs. Since version 25; before, there
+        /// were none.
+        background: Vec<Background>,
+        /// The terminals the user marked to keep running. Since version 26;
+        /// before, none was. How running each again was going isn't handed
+        /// over: it starts again.
+        kept: Vec<Kept>,
+        /// Each terminal's blocks whose commands its shell's integration said,
+        /// with its secret, so the command a shell ran last is still known to
+        /// be its own: [`Shell::trusted`] says only the latest block's. Since
+        /// version 26; before, only that one was.
+        trusted: Vec<Trusted>,
+        /// The program each terminal was started as, so one its shell has
+        /// become another program in, as with `exec`, is still known to have
+        /// no shell to type into. Since version 26; before, none was known.
+        exes: Vec<Exe>,
+        /// What panes made again as the daemon last started afresh still have
+        /// to show for it (see
+        /// [`Workspaces::restored`](clackatoo_protocol::Workspaces::restored)).
+        /// Since version 27: `None` from a build before, which couldn't hand
+        /// them over, as distinct from one that had none to.
+        restored: Option<Vec<Restored>>,
+        /// Small image previews retained by chat and turn, since version 28.
+        chat_previews: Vec<ChatPreviews>,
+        /// Thumbnails attached to tools, since version 29.
+        tool_previews: Vec<ToolPreviews>,
+        /// Compressed originals and thumbnail handles, since version 30.
+        image_originals: Vec<ImageOriginals>,
+        /// Pending drafts, resumed paused unless continuing a turn, since version 31.
+        chat_queues: Vec<ChatQueue>,
+        /// Only work interrupted by this upgrade, since version 32.
+        chat_continuations: Vec<ChatContinuation>,
+        /// Versioned managed-operation records, since version 33.
+        activities: Vec<u8>,
+    }
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: state.recovery_lock,
+                shells: state.shells,
+                machine: state.machine,
+                connections: state.connections,
+                lent: state.lent,
+                borrowers: state.borrowers,
+                lenders: state.lenders,
+                sharing: state.sharing,
+                key: state.key,
+                keys: state.keys,
+                background: state.background,
+                kept: state.kept,
+                trusted: state.trusted,
+                exes: state.exes,
+                restored: state.restored,
+                chat_previews: state.chat_previews,
+                tool_previews: state.tool_previews,
+                image_originals: state.image_originals,
+                chat_queues: state.chat_queues,
+                chat_continuations: state.chat_continuations,
+                activities: state.activities,
+                undo_states: Vec::new(),
             }
         }
     }

@@ -1178,6 +1178,7 @@ impl Daemon {
         let mut continuing = Vec::new();
         let chats = std::mem::take(&mut handover.state.chats);
         let buffers = std::mem::take(&mut handover.state.buffers);
+        let mut undo_states = std::mem::take(&mut handover.state.undo_states);
         let explorers = std::mem::take(&mut handover.state.explorers);
         let edits = std::mem::take(&mut handover.state.edits);
         let reviews = std::mem::take(&mut handover.state.reviews);
@@ -1260,7 +1261,10 @@ impl Daemon {
         daemon.workspaces.set_machine(daemon.machine.clone());
         for buffer in buffers {
             let id = BufferId(buffer.id);
-            let mut slot = BufferSlot::new(Buffer::resume(buffer));
+            let undo = (undo_states.iter())
+                .position(|undo| undo.buffer == buffer.id)
+                .map(|at| undo_states.swap_remove(at));
+            let mut slot = BufferSlot::new(Buffer::resume(buffer, undo));
             slot.applied = (state.applied.iter())
                 .filter(|applied| applied.buffer == id.0)
                 .map(|applied| {
@@ -1483,6 +1487,9 @@ impl Daemon {
                 next_buffer: self.next_buffer,
                 buffers: (self.buffers.iter())
                     .map(|(id, slot)| slot.buffer.hand_over(id.0))
+                    .collect(),
+                undo_states: (self.buffers.iter())
+                    .filter_map(|(id, slot)| slot.buffer.hand_over_undo(id.0))
                     .collect(),
                 next_files,
                 explorers,
