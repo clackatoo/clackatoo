@@ -941,6 +941,18 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "background",
         what: ":bg CMD beside a pane borrowed from another machine runs it there, in a background tab here",
     },
+    News {
+        id: "window-finds",
+        date: "2026-10-26",
+        lesson: "words",
+        what: "; and , find again the window's last f, t, F or T, whichever pane it was typed in",
+    },
+    News {
+        id: "terminal-registers",
+        date: "2026-10-26",
+        lesson: "basics",
+        what: "y in a terminal yanks into the registers, \"x too, so p puts it in an editor, lines as lines",
+    },
 ];
 
 impl News {

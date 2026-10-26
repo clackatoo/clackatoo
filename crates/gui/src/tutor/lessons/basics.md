@@ -50,6 +50,16 @@ Move it onto the line that says `hello` with `k`, and copy the line with `yy`. W
 copied "hello"
 ```
 
+## Keep it in a register
+
+What `y` copies in a terminal goes into the registers, as an editor's yank does: the unnamed register, which `p` in an editor puts, and `"0`, and the clipboard as the `clipboard` option says. Lines copied by lines go in as lines, so `p` puts them below the cursor's line. `"` and a register's name before `y` keeps the text there instead, as in an editor: `"a` to `"z` are yours, and `"+` is the clipboard, which Ctrl+Shift+C copies to. Text selected with the mouse goes on the primary selection, `"*`, alone, as in Vim.
+
+On the same line, type `"ayy`. In any editor, `"ap` would put `hello` on a line of its own.
+
+```check
+register a "hello\n"
+```
+
 ## Split the pane
 
 Type `:|` and press Enter. `:` opens the command line, in the middle of the window, and `|` splits the focused pane, with a new terminal to its right. `:-` would put it below, and `:|<` and `:-^` to the left and above. While the command line is open, the bar keeps the mode and the tabs, and the pane's cursor is hollow, as what you type goes to the line, not the pane.

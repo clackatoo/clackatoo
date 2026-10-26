@@ -15,6 +15,10 @@ The practice file is CSS. Its grammar needn't be installed: clackatoo knows CSS'
 }
 ```
 
+```practice sizes.txt
+wide gap: 8px
+```
+
 ## Delete a whole name with diw
 
 `iw` is the word under the cursor. In plain text, `margin-top` is two words with a `-` between; in CSS it's one.
@@ -74,4 +78,19 @@ On the `margin-top` line in `.wide`, press `-` to go to `.wide {`.
 
 ```check
 at ".wide"
+```
+
+## One find for the whole window
+
+`;` and `,` find again the last `f`, `t`, `F` or `T` typed anywhere in the window, as Vim keeps one for the window: in another file's editor, a terminal's normal mode or a chat.
+
+```setup
+cursor 2
+```
+
+On the first `margin-top` line, type `fp` to find the `p` of `top`. Then type `:|Editor sizes.txt` and press Enter, to open `sizes.txt` beside it, and there type `;`: it finds the next `p` on that line, though you never typed `fp` there.
+
+```check
+file sizes.txt
+at "gap"
 ```

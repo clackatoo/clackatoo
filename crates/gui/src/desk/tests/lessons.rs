@@ -284,6 +284,17 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     }
     assert_eq!(step(&desk), 4);
 
+    // Kept in a register named first, as an editor's yank is.
+    type_keys(&mut desk, "\"ayy");
+    for request in take_requests(&mut desk) {
+        let response = match request {
+            Request::Text { .. } => Response::Text("hello".into()),
+            _ => Response::Done,
+        };
+        desk.answered(response);
+    }
+    assert_eq!(step(&desk), 5);
+
     // A split, gone to and back from, and closed.
     command(&mut desk, "|");
     let asked = take_requests(&mut desk);
@@ -300,16 +311,16 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     desk.answered(Response::PaneCreated(PaneId(4)));
     answer_all(&mut desk);
     snapshot(&mut desk, 4);
-    assert_eq!(step(&desk), 5);
+    assert_eq!(step(&desk), 6);
     assert_eq!(shown_pane(&desk), PaneId(4));
     ctrl(&mut desk, "h");
-    assert_eq!(step(&desk), 6);
+    assert_eq!(step(&desk), 7);
     // Back to the new pane in insert mode, which it arrives in.
     type_keys(&mut desk, "i");
-    assert_eq!(step(&desk), 6, "the practice terminal doesn't count");
+    assert_eq!(step(&desk), 7, "the practice terminal doesn't count");
     ctrl_b(&mut desk, "l");
     assert_eq!(mode(&desk, 4), Mode::Insert);
-    assert_eq!(step(&desk), 7);
+    assert_eq!(step(&desk), 8);
     ctrl_b(&mut desk, "x");
     let asked = take_requests(&mut desk);
     assert!(
@@ -322,7 +333,7 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     let two = side_by_side(vec![file_pane(3, 8), pane(2)]);
     desk.workspaces_changed(workspaces(vec![with_lesson(two.clone(), vec![], 2)]));
     answer_all(&mut desk);
-    assert_eq!(step(&desk), 8);
+    assert_eq!(step(&desk), 9);
     assert_eq!(
         mode(&desk, 2),
         Mode::Insert,
@@ -335,13 +346,13 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     type_keys(&mut desk, ":set norel");
     key(&mut desk, NamedKey::Tab);
     enter(&mut desk);
-    assert_eq!(step(&desk), 9);
+    assert_eq!(step(&desk), 10);
     type_keys(&mut desk, ":set");
     key(&mut desk, NamedKey::ArrowUp);
     ctrl(&mut desk, "w");
     type_keys(&mut desk, "rnu");
     enter(&mut desk);
-    assert_eq!(step(&desk), 10);
+    assert_eq!(step(&desk), 11);
 
     // A tab of its own, and back.
     command(&mut desk, "Terminal");
@@ -357,10 +368,10 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     desk.answered(Response::PaneCreated(PaneId(5)));
     answer_all(&mut desk);
     snapshot(&mut desk, 5);
-    assert_eq!(step(&desk), 11);
+    assert_eq!(step(&desk), 12);
     command(&mut desk, "2");
     answer_all(&mut desk);
-    assert_eq!(step(&desk), 12);
+    assert_eq!(step(&desk), 13);
 
     // A workspace of its own, and back.
     command(&mut desk, "ws tutor");
@@ -376,20 +387,20 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     desk.answered(Response::PaneCreated(PaneId(6)));
     answer_all(&mut desk);
     snapshot(&mut desk, 6);
-    assert_eq!(step(&desk), 13);
+    assert_eq!(step(&desk), 14);
     ctrl_b(&mut desk, "w");
     type_text(&mut desk, "w");
     enter(&mut desk);
     answer_all(&mut desk);
     assert_eq!(desk.shown().unwrap().tab, TabId(2));
-    assert_eq!(step(&desk), 14);
+    assert_eq!(step(&desk), 15);
 
     // What the bar has said.
     command(&mut desk, "messages");
-    assert_eq!(step(&desk), 15);
+    assert_eq!(step(&desk), 16);
     // The last step is to read: `]s` goes on, to the end.
     let lesson = tutor::lesson("basics").unwrap();
-    assert!(lesson.steps[15].checks.is_empty());
+    assert!(lesson.steps[16].checks.is_empty());
     ctrl(&mut desk, "l");
     assert_eq!(shown_pane(&desk), PaneId(2));
     type_keys(&mut desk, "]s");

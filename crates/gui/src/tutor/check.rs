@@ -7,7 +7,7 @@
 //! | `line N` | The focused editor's cursor is on line N, from 1. |
 //! | `at "TEXT"` | The focused editor's cursor is in TEXT, on its line. |
 //! | `register R "TEXT"` | Register R holds TEXT, exactly. |
-//! | `copied "TEXT"` | What was last copied to the clipboard has TEXT in it. |
+//! | `copied "TEXT"` | What was last copied to the clipboard, or yanked, has TEXT in it. |
 //! | `mode MODE` | The focused pane is in `normal`, `insert`, `visual`, `visual-line` or `visual-block` mode. |
 //! | `pane KIND` | The lesson's tab has a pane of KIND: `terminal`, `editor`, `folder` (an editor showing a folder), `blank` (an editor showing a buffer with no file yet), `explorer`, `chat` or `board`. |
 //! | `panes N` | The lesson's tab has N panes. |
@@ -247,9 +247,13 @@ impl Check {
                     .any(|(start, found)| (start..start + found.len()).contains(&byte))
             }),
             Self::Register(name, text) => facts.register(*name).is_some_and(|held| held == *text),
-            Self::Copied(text) => facts
-                .register('+')
-                .is_some_and(|held| held.contains(text.as_str())),
+            // The unnamed register too, for a yank kept off the clipboard by
+            // `clipboard`.
+            Self::Copied(text) => ['+', '"'].into_iter().any(|name| {
+                facts
+                    .register(name)
+                    .is_some_and(|held| held.contains(text.as_str()))
+            }),
             Self::Mode(mode) => facts.mode() == Some(*mode),
             Self::Pane(kind) => facts.panes().contains(kind),
             Self::Panes(count) => facts.panes().len() == *count,
@@ -511,6 +515,13 @@ mod tests {
         assert!(holds(r#"register a "one\n""#, &facts));
         assert!(!holds(r#"register a "one""#, &facts));
         assert!(holds(r#"copied "42""#, &facts));
+        assert!(!holds(r#"copied "one""#, &facts));
+        // A yank `clipboard` kept off the clipboard is copied too.
+        let yanked = Made {
+            registers: vec![('"', "hello\n".into())],
+            ..Made::default()
+        };
+        assert!(holds(r#"copied "hello""#, &yanked));
         assert!(holds("recording q", &facts));
         assert!(!holds("messages", &facts));
         let facts = Made {
