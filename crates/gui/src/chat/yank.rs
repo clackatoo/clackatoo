@@ -79,26 +79,13 @@ impl ChatView {
         // Moved to see where the motion goes, and put back: the view
         // doesn't follow it, nor the chat's end, as `G` would have it.
         let (goal, follow, reveal) = (self.goal, self.follow, self.reveal);
-        self.moved(motion, count);
-        let moved = self.cursor.unwrap_or(start);
+        let moved = self.operator_end(motion, count, start);
         let moved_goal = self.goal;
         self.cursor = Some(start);
         (self.goal, self.follow, self.reveal) = (goal, follow, reveal);
-        // A find that found nothing takes nothing.
-        if matches!(motion, Motion::Find { .. }) && moved == start {
+        // A find that found nothing takes nothing, as `j` on the last line.
+        let Some(moved) = moved else {
             return;
-        }
-        // `w` from the chat's last word goes nowhere, and takes the rest
-        // of its block, as Vim's from a file's last word takes the rest of
-        // its line.
-        let moved = match motion {
-            Motion::WordStart | Motion::BigWordStart if moved == start => {
-                let end = self
-                    .text(start.text)
-                    .map_or(start.byte, |text| text.text.len());
-                Position { byte: end, ..start }
-            }
-            _ => moved,
         };
         let (first, last) = if moved < start {
             (moved, start)
@@ -129,6 +116,114 @@ impl ChatView {
             self.goal = moved_goal;
             self.reveal = true;
         }
+    }
+
+    /// Where `motion`, `count` typed, goes from `start` as what an operator
+    /// takes, or `None` if it fails. A chat's cursor moves by the rows its
+    /// lines wrap onto, but what an operator takes goes by the lines
+    /// themselves, each block's own, as Vim's operators go by a file's
+    /// lines: `0`, `^`, `$`, `f` and its kin within the line, and `j`,
+    /// `k`, `+` and `-` a line at a time. `w` and `W` stop at the end of
+    /// the line on the last word, as Vim's do under an operator, and at the
+    /// end of the line if there are fewer words than the count.
+    fn operator_end(
+        &mut self,
+        motion: Motion,
+        count: Option<usize>,
+        start: Position,
+    ) -> Option<Position> {
+        let times = count.unwrap_or(1).max(1);
+        let line = (self.text(start.text)).map(|text| hard_line(text.text, start.byte));
+        let at = |byte| Position { byte, ..start };
+        match motion {
+            Motion::LineStart => Some(line.map_or(start, |(first, _)| at(first))),
+            Motion::FirstNonBlank => {
+                let text = self.text(start.text)?;
+                let (first, last) = hard_line(text.text, start.byte);
+                let words = &text.text[first..last];
+                Some(at(first + words.len() - words.trim_start().len()))
+            }
+            Motion::LineEnd => {
+                let mut end = start;
+                for _ in 1..times {
+                    end = self.next_line(end)?;
+                }
+                let text = self.text(end.text)?;
+                let (first, last) = hard_line(text.text, end.byte);
+                // Nothing on an empty line.
+                (last > first).then(|| Position {
+                    byte: super::paint::before(text.text, last),
+                    ..end
+                })
+            }
+            Motion::Find {
+                ch,
+                forward,
+                till,
+                again,
+            } => {
+                let text = self.text(start.text)?;
+                let (first, last) = hard_line(text.text, start.byte);
+                let find = (ch, forward, till, again);
+                super::read::find_in(text.text, first..last, start.byte, find, times).map(at)
+            }
+            Motion::Down(_) | Motion::NextLine => self.lines_on(start, times, true),
+            Motion::Up(_) | Motion::PreviousLine => self.lines_on(start, times, false),
+            Motion::WordStart | Motion::BigWordStart => Some(self.words_on(motion, times, start)),
+            _ => {
+                self.moved(motion, count);
+                self.cursor
+            }
+        }
+    }
+
+    /// `times` lines on from `start`, or back if not `down`, as many as
+    /// there are; `None` if there are none.
+    fn lines_on(&self, start: Position, times: usize, down: bool) -> Option<Position> {
+        let mut at = start;
+        for _ in 0..times {
+            let next = if down {
+                self.next_line(at)
+            } else {
+                self.previous_line(at)
+            };
+            match next {
+                Some(next) => at = next,
+                None => break,
+            }
+        }
+        (at != start).then_some(at)
+    }
+
+    /// `w` or `W`, `times` times, from `start`, as an operator takes it:
+    /// to the end of the line, rather than the next line's first word, on
+    /// the last, and to the end of the line where the words run out.
+    fn words_on(&mut self, motion: Motion, times: usize, start: Position) -> Position {
+        let mut at = start;
+        for step in 0..times {
+            self.cursor = Some(at);
+            self.move_once(motion);
+            let next = self.cursor.unwrap_or(at);
+            if next == at || (step + 1 == times && !self.same_line(at, next)) {
+                return self.line_end(at);
+            }
+            at = next;
+        }
+        at
+    }
+
+    /// Whether `a` and `b` are on the same line of the same block.
+    fn same_line(&self, a: Position, b: Position) -> bool {
+        a.text == b.text
+            && (self.text(a.text)).is_some_and(|text| {
+                hard_line(text.text, a.byte).0 == hard_line(text.text, b.byte).0
+            })
+    }
+
+    /// The end of the line `at` is on, before its line break.
+    fn line_end(&self, at: Position) -> Position {
+        let end = (self.text(at.text)).map_or(at.byte, |text| hard_line(text.text, at.byte).1);
+        Position { byte: end, ..at }
     }
 
     /// Where an exclusive motion from `start` to `end` takes text up to,
@@ -187,6 +282,23 @@ impl ChatView {
         if let Some((from, to)) = self.range_of(visual(start, end, Selection::Lines)) {
             self.queue_yank(from, to, true, CopyTo::Register(name));
         }
+    }
+
+    /// Somewhere on the line before the one `at` is on: in its block, or
+    /// the last line of the block of text before.
+    fn previous_line(&self, at: Position) -> Option<Position> {
+        if let Some(text) = self.text(at.text) {
+            let (first, _) = hard_line(text.text, at.byte);
+            if first > 0 {
+                return Some(Position {
+                    byte: first - 1,
+                    ..at
+                });
+            }
+        }
+        let key = self.previous_text(at.text)?;
+        let byte = self.text(key).map_or(0, |text| text.text.len());
+        Some(Position { text: key, byte })
     }
 
     /// The start of the line after the one `at` is on: in its block, or
@@ -582,6 +694,56 @@ mod tests {
             !has(&after, "if", "") && !has(&after, "ib", ""),
             "{after:?}"
         );
+    }
+
+    #[test]
+    fn under_y_lines_are_each_blocks_own_not_the_rows_they_wrap_onto() {
+        let long = "word ".repeat(80);
+        let long = long.trim_end();
+        let answer = format!("{long}\n\nnext");
+        let (mut chat, mut fonts) = reading(talk(&[("one", &answer)]));
+        read(&mut chat, "gg}");
+        // It wraps: `j` alone goes to the next row, in the same block.
+        read(&mut chat, "j");
+        assert_eq!(chat.cursor.unwrap().text.part, 0, "wrapped");
+        read(&mut chat, "0k0");
+        // `y$` takes the whole line, `yj` the next line too.
+        read(&mut chat, "y$");
+        assert_eq!(yanked(&mut chat, &mut fonts), [chars(long)]);
+        read(&mut chat, "yj");
+        assert_eq!(
+            yanked(&mut chat, &mut fonts),
+            [lines(&format!("{long}\n\nnext\n"))]
+        );
+        // `f` finds on the line, past the row.
+        read(&mut chat, "y60fw");
+        let found = yanked(&mut chat, &mut fonts).remove(0).0;
+        assert_eq!(found.len(), "word ".len() * 60 + 1, "{found}");
+        // `0` and `^` from a row further down go to the line's start, not
+        // the row's.
+        read(&mut chat, "jj");
+        let row = chat.cursor.unwrap();
+        assert_eq!(row.text.part, 0);
+        read(&mut chat, "y0");
+        assert_eq!(yanked(&mut chat, &mut fonts)[0].0.len(), row.byte);
+        read(&mut chat, "jjy^");
+        assert_eq!(yanked(&mut chat, &mut fonts)[0].0.len(), row.byte);
+    }
+
+    #[test]
+    fn yw_stops_at_the_lines_end_and_ytx_takes_the_character_under_the_cursor() {
+        let code = "```\nalpha beta\n  gamma\n\nend\n```";
+        let (mut chat, mut fonts) = reading(talk(&[("one", code)]));
+        read(&mut chat, "gg}");
+        read(&mut chat, "wyw");
+        assert_eq!(yanked(&mut chat, &mut fonts), [chars("beta")]);
+        // `t` with the character just after: the one under the cursor.
+        read(&mut chat, "0ytl");
+        assert_eq!(yanked(&mut chat, &mut fonts), [chars("a")]);
+        // More words than there are: to the end.
+        let (mut chat, mut fonts) = reading(talk(&[("one", "alpha beta")]));
+        read(&mut chat, "gg}y3w");
+        assert_eq!(yanked(&mut chat, &mut fonts), [chars("alpha beta")]);
     }
 
     #[test]

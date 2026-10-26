@@ -639,7 +639,7 @@ impl ChatView {
 
     /// Moves the cursor once by `motion`, one of those [`ChatKeys`]
     /// takes.
-    fn move_once(&mut self, motion: Motion) {
+    pub(super) fn move_once(&mut self, motion: Motion) {
         match motion {
             Motion::Down(_) | Motion::RowDown(_) => self.vertical(Way::On),
             Motion::Up(_) | Motion::RowUp(_) => self.vertical(Way::Back),
@@ -1155,7 +1155,7 @@ impl ChatView {
     /// the character just before that, or after it going back; found
     /// `again`, by `;` or `,`, a `t` or `T` doesn't stop at one right by
     /// the cursor, as Vim's doesn't. Nowhere if there aren't so many.
-    fn find(&mut self, (ch, forward, till, again): (char, bool, bool, bool), count: usize) {
+    fn find(&mut self, find: (char, bool, bool, bool), count: usize) {
         let Some(cursor) = self.cursor_or_default() else {
             return;
         };
@@ -1166,36 +1166,8 @@ impl ChatView {
         let Some((_, range)) = super::paint::line_middle(text.layout, line) else {
             return;
         };
-        let end = range.end.min(text.text.len());
-        let start = range.start.min(end);
-        let chars: Vec<(usize, char)> = text.text[start..end]
-            .trim_end_matches(['\n', '\r'])
-            .char_indices()
-            .map(|(at, ch)| (start + at, ch))
-            .collect();
-        let byte = super::paint::within(text.text, cursor.byte);
-        let Some(here) = chars.iter().position(|&(at, _)| at >= byte) else {
-            return;
-        };
-        let skip = usize::from(till && again);
-        let found = if forward {
-            (chars.iter().enumerate())
-                .skip(here + 1 + skip)
-                .filter(|(_, (_, found))| *found == ch)
-                .nth(count - 1)
-                .map(|(index, _)| if till { index - 1 } else { index })
-        } else {
-            (chars[..here.saturating_sub(skip)].iter().enumerate())
-                .rev()
-                .filter(|(_, (_, found))| *found == ch)
-                .nth(count - 1)
-                .map(|(index, _)| if till { index + 1 } else { index })
-        };
-        if let Some(index) = found {
-            self.go(Position {
-                byte: chars[index].0,
-                ..cursor
-            });
+        if let Some(byte) = find_in(text.text, range, cursor.byte, find, count) {
+            self.go(Position { byte, ..cursor });
         }
         self.goal = None;
     }
@@ -1371,6 +1343,42 @@ impl ChatView {
             }
         }
     }
+}
+
+/// Where `f`, `t`, `F` or `T` (`forward`, `till`) and `ch`, `count`
+/// times, go from `byte` in `text`, within the line `range` holds, as
+/// [`ChatView::find`] says; `None` if there aren't so many.
+pub(super) fn find_in(
+    text: &str,
+    range: std::ops::Range<usize>,
+    byte: usize,
+    (ch, forward, till, again): (char, bool, bool, bool),
+    count: usize,
+) -> Option<usize> {
+    let end = range.end.min(text.len());
+    let start = range.start.min(end);
+    let chars: Vec<(usize, char)> = text[start..end]
+        .trim_end_matches(['\n', '\r'])
+        .char_indices()
+        .map(|(at, ch)| (start + at, ch))
+        .collect();
+    let byte = super::paint::within(text, byte);
+    let here = chars.iter().position(|&(at, _)| at >= byte)?;
+    let skip = usize::from(till && again);
+    let found = if forward {
+        (chars.iter().enumerate())
+            .skip(here + 1 + skip)
+            .filter(|(_, (_, found))| *found == ch)
+            .nth(count.max(1) - 1)
+            .map(|(index, _)| if till { index - 1 } else { index })
+    } else {
+        (chars[..here.saturating_sub(skip)].iter().enumerate())
+            .rev()
+            .filter(|(_, (_, found))| *found == ch)
+            .nth(count.max(1) - 1)
+            .map(|(index, _)| if till { index + 1 } else { index })
+    };
+    found.map(|index| chars[index].0)
 }
 
 /// The start of the last character of the line of `text` in `range`,
