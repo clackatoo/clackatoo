@@ -374,14 +374,14 @@ impl<A: Clone + Eq> History<A> {
         Ok(version)
     }
 
-    /// Records `edit`, made by `author` to the text as it is now, keeping
-    /// no undo step for it: for an author that never undoes its edits, as
-    /// an agent, whose turns are undone another way. Others' steps are
-    /// brought past it as past any edit.
-    pub fn record_alone(&mut self, edit: Edit, author: A) -> u64 {
-        let version = self.push(edit, author);
-        self.catch_up();
-        version
+    /// Lets go of `author`'s oldest undo steps past `steps` of them, or
+    /// past `bytes`, keeping the last, as [`Limits::undo_steps`] and
+    /// [`Limits::undo_bytes`] do for every author: for an author that
+    /// seldom undoes, as an agent, whose turns are undone another way.
+    pub fn keep_last(&mut self, author: &A, steps: usize, bytes: usize) {
+        if let Some(index) = self.authors.iter().position(|kept| kept.author == *author) {
+            self.limit_steps_to(index, steps, bytes);
+        }
     }
 
     /// Undoes `author`'s last step, recording the edit that does it, which
@@ -660,12 +660,22 @@ impl<A: Clone + Eq> History<A> {
 
     /// Lets go of the author's oldest steps past what's kept.
     fn limit_steps(&mut self, index: usize) {
-        let limits = self.limits;
+        let Limits {
+            undo_steps,
+            undo_bytes,
+            ..
+        } = self.limits;
+        self.limit_steps_to(index, undo_steps, undo_bytes);
+    }
+
+    /// Lets go of the author's oldest steps past `most` of them, or past
+    /// `bytes`, keeping the last.
+    fn limit_steps_to(&mut self, index: usize, most: usize, bytes: usize) {
         let steps = &mut self.authors[index];
         let mut size: usize = steps.undo.iter().map(Step::size).sum();
-        let mut gone = steps.undo.len().saturating_sub(limits.undo_steps.max(1));
+        let mut gone = steps.undo.len().saturating_sub(most.max(1));
         size -= steps.undo[..gone].iter().map(Step::size).sum::<usize>();
-        while size > limits.undo_bytes && gone + 1 < steps.undo.len() {
+        while size > bytes && gone + 1 < steps.undo.len() {
             size -= steps.undo[gone].size();
             gone += 1;
         }
@@ -1755,15 +1765,22 @@ mod tests {
     }
 
     #[test]
-    fn an_author_that_keeps_no_steps_is_never_caught_up() {
+    fn an_author_keeps_as_few_steps_as_said_and_one_with_none_is_let_go() {
         let mut doc = Doc::new("");
         let alone = |doc: &mut Doc, text: &str| {
             let edit = Edit::replace(doc.text.len(), 0, "", text);
             doc.text = edit.apply_to(&doc.text).unwrap();
-            doc.history.record_alone(edit, Who::Agent);
+            doc.history.record(edit, Who::Agent, true).unwrap();
+            doc.history.keep_last(&Who::Agent, 1, 0);
         };
         alone(&mut doc, "a");
-        assert!(!doc.undo(Who::Agent), "no step kept");
+        alone(&mut doc, "a");
+        assert!(
+            doc.undo(Who::Agent) && !doc.undo(Who::Agent),
+            "the last step kept"
+        );
+        assert!(doc.history.forgot(&Who::Agent));
+        assert!(doc.redo(Who::Agent));
         // One with no steps is let go as it falls behind, and one with
         // steps is kept.
         assert!(!doc.undo(Who::Other));
@@ -1774,7 +1791,7 @@ mod tests {
         let authors: Vec<Who> = (doc.history.snapshot().steps.into_iter())
             .map(|steps| steps.author)
             .collect();
-        assert_eq!(authors, [Who::You]);
+        assert_eq!(authors, [Who::Agent, Who::You]);
         assert!(doc.undo(Who::You));
     }
 
