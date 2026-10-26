@@ -162,6 +162,7 @@ impl Daemon {
         key: u64,
         beside: Option<PaneId>,
         content: PaneTerminal,
+        command: Option<&str>,
     ) -> Result<Response, Error> {
         let Some(machine) = self.machine_of_client(token).cloned() else {
             return Err(Error::Other(
@@ -172,6 +173,7 @@ impl Daemon {
             to: machine.id,
             key,
             placed: false,
+            background: None,
         };
         if let Some(pane) = self.workspaces.lent_pane(machine.id, key) {
             return Ok(Response::PaneCreated(pane));
@@ -180,8 +182,27 @@ impl Daemon {
             self.workspaces.check_pane(pane).is_ok()
                 && (self.workspaces.lent_of_pane(pane)).is_none_or(|lent| lent.to == machine.id)
         });
+        // A command makes it a shell lent as a background tab.
+        let command = match command {
+            Some(command) if matches!(content, PaneTerminal::New(_)) => {
+                Some(super::lent_background::checked_command(command)?)
+            }
+            Some(_) => {
+                return Err(Error::Other(
+                    "only a new shell is lent as a background tab".into(),
+                ));
+            }
+            None => None,
+        };
         let content = self.pane_content(content, beside)?;
         let pane = self.workspaces.new_lent(lent, content);
+        if let Some(command) = command
+            && let Some((workspace, _, shown)) = self.workspaces.get().find_pane(pane)
+            && let Some(terminal) = shown.content.terminal()
+        {
+            let workspace = workspace.id;
+            self.lend_in_background(workspace, terminal, command);
+        }
         let name = machine.name;
         self.workspaces
             .borrower_seen(machine.id, &name, now_seconds());

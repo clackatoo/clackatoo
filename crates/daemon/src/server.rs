@@ -74,6 +74,7 @@ mod hover;
 mod keep;
 mod language;
 mod lending;
+mod lent_background;
 mod links;
 mod offers;
 mod pieces;
@@ -1196,6 +1197,9 @@ impl Daemon {
             });
         daemon.workspaces.set_home(&daemon.config.home);
         daemon.workspaces.resume_background(&state.background);
+        daemon
+            .workspaces
+            .resume_lent_background(&state.lent_background);
         daemon.workspaces.resume_kept(&state.kept);
         if let Some(restored) = &state.restored {
             daemon.workspaces.resume_restored(restored);
@@ -1228,6 +1232,7 @@ impl Daemon {
             }
         }
         daemon.restate_backgrounds();
+        daemon.restate_lent_backgrounds();
         // The terminals kept running always, as they were, and how running
         // each again was going.
         daemon.resume_restarts(&state.kept);
@@ -1482,6 +1487,7 @@ impl Daemon {
                 chat_queues,
                 chat_continuations,
                 activities,
+                lent_background: self.workspaces.hand_over_lent_background(),
                 orphans,
                 workspaces,
                 next_buffer: self.next_buffer,
@@ -2268,7 +2274,10 @@ impl Daemon {
             // until the tab is dismissed.
             let again = self.kept_ended(id);
             self.background_ended(id);
+            // So does a shell lent another daemon as a background tab.
+            let lent_background = self.lent_background_of(id).is_some();
             if !again
+                && !lent_background
                 && self.workspaces.get().pane_showing(id).is_some()
                 && let Err(err) = self.close_terminal(id)
             {
@@ -3250,7 +3259,11 @@ impl Daemon {
                 key,
                 beside,
                 terminal,
-            } => self.lend(token, key, beside, terminal),
+                command,
+            } => self.lend(token, key, beside, terminal, command.as_deref()),
+            Request::LentBackground { key, action } => {
+                self.serve_lent_background(token, key, action)
+            }
             // One for a pane on another machine is the relay's.
             Request::Forwards { .. } => Err(Error::Other(
                 "this daemon's own ports are this machine's: there's nothing to forward".into(),

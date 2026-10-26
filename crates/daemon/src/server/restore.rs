@@ -406,6 +406,7 @@ impl Daemon {
                     to: lent.to.to_string(),
                     key: lent.key,
                     placed: lent.placed,
+                    background: lent.background.is_some(),
                 }),
             });
         }
@@ -636,15 +637,7 @@ impl Daemon {
                         .add_restored(&workspace.name, tabs, active_tab, background);
                 // Lent to another machine's daemon, it still is, as that
                 // daemon finds its pane again by the number it gave it.
-                let lent = (workspace.lent.as_ref()).and_then(|lent| {
-                    let to = lent.to.parse().ok()?;
-                    Some(clackatoo_protocol::Lent {
-                        to,
-                        key: lent.key,
-                        placed: lent.placed,
-                    })
-                });
-                if let Some(lent) = lent {
+                if let Some(lent) = workspace.lent.as_ref().and_then(restored_lent) {
                     self.workspaces.set_lent(made, lent);
                 }
                 Some(made)
@@ -662,6 +655,7 @@ impl Daemon {
         self.workspaces.set_restored(restored);
         self.workspaces.refresh_background();
         self.restate_backgrounds();
+        self.restate_lent_backgrounds();
         self.restore_cold_activities(state.operations, &chats);
         self.keep_restored();
         self.restore_borrowers(&state.borrowers);
@@ -1240,6 +1234,22 @@ impl Daemon {
             self.collect_damage(id);
         }
     }
+}
+
+/// Who a workspace was lent to, as `lent` kept it, if it says.
+fn restored_lent(lent: &saved::Lent) -> Option<clackatoo_protocol::Lent> {
+    Some(clackatoo_protocol::Lent {
+        to: lent.to.parse().ok()?,
+        key: lent.key,
+        placed: lent.placed,
+        // Lent as a background tab, its new shell is said again once made.
+        background: lent
+            .background
+            .then_some(clackatoo_protocol::LentBackground {
+                state: clackatoo_protocol::BackgroundState::Running,
+                failed: None,
+            }),
+    })
 }
 
 /// Where each file's editor in `layout` was, as kept, added to `into`:

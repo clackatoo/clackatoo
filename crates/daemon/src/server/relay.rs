@@ -945,6 +945,13 @@ impl Daemon {
             // well as looked for here: but not for another daemon, which
             // is shown none of the background tabs this one shows of
             // others', and would only ask back, and on, for ever.
+            // A shell started beside a pane borrowed from another machine
+            // is started there, in a background tab here (CLACKA-122).
+            Request::Background(ref action)
+                if let Some(routed) = self.route_start_borrowed(token, action) =>
+            {
+                routed
+            }
             request @ Request::Background(BackgroundAction::Ports) => {
                 if !self.relays(token) {
                     self.ask_ports_there(token);
@@ -2198,6 +2205,9 @@ impl Daemon {
         }
         if taken.lent || self.links.list[at].relayed.lends_known {
             self.borrowed_taken(at, taken.lent);
+        }
+        if taken.lent {
+            self.borrowed_backgrounds_taken(at);
         }
         // What's of this machine's in its layouts, and what this machine
         // put there, are kept in step; and what a third machine lends it is

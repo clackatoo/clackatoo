@@ -242,6 +242,10 @@ pub(crate) struct LentPane {
     /// The daemon there put it in the layout it's lent to itself (see
     /// [`Lent::placed`](clackatoo_protocol::Lent::placed)).
     pub(crate) placed: bool,
+    /// How it's getting on, as the daemon there says, if it's lent as a
+    /// background tab here (see
+    /// [`Lent::background`](clackatoo_protocol::Lent::background)).
+    pub(crate) background: Option<clackatoo_protocol::LentBackground>,
 }
 
 /// A pane of another daemon's workspaces that's on yet another machine,
@@ -781,6 +785,7 @@ impl Mirror {
             pane: pane.id,
             content: self.renumber_shown(&pane, shown, fresh, kept),
             placed: workspace.lent.is_some_and(|lent| lent.placed),
+            background: workspace.lent.and_then(|lent| lent.background),
         })
     }
 
@@ -1414,6 +1419,7 @@ mod tests {
                 to,
                 key,
                 placed: false,
+                background: None,
             });
             workspace
         };
@@ -1481,6 +1487,7 @@ mod tests {
                 to,
                 key,
                 placed: true,
+                background: None,
             });
             workspace
         };

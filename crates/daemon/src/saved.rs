@@ -178,6 +178,10 @@ pub(crate) struct Lent {
     /// can't reach this one. Builds before then read it as asked for.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) placed: bool,
+    /// It's lent as a background tab of that daemon's (CLACKA-122). Builds
+    /// before then read it as lent as any other pane.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) background: bool,
 }
 
 /// A pane on another machine, which its daemon lent this one.
@@ -859,6 +863,7 @@ mod tests {
             to: "a1".repeat(16),
             key: 9,
             placed: true,
+            background: true,
         });
         let encoded = kept.encode();
         assert_eq!(State::decode(&encoded).unwrap(), kept, "every bit of a u64");

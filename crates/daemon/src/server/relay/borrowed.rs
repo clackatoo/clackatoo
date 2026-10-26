@@ -84,11 +84,12 @@ impl Placing {
 }
 
 /// A pane asked of another machine's daemon, waiting for its answer.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(in crate::server) struct Lending {
     place: Placing,
-    /// When it was asked: one given up on is the daemon there's to close.
-    asked: Instant,
+    /// What to call it, if it's a shell started with a command, to go in
+    /// a background tab of the workspace `place` names (CLACKA-122).
+    background: Option<String>,
 }
 
 impl Daemon {
@@ -174,13 +175,20 @@ impl Daemon {
                 workspace,
                 terminal,
                 ..
-            } => self.borrow_from(token, at, Placing::Tab(workspace), &terminal, beside),
+            } => self.borrow_from(token, at, Placing::Tab(workspace), &terminal, beside, None),
             Request::Split {
                 pane,
                 side,
                 terminal,
                 ..
-            } => self.borrow_from(token, at, Placing::Split(pane, side), &terminal, beside),
+            } => self.borrow_from(
+                token,
+                at,
+                Placing::Split(pane, side),
+                &terminal,
+                beside,
+                None,
+            ),
             Request::SplitTab {
                 tab,
                 side,
@@ -193,6 +201,7 @@ impl Daemon {
                 Placing::Edge(tab, side, share),
                 &terminal,
                 beside,
+                None,
             ),
             request => Routed::Here(request),
         }
@@ -201,16 +210,22 @@ impl Daemon {
     /// Asks the daemon of the connection at `at` to lend this one a pane
     /// showing `content`, beside its pane `beside`, for the client at
     /// `token`, to go where `place` says once it has: checked first, so a
-    /// pane that couldn't go there isn't made at all.
-    fn borrow_from(
+    /// pane that couldn't go there isn't made at all. With a `command`, a
+    /// new shell running it, in a background tab of the workspace `place`
+    /// names (CLACKA-122).
+    pub(in crate::server) fn borrow_from(
         &mut self,
         token: Token,
         at: usize,
         place: Placing,
         content: &PaneTerminal,
         beside: Option<PaneId>,
+        command: Option<&str>,
     ) -> Routed {
         let checked = match place {
+            Placing::Tab(workspace) if command.is_some() => {
+                self.workspaces.check_new_background(workspace)
+            }
             Placing::Tab(workspace) => self.workspaces.check_workspace(workspace).map(|_| ()),
             Placing::Split(pane, side) => self.workspaces.check_split(pane, side),
             Placing::Edge(tab, side, _) => self.workspaces.check_split_tab(tab, side),
@@ -221,6 +236,13 @@ impl Daemon {
                     let host = &self.links.list[at].remote.host;
                     return Err(Error::Other(format!(
                         "‘{host}’ is too old to lend panes: update clackatoo there"
+                    )));
+                }
+                if command.is_some() && self.link_wire(at) < wire::ELSEWHERE {
+                    let host = &self.links.list[at].remote.host;
+                    return Err(Error::Other(format!(
+                        "‘{host}’ needs a newer clackatoo to start a background tab there: \
+                         update it"
                     )));
                 }
                 self.can_ask(at)?;
@@ -234,21 +256,23 @@ impl Daemon {
         let Some(ticket) = self.take_place(token) else {
             return Routed::Waiting;
         };
+        let asked = Instant::now();
         let lending = Lending {
             place,
-            asked: Instant::now(),
+            background: command.map(crate::server::background::shown_name),
         };
         self.links.list[at].relayed.lending.insert(key, lending);
         let lend = Request::Lend {
             key,
             beside,
             terminal: content,
+            command: command.map(str::to_owned),
         };
         let expect = Expect::Client {
             token,
             ticket,
             then: Then::Lent(key),
-            asked: lending.asked,
+            asked,
         };
         if let Err(err) = self.send_upstream(at, &ClientMessage::Request(lend), expect) {
             self.links.list[at].relayed.lending.remove(&key);
@@ -317,6 +341,27 @@ impl Daemon {
             return Response::Error(Error::Other(format!("{host} didn't say which it is")));
         };
         let kind = PaneKind::new(lent.content.kind_name());
+        // A shell running a command there, in a background tab here.
+        if let (Placing::Tab(workspace), Some(name)) = (lending.place, lending.background) {
+            let borrowed = Borrowed {
+                machine,
+                key,
+                kind,
+                placed: false,
+            };
+            let made = (self.workspaces.check_new_background(workspace).ok()).and_then(|()| {
+                self.workspaces
+                    .new_borrowed_background(workspace, borrowed, name)
+            });
+            let Some((_, pane)) = made else {
+                self.give_back(at, key, lent);
+                return Response::Error(Error::Other(
+                    "the workspace it was to start in has closed".into(),
+                ));
+            };
+            self.workspaces_changed();
+            return Response::PaneCreated(pane);
+        }
         let placeholder = Content::Other { kind };
         // Whatever it was to go beside may have gone meanwhile.
         let pane = match lending.place {
@@ -544,11 +589,11 @@ impl Daemon {
         if borrowed.is_empty() {
             return;
         }
-        for tab in shown
-            .list
-            .iter_mut()
-            .flat_map(|workspace| &mut workspace.tabs)
-        {
+        // A background tab's too, as a shell another machine lends.
+        for tab in (shown.list.iter_mut()).flat_map(|workspace| {
+            let background = workspace.background.iter_mut().map(|one| &mut one.tab);
+            workspace.tabs.iter_mut().chain(background)
+        }) {
             tab.layout.for_each_pane_mut(&mut |pane| {
                 if let Some(borrowed) = borrowed.get(&pane.id)
                     && let Some(lent) = self.lent_pane(borrowed)
@@ -860,6 +905,7 @@ mod tests {
             to: daemon.machine.id,
             key,
             placed: false,
+            background: None,
         };
         // Its workspaces come first, then the answer.
         say(&mut desk_end, &there(Some(lent)));
@@ -903,6 +949,7 @@ mod tests {
             to: daemon.machine.id,
             key,
             placed: false,
+            background: None,
         };
         // Desk made it, and said so, but its answer is long in coming.
         say(&mut desk_end, &there(Some(lent)));

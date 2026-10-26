@@ -380,6 +380,40 @@ pub struct Lent {
         deserialize_with = "wire::since::<{ wire::MIXED }, _, _>"
     )]
     pub placed: bool,
+    /// How its pane, lent as a background tab of that daemon's, is
+    /// getting on, as this daemon sees it: a shell started with a command
+    /// ([`Request::Lend`](crate::Request::Lend)'s `command`), which stays,
+    /// its last screen readable, once its program ends, until that daemon
+    /// dismisses it or brings it back. `None` for one lent as any other
+    /// pane, and from a daemon older than protocol 107.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::ELSEWHERE }, _>",
+        deserialize_with = "wire::since::<{ wire::ELSEWHERE }, _, _>"
+    )]
+    pub background: Option<LentBackground>,
+}
+
+/// How a pane lent as a background tab is getting on: see
+/// [`Lent::background`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LentBackground {
+    /// As [`Background::state`] says of a background tab.
+    pub state: BackgroundState,
+    /// As [`Background::failed`] says of a background tab.
+    pub failed: Option<i32>,
+}
+
+/// What [`Request::LentBackground`](crate::Request::LentBackground) asks of
+/// a pane lent as a background tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LentBackgroundAction {
+    /// It's brought back, as a tab of the daemon's it's lent to: it's lent
+    /// as any other pane from now on, closing as its program ends; and if
+    /// it has ended, a new shell takes its place in its folder, offering
+    /// to run again what it ran, as a background tab brought back does.
+    Bring,
+    /// Its failure was seen: [`LentBackground::failed`] is cleared.
+    Seen,
 }
 
 /// One tab of a workspace: its panes, laid out.

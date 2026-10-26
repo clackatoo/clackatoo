@@ -122,8 +122,8 @@ pub use view::{
 };
 pub use workspace::{
     Axis, Background, BackgroundAction, BackgroundState, Content, Keeping, Kept, Layout, Lent,
-    MAX_NESTING, OtherMachine, Pane, PaneId, PaneKind, PaneTerminal, Place, Restored, Side, Tab,
-    TabId, Workspace, WorkspaceId, Workspaces,
+    LentBackground, LentBackgroundAction, MAX_NESTING, OtherMachine, Pane, PaneId, PaneKind,
+    PaneTerminal, Place, Restored, Side, Tab, TabId, Workspace, WorkspaceId, Workspaces,
 };
 
 /// The protocol version this crate speaks. Bump it on any change to a
@@ -324,8 +324,8 @@ pub enum ClientMessage {
         /// connected to, which it asks, or else its own. `None` for its
         /// own, and from a client older than protocol 107.
         #[serde(
-            skip_serializing_if = "wire::before::<{ wire::SESSIONS_ELSEWHERE }, _>",
-            deserialize_with = "wire::since::<{ wire::SESSIONS_ELSEWHERE }, _, _>"
+            skip_serializing_if = "wire::before::<{ wire::ELSEWHERE }, _>",
+            deserialize_with = "wire::since::<{ wire::ELSEWHERE }, _, _>"
         )]
         on: Option<MachineId>,
     },
@@ -1319,6 +1319,16 @@ pub enum Request {
         beside: Option<PaneId>,
         /// What the pane shows.
         terminal: PaneTerminal,
+        /// A command to type at the first prompt of the new shell it
+        /// shows, as `BackgroundAction::Start` types one: the pane is then
+        /// lent as a background tab of the asking daemon's ([`Lent::background`]).
+        /// `None` from a daemon older than protocol 107, which a daemon
+        /// asking never sends one to.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::ELSEWHERE }, _>",
+            deserialize_with = "wire::since::<{ wire::ELSEWHERE }, _, _>"
+        )]
+        command: Option<String>,
     },
     /// Gives back the workspace lent to another machine's daemon,
     /// `workspace`: it becomes one of this daemon's own, named after that
@@ -1432,6 +1442,16 @@ pub enum Request {
         terminal: TerminalId,
         /// Stable operation identity.
         id: String,
+    },
+    /// Asks of a pane lent the daemon asking as a background tab of its
+    /// own (see [`Lent::background`]), the number it gave it `key`: as
+    /// `action` says. Asked by that daemon alone. Answered with
+    /// [`Response::Done`]. Only to a daemon of protocol 107 or later.
+    LentBackground {
+        /// The number that daemon gave the pane.
+        key: u64,
+        /// What's asked.
+        action: LentBackgroundAction,
     },
 }
 

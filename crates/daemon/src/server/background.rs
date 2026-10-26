@@ -46,7 +46,7 @@ const LONGEST_NAME: usize = 100;
 /// `name`, safe to show as a background tab's: one line, with nothing that
 /// goes unseen or turns the text round, of [`LONGEST_NAME`] characters at
 /// most.
-fn shown_name(name: &str) -> String {
+pub(super) fn shown_name(name: &str) -> String {
     let name: String = (name.chars())
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .filter(|&ch| !super::tools::invisible(ch))
@@ -121,6 +121,19 @@ impl Daemon {
             BackgroundAction::Bring { tab } => self.bring_back(tab),
             BackgroundAction::Dismiss { tab } => self.dismiss_background(tab),
             BackgroundAction::Seen { workspace } => {
+                // Those another machine lends say so there.
+                let borrowed: Vec<(PaneId, crate::workspaces::Borrowed)> =
+                    (self.workspaces.get().get(workspace).into_iter())
+                        .flat_map(|shown| &shown.background)
+                        .filter(|background| background.failed.is_some())
+                        .flat_map(|background| {
+                            self.workspaces.background_borrowed(background.tab.id)
+                        })
+                        .collect();
+                for (_, borrowed) in borrowed {
+                    let seen = clackatoo_protocol::LentBackgroundAction::Seen;
+                    let _ = self.ask_lent_background(borrowed, seen);
+                }
                 if self.workspaces.seen(workspace)? {
                     self.workspaces_changed();
                 }
@@ -215,6 +228,11 @@ impl Daemon {
         if self.workspaces.get().find_background(tab).is_none() {
             return Err(Error::NoSuchTab(tab));
         }
+        // A shell another machine lends is brought back only as that
+        // machine hears it is, or it would go on keeping it once it ends.
+        for (_, borrowed) in self.workspaces.background_borrowed(tab) {
+            self.can_ask_lender(borrowed)?;
+        }
         let focused = self.workspaces.bring_back(tab)?;
         self.renew_ended(tab);
         self.workspaces_changed();
@@ -227,6 +245,19 @@ impl Daemon {
     /// it's kept running always. A restart one was waiting for is dropped:
     /// this is it.
     pub(super) fn renew_ended(&mut self, tab: TabId) {
+        // One another machine lends, that machine makes again, as it hears
+        // it's brought back (CLACKA-122).
+        let borrowed = self.workspaces.borrowed_in_tab(tab);
+        if !borrowed.is_empty() {
+            // Named after its program again, as any tab.
+            self.workspaces.forget_tab_name(tab);
+        }
+        for (_, borrowed) in borrowed {
+            let bring = clackatoo_protocol::LentBackgroundAction::Bring;
+            if let Err(err) = self.ask_lent_background(borrowed, bring) {
+                log::warn!("a background tab another machine lends: {err}");
+            }
+        }
         let Some((_, found)) = self.workspaces.get().find_tab(tab) else {
             return;
         };
@@ -321,6 +352,18 @@ impl Daemon {
 
     /// Closes background tab `tab`, and its terminals.
     fn dismiss_background(&mut self, tab: TabId) -> Result<Response, Error> {
+        // A shell another machine lends goes there, as its pane goes here.
+        let borrowed = self.workspaces.background_borrowed(tab);
+        if !borrowed.is_empty() {
+            for &(_, lender) in &borrowed {
+                self.can_ask_lender(lender)?;
+            }
+            for (pane, _) in borrowed {
+                self.workspaces.remove_pane(pane);
+            }
+            self.workspaces_changed();
+            return Ok(Response::Done);
+        }
         let Some((_, background)) = self.workspaces.get().find_background(tab) else {
             return Err(Error::NoSuchTab(tab));
         };
@@ -353,7 +396,9 @@ impl Daemon {
         // A pane on another machine has its own directories.
         if beside.is_some_and(|pane| self.workspaces.borrowed().contains_key(&pane)) {
             return Err(Error::Other(
-                "background tabs on another machine: coming soon".into(),
+                "a pane on another machine starts its background tabs there, through the daemon \
+                 connected to it"
+                    .into(),
             ));
         }
         let cwd = cwd.or_else(|| beside.and_then(|pane| self.working_directory(pane)));
@@ -450,7 +495,7 @@ impl Daemon {
 
     /// Starts looking at `tab`'s terminals' blocks for failures from
     /// those to come.
-    fn watch_in_background(&mut self, tab: &Tab) {
+    pub(super) fn watch_in_background(&mut self, tab: &Tab) {
         for terminal in tab.terminals() {
             let next = (self.terminals.get(&terminal))
                 .and_then(|slot| slot.terminal.grid())
@@ -468,7 +513,8 @@ impl Daemon {
     /// windows. Costs a lookup for any other terminal.
     pub(super) fn background_moved_on(&mut self, id: TerminalId) {
         let Some(tab) = self.workspaces.background_of(id) else {
-            return;
+            // Or lent another daemon as one of its own.
+            return self.lent_background_moved_on(id, false);
         };
         let failed = self.failure_since(id);
         self.restate_background(tab, failed);
@@ -478,7 +524,7 @@ impl Daemon {
     /// tab: an exit with a failure is noted as one.
     pub(super) fn background_ended(&mut self, id: TerminalId) {
         let Some(tab) = self.workspaces.background_of(id) else {
-            return;
+            return self.lent_background_moved_on(id, true);
         };
         let failed = self.failure_since(id).or_else(|| {
             match self.terminals.get(&id)?.terminal.status() {
@@ -517,7 +563,7 @@ impl Daemon {
 
     /// Tells the windows how background tabs are getting on now, unless
     /// that was told less than [`RESTATE_EVERY`] ago: then once it's been.
-    fn background_restated(&mut self) {
+    pub(super) fn background_restated(&mut self) {
         let now = Instant::now();
         match self.background.restated {
             Some(last) if now < last + RESTATE_EVERY => {
@@ -553,14 +599,17 @@ impl Daemon {
     /// their workspace.
     pub(super) fn forget_backgrounds_gone(&mut self) {
         let workspaces = &self.workspaces;
-        (self.background.checked)
-            .retain(|terminal, _| workspaces.background_of(*terminal).is_some());
+        (self.background.checked).retain(|terminal, _| {
+            workspaces.background_of(*terminal).is_some()
+                || (workspaces.lent_terminal(*terminal))
+                    .is_some_and(|lent| lent.background.is_some())
+        });
         self.background.restate_due = None;
     }
 
     /// The exit status of the latest command of terminal `id`'s that
     /// failed since its blocks were last looked at, if one did.
-    fn failure_since(&mut self, id: TerminalId) -> Option<i32> {
+    pub(super) fn failure_since(&mut self, id: TerminalId) -> Option<i32> {
         let grid = self.terminals.get(&id)?.terminal.grid()?;
         let (latest, _) = grid.latest_block()?;
         let checked = self.background.checked.entry(id).or_insert(latest);
@@ -649,8 +698,14 @@ impl Daemon {
     /// Says how each background tab is getting on, as a daemon carrying
     /// on from an upgrade, which hands over only their failures, starts.
     pub(super) fn restate_backgrounds(&mut self) {
+        // One another machine lends is as that machine says.
         let tabs: Vec<Tab> = (self.workspaces.get().list.iter())
             .flat_map(|workspace| &workspace.background)
+            .filter(|background| {
+                self.workspaces
+                    .background_borrowed(background.tab.id)
+                    .is_empty()
+            })
             .map(|background| background.tab.clone())
             .collect();
         for tab in tabs {

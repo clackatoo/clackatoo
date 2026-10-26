@@ -20,13 +20,13 @@
 use std::collections::BTreeSet;
 
 use clackatoo_protocol::{
-    BackgroundAction, ClientMessage, Error, Event, Listening, ListeningPort, PaneId, Request,
-    TabId, wire,
+    BackgroundAction, ClientMessage, Error, Event, Listening, ListeningPort, NewTerminal, PaneId,
+    PaneTerminal, Request, Response, TabId, wire,
 };
 use mio::Token;
 
 use super::mirror::shown_name;
-use super::{Expect, Renumbered, Then};
+use super::{Expect, Renumbered, Routed, Then};
 use crate::server::{Daemon, Source};
 
 /// The most ports of one of another daemon's background tabs taken in.
@@ -149,6 +149,102 @@ impl Daemon {
                 (at, start)
             }),
             BackgroundAction::Ports => None,
+        }
+    }
+
+    /// Where `action` goes if it starts a command in a background tab of
+    /// one of this daemon's own workspaces beside a pane borrowed from
+    /// another machine, or its focused pane, borrowed: started there, in
+    /// that pane's folder, as a shell lent this daemon, which a background
+    /// tab here shows (CLACKA-122). `None` for any other.
+    pub(super) fn route_start_borrowed(
+        &mut self,
+        token: Token,
+        action: &BackgroundAction,
+    ) -> Option<Routed> {
+        let BackgroundAction::Start {
+            workspace,
+            ref command,
+            ref cwd,
+            pane,
+            size,
+        } = *action
+        else {
+            return None;
+        };
+        if self.relayed_workspace(workspace).is_some() {
+            return None;
+        }
+        let beside = pane.or_else(|| self.workspaces.focused_pane(workspace))?;
+        self.workspaces.borrowed().get(&beside)?;
+        let command = match crate::server::lent_background::checked_command(command) {
+            Ok(command) => command.to_owned(),
+            Err(err) => return Some(Routed::Answered(Response::Error(err))),
+        };
+        let (at, remote) = match self.borrowed_pane(beside)? {
+            Ok(found) => found,
+            Err(err) => return Some(Routed::Answered(Response::Error(err))),
+        };
+        let shell = PaneTerminal::New(NewTerminal {
+            size,
+            command: None,
+            cwd: cwd.clone(),
+            record_to: None,
+        });
+        let place = super::borrowed::Placing::Tab(workspace);
+        Some(self.borrow_from(token, at, place, &shell, Some(remote), Some(&command)))
+    }
+
+    /// Whether the daemon that lent this one `borrowed` can be asked about
+    /// it now, or why not.
+    pub(in crate::server) fn can_ask_lender(
+        &self,
+        borrowed: crate::workspaces::Borrowed,
+    ) -> Result<usize, Error> {
+        let Some(at) = self.link_to(borrowed.machine) else {
+            return Err(Error::Other(format!(
+                "‘{}’ isn't connected: :connect it first",
+                self.machine_named(borrowed.machine)
+            )));
+        };
+        self.can_ask(at)?;
+        Ok(at)
+    }
+
+    /// Asks the daemon that lent this one `borrowed`, a shell in a
+    /// background tab here, as `action` says, if it can be.
+    pub(in crate::server) fn ask_lent_background(
+        &mut self,
+        borrowed: crate::workspaces::Borrowed,
+        action: clackatoo_protocol::LentBackgroundAction,
+    ) -> Result<(), Error> {
+        let at = self.can_ask_lender(borrowed)?;
+        let ask = Request::LentBackground {
+            key: borrowed.key,
+            action,
+        };
+        self.send_upstream(at, &ClientMessage::Request(ask), Expect::Nothing)
+    }
+
+    /// The daemon of the connection at `at` said how the shells it lends
+    /// this daemon as background tabs are getting on: the background tabs
+    /// here showing them say so too, in this daemon's own workspaces, kept
+    /// and handed over as any are, so they say it while it can't be
+    /// reached (CLACKA-122).
+    pub(super) fn borrowed_backgrounds_taken(&mut self, at: usize) {
+        let Some(machine) = self.machine_of(at) else {
+            return;
+        };
+        let said: Vec<(u64, clackatoo_protocol::LentBackground)> =
+            (self.links.list[at].relayed.mirror.lent.iter())
+                .filter_map(|(&key, lent)| Some((key, lent.background?)))
+                .collect();
+        let mut changed = false;
+        for (key, said) in said {
+            changed |= self.workspaces.set_borrowed_background(machine, key, said);
+        }
+        if changed {
+            self.workspaces_changed();
         }
     }
 

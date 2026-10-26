@@ -109,8 +109,7 @@ impl Desk {
                     Some(_) => None,
                     None => (self.shown).and_then(|shown| self.pane_machine(shown.pane)),
                 };
-                let old =
-                    on.is_some() && !self.daemon_has(clackatoo_protocol::wire::SESSIONS_ELSEWHERE);
+                let old = on.is_some() && !self.daemon_has(clackatoo_protocol::wire::ELSEWHERE);
                 let host = on.map(|on| self.elsewhere_on(on).host);
                 if let Some(page) = &mut self.start {
                     page.listing(id);

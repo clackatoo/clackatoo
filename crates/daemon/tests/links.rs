@@ -5552,39 +5552,8 @@ impl Drop for Killed {
 /// runs in a process of its own here, so it can upgrade.
 #[test]
 fn a_chat_answering_on_another_machine_goes_on_after_it_upgrades() {
-    use std::io::Read as _;
     let world = World::new();
-    let dir = world.host("laptop");
-    let state = world.path().join("laptop-state");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::create_dir_all(&state).unwrap();
-    let log = std::fs::File::create(world.path().join("laptop.log")).unwrap();
-    let child = Command::new(example("daemon"))
-        .arg("daemon")
-        .env("CLACKATOO_UDP_PORTS", "off")
-        .env("CLACKATOO_BROWSER", "off")
-        .env("XDG_RUNTIME_DIR", &dir)
-        .env("XDG_STATE_HOME", &state)
-        .env("XDG_DATA_HOME", state.join("data"))
-        .env("XDG_CONFIG_HOME", state.join("config"))
-        .env("HOME", &dir)
-        .env("CLACKATOO_AGENT", example("fake_agent"))
-        .env("CLACKATOO_DISPLAY", "off")
-        .env("CLACKATOO_WORKSPACES", "off")
-        .env("CLACKATOO_BOARDS", "off")
-        .env("CLACKATOO_RECOVERY", "off")
-        .stderr(log)
-        .stdout(Stdio::null())
-        .stdin(Stdio::null())
-        .spawn()
-        .unwrap();
-    let child = Killed(child);
-    let socket = dir.join("clackatoo/daemon.sock");
-    let deadline = Instant::now() + PATIENCE;
-    while Client::connect(&socket).is_err() {
-        assert!(Instant::now() < deadline, "laptop never answered");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let (child, socket) = process_daemon(&world, "laptop");
     let mut at_laptop = Client::connect(&socket).unwrap();
     at_laptop.set_read_timeout(Some(PATIENCE)).unwrap();
     at_laptop
@@ -5603,33 +5572,7 @@ fn a_chat_answering_on_another_machine_goes_on_after_it_upgrades() {
     });
 
     // Laptop upgrades while its agent answers.
-    let bin = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let next = bin.path().join("daemon-next");
-    std::fs::hard_link(example("daemon"), &next).unwrap();
-    {
-        use clackatoo_protocol::PROTOCOL_VERSION;
-        use clackatoo_protocol::frame;
-        use std::os::unix::ffi::OsStrExt;
-        let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
-        let upgrade = ClientMessage::Upgrade {
-            protocol_version: PROTOCOL_VERSION,
-            executable: next.as_os_str().as_bytes().to_vec(),
-        };
-        stream
-            .write_all(&frame::encode(PROTOCOL_VERSION, &upgrade).unwrap())
-            .unwrap();
-        let mut answer = Vec::new();
-        stream.read_to_end(&mut answer).unwrap();
-        let mut decoder = clackatoo_protocol::frame::FrameDecoder::new();
-        decoder.push(&answer);
-        let refused: Option<ServerMessage> = decoder.decode(PROTOCOL_VERSION).unwrap();
-        assert!(refused.is_none(), "{refused:?}");
-    }
-    let deadline = Instant::now() + PATIENCE;
-    while std::fs::read_link(format!("/proc/{}/exe", child.0.id())).ok() != Some(next.clone()) {
-        assert!(Instant::now() < deadline, "laptop never upgraded");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    upgrade_process(&child, &socket);
     let node = wait_for_chat(&mut window, chat, |node| {
         last_words(node).contains("Clackatoo resumed")
             && node.turns.last().is_some_and(|turn| turn.end.is_some())
@@ -5840,4 +5783,343 @@ fn daemons_connected_both_ways_ask_each_other_for_ports_once() {
     let told = listening(&mut at_laptop);
     signal(&bridge, "-CONT");
     assert_eq!(told.len(), 1, "laptop asked desk for desk: {told:?}");
+}
+
+// --- Background tabs of shells another machine lends ---------------------
+
+/// Starts `command` in a background tab of `workspace`, beside `pane`, as
+/// `:bg CMD` does: the background tab's pane.
+fn start_background(
+    client: &mut Client,
+    workspace: clackatoo_protocol::WorkspaceId,
+    pane: PaneId,
+    command: &str,
+) -> Result<PaneId, Box<Response>> {
+    use clackatoo_protocol::BackgroundAction;
+    let start = BackgroundAction::Start {
+        workspace,
+        command: command.into(),
+        cwd: None,
+        pane: Some(pane),
+        size: Size::new(60, 10).unwrap(),
+    };
+    match client.request(&Request::Background(start)).unwrap() {
+        Response::PaneCreated(made) => Ok(made),
+        other => Err(Box::new(other)),
+    }
+}
+
+/// The background tab showing `pane` in `workspaces`, if one does.
+fn background_of(workspaces: &Workspaces, pane: PaneId) -> Option<clackatoo_protocol::Background> {
+    let (_, background, _) = workspaces.find_background_pane(pane)?;
+    Some(background.clone())
+}
+
+/// `:bg CMD` beside a pane laptop lends desk runs the command on laptop,
+/// in a shell laptop lends desk as a background tab of desk's: desk's
+/// windows see it as one, getting on as laptop says, kept once it ends,
+/// its failure seen there too, and brought back as a tab, a new shell on
+/// laptop in place of the one that ended (CLACKA-122).
+#[test]
+fn a_command_started_beside_a_borrowed_pane_runs_there_in_a_background_tab_here() {
+    use clackatoo_protocol::{BackgroundAction, BackgroundState, TerminalStatus};
+    let mut pair = Pair::new();
+    let (there, _) = borrow(&mut pair, shell());
+    let shown = pair.window.watch_workspaces().unwrap();
+    let home = found(&shown, there).0.id;
+    let lent_before = lent_by(&mut pair.laptop().client());
+    let made = start_background(&mut pair.window, home, there, "sleep 1; exit 3").unwrap();
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        background_of(shown, made).is_some()
+    });
+    let background = background_of(&shown, made).unwrap();
+    assert_eq!(background.name, "sleep 1; exit 3");
+    assert_eq!(lent_by(&mut pair.laptop().client()), lent_before + 1);
+    // Running there, then ended with a failure, and kept: not closed.
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        background_of(shown, made).is_some_and(|background| {
+            background.state == BackgroundState::Ended(TerminalStatus::Exited(3))
+                && background.failed == Some(3)
+        })
+    });
+    assert_eq!(found_workspace(&shown, home).background.len(), 1);
+    assert_eq!(lent_by(&mut pair.laptop().client()), lent_before + 1);
+    // Seen here, seen there: what laptop says stays seen.
+    let seen = BackgroundAction::Seen { workspace: home };
+    assert_eq!(
+        pair.window.request(&Request::Background(seen)).unwrap(),
+        Response::Done
+    );
+    wait_for_workspaces(&mut pair.window, |shown| {
+        background_of(shown, made).is_some_and(|background| background.failed.is_none())
+    });
+    // Brought back, a new shell there in its place, which keys reach.
+    let tab = background.tab.id;
+    let ended = background.tab.layout.panes()[0].content.terminal();
+    assert!(
+        ended.is_some(),
+        "its terminal there isn't shown: {background:?}"
+    );
+    let brought = pair
+        .window
+        .request(&Request::Background(BackgroundAction::Bring { tab }));
+    assert_eq!(brought.unwrap(), Response::PaneCreated(made));
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        (shown.find_pane(made)).is_some_and(|(_, _, pane)| {
+            pane.content.terminal().is_some() && pane.content.terminal() != ended
+        })
+    });
+    let terminal = terminal_of(found(&shown, made).1.content);
+    attach_to(&mut pair.window, terminal);
+    pair.window
+        .send_input(terminal, b"echo back-$(basename $PWD)\r")
+        .unwrap();
+    wait_for_view(&mut pair.window, terminal, "back-laptop");
+
+    // Another, dismissed, goes there.
+    let other = start_background(&mut pair.window, home, there, "sleep 600").unwrap();
+    let shown = wait_for_workspaces(&mut pair.window, |shown| {
+        background_of(shown, other).is_some()
+    });
+    let tab = background_of(&shown, other).unwrap().tab.id;
+    let lent = lent_by(&mut pair.laptop().client());
+    let dismissed = pair
+        .window
+        .request(&Request::Background(BackgroundAction::Dismiss { tab }));
+    assert_eq!(dismissed.unwrap(), Response::Done);
+    let deadline = Instant::now() + PATIENCE;
+    while lent_by(&mut pair.laptop().client()) != lent - 1 {
+        assert!(
+            Instant::now() < deadline,
+            "the shell lent wasn't closed there"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Desk, keeping its workspaces, connected to laptop, keeping its, with a
+/// workspace `home` holding a pane laptop lends it, and beside it a shell
+/// laptop lends it as a background tab running `command`: desk's window,
+/// home, and the background tab's pane.
+fn lent_in_background(
+    world: &World,
+    command: &str,
+) -> (
+    TestDaemon,
+    TestDaemon,
+    Client,
+    clackatoo_protocol::WorkspaceId,
+    PaneId,
+) {
+    let laptop = world.start_with("laptop", true);
+    let laptop_id = laptop.machine().id;
+    let desk = world.start_with("desk", true);
+    let mut window = desk.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "laptop");
+    wait_for_state(&mut window, "laptop", connected);
+    let first = window.new_workspace(Some("home".into()), shell()).unwrap();
+    let shown = window.watch_workspaces().unwrap();
+    let home = found(&shown, first).0.id;
+    let there = made(&mut window, &new_tab_on(home, shell(), laptop_id));
+    wait_for_borrowed(&mut window, there);
+    let made = start_background(&mut window, home, there, command).unwrap();
+    wait_for_workspaces(&mut window, |shown| background_of(shown, made).is_some());
+    (laptop, desk, window, home, made)
+}
+
+/// The background tab of `home`, by its name, in what `client` is shown,
+/// once there's one called `name` showing a terminal of laptop's.
+fn background_named(client: &mut Client, name: &str) -> clackatoo_protocol::Background {
+    let shown = wait_for_workspaces(client, |shown| {
+        (shown.list.iter()).any(|workspace| {
+            (workspace.background.iter()).any(|background| {
+                background.name == name
+                    && background.tab.layout.panes()[0]
+                        .content
+                        .terminal()
+                        .is_some()
+            })
+        })
+    });
+    (shown.list.iter())
+        .flat_map(|workspace| &workspace.background)
+        .find(|background| background.name == name)
+        .unwrap()
+        .clone()
+}
+
+/// A shell laptop lends desk as a background tab is kept through the
+/// connection being made again, and either daemon restarting: never taken
+/// for one nothing here shows, and given back or closed (CLACKA-122).
+#[test]
+fn a_background_tab_another_machine_lends_is_kept_through_reconnecting_and_restarts() {
+    let world = World::new();
+    let (laptop, desk, mut window, _, _) = lent_in_background(&world, "sleep 600");
+    background_named(&mut window, "sleep 600");
+    let lent = lent_by(&mut laptop.client());
+    assert_eq!(lent, 2, "the pane and the background shell");
+
+    // The connection is made again: once laptop shows desk all it lends,
+    // the background shell is still shown here, so it's kept there.
+    world.password(Some("hunter2"));
+    kill(&pid(&world, "ssh.laptop.pid"));
+    wait_for_state(&mut window, "laptop", |state| {
+        *state == ConnectionState::NeedsPassword
+    });
+    let mut answering = desk.client();
+    answering.watch_connections(true).unwrap();
+    let (ask, ..) = next_question(&mut answering);
+    answering.answer_login(ask, Some("hunter2".into())).unwrap();
+    wait_for_state(&mut window, "laptop", connected);
+    world.password(None);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(lent_by(&mut laptop.client()), lent, "closed as an orphan");
+    background_named(&mut window, "sleep 600");
+
+    // Desk restarts: its background tab comes back, showing laptop's shell.
+    wait_for_kept(&world, "desk", r#""name": "sleep 600""#);
+    drop(window);
+    drop(desk);
+    let desk = world.start_with("desk", true);
+    let mut window = desk.client();
+    background_named(&mut window, "sleep 600");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(lent_by(&mut laptop.client()), lent, "closed as an orphan");
+
+    // Laptop restarts: it lends the shell again, a new one, still as a
+    // background tab, which desk shows by the same key.
+    wait_for_kept(&world, "laptop", r#""background": true"#);
+    drop(laptop);
+    let laptop = world.start_with("laptop", true);
+    wait_for_state(&mut window, "laptop", connected);
+    let background = background_named(&mut window, "sleep 600");
+    assert!(!background.state.ended(), "{background:?}");
+    assert_eq!(lent_by(&mut laptop.client()), lent);
+}
+
+/// The workspace `id` in `workspaces`.
+fn found_workspace(workspaces: &Workspaces, id: clackatoo_protocol::WorkspaceId) -> Workspace {
+    workspaces.get(id).expect("the workspace").clone()
+}
+
+/// Starts the daemon on `host` in `world` in a process of its own, as one
+/// that can upgrade, with the agent for tests, keeping none of its
+/// workspaces: the process, killed as it's dropped, and its socket.
+fn process_daemon(world: &World, host: &str) -> (Killed, PathBuf) {
+    let dir = world.host(host);
+    let state = world.path().join(format!("{host}-state"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    let log = std::fs::File::create(world.path().join(format!("{host}.log"))).unwrap();
+    let child = Command::new(example("daemon"))
+        .arg("daemon")
+        .env("CLACKATOO_UDP_PORTS", "off")
+        .env("CLACKATOO_BROWSER", "off")
+        .env("XDG_RUNTIME_DIR", &dir)
+        .env("XDG_STATE_HOME", &state)
+        .env("XDG_DATA_HOME", state.join("data"))
+        .env("XDG_CONFIG_HOME", state.join("config"))
+        .env("HOME", &dir)
+        .env("CLACKATOO_AGENT", example("fake_agent"))
+        .env("SHELL", "/bin/sh")
+        .env("CLACKATOO_DISPLAY", "off")
+        .env("CLACKATOO_WORKSPACES", "off")
+        .env("CLACKATOO_BOARDS", "off")
+        .env("CLACKATOO_RECOVERY", "off")
+        .stderr(log)
+        .stdout(Stdio::null())
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let child = Killed(child);
+    let socket = dir.join("clackatoo/daemon.sock");
+    let deadline = Instant::now() + PATIENCE;
+    while Client::connect(&socket).is_err() {
+        assert!(Instant::now() < deadline, "{host} never answered");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    (child, socket)
+}
+
+/// Upgrades the daemon in `child`, at `socket`, in place, to another
+/// build: this one again, by another name. Returns once it has.
+fn upgrade_process(child: &Killed, socket: &Path) {
+    use clackatoo_protocol::PROTOCOL_VERSION;
+    use clackatoo_protocol::frame;
+    use std::io::Read as _;
+    use std::os::unix::ffi::OsStrExt;
+    let bin = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let next = bin.path().join("daemon-next");
+    std::fs::hard_link(example("daemon"), &next).unwrap();
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    let upgrade = ClientMessage::Upgrade {
+        protocol_version: PROTOCOL_VERSION,
+        executable: next.as_os_str().as_bytes().to_vec(),
+    };
+    stream
+        .write_all(&frame::encode(PROTOCOL_VERSION, &upgrade).unwrap())
+        .unwrap();
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).unwrap();
+    let mut decoder = frame::FrameDecoder::new();
+    decoder.push(&answer);
+    let refused: Option<ServerMessage> = decoder.decode(PROTOCOL_VERSION).unwrap();
+    assert!(refused.is_none(), "{refused:?}");
+    let deadline = Instant::now() + PATIENCE;
+    while std::fs::read_link(format!("/proc/{}/exe", child.0.id())).ok() != Some(next.clone()) {
+        assert!(Instant::now() < deadline, "it never upgraded");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The build runs from the hard link, which outlives this.
+    std::mem::forget(bin);
+}
+
+/// A shell laptop lends desk as a background tab is still one after
+/// laptop upgrades in place: kept, its screen readable, once its program
+/// ends, rather than closed as a pane lent as any other is (CLACKA-122).
+#[test]
+fn a_background_tab_another_machine_lends_is_kept_through_its_upgrade() {
+    use clackatoo_protocol::{BackgroundState, TerminalStatus};
+    let world = World::new();
+    let (child, socket) = process_daemon(&world, "laptop");
+    let laptop_id = (Client::connect(&socket)
+        .unwrap()
+        .watch_workspaces()
+        .unwrap())
+    .machine
+    .unwrap()
+    .id;
+    let desk = world.start("desk");
+    let mut window = desk.client();
+    window.watch_connections(false).unwrap();
+    connect(&mut window, "laptop");
+    wait_for_state(&mut window, "laptop", connected);
+    let first = window.new_workspace(Some("home".into()), shell()).unwrap();
+    let shown = window.watch_workspaces().unwrap();
+    let home = found(&shown, first).0.id;
+    let there = made(&mut window, &new_tab_on(home, shell(), laptop_id));
+    wait_for_borrowed(&mut window, there);
+    let made = start_background(&mut window, home, there, "cat").unwrap();
+    let background = background_named(&mut window, "cat");
+    let terminal = background.tab.layout.panes()[0].content.terminal().unwrap();
+    attach_to(&mut window, terminal);
+    wait_for_view(&mut window, terminal, "cat");
+
+    upgrade_process(&child, &socket);
+    wait_for_state(&mut window, "laptop", connected);
+    let background = background_named(&mut window, "cat");
+    let terminal = background.tab.layout.panes()[0].content.terminal().unwrap();
+    // Its program ends with a failure: kept, as a background tab's is.
+    attach_when_reached(&mut window, terminal);
+    window.send_input(terminal, b"\x03").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    window.send_input(terminal, b"exit 4\r").unwrap();
+    let shown = wait_for_workspaces(&mut window, |shown| {
+        background_of(shown, made).is_some_and(|background| {
+            background.state == BackgroundState::Ended(TerminalStatus::Exited(4))
+                && background.failed == Some(4)
+        })
+    });
+    assert!(background_of(&shown, made).is_some());
 }

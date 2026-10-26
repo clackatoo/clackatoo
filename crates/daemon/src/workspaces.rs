@@ -32,8 +32,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use clackatoo_protocol::{
     Axis, Background, BackgroundState, BoardId, BufferId, Content, Error, FilesId, Kept, Layout,
-    Lent, MAX_NESTING, MachineId, Pane, PaneId, PaneKind, Restored, ReviewId, Side, Tab, TabId,
-    TerminalId, Workspace, WorkspaceId, Workspaces,
+    Lent, LentBackground, MAX_NESTING, MachineId, Pane, PaneId, PaneKind, Restored, ReviewId, Side,
+    Tab, TabId, TerminalId, Workspace, WorkspaceId, Workspaces,
 };
 
 use crate::handover::{self, HandoverError};
@@ -246,7 +246,7 @@ impl WorkspaceState {
         for workspace in &self.workspaces.list {
             for background in &workspace.background {
                 // Only terminals go to the background.
-                let Some(layout) = handed_terminals(&background.tab.layout) else {
+                let Some(layout) = handed_terminals(&background.tab.layout, &self.borrowed) else {
                     continue;
                 };
                 handed.push(handover::Background {
@@ -270,7 +270,8 @@ impl WorkspaceState {
     /// and its terminals closed with the others in no pane.
     pub(crate) fn resume_background(&mut self, handed: &[handover::Background]) {
         for background in handed {
-            let tab = resumed_terminals(&background.tab.layout).and_then(|layout| {
+            let borrowed = &mut self.borrowed;
+            let tab = resumed_terminals(&background.tab.layout, borrowed).and_then(|layout| {
                 let focused = PaneId(background.tab.focused);
                 layout.contains(focused).then(|| Tab {
                     id: TabId(background.tab.id),
@@ -733,6 +734,17 @@ impl WorkspaceState {
     }
 
     /// Names `tab`, or with an empty name, takes its name away.
+    /// Forgets the name `tab` was given, if it was: it's named after its
+    /// focused pane again.
+    pub(crate) fn forget_tab_name(&mut self, tab: TabId) {
+        if let Some(found) = (self.workspaces.list.iter_mut())
+            .flat_map(|workspace| &mut workspace.tabs)
+            .find(|found| found.id == tab)
+        {
+            found.name = None;
+        }
+    }
+
     pub(crate) fn rename_tab(&mut self, tab: TabId, name: &str) -> Result<(), Error> {
         let name = name.trim();
         if name.chars().any(char::is_control) {
@@ -830,7 +842,9 @@ impl WorkspaceState {
     /// there was such a pane.
     pub(crate) fn remove_pane(&mut self, pane: PaneId) -> bool {
         let Some((workspace, tab, _)) = self.workspaces.find_pane(pane) else {
-            return false;
+            // A background tab's, as one another machine lent: the tab goes
+            // with it, or the pane alone, from a tab of several.
+            return self.remove_background_pane(pane);
         };
         let (workspace, tab) = (workspace.id, tab.id);
         let tabs = &mut self.workspace_mut(workspace).tabs;
@@ -1001,6 +1015,107 @@ impl WorkspaceState {
     }
 
     /// Adds a background tab showing `content`, a terminal, to
+    /// Removes `pane` from its background tab, and the tab with its last
+    /// pane. Returns whether it was in one.
+    fn remove_background_pane(&mut self, pane: PaneId) -> bool {
+        let Some((workspace, background, _)) = self.workspaces.find_background_pane(pane) else {
+            return false;
+        };
+        let (workspace, tab) = (workspace.id, background.tab.id);
+        let shown = self.workspace_mut(workspace);
+        let index = (shown.background.iter())
+            .position(|background| background.tab.id == tab)
+            .expect("its background tab");
+        if !remove(&mut shown.background[index].tab, pane) {
+            let gone = shown.background.remove(index);
+            for terminal in gone.tab.terminals() {
+                self.background_terminals.remove(&terminal);
+            }
+        }
+        true
+    }
+
+    /// Adds a background tab to `workspace`, which
+    /// [`check_new_background`](Self::check_new_background) checked,
+    /// called `name`, showing a pane another machine lends this daemon as
+    /// `borrowed` says, a shell running a command there (CLACKA-122): how
+    /// it's getting on is as that machine says (see
+    /// [`set_borrowed_background`](Self::set_borrowed_background)), running
+    /// until it does. Returns the tab and its pane.
+    pub(crate) fn new_borrowed_background(
+        &mut self,
+        workspace: WorkspaceId,
+        borrowed: Borrowed,
+        name: String,
+    ) -> Option<(TabId, PaneId)> {
+        let pane = self.fresh_borrowed(borrowed);
+        let id = self.fresh_tab()?;
+        let pane_id = pane.id;
+        // Its name is kept with the tab, as no terminal here says it.
+        self.workspace_mut(workspace).background.push(Background {
+            tab: Tab {
+                id,
+                layout: Layout::Pane(pane),
+                focused: pane_id,
+                name: Some(name.clone()),
+            },
+            state: BackgroundState::Running,
+            failed: None,
+            name,
+        });
+        Some((id, pane_id))
+    }
+
+    /// Notes how the background tab showing the pane `machine` lends this
+    /// daemon as `key` is getting on, as that machine says. Returns whether
+    /// that changed.
+    pub(crate) fn set_borrowed_background(
+        &mut self,
+        machine: MachineId,
+        key: u64,
+        said: LentBackground,
+    ) -> bool {
+        let Some(pane) = self.borrowed_as(machine, key) else {
+            return false;
+        };
+        let Some(background) = (self.workspaces.list.iter_mut())
+            .flat_map(|workspace| &mut workspace.background)
+            .find(|background| background.tab.layout.contains(pane))
+        else {
+            return false;
+        };
+        let name = background.tab.name.clone().unwrap_or_default();
+        let changed = background.state != said.state
+            || background.failed != said.failed
+            || background.name != name;
+        background.state = said.state;
+        background.failed = said.failed;
+        background.name = name;
+        changed
+    }
+
+    /// The panes `tab`, a tab, shows that another machine lends this
+    /// daemon, and what each is.
+    pub(crate) fn borrowed_in_tab(&self, tab: TabId) -> Vec<(PaneId, Borrowed)> {
+        let Some((_, found)) = self.workspaces.find_tab(tab) else {
+            return Vec::new();
+        };
+        (found.layout.panes().iter())
+            .filter_map(|pane| Some((pane.id, *self.borrowed.get(&pane.id)?)))
+            .collect()
+    }
+
+    /// The panes `tab`, a background tab, shows that another machine lends
+    /// this daemon: how it's getting on is that machine's to say.
+    pub(crate) fn background_borrowed(&self, tab: TabId) -> Vec<(PaneId, Borrowed)> {
+        let Some((_, background)) = self.workspaces.find_background(tab) else {
+            return Vec::new();
+        };
+        (background.tab.layout.panes().iter())
+            .filter_map(|pane| Some((pane.id, *self.borrowed.get(&pane.id)?)))
+            .collect()
+    }
+
     /// `workspace`, which [`check_new_background`](Self::check_new_background)
     /// checked, running until the server says otherwise. Returns the tab
     /// and its pane.
@@ -1112,7 +1227,12 @@ impl WorkspaceState {
         let mut kept = Vec::new();
         for tab in background {
             let tab = self.restored_tab(tab);
-            if backgroundable(&tab.layout.panes()).is_err() || tabs.is_empty() {
+            // A shell another machine lends goes back to the background too.
+            let panes = tab.layout.panes();
+            let lent_here = panes
+                .iter()
+                .all(|pane| self.borrowed.contains_key(&pane.id));
+            if (backgroundable(&panes).is_err() && !lent_here) || tabs.is_empty() {
                 tabs.push(tab);
             } else {
                 kept.push(Background {
@@ -1347,6 +1467,54 @@ impl WorkspaceState {
         })
     }
 
+    /// Marks `workspace`, lent, as lent as a background tab of the daemon
+    /// it's lent to, getting on as `background` says, or with `None`, as
+    /// lent as any other pane. Returns whether that changed.
+    pub(crate) fn set_lent_background(
+        &mut self,
+        workspace: WorkspaceId,
+        background: Option<LentBackground>,
+    ) -> bool {
+        let Some(shown) = (self.workspaces.list.iter_mut()).find(|w| w.id == workspace) else {
+            return false;
+        };
+        let Some(lent) = &mut shown.lent else {
+            return false;
+        };
+        let changed = lent.background != background;
+        lent.background = background;
+        if changed {
+            self.refresh_lent();
+        }
+        changed
+    }
+
+    /// The workspaces lent as background tabs, for the next build.
+    pub(crate) fn hand_over_lent_background(&self) -> Vec<handover::LentBackground> {
+        (self.workspaces.list.iter())
+            .filter_map(|workspace| {
+                let background = workspace.lent?.background?;
+                Some(handover::LentBackground {
+                    workspace: workspace.id.0,
+                    failed: background.failed,
+                })
+            })
+            .collect()
+    }
+
+    /// Marks the workspaces lent as background tabs again, as the last
+    /// build handed them over: how each is getting on is said again once
+    /// its terminal is taken over.
+    pub(crate) fn resume_lent_background(&mut self, lent: &[handover::LentBackground]) {
+        for one in lent {
+            let background = LentBackground {
+                state: BackgroundState::Running,
+                failed: one.failed,
+            };
+            self.set_lent_background(WorkspaceId(one.workspace), Some(background));
+        }
+    }
+
     /// Whether `workspace` is lent to another machine's daemon.
     pub(crate) fn is_lent(&self, workspace: WorkspaceId) -> bool {
         self.lent_of(workspace).is_some()
@@ -1566,7 +1734,8 @@ impl WorkspaceState {
         let workspaces = &self.workspaces;
         let mut gone = Vec::new();
         self.borrowed.retain(|&pane, borrowed| {
-            let open = workspaces.find_pane(pane).is_some();
+            let open = workspaces.find_pane(pane).is_some()
+                || workspaces.find_background_pane(pane).is_some();
             if !open {
                 gone.push(*borrowed);
             }
@@ -1651,8 +1820,22 @@ impl WorkspaceState {
 
 /// `layout`, a background tab's, as it's handed over: `None` if it shows
 /// anything but terminals, which no background tab does.
-fn handed_terminals(layout: &Layout) -> Option<handover::Layout> {
+fn handed_terminals(
+    layout: &Layout,
+    borrowed: &BTreeMap<PaneId, Borrowed>,
+) -> Option<handover::Layout> {
     match layout {
+        // A shell another machine lends as a background tab of this
+        // daemon's (CLACKA-122).
+        Layout::Pane(pane) if borrowed.contains_key(&pane.id) => {
+            let borrowed = borrowed[&pane.id];
+            Some(handover::Layout::Borrowed {
+                id: pane.id.0,
+                machine: borrowed.machine.0,
+                key: borrowed.key,
+                kind: borrowed.kind.to_string(),
+            })
+        }
         Layout::Pane(Pane {
             id,
             content: Content::Terminal(terminal),
@@ -1670,7 +1853,7 @@ fn handed_terminals(layout: &Layout) -> Option<handover::Layout> {
         } => Some(handover::Layout::Split {
             left_to_right: *axis == Axis::LeftToRight,
             parts: (parts.iter())
-                .map(handed_terminals)
+                .map(|part| handed_terminals(part, borrowed))
                 .collect::<Option<_>>()?,
             shares: shares.clone(),
         }),
@@ -1679,8 +1862,12 @@ fn handed_terminals(layout: &Layout) -> Option<handover::Layout> {
 
 /// A background tab's layout, as handed over: `None` if it's damaged, or
 /// shows anything but terminals.
-fn resumed_terminals(node: &handover::Layout) -> Option<Layout> {
+fn resumed_terminals(
+    node: &handover::Layout,
+    borrowed: &mut BTreeMap<PaneId, Borrowed>,
+) -> Option<Layout> {
     match node {
+        handover::Layout::Borrowed { .. } => handed_borrowed(node, borrowed).map(Layout::Pane),
         handover::Layout::Pane { id, terminal } => Some(Layout::Pane(Pane {
             id: PaneId(*id),
             content: Content::Terminal(TerminalId(*terminal)),
@@ -1701,7 +1888,9 @@ fn resumed_terminals(node: &handover::Layout) -> Option<Layout> {
                 } else {
                     Axis::TopToBottom
                 },
-                parts: parts.iter().map(resumed_terminals).collect::<Option<_>>()?,
+                parts: (parts.iter())
+                    .map(|part| resumed_terminals(part, borrowed))
+                    .collect::<Option<_>>()?,
                 shares: shares.clone(),
             };
             (layout.depth() <= MAX_NESTING).then_some(layout)
@@ -1779,6 +1968,7 @@ fn handed_lent(lent: &[handover::Lent], id: u32) -> Option<Lent> {
         to: MachineId(lent.to),
         key: lent.key,
         placed: lent.placed,
+        background: None,
     })
 }
 
@@ -2259,6 +2449,7 @@ mod tests {
                 to: MachineId([1; 16]),
                 key: 7,
                 placed: false,
+                background: None,
             },
             Content::Terminal(TerminalId(2)),
         );
@@ -2338,6 +2529,43 @@ mod tests {
         assert_eq!(resumed.background_of(TerminalId(3)), Some(tab));
         assert!(resumed.seen(workspace).unwrap());
         assert!(!resumed.seen(workspace).unwrap(), "seen once");
+    }
+
+    /// A background tab showing a shell another machine lends is handed
+    /// over as one, still borrowed by its key, and goes as its pane goes
+    /// (CLACKA-122).
+    #[test]
+    fn a_background_tab_another_machine_lends_is_handed_over_and_goes_with_its_pane() {
+        let mut state = WorkspaceState::new();
+        state.new_workspace("site".into(), TerminalId(1));
+        let workspace = state.get().list[0].id;
+        let borrowed = Borrowed {
+            machine: MachineId([7; 16]),
+            key: 42,
+            kind: PaneKind::new("terminal"),
+            placed: false,
+        };
+        let (tab, pane) = state
+            .new_borrowed_background(workspace, borrowed, "trail serve".into())
+            .unwrap();
+        let said = LentBackground {
+            state: BackgroundState::Ended(clackatoo_protocol::TerminalStatus::Exited(2)),
+            failed: Some(2),
+        };
+        assert!(state.set_borrowed_background(borrowed.machine, 42, said));
+        assert!(!state.set_borrowed_background(borrowed.machine, 42, said));
+        let (handed, lent) = state.hand_over();
+        let background = state.hand_over_background();
+        let mut resumed = WorkspaceState::resume(&handed, &lent).unwrap();
+        resumed.resume_background(&background);
+        let shown = &resumed.get().list[0].background[0];
+        assert_eq!(shown.tab.id, tab);
+        assert_eq!(shown.tab.name.as_deref(), Some("trail serve"));
+        assert_eq!(resumed.borrowed_as(borrowed.machine, 42), Some(pane));
+        assert!(resumed.sweep_borrowed().is_empty(), "taken for closed");
+        assert!(resumed.remove_pane(pane));
+        assert!(resumed.get().list[0].background.is_empty());
+        assert_eq!(resumed.sweep_borrowed(), [borrowed]);
     }
 
     #[test]
@@ -2489,6 +2717,7 @@ mod tests {
             to: MachineId([7; 16]),
             key: 9,
             placed: true,
+            background: None,
         };
         let pane = state.new_lent(lent, Content::Terminal(TerminalId(2)));
         assert_eq!(state.lent_pane(lent.to, 9), Some(pane));
@@ -2552,6 +2781,7 @@ mod tests {
                 to: laptop,
                 key: 1,
                 placed: false,
+                background: None,
             },
             Content::Terminal(TerminalId(1)),
         );

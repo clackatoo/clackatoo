@@ -253,10 +253,14 @@ gates! {
     /// `BufferUpdate::Reversed`. And `Change::Undo` and `Change::Redo`
     /// pass over steps that change nothing.
     UNDO_STATE = 106,
-    /// Listing an agent's past sessions on another machine the daemon is
-    /// connected to, for the start page of a pane there:
-    /// `ClientMessage::ListSessions`' `on`.
-    SESSIONS_ELSEWHERE = 107,
+    /// What's of another machine the daemon is connected to: listing its
+    /// agent's past sessions, for the start page of a pane there,
+    /// `ClientMessage::ListSessions`' `on`; and background tabs holding a
+    /// pane borrowed from it, a shell it starts with a command,
+    /// `Request::Lend`'s `command`, and reports on, `Lent`'s `background`
+    /// (`LentBackground`), and brings back or says was seen,
+    /// `Request::LentBackground` (`LentBackgroundAction`).
+    ELSEWHERE = 107,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -943,6 +947,21 @@ impl Downgrade for ClientMessage {
             && let Some(older) = change_as_older(self)
         {
             return older;
+        }
+        // A command an older daemon would drop, lending a plain shell.
+        if wire < ELSEWHERE
+            && matches!(
+                self,
+                Self::Request(
+                    crate::Request::LentBackground { .. }
+                        | crate::Request::Lend {
+                            command: Some(_),
+                            ..
+                        }
+                )
+            )
+        {
+            return Downgraded::Refused;
         }
         if wire < HARNESS
             && matches!(
@@ -1918,6 +1937,7 @@ mod tests {
             to: crate::MachineId([7; 16]),
             key: 9,
             placed: false,
+            background: None,
         };
         let workspaces = Workspaces {
             list: vec![workspace(1, None), workspace(2, Some(lent))],
@@ -2190,6 +2210,41 @@ mod original_tests {
             .downgrade(TOOL_IMAGES),
             Downgraded::Refused
         );
+    }
+}
+
+#[cfg(test)]
+mod lend_background_tests {
+    use super::*;
+
+    /// An older daemon would lend a plain shell, dropping the command, and
+    /// can't be asked about one lent as a background tab: both refused.
+    #[test]
+    fn a_background_shell_is_never_asked_of_an_older_daemon() {
+        let lend = |command: Option<&str>| {
+            ClientMessage::Request(crate::Request::Lend {
+                key: 1,
+                beside: None,
+                terminal: crate::PaneTerminal::New(crate::NewTerminal {
+                    size: crate::Size::new(80, 24).unwrap(),
+                    command: None,
+                    cwd: None,
+                    record_to: None,
+                }),
+                command: command.map(str::to_owned),
+            })
+        };
+        assert_eq!(
+            lend(Some("x")).downgrade(ELSEWHERE - 1),
+            Downgraded::Refused
+        );
+        assert_eq!(lend(Some("x")).downgrade(ELSEWHERE), Downgraded::AsIs);
+        assert_eq!(lend(None).downgrade(ELSEWHERE - 1), Downgraded::AsIs);
+        let seen = ClientMessage::Request(crate::Request::LentBackground {
+            key: 1,
+            action: crate::LentBackgroundAction::Seen,
+        });
+        assert_eq!(seen.downgrade(ELSEWHERE - 1), Downgraded::Refused);
     }
 }
 

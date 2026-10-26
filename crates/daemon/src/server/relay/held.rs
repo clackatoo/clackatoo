@@ -122,6 +122,7 @@ impl Daemon {
             to: machine.id,
             key,
             placed: true,
+            background: None,
         };
         self.workspaces.new_lent(lent, content);
         let now = super::super::lending::now_seconds();
@@ -812,11 +813,13 @@ mod tests {
             to: MachineId([5; 16]),
             key: 1,
             placed: false,
+            background: None,
         };
         let placed = Lent {
             to: desk().id,
             key: 2,
             placed: true,
+            background: None,
         };
         daemon
             .workspaces
@@ -872,6 +875,7 @@ mod tests {
             to: desk().id,
             key: 2,
             placed: true,
+            background: None,
         };
         // Lent as phase 4 lends: desk borrowed it.
         let asked = Lent {
@@ -958,6 +962,7 @@ mod tests {
             to: desk().id,
             key,
             placed: true,
+            background: None,
         };
         daemon
             .workspaces

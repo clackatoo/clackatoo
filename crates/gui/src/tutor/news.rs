@@ -935,6 +935,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: ":Agent's start page lists another machine's past sessions, to go on with one there",
     },
+    News {
+        id: "background-borrowed",
+        date: "2026-10-26",
+        lesson: "background",
+        what: ":bg CMD beside a pane borrowed from another machine runs it there, in a background tab here",
+    },
 ];
 
 impl News {

@@ -3313,7 +3313,7 @@ mod tests {
         };
         let (_, listed) = asked(None);
         assert_eq!(listed, [Some(desk_machine)]);
-        let (desk, listed) = asked(Some(clackatoo_protocol::wire::SESSIONS_ELSEWHERE - 1));
+        let (desk, listed) = asked(Some(clackatoo_protocol::wire::ELSEWHERE - 1));
         assert!(listed.is_empty(), "{listed:?}");
         let page = format!("{:?}", desk.start);
         assert!(

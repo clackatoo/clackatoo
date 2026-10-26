@@ -1272,7 +1272,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
     );
     // An agent's past sessions on another machine (CLACKA-163).
     samples.push((
-        crate::wire::SESSIONS_ELSEWHERE,
+        crate::wire::ELSEWHERE,
         Client(ClientMessage::ListSessions {
             id: 4,
             agent: "claude".into(),
@@ -1280,6 +1280,42 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             on: Some(crate::MachineId([9; 16])),
         }),
     ));
+    // A shell another machine lends as a background tab (CLACKA-122).
+    let mut lent = workspaces();
+    lent.list[0].lent = Some(Lent {
+        to: crate::MachineId([7; 16]),
+        key: 0x0123_4567_89ab_cdef,
+        placed: false,
+        background: Some(crate::LentBackground {
+            state: crate::BackgroundState::Ended(crate::TerminalStatus::Exited(2)),
+            failed: Some(2),
+        }),
+    });
+    samples.extend(
+        [
+            Client(ClientMessage::Request(Request::Lend {
+                key: 0x0123_4567_89ab_cdef,
+                beside: Some(PaneId(1)),
+                terminal: PaneTerminal::New(NewTerminal {
+                    size: Size::new(80, 24).expect("a size"),
+                    command: None,
+                    cwd: None,
+                    record_to: None,
+                }),
+                command: Some("trail serve".into()),
+            })),
+            Server(ServerMessage::Event(Event::Workspaces(lent))),
+            Client(ClientMessage::Request(Request::LentBackground {
+                key: 0x0123_4567_89ab_cdef,
+                action: crate::LentBackgroundAction::Bring,
+            })),
+            Client(ClientMessage::Request(Request::LentBackground {
+                key: 0x0123_4567_89ab_cdef,
+                action: crate::LentBackgroundAction::Seen,
+            })),
+        ]
+        .map(|sample| (crate::wire::ELSEWHERE, sample)),
+    );
     samples
 }
 
@@ -1585,6 +1621,7 @@ fn mixed() -> Vec<Sample> {
         to: desktop,
         key: 0x0123_4567_89ab_cdef,
         placed: true,
+        background: None,
     });
     vec![
         Client(ClientMessage::Request(Request::Split {
@@ -1624,6 +1661,7 @@ fn lend() -> Vec<Sample> {
         to: laptop,
         key: 0x0123_4567_89ab_cdef,
         placed: false,
+        background: None,
     });
     let mut own = workspaces.list[0].clone();
     own.id = WorkspaceId(9);
@@ -1669,6 +1707,7 @@ fn lend() -> Vec<Sample> {
             key: 0x0123_4567_89ab_cdef,
             beside: Some(PaneId(1)),
             terminal: new(),
+            command: None,
         })),
         Server(ServerMessage::Response(Response::PaneCreated(PaneId(12)))),
         Server(ServerMessage::Event(Event::Workspaces(workspaces))),
