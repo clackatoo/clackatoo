@@ -274,6 +274,18 @@ impl ChatView {
         }
     }
 
+    /// Whether text selected with the mouse is what `y` would yank, with
+    /// nothing typed but a count or a register: the bar says VISUAL.
+    pub(crate) fn mouse_selecting(&self) -> bool {
+        matches!(
+            self.picked,
+            Some(Picked {
+                how: How::Mouse,
+                ..
+            })
+        ) && crate::vim::only_count_and_register(self.keys.so_far())
+    }
+
     /// The keys of a command half typed in normal or visual mode, such as
     /// `z` waiting for `a`, or a count.
     pub(crate) fn keys(&self) -> &crate::vim::Keys {
@@ -444,16 +456,18 @@ impl ChatView {
         for stroke in strokes {
             let was_pending = self.keys.pending();
             // Text selected with the mouse is a visual selection to Vim:
-            // `y` yanks it, after a count or a register.
-            let mouse = matches!(
-                self.picked,
-                Some(Picked {
-                    how: How::Mouse,
-                    ..
-                })
-            );
-            let visual = visual || (mouse && stroke == Stroke::char('y'));
-            match self.keys.read(stroke, visual, &ChatKeys) {
+            // `y` yanks it, after a count or a register, which wait with
+            // it. Any other key forgets it, as in a terminal.
+            let mouse = self.mouse_selecting();
+            let y = stroke == Stroke::char('y');
+            let parsed = self.keys.read(stroke, visual || (mouse && y), &ChatKeys);
+            let waits = parsed == Parsed::Incomplete
+                && crate::vim::only_count_and_register(self.keys.so_far());
+            if mouse && !y && !waits {
+                self.picked = None;
+                redraw = true;
+            }
+            match parsed {
                 Parsed::Incomplete => redraw = true,
                 Parsed::Nothing => redraw |= was_pending,
                 Parsed::Command(command) => {

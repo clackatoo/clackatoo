@@ -99,6 +99,16 @@ impl ChatPane {
         self.mode
     }
 
+    /// The mode the bar shows: visual while text selected with the mouse
+    /// is what `y` would yank, as in a terminal.
+    pub(crate) fn shown_mode(&self) -> Mode {
+        if self.mode == Mode::Normal && !self.prompting() && self.view.mouse_selecting() {
+            Mode::Visual(crate::vim::Selection::Characters)
+        } else {
+            self.mode
+        }
+    }
+
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.carryover = options.carryover;

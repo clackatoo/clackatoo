@@ -882,6 +882,64 @@ mod tests {
     }
 
     #[test]
+    fn a_mouse_selection_shows_as_visual_while_y_would_yank_it_and_any_other_key_forgets_it() {
+        use crate::vim::Mode;
+        let mut fonts = fonts();
+        let node = talk(&[("q", "alpha beta")]);
+        let snapshot = clackatoo_protocol::ViewUpdate::Snapshot(clackatoo_protocol::View {
+            title: "agent".into(),
+            cwd: None,
+            root: clackatoo_protocol::Node::Chat(Box::new(node)),
+        });
+        let mut pane =
+            crate::chat::ChatPane::of_snapshot(clackatoo_protocol::TerminalId(1), &snapshot);
+        pane.enter_normal_mode();
+        pane.paint(&mut fonts, [0.0; 2], [900.0, 1000.0], true);
+        let select = |pane: &mut crate::chat::ChatPane, fonts: &mut crate::fonts::Fonts| {
+            let answer = shown(pane.view(), 0, ITEMS);
+            pane.view_mut()
+                .press([answer.at[0] + 2.0, answer.at[1] + 4.0], 2, false);
+            pane.view_mut().release();
+            pane.settle(fonts);
+        };
+        select(&mut pane, &mut fonts);
+        assert_eq!(pane.mode(), Mode::Normal);
+        assert_eq!(
+            pane.shown_mode(),
+            Mode::Visual(crate::vim::Selection::Characters)
+        );
+        // A register waits with it.
+        type_in(&mut pane, "\"");
+        type_in(&mut pane, "a");
+        assert_eq!(
+            pane.shown_mode(),
+            Mode::Visual(crate::vim::Selection::Characters)
+        );
+        type_in(&mut pane, "y");
+        assert_eq!(pane.shown_mode(), Mode::Normal);
+        pane.settle(&mut fonts);
+        assert_eq!(pane.take_yanks().len(), 1);
+        // Anything else forgets it: `j` moves, and `y` then waits for a
+        // motion.
+        select(&mut pane, &mut fonts);
+        type_in(&mut pane, "j");
+        assert_eq!(pane.shown_mode(), Mode::Normal);
+        assert!(pane.view().picked.is_none());
+    }
+
+    /// Types `text` in `pane`.
+    fn type_in(pane: &mut crate::chat::ChatPane, text: &str) {
+        let key = Key::Character(text.into());
+        pane.key(&KeyPress {
+            key: &key,
+            text: Some(text),
+            location: KeyLocation::Standard,
+            code: None,
+            modifiers: Modifiers::default(),
+        });
+    }
+
+    #[test]
     fn copies_settled_together_all_go() {
         let mut fonts = fonts();
         let mut chat = ChatView::new(String::new(), talk(&[("q", "alpha beta")]));

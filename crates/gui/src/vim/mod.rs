@@ -18,7 +18,7 @@ pub(crate) use command::{
     Action, Command, Entry, Finds, Operator, Paging, Recase, Scroll, Target, ViewAt, is_register,
     page_rows,
 };
-pub(crate) use grammar::{Dialect, Keys, Parsed, Read, Reader, parse};
+pub(crate) use grammar::{Dialect, Keys, Parsed, Read, Reader, only_count_and_register, parse};
 pub(crate) use stroke::{
     Stroke, enters_normal_mode, is_ctrl_backslash, plain_strokes, prompt_strokes, strokes,
 };

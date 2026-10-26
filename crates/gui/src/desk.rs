@@ -896,7 +896,7 @@ impl Desk {
                     under: None,
                 };
             }
-            (Some(chat.mode()), chat.label())
+            (Some(chat.shown_mode()), chat.label())
         } else {
             let pane = self
                 .focused_terminal()
@@ -913,7 +913,7 @@ impl Desk {
                     under: None,
                 };
             }
-            (pane.map(|pane| pane.mode), pane.and_then(Pane::label))
+            (pane.map(Pane::shown_mode), pane.and_then(Pane::label))
         };
         let (note, kind) = self.note(None, label.or_else(|| self.notice()));
         Status::Tabs {

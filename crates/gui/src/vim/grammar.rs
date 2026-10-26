@@ -682,6 +682,40 @@ fn after_g_motion(stroke: Stroke) -> Read<Motion> {
     }
 }
 
+/// Whether `typed`, which the grammar reads as incomplete, is only counts
+/// and registers, as `3`, `"a` or `"a2`, and not the start of a command.
+/// (`0` alone is a motion, so not incomplete.)
+pub(crate) fn only_count_and_register(typed: &[Stroke]) -> bool {
+    let mut rest = typed;
+    loop {
+        rest = match rest {
+            [] => return true,
+            [
+                Stroke::Char {
+                    ch: '"',
+                    ctrl: false,
+                },
+            ] => &[],
+            [
+                Stroke::Char {
+                    ch: '"',
+                    ctrl: false,
+                },
+                _,
+                more @ ..,
+            ]
+            | [
+                Stroke::Char {
+                    ch: '0'..='9',
+                    ctrl: false,
+                },
+                more @ ..,
+            ] => more,
+            _ => return false,
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use clackatoo_protocol::Construct;

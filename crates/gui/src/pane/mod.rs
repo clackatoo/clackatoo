@@ -3369,10 +3369,16 @@ mod mouse_tests {
             copied(pane, &terminal);
         };
         select(&mut pane);
+        // The bar says VISUAL, as Vim does of a mouse selection, while `y`
+        // would yank it.
+        assert_eq!(pane.shown_mode(), Mode::Visual(Selection::Characters));
+        assert_eq!(pane.mode, Mode::Normal, "keys are still normal mode's");
         key(&mut pane, "\"");
         key(&mut pane, "a");
         assert!(pane.mouse_selected().is_some(), "still selected");
+        assert_eq!(pane.shown_mode(), Mode::Visual(Selection::Characters));
         key(&mut pane, "y");
+        assert_eq!(pane.shown_mode(), Mode::Normal);
         let into = |name| CopyTo::Register(Some(name));
         assert_eq!(
             copied(&mut pane, &terminal),
@@ -3394,6 +3400,7 @@ mod mouse_tests {
         key(&mut pane, "a");
         key(&mut pane, "j");
         assert!(pane.mouse_selected().is_none());
+        assert_eq!(pane.shown_mode(), Mode::Normal);
         assert_eq!(copied(&mut pane, &terminal), None);
     }
 
