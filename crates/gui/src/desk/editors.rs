@@ -1335,14 +1335,14 @@ impl Desk {
     /// yank is, or onto the primary selection alone, as a mouse selection
     /// is, as Vim puts one in `"*` (see `pane::yank`).
     pub(super) fn terminal_yanked(&mut self, yanked: Yanked) {
-        match yanked.to {
-            CopyTo::Primary => self.copied(yanked.register.text, Copy::Primary),
-            CopyTo::Register(name) => {
-                let registers = &mut self.editors.shared.registers;
-                registers.wrote(name, yanked.register, Wrote::Yank);
-                self.registers_to_system();
-            }
-        }
+        let name = match yanked.to {
+            CopyTo::Primary => return self.copied(yanked.register.text, Copy::Primary),
+            CopyTo::Clipboard => Some('+'),
+            CopyTo::Register(name) => name,
+        };
+        let registers = &mut self.editors.shared.registers;
+        registers.wrote(name, yanked.register, Wrote::Yank);
+        self.registers_to_system();
     }
 
     /// Sends on what the registers put on the clipboard or the primary

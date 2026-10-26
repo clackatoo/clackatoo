@@ -349,7 +349,7 @@ Clicking a pane focuses it. What else the mouse does depends on the program in t
 - A triple click selects whole lines.
 - With Alt held, or Ctrl and Alt, dragging selects a block of columns. Over a program that takes the mouse, add Shift.
 
-Letting go copies the selection to the primary selection, `"*`, and a middle click pastes it, as elsewhere on Linux. Only there: as Vim puts a mouse selection in `"*` and leaves the unnamed register as it was, so `p` in an editor still puts what you last yanked. Ctrl+Shift+C copies it to the clipboard, as `"+y` does, and `y` in normal mode with nothing typed before it yanks it, as `y` yanks anything, into the [registers](#selecting-and-copying). The selection stays highlighted until the next key or click. In normal mode, a click also moves the cursor there.
+Letting go copies the selection to the primary selection, `"*`, and a middle click pastes it, as elsewhere on Linux. Only there: as Vim puts a mouse selection in `"*` and leaves the unnamed register as it was, so `p` in an editor still puts what you last yanked. Ctrl+Shift+C copies it to the clipboard, and `"+`, as shown: by characters, with no newline after a last line, even of lines a triple click selected. And `y` in normal mode with nothing typed before it yanks it, as `y` yanks anything, into the [registers](#selecting-and-copying). The selection stays highlighted until the next key or click. In normal mode, a click also moves the cursor there.
 
 **Programs that take the mouse.** Programs such as Neovim, htop and less can ask for clicks, drags and the wheel, and get them while their pane is in insert mode on the live screen. The pointer is then an arrow rather than a text cursor. Hold Shift to select text anyway. A drag stays with the pane it started in, even when the pointer leaves it.
 
@@ -396,7 +396,7 @@ The keys are read as an editor reads them, so a command half typed, as `y3` or `
 | `V` | Selects whole lines. |
 | Ctrl+V | Selects a block of columns. `$` takes every line to its end, and `O` goes to the other corner on the same line. |
 | `o` | Moves the other end of the selection. |
-| `y`, Ctrl+Shift+C | Yanks the selection into the registers, or with Ctrl+Shift+C, as `"+y`, onto the clipboard, and returns to normal mode. |
+| `y`, Ctrl+Shift+C | Yanks the selection into the registers, or with Ctrl+Shift+C onto the clipboard and into `"+` as shown, by characters, and returns to normal mode. |
 | `yy`, `Y` | Copies the cursor's line, or with a count, as many lines from it: `3yy`. `y2w` and `2yj` take counts too. |
 | `y` and a motion | Copies what the motion moves over: `yw` to the next word, `y$` to the line's end, `yj` this line and the next, `ygg` up to the top, `yH` up to the view's top. |
 | `y` and a [text object](#text-objects) | Copies the object around the cursor: `yiw` the word, `yi"` what's in the quotes, `yib` a command's output. |

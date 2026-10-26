@@ -5,9 +5,9 @@
 //! [`crate::editor::Registers`]): the register named with `"x` first, if
 //! one was, or else the unnamed register and `"0`, and the clipboard as
 //! `clipboard` says. It keeps its kind, so `p` in an editor puts lines
-//! copied by lines as lines, and a block as a block. Ctrl+Shift+C is `"+y`:
-//! the clipboard, as in other terminals, and the unnamed register too, as
-//! Vim's `"+y` is.
+//! copied by lines as lines, and a block as a block. Ctrl+Shift+C is `"+y`
+//! but by characters: the clipboard, with the text as shown, as other
+//! terminals copy it, and the unnamed register too, as Vim's `"+y` is.
 //!
 //! Text selected with the mouse goes onto the primary selection alone, as
 //! Vim puts a mouse selection in `"*` and leaves the unnamed register be;
@@ -28,6 +28,10 @@ use crate::motion::{Block, Point};
 pub(crate) enum CopyTo {
     /// The registers, as an editor's yank: the one named, if any.
     Register(Option<char>),
+    /// `"+`, and so the clipboard, as Ctrl+Shift+C copies, by characters:
+    /// the text as shown, whatever was selected, as other terminals copy
+    /// it, with no line break after a last line.
+    Clipboard,
     /// The primary selection alone, as a mouse selection.
     Primary,
 }
@@ -112,7 +116,9 @@ impl Pane {
         let register = match (copying.to, copying.kind) {
             // The primary selection takes the text as it is, as other
             // terminals put it there.
-            (CopyTo::Primary, _) | (_, Selection::Characters) => Register::chars(text),
+            (CopyTo::Primary | CopyTo::Clipboard, _) | (_, Selection::Characters) => {
+                Register::chars(text)
+            }
             // The daemon puts a line break between lines, and an editor's
             // lines each end with one, the last too, even if it's blank.
             (_, Selection::Lines) => {

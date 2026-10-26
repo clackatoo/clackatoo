@@ -491,7 +491,11 @@ impl Pane {
             && !modifiers.alt
             && !self.keys.pending()
             && matches!(press.key, Key::Character(text) if text == "y");
-        let to = CopyTo::Register(ctrl_shift_c.then_some('+'));
+        let to = if ctrl_shift_c {
+            CopyTo::Clipboard
+        } else {
+            CopyTo::Register(None)
+        };
         if (ctrl_shift_c || y) && self.copy_mouse_selection(to) {
             self.mouse_selection = None;
             return true;
@@ -3298,7 +3302,7 @@ mod mouse_tests {
         });
         assert_eq!(
             copied(&mut pane, &terminal),
-            Some(("world\nsec".to_owned(), CopyTo::Register(Some('+'))))
+            Some(("world\nsec".to_owned(), CopyTo::Clipboard))
         );
         // Nothing went to the program, and the selection is gone, but for
         // a moment the clipboard's copy is highlighted. The primary
@@ -3356,6 +3360,60 @@ mod mouse_tests {
         assert_eq!(
             copied(&mut pane, &terminal),
             Some(("second".to_owned(), CopyTo::Primary))
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_c_copies_lines_selected_as_shown_and_y_as_lines() {
+        let terminal = terminal("first\r\nsecond");
+        let mut pane = pane(&terminal);
+        pane.enter_normal_mode();
+        let triple_click = |pane: &mut Pane| {
+            mouse(pane, MouseAction::Press(LEFT), [1, 1], 3);
+            mouse(pane, MouseAction::Release(LEFT), [1, 1], 3);
+            copied(pane, &terminal);
+        };
+        triple_click(&mut pane);
+        let ctrl_shift_c = Key::Character("C".into());
+        pane.key(&KeyPress {
+            key: &ctrl_shift_c,
+            text: None,
+            location: winit::keyboard::KeyLocation::Standard,
+            code: None,
+            modifiers: Modifiers {
+                ctrl: true,
+                shift: true,
+                alt: false,
+            },
+        });
+        let yanked = |pane: &mut Pane| {
+            for message in pane.take_outbox() {
+                if let ClientMessage::Request(Request::Text {
+                    from,
+                    to,
+                    whole_lines,
+                    ..
+                }) = message
+                {
+                    pane.answered(Response::Text(terminal.text(from, to, whole_lines)));
+                }
+            }
+            pane.take_yanked().expect("copied")
+        };
+        // By characters, with no line break after it.
+        let copied = yanked(&mut pane);
+        assert_eq!(copied.to, CopyTo::Clipboard);
+        assert_eq!(
+            copied.register,
+            crate::editor::Register::chars("second".into())
+        );
+        // `y` is Vim's, and keeps lines as lines.
+        triple_click(&mut pane);
+        key(&mut pane, "y");
+        let yanked = yanked(&mut pane);
+        assert_eq!(
+            yanked.register,
+            crate::editor::Register::new("second\n".into(), true)
         );
     }
 

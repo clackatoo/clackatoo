@@ -200,7 +200,7 @@ impl Pane {
         if let Some((copy, _)) = terminal_control(press) {
             self.keys.clear();
             if copy {
-                return self.yank_selection(CopyTo::Register(Some('+')));
+                return self.yank_selection(CopyTo::Clipboard);
             }
             self.send_keyed(vec![0x03]);
             return false;
