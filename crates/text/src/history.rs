@@ -33,6 +33,11 @@ pub struct Limits {
     /// by before they're brought up to date, rather than wait for their
     /// author to next need them.
     pub lag_work: usize,
+    /// The most an edit's own pieces may cost bringing it up to date when
+    /// they're not counted against [`rebase_work`](Self::rebase_work) (see
+    /// [`History::rebase_any_length`]): its pieces times the edits since.
+    /// About 14 ns each, so 2^21 holds the loop some 30 ms at most.
+    pub any_length_work: usize,
 }
 
 impl Default for Limits {
@@ -44,6 +49,7 @@ impl Default for Limits {
             rebase_work: 1 << 16,
             sync_work: 1 << 16,
             lag_work: 1 << 14,
+            any_length_work: 1 << 21,
         }
     }
 }
@@ -287,9 +293,10 @@ impl<A: Clone + Eq> History<A> {
     }
 
     /// `edit` brought up to date as [`rebase`](Self::rebase) does, but its
-    /// own pieces not counted, only the text it copies at each step and the
-    /// edits since: for an edit from a window that can't send it in fewer
-    /// pieces, which, refused, would only send it again.
+    /// own pieces counted apart, against [`Limits::any_length_work`]: for an
+    /// edit from a window that can't send it in fewer pieces, which,
+    /// refused, would only send it again, as such an edit is usually only
+    /// a few edits behind.
     ///
     /// # Errors
     ///
@@ -314,7 +321,16 @@ impl<A: Clone + Eq> History<A> {
         // The text the edit puts in and takes away is copied at each step,
         // as its pieces are gone through.
         let mut work = 0;
+        let mut piece_work = 0;
+        let most_pieces = self.limits.any_length_work as u64;
         for (theirs, _) in since {
+            if !pieces {
+                piece_work += edit.ops().len() as u64;
+                if piece_work > most_pieces {
+                    self.count(work + piece_work);
+                    return Err(HistoryError::TooFar(base));
+                }
+            }
             let own = if pieces {
                 edit.weight()
             } else {
@@ -327,7 +343,7 @@ impl<A: Clone + Eq> History<A> {
             }
             (edit, _) = transform(&edit, theirs)?;
         }
-        self.count(work);
+        self.count(work + piece_work);
         Ok(edit)
     }
 
@@ -1388,6 +1404,7 @@ mod tests {
             rebase_work: 1 << 18,
             sync_work: 0,
             lag_work: 0,
+            any_length_work: 1 << 21,
         }
     }
 
@@ -1790,6 +1807,30 @@ mod tests {
         assert!(doc.history.rebase(long.clone(), 0).is_err());
         // ...but not too much text.
         assert!(doc.history.rebase_any_length(long, 0).is_ok());
+    }
+
+    #[test]
+    fn an_edit_of_any_length_far_behind_is_refused_having_done_little_work() {
+        // A million pieces, as a 16 MiB frame holds, thousands of edits
+        // behind: refused before its pieces times the edits since pass
+        // what's allowed.
+        let mut doc = Doc::new(&"a".repeat(1 << 20));
+        for _ in 0..4000 {
+            doc.edit(Who::Agent, true, 0, "", "b");
+        }
+        let mut long = Edit::new();
+        for _ in 0..(1 << 19) {
+            long.retain(1).insert("c");
+        }
+        long.retain(1 << 19);
+        let before = doc.history.work();
+        assert_eq!(
+            doc.history.rebase_any_length(long.clone(), 0),
+            Err(HistoryError::TooFar(0))
+        );
+        let most = doc.history.limits().any_length_work as u64;
+        let work = doc.history.work() - before;
+        assert!(work <= most + long.ops().len() as u64 + (1 << 16), "{work}");
     }
 
     #[test]

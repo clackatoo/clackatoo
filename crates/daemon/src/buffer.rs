@@ -314,7 +314,9 @@ impl Buffer {
             self.history.rebase(edit, base)?
         };
         // Before it's coarsened, which reads the text it takes away: a
-        // window's may not fit.
+        // window's may not fit. `Edit::coarsened` guards the same case, and
+        // `apply` refuses it after; this refuses it first, as a defence in
+        // depth.
         edit.check(&self.text)?;
         let state = state.and_then(|state| self.brought_up(state, base));
         if edit.ops().len() > MOST_PIECES {
