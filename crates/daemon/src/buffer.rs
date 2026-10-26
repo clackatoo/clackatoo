@@ -290,10 +290,29 @@ impl Buffer {
         &mut self,
         edit: Edit,
         base: u64,
-        (step, state): (bool, Option<StepState>),
+        step: (bool, Option<StepState>),
         author: Author,
     ) -> Result<Made, HistoryError> {
-        let mut edit = self.history.rebase(edit, base)?;
+        self.edit_from(edit, base, step, author, false)
+    }
+
+    /// Makes `edit` as [`edit_keeping`](Self::edit_keeping) does, and if
+    /// `any_length`, however many pieces it has: as from a window that
+    /// can't send it in fewer, which, refused, would only send it again.
+    /// The text it copies, and the edits since, are still counted.
+    pub(crate) fn edit_from(
+        &mut self,
+        edit: Edit,
+        base: u64,
+        (step, state): (bool, Option<StepState>),
+        author: Author,
+        any_length: bool,
+    ) -> Result<Made, HistoryError> {
+        let mut edit = if any_length {
+            self.history.rebase_any_length(edit, base)?
+        } else {
+            self.history.rebase(edit, base)?
+        };
         // Before it's coarsened, which reads the text it takes away: a
         // window's may not fit.
         edit.check(&self.text)?;
@@ -1367,6 +1386,37 @@ mod tests {
         let refused = buffer.edit(late, 0, true, Author::User);
         assert!(refused.is_err(), "{refused:?}");
         assert_eq!(buffer.version(), 1);
+    }
+
+    #[test]
+    fn a_long_edit_from_a_window_that_sends_it_whole_is_made_past_others_edits() {
+        // As `:%s` from a window before 106, which doesn't coarsen, made as
+        // an agent edits: refused for its length, it would be sent again
+        // and again while the agent goes on.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a");
+        fs::write(&path, "a".repeat(1 << 18)).unwrap();
+        let mut buffer = Buffer::open(path, dir.path().to_owned()).unwrap();
+        let agent = Author::Agent(TerminalId(1));
+        for at in 0..4 {
+            let len = (1 << 18) + at;
+            buffer
+                .edit(Edit::replace(len, len, "", "b"), at as u64, true, agent)
+                .unwrap();
+        }
+        let mut long = Edit::new();
+        for _ in 0..(1 << 17) {
+            long.retain(1).delete("a").insert("c");
+        }
+        let step = (true, None);
+        let refused = buffer.edit_from(long.clone(), 0, step, Author::User, false);
+        assert!(
+            matches!(refused, Err(HistoryError::TooFar(0))),
+            "{refused:?}"
+        );
+        let made = buffer.edit_from(long, 0, step, Author::User, true).unwrap();
+        assert!(made.edit.ops().len() <= MOST_PIECES);
+        assert!(buffer.text().to_string().starts_with("acac"));
     }
 
     #[test]

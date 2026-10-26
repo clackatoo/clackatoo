@@ -67,10 +67,16 @@ pub(super) struct BufferSlot {
 }
 
 /// Makes `change`, which a window sent buffer `buffer`, as the user's.
-fn serve_change(buffer: &mut Buffer, change: Change) -> Result<Served, HistoryError> {
+/// A window from before protocol 106 sends every edit whole, however many
+/// pieces (`any_length`): refused for its length, it would only send it again.
+fn serve_change(
+    buffer: &mut Buffer,
+    change: Change,
+    any_length: bool,
+) -> Result<Served, HistoryError> {
     match change {
         Change::Edit { edit, base, step } => buffer
-            .edit(edit, base, step, Author::User)
+            .edit_from(edit, base, (step, None), Author::User, any_length)
             .map(|made| Served::Made(made, Answered::Acked)),
         Change::Step { edit, base, state } => buffer
             .edit_keeping(edit, base, (true, Some(state)), Author::User)
@@ -541,11 +547,15 @@ impl Daemon {
             Some(Source::Client(client)) => client.window,
             _ => None,
         };
+        // A window that sends a long edit whole, as one before 106 does, or
+        // a relaying daemon, which passes on its windows' as they sent them.
+        let any_length = matches!(self.sources.get(token.0),
+            Some(Source::Client(client)) if client.wire < wire::UNDO_STATE || client.relays);
         let before = window
             .and_then(|window| (slot.applied).insert(window, WindowChange { seq, landed: None }));
         let buffer = &mut slot.buffer;
         let undo = matches!(change, Change::Undo | Change::Reverse { redo: false, .. });
-        let made = serve_change(buffer, change);
+        let made = serve_change(buffer, change, any_length);
         match made {
             Ok(Served::Made(Made { version, edit }, answered)) => {
                 if let Some(window) = window
@@ -632,7 +642,7 @@ impl Daemon {
     /// change it was attach again. An older relaying daemon is told its
     /// change failed instead, as it waits for an answer to it before
     /// sending more.
-    fn reattaches(&self, token: Token) -> bool {
+    pub(super) fn reattaches(&self, token: Token) -> bool {
         let wire = self.client_wire(token).unwrap_or(0);
         let least = if self.relays(token) {
             wire::UNDO_STATE
