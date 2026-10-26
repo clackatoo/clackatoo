@@ -102,6 +102,7 @@ impl ChatPane {
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.carryover = options.carryover;
+        self.view.set_case(crate::options::Case::of(options));
     }
 
     /// The number of the first turn it holds, the rest being older and
@@ -269,6 +270,22 @@ impl ChatPane {
     /// Takes what it yanked, oldest first, for the registers.
     pub(crate) fn take_yanks(&mut self) -> Vec<Yanked> {
         std::mem::take(&mut self.yanks)
+    }
+
+    /// Whether a search is being typed in it, in the bar.
+    pub(crate) fn prompting(&self) -> bool {
+        self.view.prompting()
+    }
+
+    /// The search being typed, for the desk to put a register or a
+    /// search typed before in.
+    pub(crate) fn search_line(&mut self) -> Option<&mut crate::cmdline::Line> {
+        self.view.search_line()
+    }
+
+    /// What the bar shows of the search being typed, if one is.
+    pub(crate) fn prompt_label(&self) -> Option<String> {
+        self.view.prompt_label()
     }
 
     /// When it must be drawn again, for a turn still going to count on a
@@ -521,10 +538,9 @@ impl vim::KeyState for ChatPane {
         self.mode
     }
 
-    /// Whether a search is being typed in it, which takes every key: none
-    /// is, as a chat has no search yet.
+    /// Whether a search is being typed in it, which takes every key.
     fn prompting(&self) -> bool {
-        false
+        ChatPane::prompting(self)
     }
 
     fn pending(&self) -> bool {

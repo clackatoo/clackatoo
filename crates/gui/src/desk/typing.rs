@@ -500,7 +500,10 @@ impl Desk {
             return self.editor_prompt_line(shown.pane);
         }
         let terminal = self.focused_terminal()?;
-        let line = self.panes.get_mut(&terminal)?.search_line()?;
+        let line = match self.chats.get_mut(&terminal) {
+            Some(chat) => chat.search_line()?,
+            None => self.panes.get_mut(&terminal)?.search_line()?,
+        };
         Some((line, Some(Kind::Search)))
     }
 

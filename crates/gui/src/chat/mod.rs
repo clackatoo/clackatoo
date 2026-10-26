@@ -23,6 +23,7 @@ mod pane;
 mod picker;
 mod queue;
 mod read;
+mod search;
 mod shortcuts;
 mod viewer;
 mod yank;
@@ -81,6 +82,13 @@ enum Input {
     },
     /// Yanks this, which the chat has whole already, as a message.
     YankText(Yanked),
+    /// Searches for the last search again from `from`, `count` times,
+    /// backward if `backward` (see [`search`]).
+    Search {
+        from: Position,
+        backward: bool,
+        count: usize,
+    },
     /// Asks this of the daemon.
     Act(ChatAction),
     /// Answers the question numbered so, if it's still the one asked.
@@ -346,6 +354,9 @@ pub(crate) struct ChatView {
     finds: crate::vim::Finds,
     /// How far its scrolling keys go.
     paging: crate::vim::Paging,
+    /// The search being typed in the bar, and the last one, for `n` and
+    /// `N`.
+    search: search::Searching,
     /// The block of code under the mouse, which shows a button to copy it.
     hovered_code: Option<TextKey>,
     /// The block of code just copied with its button, which says so.
@@ -501,6 +512,7 @@ impl ChatView {
             keys: crate::vim::Keys::default(),
             finds: crate::vim::Finds::default(),
             paging: crate::vim::Paging::default(),
+            search: search::Searching::default(),
             hovered_code: None,
             copied_code: None,
             copied_answer: None,
@@ -614,6 +626,7 @@ impl ChatView {
                     start.text.turn += count;
                     end.text.turn += count;
                 }
+                Input::Search { from, .. } => from.text.turn += count,
                 Input::Act(ChatAction::Undo { turn, .. } | ChatAction::Redo { turn, .. }) => {
                     *turn = turn.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
                 }
@@ -1312,7 +1325,7 @@ impl ChatView {
                         }
                     }
                 }
-                input @ (Input::Yank { .. } | Input::YankText(_)) => {
+                input @ (Input::Yank { .. } | Input::YankText(_) | Input::Search { .. }) => {
                     self.settle_reading(fonts, input, &mut settled);
                 }
                 Input::Answer { question, pick } => self.pick(question, pick, &mut settled),

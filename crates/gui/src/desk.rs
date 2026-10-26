@@ -569,6 +569,9 @@ impl Desk {
             return None;
         }
         if let Some(chat) = self.focused_chat() {
+            if chat.prompting() {
+                return Some(TextTarget::Bar);
+            }
             return chat.takes_text().then_some(TextTarget::Pane);
         }
         let pane = self.pane(self.focused_terminal()?)?;
@@ -884,6 +887,15 @@ impl Desk {
             };
         }
         let (mode, label) = if let Some(chat) = self.focused_chat() {
+            if let Some(prompt) = chat.prompt_label() {
+                return Status::Typing {
+                    label: None,
+                    text: prompt,
+                    choices: Vec::new(),
+                    selected: None,
+                    under: None,
+                };
+            }
             (Some(chat.mode()), chat.label())
         } else {
             let pane = self
@@ -2128,7 +2140,12 @@ impl Desk {
             self.paste_into_finder(text);
         } else if !self.paste_into_editor(text) && !self.paste_into_list(text) {
             if let Some(chat) = self.focused_chat_mut() {
-                chat.paste(text);
+                // Into the search being typed, if one is, as its bar's
+                // line is the command line's.
+                match chat.search_line() {
+                    Some(line) => line.put(text),
+                    None => chat.paste(text),
+                }
             } else if let Some(pane) = self.focused_pane() {
                 pane.paste(text);
             }
@@ -9296,8 +9313,8 @@ mod tests {
         assert!(desk.take_yanked().is_empty());
     }
 
-    #[test]
-    fn a_chats_copies_and_yanks_go_to_the_registers() {
+    /// A desk whose pane 1 is a chat, its answer a block of code, drawn.
+    fn chat_with_code() -> (Desk, crate::fonts::Fonts) {
         use clackatoo_protocol::{ChatNode, ChatState, Item, Node, Outcome, Turn, TurnEnd};
 
         let mut desk = desk(two_side_by_side());
@@ -9327,11 +9344,19 @@ mod tests {
             }),
         );
         let mut fonts = crate::chat::fixtures::fonts();
-        let paint = |desk: &mut Desk, fonts: &mut crate::fonts::Fonts| {
-            let pane = desk.chat_mut(TerminalId(1)).expect("the chat's pane");
-            pane.paint(fonts, [0.0; 2], [900.0, 1000.0], true);
-        };
-        paint(&mut desk, &mut fonts);
+        paint_chat(&mut desk, &mut fonts);
+        (desk, fonts)
+    }
+
+    /// Draws the chat in pane 1.
+    fn paint_chat(desk: &mut Desk, fonts: &mut crate::fonts::Fonts) {
+        let pane = desk.chat_mut(TerminalId(1)).expect("the chat's pane");
+        pane.paint(fonts, [0.0; 2], [900.0, 1000.0], true);
+    }
+
+    #[test]
+    fn a_chats_copies_and_yanks_go_to_the_registers() {
+        let (mut desk, mut fonts) = chat_with_code();
         // In the box: what's typed, selected and copied.
         desk.paste("draft");
         press(&mut desk, Key::Character("a".into()), None, CTRL);
@@ -9344,7 +9369,7 @@ mod tests {
         // editor's: the unnamed register, `"0` and, as `clipboard` says,
         // the clipboard hold it, as lines.
         normal_mode(&mut desk);
-        paint(&mut desk, &mut fonts);
+        paint_chat(&mut desk, &mut fonts);
         type_text(&mut desk, "yic");
         desk.settle_chats(&mut fonts);
         for name in ['+', '0', '"'] {
@@ -9373,6 +9398,54 @@ mod tests {
             Some("cargo\ncargo test\n")
         );
         assert_eq!(register(&mut desk, '0').as_deref(), Some("cargo test\n"));
+    }
+
+    #[test]
+    fn a_chats_search_is_typed_in_the_bar_with_its_history_and_registers() {
+        let (mut desk, mut fonts) = chat_with_code();
+        normal_mode(&mut desk);
+        paint_chat(&mut desk, &mut fonts);
+        type_text(&mut desk, "\"ayiw");
+        desk.settle_chats(&mut fonts);
+        // `/` types a search in the bar: text goes there, as a paste
+        // does, and the bar shows it.
+        type_text(&mut desk, "/car");
+        assert_eq!(desk.text_goes_to(), Some(TextTarget::Bar));
+        desk.paste("go");
+        assert!(matches!(desk.status(), Status::Typing { text, .. } if text == "/cargo▏"));
+        // A register's text, after Ctrl+R, as in any search.
+        press(&mut desk, Key::Character("r".into()), None, CTRL);
+        type_text(&mut desk, "a");
+        assert!(
+            matches!(desk.status(), Status::Typing { text, .. } if text.starts_with("/cargocargo")),
+            "{:?}",
+            desk.status()
+        );
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(desk.text_goes_to(), None);
+        // Enter searches, and the search is kept, for Up to bring back.
+        type_text(&mut desk, "gg/test");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        desk.settle_chats(&mut fonts);
+        assert_eq!(desk.text_goes_to(), None);
+        type_text(&mut desk, "/");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::ArrowUp),
+            None,
+            Modifiers::default(),
+        );
+        assert!(matches!(desk.status(), Status::Typing { text, .. } if text == "/test▏"));
     }
 
     #[test]

@@ -531,6 +531,7 @@ mod tests {
             "{normal:?}"
         );
         assert!(has(&normal, "\" + register", "register"), "{normal:?}");
+        assert!(has(&normal, "/", "Search forward") && has(&normal, "N", "Reverse search"));
         assert!(
             !has(&normal, "dd", "") && !has(&normal, "p", ""),
             "{normal:?}"

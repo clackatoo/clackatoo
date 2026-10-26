@@ -116,7 +116,7 @@ pub(in crate::chat) fn before(text: &str, byte: usize) -> usize {
 /// The blocks of `markdown`'s text, as they're copied: a line apart in a
 /// list, a table's cells a tab apart and its rows a line, and a blank
 /// line apart otherwise.
-fn blocks_text(markdown: &str) -> String {
+pub(in crate::chat) fn blocks_text(markdown: &str) -> String {
     let mut text = String::new();
     let mut before: Option<BlockKind> = None;
     for block in markdown::blocks(markdown) {

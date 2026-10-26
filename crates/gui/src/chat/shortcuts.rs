@@ -48,6 +48,9 @@ impl ChatView {
     }
 
     pub(crate) fn shortcut_context(&self, mode: Mode) -> Context {
+        if let Some(context) = self.prompt_shortcuts() {
+            return context;
+        }
         let mut context = if mode == Mode::Insert {
             if self.node.question.is_some() {
                 let mut context = bindings::from_presses("Agent question", |press| {

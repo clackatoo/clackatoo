@@ -1,6 +1,7 @@
 //! Reading a chat in normal mode: a cursor in the conversation's text,
 //! moved as in Vim, visual mode to select, `y` to yank (see
-//! [`super::yank`]), and `z` to open and fold turns' work.
+//! [`super::yank`]), `/` and `?` to search (see [`super::search`]), and
+//! `z` to open and fold turns' work.
 //!
 //! The text is laid out in proportional fonts, so the cursor isn't on a
 //! grid of cells, as the cursor of terminals and editors is (see
@@ -27,6 +28,7 @@
 //! | `y` and a motion or object, `yy` `Y` | Yank what it moves over, or the object, into the registers: `yic` a block of code, `yim` a message or card, `yam` a turn |
 //! | `"a`, before `y` | Yank into register `a`, or onto its end with `"A` |
 //! | `v` then `y`, `Y` | Yank what's selected, or its lines |
+//! | `/` `?`, `n` `N` | Search the chat's text forward or back, and again |
 //! | `za` `zo` `zc`, Enter | Open or fold the tool, turn's work, or subagents under the cursor; `zR` and `zM` all turns and subagents |
 //! | `zl` `zh`, `zL` `zH` | Scroll the table the cursor's in sideways, a little or half the column; Shift and the wheel do too |
 //! | `u`, Ctrl+R | Undo what the turn changed in files, or redo it; with nothing there, the last turn's, or the first's undone |
@@ -89,7 +91,8 @@ pub(crate) enum ChatKey {
 /// `;` `,` on a line, `v` `V` `o`, the scrolling keys as far as in any
 /// pane, and the keys into insert mode, which type a message; `y` as
 /// Vim's operator, with any of those motions or the objects it finds,
-/// `ic` and `im` among them, and a register before it; and its own: Enter, `K`, `u` and Ctrl+R for turns, and `z` for
+/// `ic` and `im` among them, and a register before it; `/`, `?`, `n` and
+/// `N`; and its own: Enter, `K`, `u` and Ctrl+R for turns, and `z` for
 /// folding and tables. It takes no mark, edit or other operator, and no
 /// register before anything but a yank: a chat's text isn't the user's
 /// to change.
@@ -204,6 +207,8 @@ impl Dialect for ChatKeys {
             | Action::Visual { .. }
             | Action::OtherEnd
             | Action::Insert(_)
+            | Action::Search { .. }
+            | Action::SearchAgain { .. }
             | Action::Own(_) => true,
             _ => false,
         }
@@ -276,6 +281,7 @@ impl ChatView {
     /// visual selection, a two-key command half typed, and an answer
     /// armed. The cursor stays where it is.
     pub(crate) fn leave(&mut self) {
+        self.give_up_search();
         self.leave_visual();
         self.keys.clear();
         self.armed = None;
@@ -299,6 +305,10 @@ impl ChatView {
     /// message.
     pub(crate) fn read_key(&mut self, press: &KeyPress<'_>) -> (bool, bool) {
         if self.chat_modal_key(press) {
+            return (true, false);
+        }
+        // A search being typed takes every key.
+        if self.prompt_key(press) {
             return (true, false);
         }
         // What the window said of the chat lasts until the next key, as
@@ -449,7 +459,8 @@ impl ChatView {
         (redraw, false)
     }
 
-    /// Carries out `input`, a yank normal or visual mode queued, now that the fonts are at hand to lay out what it needs.
+    /// Carries out `input`, a yank or a search normal or visual mode
+    /// queued, now that the fonts are at hand to lay out what it needs.
     pub(super) fn settle_reading(
         &mut self,
         fonts: &mut crate::fonts::Fonts,
@@ -469,6 +480,11 @@ impl ChatView {
             Input::YankText(crate::pane::Yanked { register, to }) => {
                 self.yanked(register.text, register.lines, to, settled);
             }
+            Input::Search {
+                from,
+                backward,
+                count,
+            } => self.searched(fonts, from, backward, count),
             _ => {}
         }
     }
@@ -512,7 +528,8 @@ impl ChatView {
             Action::Operate(Operator::Yank, target) => {
                 self.yank(target, command.count, command.register);
             }
-
+            Action::Search { backward } => self.start_search(backward),
+            Action::SearchAgain { reverse } => self.search_again(reverse, command.count),
             Action::Own(own) => return self.own(own),
             // Nothing else is taken (see `ChatKeys::takes`).
             _ => return (false, false),

@@ -47,8 +47,8 @@ use crate::markdown::{
     tables::Cells,
 };
 pub(super) use select::{
-    How, Picked, Position, Shown, TextKey, after, before, hard_line, line_middle, line_of, within,
-    x_of,
+    How, Picked, Position, Shown, TextKey, after, before, blocks_text, hard_line, line_middle,
+    line_of, within, x_of,
 };
 pub(super) use usage::Detail;
 #[cfg(test)]
@@ -67,6 +67,20 @@ pub(super) const ITEMS: usize = 2;
 /// The card for the chats its agent started is its last piece: line 0 is
 /// the card's own, and line `n` the `n`th chat's.
 pub(super) const AGENTS: usize = usize::MAX;
+
+/// Whether `item`, item `index` of a turn shaped `shape`, is folded away:
+/// folded, only the answer shows of a turn's work, and what's neither
+/// words nor tools, and tools that gave images.
+pub(super) fn folded_away(shape: fold::Shape, index: usize, item: &Item) -> bool {
+    let image = |tool: &clackatoo_protocol::Tool| {
+        (tool.content.iter())
+            .any(|content| matches!(content, clackatoo_protocol::ToolContent::Image(_)))
+    };
+    index < shape.answer
+        && !shape.open
+        && !matches!(item, Item::Other(_))
+        && !matches!(item, Item::Tool(tool) if image(tool))
+}
 
 /// Whether `piece` is a line that opens and folds, rather than text the
 /// conversation says: what's selected and copied leaves it out.
@@ -615,12 +629,7 @@ impl ChatView {
             y += height;
         }
         for (item_index, item) in turn.items.iter().enumerate() {
-            // Folded, only the answer shows.
-            if item_index < shape.answer
-                && !matches!(item, Item::Other(_))
-                && !shape.open
-                && !matches!(item, Item::Tool(tool) if tool.content.iter().any(|content| matches!(content, clackatoo_protocol::ToolContent::Image(_))))
-            {
+            if folded_away(shape, item_index, item) {
                 continue;
             }
             let key = ITEMS + item_index;
