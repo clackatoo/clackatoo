@@ -276,6 +276,7 @@ impl Pane {
                     line: Line::default(),
                     backward,
                 });
+                self.start_search_preview();
                 true
             }
             Action::SearchAgain { reverse } => self.search_again(reverse),
@@ -447,14 +448,21 @@ impl Pane {
         {
             Some(crate::cmdline::controls::Control::Accept) => {
                 let mut prompt = self.prompt.take().expect("a prompt is open");
+                // From where it started, as without `incsearch`, so it
+                // finds what was shown, the view kept.
+                self.end_search_preview(true);
                 if !prompt.line.is_empty() {
                     self.search = Some((prompt.line.take(), prompt.backward));
                     self.search_again(false);
                 }
             }
-            Some(crate::cmdline::controls::Control::Cancel) => self.prompt = None,
+            Some(crate::cmdline::controls::Control::Cancel) => {
+                self.end_search_preview(false);
+                self.prompt = None;
+            }
             _ => {
                 if prompt.line.key(press) == Keyed::Emptied {
+                    self.end_search_preview(false);
                     self.prompt = None;
                 }
             }

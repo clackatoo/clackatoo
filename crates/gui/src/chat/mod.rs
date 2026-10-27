@@ -1247,6 +1247,7 @@ impl ChatView {
             ..Settled::default()
         };
         if self.queued.is_empty() {
+            settled.redraw |= self.preview_search(fonts);
             return settled;
         }
         self.style_editor(fonts);
@@ -1344,6 +1345,7 @@ impl ChatView {
                 }),
             }
         }
+        settled.redraw |= self.preview_search(fonts);
         settled
     }
 

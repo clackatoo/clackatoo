@@ -1324,6 +1324,13 @@ impl App {
             let proxy = self.session.proxy();
             listing.spawn(move |listed| drop(proxy.send_event(SessionEvent::Listed(listed))));
         }
+        // Where the searches being typed in terminals go, as `incsearch`
+        // shows them, asked once for whatever was typed since.
+        if self.desk.preview_searches()
+            && let Some(frame) = &mut self.frame
+        {
+            frame.request_redraw();
+        }
         let messages = self.desk.take_outbox();
         let Some(sender) = &mut self.sender else {
             return;

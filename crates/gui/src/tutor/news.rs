@@ -971,6 +971,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "substitute",
         what: "A search lights every match in view in editors and terminals too, the one found brighter (hlsearch)",
     },
+    News {
+        id: "incsearch",
+        date: "2026-10-27",
+        lesson: "substitute",
+        what: "/ and ? go to the match and light it as you type; Esc goes back, Enter keeps it (incsearch)",
+    },
 ];
 
 impl News {

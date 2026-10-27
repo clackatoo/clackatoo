@@ -511,6 +511,12 @@ options! {
     /// brighter than the rest, until Esc or `:nohlsearch`, and again at
     /// the next search, `n` or `N`. Off, only that one is.
     hlsearch("hls", "Highlight every match of the last search"): bool = true;
+    /// While `/` or `?` is typed, in editors, terminals' normal mode and
+    /// chats, the cursor and the view go to the match the search would
+    /// go to, from where it started, and its matches are lit, as Neovim's
+    /// `incsearch`: Esc puts them back, Enter keeps them. Off, nothing
+    /// moves until Enter.
+    incsearch("is", "Show where a search goes while it's typed"): bool = true;
     /// While `:s` is typed, show what it would do, in place, as Neovim
     /// does; and the matches of `:g`'s pattern. Nothing changes until
     /// Enter, and Esc puts the view back. `none` shows nothing.

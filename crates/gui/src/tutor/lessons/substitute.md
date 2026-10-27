@@ -173,3 +173,25 @@ one cat, two dog, red cat
 a cat is not a dog
 cats and dogs
 ```
+
+## Shown as you type
+
+While you type a search, the cursor goes to the match it would find from where you started, the view follows, and the matches light up, as Neovim's `incsearch` shows them. Backspace shows it afresh. Esc puts the cursor and the view back; Enter keeps them, and is the search. It works the same in a terminal's normal mode and a chat. `:set noincsearch` moves nothing until Enter.
+
+```practice pets.txt
+one cat, two cat, red cat
+a cat is not a dog
+cats and dogs
+```
+
+```setup
+cursor 1
+```
+
+Type `/dogs` without pressing Enter: the cursor is on the last line already. Press Esc, and it's back. Now type `/dog` and Enter, then `cw`, `fox` and Esc.
+
+```expect
+one cat, two cat, red cat
+a cat is not a fox
+cats and dogs
+```

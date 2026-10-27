@@ -464,7 +464,9 @@ A command that failed ends its prompt's line with a small red `✗` and its exit
 
 A search ignores case unless the text has a capital letter in it, as the [`ignorecase` and `smartcase` options](~clackatoo/reference/config#options) start; set them to change it. It covers all of history and wraps around at either end, saying `search wrapped to top` (or `to bottom`) when it does. The cursor moves to the match, which is highlighted, and every other match on the screen or the history in view is lit more faintly, as Vim's `hlsearch` lights them, one after another along each line, never overlapping, until Esc or `:noh`, and again at the next search, `n` or `N`. Only the lines in view are looked through for them, at most 512 on a line, and only in normal mode: in insert mode the program has the screen, and only the match found stays lit. The [`hlsearch` option](~clackatoo/reference/config#options) off lights only the match found. If there's none, the bottom bar says `not found`.
 
-Copying and searching both happen in the daemon, which holds all of history, so neither waits for the window to fetch the lines involved.
+While you type the search, the cursor goes to the match it would find from where you started, the view follows, and its matches are lit, as Neovim's `incsearch` shows them, in an editor too (see [Shown as you type](~clackatoo/reference/editor#shown-as-you-type)). Esc puts the cursor and the view back; Enter keeps them, and is the search. The daemon is asked once before each frame is drawn, and only once it has answered the last, so typing fast never queues searches; nothing you type waits for these answers. With the [`incsearch` option](~clackatoo/reference/config#options) off, nothing moves until Enter.
+
+Copying and searching both happen in the daemon, which holds all of history, so neither waits for the window to fetch the lines involved. Keys you type after a search, `n`, `N`, `[[` or `]]` wait for its answer, so they act where it leaves the cursor; Esc gives up waiting.
 
 ### Lists
 

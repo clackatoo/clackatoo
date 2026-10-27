@@ -89,6 +89,12 @@ impl Setup {
         (self.editor.top.line, line, col)
     }
 
+    /// Shows where the search being typed goes, as the window does
+    /// before it draws.
+    fn preview_search(&mut self) {
+        self.editor.preview_search(&self.copy, &self.shared);
+    }
+
     /// The highlights of `kind`, as lines and columns.
     fn highlighted(&mut self, kind: HighlightKind) -> Vec<(usize, std::ops::Range<usize>)> {
         self.editor.settle(&self.copy);
@@ -431,6 +437,64 @@ fn every_match_in_view_is_lit_the_one_found_brighter_until_esc() {
     assert_eq!(lit(&mut setup), (1, 0));
     setup.set(|options| options.hlsearch = true);
     assert_eq!(lit(&mut setup), (1, 3));
+}
+
+#[test]
+fn a_search_being_typed_shows_where_it_goes_till_esc_puts_it_back() {
+    // Ten rows shown: the dogs on lines 28 and 29 are out of view.
+    let text = format!("cat\n{}dog here\ndog\n", "x\n".repeat(27));
+    let mut setup = Setup::new(&text);
+    let lit = |setup: &mut Setup| {
+        (
+            setup.highlighted(HighlightKind::Match).len(),
+            setup.highlighted(HighlightKind::OtherMatch).len(),
+        )
+    };
+    setup.keys("/cat<CR>");
+    let before = setup.view();
+    assert_eq!(before, (0, 0, 0));
+    assert_eq!(lit(&mut setup), (1, 0));
+    // The cursor and the view go to the match, lit as found, the others
+    // in view lit too.
+    setup.keys("/do");
+    setup.preview_search();
+    assert_eq!(setup.cursor(), (28, 0));
+    assert!(setup.view().0 > 0, "the view follows");
+    assert_eq!(lit(&mut setup), (1, 1));
+    // Typed on, or back, it's shown afresh from where it started.
+    setup.keys("<BS><BS>he");
+    setup.preview_search();
+    assert_eq!(setup.cursor(), (28, 4));
+    assert_eq!(lit(&mut setup), (1, 0));
+    // Esc puts the cursor, the view and what was lit back.
+    setup.keys("<Esc>");
+    assert_eq!(setup.view(), before);
+    assert_eq!(lit(&mut setup), (1, 0), "cat, found before");
+    assert_eq!(setup.highlighted(HighlightKind::Match), [(0, 4..7)]);
+    // A pattern that isn't one yet shows nothing, from where it started.
+    setup.keys("/do");
+    setup.preview_search();
+    setup.keys("<lt>\\(");
+    setup.preview_search();
+    assert_eq!(setup.view(), before);
+    assert_eq!(lit(&mut setup), (0, 0));
+    setup.keys("<Esc>");
+    // Enter keeps it, and is the search: `n` goes on from there.
+    setup.keys("/dog");
+    setup.preview_search();
+    let shown = setup.view();
+    setup.keys("<CR>");
+    assert_eq!(setup.view(), shown);
+    assert_eq!(setup.cursor(), (28, 0));
+    setup.keys("n");
+    assert_eq!(setup.cursor(), (29, 0));
+    // Off, nothing moves till Enter.
+    setup.set(|options| options.incsearch = false);
+    setup.keys("gg/here");
+    setup.preview_search();
+    assert_eq!(setup.cursor(), (0, 0));
+    setup.keys("<CR>");
+    assert_eq!(setup.cursor(), (28, 4));
 }
 
 #[test]

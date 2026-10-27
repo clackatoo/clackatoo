@@ -1713,6 +1713,7 @@ impl Desk {
             {
                 let line = typing.filter(|_| Some(pane) == focused);
                 editor.preview(line, copy, &editors.shared);
+                editor.preview_search(copy, &editors.shared);
                 editor.settle(copy);
             }
         }

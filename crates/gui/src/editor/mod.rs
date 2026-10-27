@@ -47,6 +47,7 @@ mod copy;
 mod drag;
 mod ex;
 mod hints;
+mod incsearch;
 mod indent;
 mod kept;
 mod keys;
@@ -532,6 +533,10 @@ pub(crate) struct Editor {
     /// Every match of the last search in view is lit, not only the one
     /// found (`hlsearch`).
     hlsearch: bool,
+    /// A search being typed shows where it goes (`incsearch`).
+    incsearch: bool,
+    /// Where the search being typed started, with `incsearch`.
+    search_start: Option<incsearch::Start>,
     /// The last search's pattern, while its matches are lit: from a
     /// search, `n` or `N`, `:s` or `:g`, until Esc or `:nohlsearch`.
     matching: Option<Lighting>,
@@ -809,6 +814,8 @@ impl Editor {
             search: None,
             found: None,
             hlsearch: options.hlsearch,
+            incsearch: options.incsearch,
+            search_start: None,
             matching: None,
             matches_lit: Vec::new(),
             matches_kept: crate::hlsearch::Memo::default(),
@@ -994,6 +1001,7 @@ impl Editor {
         self.tildeop = options.tildeop;
         self.startofline = options.startofline;
         self.hlsearch = options.hlsearch;
+        self.incsearch = options.incsearch;
         self.highlight_uses = options.highlightuses;
         if !self.highlight_uses {
             self.forget_uses();
@@ -1094,6 +1102,7 @@ impl Editor {
         }
         self.leave_visual();
         self.keys.clear();
+        self.end_search_preview(false);
         self.prompt = None;
         self.new_step = true;
         self.enter_insert(1);
@@ -1112,6 +1121,7 @@ impl Editor {
         self.insert_after = false;
         self.drag = None;
         self.keys.clear();
+        self.end_search_preview(false);
         self.prompt = None;
         self.actions = None;
         self.close_completion();
@@ -1744,7 +1754,10 @@ impl Editor {
             Action::Repeat => return self.repeat(command.count, copy, shared),
             Action::Visual { lines } => self.visual(lines),
             Action::BlockVisual => self.block_visual(),
-            Action::Search { backward } => self.prompt = Some(Prompt::search(backward)),
+            Action::Search { backward } => {
+                self.prompt = Some(Prompt::search(backward));
+                self.start_search_preview();
+            }
             Action::SearchAgain { reverse } => self.search_again(reverse, times, copy, shared),
             Action::SearchWord { backward } => self.search_word(backward, times, copy, shared),
             Action::Tilde => self.tilde(times, copy),
@@ -4248,9 +4261,15 @@ impl Editor {
             return Done::default();
         };
         match crate::cmdline::controls::Control::read(stroke).0 {
-            crate::cmdline::controls::Control::Cancel => self.prompt = None,
+            crate::cmdline::controls::Control::Cancel => {
+                self.end_search_preview(false);
+                self.prompt = None;
+            }
             crate::cmdline::controls::Control::Accept => match self.prompt.take() {
                 Some(Prompt::Search { mut line, backward }) => {
+                    // From where it started, as without `incsearch`, so it
+                    // finds what was shown, the view kept.
+                    self.end_search_preview(true);
                     let query = line.take();
                     // Empty, it's the last search again, this way.
                     if !query.is_empty() {
@@ -4273,6 +4292,7 @@ impl Editor {
             },
             crate::cmdline::controls::Control::Other => {
                 if typed.stroke(stroke) == Keyed::Emptied {
+                    self.end_search_preview(false);
                     self.prompt = None;
                 }
             }
@@ -5009,12 +5029,14 @@ impl Editor {
         let cursor = text.byte_at(self.cursor.at);
         let anchor = self.anchor.map(|anchor| text.byte_at(anchor));
         self.held = Some((cursor, anchor));
+        self.hold_search_start(&text);
     }
 
     /// Moves the cursor with the text around it, through `edit`, made
     /// since [`hold`](Self::hold).
     pub(crate) fn follow_edit(&mut self, edit: &Edit, copy: &BufferCopy) {
         self.edited(edit, snippet::Grows::Nothing);
+        self.search_start_follows(edit);
         self.drag_follows(edit);
         self.awaiting_follows(edit);
         if let Some(Prompt::Confirm(confirming)) = &mut self.prompt {
@@ -5042,6 +5064,9 @@ impl Editor {
         self.corrections.clear();
         self.held = None;
         self.blocks.spread = None;
+        // Where a search being typed started may not be there now: it's
+        // shown no more, and stays where it was shown.
+        self.search_start = None;
         // What `:s///c` was asking about is gone.
         if matches!(self.prompt, Some(Prompt::Confirm(_))) {
             self.prompt = None;
@@ -5597,10 +5622,11 @@ impl Editor {
     }
 
     fn place_held(&mut self, copy: &BufferCopy) {
+        let text = self.text(copy);
+        self.place_search_start(&text);
         let Some((cursor, anchor)) = self.held.take() else {
             return;
         };
-        let text = self.text(copy);
         // Only moved with the text: still aiming for the column it was.
         self.cursor = self.cursor.moved(text.point_of(cursor));
         self.anchor = anchor.map(|anchor| text.point_of(anchor));
@@ -6748,7 +6774,7 @@ struct Compiled {
 
 /// The last search's pattern, while its matches are lit, and what it was
 /// compiled from: its source, and how it matches case.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Lighting {
     source: String,
     matching: Matching,

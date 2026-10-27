@@ -114,6 +114,7 @@ impl ChatPane {
         self.carryover = options.carryover;
         self.view.set_case(crate::options::Case::of(options));
         self.view.set_hlsearch(options.hlsearch);
+        self.view.set_incsearch(options.incsearch);
     }
 
     /// The number of the first turn it holds, the rest being older and

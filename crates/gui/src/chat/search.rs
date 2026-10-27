@@ -37,6 +37,14 @@
 //!
 //! A card shows no more than 1000 lines of its output: a match only in
 //! those it leaves out is said to be there, rather than not found.
+//!
+//! With `incsearch`, while a search is typed, the cursor goes to the match
+//! it would go to from where it started, opening what that needs, and the
+//! view follows, as an editor's does: worked out as the chat settles
+//! before it's drawn, not at each key, a step within the same bounds, and
+//! never failing or saying anything. Esc puts the cursor, the view, what
+//! was opened and what was lit back; Enter searches from where it started,
+//! keeping the view.
 
 use clackatoo_protocol::{Item, Tool};
 
@@ -83,6 +91,29 @@ pub(super) struct Searching {
     found: Option<Position>,
     /// What was last found lit up, and of what text drawn where.
     lit_kept: hlsearch::Memo<LitKey, (usize, std::ops::Range<usize>)>,
+    /// A search being typed shows where it goes (`incsearch`).
+    incsearch: bool,
+    /// Where the search being typed started, with `incsearch`.
+    start: Option<Start>,
+}
+
+/// Where a search being typed started, to put back on Esc, and what was
+/// last shown of it.
+#[derive(Debug)]
+struct Start {
+    cursor: Option<Position>,
+    goal: Option<f32>,
+    scroll: f32,
+    follow: bool,
+    lit: Option<(Pattern, (String, Case))>,
+    found: Option<Position>,
+    folds: std::collections::HashMap<usize, bool>,
+    open_cards: std::collections::HashSet<String>,
+    /// The turn the match last shown is in, whose work or card may have
+    /// been opened for it.
+    opened_in: Option<usize>,
+    /// What was typed when it was last shown, if it has been.
+    previewed: Option<String>,
 }
 
 impl Default for Searching {
@@ -95,6 +126,8 @@ impl Default for Searching {
             lit: None,
             found: None,
             lit_kept: hlsearch::Memo::default(),
+            incsearch: crate::options::Options::default().incsearch,
+            start: None,
         }
     }
 }
@@ -332,6 +365,15 @@ impl ChatView {
         if let Some(found) = &mut self.search.found {
             found.text.turn += count;
         }
+        if let Some(start) = &mut self.search.start {
+            for position in [&mut start.cursor, &mut start.found].into_iter().flatten() {
+                position.text.turn += count;
+            }
+            if let Some(turn) = &mut start.opened_in {
+                *turn += count;
+            }
+            start.folds = start.folds.drain().map(|(i, v)| (i + count, v)).collect();
+        }
     }
 
     /// Takes how searches treat case, as the options say.
@@ -343,6 +385,12 @@ impl ChatView {
     /// (`hlsearch`).
     pub(crate) fn set_hlsearch(&mut self, every: bool) {
         self.search.every = every;
+    }
+
+    /// Takes whether a search being typed shows where it goes
+    /// (`incsearch`).
+    pub(crate) fn set_incsearch(&mut self, on: bool) {
+        self.search.incsearch = on;
     }
 
     /// Whether a search is being typed, which takes every key.
@@ -372,17 +420,108 @@ impl ChatView {
 
     /// Forgets the search being typed, as leaving the chat does.
     pub(super) fn give_up_search(&mut self) {
+        self.end_search_preview(false);
         self.search.prompt = None;
     }
 
     /// `/`, or `?` if `backward`: starts typing a search in the bar, for
-    /// the `count`th match.
+    /// the `count`th match. Where it starts is kept, with `incsearch`, to
+    /// show it from and put back.
     pub(super) fn start_search(&mut self, backward: bool, count: Option<usize>) {
         self.search.prompt = Some(Prompt {
             line: Line::default(),
             backward,
             count,
         });
+        self.search.start = self.search.incsearch.then(|| Start {
+            cursor: self.cursor,
+            goal: self.goal,
+            scroll: self.scroll,
+            follow: self.follow,
+            lit: self.search.lit.clone(),
+            found: self.search.found,
+            folds: self.folds.clone(),
+            open_cards: self.open_cards.clone(),
+            opened_in: None,
+            previewed: None,
+        });
+    }
+
+    /// Shows where the search being typed would go, if what's typed has
+    /// changed since it was last shown: from where it started, one step,
+    /// within a step's bounds, the cursor going to the match, what it needs
+    /// opened, and the matches lit. A pattern that isn't one yet, or no
+    /// match within bounds, shows nothing. A search no longer being typed,
+    /// by a way that didn't put things back, is put back now. Returns
+    /// whether the chat must be redrawn.
+    pub(super) fn preview_search(&mut self, fonts: &mut Fonts) -> bool {
+        let Some(start) = &self.search.start else {
+            return false;
+        };
+        let Some(prompt) = &self.search.prompt else {
+            self.end_search_preview(false);
+            return true;
+        };
+        if start.previewed.as_deref() == Some(prompt.line.text()) {
+            return false;
+        }
+        let (typed, backward) = (prompt.line.text().to_owned(), prompt.backward);
+        self.put_back_search_start(false);
+        if let Some(start) = &mut self.search.start {
+            start.previewed = Some(typed.clone());
+        }
+        if typed.is_empty() {
+            return true;
+        }
+        self.search.found = None;
+        let case = self.search.case;
+        let Ok(pattern) = Pattern::new(&typed, Matching::Typed(case), "", Words::NONE) else {
+            self.search.lit = None;
+            return true;
+        };
+        self.search.lit = Some((pattern.clone(), (typed, case)));
+        let Some(from) = self.cursor_or_default() else {
+            return true;
+        };
+        let mut spent = Spent::new(&pattern);
+        if let Some((position, _)) = self.next_match(fonts, &mut spent, from, backward) {
+            self.search.found = Some(position);
+            if let Some(start) = &mut self.search.start {
+                start.opened_in = Some(position.text.turn);
+            }
+            self.go(position);
+            self.goal = None;
+        }
+        true
+    }
+
+    /// Stops showing the search being typed: the cursor goes back to where
+    /// it started, and what was lit; and the view and what was opened,
+    /// unless `keep_view`, as Enter keeps them.
+    fn end_search_preview(&mut self, keep_view: bool) {
+        self.put_back_search_start(keep_view);
+        self.search.start = None;
+    }
+
+    /// Puts the cursor back where the search being typed started, and
+    /// what was lit, and the view and what was opened unless `keep_view`.
+    fn put_back_search_start(&mut self, keep_view: bool) {
+        let Some(start) = &mut self.search.start else {
+            return;
+        };
+        self.cursor = start.cursor;
+        self.goal = start.goal;
+        self.search.lit = start.lit.clone();
+        self.search.found = start.found;
+        if keep_view {
+            return;
+        }
+        (self.scroll, self.follow, self.reveal) = (start.scroll, start.follow, false);
+        self.folds.clone_from(&start.folds);
+        self.open_cards.clone_from(&start.open_cards);
+        if let Some(turn) = start.opened_in.take() {
+            self.restyled(turn);
+        }
     }
 
     /// A key typed into the search, edited as the command line is (see
@@ -403,6 +542,9 @@ impl ChatView {
                 let Some(mut prompt) = self.search.prompt.take() else {
                     return true;
                 };
+                // From where it started, as without `incsearch`, so it
+                // finds what was shown, the view kept.
+                self.end_search_preview(true);
                 let query = prompt.line.take();
                 match &mut self.search.last {
                     _ if !query.is_empty() => self.search.last = Some((query, prompt.backward)),
@@ -411,9 +553,13 @@ impl ChatView {
                 }
                 self.search_again(false, prompt.count);
             }
-            Some(Control::Cancel) => self.search.prompt = None,
+            Some(Control::Cancel) => {
+                self.end_search_preview(false);
+                self.search.prompt = None;
+            }
             _ => {
                 if prompt.line.key(press) == Keyed::Emptied {
+                    self.end_search_preview(false);
                     self.search.prompt = None;
                 }
             }
@@ -1016,6 +1162,62 @@ mod tests {
             matches!(card, clackatoo_protocol::Item::Tool(tool) if tool.title.contains("ci.yml")),
             "{card:?}"
         );
+    }
+
+    #[test]
+    fn a_search_being_typed_shows_where_it_goes_till_esc_puts_it_back() {
+        let mut node = long_chat(3);
+        let done = node.turns[0].end.clone();
+        node.turns[2].end = done;
+        let (mut chat, mut fonts) = reading(node);
+        read(&mut chat, "gg");
+        paint(&mut chat, &mut fonts);
+        let open = |chat: &ChatView, turn| chat.shape(turn, &chat.node.turns[turn]).open;
+        let before = (chat.cursor, chat.scroll);
+        // Typed, the cursor goes to the match, opening the work it's in,
+        // and it's lit as found.
+        read(&mut chat, "/build it the w");
+        chat.settle(&mut fonts);
+        assert!(chat.prompting());
+        assert!(open(&chat, 0), "opened to show the match");
+        let (turn, piece, _) = at(&chat);
+        assert_eq!(turn, 0);
+        assert!(piece >= ITEMS, "{piece}");
+        paint(&mut chat, &mut fonts);
+        assert_eq!(chat.lit_matches().len(), 1);
+        // Esc puts the cursor, the view and what was opened back.
+        read_named(&mut chat, NamedKey::Escape);
+        assert_eq!((chat.cursor, chat.scroll), before);
+        assert!(!open(&chat, 0));
+        assert!(chat.lit_matches().is_empty());
+        // Typed afresh, from where it started; a pattern that isn't one
+        // yet shows nothing, and Backspace shows it again.
+        read(&mut chat, "/Turn 2: why");
+        chat.settle(&mut fonts);
+        assert_eq!(at(&chat), (2, PROMPT, 0));
+        read(&mut chat, "\\(");
+        chat.settle(&mut fonts);
+        assert_eq!(chat.cursor, before.0);
+        read_named(&mut chat, NamedKey::Backspace);
+        read_named(&mut chat, NamedKey::Backspace);
+        chat.settle(&mut fonts);
+        assert_eq!(at(&chat), (2, PROMPT, 0));
+        // Enter keeps it, and is the search: `n` goes on from there.
+        paint(&mut chat, &mut fonts);
+        let shown = chat.scroll;
+        read_named(&mut chat, NamedKey::Enter);
+        chat.settle(&mut fonts);
+        paint(&mut chat, &mut fonts);
+        assert_eq!((at(&chat), chat.scroll), ((2, PROMPT, 0), shown));
+        assert!(!chat.take_failed());
+        // Off, nothing moves till Enter.
+        chat.set_incsearch(false);
+        read(&mut chat, "gg/Turn 1");
+        chat.settle(&mut fonts);
+        assert_eq!(chat.cursor, before.0);
+        read_named(&mut chat, NamedKey::Enter);
+        chat.settle(&mut fonts);
+        assert_eq!(at(&chat), (1, PROMPT, 0));
     }
 
     #[test]

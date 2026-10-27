@@ -1860,6 +1860,14 @@ impl Desk {
         }
     }
 
+    /// Has each terminal asked the daemon where the search being typed in
+    /// it would go, if that's changed and it's not still answering, as
+    /// `incsearch` shows it: once before the window sends what it has, not
+    /// at every key. Returns whether the window must be redrawn.
+    pub(crate) fn preview_searches(&mut self) -> bool {
+        (self.panes.values_mut()).fold(false, |redraw, pane| pane.preview_search() | redraw)
+    }
+
     /// Takes the messages waiting for the daemon: the window's, then each
     /// pane's.
     pub(crate) fn take_outbox(&mut self) -> Vec<ClientMessage> {
@@ -9686,6 +9694,87 @@ mod tests {
         assert_eq!(daemon_text(&daemons, 7), "x..\n");
         let said = desk.message.clone().unwrap_or_default();
         assert!(!said.contains("stopped"), "{said}");
+    }
+
+    /// What the terminal asked the daemon to search for since this was
+    /// last asked.
+    fn searches_asked(desk: &mut Desk) -> Vec<String> {
+        (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Request(Request::Search { query, .. }) => Some(query),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_terminals_search_being_typed_is_asked_once_at_a_time_and_holds_no_keys() {
+        let mut desk = terminal_showing_cargo_test();
+        let cursor = |desk: &Desk| desk.panes[&TerminalId(1)].cursor_col();
+        let found = Response::Found(Some(clackatoo_term::Match {
+            start: clackatoo_protocol::Position { line: 0, col: 6 },
+            cells: 3,
+        }));
+        type_text(&mut desk, "/tes");
+        desk.preview_searches();
+        assert_eq!(searches_asked(&mut desk), ["tes"]);
+        assert!(!desk.pane_waits_to_settle(), "keys don't wait for it");
+        type_text(&mut desk, "t");
+        desk.preview_searches();
+        assert!(searches_asked(&mut desk).is_empty(), "one in flight");
+        // An answer to what's no longer typed is dropped, and the latest
+        // asked once it's in.
+        desk.answered(found.clone());
+        assert_eq!(cursor(&desk), Some(0));
+        desk.preview_searches();
+        assert_eq!(searches_asked(&mut desk), ["test"]);
+        desk.answered(found);
+        assert_eq!(cursor(&desk), Some(6));
+        // Esc puts it back.
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(cursor(&desk), Some(0));
+        assert!(!desk.holding());
+    }
+
+    #[test]
+    fn a_macro_searching_goes_where_it_went_with_incsearch_on_or_off() {
+        let run = |incsearch: bool| {
+            let mut desk = editing("/p/a.txt", "a\nb dog\nc dog\nd\n");
+            if !incsearch {
+                command(&mut desk, "set noincsearch");
+            }
+            // Recorded with what's typed shown as it's typed.
+            type_keys(&mut desk, "qa/do");
+            desk.settle_editors();
+            type_keys(&mut desk, "g");
+            desk.settle_editors();
+            press(
+                &mut desk,
+                Key::Named(NamedKey::Enter),
+                None,
+                Modifiers::default(),
+            );
+            desk.settle_editors();
+            type_keys(&mut desk, "q");
+            let mut seen = vec![editor_label(&desk)];
+            for keys in ["gg@a", "@a", "``"] {
+                type_keys(&mut desk, keys);
+                desk.settle_editors();
+                seen.push(editor_label(&desk));
+            }
+            seen
+        };
+        let seen = run(true);
+        let at: Vec<&str> = (seen.iter())
+            .map(|label| label.rsplit(' ').next().unwrap_or_default())
+            .collect();
+        assert_eq!(at, ["2:3", "2:3", "3:3", "2:3"], "{seen:?}");
+        assert_eq!(seen, run(false));
     }
 
     #[test]

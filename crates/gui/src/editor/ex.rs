@@ -193,6 +193,7 @@ impl Editor {
         // and on from there.
         self.end_preview();
         self.leave_visual();
+        self.end_search_preview(false);
         self.prompt = None;
         self.status = None;
         self.replaying = replaying;
@@ -1237,6 +1238,7 @@ impl Editor {
         self.failed = false;
         // What's left half done is finished, or given up, as Esc does.
         if matches!(self.prompt, Some(Prompt::Search { .. })) {
+            self.end_search_preview(false);
             self.prompt = None;
         }
         self.keys.clear();

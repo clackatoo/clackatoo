@@ -28,6 +28,7 @@ use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 use crate::screen::Screen;
 use crate::vim::{self, Mode, Selection, enters_normal_mode, is_ctrl_backslash};
 
+mod incsearch;
 mod links;
 mod marks;
 mod mouse;
@@ -70,6 +71,9 @@ enum Pending {
     Block(operator::BlockUse),
     /// Input for the program, numbered by the [`Predictor`].
     Input(u64),
+    /// Where a search being typed would go, asked as it's typed, for
+    /// what was typed then (see [`incsearch`]).
+    Preview(String),
     /// Anything answered with just "done" or an error.
     Other,
 }
@@ -134,6 +138,10 @@ pub(crate) struct Pane {
     /// Every match of the last search in view is lit in normal mode, not
     /// only the one found (`hlsearch`).
     hlsearch: bool,
+    /// A search being typed shows where it goes (`incsearch`).
+    incsearch: bool,
+    /// Where the search being typed started, with `incsearch`.
+    search_start: Option<incsearch::Start>,
     /// The last search, while its matches are lit: from a search, `n` or
     /// `N` until Esc or `:nohlsearch`. What it looks for, and whether it
     /// matches case.
@@ -201,6 +209,8 @@ impl Pane {
             blockmarks: Options::default().blockmarks,
             found: None,
             hlsearch: Options::default().hlsearch,
+            incsearch: Options::default().incsearch,
+            search_start: None,
             matching: None,
             changes: 0,
             matches_kept: crate::hlsearch::Memo::default(),
@@ -231,6 +241,7 @@ impl Pane {
         self.case = Case::of(options);
         self.startofline = options.startofline;
         self.hlsearch = options.hlsearch;
+        self.incsearch = options.incsearch;
         self.blockmarks = options.blockmarks;
         self.predictor.set_choice(options.predictecho);
         self.refresh_overlay();
@@ -357,6 +368,7 @@ impl Pane {
         self.leave_visual();
         self.keys.clear();
         self.after_ctrl_backslash = false;
+        self.end_search_preview(false);
         self.prompt = None;
     }
 
@@ -420,6 +432,7 @@ impl Pane {
             Some(old_end) if snapshot => {
                 self.history.clear();
                 self.forget_unplaced();
+                self.forget_search_start();
                 if follow {
                     self.scroll = (self.scroll + end).saturating_sub(old_end);
                 }
@@ -428,10 +441,14 @@ impl Pane {
             Some(old_end) if end < old_end => {
                 self.history.clear();
                 self.forget_unplaced();
+                self.forget_search_start();
                 self.scroll = 0;
             }
             // New lines scrolled into history.
-            Some(old_end) if follow => self.scroll += end - old_end,
+            Some(old_end) if follow => {
+                self.scroll += end - old_end;
+                self.search_start_scrolled(end - old_end);
+            }
             _ => {}
         }
         self.scroll = self.scroll.min(self.max_scroll());
@@ -483,6 +500,10 @@ impl Pane {
             }
             (Some(Pending::Search(from, backward)), Response::Found(found)) => {
                 self.searched(found, (from, backward));
+                true
+            }
+            (Some(Pending::Preview(query)), Response::Found(found)) => {
+                self.previewed(&query, found);
                 true
             }
             (Some(Pending::Block(use_)), Response::Block(block)) => {
@@ -597,6 +618,7 @@ impl Pane {
             _ if to_normal => {
                 self.leave_visual();
                 self.mode = Mode::Normal;
+                self.end_search_preview(false);
                 self.prompt = None;
                 self.keys.clear();
                 true
@@ -947,6 +969,7 @@ impl Pane {
     fn insert(&mut self) -> bool {
         self.leave_visual();
         self.mode = Mode::Insert;
+        self.search_start = None;
         self.cursor = None;
         self.prompt = None;
         self.keys.clear();
@@ -3217,6 +3240,78 @@ mod tests {
         serve(&mut pane, &terminal);
         assert_eq!(cursor(&pane), before);
         assert!(!pane.take_failed());
+    }
+
+    /// The searches asked of the daemon in `outbox`, as what each was for.
+    fn searches_in(outbox: &[ClientMessage]) -> Vec<String> {
+        (outbox.iter())
+            .filter_map(|message| match message {
+                ClientMessage::Request(Request::Search { query, .. }) => Some(query.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_search_being_typed_shows_where_it_goes_till_esc_puts_it_back() {
+        let terminal = terminal(&format!("{}cat\r\ndog", numbered_lines("line ")));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        serve(&mut pane, &terminal);
+        let before = cursor(&pane);
+        assert_eq!(before.0, "dog");
+        // Asked once at a time, however much is typed meanwhile; an answer
+        // to what's no longer typed is dropped, and the latest asked.
+        keys(&mut pane, "?line ");
+        pane.preview_search();
+        let asked = pane.take_outbox();
+        assert_eq!(searches_in(&asked), ["line "]);
+        assert!(!pane.waits_for_answer(), "keys don't wait for it");
+        keys(&mut pane, "5");
+        pane.preview_search();
+        assert!(searches_in(&pane.take_outbox()).is_empty(), "one in flight");
+        serve_once(&mut pane, &terminal, asked);
+        assert_eq!(cursor(&pane), before, "dropped");
+        pane.preview_search();
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane).0, "line 5");
+        assert!(pane.scroll > 0, "the view follows");
+        let lit = |pane: &Pane, kind| {
+            (pane.highlights(5).iter())
+                .filter(|highlight| highlight.kind == kind)
+                .count()
+        };
+        assert_eq!(lit(&pane, HighlightKind::Match), 1);
+        // Backspace shows it afresh, from where it started.
+        named(&mut pane, NamedKey::Backspace);
+        pane.preview_search();
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane).0, "line 12", "the nearest back");
+        // Esc puts the cursor and the view back, and nothing's lit.
+        named(&mut pane, NamedKey::Escape);
+        assert_eq!(cursor(&pane), before);
+        assert_eq!(pane.scroll, 0);
+        assert_eq!(lit(&pane, HighlightKind::Match), 0);
+        assert_eq!(lit(&pane, HighlightKind::OtherMatch), 0);
+        // Enter keeps the view, and searches from where it started.
+        keys(&mut pane, "?line 3");
+        pane.preview_search();
+        serve(&mut pane, &terminal);
+        let (shown, scroll) = (cursor(&pane), pane.scroll);
+        assert_eq!(shown.0, "line 3");
+        named(&mut pane, NamedKey::Enter);
+        assert!(pane.waits_for_answer());
+        serve(&mut pane, &terminal);
+        assert_eq!((cursor(&pane), pane.scroll), (shown, scroll));
+        assert!(!pane.take_failed());
+        // Off, nothing's asked till Enter.
+        pane.set_options(&Options {
+            incsearch: false,
+            ..Options::default()
+        });
+        keys(&mut pane, "/cat");
+        pane.preview_search();
+        assert!(searches_in(&pane.take_outbox()).is_empty());
     }
 
     #[test]
