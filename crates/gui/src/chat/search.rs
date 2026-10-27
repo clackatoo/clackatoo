@@ -77,6 +77,10 @@ pub(super) struct Searching {
     lit: Option<Pattern>,
 }
 
+/// The matches lit up: each one's block, by its place among those shown,
+/// and its bytes.
+type Lit = Vec<(usize, std::ops::Range<usize>)>;
+
 /// A search being typed.
 #[derive(Debug)]
 struct Prompt {
@@ -148,11 +152,11 @@ impl ChatView {
     }
 
     /// What the last search matches in the text drawn, while it's lit up:
-    /// each match's block, by its place among those shown, and its bytes,
-    /// no more than [`MOST_LIT`] of them
-    /// in a block. Only what's laid out and in view is looked through, and
-    /// nothing at all once it isn't lit.
-    pub(crate) fn lit_matches(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+    /// each match's block, by its place among those shown, and its bytes.
+    /// Only the lines of each block in view are looked through, no more
+    /// than [`MOST_LIT`] matches in them, and nothing at all once it isn't
+    /// lit.
+    pub(crate) fn lit_matches(&self) -> Lit {
         let Some(pattern) = &self.search.lit else {
             return Vec::new();
         };
@@ -164,12 +168,16 @@ impl ChatView {
             let Some(text) = self.text(shown.key) else {
                 continue;
             };
+            let Some(bytes) = self.bytes_in_view(shown, text.layout) else {
+                continue;
+            };
             let text = text.text;
-            let mut at = 0;
+            let mut at = bytes.start.min(text.len());
             for _ in 0..MOST_LIT {
                 let Some(found) = (at <= text.len())
                     .then(|| pattern.find_at(text, at))
                     .flatten()
+                    .filter(|found| found.start < bytes.end)
                 else {
                     break;
                 };
@@ -184,6 +192,32 @@ impl ChatView {
             }
         }
         lit
+    }
+
+    /// The bytes of `shown`'s lines, laid out as `layout`, that are in
+    /// view, if any are.
+    fn bytes_in_view(
+        &self,
+        shown: &super::paint::Shown,
+        layout: &parley::Layout<super::Brush>,
+    ) -> Option<std::ops::Range<usize>> {
+        let lines = layout.len();
+        let bottom = |line: usize| {
+            (layout.get(line)).map_or(f32::INFINITY, |line| line.metrics().block_max_coord)
+        };
+        let top = |line: usize| {
+            (layout.get(line)).map_or(f32::INFINITY, |line| line.metrics().block_min_coord)
+        };
+        // The first line whose bottom is below the view's top, and the
+        // first after it whose top is below the view's bottom.
+        let first = first_line(lines, |line| shown.at[1] + bottom(line) > 0.0);
+        let end = first_line(lines, |line| shown.at[1] + top(line) >= self.view_height);
+        if first >= end {
+            return None;
+        }
+        let start = layout.get(first)?.text_range().start;
+        let stop = layout.get(end - 1)?.text_range().end;
+        Some(start..stop)
     }
 
     /// Takes how searches treat case, as the options say.
@@ -685,6 +719,21 @@ fn lines_bytes(text: &str, lines: usize, last: bool) -> usize {
     found.unwrap_or(text.len())
 }
 
+/// The first of `lines` lines that `past` is true of, or `lines` if none
+/// is, `past` being false of every line before one it's true of.
+fn first_line(lines: usize, past: impl Fn(usize) -> bool) -> usize {
+    let (mut low, mut high) = (0, lines);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if past(middle) {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    low
+}
+
 /// `tool`'s card as a search reads it, as it shows open: its head, a
 /// command's purpose, and its lines.
 fn card_text(tool: &Tool) -> String {
@@ -1042,6 +1091,28 @@ mod tests {
         assert_eq!(lit(&mut chat, &mut fonts), 3);
         chat.stop_highlighting();
         assert!(chat.lit_matches().is_empty());
+    }
+
+    #[test]
+    fn the_matches_lit_are_those_in_view_of_a_long_block() {
+        let lines: Vec<String> = (0..3000).map(|line| format!("line {line}")).collect();
+        let code = format!("```\n{}\n```", lines.join("\n"));
+        let (mut chat, mut fonts) = reading(talk(&[("one", &code)]));
+        search(&mut chat, &mut fonts, "/line");
+        read(&mut chat, "GN");
+        chat.settle(&mut fonts);
+        paint(&mut chat, &mut fonts);
+        let cursor = chat.cursor.unwrap();
+        let lit = chat.lit_matches();
+        assert!(!lit.is_empty());
+        assert!(
+            lit.iter()
+                .any(|(index, range)| chat.shown[*index].key == cursor.text
+                    && range.start == cursor.byte),
+            "the match at the cursor, near the end, is lit: {cursor:?}"
+        );
+        // Only what's in view: far fewer than the block's 3000.
+        assert!(lit.len() < 200, "{}", lit.len());
     }
 
     #[test]
