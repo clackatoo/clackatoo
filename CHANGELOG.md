@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026.10.85 (2026-10-27)
+
+### Features
+
+- **gui:** y is Vim's yank operator in a chat, into the registers (CLACKA-165) (c2c27f2)
+- **gui:** / ? n N search a chat's text (CLACKA-165) (dd98df0)
+- **gui:** a chat's code block is ix and ax, as ic stays a class (CLACKA-165) (0cfac5a)
+- **gui:** a chat's search lights up every match in view, until Esc or :noh (CLACKA-165) (891fe88)
+
+### Fixes
+
+- **gui:** a chat's yG leaves the view be, and yw takes its last word (CLACKA-165) (95ed8aa)
+- **gui:** keys after a chat's search or yank wait for it to settle (CLACKA-165) (154619f)
+- **gui:** under y, a chat's motions go by its lines, not its rows (CLACKA-165) (fc5af7c)
+- **gui:** a chat's yy takes an empty line, yim goes to its start, ib is i( (CLACKA-165) (c749cbc)
+- **gui:** a mouse selection shows as VISUAL while y would yank it (CLACKA-165) (28e94ae)
+- **gui:** a chat's search opens and lays out only what may hold the match (CLACKA-165) (d5318e5)
+- **gui:** keys typed into a chat's search never answer its question (CLACKA-165) (a4e1956)
+- **gui:** keys waiting for a chat behind a paste no longer hang the window (CLACKA-165) (cfedc6c)
+- **gui:** a chat's search lays out a turn too big for its bounds, as it shows (CLACKA-165) (a6933e4)
+- **gui:** a chat's y3$ stops at the last line, which a last line break doesn't add to (CLACKA-165) (4eb0dc1)
+- **gui:** a chat's failed search or yank stops a macro or binding (CLACKA-165) (06bac2c)
+- **gui:** giving up a chat's wait drops its yank or search, and lets Esc through (CLACKA-165) (d40a513)
+- **gui:** keys waiting for a chat give up on time, with no key pressed (CLACKA-165) (4f46935)
+- **gui:** a chat lights up the matches in view, not a long block's first (CLACKA-165) (ee8706a)
+- **gui:** what a chat lit up is looked for again when a block wraps differently (CLACKA-165) (23240ed)
+- **gui:** a chat's refused keys stop a macro, and two stale names (CLACKA-165) (8be1db6)
+
+### Speed
+
+- **gui:** a chat keeps the matches it lit up while what's drawn doesn't change (CLACKA-165) (7320b80)
+
 ## 2026.10.84 (2026-10-26)
 
 ### Features
