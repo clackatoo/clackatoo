@@ -9319,9 +9319,15 @@ mod tests {
 
     /// A desk whose pane 1 is a chat, its answer a block of code, drawn.
     fn chat_with_code() -> (Desk, crate::fonts::Fonts) {
+        chat_with_code_in(two_side_by_side())
+    }
+
+    /// A desk of `workspaces`, whose pane 1 is a chat, its answer a block
+    /// of code, drawn.
+    fn chat_with_code_in(workspaces: Workspaces) -> (Desk, crate::fonts::Fonts) {
         use clackatoo_protocol::{ChatNode, ChatState, Item, Node, Outcome, Turn, TurnEnd};
 
-        let mut desk = desk(two_side_by_side());
+        let mut desk = desk(workspaces);
         let node = ChatNode {
             state: ChatState::Ready,
             turns: vec![Turn {
@@ -9481,6 +9487,80 @@ mod tests {
         type_text(&mut desk, " y");
         desk.settle_chats(&mut fonts);
         assert!(register(&mut desk, '0').is_some());
+    }
+
+    #[test]
+    fn a_chats_failed_motion_stops_a_macro_or_a_binding() {
+        let (mut desk, mut fonts) = chat_with_code();
+        desk.lua_from(r#"client.keys.map("n", "<Space>f", "fZyy")"#);
+        normal_mode(&mut desk);
+        paint_chat(&mut desk, &mut fonts);
+        type_text(&mut desk, "/cargo");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        desk.settle_chats(&mut fonts);
+        type_text(&mut desk, " f");
+        desk.settle_chats(&mut fonts);
+        assert_eq!(register(&mut desk, '0'), None, "stopped at fZ");
+        // A find a count of it can't make fails too, as `3ft` would.
+        desk.lua_from(r#"client.keys.map("n", "<Space>t", "ftftftyy")"#);
+        type_text(&mut desk, "0 t");
+        desk.settle_chats(&mut fonts);
+        assert_eq!(register(&mut desk, '0'), None, "stopped at the third ft");
+        // Moves that go nowhere and can't fail don't stop one: `0` at the
+        // line's start, then the yank.
+        desk.lua_from(r#"client.keys.map("n", "<Space>z", "0yy")"#);
+        type_text(&mut desk, "0 z");
+        desk.settle_chats(&mut fonts);
+        assert_eq!(register(&mut desk, '0').as_deref(), Some("cargo test\n"));
+    }
+
+    #[test]
+    fn a_macro_typing_itself_through_a_chat_ends_where_a_find_there_fails() {
+        let (mut desk, mut fonts) =
+            chat_with_code_in(one_tab(side_by_side(vec![pane(1), file_pane(2, 7)])));
+        load(&mut desk, 7, "/a.txt", "x\n");
+        let mut daemons = HashMap::from([(BufferId(7), crate::editor::Daemon::new("x\n"))]);
+        normal_mode(&mut desk);
+        paint_chat(&mut desk, &mut fonts);
+        let cursor = |desk: &mut Desk| {
+            let chat = desk.chat_mut(TerminalId(1)).expect("the chat");
+            chat.view().cursor_byte()
+        };
+        // On `cargo test`'s first t, from the editor, which records it: a
+        // chat records no macros of its own.
+        type_text(&mut desk, "/cargo");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        desk.settle_chats(&mut fonts);
+        ctrl(&mut desk, "l");
+        type_text(&mut desk, "qaqqa");
+        ctrl(&mut desk, "h");
+        type_text(&mut desk, "ft");
+        ctrl(&mut desk, "l");
+        type_text(&mut desk, "A.");
+        escape(&mut desk);
+        type_text(&mut desk, "@aq");
+        serve(&mut desk, &mut daemons);
+        assert_eq!(cursor(&mut desk), Some("cargo ".len()));
+        assert_eq!(daemon_text(&daemons, 7), "x.\n");
+        // Typed again, it goes on to the next t, and ends where `ft` finds
+        // none, as in Vim, rather than being stopped after so many keys.
+        type_text(&mut desk, "@a");
+        serve(&mut desk, &mut daemons);
+        desk.settle_chats(&mut fonts);
+        assert_eq!(cursor(&mut desk), Some("cargo tes".len()));
+        assert_eq!(daemon_text(&daemons, 7), "x..\n");
+        let said = desk.message.clone().unwrap_or_default();
+        assert!(!said.contains("stopped"), "{said}");
     }
 
     #[test]

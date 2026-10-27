@@ -668,6 +668,29 @@ pub(crate) enum Reach {
 }
 
 impl Motion {
+    /// Whether it fails when it doesn't move the cursor, which stops a
+    /// macro being typed, as in Vim: all but those that go to a place on
+    /// the line or its screen row, or in the file, whatever's there.
+    pub(crate) fn can_fail(self) -> bool {
+        !matches!(
+            self,
+            Self::LineStart
+                | Self::LineEnd
+                | Self::FirstNonBlank
+                | Self::First
+                | Self::Last
+                | Self::TextEnd
+                | Self::RowStart
+                | Self::RowEnd
+                | Self::ViewTop
+                | Self::ViewMiddle
+                | Self::ViewBottom
+                | Self::LineFirstNonBlank
+                | Self::LastNonBlank
+                | Self::Column
+        )
+    }
+
     /// What an operator takes with it from `from` to `to`, in `lines`; or
     /// `None` if the motion went nowhere it could, as `%` with no bracket,
     /// which takes nothing.

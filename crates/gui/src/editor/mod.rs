@@ -1706,7 +1706,7 @@ impl Editor {
                     no_line || motion.runs_out((from, self.cursor.at), command.count, &text);
                 drop(text);
                 let failed =
-                    |cursor: Cursor| (cursor.at == from && can_fail(motion) && !stays) || no_line;
+                    |cursor: Cursor| (cursor.at == from && motion.can_fail() && !stays) || no_line;
                 if visual {
                     let went = !failed(self.cursor);
                     self.past_line_end(motion, (from, times), went, copy);
@@ -6457,29 +6457,6 @@ fn on_character(at: Point, text: &Text<'_>) -> Point {
 /// jump, by either name.
 fn previous(mark: char) -> char {
     if mark == '`' { '\'' } else { mark }
-}
-
-/// Whether `motion` fails when it doesn't move the cursor, which stops a
-/// macro being typed, as in Vim: all but those that go to a place on the
-/// line or its screen row, or in the file, whatever's there.
-fn can_fail(motion: Motion) -> bool {
-    !matches!(
-        motion,
-        Motion::LineStart
-            | Motion::LineEnd
-            | Motion::FirstNonBlank
-            | Motion::First
-            | Motion::Last
-            | Motion::TextEnd
-            | Motion::RowStart
-            | Motion::RowEnd
-            | Motion::ViewTop
-            | Motion::ViewMiddle
-            | Motion::ViewBottom
-            | Motion::LineFirstNonBlank
-            | Motion::LastNonBlank
-            | Motion::Column
-    )
 }
 
 /// Where the word before `byte` starts, on its line, taking the blanks

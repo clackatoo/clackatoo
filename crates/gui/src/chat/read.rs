@@ -553,10 +553,10 @@ impl ChatView {
         match command.action {
             Action::Move(motion) => {
                 let motion = self.finds.remember(motion);
-                self.moved(motion, command.count);
+                self.move_key(motion, command.count);
             }
             Action::FindAgain { reverse } => match self.finds.again(reverse) {
-                Some(motion) => self.moved(motion, command.count),
+                Some(motion) => self.move_key(motion, command.count),
                 None => return (false, false),
             },
             Action::Scroll(scroll) => {
@@ -651,9 +651,20 @@ impl ChatView {
         }
     }
 
+    /// `motion` typed, `count` times: the cursor moves (see
+    /// [`moved`](Self::moved)), or fails to, as `j` on the last line or
+    /// `fx` with no x does, which Vim beeps at, stopping a macro.
+    fn move_key(&mut self, motion: Motion, count: Option<usize>) {
+        if !self.moved(motion, count) && motion.can_fail() {
+            self.failed = true;
+        }
+    }
+
     /// Moves the cursor by `motion`, `times` times, or until it goes no
     /// further, so a count as big as there is costs no more than the chat.
-    pub(super) fn moved(&mut self, motion: Motion, count: Option<usize>) {
+    /// Returns whether it went: a find found its character, or the cursor
+    /// moved.
+    pub(super) fn moved(&mut self, motion: Motion, count: Option<usize>) -> bool {
         let times = count.unwrap_or(1);
         if let Motion::Find {
             ch,
@@ -662,13 +673,13 @@ impl ChatView {
             again,
         } = motion
         {
-            self.find((ch, forward, till, again), times);
-            return;
+            return self.find((ch, forward, till, again), times);
         }
         if let (Motion::First | Motion::Last, Some(number)) = (motion, count) {
             self.go_to_turn_numbered(number);
-            return;
+            return true;
         }
+        let from = self.cursor;
         for _ in 0..times {
             let before = (self.cursor, self.goal);
             self.move_once(motion);
@@ -687,6 +698,7 @@ impl ChatView {
                 break;
             }
         }
+        self.cursor != from
     }
 
     /// Moves the cursor once by `motion`, one of those [`ChatKeys`]
@@ -1207,21 +1219,24 @@ impl ChatView {
     /// the character just before that, or after it going back; found
     /// `again`, by `;` or `,`, a `t` or `T` doesn't stop at one right by
     /// the cursor, as Vim's doesn't. Nowhere if there aren't so many.
-    fn find(&mut self, find: (char, bool, bool, bool), count: usize) {
+    /// Returns whether it found one.
+    fn find(&mut self, find: (char, bool, bool, bool), count: usize) -> bool {
         let Some(cursor) = self.cursor_or_default() else {
-            return;
+            return false;
         };
         let Some(text) = self.text(cursor.text) else {
-            return;
+            return false;
         };
         let line = super::paint::line_of(text.layout, cursor.byte);
         let Some((_, range)) = super::paint::line_middle(text.layout, line) else {
-            return;
+            return false;
         };
-        if let Some(byte) = find_in(text.text, range, cursor.byte, find, count) {
+        let found = find_in(text.text, range, cursor.byte, find, count);
+        if let Some(byte) = found {
             self.go(Position { byte, ..cursor });
         }
         self.goal = None;
+        found.is_some()
     }
 
     /// `{` or `}`: the start of the block before, or after.
@@ -1566,6 +1581,31 @@ mod tests {
         // `G` goes to the end.
         read(&mut chat, "G");
         assert_eq!(chat.cursor.map(|cursor| cursor.text), Some(key(1, ITEMS)));
+    }
+
+    #[test]
+    fn a_motion_that_goes_nowhere_fails_unless_it_goes_to_a_place() {
+        let (mut chat, _fonts) = reading(talk(&[("one", "first answer")]));
+        read(&mut chat, "G0");
+        assert!(!chat.take_failed());
+        // `j` on the last line, `h` at a line's start and a find that
+        // finds nothing fail, as Vim's beep, which stops a macro.
+        for keys in ["j", "h", "fZ", "3fe"] {
+            read(&mut chat, keys);
+            assert!(chat.take_failed(), "{keys}");
+        }
+        // `t` with its character right by the cursor stays, failing
+        // nothing, as do `0`, `gg`, `G` where they are.
+        read(&mut chat, "ti");
+        assert!(!chat.take_failed());
+        for keys in ["0", "G", "gg", "gg"] {
+            read(&mut chat, keys);
+            assert!(!chat.take_failed(), "{keys}");
+        }
+        // A count goes as far as it can, failing only if it goes nowhere.
+        read(&mut chat, "G099l");
+        assert!(!chat.take_failed());
+        assert_eq!(chat.cursor.unwrap().byte, "first answer".len() - 1);
     }
 
     #[test]
