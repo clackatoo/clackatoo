@@ -472,10 +472,11 @@ impl ChatView {
             match parsed {
                 Parsed::Incomplete => redraw = true,
                 // Keys a chat doesn't take, as `yic` (a chat has no
-                // classes) or `dw`: Vim beeps, which stops a macro.
+                // classes) or `dw`: Vim beeps, which stops a macro. Not
+                // Esc, which only forgets what was typed, as Vim's does.
                 Parsed::Nothing => {
                     redraw |= was_pending;
-                    self.failed = true;
+                    self.failed |= stroke != Stroke::Escape;
                 }
                 Parsed::Command(command) => {
                     let (drawn, insert) = self.execute(command);
@@ -1641,6 +1642,10 @@ mod tests {
         // `t` with its character right by the cursor stays, failing
         // nothing, as do `0`, `gg`, `G` where they are.
         read(&mut chat, "ti");
+        assert!(!chat.take_failed());
+        // Esc after a key waiting for more only forgets it, as Vim's.
+        read(&mut chat, "y");
+        read_named(&mut chat, NamedKey::Escape);
         assert!(!chat.take_failed());
         for keys in ["0", "G", "gg", "gg"] {
             read(&mut chat, keys);

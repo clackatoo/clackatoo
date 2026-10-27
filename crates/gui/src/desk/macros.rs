@@ -63,7 +63,7 @@ const DEEPEST: usize = 1000;
 /// How long a macro waits for something its keys started before it's
 /// stopped. Longer than a command waits for the grammar, as a language
 /// server can take a while to answer.
-const PATIENCE: Duration = Duration::from_secs(5);
+pub(super) const PATIENCE: Duration = Duration::from_secs(5);
 
 /// The macros, and keys bindings type, being typed, and what's noted of
 /// the key being pressed for the macro being recorded.

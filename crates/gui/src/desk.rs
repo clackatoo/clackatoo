@@ -2102,16 +2102,26 @@ impl Desk {
         if let Some(chat) = self.focused_chat_mut() {
             return chat.key(press) || had_message;
         }
-        let redraw = self.focused_pane().is_some_and(|pane| pane.key(press));
-        // A motion that went nowhere, or a command refused, stops a macro
-        // or a binding, as Vim's beep does.
-        if self.focused_pane().is_some_and(Pane::take_failed) && self.frames_typing() {
-            self.stop_macro(None);
-        }
+        let redraw = self.terminal_key(press);
         if let Some(terminal) = self.focused_terminal() {
             self.open_pane_link(terminal);
         }
         redraw || had_message
+    }
+
+    /// Hands `press` to the focused terminal. A motion that went nowhere,
+    /// or a command refused, stops a macro or a binding, as Vim's beep
+    /// does; and is forgotten either way, so it can't stop one typed later.
+    /// Returns whether the pane must be redrawn.
+    pub(super) fn terminal_key(&mut self, press: &KeyPress<'_>) -> bool {
+        let Some(pane) = self.focused_pane() else {
+            return false;
+        };
+        let redraw = pane.key(press);
+        if pane.take_failed() && self.frames_typing() {
+            self.stop_macro(None);
+        }
+        redraw
     }
 
     /// Whether `press` is Ctrl+V in a terminal's normal or visual mode,
@@ -9644,9 +9654,27 @@ mod tests {
             cells: 4,
         })));
         assert!(asked_to_copy(&mut desk));
-        // Esc pressed gives up the wait, and the binding: the answer come
-        // late moves nothing and stops nothing, and keys after it go on.
+        desk.answered(Response::Text("test".into()));
+        // Esc pressed gives up the wait, and the binding; but the search,
+        // asked already, still lands, as Vim's would have before the Esc.
+        type_text(&mut desk, "0 c");
+        desk.take_outbox();
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        desk.answered(Response::Found(Some(clackatoo_term::Match {
+            start: clackatoo_protocol::Position { line: 0, col: 6 },
+            cells: 4,
+        })));
+        assert!(!asked_to_copy(&mut desk), "given up");
+        assert_eq!(desk.panes[&TerminalId(1)].cursor_col(), Some(6), "landed");
+        // A search failing after the binding was given up stops nothing
+        // left over: keys after it go on.
         type_text(&mut desk, " s");
+        desk.take_outbox();
         press(
             &mut desk,
             Key::Named(NamedKey::Escape),
@@ -9654,10 +9682,45 @@ mod tests {
             Modifiers::default(),
         );
         desk.answered(Response::Found(None));
-        assert!(!asked_to_copy(&mut desk), "given up");
         type_text(&mut desk, " y");
         assert!(asked_to_copy(&mut desk), "nothing failed left over");
         assert!(!desk.holding());
+    }
+
+    #[test]
+    fn keys_waiting_too_long_for_a_terminals_search_go_on_without_it() {
+        let mut desk = terminal_showing_cargo_test();
+        type_text(&mut desk, "/test");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        desk.take_outbox();
+        // `i` and a key for the program wait for the answer, which doesn't
+        // come in time: they go on, rather than being lost, and the bar
+        // says why.
+        type_text(&mut desk, "ix");
+        assert!(desk.holding());
+        let deadline = desk.editor_wakes().expect("woken to give up");
+        assert!(deadline >= std::time::Instant::now() + std::time::Duration::from_secs(4));
+        desk.tick_editors(deadline);
+        assert!(!desk.holding());
+        assert_eq!(desk.panes[&TerminalId(1)].mode, Mode::Insert);
+        let typed: Vec<u8> = (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Request(Request::SendInput { bytes, .. }) => Some(bytes),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(typed, b"x");
+        let said = desk.message.clone().unwrap_or_default();
+        assert!(said.contains("took too long"), "{said}");
+        // The answer come late moves nothing.
+        desk.answered(Response::Found(None));
+        assert_eq!(desk.panes[&TerminalId(1)].mode, Mode::Insert);
     }
 
     #[test]

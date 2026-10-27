@@ -21,7 +21,7 @@ use clackatoo_protocol::{
 use clackatoo_term::mouse::{MouseAction, MouseButton};
 use clackatoo_text::Edit;
 
-use super::chats::PANE_WAITED;
+use super::chats::GiveUp as WaitGiven;
 use super::jumps::{FilePlace, Jump, Jumps};
 use super::{Asked, Desk, Purpose};
 use crate::command::Place;
@@ -899,14 +899,21 @@ impl Desk {
         let now = std::time::Instant::now();
         if self.pane_waits_to_settle() {
             self.note_pane_wait(now);
-            // Given up on, what waited is dropped, and this key goes on: an
-            // Esc does what Esc does there, as it stops selecting.
+            // Esc gives the wait up, and goes on, doing what Esc does
+            // there, as it stops selecting (see `give_up_pane_wait`).
             if cancel {
-                self.give_up_pane_wait(None);
+                self.give_up_pane_wait(WaitGiven::Cancelled);
                 return None;
             }
             if self.pane_waited_too_long(now) {
-                self.give_up_pane_wait(Some(PANE_WAITED));
+                // The keys held went on; if one asked another search, this
+                // one waits for that.
+                if self.give_up_pane_wait(WaitGiven::TooLong) && self.pane_waits_to_settle() {
+                    self.note_pane_wait(now);
+                    let held = given_back.or_else(|| unmade.map(|make| make()));
+                    self.editors.held.extend(held);
+                    return Some(true);
+                }
                 return None;
             }
             let held = given_back.or_else(|| unmade.map(|make| make()));
@@ -999,7 +1006,7 @@ impl Desk {
             .pane_wait
             .is_some_and(|(_, pane)| Some(pane) != focused)
         {
-            self.give_up_pane_wait(None);
+            self.give_up_pane_wait(WaitGiven::FocusMoved);
             gave_up = true;
         }
         if self.macro_left_behind() {
@@ -1794,7 +1801,7 @@ impl Desk {
         // Keys waiting for a chat's yank or search, with no key to see to
         // it.
         if self.pane_waited_too_long(now) {
-            self.give_up_pane_wait(Some(PANE_WAITED));
+            self.give_up_pane_wait(WaitGiven::TooLong);
             asked = true;
         }
         asked | self.type_macros()
@@ -1807,10 +1814,7 @@ impl Desk {
         (self.editors.panes.values().filter_map(Editor::wakes))
             .chain(self.macro_gives_up())
             .chain(self.insert_gives_up())
-            .chain(
-                self.pane_wait
-                    .map(|(since, _)| since + crate::editor::PATIENCE),
-            )
+            .chain(self.pane_wait_gives_up())
             .min()
     }
 

@@ -3215,10 +3215,19 @@ mod tests {
         }
         // To a place, wherever it is; a count going part of the way; and
         // `t` with its character right by the cursor.
-        for typed in ["0", "gg", "^", "tb", "99l", "$", "yy", "G"] {
+        for typed in ["0", "gg", "^", "tb", "99l", "$", "yy", "0y0", "G"] {
             keys(&mut pane, typed);
             assert!(!pane.take_failed(), "{typed}");
         }
+        // Esc after a key waiting for more only forgets it, as Vim's; and
+        // Enter, Backspace and Space, the program's in insert mode, do
+        // nothing here, failing nothing.
+        keys(&mut pane, "y");
+        named(&mut pane, NamedKey::Escape);
+        named(&mut pane, NamedKey::Enter);
+        named(&mut pane, NamedKey::Backspace);
+        keys(&mut pane, " ");
+        assert!(!pane.take_failed());
         // On the last line, none below to go to.
         for typed in ["j", "2$", "+"] {
             keys(&mut pane, typed);

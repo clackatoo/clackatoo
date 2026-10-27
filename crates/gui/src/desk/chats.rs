@@ -20,10 +20,26 @@ use crate::chat::ChatPane;
 use crate::input::KeyPress;
 use crate::pane::Pane;
 
-/// What the bar says of keys that waited too long for a chat, or a
-/// terminal's search.
-pub(super) const PANE_WAITED: &str =
-    "the keys typed waited too long: they and what they waited for were dropped";
+/// What the bar says of keys that waited too long for a chat.
+pub(super) const CHAT_WAITED: &str =
+    "the keys typed waited too long for the chat: they and what they waited for were dropped";
+
+/// What the bar says of keys that waited too long for the daemon to answer
+/// a terminal's search: they go on without it.
+pub(super) const TERMINAL_WAITED: &str =
+    "the daemon took too long to answer the search: the keys typed after it went on without it";
+
+/// How a wait for a chat or a terminal is given up (see
+/// [`Desk::give_up_pane_wait`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GiveUp {
+    /// Esc pressed.
+    Cancelled,
+    /// The focus left the pane waited in.
+    FocusMoved,
+    /// It waited past its patience.
+    TooLong,
+}
 
 /// The most rounds of settling chats and typing the keys that waited for
 /// them [`Desk::settle_chats`] goes at once, so one call stays short: a
@@ -191,35 +207,84 @@ impl Desk {
         }
     }
 
-    /// Whether keys have waited for a chat or a terminal past
-    /// [`PATIENCE`] by `now`.
-    ///
-    /// [`PATIENCE`]: crate::editor::PATIENCE
-    pub(super) fn pane_waited_too_long(&self, now: std::time::Instant) -> bool {
-        self.pane_wait
-            .is_some_and(|(since, _)| now >= since + crate::editor::PATIENCE)
+    /// The terminal of the pane keys wait for, if they wait.
+    fn waited_terminal(&self) -> Option<TerminalId> {
+        let (_, pane) = self.pane_wait?;
+        let (_, _, found) = self.workspaces.find_pane(pane)?;
+        found.content.terminal()
     }
 
-    /// Gives up on what keys wait for in a chat or a terminal, as Esc, the
-    /// focus leaving it or waiting too long does, saying `why`, if
-    /// anything: the yanks and searches a chat queued are dropped, and a
-    /// terminal's answers when they come, with the keys held and the macro
-    /// typing them, so nothing waits any more.
-    pub(super) fn give_up_pane_wait(&mut self, why: Option<&str>) {
-        let waited = (self.pane_wait.take())
-            .and_then(|(_, pane)| self.workspaces.find_pane(pane))
-            .and_then(|(_, _, found)| found.content.terminal());
-        for terminal in waited.into_iter().chain(self.focused_terminal()) {
+    /// When keys waiting for a chat or a terminal give up, if they wait: a
+    /// chat's yank or search waits only for the window, behind a paste
+    /// reading the clipboard, so [`editor::PATIENCE`]; a terminal's search
+    /// for the daemon, maybe across machines, so as long as a macro waits
+    /// for it.
+    ///
+    /// [`editor::PATIENCE`]: crate::editor::PATIENCE
+    pub(super) fn pane_wait_gives_up(&self) -> Option<std::time::Instant> {
+        let (since, _) = self.pane_wait?;
+        let chat = self
+            .waited_terminal()
+            .is_some_and(|terminal| self.chats.contains_key(&terminal));
+        Some(
+            since
+                + if chat {
+                    crate::editor::PATIENCE
+                } else {
+                    super::macros::PATIENCE
+                },
+        )
+    }
+
+    /// Whether keys have waited for a chat or a terminal past its patience
+    /// by `now` (see [`pane_wait_gives_up`](Self::pane_wait_gives_up)).
+    pub(super) fn pane_waited_too_long(&self, now: std::time::Instant) -> bool {
+        self.pane_wait_gives_up().is_some_and(|when| now >= when)
+    }
+
+    /// Gives up on what keys wait for in the chat or the terminal they wait
+    /// in, as `how` says, and stops the macro typing them, so nothing waits
+    /// any more. Returns whether the keys held go on, rather than being
+    /// dropped.
+    ///
+    /// - Esc pressed drops the keys held and what a chat queued; a
+    ///   terminal's search or block, already asked, still lands, as Vim's
+    ///   `/foo<CR>` does before the Esc after it.
+    /// - The focus leaving drops the keys, typed for that pane, and what
+    ///   they waited for: a terminal's answer, when it comes, moves nothing.
+    /// - Waiting too long drops a chat's keys and what they waited for, as
+    ///   the bar says. A terminal's keys, which may be Ctrl+C for a program
+    ///   after `i`, go on now without the answer, which moves nothing when
+    ///   it comes, and the bar says so.
+    pub(super) fn give_up_pane_wait(&mut self, how: GiveUp) -> bool {
+        let waited = self.waited_terminal();
+        self.pane_wait = None;
+        let mut said = None;
+        let mut go_on = false;
+        if let Some(terminal) = waited {
             if let Some(chat) = self.chats.get_mut(&terminal) {
                 chat.view_mut().drop_reading();
+                said = (how == GiveUp::TooLong).then_some(CHAT_WAITED);
             } else if let Some(pane) = self.panes.get_mut(&terminal) {
-                pane.drop_waiting();
+                if how != GiveUp::Cancelled {
+                    pane.drop_waiting();
+                }
+                go_on = how == GiveUp::TooLong;
+                said = go_on.then_some(TERMINAL_WAITED);
             }
         }
-        self.gave_up();
-        if let Some(why) = why {
-            self.say(why.to_owned());
+        if go_on {
+            self.stop_macro(None);
+            // In the order they were pressed, now; those behind a search
+            // one of them asks wait for that.
+            while !self.pane_waits_to_settle() && self.have_held() {}
+        } else {
+            self.gave_up();
         }
+        if let Some(said) = said {
+            self.say(said.to_owned());
+        }
+        go_on
     }
 
     /// Whether the focused chat has a yank or a search waiting for the

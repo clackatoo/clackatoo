@@ -209,14 +209,18 @@ impl Pane {
         let mut redraw = false;
         for stroke in strokes(press, false) {
             let visual = matches!(self.mode, Mode::Visual(_));
+            let was_pending = self.keys.pending();
             redraw |= match self.keys.read(stroke, visual, &TerminalKeys) {
                 // The keys typed are drawn in the bar while they wait, and
                 // gone from it once they make nothing.
                 Parsed::Incomplete => true,
                 // Keys a terminal doesn't take, as `dw`: Vim beeps, which
-                // stops a macro.
+                // stops a macro. Not Esc, which only forgets what was
+                // typed, as Vim's does; nor Enter, Backspace or Space
+                // alone, which do nothing in normal mode (see
+                // [`TerminalKeys::own`]).
                 Parsed::Nothing => {
-                    self.failed = true;
+                    self.failed |= stroke != Stroke::Escape && (was_pending || !inert(stroke));
                     true
                 }
                 Parsed::Command(command) => self.execute(command),
@@ -977,6 +981,20 @@ impl Pane {
             self.move_to_line(line);
         }
     }
+}
+
+/// Whether `stroke` is a key that does nothing in a terminal's normal
+/// mode, being for the program in insert mode: Enter, Backspace or Space.
+fn inert(stroke: Stroke) -> bool {
+    matches!(
+        stroke,
+        Stroke::Enter
+            | Stroke::Backspace
+            | Stroke::Char {
+                ch: ' ',
+                ctrl: false
+            }
+    )
 }
 
 pub(super) fn position(point: Point) -> Position {
