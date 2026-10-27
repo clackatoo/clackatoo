@@ -1810,13 +1810,13 @@ impl Editor {
         }
     }
 
-    /// Esc in normal or visual mode, with nothing typed before it but a
-    /// count or a register: leaves visual mode, and forgets the match.
     /// Stops lighting up the last match found, as `:nohlsearch` does.
     pub(crate) fn forget_match(&mut self) {
         self.found = None;
     }
 
+    /// Esc in normal or visual mode, with nothing typed before it but a
+    /// count or a register: leaves visual mode, and forgets the match.
     fn escape(&mut self) {
         self.mode = Mode::Normal;
         self.anchor = None;

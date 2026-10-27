@@ -494,11 +494,6 @@ impl Pane {
         true
     }
 
-    /// A key in normal mode while text selected with the mouse shows, which
-    /// is read as Vim reads a key in visual mode: a count or a register
-    /// waits with the selection, and `y` after them, or alone, yanks it,
-    /// into the register named. `None` for any other key, which is the
-    /// pane's, and forgets the selection.
     /// Stops lighting up the match found, as `:nohlsearch` does.
     pub(crate) fn forget_match(&mut self) {
         self.found = None;
@@ -517,6 +512,11 @@ impl Pane {
         }
     }
 
+    /// A key in normal mode while text selected with the mouse shows, which
+    /// is read as Vim reads a key in visual mode: a count or a register
+    /// waits with the selection, and `y` after them, or alone, yanks it,
+    /// into the register named. `None` for any other key, which is the
+    /// pane's, and forgets the selection.
     pub(super) fn mouse_selection_key(&mut self, press: &KeyPress<'_>) -> Option<bool> {
         // An operator typed before, as `y` waiting for its motion, has the
         // key, as it did before the drag; and a search being typed has it.
