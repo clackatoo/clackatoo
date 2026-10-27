@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026.10.86 (2026-10-27)
+
+### Features
+
+- **gui:** hlsearch lights every match in view in editors and terminals (CLACKA-167) (2d6bab7)
+
+### Fixes
+
+- **gui:** a chat's failed plain motion stops a macro (CLACKA-168) (42cda7d)
+- **gui:** a chat's +, 2$ and a b running out fail as Vim's do (CLACKA-168) (ea5fb73)
+- **gui:** hlsearch lights what n finds, :s and :g too, at bounded cost (CLACKA-167) (c98cc6c)
+- **gui:** a chat's first motion, 2$ and b fail exactly as Vim's (CLACKA-168) (56d8d59)
+- **gui:** hlsearch's found match survives older turns and shorter text (CLACKA-167) (f032815)
+
 ## 2026.10.85 (2026-10-27)
 
 ### Features
