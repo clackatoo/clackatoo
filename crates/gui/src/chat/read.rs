@@ -663,10 +663,16 @@ impl ChatView {
     /// Moves the cursor by `motion`, `times` times, or until it goes no
     /// further, so a count as big as there is costs no more than the chat.
     /// Returns whether it went as Vim's would, without failing: a find
-    /// found its character; a motion that can fail moved, and `b` or `B`
-    /// as many times as counted, not running out at the chat's start; `2$`
-    /// found a line below to go to the end of. Motions to a place, as `0`
-    /// and `gg`, never fail (see [`Motion::can_fail`]).
+    /// found its character; a motion that can fail moved; `2$` found a line
+    /// below to go to the end of, or else went nowhere, as Vim's
+    /// `nv_dollar()`. Motions to a place, as `0` and `gg`, never fail (see
+    /// [`Motion::can_fail`]).
+    ///
+    /// `b` and `B` with a count fail as Vim's `bck_word()` does: when one
+    /// of the count starts at the chat's start, though the cursor got there.
+    /// From anywhere else one always moves, so that's one that didn't,
+    /// which is all the editor's `objects::back_fails` works out, from a
+    /// text's lines, the chat not being one.
     pub(super) fn moved(&mut self, motion: Motion, count: Option<usize>) -> bool {
         let times = count.unwrap_or(1);
         if let Motion::Find {
@@ -682,10 +688,11 @@ impl ChatView {
             self.go_to_turn_numbered(number);
             return true;
         }
-        // `2$` is the end of the next line, as Vim's: with none below, it
-        // fails, though it goes to this one's end.
+        let from = self.cursor_or_default();
+        // `2$` is the end of the next line, as many on as there are, as
+        // Vim's: with none below, it fails, going nowhere.
         if motion == Motion::LineEnd && times > 1 {
-            let from = self.cursor_or_default();
+            let goal = self.goal;
             for _ in 1..times {
                 let before = self.cursor;
                 self.vertical(Way::On);
@@ -693,19 +700,21 @@ impl ChatView {
                     break;
                 }
             }
-            let down = self.cursor != from;
+            if self.cursor == from {
+                self.goal = goal;
+                return false;
+            }
             self.line_edge('$');
-            return down;
+            return true;
         }
-        let from = self.cursor;
-        let mut went = 0;
+        let mut stuck = false;
         for _ in 0..times {
             let before = (self.cursor, self.goal);
             self.move_once(motion);
+            stuck |= self.cursor == before.0;
             if (self.cursor, self.goal) == before {
                 break;
             }
-            went += 1;
             // `gg`, `G`, `0`, `^` and `$` go where they go, once.
             if matches!(
                 motion,
@@ -718,7 +727,7 @@ impl ChatView {
                 break;
             }
         }
-        let ran_out = went < times && matches!(motion, Motion::WordBack | Motion::BigWordBack);
+        let ran_out = stuck && matches!(motion, Motion::WordBack | Motion::BigWordBack);
         !motion.can_fail() || (self.cursor != from && !ran_out)
     }
 
@@ -1613,6 +1622,11 @@ mod tests {
     #[test]
     fn a_motion_that_goes_nowhere_fails_unless_it_goes_to_a_place() {
         let (mut chat, _fonts) = reading(talk(&[("one", "first answer")]));
+        // The first key, before there's a cursor, starts from where it
+        // would be: on the last line, `j` goes nowhere.
+        chat.cursor = None;
+        read(&mut chat, "j");
+        assert!(chat.take_failed());
         read(&mut chat, "G0");
         assert!(!chat.take_failed());
         // `j` on the last line, `h` at a line's start and a find that
@@ -1634,15 +1648,21 @@ mod tests {
         assert!(!chat.take_failed());
         assert_eq!(chat.cursor.unwrap().byte, "first answer".len() - 1);
         // But as in Vim, `+` on the last line fails, though `^`
-        // would move; `2$` there, with no line below to end; and `b` that
-        // runs out at the chat's start before its count does.
+        // would move; `2$` there, with no line below to end, going
+        // nowhere; and `b` that starts one of its count at the chat's
+        // start.
         for keys in ["G$+", "G02$", "G0w3b"] {
             read(&mut chat, keys);
             assert!(chat.take_failed(), "{keys:?}");
         }
         assert_eq!(chat.cursor.map(|cursor| cursor.text), Some(key(0, PROMPT)));
+        read(&mut chat, "G02$");
+        assert!(chat.take_failed());
+        assert_eq!(chat.cursor.unwrap().byte, 0, "2$ went nowhere");
+        // `2b` to the chat's start exactly fails nothing.
         read(&mut chat, "G0w2b");
         assert!(!chat.take_failed());
+        assert_eq!(chat.cursor.map(|cursor| cursor.text), Some(key(0, PROMPT)));
         read(&mut chat, "G0w$");
         assert_eq!(chat.cursor.unwrap().byte, "first answer".len() - 1);
         assert!(!chat.take_failed());
