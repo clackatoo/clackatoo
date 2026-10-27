@@ -75,11 +75,39 @@ pub(super) struct Searching {
     /// The last search's pattern, while what it matches is lit up: from
     /// a search until Esc or `:nohlsearch`, as Vim's `hlsearch` lights it.
     lit: Option<Pattern>,
+    /// Which search that is, counting from the first, for what was found
+    /// of it to be kept against.
+    generation: u64,
+    /// What was last found lit up, and of what text drawn where.
+    lit_kept: std::cell::RefCell<Option<(LitKey, Lit)>>,
 }
 
 /// The matches lit up: each one's block, by its place among those shown,
 /// and its bytes.
 type Lit = Vec<(usize, std::ops::Range<usize>)>;
+
+/// What the matches lit up were found in: which search, how tall the view
+/// is, and each block drawn, where, and how long its text is.
+#[derive(Debug, PartialEq, Eq)]
+struct LitKey {
+    generation: u64,
+    view: u32,
+    blocks: Vec<LitBlock>,
+}
+
+/// A block of text drawn, as [`LitKey`] knows it.
+#[derive(Debug, PartialEq, Eq)]
+struct LitBlock {
+    key: super::paint::TextKey,
+    at: [u32; 2],
+    len: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times the matches lit up have been looked for, for tests.
+    static LIT_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// A search being typed.
 #[derive(Debug)]
@@ -155,11 +183,31 @@ impl ChatView {
     /// each match's block, by its place among those shown, and its bytes.
     /// Only the lines of each block in view are looked through, no more
     /// than [`MOST_LIT`] matches in them, and nothing at all once it isn't
-    /// lit.
+    /// lit. What was found is kept, so a frame that draws the same text
+    /// in the same places doesn't look again.
     pub(crate) fn lit_matches(&self) -> Lit {
         let Some(pattern) = &self.search.lit else {
             return Vec::new();
         };
+        let blocks: Vec<LitBlock> = (self.shown.iter())
+            .map(|shown| LitBlock {
+                key: shown.key,
+                at: shown.at.map(f32::to_bits),
+                len: self.text(shown.key).map_or(0, |text| text.text.len()),
+            })
+            .collect();
+        let key = LitKey {
+            generation: self.search.generation,
+            view: self.view_height.to_bits(),
+            blocks,
+        };
+        if let Some((kept, lit)) = &*self.search.lit_kept.borrow()
+            && *kept == key
+        {
+            return lit.clone();
+        }
+        #[cfg(test)]
+        LIT_SCANS.with(|scans| scans.set(scans.get() + 1));
         let mut lit = Vec::new();
         for (index, shown) in self.shown.iter().enumerate() {
             if control(shown.key.piece) {
@@ -191,6 +239,7 @@ impl ChatView {
                 }
             }
         }
+        *self.search.lit_kept.borrow_mut() = Some((key, lit.clone()));
         lit
     }
 
@@ -344,6 +393,7 @@ impl ChatView {
             }
         };
         self.search.lit = Some(pattern.clone());
+        self.search.generation += 1;
         let (mut at, mut left, mut taken) = (from, count.max(1), 0);
         let (mut first, mut found, mut wrapped) = (None, None, false);
         let mut spent = Spent::new(&pattern);
@@ -1094,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn the_matches_lit_are_those_in_view_of_a_long_block() {
+    fn the_matches_lit_are_those_in_view_of_a_long_block_found_once_a_frame() {
         let lines: Vec<String> = (0..3000).map(|line| format!("line {line}")).collect();
         let code = format!("```\n{}\n```", lines.join("\n"));
         let (mut chat, mut fonts) = reading(talk(&[("one", &code)]));
@@ -1113,6 +1163,15 @@ mod tests {
         );
         // Only what's in view: far fewer than the block's 3000.
         assert!(lit.len() < 200, "{}", lit.len());
+        // A frame drawing the same doesn't look again.
+        let scans = || super::LIT_SCANS.with(std::cell::Cell::get);
+        let before = scans();
+        paint(&mut chat, &mut fonts);
+        paint(&mut chat, &mut fonts);
+        assert_eq!(scans(), before, "kept");
+        chat.scroll_lines(5.0);
+        paint(&mut chat, &mut fonts);
+        assert_eq!(scans(), before + 1, "looked again once it scrolled");
     }
 
     #[test]
