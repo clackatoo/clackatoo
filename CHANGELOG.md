@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026.10.87 (2026-10-27)
+
+### Features
+
+- **gui:** incsearch shows where / and ? go and lights it as they're typed (CLACKA-170) (c953d07)
+
+### Fixes
+
+- **gui:** a terminal's failed motion, search or refused command stops a macro (CLACKA-169) (8abac6a)
+- **gui:** Esc lets a terminal's search land, slow answers release keys, fewer false failures (CLACKA-169) (abca482)
+- **gui:** incsearch keeps its start through snapshots, its last match till the next, and shows nothing when unsure (CLACKA-170) (8f65376)
+- **gui:** Esc waits for a terminal's search, given-up keys keep their order, yh and yb fail as Vim's (CLACKA-169) (16231f7)
+- **gui:** incsearch previews long lines safely, puts the view back after a replace, dims a stale match (CLACKA-170) (2c72c83)
+
 ## 2026.10.86 (2026-10-27)
 
 ### Features
