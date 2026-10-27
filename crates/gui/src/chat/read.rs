@@ -655,15 +655,18 @@ impl ChatView {
     /// [`moved`](Self::moved)), or fails to, as `j` on the last line or
     /// `fx` with no x does, which Vim beeps at, stopping a macro.
     fn move_key(&mut self, motion: Motion, count: Option<usize>) {
-        if !self.moved(motion, count) && motion.can_fail() {
+        if !self.moved(motion, count) {
             self.failed = true;
         }
     }
 
     /// Moves the cursor by `motion`, `times` times, or until it goes no
     /// further, so a count as big as there is costs no more than the chat.
-    /// Returns whether it went: a find found its character, or the cursor
-    /// moved.
+    /// Returns whether it went as Vim's would, without failing: a find
+    /// found its character; a motion that can fail moved, and `b` or `B`
+    /// as many times as counted, not running out at the chat's start; `2$`
+    /// found a line below to go to the end of. Motions to a place, as `0`
+    /// and `gg`, never fail (see [`Motion::can_fail`]).
     pub(super) fn moved(&mut self, motion: Motion, count: Option<usize>) -> bool {
         let times = count.unwrap_or(1);
         if let Motion::Find {
@@ -679,13 +682,30 @@ impl ChatView {
             self.go_to_turn_numbered(number);
             return true;
         }
+        // `2$` is the end of the next line, as Vim's: with none below, it
+        // fails, though it goes to this one's end.
+        if motion == Motion::LineEnd && times > 1 {
+            let from = self.cursor_or_default();
+            for _ in 1..times {
+                let before = self.cursor;
+                self.vertical(Way::On);
+                if self.cursor == before {
+                    break;
+                }
+            }
+            let down = self.cursor != from;
+            self.line_edge('$');
+            return down;
+        }
         let from = self.cursor;
+        let mut went = 0;
         for _ in 0..times {
             let before = (self.cursor, self.goal);
             self.move_once(motion);
             if (self.cursor, self.goal) == before {
                 break;
             }
+            went += 1;
             // `gg`, `G`, `0`, `^` and `$` go where they go, once.
             if matches!(
                 motion,
@@ -698,7 +718,8 @@ impl ChatView {
                 break;
             }
         }
-        self.cursor != from
+        let ran_out = went < times && matches!(motion, Motion::WordBack | Motion::BigWordBack);
+        !motion.can_fail() || (self.cursor != from && !ran_out)
     }
 
     /// Moves the cursor once by `motion`, one of those [`ChatKeys`]
@@ -718,13 +739,19 @@ impl ChatView {
             Motion::LineStart => self.line_edge('0'),
             Motion::FirstNonBlank => self.line_edge('^'),
             Motion::LineEnd => self.line_edge('$'),
-            Motion::NextLine => {
-                self.vertical(Way::On);
-                self.line_edge('^');
-            }
-            Motion::PreviousLine => {
-                self.vertical(Way::Back);
-                self.line_edge('^');
+            // On the last line, or the first, they go nowhere, failing, as
+            // Vim's do.
+            Motion::NextLine | Motion::PreviousLine => {
+                let before = self.cursor;
+                let way = if motion == Motion::NextLine {
+                    Way::On
+                } else {
+                    Way::Back
+                };
+                self.vertical(way);
+                if self.cursor != before {
+                    self.line_edge('^');
+                }
             }
             Motion::Paragraph { forward } => {
                 self.block(if forward { Way::On } else { Way::Back });
@@ -1606,6 +1633,19 @@ mod tests {
         read(&mut chat, "G099l");
         assert!(!chat.take_failed());
         assert_eq!(chat.cursor.unwrap().byte, "first answer".len() - 1);
+        // But as in Vim, `+` on the last line fails, though `^`
+        // would move; `2$` there, with no line below to end; and `b` that
+        // runs out at the chat's start before its count does.
+        for keys in ["G$+", "G02$", "G0w3b"] {
+            read(&mut chat, keys);
+            assert!(chat.take_failed(), "{keys:?}");
+        }
+        assert_eq!(chat.cursor.map(|cursor| cursor.text), Some(key(0, PROMPT)));
+        read(&mut chat, "G0w2b");
+        assert!(!chat.take_failed());
+        read(&mut chat, "G0w$");
+        assert_eq!(chat.cursor.unwrap().byte, "first answer".len() - 1);
+        assert!(!chat.take_failed());
     }
 
     #[test]
