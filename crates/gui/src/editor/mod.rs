@@ -533,12 +533,8 @@ pub(crate) struct Editor {
     /// found (`hlsearch`).
     hlsearch: bool,
     /// The last search's pattern, while its matches are lit: from a
-    /// search, `n` or `N` until Esc or `:nohlsearch`. And which search it
-    /// was, counting from the first, for what's found of it to be kept
-    /// against.
-    matching: Option<(Pattern, u64)>,
-    /// How many searches have lit their matches.
-    searches: u64,
+    /// search, `n` or `N`, `:s` or `:g`, until Esc or `:nohlsearch`.
+    matching: Option<Lighting>,
     /// The matches of the last search in view, as of the last settle,
     /// each from its first character to its last, while they're lit.
     matches_lit: Vec<(Point, Point)>,
@@ -814,7 +810,6 @@ impl Editor {
             found: None,
             hlsearch: options.hlsearch,
             matching: None,
-            searches: 0,
             matches_lit: Vec::new(),
             matches_kept: crate::hlsearch::Memo::default(),
             status: None,
@@ -1832,6 +1827,17 @@ impl Editor {
         }
     }
 
+    /// Lights the matches of `pattern`, compiled from `source` matching
+    /// case as `matching` says, as the last search's, from now till Esc or
+    /// `:nohlsearch`.
+    fn light_matches(&mut self, pattern: &Pattern, source: &str, matching: Matching) {
+        self.matching = Some(Lighting {
+            pattern: pattern.clone(),
+            source: source.to_owned(),
+            matching,
+        });
+    }
+
     /// Stops lighting up the last search's matches, as `:nohlsearch` does,
     /// until the next search.
     pub(crate) fn forget_match(&mut self) {
@@ -1842,11 +1848,15 @@ impl Editor {
     }
 
     /// Esc in normal or visual mode, with nothing typed before it but a
-    /// count or a register: leaves visual mode, and forgets the matches.
+    /// count or a register: leaves visual mode, keeping the matches lit,
+    /// as Vim's does; or in normal mode, puts them out, as `:nohlsearch`.
     fn escape(&mut self) {
-        self.mode = Mode::Normal;
-        self.anchor = None;
-        self.forget_match();
+        if matches!(self.mode, Mode::Visual(_)) {
+            self.mode = Mode::Normal;
+            self.anchor = None;
+        } else {
+            self.forget_match();
+        }
     }
 
     /// Notes `command` as the change being made, for `.`, if it's one: in
@@ -4445,8 +4455,7 @@ impl Editor {
             }
         };
         // Its matches are lit from now, found or not, as a chat's are.
-        self.searches += 1;
-        self.matching = Some((compiled.clone(), self.searches));
+        self.light_matches(&compiled, &pattern, matching);
         let (whole, len) = self.haystack(copy);
         let hay = &whole[..len];
         let text = self.text(copy);
@@ -6346,7 +6355,13 @@ impl Editor {
         }
         // The last search's other matches in view, fainter than the one
         // found.
-        let others = (self.matches_lit.iter()).filter(|&&lit| self.found != Some(lit));
+        // None drawn over the one found, as `n` can go to a match that
+        // overlaps those found one after another from a line's start.
+        let apart = |&&(start, last): &&(Point, Point)| {
+            self.found
+                .is_none_or(|(found, found_last)| last < found || start > found_last)
+        };
+        let others = self.matches_lit.iter().filter(apart);
         let lit = (others.map(|&lit| (lit, HighlightKind::OtherMatch)))
             .chain(self.found.map(|found| (found, HighlightKind::Match)));
         for ((start, last), why) in lit {
@@ -6371,26 +6386,32 @@ impl Editor {
     }
 
     /// Every match of the last search in view, while they're lit and
-    /// `hlsearch` is on, each from its first character to its last: looked
-    /// for in each line shown, from the first cell of it shown to the last,
-    /// with no more of the text around that than [`hlsearch::cut`] looks
-    /// at, so a long line or file costs no more than a short one; no more
-    /// than [`hlsearch::MOST_LIT`] on a line; and only when the text, the
-    /// rows shown or the search have changed since they were last looked
-    /// for.
+    /// `hlsearch` is on, each from its first character to its last.
     ///
-    /// [`hlsearch::cut`]: crate::hlsearch::cut
-    /// [`hlsearch::MOST_LIT`]: crate::hlsearch::MOST_LIT
+    /// Each line shown is looked through from its start, as `n` finds
+    /// matches, for those that reach into what's shown of it: from its
+    /// first cell shown to its last, and on its last row its line break, as
+    /// a match can start there. Only [`AROUND`] bytes are looked through
+    /// before what's shown and after it, the first line's from before its
+    /// start too, for a match coming into view over a line break: so a long
+    /// line or file costs no more than a short one. The lines are looked
+    /// through in as few stretches of the text as that makes, one for a
+    /// view of short lines; no more than [`MOST_LIT`] matches on a line;
+    /// and only when the text, the rows shown or the search have changed
+    /// since.
+    ///
+    /// [`AROUND`]: crate::hlsearch::AROUND
+    /// [`MOST_LIT`]: crate::hlsearch::MOST_LIT
     fn matches_in_view(&self, text: &Text<'_>, copy: &BufferCopy) -> Vec<(Point, Point)> {
         use crate::hlsearch::{AROUND, MOST_LIT};
 
-        let Some((pattern, search)) = self.matching.as_ref().filter(|_| self.hlsearch) else {
+        let Some(lighting) = self.matching.as_ref().filter(|_| self.hlsearch) else {
             return Vec::new();
         };
         let width = self.text_width();
         let key = MatchesIn {
             text: (copy.buffer(), copy.revision()),
-            search: *search,
+            search: (lighting.source.clone(), lighting.matching),
             tabstop: self.indent.tabstop,
             width,
             rows: (self.shown.iter())
@@ -6399,29 +6420,64 @@ impl Editor {
         };
         self.matches_kept.get(key, || {
             let rope = text.rope();
-            let char_start = |byte: usize| rope.char_to_byte(rope.byte_to_char(byte));
+            let len = rope.len_bytes();
+            let back = |byte: usize| rope.char_to_byte(rope.byte_to_char(byte.min(len)));
+            // Each line's place to start looking from, and the bytes shown.
+            let lines: Vec<(usize, std::ops::Range<usize>)> = (self.shown)
+                .chunk_by(|a, b| a.line == b.line)
+                .enumerate()
+                .map(|(index, rows)| {
+                    let (first, last) = (&rows[0], &rows[rows.len() - 1]);
+                    let line = first.line;
+                    let start = text.byte_at(Point {
+                        line,
+                        col: first.start,
+                    });
+                    let line_end = text.line_end(line);
+                    let shown_end = text.byte_at(Point {
+                        line,
+                        col: last.next.unwrap_or(last.start.saturating_add(width)),
+                    });
+                    let end = if shown_end >= line_end {
+                        (line_end + 1).min(len)
+                    } else {
+                        shown_end
+                    };
+                    let from = back(start.saturating_sub(AROUND));
+                    let from = if index == 0 {
+                        from
+                    } else {
+                        from.max(text.line_start(line))
+                    };
+                    (from, start..end)
+                })
+                .collect();
             let mut lit = Vec::new();
-            for rows in self.shown.chunk_by(|a, b| a.line == b.line) {
-                let (first, last) = (&rows[0], &rows[rows.len() - 1]);
-                let line = first.line;
-                // To the last cell shown: past the row's end, the line's.
-                let end = last.next.unwrap_or(last.start.saturating_add(width));
-                let start = text.byte_at(Point {
-                    line,
-                    col: first.start,
+            let mut rest = &lines[..];
+            while let Some(&(hay_start, ref first)) = rest.first() {
+                // The lines whose stretches run into one another.
+                let mut hay_end = back(first.end.saturating_add(AROUND));
+                let mut taken = 1;
+                while let Some((from, range)) = rest.get(taken)
+                    && *from <= hay_end
+                {
+                    hay_end = hay_end.max(back(range.end.saturating_add(AROUND)));
+                    taken += 1;
+                }
+                let hay = text.slice(hay_start, hay_end);
+                let spans = (rest[..taken].iter()).map(|(from, range)| {
+                    let range = range.start - hay_start..range.end - hay_start;
+                    (from - hay_start, range)
                 });
-                let end = text.byte_at(Point { line, col: end });
-                let from = char_start(start.saturating_sub(AROUND));
-                let to = char_start(end.saturating_add(AROUND).min(rope.len_bytes()));
-                let hay = text.slice(from, to);
-                for found in pattern.matches_in(&hay, start - from..end - from, MOST_LIT) {
+                for found in lighting.pattern.matches_in(&hay, spans, MOST_LIT) {
                     let matched = &hay[found.clone()];
                     let last = (matched.char_indices().next_back()).map_or(0, |(at, _)| at);
                     lit.push((
-                        text.point_of(from + found.start),
-                        text.point_of(from + found.start + last),
+                        text.point_of(hay_start + found.start),
+                        text.point_of(hay_start + found.start + last),
                     ));
                 }
+                rest = &rest[taken..];
             }
             lit
         })
@@ -6690,14 +6746,25 @@ struct Compiled {
     pattern: Pattern,
 }
 
+/// The last search's pattern, while its matches are lit, and what it was
+/// compiled from: its source, and how it matches case.
+#[derive(Debug)]
+struct Lighting {
+    pattern: Pattern,
+    source: String,
+    matching: Matching,
+}
+
 /// What an editor's matches in view were found in (see
 /// [`Editor::matches_in_view`]): the text, as its buffer and revision,
-/// which search, how wide a tab and the text area are, and each row shown,
-/// as its line, its first cell and the next row's.
+/// which search, as its pattern's source and how it matches case, how
+/// wide a tab and the text area are, and each row shown, as its line, its
+/// first cell and the next row's. So `n`, finding the same pattern again,
+/// doesn't look for them again.
 #[derive(Debug, PartialEq, Eq)]
 struct MatchesIn {
     text: (BufferId, u64),
-    search: u64,
+    search: (String, Matching),
     tabstop: usize,
     width: usize,
     rows: Vec<(u64, usize, Option<usize>)>,

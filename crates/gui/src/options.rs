@@ -507,7 +507,7 @@ options! {
     /// ...unless, with `ignorecase`, what's searched for has a capital.
     smartcase("scs", "Match case when the search contains capitals"): bool = true;
     /// Every match of the last search in view is lit up, in editors, in
-    /// terminals' normal mode and in chats, the one the cursor went to
+    /// terminals' normal mode and in chats, the one the search went to
     /// brighter than the rest, until Esc or `:nohlsearch`, and again at
     /// the next search, `n` or `N`. Off, only that one is.
     hlsearch("hls", "Highlight every match of the last search"): bool = true;

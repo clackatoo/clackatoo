@@ -554,7 +554,7 @@ impl Editor {
         shared: &Shared,
     ) -> Result<i64, String> {
         let pattern = self.compile(source, None, copy, shared)?;
-        self.remember_search(source);
+        self.remember_search(source, copy, shared);
         let (whole, len) = self.haystack(copy);
         let hay = &whole[..len];
         let text = self.text(copy);
@@ -703,14 +703,19 @@ impl Editor {
     }
 
     /// Makes `source` the last search, for `n` and `:s//`, going the way
-    /// the last went.
-    fn remember_search(&mut self, source: &str) {
+    /// the last went; and lights its matches, as Vim's `hlsearch` lights
+    /// the last search's, matching case as a search typed does.
+    fn remember_search(&mut self, source: &str, copy: &BufferCopy, shared: &Shared) {
         let backward = self.search.as_ref().is_some_and(|search| search.backward);
         self.search = Some(Searched {
             pattern: source.to_owned(),
             backward,
             star: false,
         });
+        let matching = Matching::Typed(self.case);
+        if let Ok(pattern) = self.pattern(source, matching, copy, shared) {
+            self.light_matches(&pattern, source, matching);
+        }
     }
 
     /// `:s`, as `typed`, on `lines`; with the last search's pattern if
@@ -743,7 +748,7 @@ impl Editor {
             replacement: replacement.clone(),
             flags,
         });
-        self.remember_search(&pattern);
+        self.remember_search(&pattern, copy, shared);
         let text = self.text(copy);
         let total = text.rope().len_bytes();
         let (start, end) = (text.line_start(lines.first), text.line_end(lines.last));
@@ -1106,7 +1111,7 @@ impl Editor {
             return Err(":g needs a command to do on each line, as :g/pattern/d".into());
         }
         let compiled = self.compile(&pattern, None, copy, shared)?;
-        self.remember_search(&pattern);
+        self.remember_search(&pattern, copy, shared);
         let starts = {
             let (whole, len) = self.haystack(copy);
             matching_lines(&whole[..len], &compiled, &self.text(copy), lines, invert)

@@ -160,8 +160,12 @@ impl Editor {
             self.top = top;
         }
         let (search, cursor) = (self.search.clone(), self.cursor);
+        // What a preview runs makes its pattern the last search, lit: put
+        // back, as nothing is done till Enter.
+        let matching = self.matching.take();
         let preview = self.work_out_preview(line, copy, shared);
         self.search = search;
+        self.matching = matching;
         self.cursor = cursor;
         self.preview = preview.map(|mut preview| {
             preview.top_was = preview.top_was.or(top_was);

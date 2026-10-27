@@ -119,6 +119,9 @@ pub(super) struct Cache {
     working: Option<working::WorkingLaid>,
     /// The box's own short lines, as its chips say, laid out.
     labels: Labels,
+    /// How many times a turn has been laid out, kept through a new width
+    /// or font, for what's found in a turn's text to be kept against.
+    layouts: u64,
 }
 
 impl Cache {
@@ -174,6 +177,9 @@ pub(super) struct TurnSlot {
     /// The time above it, laid out, if it was sent long after the turn
     /// before: what it says changes as the days go by.
     divider: Option<Laid>,
+    /// Which time laying out a turn it was laid out last, counting from
+    /// the first (see [`Cache::layouts`]).
+    laid_at: u64,
 }
 
 /// A turn, laid out.
@@ -248,6 +254,7 @@ impl ChatView {
                 size: em,
                 fonts: fonts.generation,
                 turns,
+                layouts: self.cache.layouts,
                 ..Cache::default()
             };
         }
@@ -703,6 +710,8 @@ impl ChatView {
         }
         slot.stale = false;
         slot.laid = Some(laid);
+        self.cache.layouts += 1;
+        slot.laid_at = self.cache.layouts;
         self.set_height(index, y);
     }
 
@@ -2187,6 +2196,14 @@ impl Span {
             top,
             bottom: top + height,
         }
+    }
+}
+
+impl ChatView {
+    /// Which time laying out a turn turn `turn` was last laid out, so what
+    /// was found in its text is known to be of the text it has now.
+    pub(super) fn laid_at(&self, turn: usize) -> u64 {
+        self.cache.turns.get(turn).map_or(0, |slot| slot.laid_at)
     }
 }
 

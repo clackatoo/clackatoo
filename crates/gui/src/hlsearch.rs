@@ -1,7 +1,9 @@
 //! Every match of the last search in view lit up, as Vim's `hlsearch`
 //! lights them, in editors, in terminals' normal mode and in chats: from a
-//! search, `n` or `N` until Esc or `:nohlsearch`, the match the cursor went
-//! to brighter than the rest. With the option off, only that one's lit.
+//! search, `n` or `N` until Esc or `:nohlsearch`, the match the search went
+//! to brighter than the rest, and none of the rest drawn over it. With the
+//! option off, only that one's lit. Matches are found one after another,
+//! as `n` goes from a line's start, so they never overlap.
 //!
 //! What's lit is looked for only in what's drawn, no more than
 //! [`MOST_LIT`] matches in a block of it (a chat's block of text, an
@@ -24,17 +26,21 @@ pub(crate) const MOST_LIT: usize = 512;
 /// it.
 pub(crate) const AROUND: usize = 4 << 10;
 
-/// `text` up to [`AROUND`] bytes past byte `end`, back to a character's
-/// start, so a search for matches before `end` that finds none never goes
-/// through the rest of a long text. Only a match ending near the cut could
-/// differ from what the whole text has, as `$` matches there, and one of
-/// those starting before `end` would be thousands of bytes long.
-pub(crate) fn cut(text: &str, end: usize) -> &str {
-    let mut cut = end.saturating_add(AROUND).min(text.len());
-    while !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    &text[..cut]
+/// The bytes of `text` looked through for the matches drawn in `range`:
+/// from [`AROUND`] bytes before it to as many after, each back to a
+/// character's start, so a search that finds none never goes through the
+/// rest of a long text. Only a match near either end could differ from
+/// what the whole text has, as `^` and `$` match there, and one of those
+/// reaching into `range` would be thousands of bytes long.
+pub(crate) fn around(text: &str, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+    let back = |mut at: usize| {
+        at = at.min(text.len());
+        while !text.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    };
+    back(range.start.saturating_sub(AROUND))..back(range.end.saturating_add(AROUND))
 }
 
 #[cfg(test)]

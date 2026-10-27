@@ -404,6 +404,16 @@ fn every_match_in_view_is_lit_the_one_found_brighter_until_esc() {
     assert_eq!(lit(&mut setup), (1, 2));
     assert_eq!(scans(), before);
     // An edit looks again, and lights what it made.
+    // `n` finding the same pattern doesn't look for them again, nor does
+    // leaving visual mode put them out, as in Vim.
+    let before = scans();
+    setup.keys("n");
+    assert_eq!(setup.cursor(), (2, 0));
+    assert_eq!(lit(&mut setup), (1, 2));
+    assert_eq!(scans(), before, "kept through n");
+    setup.keys("vl<Esc>");
+    assert_eq!(lit(&mut setup), (1, 2));
+    setup.keys("gg$");
     setup.keys("jciwcat<Esc>");
     assert_eq!(lit(&mut setup), (1, 3));
     assert!(scans() > before);
@@ -433,6 +443,43 @@ fn no_more_matches_than_so_many_are_lit_on_a_line() {
         setup.highlighted(HighlightKind::OtherMatch).len(),
         crate::hlsearch::MOST_LIT - 1
     );
+}
+
+#[test]
+fn matches_are_lit_from_the_line_start_as_n_finds_them_none_over_the_one_found() {
+    // Sideways, the view starts at the line's cell 25: the match from 24
+    // that runs into it is lit, and the rest from there, two by two from
+    // the line's start, not from the view's.
+    let mut setup = Setup::new(&format!("{}\n", "a".repeat(61)));
+    setup.set(|options| options.wrap = false);
+    setup.keys("/aa<CR>$");
+    let lit = setup.highlighted(HighlightKind::OtherMatch);
+    assert_eq!(lit.len(), 18);
+    assert_eq!(lit[0], (0, 4..5), "the match from cell 24, its second cell");
+    assert_eq!(lit[1], (0, 5..7));
+    // `n` can go to a match inside those found two by two: none of them
+    // is drawn over it.
+    let mut setup = Setup::new("aaaaa\n");
+    setup.keys("/aa<CR>");
+    assert_eq!(setup.cursor(), (0, 1));
+    assert_eq!(setup.highlighted(HighlightKind::Match), [(0, 5..7)]);
+    assert!(setup.highlighted(HighlightKind::OtherMatch).is_empty());
+    setup.keys("n");
+    assert_eq!(setup.cursor(), (0, 2));
+    assert_eq!(setup.highlighted(HighlightKind::OtherMatch), [(0, 4..6)]);
+}
+
+#[test]
+fn a_match_starting_at_a_line_break_is_lit() {
+    let mut setup = Setup::new("a\nb\na\nb\n");
+    setup.keys("/\\nb<CR>");
+    assert_eq!(setup.cursor(), (0, 1));
+    // The other, from line 3's break to line 4's `b`: on from the cell
+    // after the `a`, and the `b`.
+    let lit = setup.highlighted(HighlightKind::OtherMatch);
+    assert_eq!(lit.len(), 2, "{lit:?}");
+    assert_eq!((lit[0].0, lit[0].1.start), (2, 5));
+    assert_eq!(lit[1], (3, 4..5));
 }
 
 #[test]

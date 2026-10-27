@@ -860,3 +860,24 @@ fn global_substitute_on_two_megabytes() {
         text.len()
     );
 }
+
+#[test]
+fn s_and_g_light_their_patterns_matches_as_the_last_search() {
+    let mut setup = Setup::new("cat dog\ndog dog\ncat\n");
+    let others = |setup: &mut Setup| setup.highlighted(HighlightKind::OtherMatch);
+    setup.keys("/cat<CR>");
+    assert_eq!(others(&mut setup), [(0, 4..7)]);
+    // `:s` makes its pattern the last search, lit, as `n` goes to it.
+    run(&mut setup, "2s/dog/bird/");
+    assert_eq!(others(&mut setup), [(0, 8..11), (1, 9..12)]);
+    setup.keys("gg0n");
+    assert_eq!(setup.cursor(), (0, 4));
+    // So does `:g`, and a preview of `:s` lights nothing of its own.
+    run(&mut setup, "g/cat/normal A!");
+    assert_eq!(others(&mut setup).len(), 2);
+    setup
+        .editor
+        .preview(Some("s/bird/x/"), &setup.copy, &setup.shared);
+    setup.editor.preview(None, &setup.copy, &setup.shared);
+    assert_eq!(others(&mut setup).len(), 2, "the preview put it back");
+}

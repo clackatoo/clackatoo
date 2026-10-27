@@ -406,8 +406,7 @@ impl Pane {
         let backward = backward != reverse;
         let exact = self.case.exact(&query);
         // Its matches are lit from now, found or not, as a chat's are.
-        self.searches += 1;
-        self.matching = Some((query.chars().collect(), exact, self.searches));
+        self.matching = Some((query.chars().collect(), exact));
         self.request(
             Request::Search {
                 terminal: self.terminal(),

@@ -75,10 +75,12 @@ pub(super) struct Searching {
     every: bool,
     /// The last search's pattern, while what it matches is lit up: from
     /// a search until Esc or `:nohlsearch`, as Vim's `hlsearch` lights it.
-    lit: Option<Pattern>,
-    /// Which search that is, counting from the first, for what was found
-    /// of it to be kept against.
-    generation: u64,
+    /// And what it was compiled from, what was searched for and how case
+    /// was matched, for what was found of it to be kept against.
+    lit: Option<(Pattern, (String, Case))>,
+    /// Where the match the last search, `n` or `N` went to starts, lit
+    /// brighter than the rest, while they're lit.
+    found: Option<Position>,
     /// What was last found lit up, and of what text drawn where.
     lit_kept: hlsearch::Memo<LitKey, (usize, std::ops::Range<usize>)>,
 }
@@ -91,7 +93,7 @@ impl Default for Searching {
             case: Case::default(),
             every: crate::options::Options::default().hlsearch,
             lit: None,
-            generation: 0,
+            found: None,
             lit_kept: hlsearch::Memo::default(),
         }
     }
@@ -101,11 +103,13 @@ impl Default for Searching {
 /// and its bytes.
 type Lit = Vec<(usize, std::ops::Range<usize>)>;
 
-/// What the matches lit up were found in: which search, how tall the view
-/// is, and each block drawn, where, how big, and how long its text is.
+/// What the matches lit up were found in: which search, as what was
+/// searched for and how case was matched, so `n` doesn't look again; how
+/// tall the view is; and each block drawn, where, how big, and of which
+/// layout of its turn.
 #[derive(Debug, PartialEq, Eq)]
 struct LitKey {
-    generation: u64,
+    search: (String, Case),
     view: u32,
     blocks: Vec<LitBlock>,
 }
@@ -117,7 +121,9 @@ struct LitBlock {
     at: [u32; 2],
     /// How big it's laid out, which changes as it wraps differently.
     size: [u32; 2],
-    len: usize,
+    /// Which time laying out a turn laid out its turn, which changes as
+    /// its text does, whether or not its length does.
+    laid: u64,
 }
 
 /// A search being typed.
@@ -188,49 +194,71 @@ impl ChatView {
     /// `:nohlsearch` do, until the next search.
     pub(crate) fn stop_highlighting(&mut self) {
         self.search.lit = None;
+        self.search.found = None;
         self.search.lit_kept.forget();
     }
 
     /// What the last search matches in the text drawn, while it's lit up:
-    /// each match's block, by its place among those shown, and its bytes;
-    /// without `hlsearch`, only the match the cursor's on. Only the lines
-    /// of each block in view are looked through, no more than [`MOST_LIT`]
-    /// matches in them, and nothing at all once it isn't lit. What was
-    /// found is kept, so a frame that draws the same text in the same
-    /// places doesn't look again.
+    /// each match's block, by its place among those shown, and its bytes.
+    /// The match the last search, `n` or `N` went to is among them, and
+    /// none of the rest over it; without `hlsearch`, it's the only one, and
+    /// nothing else is looked for. Nothing at all once it isn't lit.
     pub(crate) fn lit_matches(&self) -> Lit {
-        let mut lit = self.every_match_lit();
-        if !self.search.every {
-            lit.retain(|lit| self.found_at(lit));
+        let Some((pattern, search)) = &self.search.lit else {
+            return Vec::new();
+        };
+        let mut lit = if self.search.every {
+            self.every_match_lit(pattern, search)
+        } else {
+            Vec::new()
+        };
+        if let Some(found) = self.found_match(pattern) {
+            let (index, ref range) = found;
+            lit.retain(|(other, lit)| {
+                *other != index || lit.end <= range.start || lit.start >= range.end
+            });
+            lit.push(found);
         }
         lit
     }
 
-    /// Whether `lit`, a match lit up, is the one the cursor's on, the one
-    /// found.
-    pub(super) fn found_at(&self, (index, range): &(usize, std::ops::Range<usize>)) -> bool {
-        self.cursor.is_some_and(|cursor| {
-            (self.shown.get(*index)).is_some_and(|shown| shown.key == cursor.text)
-                && range.start == cursor.byte
-        })
+    /// The match the last search, `n` or `N` went to, while it's drawn:
+    /// its block, by its place among those shown, and its bytes. Found
+    /// again where it starts, which `n` can put inside the matches found
+    /// one after another from a line's start, as `/aa` in `aaaa` does.
+    fn found_match(&self, pattern: &Pattern) -> Option<(usize, std::ops::Range<usize>)> {
+        let found = self.search.found?;
+        let index = self
+            .shown
+            .iter()
+            .position(|shown| shown.key == found.text)?;
+        let text = self.text(found.text)?.text;
+        let hay = hlsearch::around(text, found.byte..found.byte);
+        let at = found.byte.checked_sub(hay.start)?;
+        let matched = (pattern.find_at(&text[hay.clone()], at))
+            .filter(|matched| matched.start == at && matched.end > matched.start)?;
+        Some((index, hay.start + matched.start..hay.start + matched.end))
     }
 
-    /// Every match of the last search in the text drawn, while it's lit
-    /// up, as [`lit_matches`](Self::lit_matches) says.
-    fn every_match_lit(&self) -> Lit {
-        let Some(pattern) = &self.search.lit else {
-            return Vec::new();
-        };
+    /// Every match of the last search, `pattern`, compiled from `search`,
+    /// in the text drawn. In each block, only its lines in view are looked
+    /// through, and [`AROUND`] bytes either side, matches found one after
+    /// another from there, as `n` goes, no more than [`MOST_LIT`] of them.
+    /// What was found is kept, so a frame that draws the same text in the
+    /// same places doesn't look again, nor does `n`.
+    ///
+    /// [`AROUND`]: hlsearch::AROUND
+    fn every_match_lit(&self, pattern: &Pattern, search: &(String, Case)) -> Lit {
         let blocks: Vec<LitBlock> = (self.shown.iter())
             .map(|shown| LitBlock {
                 key: shown.key,
                 at: shown.at.map(f32::to_bits),
                 size: shown.size.map(f32::to_bits),
-                len: self.text(shown.key).map_or(0, |text| text.text.len()),
+                laid: self.laid_at(shown.key.turn),
             })
             .collect();
         let key = LitKey {
-            generation: self.search.generation,
+            search: search.clone(),
             view: self.view_height.to_bits(),
             blocks,
         };
@@ -246,11 +274,24 @@ impl ChatView {
                 let Some(bytes) = self.bytes_in_view(shown, text.layout) else {
                     continue;
                 };
-                let text = hlsearch::cut(text.text, bytes.end);
-                let found = pattern.matches_in(text, bytes, MOST_LIT);
-                lit.extend(found.into_iter().map(|range| (index, range)));
+                let hay = hlsearch::around(text.text, bytes.clone());
+                let range = bytes.start - hay.start..bytes.end - hay.start;
+                let found = pattern.matches_in(&text.text[hay.clone()], [(0, range)], MOST_LIT);
+                lit.extend(
+                    (found.into_iter())
+                        .map(|found| (index, hay.start + found.start..hay.start + found.end)),
+                );
             }
             lit
+        })
+    }
+
+    /// Whether `lit`, a match lit up, is the one the last search, `n` or
+    /// `N` went to.
+    pub(super) fn found_at(&self, (index, range): &(usize, std::ops::Range<usize>)) -> bool {
+        self.search.found.is_some_and(|found| {
+            (self.shown.get(*index)).is_some_and(|shown| shown.key == found.text)
+                && range.start == found.byte
         })
     }
 
@@ -409,8 +450,8 @@ impl ChatView {
                 return;
             }
         };
-        self.search.lit = Some(pattern.clone());
-        self.search.generation += 1;
+        self.search.lit = Some((pattern.clone(), (query.clone(), self.search.case)));
+        self.search.found = None;
         let (mut at, mut left, mut taken) = (from, count.max(1), 0);
         let (mut first, mut found, mut wrapped) = (None, None, false);
         let mut spent = Spent::new(&pattern);
@@ -449,6 +490,7 @@ impl ChatView {
             });
             return;
         };
+        self.search.found = Some(position);
         self.go(position);
         self.goal = None;
         self.follow_selection();
@@ -1161,12 +1203,48 @@ mod tests {
         read(&mut chat, "n");
         chat.settle(&mut fonts);
         assert_eq!(lit(&mut chat, &mut fonts), (1, 2));
-        // Without `hlsearch`, only the one found is.
+        // The one found stays the bright one, wherever the cursor goes.
+        read(&mut chat, "w");
+        assert_eq!(lit(&mut chat, &mut fonts), (1, 2));
+        // `n` finding the same pattern doesn't look for them again.
+        let scans = || crate::hlsearch::SCANS.with(std::cell::Cell::get);
+        let before = scans();
+        read(&mut chat, "n");
+        chat.settle(&mut fonts);
+        assert_eq!(lit(&mut chat, &mut fonts), (1, 2));
+        assert_eq!(scans(), before, "kept through n");
+        // Without `hlsearch`, only the one found is, until Esc, though
+        // the cursor moves off it.
         chat.set_hlsearch(false);
         assert_eq!(lit(&mut chat, &mut fonts), (1, 0));
+        read(&mut chat, "w");
+        assert_eq!(lit(&mut chat, &mut fonts), (1, 0));
+        read_named(&mut chat, NamedKey::Escape);
+        assert_eq!(lit(&mut chat, &mut fonts), (0, 0));
         chat.set_hlsearch(true);
+        read(&mut chat, "n");
+        chat.settle(&mut fonts);
         chat.stop_highlighting();
         assert!(chat.lit_matches().is_empty());
+    }
+
+    #[test]
+    fn what_is_lit_follows_a_change_to_the_text_of_the_same_length() {
+        use clackatoo_protocol::{Node, View, ViewUpdate};
+        let (mut chat, mut fonts) = reading(talk(&[("find the cat", "a cat sat")]));
+        read(&mut chat, "gg");
+        search(&mut chat, &mut fonts, "/cat");
+        paint(&mut chat, &mut fonts);
+        assert_eq!(chat.lit_matches().len(), 2);
+        // The answer's text changes, its length the same, as a counter's
+        // does: what's lit is looked for again.
+        chat.apply(&ViewUpdate::Snapshot(View {
+            title: String::new(),
+            cwd: None,
+            root: Node::Chat(Box::new(talk(&[("find the cat", "a tac sat")]))),
+        }));
+        paint(&mut chat, &mut fonts);
+        assert_eq!(chat.lit_matches().len(), 1);
     }
 
     #[test]

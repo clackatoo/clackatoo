@@ -433,15 +433,18 @@ impl Pattern {
         Some(Found { start, end })
     }
 
-    /// Every match in `text` that starts in `range`, in order, but none
-    /// that's empty, and no more than `most`: what `hlsearch` lights up of
-    /// the text in view. Only as far into `text` as the next match is
-    /// looked through, so the caller bounds the cost by what it hands in:
-    /// past `range`'s end, only as far as a match from it could go.
+    /// The matches in `text` that `hlsearch` lights in each of `spans`, a
+    /// place to start looking and a range drawn: one after another from
+    /// the place, as `n` goes from a line's start, those that reach into
+    /// the range, though they start before it or go on past it, but none
+    /// that's empty, and no more than `most` in a range. Only as far into
+    /// `text` as the next match is looked through, so the caller bounds the
+    /// cost by what it hands in: a place to start a little before each
+    /// range, and past the last only as far as a match from it could go.
     pub(crate) fn matches_in(
         &self,
         text: &str,
-        range: std::ops::Range<usize>,
+        spans: impl IntoIterator<Item = (usize, std::ops::Range<usize>)>,
         most: usize,
     ) -> Vec<std::ops::Range<usize>> {
         // Whether the text's words are plain is worked out once for it,
@@ -449,22 +452,30 @@ impl Pattern {
         // be where it is then.
         if let Engine::Looking { odd, .. } = &self.engine {
             let plain = self.plain_in(text, odd);
-            (self.plain_now).set(Some((text.as_ptr() as usize, text.len(), plain)));
+            self.plain_now
+                .set(Some((text.as_ptr() as usize, text.len(), plain)));
         }
         let mut found = Vec::new();
-        let mut at = range.start.min(text.len());
-        while found.len() < most {
-            let Some(next) = (self.find_at(text, at)).filter(|next| next.start < range.end) else {
-                break;
-            };
-            if next.end > next.start {
-                found.push(next.start..next.end);
-                at = next.end;
-            } else if let Some(ch) = text[next.start..].chars().next() {
-                // An empty match is passed over, a character on.
-                at = next.start + ch.len_utf8();
-            } else {
-                break;
+        for (from, range) in spans {
+            let mut at = from.min(text.len());
+            let mut lit = 0;
+            while lit < most {
+                let Some(next) = (self.find_at(text, at)).filter(|next| next.start < range.end)
+                else {
+                    break;
+                };
+                if next.end > next.start {
+                    if next.end > range.start {
+                        found.push(next.start..next.end);
+                        lit += 1;
+                    }
+                    at = next.end;
+                } else if let Some(ch) = text[next.start..].chars().next() {
+                    // An empty match is passed over, a character on.
+                    at = next.start + ch.len_utf8();
+                } else {
+                    break;
+                }
             }
         }
         self.plain_now.set(None);
@@ -1376,34 +1387,49 @@ mod tests {
     }
 
     #[test]
-    fn the_matches_in_a_range_are_those_starting_there_but_no_empty_ones() {
+    fn the_matches_lit_are_found_from_where_looking_starts_and_reach_the_range() {
         fn lit(
             source: &str,
             text: &str,
-            range: std::ops::Range<usize>,
+            spans: &[(usize, std::ops::Range<usize>)],
             most: usize,
-        ) -> Vec<String> {
+        ) -> Vec<(usize, String)> {
             let pattern = Pattern::new(source, Matching::Exact, "", Words::NONE).unwrap();
-            let found = pattern.matches_in(text, range, most);
+            let found = pattern.matches_in(text, spans.iter().cloned(), most);
             found
                 .into_iter()
-                .map(|found| text[found].to_owned())
+                .map(|found| (found.start, text[found].to_owned()))
                 .collect()
         }
-        // One starting in the range and going on past it is lit; one
-        // starting after it isn't.
-        assert_eq!(lit("cat\\w*", "cat catalog cats", 2..6, 9), ["catalog"]);
-        assert_eq!(lit("a", "aaaa", 0..4, 3), ["a", "a", "a"], "no more");
+        let cat = |at: usize, text: &str| (at, text.to_owned());
+        // One starting in the range and going on past it is lit, and one
+        // starting before it and going on into it; one after it isn't.
+        let text = "cat catalog cats";
+        assert_eq!(
+            lit("cat\\w*", text, &[(0, 2..6)], 9),
+            [cat(0, "cat"), cat(4, "catalog")]
+        );
+        assert_eq!(lit("cat\\w*", text, &[(0, 3..4)], 9), Vec::new());
+        // Found one after another from where looking starts, as `n` finds
+        // them from a line's start, whatever byte the range starts at.
+        assert_eq!(
+            lit("aa", "aaaaa", &[(0, 1..5)], 9),
+            [cat(0, "aa"), cat(2, "aa")]
+        );
+        assert_eq!(lit("a", "aaaa", &[(0, 0..4)], 3).len(), 3, "no more");
+        // Each span has its own count.
+        assert_eq!(lit("a", "a\na", &[(0, 0..1), (2, 2..3)], 1).len(), 2);
         // An empty match lights nothing, and is passed over.
-        assert_eq!(lit("x*", "axxb", 0..4, 9), ["xx"]);
-        assert!(lit("^", "a\nb", 0..3, 9).is_empty());
+        assert_eq!(lit("x*", "axxb", &[(0, 0..4)], 9), [cat(1, "xx")]);
+        assert!(lit("^", "a\nb", &[(0, 0..3)], 9).is_empty());
         // With `\<`, whether the text's words are plain is worked out once
-        // for all its matches, not at each.
+        // for all its matches and spans, not at each.
         let words = Words::new("-");
         let pattern = Pattern::new("\\<a", Matching::Exact, "", words).unwrap();
         let scans = || PLAIN_SCANS.with(Cell::get);
         let before = scans();
-        assert_eq!(pattern.matches_in("a a a a", 0..7, 9).len(), 4);
+        let in_view = [(0, 0..3), (4, 4..7)];
+        assert_eq!(pattern.matches_in("a a a a", in_view, 9).len(), 4);
         assert_eq!(scans(), before + 1);
     }
 
