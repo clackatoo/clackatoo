@@ -86,6 +86,10 @@ pub(crate) struct Pattern {
     /// it and every copy of it, as the editor keeps it and hands it out
     /// for each search (see [`searching`](Self::searching)).
     plain_in: Rc<RefCell<Option<Searching>>>,
+    /// Whether the text [`matches_in`](Self::matches_in) is going through
+    /// has plain words, while it is: where it is, how long, and whether it
+    /// has, worked out once for all its searches.
+    plain_now: Cell<Option<(usize, usize, bool)>>,
 }
 
 /// A file's whole text being searched, kept so no other can be where it
@@ -252,6 +256,7 @@ impl Pattern {
             multiline: translated.multiline,
             gave_up: Cell::new(false),
             plain_in: Rc::default(),
+            plain_now: Cell::new(None),
         })
     }
 
@@ -349,6 +354,11 @@ impl Pattern {
     /// out each time. A part of a text that isn't plain may be, but the
     /// look-arounds are right for it all the same.
     fn plain_in(&self, text: &str, odd: &Regex) -> bool {
+        if let Some((at, len, plain)) = self.plain_now.get()
+            && (at, len) == (text.as_ptr() as usize, text.len())
+        {
+            return plain;
+        }
         if let Some((whole, plain)) = self.plain_in.borrow().as_ref() {
             let (start, end) = (
                 whole.as_ptr() as usize,
@@ -421,6 +431,44 @@ impl Pattern {
             })?,
         };
         Some(Found { start, end })
+    }
+
+    /// Every match in `text` that starts in `range`, in order, but none
+    /// that's empty, and no more than `most`: what `hlsearch` lights up of
+    /// the text in view. Only as far into `text` as the next match is
+    /// looked through, so the caller bounds the cost by what it hands in:
+    /// past `range`'s end, only as far as a match from it could go.
+    pub(crate) fn matches_in(
+        &self,
+        text: &str,
+        range: std::ops::Range<usize>,
+        most: usize,
+    ) -> Vec<std::ops::Range<usize>> {
+        // Whether the text's words are plain is worked out once for it,
+        // not at every match; and forgotten after, as another text could
+        // be where it is then.
+        if let Engine::Looking { odd, .. } = &self.engine {
+            let plain = self.plain_in(text, odd);
+            (self.plain_now).set(Some((text.as_ptr() as usize, text.len(), plain)));
+        }
+        let mut found = Vec::new();
+        let mut at = range.start.min(text.len());
+        while found.len() < most {
+            let Some(next) = (self.find_at(text, at)).filter(|next| next.start < range.end) else {
+                break;
+            };
+            if next.end > next.start {
+                found.push(next.start..next.end);
+                at = next.end;
+            } else if let Some(ch) = text[next.start..].chars().next() {
+                // An empty match is passed over, a character on.
+                at = next.start + ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        self.plain_now.set(None);
+        found
     }
 
     /// Where Vim's group `number` matched, as last kept in `locations`:
@@ -1325,6 +1373,38 @@ mod tests {
             };
         }
         found
+    }
+
+    #[test]
+    fn the_matches_in_a_range_are_those_starting_there_but_no_empty_ones() {
+        fn lit(
+            source: &str,
+            text: &str,
+            range: std::ops::Range<usize>,
+            most: usize,
+        ) -> Vec<String> {
+            let pattern = Pattern::new(source, Matching::Exact, "", Words::NONE).unwrap();
+            let found = pattern.matches_in(text, range, most);
+            found
+                .into_iter()
+                .map(|found| text[found].to_owned())
+                .collect()
+        }
+        // One starting in the range and going on past it is lit; one
+        // starting after it isn't.
+        assert_eq!(lit("cat\\w*", "cat catalog cats", 2..6, 9), ["catalog"]);
+        assert_eq!(lit("a", "aaaa", 0..4, 3), ["a", "a", "a"], "no more");
+        // An empty match lights nothing, and is passed over.
+        assert_eq!(lit("x*", "axxb", 0..4, 9), ["xx"]);
+        assert!(lit("^", "a\nb", 0..3, 9).is_empty());
+        // With `\<`, whether the text's words are plain is worked out once
+        // for all its matches, not at each.
+        let words = Words::new("-");
+        let pattern = Pattern::new("\\<a", Matching::Exact, "", words).unwrap();
+        let scans = || PLAIN_SCANS.with(Cell::get);
+        let before = scans();
+        assert_eq!(pattern.matches_in("a a a a", 0..7, 9).len(), 4);
+        assert_eq!(scans(), before + 1);
     }
 
     #[test]

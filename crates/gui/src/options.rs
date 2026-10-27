@@ -506,6 +506,11 @@ options! {
     ignorecase("ic", "Ignore letter case when searching"): bool = true;
     /// ...unless, with `ignorecase`, what's searched for has a capital.
     smartcase("scs", "Match case when the search contains capitals"): bool = true;
+    /// Every match of the last search in view is lit up, in editors, in
+    /// terminals' normal mode and in chats, the one the cursor went to
+    /// brighter than the rest, until Esc or `:nohlsearch`, and again at
+    /// the next search, `n` or `N`. Off, only that one is.
+    hlsearch("hls", "Highlight every match of the last search"): bool = true;
     /// While `:s` is typed, show what it would do, in place, as Neovim
     /// does; and the matches of `:g`'s pattern. Nothing changes until
     /// Enter, and Esc puts the view back. `none` shows nothing.

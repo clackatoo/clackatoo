@@ -227,8 +227,11 @@ impl Terminal {
 }
 
 /// Every place `query` starts in `row`, as a column and the cells it
-/// covers.
-fn matches_in(row: &Row, query: &[char], exact: bool) -> Vec<(usize, usize)> {
+/// covers, as [`Terminal::search`] finds it, case ignored unless `exact`:
+/// so a window lighting the matches it draws lights what a search goes
+/// to.
+#[must_use]
+pub fn matches_in(row: &Row, query: &[char], exact: bool) -> Vec<(usize, usize)> {
     // Each character with the column of the cell it's in.
     let mut chars: Vec<(usize, char)> = Vec::new();
     let mut cell_text = String::new();

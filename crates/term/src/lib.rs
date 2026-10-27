@@ -41,7 +41,7 @@ pub use blocks::{Block, Progress, ShellState, Which};
 pub use cell::{Cell, CellFlags};
 pub use clipboard::{ClipboardRead, ClipboardRequest, MAX_CLIPBOARD_TEXT, Selection};
 pub use damage::Damage;
-pub use document::{MOST_LINES, MOST_TEXT, Match, Position};
+pub use document::{MOST_LINES, MOST_TEXT, Match, Position, matches_in};
 pub use grid::Grid;
 pub use links::{Hyperlink, LinkId};
 pub use paste::{bracketed_paste, paste, unbracketed};

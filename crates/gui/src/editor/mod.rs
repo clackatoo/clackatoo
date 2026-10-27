@@ -529,6 +529,22 @@ pub(crate) struct Editor {
     search: Option<Searched>,
     /// The last match found, highlighted until Esc.
     found: Option<(Point, Point)>,
+    /// Every match of the last search in view is lit, not only the one
+    /// found (`hlsearch`).
+    hlsearch: bool,
+    /// The last search's pattern, while its matches are lit: from a
+    /// search, `n` or `N` until Esc or `:nohlsearch`. And which search it
+    /// was, counting from the first, for what's found of it to be kept
+    /// against.
+    matching: Option<(Pattern, u64)>,
+    /// How many searches have lit their matches.
+    searches: u64,
+    /// The matches of the last search in view, as of the last settle,
+    /// each from its first character to its last, while they're lit.
+    matches_lit: Vec<(Point, Point)>,
+    /// What they were found in, so a settle drawing the same text the
+    /// same way doesn't look for them again.
+    matches_kept: crate::hlsearch::Memo<MatchesIn, (Point, Point)>,
     /// A short message for the bar, until the next key.
     status: Option<String>,
     /// The number of the language server query asked last, and what it
@@ -796,6 +812,11 @@ impl Editor {
             prompt: None,
             search: None,
             found: None,
+            hlsearch: options.hlsearch,
+            matching: None,
+            searches: 0,
+            matches_lit: Vec::new(),
+            matches_kept: crate::hlsearch::Memo::default(),
             status: None,
             asked: None,
             renaming: None,
@@ -977,6 +998,7 @@ impl Editor {
         self.inccommand = options.inccommand == crate::options::InCommand::NoSplit;
         self.tildeop = options.tildeop;
         self.startofline = options.startofline;
+        self.hlsearch = options.hlsearch;
         self.highlight_uses = options.highlightuses;
         if !self.highlight_uses {
             self.forget_uses();
@@ -1810,17 +1832,21 @@ impl Editor {
         }
     }
 
-    /// Stops lighting up the last match found, as `:nohlsearch` does.
+    /// Stops lighting up the last search's matches, as `:nohlsearch` does,
+    /// until the next search.
     pub(crate) fn forget_match(&mut self) {
         self.found = None;
+        self.matching = None;
+        self.matches_lit.clear();
+        self.matches_kept.forget();
     }
 
     /// Esc in normal or visual mode, with nothing typed before it but a
-    /// count or a register: leaves visual mode, and forgets the match.
+    /// count or a register: leaves visual mode, and forgets the matches.
     fn escape(&mut self) {
         self.mode = Mode::Normal;
         self.anchor = None;
-        self.found = None;
+        self.forget_match();
     }
 
     /// Notes `command` as the change being made, for `.`, if it's one: in
@@ -4418,6 +4444,9 @@ impl Editor {
                 return;
             }
         };
+        // Its matches are lit from now, found or not, as a chat's are.
+        self.searches += 1;
+        self.matching = Some((compiled.clone(), self.searches));
         let (whole, len) = self.haystack(copy);
         let hay = &whole[..len];
         let text = self.text(copy);
@@ -5988,6 +6017,12 @@ impl Editor {
             rows.push(builder.finish(false));
         }
         self.styling.code_lit = self.code_in_view(&text);
+        // Not over a preview's text, which lights what it matches itself.
+        self.matches_lit = if previewed.is_some() {
+            Vec::new()
+        } else {
+            self.matches_in_view(&text, copy)
+        };
         self.rows = rows;
         self.blocks.cells = shown_cells;
         if let Some(preview) = &mut self.preview {
@@ -6309,14 +6344,14 @@ impl Editor {
             let kind = Selection::Characters;
             self.highlight(start, last, kind, HighlightKind::Selection, &mut highlights);
         }
-        if let Some((start, last)) = self.found {
-            self.highlight(
-                start,
-                last,
-                Selection::Characters,
-                HighlightKind::Match,
-                &mut highlights,
-            );
+        // The last search's other matches in view, fainter than the one
+        // found.
+        let others = (self.matches_lit.iter()).filter(|&&lit| self.found != Some(lit));
+        let lit = (others.map(|&lit| (lit, HighlightKind::OtherMatch)))
+            .chain(self.found.map(|found| (found, HighlightKind::Match)));
+        for ((start, last), why) in lit {
+            let kind = Selection::Characters;
+            self.highlight(start, last, kind, why, &mut highlights);
         }
         for &(start, last) in self.preview.iter().flat_map(|preview| &preview.lit) {
             self.highlight(
@@ -6333,6 +6368,63 @@ impl Editor {
             self.highlight(start, last, kind, HighlightKind::Copied, &mut highlights);
         }
         highlights
+    }
+
+    /// Every match of the last search in view, while they're lit and
+    /// `hlsearch` is on, each from its first character to its last: looked
+    /// for in each line shown, from the first cell of it shown to the last,
+    /// with no more of the text around that than [`hlsearch::cut`] looks
+    /// at, so a long line or file costs no more than a short one; no more
+    /// than [`hlsearch::MOST_LIT`] on a line; and only when the text, the
+    /// rows shown or the search have changed since they were last looked
+    /// for.
+    ///
+    /// [`hlsearch::cut`]: crate::hlsearch::cut
+    /// [`hlsearch::MOST_LIT`]: crate::hlsearch::MOST_LIT
+    fn matches_in_view(&self, text: &Text<'_>, copy: &BufferCopy) -> Vec<(Point, Point)> {
+        use crate::hlsearch::{AROUND, MOST_LIT};
+
+        let Some((pattern, search)) = self.matching.as_ref().filter(|_| self.hlsearch) else {
+            return Vec::new();
+        };
+        let width = self.text_width();
+        let key = MatchesIn {
+            text: (copy.buffer(), copy.revision()),
+            search: *search,
+            tabstop: self.indent.tabstop,
+            width,
+            rows: (self.shown.iter())
+                .map(|shown| (shown.line, shown.start, shown.next))
+                .collect(),
+        };
+        self.matches_kept.get(key, || {
+            let rope = text.rope();
+            let char_start = |byte: usize| rope.char_to_byte(rope.byte_to_char(byte));
+            let mut lit = Vec::new();
+            for rows in self.shown.chunk_by(|a, b| a.line == b.line) {
+                let (first, last) = (&rows[0], &rows[rows.len() - 1]);
+                let line = first.line;
+                // To the last cell shown: past the row's end, the line's.
+                let end = last.next.unwrap_or(last.start.saturating_add(width));
+                let start = text.byte_at(Point {
+                    line,
+                    col: first.start,
+                });
+                let end = text.byte_at(Point { line, col: end });
+                let from = char_start(start.saturating_sub(AROUND));
+                let to = char_start(end.saturating_add(AROUND).min(rope.len_bytes()));
+                let hay = text.slice(from, to);
+                for found in pattern.matches_in(&hay, start - from..end - from, MOST_LIT) {
+                    let matched = &hay[found.clone()];
+                    let last = (matched.char_indices().next_back()).map_or(0, |(at, _)| at);
+                    lit.push((
+                        text.point_of(from + found.start),
+                        text.point_of(from + found.start + last),
+                    ));
+                }
+            }
+            lit
+        })
     }
 
     /// Highlights from `start` to `last`, as `why` says, on the rows shown.
@@ -6596,6 +6688,19 @@ struct Compiled {
     tilde: String,
     words: Words,
     pattern: Pattern,
+}
+
+/// What an editor's matches in view were found in (see
+/// [`Editor::matches_in_view`]): the text, as its buffer and revision,
+/// which search, how wide a tab and the text area are, and each row shown,
+/// as its line, its first cell and the next row's.
+#[derive(Debug, PartialEq, Eq)]
+struct MatchesIn {
+    text: (BufferId, u64),
+    search: u64,
+    tabstop: usize,
+    width: usize,
+    rows: Vec<(u64, usize, Option<usize>)>,
 }
 
 /// The last search: what was searched for, which way, and whether `*`

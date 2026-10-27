@@ -151,3 +151,25 @@ Make the last line capitals with `gUU`.
 ```check
 has "CATS AND DOGS"
 ```
+
+## Every match lit
+
+A search lights up every match in view, the one the cursor went to brighter than the rest, as Vim's `hlsearch` does: after `/`, `?`, `*`, `#`, `n` and `N`, in a terminal's normal mode and a chat too. Esc or `:noh` puts them out until the next search. `:set nohlsearch` lights only the one found.
+
+```practice pets.txt
+one cat, two cat, red cat
+a cat is not a dog
+cats and dogs
+```
+
+```setup
+cursor 1
+```
+
+Type `/cat` and press Enter: every `cat` lights up. Press `n` to go to the next, then type `cw`, `dog` and Esc.
+
+```expect
+one cat, two dog, red cat
+a cat is not a dog
+cats and dogs
+```

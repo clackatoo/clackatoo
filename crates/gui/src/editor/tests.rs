@@ -384,6 +384,58 @@ fn search_finds_and_wraps() {
 }
 
 #[test]
+fn every_match_in_view_is_lit_the_one_found_brighter_until_esc() {
+    // Ten rows shown: the match on line 30 is out of view.
+    let text = format!("cat a cat\nno\ncat\n{}cat\n", "x\n".repeat(27));
+    let mut setup = Setup::new(&text);
+    let lit = |setup: &mut Setup| {
+        (
+            setup.highlighted(HighlightKind::Match).len(),
+            setup.highlighted(HighlightKind::OtherMatch).len(),
+        )
+    };
+    assert_eq!(lit(&mut setup), (0, 0), "nothing searched");
+    setup.keys("/cat<CR>");
+    assert_eq!(setup.cursor(), (0, 6));
+    assert_eq!(lit(&mut setup), (1, 2));
+    // Kept while nothing changes: drawn again, it doesn't look again.
+    let scans = || crate::hlsearch::SCANS.with(std::cell::Cell::get);
+    let before = scans();
+    assert_eq!(lit(&mut setup), (1, 2));
+    assert_eq!(scans(), before);
+    // An edit looks again, and lights what it made.
+    setup.keys("jciwcat<Esc>");
+    assert_eq!(lit(&mut setup), (1, 3));
+    assert!(scans() > before);
+    // Esc stops lighting them, until `n` lights them again.
+    setup.keys("<Esc>");
+    assert_eq!(lit(&mut setup), (0, 0));
+    setup.keys("n");
+    assert_eq!(lit(&mut setup), (1, 3));
+    // `:nohlsearch` stops it too.
+    setup.editor.forget_match();
+    assert_eq!(lit(&mut setup), (0, 0));
+    // Without `hlsearch`, only the one found is.
+    setup.set(|options| options.hlsearch = false);
+    setup.keys("N");
+    assert_eq!(lit(&mut setup), (1, 0));
+    setup.set(|options| options.hlsearch = true);
+    assert_eq!(lit(&mut setup), (1, 3));
+}
+
+#[test]
+fn no_more_matches_than_so_many_are_lit_on_a_line() {
+    let mut setup = Setup::new(&format!("{}\n", "a".repeat(1000)));
+    setup.editor.resize(Size::new(1100, 5).unwrap());
+    setup.keys("/a<CR>");
+    assert_eq!(setup.highlighted(HighlightKind::Match).len(), 1);
+    assert_eq!(
+        setup.highlighted(HighlightKind::OtherMatch).len(),
+        crate::hlsearch::MOST_LIT - 1
+    );
+}
+
+#[test]
 fn a_search_that_goes_round_an_end_says_so() {
     let mut setup = Setup::new("a two\nb two\nc\n");
     setup.keys("/two<CR>");

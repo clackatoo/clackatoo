@@ -35,6 +35,7 @@ mod fonts;
 mod forwards;
 mod glyphs;
 mod history;
+mod hlsearch;
 pub mod hosts;
 mod ime;
 mod input;

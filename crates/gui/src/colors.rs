@@ -19,6 +19,11 @@ const LINK: u32 = 0x7c_b7_f5;
 /// How opaque the focused pane's edge is, in the accent.
 const FOCUS_EDGE: f32 = 0.6;
 
+/// How opaque the other matches of a search in view are, in the accent:
+/// fainter than the one found (0.6) and than a selection (0.35), so the
+/// cursor's stands out among them.
+const OTHER_MATCH: f32 = 0.25;
+
 /// White, `alpha` opaque, for faint lines that lighten what's behind them.
 const fn white(alpha: f32) -> Rgba {
     [1.0, 1.0, 1.0, alpha]
@@ -464,6 +469,7 @@ impl Theme {
             Paint::FocusEdge => faint(self.accent, FOCUS_EDGE),
             Paint::Selected => faint(self.accent, 0.35),
             Paint::Found => faint(self.accent, 0.6),
+            Paint::OtherMatch => faint(self.accent, OTHER_MATCH),
             Paint::Accent => self.accent,
             Paint::Picked => self.picked,
             Paint::PickedEdge => self.picked_edge,
@@ -506,6 +512,7 @@ impl Theme {
         match kind {
             HighlightKind::Selection => faint(self.accent, 0.35),
             HighlightKind::Match | HighlightKind::Copied => faint(self.accent, 0.6),
+            HighlightKind::OtherMatch => faint(self.accent, OTHER_MATCH),
             // Only just there: they say where things are, not what they are.
             HighlightKind::CursorLine => white(0.035),
             HighlightKind::Added => faint(self.added, 0.13),

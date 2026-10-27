@@ -250,8 +250,10 @@ pub(crate) enum Paint {
     Removed,
     /// Behind text selected, in a chat, as a terminal's selection is.
     Selected,
-    /// Behind what a search matches, in a chat, as an editor's match is.
+    /// Behind what a search found, in a chat, as an editor's match is...
     Found,
+    /// ...and fainter, behind its other matches in view (`hlsearch`).
+    OtherMatch,
     /// A gauge's filling while there's room to spare, quietly...
     Gauge,
     /// ...in amber once it's getting full...
@@ -398,8 +400,11 @@ pub(crate) const FLASH: std::time::Duration = std::time::Duration::from_millis(1
 pub(crate) enum HighlightKind {
     /// It's selected.
     Selection,
-    /// A search found it.
+    /// A search found it, the cursor going there.
     Match,
+    /// It's another match of the last search in view (`hlsearch`): lit
+    /// more faintly than the one found.
+    OtherMatch,
     /// It was just copied, for [`FLASH`].
     Copied,
     /// It's the cursor's line (`cursorline`).

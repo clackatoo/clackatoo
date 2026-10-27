@@ -273,7 +273,7 @@ impl Pane {
                 if matches!(self.mode, Mode::Visual(_)) {
                     self.leave_visual();
                 } else {
-                    self.found = None;
+                    self.forget_match();
                 }
                 true
             }
@@ -404,10 +404,14 @@ impl Pane {
             return false;
         };
         let backward = backward != reverse;
+        let exact = self.case.exact(&query);
+        // Its matches are lit from now, found or not, as a chat's are.
+        self.searches += 1;
+        self.matching = Some((query.chars().collect(), exact, self.searches));
         self.request(
             Request::Search {
                 terminal: self.terminal(),
-                exact: self.case.exact(&query),
+                exact,
                 query,
                 from: position(cursor.at),
                 backward,
@@ -494,9 +498,12 @@ impl Pane {
         true
     }
 
-    /// Stops lighting up the match found, as `:nohlsearch` does.
+    /// Stops lighting up the last search's matches, as `:nohlsearch` does,
+    /// until the next search.
     pub(crate) fn forget_match(&mut self) {
         self.found = None;
+        self.matching = None;
+        self.matches_kept.forget();
     }
 
     /// The mode the bar shows: visual while text selected with the mouse

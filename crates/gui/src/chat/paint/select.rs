@@ -608,9 +608,16 @@ impl ChatView {
         Some(self.note(fonts, m, label, Tone::Muted, f32::INFINITY))
     }
 
-    /// Draws what the last search matches, in view, while it's lit up.
+    /// Draws what the last search matches, in view, while it's lit up: the
+    /// match the cursor's on brighter than the rest.
     fn draw_lit(&self, canvas: &mut Canvas<'_>, pane: [f32; 2]) {
-        for (index, range) in self.lit_matches() {
+        for lit in self.lit_matches() {
+            let paint = if self.found_at(&lit) {
+                Paint::Found
+            } else {
+                Paint::OtherMatch
+            };
+            let (index, range) = lit;
             let shown = &self.shown[index];
             let Some(text) = self.text(shown.key) else {
                 continue;
@@ -621,7 +628,7 @@ impl ChatView {
             );
             let at = [pane[0] + shown.at[0], pane[1] + shown.at[1]];
             for (bounds, _) in range.geometry(text.layout) {
-                canvas.fill(Fill::solid(rect_at(bounds, at), Paint::Found));
+                canvas.fill(Fill::solid(rect_at(bounds, at), paint));
             }
         }
     }

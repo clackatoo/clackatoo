@@ -217,7 +217,7 @@ Up and Down go back through the commands you've typed, in this window and others
 | `:Editor PATH`, `:\|Editor PATH`…, `:e PATH`, `:e` | [Edits the file](~clackatoo/reference/editor), in a new tab or beside the focused pane; `:e` in place of the file an editor shows, and alone, an explorer beside an empty file. |
 | `:Files`, `:Grep PATTERN`, `:Buffers`, `:Diagnostics`, `:Symbols`, `:ProjectSymbols NAME` | Opens [the finder](#the-finder), with what follows typed. |
 | `:Registers`, `:reg` | Lists what an editor's [registers](~clackatoo/reference/editor#registers) hold, by its cursor. |
-| `:nohlsearch`, `:noh` | Stops lighting up what the last search matched in the focused pane: a chat's matches, or an editor's or a terminal's match found, until the next search. |
+| `:nohlsearch`, `:noh` | Stops lighting up what the last search matched in the focused pane, an editor's, a terminal's or a chat's, until the next search, `n` or `N`. Esc in normal mode does too. |
 | `:Messages`, `:mes` | Shows what the bottom bar has said lately, above it, until the next key. |
 | `:Marks` | Opens [the finder](#the-finder) on the [marks](~clackatoo/reference/editor#marks) the focused file can go to. |
 | `:1`, `:2`… | In an editor, goes to that line, as Vim does, as do `:$`, `:+3` and `:'a`. Elsewhere, moves to that tab of the workspace shown. |
@@ -462,7 +462,7 @@ A command that failed ends its prompt's line with a small red `✗` and its exit
 | `n` `N` | Searches again, the same way or the other way. |
 | Esc | Clears the highlight on the last match. |
 
-A search ignores case unless the text has a capital letter in it, as the [`ignorecase` and `smartcase` options](~clackatoo/reference/config#options) start; set them to change it. It covers all of history and wraps around at either end, saying `search wrapped to top` (or `to bottom`) when it does. The cursor moves to the match, which is highlighted. If there's none, the bottom bar says `not found`.
+A search ignores case unless the text has a capital letter in it, as the [`ignorecase` and `smartcase` options](~clackatoo/reference/config#options) start; set them to change it. It covers all of history and wraps around at either end, saying `search wrapped to top` (or `to bottom`) when it does. The cursor moves to the match, which is highlighted, and every other match on the screen or the history in view is lit more faintly, as Vim's `hlsearch` lights them, until Esc or `:noh`, and again at the next search, `n` or `N`. Only the lines in view are looked through for them, at most 512 on a line, and only in normal mode: in insert mode the program has the screen, and only the match found stays lit. The [`hlsearch` option](~clackatoo/reference/config#options) off lights only the match found. If there's none, the bottom bar says `not found`.
 
 Copying and searching both happen in the daemon, which holds all of history, so neither waits for the window to fetch the lines involved.
 

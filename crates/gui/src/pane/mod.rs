@@ -127,6 +127,21 @@ pub(crate) struct Pane {
     blockmarks: BlockMarks,
     /// The last match found, highlighted until Esc.
     found: Option<Match>,
+    /// Every match of the last search in view is lit in normal mode, not
+    /// only the one found (`hlsearch`).
+    hlsearch: bool,
+    /// The last search, while its matches are lit: from a search, `n` or
+    /// `N` until Esc or `:nohlsearch`. What it looks for, whether it
+    /// matches case, and which search it was, counting from the first.
+    matching: Option<(Vec<char>, bool, u64)>,
+    /// How many searches have lit their matches.
+    searches: u64,
+    /// How many times what the pane shows has changed, its screen or its
+    /// history, for what's lit to be kept against.
+    changes: u64,
+    /// The matches of the last search last found in view, and what they
+    /// were found in.
+    matches_kept: crate::hlsearch::Memo<MatchesIn, Match>,
     /// A short message for the label, until the next key.
     status: Option<String>,
     /// Text copied, and where the window is to put it.
@@ -179,6 +194,11 @@ impl Pane {
             unplaced: normal::Unplacements::default(),
             blockmarks: Options::default().blockmarks,
             found: None,
+            hlsearch: Options::default().hlsearch,
+            matching: None,
+            searches: 0,
+            changes: 0,
+            matches_kept: crate::hlsearch::Memo::default(),
             status: None,
             yanked: None,
             mouse_selection: None,
@@ -204,6 +224,7 @@ impl Pane {
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.case = Case::of(options);
         self.startofline = options.startofline;
+        self.hlsearch = options.hlsearch;
         self.blockmarks = options.blockmarks;
         self.predictor.set_choice(options.predictecho);
         self.refresh_overlay();
@@ -374,6 +395,7 @@ impl Pane {
             (None, ViewUpdate::Snapshot(view)) => self.screen = Screen::new(view),
             (None, ViewUpdate::Patch(_)) => return false,
         }
+        self.changes += 1;
         let end = self.history_end();
         if let Some(screen) = &self.screen {
             if snapshot || old_end.is_some_and(|old_end| end < old_end) {
@@ -437,6 +459,7 @@ impl Pane {
             (Some(Pending::History(asked, generation)), Response::History(lines)) => {
                 let shown = self.shown_history();
                 self.history.receive(&lines, &asked, generation, &shown);
+                self.changes += 1;
                 if generation == self.history.generation() {
                     self.learn_links(&lines.links);
                     if let Some(screen) = &mut self.screen {
@@ -462,6 +485,45 @@ impl Pane {
             }
             _ => false,
         }
+    }
+
+    /// Every match of the last search on the `height` lines in view from
+    /// line `top`, in normal or visual mode, while they're lit and
+    /// `hlsearch` is on: found as the daemon's search finds them, so what's
+    /// lit is what `n` goes to, no more than [`MOST_LIT`] on a line, and
+    /// only when what's shown, the view or the search have changed since
+    /// they were last looked for. Lines not fetched yet have none.
+    ///
+    /// [`MOST_LIT`]: crate::hlsearch::MOST_LIT
+    fn matches_in_view(&self, top: u64, height: usize) -> Vec<Match> {
+        let Some((query, exact, search)) =
+            (self.matching.as_ref()).filter(|_| self.hlsearch && self.mode != Mode::Insert)
+        else {
+            return Vec::new();
+        };
+        let key = MatchesIn {
+            search: *search,
+            changes: self.changes,
+            top,
+            height,
+        };
+        self.matches_kept.get(key, || {
+            let document = Document(self);
+            let mut lit = Vec::new();
+            for line in top..top + height as u64 {
+                let Some(row) = document.line(line) else {
+                    continue;
+                };
+                let found = clackatoo_term::matches_in(row, query, *exact);
+                lit.extend((found.into_iter().take(crate::hlsearch::MOST_LIT)).map(
+                    |(col, cells)| Match {
+                        start: clackatoo_term::Position { line, col },
+                        cells,
+                    },
+                ));
+            }
+            lit
+        })
     }
 
     /// Takes text copied, for the window to keep in the registers or put
@@ -705,6 +767,17 @@ impl Pane {
         }
         let top = self.view_top();
         let bottom = top + height as u64;
+        // The last search's other matches in view, fainter than the one
+        // found.
+        for lit in self.matches_in_view(top, height) {
+            if self.found != Some(lit) {
+                highlights.push(Highlight {
+                    line: usize::try_from(lit.start.line - top).expect("within the height"),
+                    cols: lit.start.col..lit.start.col + lit.cells,
+                    kind: HighlightKind::OtherMatch,
+                });
+            }
+        }
         if let Some(found) = self.found
             && (top..bottom).contains(&found.start.line)
         {
@@ -1077,6 +1150,17 @@ impl vim::KeyState for Pane {
     fn forget_count(&mut self) {
         Pane::forget_count(self);
     }
+}
+
+/// What a terminal's matches in view were found in (see
+/// [`Pane::matches_in_view`]): which search, after how many changes to
+/// what the pane shows, and the view's top line and height.
+#[derive(Debug, PartialEq, Eq)]
+struct MatchesIn {
+    search: u64,
+    changes: u64,
+    top: u64,
+    height: usize,
 }
 
 /// History and screen as one document, for the normal-mode cursor: history
@@ -1701,9 +1785,10 @@ mod tests {
         named(&mut pane, NamedKey::Enter);
         serve(&mut pane, &terminal);
         assert_eq!(cursor(&pane), ("bird cat".into(), 1, 5));
-        let found = pane.highlights(5);
-        assert_eq!(found[0].kind, HighlightKind::Match);
-        assert_eq!(found[0].cols, 5..8);
+        let found: Vec<_> = (pane.highlights(5).into_iter())
+            .filter(|highlight| highlight.kind == HighlightKind::Match)
+            .collect();
+        assert_eq!((found[0].line, found[0].cols.clone()), (1, 5..8));
         // Again, round past the end to the first.
         keys(&mut pane, "n");
         serve(&mut pane, &terminal);
@@ -3001,6 +3086,62 @@ mod tests {
         named(&mut pane, NamedKey::Escape);
         assert_eq!(pane.mode, Mode::Normal);
         assert_eq!(lit(&pane, HighlightKind::Selection), 0);
+    }
+
+    #[test]
+    fn every_match_in_view_is_lit_the_one_found_brighter_until_esc() {
+        let terminal = terminal("cat dog\r\nbird cat\r\nCAT cat\r\nfish");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let lit = |pane: &Pane, kind| {
+            (pane.highlights(5).iter())
+                .filter(|highlight| highlight.kind == kind)
+                .count()
+        };
+        let search = |pane: &mut Pane, keys_: &str| {
+            keys(pane, keys_);
+            named(pane, NamedKey::Enter);
+            serve(pane, &terminal);
+        };
+        assert_eq!(lit(&pane, HighlightKind::OtherMatch), 0, "nothing searched");
+        search(&mut pane, "gg/cat");
+        // Case ignored, as the search ignores it: four, one of them found.
+        assert_eq!(lit(&pane, HighlightKind::Match), 1);
+        assert_eq!(lit(&pane, HighlightKind::OtherMatch), 3);
+        // Kept while nothing changes: drawn again, it doesn't look again.
+        let scans = || crate::hlsearch::SCANS.with(std::cell::Cell::get);
+        let before = scans();
+        assert_eq!(lit(&pane, HighlightKind::OtherMatch), 3);
+        assert_eq!(scans(), before);
+        // A capital matches case, as the search does.
+        search(&mut pane, "/CAT");
+        assert_eq!(lit(&pane, HighlightKind::Match), 1);
+        assert_eq!(lit(&pane, HighlightKind::OtherMatch), 0);
+        // Esc stops lighting them, until `n` lights them again.
+        search(&mut pane, "/cat");
+        named(&mut pane, NamedKey::Escape);
+        assert_eq!(lit(&pane, HighlightKind::OtherMatch), 0);
+        keys(&mut pane, "n");
+        serve(&mut pane, &terminal);
+        assert_eq!(lit(&pane, HighlightKind::OtherMatch), 3);
+        // `:nohlsearch` stops it too.
+        pane.forget_match();
+        assert_eq!(lit(&pane, HighlightKind::OtherMatch), 0);
+        assert_eq!(lit(&pane, HighlightKind::Match), 0);
+        // Without `hlsearch`, only the one found is.
+        pane.set_options(&Options {
+            hlsearch: false,
+            ..Options::default()
+        });
+        keys(&mut pane, "n");
+        serve(&mut pane, &terminal);
+        assert_eq!(lit(&pane, HighlightKind::Match), 1);
+        assert_eq!(lit(&pane, HighlightKind::OtherMatch), 0);
+        // Nor in insert mode, where the program has the screen.
+        pane.set_options(&Options::default());
+        assert_eq!(lit(&pane, HighlightKind::OtherMatch), 3);
+        pane.mode = Mode::Insert;
+        assert_eq!(lit(&pane, HighlightKind::OtherMatch), 0);
     }
 
     #[test]
