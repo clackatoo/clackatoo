@@ -24,7 +24,10 @@ pub(super) const CHAT_WAITED: &str =
     "the keys typed waited too long for the chat: they and what they waited for were dropped";
 
 /// The most rounds of settling chats and typing the keys that waited for
-/// them [`Desk::settle_chats`] goes, a bound it never reaches.
+/// them [`Desk::settle_chats`] goes at once, so one call stays short: a
+/// binding typing more yanks and searches than that reaches it, and what's
+/// left of it waits, held, for the next, which the window makes before it
+/// draws, and goes on.
 const MOST_ROUNDS: usize = 4096;
 
 #[cfg(test)]

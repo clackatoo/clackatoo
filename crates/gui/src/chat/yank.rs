@@ -684,11 +684,19 @@ mod tests {
     }
 
     #[test]
-    fn ic_needs_a_block_of_code_and_the_bar_says_so() {
+    fn ix_needs_a_block_of_code_and_the_bar_says_so() {
         let (mut chat, mut fonts) = reading(talk(&[("one", "no code here")]));
         read(&mut chat, "yix");
         assert!(yanked(&mut chat, &mut fonts).is_empty());
         assert_eq!(chat.label().as_deref(), Some("no block of code here"));
+        assert!(chat.take_failed());
+        // `yic` is a class, which a chat hasn't got: refused, it fails
+        // too, as Vim's refusal beeps, so a macro stops.
+        read(&mut chat, "yic");
+        assert!(yanked(&mut chat, &mut fonts).is_empty());
+        assert!(chat.take_failed());
+        read(&mut chat, "yy");
+        assert!(!chat.take_failed());
     }
 
     #[test]

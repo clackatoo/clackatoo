@@ -471,7 +471,12 @@ impl ChatView {
             }
             match parsed {
                 Parsed::Incomplete => redraw = true,
-                Parsed::Nothing => redraw |= was_pending,
+                // Keys a chat doesn't take, as `yic` (a chat has no
+                // classes) or `dw`: Vim beeps, which stops a macro.
+                Parsed::Nothing => {
+                    redraw |= was_pending;
+                    self.failed = true;
+                }
                 Parsed::Command(command) => {
                     let (drawn, insert) = self.execute(command);
                     if insert {
