@@ -5064,9 +5064,7 @@ impl Editor {
         self.corrections.clear();
         self.held = None;
         self.blocks.spread = None;
-        // Where a search being typed started may not be there now: it's
-        // shown no more, and stays where it was shown.
-        self.search_start = None;
+        self.search_start_replaced(copy);
         // What `:s///c` was asking about is gone.
         if matches!(self.prompt, Some(Prompt::Confirm(_))) {
             self.prompt = None;

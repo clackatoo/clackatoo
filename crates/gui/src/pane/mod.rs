@@ -432,7 +432,7 @@ impl Pane {
             Some(old_end) if snapshot => {
                 self.history.clear();
                 self.forget_unplaced();
-                self.forget_search_start();
+                self.search_start_renumbered();
                 if follow {
                     self.scroll = (self.scroll + end).saturating_sub(old_end);
                 }
@@ -441,7 +441,7 @@ impl Pane {
             Some(old_end) if end < old_end => {
                 self.history.clear();
                 self.forget_unplaced();
-                self.forget_search_start();
+                self.search_start_renumbered();
                 self.scroll = 0;
             }
             // New lines scrolled into history.
@@ -968,8 +968,8 @@ impl Pane {
     /// Back to insert mode, at the live screen.
     fn insert(&mut self) -> bool {
         self.leave_visual();
+        self.end_search_preview(false);
         self.mode = Mode::Insert;
-        self.search_start = None;
         self.cursor = None;
         self.prompt = None;
         self.keys.clear();
@@ -3291,11 +3291,21 @@ mod tests {
                 .count()
         };
         assert_eq!(lit(&pane, HighlightKind::Match), 1);
-        // Backspace shows it afresh, from where it started.
+        // Backspace shows it afresh, from where it started; the last shown
+        // stays till the answer comes, rather than flickering back.
         named(&mut pane, NamedKey::Backspace);
         pane.preview_search();
+        assert_eq!(cursor(&pane).0, "line 5");
         serve(&mut pane, &terminal);
         assert_eq!(cursor(&pane).0, "line 12", "the nearest back");
+        // Nothing found goes back where it started.
+        keys(&mut pane, "zzz");
+        pane.preview_search();
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), before);
+        for _ in 0..3 {
+            named(&mut pane, NamedKey::Backspace);
+        }
         // Esc puts the cursor and the view back, and nothing's lit.
         named(&mut pane, NamedKey::Escape);
         assert_eq!(cursor(&pane), before);
@@ -3321,6 +3331,39 @@ mod tests {
         keys(&mut pane, "/cat");
         pane.preview_search();
         assert!(searches_in(&pane.take_outbox()).is_empty());
+    }
+
+    #[test]
+    fn a_search_being_typed_goes_on_from_where_it_started_after_a_snapshot() {
+        let terminal = terminal(&format!("{}cat\r\ndog", numbered_lines("line ")));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        serve(&mut pane, &terminal);
+        let before = cursor(&pane);
+        let preview = |pane: &mut Pane| {
+            pane.preview_search();
+            serve(pane, &terminal);
+        };
+        // A fresh snapshot, as a resize sends, numbers history afresh.
+        let snapshot = |pane: &mut Pane| {
+            pane.view_changed(&ViewUpdate::Snapshot(View::capture(&terminal)));
+            serve(pane, &terminal);
+        };
+        keys(&mut pane, "?line 3");
+        preview(&mut pane);
+        assert_eq!(cursor(&pane).0, "line 3");
+        snapshot(&mut pane);
+        named(&mut pane, NamedKey::Escape);
+        assert_eq!(cursor(&pane), before, "Esc still goes back");
+        keys(&mut pane, "?line 3");
+        preview(&mut pane);
+        snapshot(&mut pane);
+        // Asked again, and Enter still searches from where it started.
+        preview(&mut pane);
+        assert_eq!(cursor(&pane).0, "line 3");
+        named(&mut pane, NamedKey::Enter);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane).0, "line 3");
     }
 
     #[test]

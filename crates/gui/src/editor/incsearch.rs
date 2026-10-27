@@ -8,8 +8,10 @@
 //! so keys typed faster than frames cost one search between them, and a
 //! macro's `/foo<CR>`, typed within one, none. Each looks no further than
 //! [`REACH`] bytes from the cursor, each way round the file's ends: one
-//! that would have to look further shows nothing, rather than a match
-//! Enter wouldn't go to.
+//! that would have to look further, or can't be sure it finds what Enter
+//! would (see [`near`]), shows nothing, rather than a match Enter wouldn't
+//! go to. Edits from elsewhere while it's typed move where it started, but
+//! aren't shown afresh till the next key.
 
 use super::pattern::{Found, Pattern};
 use super::wrap::Top;
@@ -31,8 +33,8 @@ const MOST_TRIES: usize = 1 << 14;
 #[derive(Debug)]
 pub(super) struct Start {
     cursor: Cursor,
-    top: Top,
-    left: usize,
+    /// The view's top and left, unless the text has been replaced since.
+    view: Option<(Top, usize)>,
     matching: Option<Lighting>,
     found: Option<(Point, Point)>,
     /// What was typed when it was last shown, if it has been.
@@ -48,8 +50,7 @@ impl Editor {
     pub(super) fn start_search_preview(&mut self) {
         self.search_start = self.incsearch.then(|| Start {
             cursor: self.cursor,
-            top: self.top,
-            left: self.left,
+            view: Some((self.top, self.left)),
             matching: self.matching.clone(),
             found: self.found,
             previewed: None,
@@ -92,6 +93,11 @@ impl Editor {
         self.light_matches(&typed, matching, shared);
         let (whole, len) = self.haystack(copy);
         pattern.searching(&whole);
+        // What's lit is matched with this, compiled once, its words read
+        // once.
+        if let Some(lighting) = &self.matching {
+            *lighting.compiled.borrow_mut() = Some((copy.words(), Some(pattern.clone())));
+        }
         let text = self.text(copy);
         let from = text.byte_at(self.cursor.at);
         let Some(found) = near(&whole[..len], &pattern, from, backward) else {
@@ -122,8 +128,8 @@ impl Editor {
             return;
         };
         self.cursor = start.cursor;
-        if !keep_view {
-            (self.top, self.left) = (start.top, start.left);
+        if let Some(view) = start.view.filter(|_| !keep_view) {
+            (self.top, self.left) = view;
         }
         self.matching = start.matching.clone();
         self.found = start.found;
@@ -144,8 +150,20 @@ impl Editor {
         if let Some(start) = &mut self.search_start {
             start.held = (start.held).map(|at| edit.map(at, clackatoo_text::Bias::Before));
             start.found = None;
-            // Shown afresh in the text as it is now.
-            start.previewed = None;
+        }
+    }
+
+    /// The text is new, as when the file is read again: where the search
+    /// being typed started is kept, as far as the text goes now, but not
+    /// the view then, nor the match lit, which may be elsewhere now; and
+    /// it's shown afresh.
+    pub(super) fn search_start_replaced(&mut self, copy: &BufferCopy) {
+        let text = self.text(copy);
+        if let Some(start) = &mut self.search_start {
+            let line = start.cursor.at.line.min(text.last_line());
+            let col = start.cursor.at.col.min(text.line_cells(line));
+            start.cursor = Cursor::new(text.point_of(text.byte_at(Point { line, col })));
+            (start.view, start.found, start.previewed, start.held) = (None, None, None, None);
         }
     }
 
@@ -162,7 +180,14 @@ impl Editor {
 
 /// Where `pattern` next matches in `text` after byte `from`, or before it
 /// if `backward`, going round the ends, as [`super::find`] finds it; or
-/// `None` if it isn't within [`REACH`] of `from` each way round.
+/// `None` if that can't be known within [`REACH`] of `from` each way round.
+///
+/// It looks in the text cut short at a line's end, so `$` is right there,
+/// and a match that can't cross a line break, starting before the cut,
+/// can't need what's past it. One that can (a pattern with `\n` in it), or
+/// a cut a very long line forced away from its end, could match across the
+/// cut where the search Enter makes would, so then only the text to its
+/// end is looked through, or nothing is shown.
 fn near(text: &str, pattern: &Pattern, from: usize, backward: bool) -> Option<Found> {
     if backward {
         return match last_before(text, pattern, from) {
@@ -181,7 +206,7 @@ fn near(text: &str, pattern: &Pattern, from: usize, backward: bool) -> Option<Fo
             .next()
             .map_or(1, char::len_utf8);
     if after <= text.len() {
-        let end = line_end(text, (after + REACH).min(text.len()), REACH);
+        let end = cut(text, pattern, (after + REACH).min(text.len()))?;
         if let Some(found) = pattern.find_at(&text[..end], after) {
             return Some(found);
         }
@@ -191,7 +216,7 @@ fn near(text: &str, pattern: &Pattern, from: usize, backward: bool) -> Option<Fo
         }
     }
     // Round the start, as far as the cursor.
-    let end = line_end(text, REACH.min(from).min(text.len()), REACH);
+    let end = cut(text, pattern, REACH.min(from).min(text.len()))?;
     let found = pattern.find_at(&text[..end], 0);
     if found.is_none() && end < from.min(text.len()) {
         return None;
@@ -199,81 +224,128 @@ fn near(text: &str, pattern: &Pattern, from: usize, backward: bool) -> Option<Fo
     found
 }
 
+/// Where the text is cut, to look through it for `pattern` as far as byte
+/// `at`: the end of `at`'s line; or `None` if a match there could cross the
+/// cut (see [`near`]).
+fn cut(text: &str, pattern: &Pattern, at: usize) -> Option<usize> {
+    let (end, line) = line_end(text, at, REACH);
+    (end == text.len() || (line && !pattern.multiline())).then_some(end)
+}
+
 /// What looking back for a match found.
 enum Back {
     Found(Found),
     /// There's none.
     None,
-    /// It would have to look further back than [`REACH`], or through more
-    /// than [`MOST_TRIES`] matches, to know.
+    /// It can't be known without looking further back than [`REACH`], or
+    /// through more than [`MOST_TRIES`] matches.
     TooFar,
 }
 
 /// The last match of `pattern` in `text` that starts before byte `before`,
-/// looked for in chunks back from it, from a line's start, each in the
-/// text to the end of the line its end is on, so a match going on past it
-/// is whole.
+/// as the search Enter makes finds it, one after another from the text's
+/// start. Looked for in chunks back from it, each from a line's start, which
+/// for a match that can't cross a line break is where the search from the
+/// start would be looking too, in the text cut at the end of the line its
+/// end is on, so a match going on past it is whole. A pattern that can cross
+/// them is looked for from the text's start, in a text no longer than
+/// [`REACH`].
 fn last_before(text: &str, pattern: &Pattern, before: usize) -> Back {
-    let (mut high, mut tries) = (before, 0);
-    loop {
-        let low = line_start(text, high.saturating_sub(CHUNK).min(text.len()), CHUNK);
-        let hay = &text[..line_end(text, high.min(text.len()), REACH)];
-        let (mut at, mut last) = (low, None);
-        while at <= hay.len()
-            && let Some(found) = pattern.find_at(hay, at)
-            && found.start < high
-        {
-            tries += 1;
-            if tries > MOST_TRIES {
-                return Back::TooFar;
-            }
-            last = Some(found);
-            at = if found.end > found.start {
-                found.end
-            } else {
-                found.end + hay[found.end..].chars().next().map_or(1, char::len_utf8)
-            };
-        }
-        if pattern.gave_up() {
+    if pattern.multiline() {
+        if text.len() > REACH {
             return Back::TooFar;
         }
-        match last {
-            Some(found) => return Back::Found(found),
-            None if low == 0 => return Back::None,
-            None if before.saturating_sub(low) >= REACH => return Back::TooFar,
-            None => high = low,
+        return matches_before(text, pattern, 0, before, &mut 0).unwrap_or(Back::TooFar);
+    }
+    let (mut high, mut tries) = (before, 0);
+    loop {
+        let (low, at_line) = line_start(text, high.saturating_sub(CHUNK).min(text.len()), CHUNK);
+        let Some(end) = cut(text, pattern, high.min(text.len())) else {
+            return Back::TooFar;
+        };
+        if !at_line {
+            return Back::TooFar;
+        }
+        match matches_before(&text[..end], pattern, low, high, &mut tries) {
+            Some(Back::None) if low == 0 => return Back::None,
+            Some(Back::None) if before.saturating_sub(low) >= REACH => return Back::TooFar,
+            Some(Back::None) => high = low,
+            Some(back) => return back,
+            None => return Back::TooFar,
         }
     }
 }
 
-/// The end of the line byte `at` is on, or `most` bytes past it at a
-/// character's start, if the line goes on further.
-fn line_end(text: &str, at: usize, most: usize) -> usize {
+/// The last match of `pattern` in `hay` starting from byte `low` and
+/// before `high`, one after another; `None` if it took more than
+/// [`MOST_TRIES`] in all, counted in `tries`, or the pattern gave up.
+fn matches_before(
+    hay: &str,
+    pattern: &Pattern,
+    low: usize,
+    high: usize,
+    tries: &mut usize,
+) -> Option<Back> {
+    let (mut at, mut last) = (low, None);
+    while at <= hay.len()
+        && let Some(found) = pattern.find_at(hay, at)
+        && found.start < high
+    {
+        *tries += 1;
+        if *tries > MOST_TRIES {
+            return None;
+        }
+        last = Some(found);
+        at = if found.end > found.start {
+            found.end
+        } else {
+            found.end + hay[found.end..].chars().next().map_or(1, char::len_utf8)
+        };
+    }
+    if pattern.gave_up() {
+        return None;
+    }
+    Some(last.map_or(Back::None, Back::Found))
+}
+
+/// The end of the line byte `at` is on, and `true`; or if the line goes on
+/// further than `most` bytes past it, a character's start there, and
+/// `false`.
+fn line_end(text: &str, at: usize, most: usize) -> (usize, bool) {
     let near = (at + most).min(text.len());
     match text.as_bytes()[at..near]
         .iter()
         .position(|&byte| byte == b'\n')
     {
-        Some(offset) => at + offset,
-        None => (near..=text.len())
-            .find(|&at| text.is_char_boundary(at))
-            .unwrap_or(text.len()),
+        Some(offset) => (at + offset, true),
+        None if near == text.len() => (near, true),
+        None => (
+            (near..=text.len())
+                .find(|&at| text.is_char_boundary(at))
+                .unwrap_or(text.len()),
+            false,
+        ),
     }
 }
 
-/// The start of the line byte `at` is on, or `most` bytes before it at a
-/// character's start, if the line goes back further.
-fn line_start(text: &str, at: usize, most: usize) -> usize {
+/// The start of the line byte `at` is on, and `true`; or if the line goes
+/// back further than `most` bytes before it, a character's start there, and
+/// `false`.
+fn line_start(text: &str, at: usize, most: usize) -> (usize, bool) {
     let near = at.saturating_sub(most);
     match text.as_bytes()[near..at]
         .iter()
         .rposition(|&byte| byte == b'\n')
     {
-        Some(offset) => near + offset + 1,
-        None => (0..=near)
-            .rev()
-            .find(|&at| text.is_char_boundary(at))
-            .unwrap_or(0),
+        Some(offset) => (near + offset + 1, true),
+        None if near == 0 => (0, true),
+        None => (
+            (0..=near)
+                .rev()
+                .find(|&at| text.is_char_boundary(at))
+                .unwrap_or(0),
+            false,
+        ),
     }
 }
 
@@ -343,8 +415,35 @@ mod tests {
     }
 
     #[test]
+    fn where_it_cant_be_sure_it_shows_nothing_rather_than_another() {
+        let long = "a".repeat(3 * CHUNK + 1);
+        let past_reach = "x".repeat(REACH + 10);
+        let lines = "a\nb\n".repeat(REACH / 2);
+        for (text, source, from, backward) in [
+            // Matches one after another along a line longer than a chunk:
+            // from part way along, they'd fall differently.
+            (long.as_str(), "aa", long.len() - 1, true),
+            // `$` where a very long line was cut short.
+            (past_reach.as_str(), "x$", 0, false),
+            (past_reach.as_str(), "x$", past_reach.len() - 1, true),
+            // A pattern that crosses line breaks, past where it looks.
+            (lines.as_str(), "b\\na", 0, false),
+            (lines.as_str(), "b\\na", lines.len() - 1, true),
+        ] {
+            let (preview, search) = both(text, source, from, backward);
+            assert!(
+                preview.is_none() || preview == search,
+                "{source} from {from}: {preview:?}, not {search:?}"
+            );
+        }
+        // Near enough, one that crosses line breaks is found.
+        assert_eq!(both("a\nb\na", "b\\na", 0, false), (Some(2), Some(2)));
+        assert_eq!(both("a\nb\na\nb", "b\\na", 6, true), (Some(2), Some(2)));
+    }
+
+    #[test]
     fn going_back_through_every_character_stops_short() {
-        let text = "x".repeat(4 * MOST_TRIES);
+        let text = "xxxxxxx\n".repeat(MOST_TRIES);
         let pattern = pattern(".");
         // The one just before is found at once, not after all the others.
         assert_eq!(

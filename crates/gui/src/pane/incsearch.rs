@@ -5,23 +5,27 @@
 //! searches from where it started, keeping the view.
 //!
 //! The daemon searches, as it holds all of history, so what's typed is
-//! asked of it as the window settles before it draws, not at each key, and
-//! only once the answer to the last is in: never more than one in flight,
-//! however fast keys come, and an answer to what's no longer typed is
-//! dropped, the latest asked instead. Nothing waits for these answers, as
-//! keys wait for a search's (see [`Pane::waits_for_answer`]).
+//! asked of it once the window has handled what came in, just before it
+//! sends what it has (see [`crate::desk::Desk::preview_searches`]), not at
+//! each key, and only once the answer to the last is in: never more than
+//! one in flight, however fast keys come, and an answer to what's no longer
+//! typed is dropped, the latest asked instead. Meanwhile what's typed is lit
+//! and the last match shown stays shown, so the view doesn't flicker back
+//! at each key. Nothing waits for these answers, as keys wait for a
+//! search's (see [`Pane::waits_for_answer`]).
 
 use clackatoo_protocol::{Match, Request};
 
-use super::{Pane, Pending, normal};
-use crate::motion::Cursor;
+use super::{Document, Pane, Pending, normal};
+use crate::motion::{Cursor, Lines, Point};
 
 /// Where a search being typed started, to put back on Esc, and what was
 /// last asked of it.
 #[derive(Debug)]
 pub(super) struct Start {
     cursor: Option<Cursor>,
-    scroll: u64,
+    /// The view's place, unless history has been numbered afresh since.
+    scroll: Option<u64>,
     found: Option<Match>,
     matching: Option<(Vec<char>, bool)>,
     /// What was typed when the daemon was last asked where it goes.
@@ -34,7 +38,7 @@ impl Pane {
     pub(super) fn start_search_preview(&mut self) {
         self.search_start = self.incsearch.then(|| Start {
             cursor: self.cursor,
-            scroll: self.scroll,
+            scroll: Some(self.scroll),
             found: self.found,
             matching: self.matching.clone(),
             asked: None,
@@ -43,9 +47,10 @@ impl Pane {
 
     /// Asks the daemon where the search being typed would go from where it
     /// started, if what's typed has changed since it was last asked and
-    /// it's not still answering, and lights its matches meanwhile. A search
-    /// no longer being typed, by a way that didn't put things back, is put
-    /// back now. Returns whether the pane must be redrawn.
+    /// it's not still answering, and lights its matches meanwhile; nothing
+    /// typed puts it all back. A search no longer being typed, by a way that
+    /// didn't put things back, is put back now. Returns whether the pane
+    /// must be redrawn.
     pub(crate) fn preview_search(&mut self) -> bool {
         let Some(start) = &self.search_start else {
             return false;
@@ -59,7 +64,9 @@ impl Pane {
             return false;
         }
         let (typed, backward) = (typed.to_owned(), prompt.backward);
-        self.put_back_search_start(false);
+        if typed.is_empty() {
+            self.put_back_search_start(false);
+        }
         let Some(start) = &mut self.search_start else {
             return true;
         };
@@ -68,7 +75,6 @@ impl Pane {
             return true;
         };
         let exact = self.case.exact(&typed);
-        self.found = None;
         self.matching = Some((typed.chars().collect(), exact));
         self.request(
             Request::Search {
@@ -90,34 +96,50 @@ impl Pane {
     }
 
     /// Takes in where the daemon found `query`, asked of a search being
-    /// typed: shown, if it's still what's typed, and else dropped.
+    /// typed, if it's still what's typed, and else drops it: the cursor
+    /// goes there, or with none, back where the search started, its
+    /// matches still lit.
     pub(super) fn previewed(&mut self, query: &str, found: Option<Match>) {
         let typed = self.prompt.as_ref().map(|prompt| prompt.line.text());
         let asked = (self.search_start.as_ref()).and_then(|start| start.asked.as_deref());
         if typed != Some(query) || asked != Some(query) {
             return;
         }
-        if let Some(found) = found {
-            self.found = Some(found);
-            self.cursor = Some(Cursor::new(crate::motion::Point {
-                line: found.start.line,
-                col: found.start.col,
-            }));
-            self.follow_cursor();
-        }
+        let Some(found) = found else {
+            let matching = self.matching.take();
+            self.put_back_search_start(false);
+            (self.matching, self.found) = (matching, None);
+            return;
+        };
+        self.found = Some(found);
+        self.cursor = Some(Cursor::new(Point {
+            line: found.start.line,
+            col: found.start.col,
+        }));
+        self.follow_cursor();
     }
 
-    /// Forgets where the search being typed started, as history is
-    /// numbered afresh: it's shown no more, and stays where it was shown.
-    pub(super) fn forget_search_start(&mut self) {
-        self.search_start = None;
+    /// History is numbered afresh: where the search being typed started
+    /// is kept, as far as the lines go now, but not the view then, nor the
+    /// match found, which may be elsewhere now; and it's asked again.
+    pub(super) fn search_start_renumbered(&mut self) {
+        let (first, last) = Document(self).bounds();
+        if let Some(start) = &mut self.search_start {
+            if let Some(cursor) = &mut start.cursor {
+                let line = cursor.at.line.clamp(first, last);
+                if line != cursor.at.line {
+                    *cursor = Cursor::new(Point { line, col: 0 });
+                }
+            }
+            (start.scroll, start.found, start.asked) = (None, None, None);
+        }
     }
 
     /// Keeps the view the search being typed started with on the same
     /// lines, as `lines` more have scrolled into history.
     pub(super) fn search_start_scrolled(&mut self, lines: u64) {
-        if let Some(start) = &mut self.search_start {
-            start.scroll += lines;
+        if let Some(scroll) = (self.search_start.as_mut()).and_then(|start| start.scroll.as_mut()) {
+            *scroll += lines;
         }
     }
 
@@ -130,7 +152,8 @@ impl Pane {
     }
 
     /// Puts the cursor back where the search being typed started, and
-    /// what was lit, and the view unless `keep_view`.
+    /// what was lit, and the view unless `keep_view`; or if history has been
+    /// numbered afresh since, the view follows the cursor.
     fn put_back_search_start(&mut self, keep_view: bool) {
         let Some(start) = &self.search_start else {
             return;
@@ -138,9 +161,14 @@ impl Pane {
         self.cursor = start.cursor;
         self.found = start.found;
         self.matching = start.matching.clone();
-        if !keep_view {
-            self.scroll = start.scroll.min(self.max_scroll());
-            self.fetch_history();
+        match start.scroll {
+            _ if keep_view => {}
+            Some(scroll) => {
+                self.scroll = scroll.min(self.max_scroll());
+                self.fetch_history();
+            }
+            // The view then is gone: it goes to the cursor.
+            None => self.follow_cursor(),
         }
     }
 }

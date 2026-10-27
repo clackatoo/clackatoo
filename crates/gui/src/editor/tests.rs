@@ -498,6 +498,30 @@ fn a_search_being_typed_shows_where_it_goes_till_esc_puts_it_back() {
 }
 
 #[test]
+fn a_search_being_typed_goes_on_from_where_it_started_after_the_text_is_replaced() {
+    let mut setup = Setup::new("one\ntwo dog\nthree\n");
+    setup.keys("j/dog");
+    setup.preview_search();
+    assert_eq!(setup.cursor(), (1, 4));
+    // Read again, as when the file changes on disk: shown afresh in the new
+    // text, from where it started.
+    let replaced = Daemon::new("one\ntwo\nthree dog\n").snapshot();
+    setup.editor.hold(&setup.copy);
+    let mut heard = setup.copy.update(replaced);
+    assert_eq!(heard, super::Heard::Replaced);
+    setup.editor.heard(&mut heard, false, &mut setup.copy);
+    setup.preview_search();
+    assert_eq!(setup.cursor(), (2, 6));
+    // Esc goes back there; Enter, typed again, searches from there.
+    setup.keys("<Esc>");
+    assert_eq!(setup.cursor(), (1, 0));
+    setup.keys("/dog");
+    setup.preview_search();
+    setup.keys("<CR>");
+    assert_eq!(setup.cursor(), (2, 6));
+}
+
+#[test]
 fn no_more_matches_than_so_many_are_lit_on_a_line() {
     let mut setup = Setup::new(&format!("{}\n", "a".repeat(1000)));
     setup.editor.resize(Size::new(1100, 5).unwrap());
