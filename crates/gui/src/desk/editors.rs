@@ -21,6 +21,7 @@ use clackatoo_protocol::{
 use clackatoo_term::mouse::{MouseAction, MouseButton};
 use clackatoo_text::Edit;
 
+use super::chats::CHAT_WAITED;
 use super::jumps::{FilePlace, Jump, Jumps};
 use super::{Asked, Desk, Purpose};
 use crate::command::Place;
@@ -896,18 +897,16 @@ impl Desk {
         // as an editor's wait can.
         let now = std::time::Instant::now();
         if self.chat_waits_to_settle() {
-            let pane = self.shown.map_or(PaneId(0), |shown| shown.pane);
-            let (since, _) = *self.chat_wait.get_or_insert((now, pane));
-            if cancel || now >= since + crate::editor::PATIENCE {
-                self.chat_wait = None;
-                self.gave_up();
-                if !cancel {
-                    self.say(
-                        "the keys typed waited too long for the chat: they were dropped".into(),
-                    );
-                    return None;
-                }
-                return Some(true);
+            self.note_chat_wait(now);
+            // Given up on, what waited is dropped, and this key goes on: an
+            // Esc does what Esc does there, as it stops selecting.
+            if cancel {
+                self.give_up_chat_wait(None);
+                return None;
+            }
+            if self.chat_waited_too_long(now) {
+                self.give_up_chat_wait(Some(CHAT_WAITED));
+                return None;
             }
             let held = given_back.or_else(|| unmade.map(|make| make()));
             self.editors.held.extend(held);
@@ -968,7 +967,7 @@ impl Desk {
 
     /// What an editor's command waited for was given up on: what's held
     /// for it goes, and so does a macro whose command it was.
-    fn gave_up(&mut self) {
+    pub(super) fn gave_up(&mut self) {
         self.drop_held();
         self.stop_macro(None);
     }
@@ -993,12 +992,13 @@ impl Desk {
                 gave_up = true;
             }
         }
-        // Keys held for a chat's yank or search were typed for it.
+        // Keys held for a chat's yank or search were typed for it, and
+        // what they waited for goes with them.
         if self
             .chat_wait
             .is_some_and(|(_, pane)| Some(pane) != focused)
         {
-            self.chat_wait = None;
+            self.give_up_chat_wait(None);
             gave_up = true;
         }
         if self.macro_left_behind() {

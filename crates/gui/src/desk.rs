@@ -9506,9 +9506,28 @@ mod tests {
         desk.settle_chats(&mut fonts);
         assert!(!desk.holding());
         assert_eq!(register(&mut desk, '0').as_deref(), Some("cargo test\n"));
-        // Esc pressed gives up what waits, as it does an editor's wait.
+        // Esc pressed gives up what waits, as it does an editor's wait:
+        // the yank too, and Esc goes on to the chat, which stops lighting
+        // up the search's matches.
+        type_text(&mut desk, "/cargo");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        desk.settle_chats(&mut fonts);
+        paint_chat(&mut desk, &mut fonts);
+        let lit = |desk: &mut Desk| {
+            desk.chat_mut(TerminalId(1))
+                .unwrap()
+                .view()
+                .lit_matches()
+                .len()
+        };
+        assert_eq!(lit(&mut desk), 1);
         assert!(desk.begin_image_paste(TerminalId(1)));
-        type_text(&mut desk, "yyj");
+        type_text(&mut desk, "\"byyj");
         assert!(desk.holding());
         press(
             &mut desk,
@@ -9517,9 +9536,11 @@ mod tests {
             Modifiers::default(),
         );
         assert!(!desk.holding());
-        // The focus leaving the chat gives up the keys typed for it.
+        assert_eq!(lit(&mut desk), 0, "Esc did what Esc does");
         desk.finish_image_paste(TerminalId(1), Ok(Pasted::Text(String::new())));
         desk.settle_chats(&mut fonts);
+        assert_eq!(register(&mut desk, 'b'), None, "the yank was given up too");
+        // The focus leaving the chat gives up the keys typed for it.
         assert!(desk.begin_image_paste(TerminalId(1)));
         type_text(&mut desk, "yyj");
         assert!(desk.holding());

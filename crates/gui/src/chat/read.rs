@@ -490,6 +490,17 @@ impl ChatView {
         std::mem::take(&mut self.failed)
     }
 
+    /// Drops the yanks and searches normal or visual mode queued, as keys
+    /// waiting for them are given up on.
+    pub(crate) fn drop_reading(&mut self) {
+        self.queued.retain(|input| {
+            !matches!(
+                input,
+                Input::Yank { .. } | Input::YankText(_) | Input::Search { .. }
+            )
+        });
+    }
+
     /// Whether a yank or a search normal or visual mode queued waits for
     /// the fonts.
     pub(crate) fn reading_unsettled(&self) -> bool {

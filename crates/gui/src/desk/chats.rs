@@ -19,6 +19,10 @@ use super::Desk;
 use crate::chat::ChatPane;
 use crate::input::KeyPress;
 
+/// What the bar says of keys that waited too long for a chat.
+pub(super) const CHAT_WAITED: &str =
+    "the keys typed waited too long for the chat: they and what they waited for were dropped";
+
 /// The most rounds of settling chats and typing the keys that waited for
 /// them [`Desk::settle_chats`] goes, a bound it never reaches.
 const MOST_ROUNDS: usize = 4096;
@@ -169,6 +173,43 @@ impl Desk {
     /// Whether a chat's yank or search failed since this was last asked.
     pub(super) fn take_chat_failed(&mut self) -> bool {
         (self.chats.values_mut()).fold(false, |failed, chat| chat.take_failed() | failed)
+    }
+
+    /// Notes that keys wait for the focused chat from `now`, if they
+    /// didn't already.
+    pub(super) fn note_chat_wait(&mut self, now: std::time::Instant) {
+        if let Some(shown) = self.shown {
+            self.chat_wait.get_or_insert((now, shown.pane));
+        }
+    }
+
+    /// Whether keys have waited for a chat past [`PATIENCE`] by `now`.
+    ///
+    /// [`PATIENCE`]: crate::editor::PATIENCE
+    pub(super) fn chat_waited_too_long(&self, now: std::time::Instant) -> bool {
+        self.chat_wait
+            .is_some_and(|(since, _)| now >= since + crate::editor::PATIENCE)
+    }
+
+    /// Gives up on what keys wait for in a chat, as Esc, the focus leaving
+    /// it or waiting too long does, saying `why`, if anything: the yanks
+    /// and searches it queued are dropped, with the keys held and the macro
+    /// typing them, so nothing waits any more.
+    pub(super) fn give_up_chat_wait(&mut self, why: Option<&str>) {
+        if let Some((_, pane)) = self.chat_wait.take()
+            && let Some((_, _, found)) = self.workspaces.find_pane(pane)
+            && let Some(terminal) = found.content.terminal()
+            && let Some(chat) = self.chats.get_mut(&terminal)
+        {
+            chat.view_mut().drop_reading();
+        }
+        if let Some(chat) = self.focused_chat_mut() {
+            chat.view_mut().drop_reading();
+        }
+        self.gave_up();
+        if let Some(why) = why {
+            self.say(why.to_owned());
+        }
     }
 
     /// Whether the focused chat has a yank or a search waiting for the
