@@ -87,7 +87,7 @@ pub(super) struct Searching {
 type Lit = Vec<(usize, std::ops::Range<usize>)>;
 
 /// What the matches lit up were found in: which search, how tall the view
-/// is, and each block drawn, where, and how long its text is.
+/// is, and each block drawn, where, how big, and how long its text is.
 #[derive(Debug, PartialEq, Eq)]
 struct LitKey {
     generation: u64,
@@ -100,6 +100,8 @@ struct LitKey {
 struct LitBlock {
     key: super::paint::TextKey,
     at: [u32; 2],
+    /// How big it's laid out, which changes as it wraps differently.
+    size: [u32; 2],
     len: usize,
 }
 
@@ -193,6 +195,7 @@ impl ChatView {
             .map(|shown| LitBlock {
                 key: shown.key,
                 at: shown.at.map(f32::to_bits),
+                size: shown.size.map(f32::to_bits),
                 len: self.text(shown.key).map_or(0, |text| text.text.len()),
             })
             .collect();
