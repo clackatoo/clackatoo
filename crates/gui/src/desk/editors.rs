@@ -21,7 +21,7 @@ use clackatoo_protocol::{
 use clackatoo_term::mouse::{MouseAction, MouseButton};
 use clackatoo_text::Edit;
 
-use super::chats::CHAT_WAITED;
+use super::chats::PANE_WAITED;
 use super::jumps::{FilePlace, Jump, Jumps};
 use super::{Asked, Desk, Purpose};
 use crate::command::Place;
@@ -894,18 +894,19 @@ impl Desk {
         // settles it with before it draws: keys wait with it, so the next
         // sees where it left the cursor, and what it yanked. It may wait
         // behind a paste reading the clipboard, so it can be given up on,
-        // as an editor's wait can.
+        // as an editor's wait can. A terminal's search waits for the
+        // daemon, which may not answer, the same way.
         let now = std::time::Instant::now();
-        if self.chat_waits_to_settle() {
-            self.note_chat_wait(now);
+        if self.pane_waits_to_settle() {
+            self.note_pane_wait(now);
             // Given up on, what waited is dropped, and this key goes on: an
             // Esc does what Esc does there, as it stops selecting.
             if cancel {
-                self.give_up_chat_wait(None);
+                self.give_up_pane_wait(None);
                 return None;
             }
-            if self.chat_waited_too_long(now) {
-                self.give_up_chat_wait(Some(CHAT_WAITED));
+            if self.pane_waited_too_long(now) {
+                self.give_up_pane_wait(Some(PANE_WAITED));
                 return None;
             }
             let held = given_back.or_else(|| unmade.map(|make| make()));
@@ -992,13 +993,13 @@ impl Desk {
                 gave_up = true;
             }
         }
-        // Keys held for a chat's yank or search were typed for it, and
-        // what they waited for goes with them.
+        // Keys held for a chat's yank or search, or a terminal's search,
+        // were typed for it, and what they waited for goes with them.
         if self
-            .chat_wait
+            .pane_wait
             .is_some_and(|(_, pane)| Some(pane) != focused)
         {
-            self.give_up_chat_wait(None);
+            self.give_up_pane_wait(None);
             gave_up = true;
         }
         if self.macro_left_behind() {
@@ -1017,12 +1018,12 @@ impl Desk {
     fn drop_held_for_none(&mut self) {
         if !self.editors_wait_for_grammar()
             && !self.macro_waiting()
-            && !self.chat_waits_to_settle()
+            && !self.pane_waits_to_settle()
             && !self.editors.held.is_empty()
         {
             self.editors.held.clear();
-            let what = if self.chat_wait.take().is_some() {
-                "the chat the keys typed waited for closed: they were dropped"
+            let what = if self.pane_wait.take().is_some() {
+                "the pane the keys typed waited for closed: they were dropped"
             } else {
                 "the editor waiting for the grammar closed: nothing was done"
             };
@@ -1791,8 +1792,8 @@ impl Desk {
         asked |= self.insert_patience(now);
         // Keys waiting for a chat's yank or search, with no key to see to
         // it.
-        if self.chat_waited_too_long(now) {
-            self.give_up_chat_wait(Some(CHAT_WAITED));
+        if self.pane_waited_too_long(now) {
+            self.give_up_pane_wait(Some(PANE_WAITED));
             asked = true;
         }
         asked | self.type_macros()
@@ -1806,7 +1807,7 @@ impl Desk {
             .chain(self.macro_gives_up())
             .chain(self.insert_gives_up())
             .chain(
-                self.chat_wait
+                self.pane_wait
                     .map(|(since, _)| since + crate::editor::PATIENCE),
             )
             .min()

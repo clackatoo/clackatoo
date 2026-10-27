@@ -18,10 +18,12 @@ use clackatoo_protocol::{TerminalId, ViewUpdate, wire};
 use super::Desk;
 use crate::chat::ChatPane;
 use crate::input::KeyPress;
+use crate::pane::Pane;
 
-/// What the bar says of keys that waited too long for a chat.
-pub(super) const CHAT_WAITED: &str =
-    "the keys typed waited too long for the chat: they and what they waited for were dropped";
+/// What the bar says of keys that waited too long for a chat, or a
+/// terminal's search.
+pub(super) const PANE_WAITED: &str =
+    "the keys typed waited too long: they and what they waited for were dropped";
 
 /// The most rounds of settling chats and typing the keys that waited for
 /// them [`Desk::settle_chats`] goes at once, so one call stays short: a
@@ -113,7 +115,7 @@ impl Desk {
     /// whether the window must be redrawn.
     ///
     /// Keys typed after a chat's yank or search waited for it (see
-    /// [`chat_waits_to_settle`](Self::chat_waits_to_settle)): they go on
+    /// [`pane_waits_to_settle`](Self::pane_waits_to_settle)): they go on
     /// now, and if one yanks or searches again, it's settled in turn.
     pub(crate) fn settle_chats(&mut self, fonts: &mut crate::fonts::Fonts) -> bool {
         let mut redraw = false;
@@ -136,22 +138,22 @@ impl Desk {
             }
             // A search that found nothing stops a macro or a binding, as
             // Vim's stops on a failing command.
-            if self.take_chat_failed() && self.frames_typing() {
+            if self.take_pane_failed() && self.frames_typing() {
                 self.stop_macro(None);
             }
             // Still waiting, as behind a paste reading the clipboard: the
             // keys stay held, for the settling once it's read.
-            if self.chat_waits_to_settle() {
+            if self.pane_waits_to_settle() {
                 return redraw;
             }
-            self.chat_wait = None;
+            self.pane_wait = None;
             if !self.holding() && !self.frames_typing() {
                 break;
             }
             // Each time round takes at least the key that waits, so this
             // ends.
             redraw |= self.type_macros();
-            if !self.chat_waits_to_settle() {
+            if !self.pane_waits_to_settle() {
                 break;
             }
         }
@@ -173,41 +175,46 @@ impl Desk {
         }
     }
 
-    /// Whether a chat's yank or search failed since this was last asked.
-    pub(super) fn take_chat_failed(&mut self) -> bool {
-        (self.chats.values_mut()).fold(false, |failed, chat| chat.take_failed() | failed)
+    /// Whether a chat's or a terminal's command failed since this was
+    /// last asked.
+    pub(super) fn take_pane_failed(&mut self) -> bool {
+        let chats =
+            (self.chats.values_mut()).fold(false, |failed, chat| chat.take_failed() | failed);
+        (self.panes.values_mut()).fold(chats, |failed, pane| pane.take_failed() | failed)
     }
 
-    /// Notes that keys wait for the focused chat from `now`, if they
-    /// didn't already.
-    pub(super) fn note_chat_wait(&mut self, now: std::time::Instant) {
+    /// Notes that keys wait for the focused chat or terminal from `now`,
+    /// if they didn't already.
+    pub(super) fn note_pane_wait(&mut self, now: std::time::Instant) {
         if let Some(shown) = self.shown {
-            self.chat_wait.get_or_insert((now, shown.pane));
+            self.pane_wait.get_or_insert((now, shown.pane));
         }
     }
 
-    /// Whether keys have waited for a chat past [`PATIENCE`] by `now`.
+    /// Whether keys have waited for a chat or a terminal past
+    /// [`PATIENCE`] by `now`.
     ///
     /// [`PATIENCE`]: crate::editor::PATIENCE
-    pub(super) fn chat_waited_too_long(&self, now: std::time::Instant) -> bool {
-        self.chat_wait
+    pub(super) fn pane_waited_too_long(&self, now: std::time::Instant) -> bool {
+        self.pane_wait
             .is_some_and(|(since, _)| now >= since + crate::editor::PATIENCE)
     }
 
-    /// Gives up on what keys wait for in a chat, as Esc, the focus leaving
-    /// it or waiting too long does, saying `why`, if anything: the yanks
-    /// and searches it queued are dropped, with the keys held and the macro
+    /// Gives up on what keys wait for in a chat or a terminal, as Esc, the
+    /// focus leaving it or waiting too long does, saying `why`, if
+    /// anything: the yanks and searches a chat queued are dropped, and a
+    /// terminal's answers when they come, with the keys held and the macro
     /// typing them, so nothing waits any more.
-    pub(super) fn give_up_chat_wait(&mut self, why: Option<&str>) {
-        if let Some((_, pane)) = self.chat_wait.take()
-            && let Some((_, _, found)) = self.workspaces.find_pane(pane)
-            && let Some(terminal) = found.content.terminal()
-            && let Some(chat) = self.chats.get_mut(&terminal)
-        {
-            chat.view_mut().drop_reading();
-        }
-        if let Some(chat) = self.focused_chat_mut() {
-            chat.view_mut().drop_reading();
+    pub(super) fn give_up_pane_wait(&mut self, why: Option<&str>) {
+        let waited = (self.pane_wait.take())
+            .and_then(|(_, pane)| self.workspaces.find_pane(pane))
+            .and_then(|(_, _, found)| found.content.terminal());
+        for terminal in waited.into_iter().chain(self.focused_terminal()) {
+            if let Some(chat) = self.chats.get_mut(&terminal) {
+                chat.view_mut().drop_reading();
+            } else if let Some(pane) = self.panes.get_mut(&terminal) {
+                pane.drop_waiting();
+            }
         }
         self.gave_up();
         if let Some(why) = why {
@@ -217,10 +224,17 @@ impl Desk {
 
     /// Whether the focused chat has a yank or a search waiting for the
     /// fonts to be carried out, which moves its cursor or fills a
-    /// register: the keys after it wait for it, as they wait for an
-    /// editor's grammar.
-    pub(super) fn chat_waits_to_settle(&self) -> bool {
-        self.focused_chat().is_some_and(ChatPane::reading_unsettled)
+    /// register, or the focused terminal a search or a block waiting for
+    /// the daemon's answer: the keys after it wait for it, as they wait for
+    /// an editor's grammar.
+    pub(super) fn pane_waits_to_settle(&self) -> bool {
+        let Some(terminal) = self.focused_terminal() else {
+            return false;
+        };
+        match self.chats.get(&terminal) {
+            Some(chat) => chat.reading_unsettled(),
+            None => (self.panes.get(&terminal)).is_some_and(Pane::waits_for_answer),
+        }
     }
 
     /// When a chat must be drawn again by itself, as for its agent's

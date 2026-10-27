@@ -757,6 +757,30 @@ impl Motion {
         }
     }
 
+    /// Whether, typed as a move with `count`, it failed, going from `from`
+    /// to `to` in `lines`, as Vim's beep: one that can fail went nowhere,
+    /// unless it's `t` finding its character right by the cursor; `2_`,
+    /// `2g_` and `2$` had no line below; or `3b` ran out at the start (see
+    /// [`runs_out`](Self::runs_out)). A count that went part of the way
+    /// doesn't fail, as Vim's doesn't.
+    pub(crate) fn failed(
+        self,
+        (from, to): (Point, Point),
+        count: Option<usize>,
+        lines: &impl Lines,
+    ) -> bool {
+        let once = count.is_none_or(|count| count == 1);
+        let stays = once && self.found_in_place(from, lines);
+        let down = matches!(
+            self,
+            Self::LineFirstNonBlank | Self::LastNonBlank | Self::LineEnd
+        );
+        let no_line = down && !once && from.line >= lines.bounds().1;
+        (to == from && self.can_fail() && !stays)
+            || no_line
+            || self.runs_out((from, to), count, lines)
+    }
+
     /// Whether it's `b`, `B`, `ge` or `gE` with a count, one of which
     /// starts at the text's start, from `from` to `to`, where it went:
     /// Vim's fail then, and an operator takes nothing, though the cursor

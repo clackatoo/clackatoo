@@ -89,6 +89,10 @@ struct Overlay {
 /// The pane does no I/O: messages for the daemon wait in its outbox, which
 /// the window sends.
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent states of the pane"
+)]
 pub(crate) struct Pane {
     requests: Requests<Pending>,
     /// The size last asked of the daemon.
@@ -142,6 +146,10 @@ pub(crate) struct Pane {
     matches_kept: crate::hlsearch::Memo<MatchesIn, Match>,
     /// A short message for the label, until the next key.
     status: Option<String>,
+    /// A command failed since the desk last asked, as Vim beeps: a motion
+    /// that went nowhere, a search that found nothing, a command refused.
+    /// A macro or a binding typing keys stops.
+    failed: bool,
     /// Text copied, and where the window is to put it.
     yanked: Option<Yanked>,
     /// Text selected with the mouse.
@@ -197,6 +205,7 @@ impl Pane {
             changes: 0,
             matches_kept: crate::hlsearch::Memo::default(),
             status: None,
+            failed: false,
             yanked: None,
             mouse_selection: None,
             flash: None,
@@ -3166,6 +3175,62 @@ mod tests {
         assert_eq!(scans(), before, "kept through n");
         pane.mode = Mode::Insert;
         assert_eq!(lit(&pane, HighlightKind::OtherMatch), 0);
+    }
+
+    #[test]
+    fn a_motion_that_goes_nowhere_fails_unless_it_goes_to_a_place() {
+        let terminal = terminal("abc def\r\nxyz");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg0");
+        assert!(!pane.take_failed());
+        // Nowhere to go, nothing found, a command refused, no search to
+        // search again: each fails, as Vim's beeps.
+        for typed in ["h", "k", "fZ", "Fa", ";", "yfZ", "dw", "n"] {
+            keys(&mut pane, typed);
+            assert!(pane.take_failed(), "{typed}");
+        }
+        // To a place, wherever it is; a count going part of the way; and
+        // `t` with its character right by the cursor.
+        for typed in ["0", "gg", "^", "tb", "99l", "$", "yy", "G"] {
+            keys(&mut pane, typed);
+            assert!(!pane.take_failed(), "{typed}");
+        }
+        // On the last line, none below to go to.
+        for typed in ["j", "2$", "+"] {
+            keys(&mut pane, typed);
+            assert!(pane.take_failed(), "{typed}");
+        }
+        // A search that finds nothing fails once the daemon answers; one
+        // given up on, as keys waiting for it are, moves and fails nothing.
+        keys(&mut pane, "/zzz");
+        named(&mut pane, NamedKey::Enter);
+        assert!(pane.waits_for_answer());
+        serve(&mut pane, &terminal);
+        assert!(!pane.waits_for_answer());
+        assert!(pane.take_failed());
+        let before = cursor(&pane);
+        keys(&mut pane, "?abc");
+        named(&mut pane, NamedKey::Enter);
+        pane.drop_waiting();
+        assert!(!pane.waits_for_answer());
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), before);
+        assert!(!pane.take_failed());
+    }
+
+    #[test]
+    fn a_find_on_history_not_fetched_yet_isnt_known_to_fail() {
+        let terminal = terminal(&numbered_lines("line "));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "kkkkkk");
+        keys(&mut pane, "fZ");
+        assert!(!pane.take_failed(), "read as blank till it comes");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane).0, "line 7");
+        keys(&mut pane, "fZ");
+        assert!(pane.take_failed());
     }
 
     #[test]

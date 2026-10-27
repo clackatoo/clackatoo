@@ -395,6 +395,9 @@ fn searches_go_back_through_those_typed_in_terminals_and_editors() {
     for search in ["/foo", "/bar"] {
         type_keys(&mut desk, search);
         key(&mut desk, NamedKey::Enter);
+        // Keys after it wait for the daemon's answer.
+        desk.take_outbox();
+        desk.answered(Response::Found(None));
     }
     type_keys(&mut desk, "/");
     key(&mut desk, NamedKey::ArrowUp);

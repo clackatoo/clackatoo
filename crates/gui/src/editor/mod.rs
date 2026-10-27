@@ -1710,25 +1710,16 @@ impl Editor {
                 let motion = self.finds.remember(motion);
                 let motion = self.by_rows(motion);
                 self.cursor = self.moved(copy, motion, command.count);
-                let once = command.count.is_none_or(|count| count == 1);
-                let text = self.text(copy);
-                let stays = once && motion.found_in_place(from, &text);
-                // `2_`, `2g_` and `2$` have no line to go to from the last.
-                let down = matches!(
-                    motion,
-                    Motion::LineFirstNonBlank | Motion::LastNonBlank | Motion::LineEnd
-                );
-                let no_line = down && !once && from.line >= text.last_line();
-                let no_line =
-                    no_line || motion.runs_out((from, self.cursor.at), command.count, &text);
-                drop(text);
-                let failed =
-                    |cursor: Cursor| (cursor.at == from && motion.can_fail() && !stays) || no_line;
+                // Asked again after visual mode's step past a line's end,
+                // which `vl` on the last character takes, not failing.
+                let failed = |editor: &Self, copy: &BufferCopy| {
+                    motion.failed((from, editor.cursor.at), command.count, &editor.text(copy))
+                };
                 if visual {
-                    let went = !failed(self.cursor);
+                    let went = !failed(self, copy);
                     self.past_line_end(motion, (from, times), went, copy);
                 }
-                if failed(self.cursor) {
+                if failed(self, copy) {
                     self.fail();
                 }
             }

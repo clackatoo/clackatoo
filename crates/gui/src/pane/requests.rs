@@ -60,6 +60,17 @@ impl<P> Requests<P> {
         self.pending.pop_front()
     }
 
+    /// What the requests waiting for their answers were for, oldest
+    /// first.
+    pub(crate) fn pending(&self) -> impl Iterator<Item = &P> {
+        self.pending.iter()
+    }
+
+    /// The same, to change, as for answers no longer wanted.
+    pub(crate) fn pending_mut(&mut self) -> impl Iterator<Item = &mut P> {
+        self.pending.iter_mut()
+    }
+
     /// How many requests wait for their answers.
     #[cfg(test)]
     pub(crate) fn waiting(&self) -> usize {

@@ -361,8 +361,9 @@ pub(crate) struct Desk {
     /// primary selection, oldest first.
     yanked: Vec<(String, Copy)>,
     /// Since when keys have waited for the focused chat's yank or search
-    /// to settle, and in which pane, while they do.
-    chat_wait: Option<(std::time::Instant, PaneId)>,
+    /// to settle, or a terminal's search to be answered, and in which pane,
+    /// while they do.
+    pane_wait: Option<(std::time::Instant, PaneId)>,
     /// The window's last `f`, `t`, `F` or `T`, which every pane it makes
     /// shares, so `;` and `,` find it again in any of them, as in Vim.
     finds: vim::Finds,
@@ -1659,8 +1660,14 @@ impl Desk {
                     return false;
                 };
                 let redraw = pane.answered(response);
+                let failed = pane.take_failed();
                 if let Some(yanked) = pane.take_yanked() {
                     self.pane_yanked(yanked);
+                }
+                // A search or a block that found nothing stops a macro or
+                // a binding, as Vim's stops on a failing command.
+                if failed && self.frames_typing() {
+                    self.stop_macro(None);
                 }
                 redraw
             }
@@ -2088,6 +2095,11 @@ impl Desk {
             return chat.key(press) || had_message;
         }
         let redraw = self.focused_pane().is_some_and(|pane| pane.key(press));
+        // A motion that went nowhere, or a command refused, stops a macro
+        // or a binding, as Vim's beep does.
+        if self.focused_pane().is_some_and(Pane::take_failed) && self.frames_typing() {
+            self.stop_macro(None);
+        }
         if let Some(terminal) = self.focused_terminal() {
             self.open_pane_link(terminal);
         }
@@ -9557,6 +9569,119 @@ mod tests {
         type_text(&mut desk, "@a");
         serve(&mut desk, &mut daemons);
         desk.settle_chats(&mut fonts);
+        assert_eq!(cursor(&mut desk), Some("cargo tes".len()));
+        assert_eq!(daemon_text(&daemons, 7), "x..\n");
+        let said = desk.message.clone().unwrap_or_default();
+        assert!(!said.contains("stopped"), "{said}");
+    }
+
+    /// A terminal showing `cargo test`, in normal mode at the line's start.
+    fn terminal_showing_cargo_test() -> Desk {
+        let mut desk = desk(one_tab(pane(1)));
+        screen_showing(&mut desk, 1, 40, "cargo test");
+        normal_mode(&mut desk);
+        type_text(&mut desk, "0");
+        desk.take_outbox();
+        desk
+    }
+
+    /// Whether the terminal asked the daemon for text to copy since this
+    /// was last asked, as `yy` does.
+    fn asked_to_copy(desk: &mut Desk) -> bool {
+        (desk.take_outbox().iter())
+            .any(|message| matches!(message, ClientMessage::Request(Request::Text { .. })))
+    }
+
+    #[test]
+    fn a_terminals_failed_motion_stops_a_macro_or_a_binding() {
+        let mut desk = terminal_showing_cargo_test();
+        desk.lua_from(r#"client.keys.map("n", "<Space>f", "fZyy")"#);
+        type_text(&mut desk, " f");
+        assert!(!asked_to_copy(&mut desk), "stopped at fZ");
+        // A find a count of it can't make fails too, as `3ft` would.
+        desk.lua_from(r#"client.keys.map("n", "<Space>t", "ftftftyy")"#);
+        type_text(&mut desk, "0 t");
+        assert!(!asked_to_copy(&mut desk), "stopped at the third ft");
+        // So does a command a terminal refuses.
+        desk.lua_from(r#"client.keys.map("n", "<Space>d", "dwyy")"#);
+        type_text(&mut desk, " d");
+        assert!(!asked_to_copy(&mut desk), "stopped at dw");
+        // Moves that go nowhere and can't fail don't stop one: `0` at the
+        // line's start, then the yank.
+        desk.lua_from(r#"client.keys.map("n", "<Space>z", "0yy")"#);
+        type_text(&mut desk, "0 z");
+        assert!(asked_to_copy(&mut desk));
+    }
+
+    #[test]
+    fn a_terminals_search_that_finds_nothing_stops_the_keys_after_it() {
+        let mut desk = terminal_showing_cargo_test();
+        desk.lua_from(
+            r#"
+            client.keys.map("n", "<Space>s", "/nowhere<CR>yy")
+            client.keys.map("n", "<Space>c", "/test<CR>yy")
+            client.keys.map("n", "<Space>y", "yy")
+            "#,
+        );
+        // `yy` waits for the daemon's answer, and goes with the search.
+        type_text(&mut desk, " s");
+        assert!(!asked_to_copy(&mut desk), "waits for the answer");
+        assert!(desk.answered(Response::Found(None)));
+        assert!(!asked_to_copy(&mut desk), "stopped at the search");
+        // Found, it goes on.
+        type_text(&mut desk, " c");
+        assert!(!asked_to_copy(&mut desk), "waits for the answer");
+        desk.answered(Response::Found(Some(clackatoo_term::Match {
+            start: clackatoo_protocol::Position { line: 0, col: 6 },
+            cells: 4,
+        })));
+        assert!(asked_to_copy(&mut desk));
+        // Esc pressed gives up the wait, and the binding: the answer come
+        // late moves nothing and stops nothing, and keys after it go on.
+        type_text(&mut desk, " s");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        desk.answered(Response::Found(None));
+        assert!(!asked_to_copy(&mut desk), "given up");
+        type_text(&mut desk, " y");
+        assert!(asked_to_copy(&mut desk), "nothing failed left over");
+        assert!(!desk.holding());
+    }
+
+    #[test]
+    fn a_macro_typing_itself_through_a_terminal_ends_where_a_find_there_fails() {
+        let mut desk = desk(one_tab(side_by_side(vec![pane(1), file_pane(2, 7)])));
+        screen_showing(&mut desk, 1, 40, "cargo test");
+        load(&mut desk, 7, "/a.txt", "x\n");
+        let mut daemons = HashMap::from([(BufferId(7), crate::editor::Daemon::new("x\n"))]);
+        normal_mode(&mut desk);
+        type_text(&mut desk, "0");
+        let cursor = |desk: &mut Desk| {
+            desk.panes
+                .get(&TerminalId(1))
+                .expect("the terminal")
+                .cursor_col()
+        };
+        // On `cargo test`'s first t, from the editor, which records it.
+        ctrl(&mut desk, "l");
+        type_text(&mut desk, "qaqqa");
+        ctrl(&mut desk, "h");
+        type_text(&mut desk, "ft");
+        ctrl(&mut desk, "l");
+        type_text(&mut desk, "A.");
+        escape(&mut desk);
+        type_text(&mut desk, "@aq");
+        serve(&mut desk, &mut daemons);
+        assert_eq!(cursor(&mut desk), Some("cargo ".len()));
+        assert_eq!(daemon_text(&daemons, 7), "x.\n");
+        // Typed again, it goes on to the next t, and ends where `ft` finds
+        // none, as in Vim, rather than being stopped after so many keys.
+        type_text(&mut desk, "@a");
+        serve(&mut desk, &mut daemons);
         assert_eq!(cursor(&mut desk), Some("cargo tes".len()));
         assert_eq!(daemon_text(&daemons, 7), "x..\n");
         let said = desk.message.clone().unwrap_or_default();

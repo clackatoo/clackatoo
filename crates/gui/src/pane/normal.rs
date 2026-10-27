@@ -212,7 +212,13 @@ impl Pane {
             redraw |= match self.keys.read(stroke, visual, &TerminalKeys) {
                 // The keys typed are drawn in the bar while they wait, and
                 // gone from it once they make nothing.
-                Parsed::Incomplete | Parsed::Nothing => true,
+                Parsed::Incomplete => true,
+                // Keys a terminal doesn't take, as `dw`: Vim beeps, which
+                // stops a macro.
+                Parsed::Nothing => {
+                    self.failed = true;
+                    true
+                }
                 Parsed::Command(command) => self.execute(command),
             };
         }
@@ -226,24 +232,30 @@ impl Pane {
         match command.action {
             Action::Move(motion) => {
                 let motion = self.finds.remember(motion);
-                self.move_cursor(motion, count)
+                self.move_key(motion, count)
             }
             Action::Operate(Operator::Yank, Target::Motion(motion)) => {
                 let motion = self.finds.remember(motion);
                 self.yank_motion(motion, count, to)
             }
-            Action::FindAgain { reverse } => match self.finds.again(reverse) {
-                Some(motion) => self.move_cursor(motion, count),
-                None => false,
-            },
+            Action::FindAgain { reverse } => {
+                if let Some(motion) = self.finds.again(reverse) {
+                    self.move_key(motion, count)
+                } else {
+                    self.failed = true;
+                    false
+                }
+            }
             Action::Operate(Operator::Yank, Target::Lines) => self.yank_lines(command.times(), to),
-            Action::Operate(Operator::Yank, Target::Selection) => self.yank_selection(to),
+            Action::Operate(Operator::Yank, Target::Selection) => {
+                self.fails_unless(|pane| pane.yank_selection(to))
+            }
             // `Y` in visual mode: the lines selected, a block as it is.
             Action::Operate(Operator::Yank, Target::SelectedLines) => {
                 if matches!(self.mode, Mode::Visual(kind) if kind != Selection::Block) {
                     self.mode = Mode::Visual(Selection::Lines);
                 }
-                self.yank_selection(to)
+                self.fails_unless(|pane| pane.yank_selection(to))
             }
             // Copied after `y`, selected in visual mode.
             Action::Operate(Operator::Yank, Target::Object { object, inner })
@@ -254,7 +266,7 @@ impl Pane {
             Action::Visual { lines: false } => self.toggle_visual(Selection::Characters),
             Action::Visual { lines: true } => self.toggle_visual(Selection::Lines),
             Action::BlockVisual => self.toggle_visual(Selection::Block),
-            Action::Reselect => self.reselect(),
+            Action::Reselect => self.fails_unless(Self::reselect),
             Action::OtherCorner if self.mode == Mode::Visual(Selection::Block) => {
                 self.other_corner()
             }
@@ -300,6 +312,64 @@ impl Pane {
         }
     }
 
+    /// `motion` typed, `count` times: the cursor moves (see
+    /// [`move_cursor`](Self::move_cursor)), or fails to, as `j` on the last
+    /// line or `fx` with no x does, which Vim beeps at, stopping a macro
+    /// (see [`Motion::failed`]). From a line of history not fetched yet,
+    /// read as blank till it comes, it's not known to fail.
+    fn move_key(&mut self, motion: Motion, count: Option<usize>) -> bool {
+        let Some(from) = self.cursor.map(|cursor| cursor.at) else {
+            self.failed = true;
+            return false;
+        };
+        self.move_cursor(motion, count);
+        let to = self.cursor.map_or(from, |cursor| cursor.at);
+        let document = Document(self);
+        let known = document.row(from.line).is_some();
+        self.failed |= known && motion.failed((from, to), count, &document);
+        true
+    }
+
+    /// Does `act`, which returns whether it could, failing if it couldn't,
+    /// as a yank with nothing selected does. Returns whether it did.
+    fn fails_unless(&mut self, act: impl FnOnce(&mut Self) -> bool) -> bool {
+        let done = act(self);
+        self.failed |= !done;
+        done
+    }
+
+    /// Whether a search or a shell's block asked of the daemon, which
+    /// moves the cursor or copies, isn't answered yet: keys typed after it
+    /// wait for it, as for a chat's search, so they act where it leaves the
+    /// cursor, and a macro stops where it fails.
+    pub(crate) fn waits_for_answer(&self) -> bool {
+        (self.requests.pending())
+            .any(|pending| matches!(pending, Pending::Search(..) | Pending::Block(_)))
+    }
+
+    /// Gives up on the searches and blocks waiting for their answers, as
+    /// keys waiting for them are given up on: when they come, they're
+    /// dropped, moving and failing nothing.
+    pub(crate) fn drop_waiting(&mut self) {
+        for pending in self.requests.pending_mut() {
+            if matches!(pending, Pending::Search(..) | Pending::Block(_)) {
+                *pending = Pending::Other;
+            }
+        }
+    }
+
+    /// The column of normal mode's cursor, if there is one.
+    #[cfg(test)]
+    pub(crate) fn cursor_col(&self) -> Option<usize> {
+        self.cursor.map(|cursor| cursor.at.col)
+    }
+
+    /// Whether a command failed since this was last asked, as Vim beeps: a
+    /// macro or a binding typing keys stops.
+    pub(crate) fn take_failed(&mut self) -> bool {
+        std::mem::take(&mut self.failed)
+    }
+
     /// `o` and `O` in visual mode: the cursor goes to the other end of the
     /// selection, and the selection's start to where the cursor was.
     fn other_end(&mut self) -> bool {
@@ -320,6 +390,7 @@ impl Pane {
         let Some(found) = found else {
             let query = self.search.as_ref().map_or("", |(query, _)| query);
             self.status = Some(format!("not found: {query}"));
+            self.failed = true;
             return;
         };
         let at = Point {
@@ -401,6 +472,8 @@ impl Pane {
     /// the other way.
     fn search_again(&mut self, reverse: bool) -> bool {
         let (Some((query, backward)), Some(cursor)) = (self.search.clone(), self.cursor) else {
+            // No search before, as Vim's E35.
+            self.failed = true;
             return false;
         };
         let backward = backward != reverse;

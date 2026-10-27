@@ -262,9 +262,11 @@ impl Pane {
     /// `gx`: opens the link at the normal-mode cursor, as Vim does.
     pub(super) fn open_link_at_cursor(&mut self) -> bool {
         let link = self.cursor.and_then(|cursor| self.link_at(cursor.at));
-        match link {
-            Some(link) => self.opening = Some(link.target),
-            None => self.status = Some("no link under the cursor".into()),
+        if let Some(link) = link {
+            self.opening = Some(link.target);
+        } else {
+            self.status = Some("no link under the cursor".into());
+            self.failed = true;
         }
         true
     }

@@ -340,9 +340,13 @@ impl Desk {
         let mut redraw = self.give_up_off_focus();
         self.macros.handing = Some(Handing::Held);
         loop {
-            if self.editors_wait_for_grammar() || self.chat_waits_to_settle() {
-                if self.chat_waits_to_settle() {
-                    self.note_chat_wait(Instant::now());
+            // A terminal's answer come, nothing waits for it any more.
+            if !self.pane_waits_to_settle() {
+                self.pane_wait = None;
+            }
+            if self.editors_wait_for_grammar() || self.pane_waits_to_settle() {
+                if self.pane_waits_to_settle() {
+                    self.note_pane_wait(Instant::now());
                 }
                 self.macros.waiting_in = self.shown.map(|shown| shown.pane);
                 break;
@@ -387,9 +391,10 @@ impl Desk {
             redraw |= self.key_with(&keys[index].press(), true);
             self.macros.handing = Some(Handing::Held);
             self.script.typing = was;
-            // A chat's yank that failed stops it, as Vim's failing
-            // command does; its search fails once settled.
-            if self.take_chat_failed() {
+            // A chat's yank or a terminal's motion that failed stops it,
+            // as Vim's failing command does; a search fails once settled
+            // or answered.
+            if self.take_pane_failed() {
                 self.stop_macro(None);
             }
         }

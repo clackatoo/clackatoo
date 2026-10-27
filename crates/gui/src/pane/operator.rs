@@ -29,7 +29,16 @@ impl Pane {
     /// `y` and `motion`: copies what the motion moves over, as `count`
     /// says it moves (see [`Cursor::go`]). The cursor moves to the start of
     /// it, as it does when the motion goes back.
+    /// Fails, copying nothing, if the motion goes nowhere it could, as
+    /// `yfZ` with no Z.
     pub(super) fn yank_motion(&mut self, motion: Motion, count: Option<usize>, to: CopyTo) -> bool {
+        let copied = self.yank_motion_copied(motion, count, to);
+        self.failed |= !copied;
+        copied
+    }
+
+    /// [`yank_motion`](Self::yank_motion): returns whether it copied.
+    fn yank_motion_copied(&mut self, motion: Motion, count: Option<usize>, to: CopyTo) -> bool {
         let Some(cursor) = self.cursor else {
             return false;
         };
@@ -124,18 +133,24 @@ impl Pane {
                 _ if failed => self.cursor = self.cursor.map(|cursor| Cursor::new(cursor.at)),
                 _ => {}
             }
+            self.failed |= failed;
             return !failed;
         }
         let found = match object.find(&Document(self), cursor.at, inner, count) {
-            Ok(found) => match found.taken(&Document(self)) {
-                Some(found) => found,
-                None => return false,
-            },
+            Ok(found) => {
+                if let Some(found) = found.taken(&Document(self)) {
+                    found
+                } else {
+                    self.failed = true;
+                    return false;
+                }
+            }
             Err(moved) => {
                 if let Some(at) = moved {
                     self.cursor = Some(Cursor::new(at));
                     self.follow_cursor();
                 }
+                self.failed = true;
                 return false;
             }
         };
@@ -176,6 +191,7 @@ impl Pane {
     pub(super) fn found_block(&mut self, block: Option<Block>, use_: BlockUse) {
         let Some(block) = block else {
             self.status = Some("no block here".into());
+            self.failed = true;
             return;
         };
         let lines = |inner| {
@@ -190,6 +206,7 @@ impl Pane {
             BlockUse::Copy { inner, to } => {
                 let Some((first, last)) = lines(inner) else {
                     self.status = Some("no output".into());
+                    self.failed = true;
                     return;
                 };
                 self.copy(line_start(first), line_start(last), Selection::Lines, to);
@@ -199,6 +216,7 @@ impl Pane {
             BlockUse::Select { inner } if matches!(self.mode, Mode::Visual(_)) => {
                 let Some((first, last)) = lines(inner) else {
                     self.status = Some("no output".into());
+                    self.failed = true;
                     return;
                 };
                 self.select(line_start(first), line_start(last), Selection::Lines);
