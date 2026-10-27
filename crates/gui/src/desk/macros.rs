@@ -341,6 +341,9 @@ impl Desk {
         self.macros.handing = Some(Handing::Held);
         loop {
             if self.editors_wait_for_grammar() || self.chat_waits_to_settle() {
+                if self.chat_waits_to_settle() {
+                    self.note_chat_wait(Instant::now());
+                }
                 self.macros.waiting_in = self.shown.map(|shown| shown.pane);
                 break;
             }

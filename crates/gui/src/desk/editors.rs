@@ -1789,6 +1789,12 @@ impl Desk {
         // anything the daemon says, or gives up if it's waited too long.
         asked |= self.macro_patience(now);
         asked |= self.insert_patience(now);
+        // Keys waiting for a chat's yank or search, with no key to see to
+        // it.
+        if self.chat_waited_too_long(now) {
+            self.give_up_chat_wait(Some(CHAT_WAITED));
+            asked = true;
+        }
         asked | self.type_macros()
     }
 
@@ -1799,6 +1805,10 @@ impl Desk {
         (self.editors.panes.values().filter_map(Editor::wakes))
             .chain(self.macro_gives_up())
             .chain(self.insert_gives_up())
+            .chain(
+                self.chat_wait
+                    .map(|(since, _)| since + crate::editor::PATIENCE),
+            )
             .min()
     }
 

@@ -9540,6 +9540,20 @@ mod tests {
         desk.finish_image_paste(TerminalId(1), Ok(Pasted::Text(String::new())));
         desk.settle_chats(&mut fonts);
         assert_eq!(register(&mut desk, 'b'), None, "the yank was given up too");
+        // Waiting too long, with no key pressed, gives up too, and keys
+        // after it go as ever, not held one in two.
+        assert!(desk.begin_image_paste(TerminalId(1)));
+        type_text(&mut desk, "\"cyyj");
+        assert!(desk.holding());
+        desk.tick_editors(std::time::Instant::now() + crate::editor::PATIENCE);
+        assert!(!desk.holding());
+        type_text(&mut desk, "j");
+        assert!(!desk.holding());
+        type_text(&mut desk, "k");
+        assert!(!desk.holding());
+        desk.finish_image_paste(TerminalId(1), Ok(Pasted::Text(String::new())));
+        desk.settle_chats(&mut fonts);
+        assert_eq!(register(&mut desk, 'c'), None);
         // The focus leaving the chat gives up the keys typed for it.
         assert!(desk.begin_image_paste(TerminalId(1)));
         type_text(&mut desk, "yyj");
