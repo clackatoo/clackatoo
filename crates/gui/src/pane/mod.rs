@@ -3209,13 +3209,13 @@ mod tests {
         assert!(!pane.take_failed());
         // Nowhere to go, nothing found, a command refused, no search to
         // search again: each fails, as Vim's beeps.
-        for typed in ["h", "k", "fZ", "Fa", ";", "yfZ", "dw", "n"] {
+        for typed in ["h", "k", "fZ", "Fa", ";", "yfZ", "yb", "yk", "dw", "n"] {
             keys(&mut pane, typed);
             assert!(pane.take_failed(), "{typed}");
         }
         // To a place, wherever it is; a count going part of the way; and
         // `t` with its character right by the cursor.
-        for typed in ["0", "gg", "^", "tb", "99l", "$", "yy", "0y0", "G"] {
+        for typed in ["0", "yh", "gg", "^", "tb", "99l", "$", "yy", "0y0", "G"] {
             keys(&mut pane, typed);
             assert!(!pane.take_failed(), "{typed}");
         }

@@ -901,21 +901,29 @@ impl Desk {
             self.note_pane_wait(now);
             // Esc gives the wait up, and goes on, doing what Esc does
             // there, as it stops selecting (see `give_up_pane_wait`).
+            // Esc after a terminal's search drops the keys typed since, and
+            // the macro, and waits for the search to land, to act after it,
+            // as Vim's `/foo<CR><Esc>` does: so it puts out what's lit then.
+            if cancel && self.waits_for_terminal() {
+                self.drop_held();
+                self.stop_macro(None);
+                let held = given_back.or_else(|| unmade.map(|make| make()));
+                self.editors.held.extend(held);
+                return Some(true);
+            }
             if cancel {
                 self.give_up_pane_wait(WaitGiven::Cancelled);
                 return None;
             }
-            if self.pane_waited_too_long(now) {
-                // The keys held went on; if one asked another search, this
-                // one waits for that.
-                if self.give_up_pane_wait(WaitGiven::TooLong) && self.pane_waits_to_settle() {
-                    self.note_pane_wait(now);
-                    let held = given_back.or_else(|| unmade.map(|make| make()));
-                    self.editors.held.extend(held);
-                    return Some(true);
-                }
-                return None;
+            // Behind the keys held, which go on first, with what a binding
+            // among them types.
+            if self.pane_waited_too_long(now) && self.give_up_pane_wait(WaitGiven::TooLong) {
+                let held = given_back.or_else(|| unmade.map(|make| make()));
+                self.editors.held.extend(held);
+                return Some(true);
             }
+            // Given up, by the clock, a chat's keys went with it.
+            self.pane_wait?;
             let held = given_back.or_else(|| unmade.map(|make| make()));
             self.editors.held.extend(held);
             return Some(false);
@@ -939,6 +947,13 @@ impl Desk {
             }
         } else {
             if !self.macro_waiting() || self.macro_patience(now) {
+                // Nothing waits, but keys held for what did haven't all gone:
+                // a key pressed goes after them, never ahead.
+                if self.holding() && !self.key_from_frame() {
+                    let held = given_back.or_else(|| unmade.map(|make| make()));
+                    self.editors.held.extend(held);
+                    return Some(true);
+                }
                 return None;
             }
             if cancel {

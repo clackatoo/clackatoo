@@ -399,7 +399,19 @@ impl Desk {
             }
         }
         self.macros.handing = None;
+        if !self.holding()
+            && let Some(said) = self.said_after_held.take()
+        {
+            self.say(said);
+            redraw = true;
+        }
         redraw
+    }
+
+    /// Says `said` once the keys held have gone, as the bar would be put
+    /// out by them.
+    pub(super) fn say_after_held(&mut self, said: String) {
+        self.said_after_held = Some(said);
     }
 
     /// The macros being typed are done, and nothing waits: the buffers

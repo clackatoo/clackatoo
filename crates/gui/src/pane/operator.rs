@@ -30,8 +30,8 @@ impl Pane {
     /// says it moves (see [`Cursor::go`]). The cursor moves to the start of
     /// it, as it does when the motion goes back.
     /// Fails, copying nothing, if the motion goes nowhere it could, as
-    /// `yfZ` with no Z; but not if it takes nothing, as `y0` at a line's
-    /// start does, which Vim doesn't beep at.
+    /// `yfZ` with no Z, or `yb` at the text's start; but not `y0` or `yh`
+    /// at a line's start, which take nothing, as Vim's don't fail.
     pub(super) fn yank_motion(&mut self, motion: Motion, count: Option<usize>, to: CopyTo) -> bool {
         let copied = self.yank_motion_copied(motion, count, to);
         self.failed |= !copied;
@@ -60,8 +60,12 @@ impl Pane {
                 before(&document, start, end).map(|last| (last, Selection::Characters))
             }
         };
+        // Nothing taken: failing as the motion would, as `yb` at the text's
+        // start does, but not `y0` there; nor `yh` there, as Vim's `h` and
+        // `l` don't fail with an operator waiting (Neovim 0.11).
         let Some((last, kind)) = copied else {
-            return true;
+            let sideways = matches!(motion, Motion::Left | Motion::Right);
+            return sideways || !motion.failed((cursor.at, moved.at), count, &document);
         };
         self.copy(start, last, kind, to);
         if moved.at < cursor.at {

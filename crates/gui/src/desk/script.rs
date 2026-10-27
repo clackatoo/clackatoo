@@ -249,10 +249,8 @@ impl Desk {
             let press = press.press();
             if self.focused_editor().is_some() {
                 self.editor_key(&press);
-            } else if let Some(chat) = self.focused_chat_mut() {
-                chat.key(&press);
             } else {
-                self.terminal_key(&press);
+                self.pane_key(&press);
             }
         }
     }

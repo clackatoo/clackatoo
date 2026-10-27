@@ -364,6 +364,9 @@ pub(crate) struct Desk {
     /// to settle, or a terminal's search to be answered, and in which pane,
     /// while they do.
     pane_wait: Option<(std::time::Instant, PaneId)>,
+    /// What the bar is to say once the keys held have gone, which would
+    /// put it out if said before them.
+    said_after_held: Option<String>,
     /// The window's last `f`, `t`, `F` or `T`, which every pane it makes
     /// shares, so `;` and `,` find it again in any of them, as in Vim.
     finds: vim::Finds,
@@ -1437,6 +1440,10 @@ impl Desk {
         for chat in self.chats.values_mut() {
             chat.reconnected();
         }
+        // What terminals asked is forgotten, unanswered: the keys held for
+        // it go on now, in the panes they were typed for, before any
+        // pressed after.
+        self.type_macros();
         self.chats_offline(false);
         self.workspaces_changed(workspaces);
         self.watch_chats();
@@ -2099,26 +2106,30 @@ impl Desk {
         if self.ran_key(press) {
             return true;
         }
-        if let Some(chat) = self.focused_chat_mut() {
-            return chat.key(press) || had_message;
+        if self.focused_chat().is_some() {
+            return self.pane_key(press) || had_message;
         }
-        let redraw = self.terminal_key(press);
+        let redraw = self.pane_key(press);
         if let Some(terminal) = self.focused_terminal() {
             self.open_pane_link(terminal);
         }
         redraw || had_message
     }
 
-    /// Hands `press` to the focused terminal. A motion that went nowhere,
-    /// or a command refused, stops a macro or a binding, as Vim's beep
-    /// does; and is forgotten either way, so it can't stop one typed later.
-    /// Returns whether the pane must be redrawn.
-    pub(super) fn terminal_key(&mut self, press: &KeyPress<'_>) -> bool {
-        let Some(pane) = self.focused_pane() else {
+    /// Hands `press` to the focused chat or terminal. A motion that went
+    /// nowhere, or a command refused, stops a macro or a binding, as Vim's
+    /// beep does; and is forgotten either way, so it can't stop one typed
+    /// later. (A chat's yank or search fails once settled.) Returns whether
+    /// the pane must be redrawn.
+    pub(super) fn pane_key(&mut self, press: &KeyPress<'_>) -> bool {
+        let (redraw, failed) = if let Some(chat) = self.focused_chat_mut() {
+            (chat.key(press), chat.take_failed())
+        } else if let Some(pane) = self.focused_pane() {
+            (pane.key(press), pane.take_failed())
+        } else {
             return false;
         };
-        let redraw = pane.key(press);
-        if pane.take_failed() && self.frames_typing() {
+        if failed && self.frames_typing() {
             self.stop_macro(None);
         }
         redraw
@@ -9655,8 +9666,9 @@ mod tests {
         })));
         assert!(asked_to_copy(&mut desk));
         desk.answered(Response::Text("test".into()));
-        // Esc pressed gives up the wait, and the binding; but the search,
-        // asked already, still lands, as Vim's would have before the Esc.
+        // Esc pressed drops the binding, but waits for the search, asked
+        // already, which lands, as Vim's would have before the Esc; then
+        // Esc puts out what it lit.
         type_text(&mut desk, "0 c");
         desk.take_outbox();
         press(
@@ -9671,6 +9683,15 @@ mod tests {
         })));
         assert!(!asked_to_copy(&mut desk), "given up");
         assert_eq!(desk.panes[&TerminalId(1)].cursor_col(), Some(6), "landed");
+        let lit = desk.panes[&TerminalId(1)].highlights(24);
+        assert!(
+            lit.iter().all(|highlight| !matches!(
+                highlight.kind,
+                crate::render::HighlightKind::Match | crate::render::HighlightKind::OtherMatch
+            )),
+            "put out: {lit:?}"
+        );
+        assert!(!desk.holding());
         // A search failing after the binding was given up stops nothing
         // left over: keys after it go on.
         type_text(&mut desk, " s");
@@ -9721,6 +9742,82 @@ mod tests {
         // The answer come late moves nothing.
         desk.answered(Response::Found(None));
         assert_eq!(desk.panes[&TerminalId(1)].mode, Mode::Insert);
+    }
+
+    /// What the terminal sent its program since this was last asked.
+    fn sent_to_program(desk: &mut Desk) -> Vec<u8> {
+        (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Request(Request::SendInput { bytes, .. }) => Some(bytes),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn keys_waiting_for_a_terminals_answer_go_on_when_the_connection_starts_over() {
+        let mut desk = terminal_showing_cargo_test();
+        type_text(&mut desk, "/test");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        desk.take_outbox();
+        type_text(&mut desk, "ix");
+        assert!(desk.holding());
+        // What was asked is forgotten with the old connection: the keys go
+        // now, and one pressed after goes after them.
+        desk.connected(one_tab(pane(1)), false);
+        assert!(!desk.holding());
+        type_text(&mut desk, "y");
+        assert_eq!(sent_to_program(&mut desk), b"xy");
+    }
+
+    #[test]
+    fn keys_given_up_on_go_in_turn_with_what_a_binding_among_them_types() {
+        let mut desk = terminal_showing_cargo_test();
+        desk.lua_from(r#"client.keys.map("n", "<Space>u", "iX")"#);
+        type_text(&mut desk, "/test");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        desk.take_outbox();
+        // The binding's keys wait, and a key after it.
+        type_text(&mut desk, " u");
+        assert!(desk.holding());
+        // Pressed once it's waited too long: it goes after the binding's
+        // `iX`, in insert mode, as they were pressed.
+        let (since, pane) = desk.pane_wait.expect("waiting");
+        let since = since
+            .checked_sub(super::macros::PATIENCE)
+            .expect("an instant 5 s back");
+        desk.pane_wait = Some((since, pane));
+        type_text(&mut desk, "c");
+        assert!(!desk.holding());
+        assert_eq!(sent_to_program(&mut desk), b"Xc");
+        let said = desk.message.clone().unwrap_or_default();
+        assert!(said.contains("took too long"), "{said}");
+        // The same given up by the clock, with no key pressed after.
+        normal_mode(&mut desk);
+        type_text(&mut desk, "/test");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        desk.take_outbox();
+        type_text(&mut desk, " u");
+        let deadline = desk.editor_wakes().expect("woken to give up");
+        desk.tick_editors(deadline);
+        assert!(!desk.holding());
+        assert_eq!(sent_to_program(&mut desk), b"X");
     }
 
     #[test]

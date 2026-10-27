@@ -25,9 +25,14 @@ pub(super) const CHAT_WAITED: &str =
     "the keys typed waited too long for the chat: they and what they waited for were dropped";
 
 /// What the bar says of keys that waited too long for the daemon to answer
-/// a terminal's search: they go on without it.
+/// a terminal: they go on without it.
 pub(super) const TERMINAL_WAITED: &str =
-    "the daemon took too long to answer the search: the keys typed after it went on without it";
+    "the daemon took too long to answer the terminal: the keys typed went on without it";
+
+/// What the bar says of a macro, with no keys typed behind it, that waited
+/// too long for the daemon to answer a terminal.
+pub(super) const MACRO_WAITED: &str =
+    "the macro was stopped: the daemon took too long to answer the terminal";
 
 /// How a wait for a chat or a terminal is given up (see
 /// [`Desk::give_up_pane_wait`]).
@@ -223,17 +228,23 @@ impl Desk {
     /// [`editor::PATIENCE`]: crate::editor::PATIENCE
     pub(super) fn pane_wait_gives_up(&self) -> Option<std::time::Instant> {
         let (since, _) = self.pane_wait?;
-        let chat = self
+        let terminal = self
             .waited_terminal()
-            .is_some_and(|terminal| self.chats.contains_key(&terminal));
+            .is_some_and(|terminal| self.panes.contains_key(&terminal));
         Some(
             since
-                + if chat {
-                    crate::editor::PATIENCE
-                } else {
+                + if terminal {
                     super::macros::PATIENCE
+                } else {
+                    crate::editor::PATIENCE
                 },
         )
+    }
+
+    /// Whether the keys waiting wait for a terminal's answer, not a chat.
+    pub(super) fn waits_for_terminal(&self) -> bool {
+        self.waited_terminal()
+            .is_some_and(|terminal| self.panes.contains_key(&terminal))
     }
 
     /// Whether keys have waited for a chat or a terminal past its patience
@@ -247,15 +258,16 @@ impl Desk {
     /// any more. Returns whether the keys held go on, rather than being
     /// dropped.
     ///
-    /// - Esc pressed drops the keys held and what a chat queued; a
-    ///   terminal's search or block, already asked, still lands, as Vim's
-    ///   `/foo<CR>` does before the Esc after it.
+    /// - Esc pressed drops the keys held and what a chat queued. (A
+    ///   terminal's wait isn't given up by Esc: see `hold_while_waiting`.)
     /// - The focus leaving drops the keys, typed for that pane, and what
     ///   they waited for: a terminal's answer, when it comes, moves nothing.
     /// - Waiting too long drops a chat's keys and what they waited for, as
     ///   the bar says. A terminal's keys, which may be Ctrl+C for a program
-    ///   after `i`, go on now without the answer, which moves nothing when
-    ///   it comes, and the bar says so.
+    ///   after `i`, go on without the answer, which moves nothing when it
+    ///   comes, in turn with what a binding among them types, once
+    ///   [`type_macros`](Self::type_macros) hands them over; and the bar says
+    ///   so once they have.
     pub(super) fn give_up_pane_wait(&mut self, how: GiveUp) -> bool {
         let waited = self.waited_terminal();
         self.pane_wait = None;
@@ -266,18 +278,18 @@ impl Desk {
                 chat.view_mut().drop_reading();
                 said = (how == GiveUp::TooLong).then_some(CHAT_WAITED);
             } else if let Some(pane) = self.panes.get_mut(&terminal) {
-                if how != GiveUp::Cancelled {
-                    pane.drop_waiting();
-                }
+                pane.drop_waiting();
                 go_on = how == GiveUp::TooLong;
-                said = go_on.then_some(TERMINAL_WAITED);
             }
         }
         if go_on {
+            let said = if self.holding() {
+                TERMINAL_WAITED
+            } else {
+                MACRO_WAITED
+            };
             self.stop_macro(None);
-            // In the order they were pressed, now; those behind a search
-            // one of them asks wait for that.
-            while !self.pane_waits_to_settle() && self.have_held() {}
+            self.say_after_held(said.to_owned());
         } else {
             self.gave_up();
         }
