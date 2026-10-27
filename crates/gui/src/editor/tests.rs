@@ -505,20 +505,26 @@ fn a_search_being_typed_goes_on_from_where_it_started_after_the_text_is_replaced
     assert_eq!(setup.cursor(), (1, 4));
     // Read again, as when the file changes on disk: shown afresh in the new
     // text, from where it started.
-    let replaced = Daemon::new("one\ntwo\nthree dog\n").snapshot();
+    let text = format!("one\ntwo\n{}three dog\n", "x\n".repeat(40));
+    let replaced = Daemon::new(&text).snapshot();
     setup.editor.hold(&setup.copy);
     let mut heard = setup.copy.update(replaced);
     assert_eq!(heard, super::Heard::Replaced);
     setup.editor.heard(&mut heard, false, &mut setup.copy);
     setup.preview_search();
-    assert_eq!(setup.cursor(), (2, 6));
-    // Esc goes back there; Enter, typed again, searches from there.
+    assert_eq!(setup.cursor(), (42, 6));
+    setup.editor.settle(&setup.copy);
+    assert!(setup.view().0 > 0, "the view follows");
+    // Esc goes back there, the view following it, the view it started
+    // with being gone; Enter, typed again, searches from there.
     setup.keys("<Esc>");
+    setup.editor.settle(&setup.copy);
     assert_eq!(setup.cursor(), (1, 0));
+    assert!(setup.view().0 <= 1, "{:?}", setup.view());
     setup.keys("/dog");
     setup.preview_search();
     setup.keys("<CR>");
-    assert_eq!(setup.cursor(), (2, 6));
+    assert_eq!(setup.cursor(), (42, 6));
 }
 
 #[test]

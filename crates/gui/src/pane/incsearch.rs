@@ -10,8 +10,8 @@
 //! each key, and only once the answer to the last is in: never more than
 //! one in flight, however fast keys come, and an answer to what's no longer
 //! typed is dropped, the latest asked instead. Meanwhile what's typed is lit
-//! and the last match shown stays shown, so the view doesn't flicker back
-//! at each key. Nothing waits for these answers, as keys wait for a
+//! and the cursor and the view stay where the last answer put them, so they
+//! don't flicker back at each key. Nothing waits for these answers, as keys wait for a
 //! search's (see [`Pane::waits_for_answer`]).
 
 use clackatoo_protocol::{Match, Request};
@@ -75,6 +75,9 @@ impl Pane {
             return true;
         };
         let exact = self.case.exact(&typed);
+        // The last match shown isn't this one's: it's lit no more, though
+        // the view stays where it went till the answer comes.
+        self.found = None;
         self.matching = Some((typed.chars().collect(), exact));
         self.request(
             Request::Search {

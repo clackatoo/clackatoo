@@ -423,9 +423,10 @@ pub(crate) struct Editor {
     /// Extra rows drawn only while the view is between whole rows.
     pub(crate) scroll_extra: usize,
     left: usize,
-    /// The pane has been resized since the view last followed the cursor,
-    /// which the next settle does, as rows may have wrapped afresh.
-    resized: bool,
+    /// The view is to follow the cursor at the next settle: the pane has
+    /// been resized since it last did, as rows may have wrapped afresh, or
+    /// a view to put back was gone.
+    follow_due: bool,
     /// The cursor's line, when a page or `zt` put the view and the cursor
     /// in it where they go, `scrolloff` counted in whole lines as Vim's
     /// does: following the cursor then only keeps it in view, until it
@@ -774,7 +775,7 @@ impl Editor {
             top: Top { line: 0, cell: 0 },
             scroll_extra: 0,
             left: 0,
-            resized: false,
+            follow_due: false,
             view_placed: None,
             seen: None,
             kept: Kept::default(),
@@ -958,7 +959,7 @@ impl Editor {
     pub(crate) fn resize(&mut self, size: Size) {
         let (height, width) = (usize::from(size.rows()), usize::from(size.cols()));
         if (height, width) != (self.height, self.width) {
-            self.resized = true;
+            self.follow_due = true;
             self.view_placed = None;
         }
         if height != self.height {
@@ -5660,7 +5661,7 @@ impl Editor {
     /// Scrolls the view to keep the cursor in it, with `scrolloff` screen
     /// rows above and below it, short of the file's ends.
     fn follow(&mut self, copy: &BufferCopy) {
-        self.resized = false;
+        self.follow_due = false;
         // The gutter first: the rows' width depends on it.
         self.place_gutter(copy);
         let text = self.text(copy);
@@ -5915,7 +5916,7 @@ impl Editor {
         }
         self.settle_uses(copy);
         // The rows may have wrapped afresh, putting the cursor out of view.
-        if self.resized {
+        if self.follow_due {
             self.follow(copy);
         }
         self.place_gutter(copy);
