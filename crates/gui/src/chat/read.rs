@@ -615,11 +615,14 @@ impl ChatView {
                     }
                 }
             }
-            // Esc stops selecting, and lighting up the last search's
-            // matches, as `:nohlsearch` does.
+            // Esc leaves visual mode, keeping the last search's matches
+            // lit, as Vim's does; or else stops a mouse's selection and
+            // lighting them up, as `:nohlsearch` does.
             ChatKey::Escape => {
+                if self.visual().is_none() {
+                    self.stop_highlighting();
+                }
                 self.picked = None;
-                self.stop_highlighting();
             }
             ChatKey::Detail => {
                 if !self.toggle_detail() {

@@ -158,9 +158,9 @@ impl Desk {
         redraw
     }
 
-    /// `:nohlsearch`: the focused pane stops lighting up what its last
-    /// search matches: a chat's every match, an editor's or a terminal's
-    /// match found.
+    /// `:nohlsearch`: the focused pane, a chat, an editor or a terminal,
+    /// stops lighting up what its last search matches, the match found
+    /// and the rest, until the next search, `n` or `N`.
     pub(super) fn stop_highlighting(&mut self) {
         if let Some(chat) = self.focused_chat_mut() {
             chat.view_mut().stop_highlighting();

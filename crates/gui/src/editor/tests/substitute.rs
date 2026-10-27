@@ -881,3 +881,21 @@ fn s_and_g_light_their_patterns_matches_as_the_last_search() {
     setup.editor.preview(None, &setup.copy, &setup.shared);
     assert_eq!(others(&mut setup).len(), 2, "the preview put it back");
 }
+
+#[test]
+fn what_is_lit_follows_what_tilde_stands_for_as_n_does() {
+    let mut setup = Setup::new("ab\nZ\nb\n");
+    let others = |setup: &mut Setup| setup.highlighted(HighlightKind::OtherMatch);
+    run(&mut setup, "s/a/X/");
+    // `~` is the last replacement, X.
+    setup.keys("/~<CR>");
+    assert_eq!(setup.cursor(), (0, 0));
+    assert!(others(&mut setup).is_empty());
+    // A `:s` that finds nothing still makes Z the last replacement, and
+    // `~` its last search: Z is lit, where `n` goes.
+    setup.keys("G");
+    assert!(ex(&mut setup, "s/~/Z/").is_err());
+    assert_eq!(others(&mut setup), [(1, 4..5)]);
+    setup.keys("n");
+    assert_eq!(setup.cursor(), (1, 0));
+}

@@ -225,7 +225,9 @@ impl ChatView {
     /// The match the last search, `n` or `N` went to, while it's drawn:
     /// its block, by its place among those shown, and its bytes. Found
     /// again where it starts, which `n` can put inside the matches found
-    /// one after another from a line's start, as `/aa` in `aaaa` does.
+    /// one after another from a line's start, as `/aa` in `aaaa` does; and
+    /// none if the block's text has changed so that no match starts there,
+    /// or the place isn't in it at all, as when it's grown shorter.
     fn found_match(&self, pattern: &Pattern) -> Option<(usize, std::ops::Range<usize>)> {
         let found = self.search.found?;
         let index = self
@@ -233,6 +235,9 @@ impl ChatView {
             .iter()
             .position(|shown| shown.key == found.text)?;
         let text = self.text(found.text)?.text;
+        if !text.is_char_boundary(found.byte) {
+            return None;
+        }
         let hay = hlsearch::around(text, found.byte..found.byte);
         let at = found.byte.checked_sub(hay.start)?;
         let matched = (pattern.find_at(&text[hay.clone()], at))
@@ -319,6 +324,14 @@ impl ChatView {
         let start = layout.get(first)?.text_range().start;
         let stop = layout.get(end - 1)?.text_range().end;
         Some(start..stop)
+    }
+
+    /// Older turns, `count` of them, have come before those held: the
+    /// match the last search went to is in a turn numbered that many on.
+    pub(super) fn search_prepended(&mut self, count: usize) {
+        if let Some(found) = &mut self.search.found {
+            found.text.turn += count;
+        }
     }
 
     /// Takes how searches treat case, as the options say.
@@ -1203,8 +1216,13 @@ mod tests {
         read(&mut chat, "n");
         chat.settle(&mut fonts);
         assert_eq!(lit(&mut chat, &mut fonts), (1, 2));
-        // The one found stays the bright one, wherever the cursor goes.
+        // The one found stays the bright one, wherever the cursor goes;
+        // and Esc leaving visual mode keeps them all lit, as Vim's does.
         read(&mut chat, "w");
+        assert_eq!(lit(&mut chat, &mut fonts), (1, 2));
+        read(&mut chat, "vl");
+        read_named(&mut chat, NamedKey::Escape);
+        assert!(chat.visual().is_none());
         assert_eq!(lit(&mut chat, &mut fonts), (1, 2));
         // `n` finding the same pattern doesn't look for them again.
         let scans = || crate::hlsearch::SCANS.with(std::cell::Cell::get);
@@ -1226,6 +1244,43 @@ mod tests {
         chat.settle(&mut fonts);
         chat.stop_highlighting();
         assert!(chat.lit_matches().is_empty());
+    }
+
+    #[test]
+    fn the_match_found_follows_older_turns_coming_and_its_text_growing_shorter() {
+        use clackatoo_protocol::{ChatPatch, Node, Patch, View, ViewUpdate};
+        // Older turns come before those held: the match found is in a turn
+        // numbered on, and still the bright one.
+        let full = crate::chat::fixtures::long_chat(40);
+        let (mut chat, mut fonts) = reading(full.since_turn(Some(32)));
+        search(&mut chat, &mut fonts, "?Turn 39");
+        paint(&mut chat, &mut fonts);
+        let found = |chat: &ChatView| chat.lit_matches().iter().any(|lit| chat.found_at(lit));
+        assert!(found(&chat));
+        let turn = chat.search.found.unwrap().text.turn;
+        chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::History {
+            first: 24,
+            before: 32,
+            messages_before: 24,
+            turns: full.turns[24..32].to_vec(),
+        })]));
+        paint(&mut chat, &mut fonts);
+        assert_eq!(chat.search.found.unwrap().text.turn, turn + 8);
+        assert!(found(&chat));
+        // The text it's in grows shorter than where it was: nothing's lit
+        // there, and drawing doesn't fall over.
+        let (mut chat, mut fonts) = reading(talk(&[("x", "a long answer with a cat")]));
+        read(&mut chat, "gg");
+        search(&mut chat, &mut fonts, "/cat");
+        paint(&mut chat, &mut fonts);
+        assert!(found(&chat));
+        chat.apply(&ViewUpdate::Snapshot(View {
+            title: String::new(),
+            cwd: None,
+            root: Node::Chat(Box::new(talk(&[("x", "ok")]))),
+        }));
+        paint(&mut chat, &mut fonts);
+        assert!(!found(&chat));
     }
 
     #[test]

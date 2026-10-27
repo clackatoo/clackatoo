@@ -54,6 +54,11 @@ pub(crate) const MOST_BACKTRACKS: usize = if cfg!(test) { 500_000 } else { 8_000
 /// What the bar says of a search that gave up.
 pub(crate) const TOO_COMPLEX: &str = "too complex a pattern to search this file with";
 
+/// How many searches [`Pattern::matches_in`] makes for a span, at most, for
+/// each match it may light: matches before the span's range, which it
+/// passes over, count too.
+pub(crate) const MOST_TRIES: usize = 4;
+
 /// How a pattern's case is matched, unless `\c` or `\C` in it says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Matching {
@@ -441,6 +446,12 @@ impl Pattern {
     /// `text` as the next match is looked through, so the caller bounds the
     /// cost by what it hands in: a place to start a little before each
     /// range, and past the last only as far as a match from it could go.
+    ///
+    /// The spans go in order through the text, and the match one stopped
+    /// at, past its range, is the next's first if it starts after the
+    /// next's place: so spans sharing a text don't each look again to the
+    /// same match. And no more than [`MOST_TRIES`] times `most` searches
+    /// are made for a span, matches before its range included.
     pub(crate) fn matches_in(
         &self,
         text: &str,
@@ -456,12 +467,26 @@ impl Pattern {
                 .set(Some((text.as_ptr() as usize, text.len(), plain)));
         }
         let mut found = Vec::new();
+        // The match the last span stopped at, past its range; or none left
+        // in the text after the last span's place.
+        let mut ahead: Option<Option<Found>> = None;
         for (from, range) in spans {
             let mut at = from.min(text.len());
-            let mut lit = 0;
+            let (mut lit, mut tries) = (0, 0);
+            let mut first = ahead
+                .take()
+                .filter(|next| next.is_none_or(|next| next.start >= at));
             while lit < most {
-                let Some(next) = (self.find_at(text, at)).filter(|next| next.start < range.end)
-                else {
+                let next = match first.take() {
+                    Some(next) => next,
+                    None if tries < MOST_TRIES * most => {
+                        tries += 1;
+                        self.find_at(text, at)
+                    }
+                    None => break,
+                };
+                let Some(next) = next.filter(|next| next.start < range.end) else {
+                    ahead = Some(next);
                     break;
                 };
                 if next.end > next.start {
@@ -1384,6 +1409,27 @@ mod tests {
             };
         }
         found
+    }
+
+    #[test]
+    fn spans_share_the_match_one_stopped_at_and_each_tries_so_many_times() {
+        let finds = || FINDS.with(Cell::get);
+        // Fifty lines of `x`, then an `a`: the first line's search finds
+        // the `a`, past its range, and the rest take it from there.
+        let text = format!("{}a", "x\n".repeat(50));
+        let spans: Vec<_> = (0..50)
+            .map(|line| (2 * line, 2 * line..2 * line + 2))
+            .collect();
+        let pattern = Pattern::new("a", Matching::Exact, "", Words::NONE).unwrap();
+        let before = finds();
+        assert!(pattern.matches_in(&text, spans, 9).is_empty());
+        assert_eq!(finds() - before, 1);
+        // Matches before the range are passed over only so many times.
+        let text = "a".repeat(10_000);
+        let before = finds();
+        let lit = pattern.matches_in(&text, [(0, 9_990..10_000)], 9);
+        assert!(lit.is_empty());
+        assert_eq!(finds() - before, MOST_TRIES * 9);
     }
 
     #[test]

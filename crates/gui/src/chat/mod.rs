@@ -590,6 +590,7 @@ impl ChatView {
             .drain()
             .map(|((t, p, n), v)| ((t + count, p, n), v))
             .collect();
+        self.search_prepended(count);
         if let Some(cursor) = &mut self.cursor {
             cursor.text.turn += count;
         }

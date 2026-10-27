@@ -1827,14 +1827,17 @@ impl Editor {
         }
     }
 
-    /// Lights the matches of `pattern`, compiled from `source` matching
-    /// case as `matching` says, as the last search's, from now till Esc or
-    /// `:nohlsearch`.
-    fn light_matches(&mut self, pattern: &Pattern, source: &str, matching: Matching) {
+    /// Lights the matches of `source`, a pattern, matching case as
+    /// `matching` says, with `~` the last replacement, as the last
+    /// search's, from now till Esc or `:nohlsearch`. It's compiled only
+    /// once they're looked for.
+    fn light_matches(&mut self, source: &str, matching: Matching, shared: &Shared) {
+        let tilde = (shared.substituted.as_ref()).map_or("", |last| last.replacement.as_str());
         self.matching = Some(Lighting {
-            pattern: pattern.clone(),
             source: source.to_owned(),
             matching,
+            tilde: tilde.to_owned(),
+            compiled: std::cell::RefCell::new(None),
         });
     }
 
@@ -4455,7 +4458,7 @@ impl Editor {
             }
         };
         // Its matches are lit from now, found or not, as a chat's are.
-        self.light_matches(&compiled, &pattern, matching);
+        self.light_matches(&pattern, matching, shared);
         let (whole, len) = self.haystack(copy);
         let hay = &whole[..len];
         let text = self.text(copy);
@@ -6409,9 +6412,12 @@ impl Editor {
             return Vec::new();
         };
         let width = self.text_width();
+        let words = copy.words();
         let key = MatchesIn {
             text: (copy.buffer(), copy.revision()),
             search: (lighting.source.clone(), lighting.matching),
+            tilde: lighting.tilde.clone(),
+            words,
             tabstop: self.indent.tabstop,
             width,
             rows: (self.shown.iter())
@@ -6419,6 +6425,9 @@ impl Editor {
                 .collect(),
         };
         self.matches_kept.get(key, || {
+            let Some(pattern) = lighting.pattern(words) else {
+                return Vec::new();
+            };
             let rope = text.rope();
             let len = rope.len_bytes();
             let back = |byte: usize| rope.char_to_byte(rope.byte_to_char(byte.min(len)));
@@ -6469,7 +6478,7 @@ impl Editor {
                     let range = range.start - hay_start..range.end - hay_start;
                     (from - hay_start, range)
                 });
-                for found in lighting.pattern.matches_in(&hay, spans, MOST_LIT) {
+                for found in pattern.matches_in(&hay, spans, MOST_LIT) {
                     let matched = &hay[found.clone()];
                     let last = (matched.char_indices().next_back()).map_or(0, |(at, _)| at);
                     lit.push((
@@ -6750,21 +6759,42 @@ struct Compiled {
 /// compiled from: its source, and how it matches case.
 #[derive(Debug)]
 struct Lighting {
-    pattern: Pattern,
     source: String,
     matching: Matching,
+    /// What `~` in it stands for: the last replacement, as it was then.
+    tilde: String,
+    /// It compiled, with the words it was compiled for, or `None` if it
+    /// can't be: compiled only once its matches are first looked for, and
+    /// again if the file's words change, so `:g` running `:s` on every
+    /// line compiles nothing more for it.
+    compiled: std::cell::RefCell<Option<(Words, Option<Pattern>)>>,
+}
+
+impl Lighting {
+    /// It compiled for `words`, if it can be.
+    fn pattern(&self, words: Words) -> Option<Pattern> {
+        let mut compiled = self.compiled.borrow_mut();
+        if compiled.as_ref().is_none_or(|(was, _)| *was != words) {
+            let pattern = Pattern::new(&self.source, self.matching, &self.tilde, words).ok();
+            *compiled = Some((words, pattern));
+        }
+        compiled.as_ref().and_then(|(_, pattern)| pattern.clone())
+    }
 }
 
 /// What an editor's matches in view were found in (see
 /// [`Editor::matches_in_view`]): the text, as its buffer and revision,
-/// which search, as its pattern's source and how it matches case, how
-/// wide a tab and the text area are, and each row shown, as its line, its
-/// first cell and the next row's. So `n`, finding the same pattern again,
-/// doesn't look for them again.
+/// which search, as its pattern's source, how it matches case, what `~`
+/// stands for and the words it's compiled for; how wide a tab and the
+/// text area are; and each row shown, as its line, its first cell and the
+/// next row's. So `n`, finding the same pattern again, doesn't look for
+/// them again.
 #[derive(Debug, PartialEq, Eq)]
 struct MatchesIn {
     text: (BufferId, u64),
     search: (String, Matching),
+    tilde: String,
+    words: Words,
     tabstop: usize,
     width: usize,
     rows: Vec<(u64, usize, Option<usize>)>,
