@@ -1751,8 +1751,13 @@ impl App {
         let footer = view::footer(&self.state, node);
         if fresh || footer != page.shown_footer {
             // A form being filled in keeps what's filled in, as the rest
-            // of what's under the turns is drawn again.
-            let kept = kept_inputs(&page.footer);
+            // of what's under the turns is drawn again; not into another
+            // chat's, drawn afresh.
+            let kept = if fresh {
+                Vec::new()
+            } else {
+                kept_inputs(&page.footer)
+            };
             dom::replace_children(
                 &self.document,
                 &page.footer,
@@ -2280,7 +2285,8 @@ impl App {
         let Some(form) = self.form_asked(question) else {
             return;
         };
-        let answers = view::form_answers(&form, |id| self.input(id), |id| self.checked(id));
+        let answers =
+            view::form_answers(question, &form, |id| self.input(id), |id| self.checked(id));
         if let Some(why) = form.problem(&answers) {
             if let Some(line) = self.document.get_element_by_id(view::FORM_PROBLEM) {
                 line.set_text_content(Some(&format!("Can't submit yet: {why}")));

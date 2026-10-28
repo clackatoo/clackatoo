@@ -837,13 +837,15 @@ pub fn footer(state: &State, node: Option<&ChatNode>) -> Element {
     footer
 }
 
-/// The id of the input for field `field` of a form, option `option` of
-/// it if it's a field of choices.
+/// The id of the input for field `field` of the form question `question`
+/// asks, option `option` of it if it's a field of choices. The question is
+/// in it, so what's kept of one form as the page is drawn again never
+/// lands in the next.
 #[must_use]
-pub fn form_input(field: usize, option: Option<usize>) -> String {
+pub fn form_input(question: u64, field: usize, option: Option<usize>) -> String {
     match option {
-        Some(option) => format!("form-{field}-{option}"),
-        None => format!("form-{field}"),
+        Some(option) => format!("form-{question}-{field}-{option}"),
+        None => format!("form-{question}-{field}"),
     }
 }
 
@@ -878,7 +880,7 @@ fn form_card(question: u64, form: &Form) -> Element {
             .child(el("div").class("choices").child(open).child(decline));
     }
     for (index, field) in form.fields().iter().enumerate() {
-        card = card.child(form_field(index, field));
+        card = card.child(form_field(question, index, field));
     }
     let mut buttons = el("div").class("choices");
     if form.answerable() {
@@ -903,6 +905,7 @@ fn form_card(question: u64, form: &Form) -> Element {
 /// an input of an id holds, and `checked` whether it's ticked. A box left
 /// empty, and a field of several with none ticked, aren't answered.
 pub fn form_answers(
+    question: u64,
     form: &Form,
     value: impl Fn(&str) -> Option<String>,
     checked: impl Fn(&str) -> bool,
@@ -911,7 +914,7 @@ pub fn form_answers(
     for (index, field) in form.fields().iter().enumerate() {
         let picked = |options: &[clackatoo_protocol::FieldOption]| -> Vec<String> {
             (options.iter().enumerate())
-                .filter(|(option, _)| checked(&form_input(index, Some(*option))))
+                .filter(|(option, _)| checked(&form_input(question, index, Some(*option))))
                 .map(|(_, offered)| offered.value.clone())
                 .collect()
         };
@@ -922,13 +925,13 @@ pub fn form_answers(
             FieldInput::Many { options, .. } => Some(picked(options))
                 .filter(|picked| !picked.is_empty())
                 .map(FieldValue::Many),
-            FieldInput::Toggle { .. } => {
-                Some(FieldValue::Toggle(checked(&form_input(index, None))))
-            }
-            FieldInput::Text { .. } => (value(&form_input(index, None)))
+            FieldInput::Toggle { .. } => Some(FieldValue::Toggle(checked(&form_input(
+                question, index, None,
+            )))),
+            FieldInput::Text { .. } => (value(&form_input(question, index, None)))
                 .filter(|text| !text.trim().is_empty())
                 .map(FieldValue::Text),
-            FieldInput::Number { .. } => (value(&form_input(index, None)))
+            FieldInput::Number { .. } => (value(&form_input(question, index, None)))
                 .map(|text| text.trim().to_owned())
                 .filter(|text| !text.is_empty())
                 .map(FieldValue::Number),
@@ -941,7 +944,7 @@ pub fn form_answers(
 }
 
 /// Field `index` of a form, `field`, as the page's inputs.
-fn form_field(index: usize, field: &Field) -> Element {
+fn form_field(question: u64, index: usize, field: &Field) -> Element {
     let mut fieldset = el("fieldset").class("field");
     let mut legend = String::new();
     if let Some(title) = &field.title {
@@ -959,10 +962,10 @@ fn form_field(index: usize, field: &Field) -> Element {
     if !legend.trim().is_empty() && !matches!(field.input, FieldInput::Toggle { .. }) {
         fieldset = fieldset.child(el("legend").text(legend));
     }
-    let name = form_input(index, None);
+    let name = form_input(question, index, None);
     let choice =
         |kind: &'static str, option: usize, title: &str, note: Option<&String>, on: bool| {
-            let id = form_input(index, Some(option));
+            let id = form_input(question, index, Some(option));
             let mut input = el("input")
                 .attr("type", kind)
                 .attr("name", name.clone())
@@ -1897,10 +1900,16 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            ["form-0-0", "form-0-1", "form-1", "form-2", FORM_PROBLEM]
+            [
+                "form-3-0-0",
+                "form-3-0-1",
+                "form-3-1",
+                "form-3-2",
+                FORM_PROBLEM
+            ]
         );
         let typed = (drawn.find_all("type").into_iter())
-            .find(|element| element.get("id") == Some("form-1"))
+            .find(|element| element.get("id") == Some("form-3-1"))
             .and_then(|element| element.get("type"));
         assert_eq!(typed, Some("password"), "a secret is hidden as it's typed");
         let actions: Vec<&str> = (drawn.find_all("data-action").into_iter())
@@ -1911,9 +1920,10 @@ mod tests {
             [Action::Fill(3).encode(), Action::Decline(3).encode()]
         );
         let answers = form_answers(
+            3,
             &form,
-            |id| (id == "form-1").then(|| "s3cret".to_owned()),
-            |id| id == "form-0-1",
+            |id| (id == "form-3-1").then(|| "s3cret".to_owned()),
+            |id| id == "form-3-0-1",
         );
         assert_eq!(
             answers,
