@@ -702,8 +702,7 @@ impl Daemon {
             );
             let share = MAX_READ / unheard.len();
             for &(asked, end) in &unheard {
-                let quoted = head(turns[asked].prompt.lines().next().unwrap_or_default(), 80);
-                let whose = format!("your message {quoted:?}");
+                let whose = format!("your message \"{}\"", quote(&turns[asked].prompt));
                 text.push('\n');
                 text.push_str(&answer_text(turns, to, end, &whose, share));
                 text.push('\n');
@@ -817,6 +816,7 @@ impl Daemon {
         if self.tools.talk.finished.is_empty() {
             return;
         }
+        let mut later = Vec::new();
         for child in std::mem::take(&mut self.tools.talk.finished) {
             let Some(kid) = self.chat_ref(child) else {
                 continue;
@@ -824,7 +824,14 @@ impl Daemon {
             let Some(parent) = kid.relations().parent else {
                 continue;
             };
-            if self.chat_ref(parent).is_none() || !idle(kid) {
+            if self.chat_ref(parent).is_none() {
+                continue;
+            }
+            // Its card can say it failed while its turn is still ending,
+            // or it may have gone straight on: it's looked at again once
+            // it's idle.
+            if !idle(kid) {
+                later.push(child);
                 continue;
             }
             let waited = (self.tools.waiting.iter()).any(|waiting| {
@@ -850,6 +857,7 @@ impl Daemon {
             );
             self.notify(parent, sender, text);
         }
+        self.tools.talk.finished.extend(later);
     }
 
     /// Gives the chat `chat` a notice from clackatoo, `text`, about the
@@ -941,6 +949,17 @@ fn answers_to(turns: &[Turn], chat: TerminalId) -> Vec<(usize, usize)> {
             (asked, end)
         })
         .collect()
+}
+
+/// The first line of `prompt`, a message, to quote: at most 80 characters
+/// of it, ending in "…" if cut.
+fn quote(prompt: &str) -> String {
+    const MOST: usize = 80;
+    let line = prompt.lines().next().unwrap_or_default();
+    match line.char_indices().nth(MOST) {
+        Some((cut, _)) => format!("{}…", &line[..cut]),
+        None => line.to_owned(),
+    }
 }
 
 /// The answer turn `index` of the chat `to`'s `turns` gives to `whose`
@@ -1570,6 +1589,9 @@ mod tests {
         assert_eq!(head("héllo", 2), "h\n[the rest is cut off]");
         assert_eq!(tail("héllo", 4), "[the start is cut off]\nllo");
         assert_eq!(tail("abc", 4), "abc");
+        // A message's first line, quoted as a wait gives several answers.
+        assert_eq!(quote(&format!("{}\nmore", "é".repeat(80))), "é".repeat(80));
+        assert_eq!(quote(&"é".repeat(81)), format!("{}…", "é".repeat(80)));
     }
 
     // --- A PM agent running builders and reviewers (CLACKA-185, 186) ------
@@ -1855,15 +1877,12 @@ mod tests {
             "{}",
             inbox[0].text
         );
-        // It goes whatever the chats may do, as the next turn, framed as
-        // clackatoo's, and the chain of messages a was in goes on as it
-        // was.
+        // It goes whatever the chats may do, as the next turn.
         answers(&mut daemon, a, "done");
         daemon.relay_chats();
         let node = daemon.chat_ref(a).unwrap().node();
         assert_eq!(node.turns.len(), 2, "the notice is a turn");
         assert!(node.turns[1].prompt.starts_with("[chat 2 finished]"));
-        assert_eq!(daemon.chat_ref(a).unwrap().relations().hops, 0);
         // A chat waited for gets no notice: the wait gives the answer.
         answers(&mut daemon, a, "noted");
         let message = daemon.message_from(a, "again").unwrap();
@@ -1883,6 +1902,28 @@ mod tests {
             2,
             "no notice"
         );
+    }
+
+    /// A notice that starts a turn is no message between agents: the chain
+    /// of messages the chat was in goes on as it was, neither started
+    /// again nor one longer.
+    #[test]
+    fn a_notice_leaves_the_chain_of_messages_a_chat_is_in_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let pm = idle_chat(&mut daemon, 2);
+        let third = Message {
+            hops: 3,
+            ..message(a.0, "lead the builders")
+        };
+        drop(daemon.chat(pm).unwrap().deliver(third).unwrap());
+        let builder = building(&mut daemon, 3, pm);
+        answers(&mut daemon, pm, "started a builder");
+        finishes(&mut daemon, builder, "built it");
+        daemon.relay_chats();
+        let node = daemon.chat_ref(pm).unwrap().node();
+        assert!(node.turns[1].prompt.starts_with("[chat 3 finished]"));
+        assert_eq!(daemon.chat_ref(pm).unwrap().relations().hops, 3);
     }
 
     /// A turn the user had with a chat an agent started is the user's: the
