@@ -297,6 +297,10 @@ struct App {
     term_page: Option<TermPage>,
     /// When the app looks again at whether keys go, if it's to.
     check_at: f64,
+    /// The form question shown, by its chat and number, and when it came,
+    /// in milliseconds: for [`FORM_PAUSE`] after, its buttons don't answer
+    /// it, as a tap meant for what was there before mustn't.
+    form_since: Option<(TerminalId, u64, f64)>,
     /// When the chat shown is next drawn for its seconds to count, while
     /// its agent works, in milliseconds since the Unix epoch.
     count_at: f64,
@@ -397,6 +401,7 @@ pub(crate) fn start() {
             page: None,
             term_page: None,
             check_at: 0.0,
+            form_since: None,
             count_at: 0.0,
             pressed: None,
             refits: 0,
@@ -500,6 +505,10 @@ fn listen_for_chat_input(root: &DomElement) {
         }
     });
 }
+
+/// How long after a form comes, in milliseconds, before its buttons answer
+/// it, as in the window.
+const FORM_PAUSE: f64 = 500.0;
 
 /// What's filled in in `within`'s inputs, by their ids: each one's value
 /// and whether it's ticked.
@@ -1699,6 +1708,7 @@ impl App {
 
     /// Draws what changed in the chat shown.
     fn draw_chat(&mut self, now: u64) {
+        self.note_form_shown();
         let Some(open) = &self.state.open else {
             return;
         };
@@ -2296,9 +2306,29 @@ impl App {
         self.answer_form(question, FormReply::Accept(answers));
     }
 
+    /// Notes when the form question shown came, if it's a new one.
+    fn note_form_shown(&mut self) {
+        let asked = self.state.open.as_ref().and_then(|open| {
+            let question = open.view.as_ref()?.chat()?.question.as_ref()?;
+            question.form.is_some().then_some((open.id, question.id))
+        });
+        if asked != self.form_since.map(|(chat, question, _)| (chat, question)) {
+            self.form_since = asked.map(|(chat, question)| (chat, question, js_sys::Date::now()));
+        }
+    }
+
     /// Answers the form question `question` asks with `reply`, if it's
-    /// still the one asked.
+    /// still the one asked, and came long enough ago.
     fn answer_form(&mut self, question: u64, reply: FormReply) {
+        let just = self.form_since.is_some_and(|(_, asked, since)| {
+            asked == question && js_sys::Date::now() - since < FORM_PAUSE
+        });
+        if just {
+            if let Some(line) = self.document.get_element_by_id(view::FORM_PROBLEM) {
+                line.set_text_content(Some("A question just came: tap again to answer it."));
+            }
+            return;
+        }
         if self.form_asked(question).is_some() {
             self.state
                 .chat(ChatAction::Fill { question, reply }, "answering");

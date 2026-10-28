@@ -864,6 +864,22 @@ fn form_card(question: u64, form: &Form) -> Element {
             .children(markdown::render(&form.message)),
     );
     if let FormAsk::Url(url) = &form.ask {
+        let decline = el("button")
+            .class("reject")
+            .action(&Action::Decline(question))
+            .text("Decline");
+        // Checked here too, with the filter links in Markdown have: the
+        // daemon that sent it may not be this one. Where it goes is said
+        // on a line of its own, so a long link can't hide it.
+        let Some(host) = clackatoo_protocol::url_host(url) else {
+            return card
+                .child(
+                    el("p")
+                        .class("failed")
+                        .text("The link isn't one this page opens."),
+                )
+                .child(el("div").class("choices").child(decline));
+        };
         let open = el("a")
             .class("button allow")
             .attr("href", url.clone())
@@ -871,12 +887,14 @@ fn form_card(question: u64, form: &Form) -> Element {
             .attr("rel", "noopener noreferrer")
             .action(&Action::OpenLink(question))
             .text("Open the link");
-        let decline = el("button")
-            .class("reject")
-            .action(&Action::Decline(question))
-            .text("Decline");
         return card
+            .child(
+                el("p")
+                    .text("Goes to ")
+                    .child(el("code").text(host.to_owned())),
+            )
             .child(el("p").child(el("code").text(url.clone())))
+            .child(el("p").class("failed").attr("id", FORM_PROBLEM))
             .child(el("div").class("choices").child(open).child(decline));
     }
     for (index, field) in form.fields().iter().enumerate() {
@@ -1934,6 +1952,36 @@ mod tests {
             ]
         );
         assert_eq!(form.problem(&answers), None);
+    }
+
+    #[test]
+    fn a_link_is_shown_with_where_it_goes_and_only_a_web_one_opens() {
+        use clackatoo_protocol::{Form, FormAsk};
+        let card = |url: &str| {
+            let node = ChatNode {
+                question: Some(Question {
+                    id: 2,
+                    title: "open a link".into(),
+                    choices: Vec::new(),
+                    own: false,
+                    form: Some(Form {
+                        message: "Sign in".into(),
+                        ask: FormAsk::Url(url.into()),
+                    }),
+                    plan: None,
+                }),
+                ..ChatNode::default()
+            };
+            footer(&State::default(), Some(&node))
+        };
+        let good = card("https://example.com/oauth?state=1");
+        assert!(good.all_text().contains("Goes to example.com"));
+        assert_eq!(good.find_all("href").len(), 1);
+        for bad in ["javascript:alert(1)", "https://me@evil.example/"] {
+            let drawn = card(bad);
+            assert!(drawn.find_all("href").is_empty(), "{bad}");
+            assert!(drawn.all_text().contains("isn't one this page opens"));
+        }
     }
 
     #[test]
