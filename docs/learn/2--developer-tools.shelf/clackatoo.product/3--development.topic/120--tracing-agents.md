@@ -17,7 +17,7 @@ Start the daemon with `CLACKATOO_ACP_TRACE` set to a directory:
 
 Every agent the daemon starts from then on writes to a new file of its own there, named for the agent and the adapter's process ID, as `claude-12345.log`. A chat whose agent stops and starts again gets a new file. A file is never added to: if the name is taken, as when a process ID comes round again, the trace goes to `claude-12345.log.2`, `.3` and so on.
 
-The directory is made if it isn't there, readable by you only, and each file is readable by you only. The daemon traces nowhere if the directory isn't yours, if anyone else may write in it, or if it's a symbolic link, and the log says why. Files are made in it directly, never through a link.
+The directory is made if it isn't there, readable by you only, and each file is readable by you only. A directory of your own that others may read, as one made `0755`, is fine: they can see the files' names, not what's in them. The daemon traces nowhere if the directory isn't yours, if anyone else may write in it, or if it's a symbolic link, and the log says why. Files are made in it directly, never through a link.
 
 Each line is one message or one line the adapter wrote to stderr:
 
@@ -29,10 +29,12 @@ The time is in UTC. `->` is what clackatoo sent, `<-` what the adapter sent, and
 
 A trace is meant to be shareable, so obvious secrets are replaced by `[redacted]`:
 
-- the string values of fields named for keys, tokens, passwords, secrets, cookies and credentials (counts like `inputTokens` stay);
+- the string values of fields named for keys, tokens, passwords, secrets, cookies and credentials, told by the words in their names (`api_key`, `refreshToken`); a token to go on from, as `nextPageToken`, stays, as do `tokenizer` and counts like `inputTokens`;
 - every value of an MCP server's environment and headers (their names stay);
 - bearer tokens, and API keys by their prefixes, such as `sk-`, `ghp_` and `xoxb-`, wherever they start a word, as in `OPENAI_API_KEY=sk-…`;
-- the values of assignments and URL query parameters named for secrets, as `GITHUB_TOKEN=…`, `?token=…` or `&api_key=…`.
+- the values of names for secrets given one in text: `GITHUB_TOKEN=…`, `?token=…`, `api_key: …`, `"password": "…"`, and `Authorization: Basic …`, whose scheme stays.
+
+API keys known by their prefixes are Anthropic's and OpenAI's (`sk-`), GitHub's (`ghp_`, `gho_`, `ghs_`, `ghu_`, `github_pat_`), GitLab's (`glpat-`), Slack's (`xoxb-`, `xoxp-`), AWS's access keys (`AKIA`) and Google's API keys (`AIza`).
 
 This is a safety net, not a guarantee: files' text and your messages are in a trace as they were sent, so read one before you share it.
 
