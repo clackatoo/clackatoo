@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.10.93 (2026-10-28)
+
+### Features
+
+- send the agent's plan to windows in the chat's view (CLACKA-190) (02698967)
+- show the agent's plan above the chat's box, and on the phone (CLACKA-190) (321747e9)
+
+### Fixes
+
+- review of the agent's plan (CLACKA-190) (b38420fe)
+
 ## 2026.10.92 (2026-10-28)
 
 ### Features
