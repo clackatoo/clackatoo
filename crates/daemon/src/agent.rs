@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::io;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
@@ -142,6 +143,13 @@ pub(crate) enum Incoming {
     /// Work the agent runs in the background of a session started,
     /// changed or ended (see [`Task`]).
     Task { session: String, task: Task },
+    /// What tools found, as Claude Code's adapter forwards the raw messages
+    /// it hands the model: by the tool call, the text to show (see
+    /// [`tool_results`]).
+    ToolResults {
+        session: String,
+        results: Vec<(String, String)>,
+    },
     /// The agent answered asking it to stop task `task` of the chat in
     /// `terminal`: whether it stopped it, or why it couldn't say.
     TaskStopped {
@@ -366,9 +374,12 @@ impl Agent {
     ) {
         let mut params = session_params(cwd, opening);
         // As AIR, Claude Code's adapter keeps the words and thinking of its
-        // own subagents to itself unless asked for them.
+        // own subagents to itself unless asked for them, and what a read or
+        // a search of files found: that comes in the raw messages it hands
+        // the model, which it forwards, those of the user's side, if asked.
         if self.tasks {
             params["_meta"]["claudeCode"]["options"]["forwardSubagentText"] = true.into();
+            params["_meta"]["claudeCode"]["emitRawSDKMessages"] = json!([{ "type": "user" }]);
         }
         // Before the agent has said what it can, it's asked to load, and
         // that's changed as it says, if it can't (see `cannot_load`).
@@ -686,6 +697,10 @@ impl Agent {
             (Some(method), None) => {
                 if method == "_clackatoo/login_required" && self.name() == "agent antigravity" {
                     self.peer.require_login();
+                } else if method == "_claude/sdkMessage" {
+                    if let Some((session, results)) = tool_results(&message.params) {
+                        incoming.push(Incoming::ToolResults { session, results });
+                    }
                 } else if method == "session/update" {
                     // Not ACP's own, so its schema doesn't know them.
                     if let Some((session, task)) = task(&message.params) {
@@ -1084,6 +1099,118 @@ fn listed(result: &Value) -> Vec<Listed> {
     listed.sort_by(|a, b| b.updated.cmp(&a.updated));
     listed.truncate(MOST_LISTED);
     listed
+}
+
+/// The most bytes of what a tool found kept, as clackatoo's chats keep
+/// more of no tool's output.
+const MOST_RESULT: usize = 64 * 1024;
+
+/// The session and what its tools found, by the tool call, if `params`,
+/// a `_claude/sdkMessage`'s, hold a raw message of the user's side with
+/// tool results: as text to show, as Claude Code's adapter shows them to a
+/// client that isn't AIR. A read of text is its lines, numbered, from the
+/// structured result, which leaves out what's only for the model; any
+/// other result is its text, without `<system-reminder>`s. Each is fenced
+/// as code.
+fn tool_results(params: &Value) -> Option<(String, Vec<(String, String)>)> {
+    let session = params.get("sessionId")?.as_str()?;
+    let message = params.get("message")?;
+    if message.get("type")?.as_str()? != "user" {
+        return None;
+    }
+    let blocks = message.pointer("/message/content")?.as_array()?;
+    let results: Vec<&Value> = (blocks.iter())
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .take(64)
+        .collect();
+    // The structured result is one tool's: of the only one.
+    let structured = message
+        .get("tool_use_result")
+        .filter(|_| results.len() == 1);
+    let found: Vec<(String, String)> = (results.iter())
+        .filter_map(|result| {
+            let id = result.get("tool_use_id")?.as_str()?;
+            if id.is_empty() || id.len() > MOST_TASK_ID {
+                return None;
+            }
+            let text = structured
+                .and_then(numbered_read)
+                .or_else(|| result_text(result.get("content")?))?;
+            Some((id.to_owned(), fenced(&text)))
+        })
+        .collect();
+    (!found.is_empty()).then(|| (session.to_owned(), found))
+}
+
+/// The lines a read of text found, numbered from where it started, as
+/// Claude Code's adapter shows them, if `structured` is such a read's.
+fn numbered_read(structured: &Value) -> Option<String> {
+    if structured.get("type")?.as_str()? != "text" {
+        return None;
+    }
+    let file = structured.get("file")?;
+    let content = file.get("content")?.as_str()?;
+    if content.is_empty() {
+        return None;
+    }
+    let start = file.get("startLine").and_then(Value::as_u64).unwrap_or(1);
+    let content = &content[..floor(content, MOST_RESULT)];
+    let mut numbered = String::with_capacity(content.len() + content.len() / 8);
+    for (at, line) in (content.strip_suffix('\n').unwrap_or(content).split('\n')).enumerate() {
+        if at > 0 {
+            numbered.push('\n');
+        }
+        let _ = write!(numbered, "{}\t{line}", start + at as u64);
+    }
+    Some(numbered)
+}
+
+/// A tool result's text, without what's only for the model, if it has any.
+fn result_text(content: &Value) -> Option<String> {
+    let mut text = match content {
+        Value::String(text) => text[..floor(text, MOST_RESULT)].to_owned(),
+        Value::Array(blocks) => {
+            let mut joined = String::new();
+            for block in blocks.iter().take(64) {
+                if let Some(part) = block.get("text").and_then(Value::as_str)
+                    && joined.len() < MOST_RESULT
+                {
+                    joined.push_str(&part[..floor(part, MOST_RESULT - joined.len())]);
+                }
+            }
+            joined
+        }
+        _ => return None,
+    };
+    while let Some(start) = text.find("<system-reminder>") {
+        let end = text[start..]
+            .find("</system-reminder>")
+            .map_or(text.len(), |end| start + end + "</system-reminder>".len());
+        text.replace_range(start..end, "");
+    }
+    let text = text.trim_end();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// `text` as a fenced code block, with a fence longer than any it holds.
+fn fenced(text: &str) -> String {
+    let mut fence = "```".to_owned();
+    for line in text.lines() {
+        let ticks = line.len() - line.trim_start_matches('`').len();
+        while ticks >= fence.len() {
+            fence.push('`');
+        }
+    }
+    format!("{fence}\n{text}\n{fence}")
+}
+
+/// The most of `text`, up to `most` bytes, that ends on a character.
+fn floor(text: &str, most: usize) -> usize {
+    let mut at = most.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
 }
 
 /// The session and what it says, if `params`, a `session/update`'s, say

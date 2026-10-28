@@ -1239,6 +1239,16 @@ impl Daemon {
                 }
                 id
             }
+            Incoming::ToolResults { session, results } => {
+                let Some((id, chat)) = self.chat_in(name, &session) else {
+                    return;
+                };
+                if chat.loading() || chat.skipping() || (gone && !chat.is_connected()) {
+                    return;
+                }
+                chat.tool_results(results);
+                id
+            }
             Incoming::TaskStopped {
                 terminal,
                 task,

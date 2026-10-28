@@ -2363,6 +2363,25 @@ impl HostedChat {
         None
     }
 
+    /// Shows what tools found, `results`, by the tool call, in those of the
+    /// turn being answered that read or search files and show nothing of
+    /// it: Claude Code's adapter, to a client that asks as AIR does, says
+    /// such a tool ended without what it found (see
+    /// `agent::tool_results`).
+    pub(crate) fn tool_results(&mut self, results: Vec<(String, String)>) {
+        for (id, text) in results {
+            let Some(tool) = self.tool(&id).filter(|tool| {
+                matches!(tool.kind, ToolKind::Read | ToolKind::Search)
+                    && !(tool.content.iter()).any(|content| matches!(content, ToolContent::Text(_)))
+            }) else {
+                continue;
+            };
+            let mut tool = tool.clone();
+            tool.content.push(ToolContent::Text(clean_text(&text)));
+            self.set_tool(tool);
+        }
+    }
+
     /// Notes the changes to files in `content`, which tool `id` shows,
     /// if it shows any, in place of what it showed before.
     fn note_diffs(&mut self, id: &str, content: &[ToolCallContent]) {

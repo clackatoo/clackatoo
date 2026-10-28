@@ -29,6 +29,7 @@
 //! | `wake` | Says `started` and ends its turn; 300 ms later takes a turn by itself, as Claude Code does when something it ran in the background ends: runs `git commit` and says `committed`. To a client that asked for AIR's `asyncTasks`, it says the turn starts and ends, as a task of kind `turn` |
 //! | `wake-wait` | As `wake`, but its turn goes on, saying `working`, until it's cancelled: then it says `late` as words in flight would, and that the turn stopped |
 //! | `wake-missed` | As `wake`, to a client that asked for AIR's `asyncTasks`, but as if what said the turn started went missing: it runs `git commit`, says `committed`, and says task `autonomous-turn-9` completed |
+//! | `look` | Reads `notes.txt` and searches for `needle`, as Claude Code's adapter says them to a client that asks as AIR does: each ends with nothing of what it found, which, if the session asked for raw messages (`_meta.claudeCode.emitRawSDKMessages`), comes before in a `_claude/sdkMessage`; then `done` |
 //! | anything else | `echo:` and the message, in two pieces |
 //!
 //! Asked to stop a task (`_session/async_task/stop`), it says it stopped
@@ -1064,6 +1065,55 @@ impl Fake {
                     }
                     say(&session, "working\n");
                 });
+            }
+            "look" => {
+                let raw = (self.meta.get(&session))
+                    .and_then(|meta| meta.pointer("/claudeCode/emitRawSDKMessages"))
+                    .is_some_and(Value::is_array);
+                let found = [
+                    (
+                        "r1",
+                        "Read notes.txt",
+                        "read",
+                        json!(
+                            "1\thello\n2\tworld\n<system-reminder>for the model</system-reminder>"
+                        ),
+                        json!({ "type": "text", "file": { "content": "hello\nworld\n", "startLine": 3 } }),
+                    ),
+                    (
+                        "r2",
+                        "grep \"needle\"",
+                        "search",
+                        json!([{ "type": "text", "text": "a.txt:2:needle\n<system-reminder>x</system-reminder>" }]),
+                        json!({ "mode": "content" }),
+                    ),
+                ];
+                for (tool, title, kind, content, structured) in found {
+                    update(
+                        &session,
+                        &json!({ "sessionUpdate": "tool_call", "toolCallId": tool, "title": title,
+                                 "kind": kind, "status": "in_progress" }),
+                    );
+                    if raw {
+                        send(
+                            &json!({ "jsonrpc": "2.0", "method": "_claude/sdkMessage", "params": {
+                            "sessionId": session,
+                            "message": { "type": "user", "parent_tool_use_id": null,
+                                "message": { "role": "user", "content": [
+                                    { "type": "tool_result", "tool_use_id": tool, "content": content },
+                                ] },
+                                "tool_use_result": structured },
+                        } }),
+                        );
+                    }
+                    update(
+                        &session,
+                        &json!({ "sessionUpdate": "tool_call_update", "toolCallId": tool,
+                                 "status": "completed" }),
+                    );
+                }
+                say(&session, "done\n");
+                done(&id, "end_turn");
             }
             "wake-missed" => {
                 say(&session, "started\n");

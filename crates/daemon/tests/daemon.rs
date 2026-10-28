@@ -2766,6 +2766,32 @@ fn a_background_task_never_runs_on_after_its_agent_stops() {
 }
 
 #[test]
+fn what_claude_codes_reads_and_searches_found_shows_though_it_is_asked_as_air() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let node = ask(&mut client, chat, "look");
+    let shown = |id: &str| -> Vec<ToolContent> {
+        (node.turns.last().unwrap().items.iter())
+            .find_map(|item| match item {
+                Item::Tool(tool) if tool.id == id => Some(tool.content.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    // A read's lines, numbered from where it read, as Claude Code's
+    // adapter numbers them; nothing that was only for the model.
+    assert_eq!(
+        shown("r1"),
+        [ToolContent::Text("```\n3\thello\n4\tworld\n```".into())]
+    );
+    assert_eq!(
+        shown("r2"),
+        [ToolContent::Text("```\na.txt:2:needle\n```".into())]
+    );
+}
+
+#[test]
 fn only_claude_code_is_asked_for_its_background_tasks() {
     // Codex's adapter would leave out its commands' output for a client
     // that asks as AIR does.
@@ -11697,6 +11723,9 @@ fn claude_code_keeps_its_task_tool_unless_the_chat_starts_without_it() {
     // Asked for its background tasks, it's asked for its subagents' words
     // too, as AIR's adapter keeps them otherwise.
     let forward = true;
+    // And for the raw messages of the user's side, which hold what its
+    // reads and searches found.
+    let raw = serde_json::json!([{ "type": "user" }]);
 
     let with = start_new_chat(&mut client, new(AgentTools::Ask, true));
     let meta = session_meta(&mut client, with);
@@ -11704,7 +11733,7 @@ fn claude_code_keeps_its_task_tool_unless_the_chat_starts_without_it() {
         meta,
         serde_json::json!({ "claudeCode": { "options": {
             "allowedTools": allowed, "forwardSubagentText": forward,
-        } } })
+        }, "emitRawSDKMessages": raw } })
     );
 
     let without = start_new_chat(&mut client, new(AgentTools::Ask, false));
@@ -11718,12 +11747,12 @@ fn claude_code_keeps_its_task_tool_unless_the_chat_starts_without_it() {
         session_meta(&mut client, bare),
         serde_json::json!({ "claudeCode": { "options": {
             "disallowedTools": disallowed, "forwardSubagentText": forward,
-        } } })
+        }, "emitRawSDKMessages": raw } })
     );
     let plain = start_new_chat(&mut client, new(AgentTools::Off, true));
     assert_eq!(
         session_meta(&mut client, plain),
-        serde_json::json!({ "claudeCode": { "options": { "forwardSubagentText": forward } } })
+        serde_json::json!({ "claudeCode": { "options": { "forwardSubagentText": forward }, "emitRawSDKMessages": raw } })
     );
 
     // The session opened again, as after the agent stops, is opened the
@@ -16394,6 +16423,71 @@ fn a_real_agent_lists_the_sessions_it_kept() {
     let mut client = daemon.client();
     let listed = sessions(&mut client, 1, "claude", &scratch);
     assert_eq!(listed, Ok(Vec::new()), "a new folder has none");
+}
+
+/// What Claude Code's Read finds shows in its row, though clackatoo asks
+/// its adapter as AIR does, which leaves it out: it comes from the raw
+/// messages the adapter forwards. So would a Grep's or a Glob's, which
+/// Claude Code 2.1.310 has none of in a session of its SDK: it searches
+/// with Bash, whose output shows anyway. As
+/// [`a_real_agent_answers_and_asks_before_running_commands`].
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agents_reads_and_searches_show_what_they_found() {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
+    };
+    let daemon = TestDaemon::start_with_agent(|_| {
+        ["env", "ANTHROPIC_MODEL=haiku"]
+            .into_iter()
+            .chain(command.split_whitespace())
+            .map(Into::into)
+            .collect()
+    });
+    let notes = daemon.dir.path().join("notes.txt");
+    std::fs::write(&notes, "alpha\nbeta needle\n").unwrap();
+    let mut client = daemon.client();
+    client.new_workspace(None, new_chat()).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minute = Duration::from_mins(1);
+    wait_for_chat_for(&mut client, chat, minute, |node| {
+        node.state == ChatState::Ready
+    });
+    let dir = daemon.dir.path().display();
+    let text = format!(
+        "One at a time: use the Read tool on {}, then the Grep tool for the pattern needle in \
+         {dir}, then the Glob tool for *.txt in {dir}. If a tool isn't available, skip it. Then \
+         reply with the single word done.",
+        notes.display()
+    );
+    client.chat(chat, ChatAction::Send(text)).unwrap();
+    let node = wait_for_chat_for(&mut client, chat, Duration::from_mins(2), |node| {
+        last_outcome(node).is_some()
+    });
+    let tools: Vec<&Tool> = (node.turns.last().unwrap().items.iter())
+        .filter_map(|item| match item {
+            Item::Tool(tool) if matches!(tool.kind, ToolKind::Read | ToolKind::Search) => {
+                Some(tool)
+            }
+            _ => None,
+        })
+        .filter(|tool| tool.status == ToolStatus::Done)
+        .collect();
+    let read = (tools.iter()).find(|tool| tool.kind == ToolKind::Read);
+    assert!(read.is_some(), "{node:#?}");
+    for tool in tools {
+        let text: String = (tool.content.iter())
+            .filter_map(|content| match content {
+                ToolContent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text.contains("needle") || text.contains("notes.txt"),
+            "{} shows nothing it found: {tool:#?}",
+            tool.title
+        );
+    }
 }
 
 /// A shell Claude Code runs in the background shows in the chat while it
