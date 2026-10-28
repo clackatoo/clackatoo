@@ -2185,7 +2185,7 @@ impl Desk {
         // Vim's beep does.
         let failed = self
             .focused_list_mut()
-            .is_some_and(|list| list.take_failed());
+            .is_some_and(crate::vim::list::Searched::take_failed);
         if failed && self.frames_typing() {
             self.stop_macro(None);
         }

@@ -536,14 +536,10 @@ pub(crate) fn preview<P: Searcher>(pane: &mut P) -> bool {
         return true;
     }
     let last = Last::typed(typed, backward);
-    let search = pane.search();
-    search.found = None;
-    let lit = match pane.compile(&last) {
-        Ok(lit) => lit,
-        Err(_) => {
-            pane.search().lit = None;
-            return true;
-        }
+    pane.search().found = None;
+    let Ok(lit) = pane.compile(&last) else {
+        pane.search().lit = None;
+        return true;
     };
     let search = pane.search();
     search.lit = Some(lit.clone());
@@ -564,7 +560,11 @@ pub(crate) fn preview<P: Searcher>(pane: &mut P) -> bool {
     if let Some(typing) = &mut pane.search().typing {
         typing.start = Some(started);
     }
-    shown(pane, finding);
+    match finding {
+        Finding::Found { at, .. } => shown(pane, Some(at)),
+        Finding::Missed(_) => shown(pane, None),
+        Finding::Asked => {}
+    }
     true
 }
 
@@ -573,7 +573,7 @@ pub(crate) fn preview<P: Searcher>(pane: &mut P) -> bool {
 pub(crate) fn previewed<P: Searcher>(
     pane: &mut P,
     query: &str,
-    finding: Finding<<P::Kinds as Kinds>::Found>,
+    found: Option<<P::Kinds as Kinds>::Found>,
 ) {
     let Some(typing) = &pane.search().typing else {
         return;
@@ -581,25 +581,21 @@ pub(crate) fn previewed<P: Searcher>(
     if typing.line.text() != query || typing.previewed.as_deref() != Some(query) {
         return;
     }
-    shown(pane, finding);
+    shown(pane, found);
 }
 
 /// Shows what a preview found: the cursor goes to the match, or with none,
 /// back where the search started, its matches still lit.
-fn shown<P: Searcher>(pane: &mut P, finding: Finding<<P::Kinds as Kinds>::Found>) {
-    match finding {
-        Finding::Found { at, .. } => {
-            pane.search().found = Some(at);
-            pane.go(at);
-        }
-        Finding::Missed(_) => {
-            let lit = pane.search().lit.take();
-            put_back_kept(pane);
-            let search = pane.search();
-            (search.lit, search.found) = (lit, None);
-        }
-        Finding::Asked => {}
+fn shown<P: Searcher>(pane: &mut P, found: Option<<P::Kinds as Kinds>::Found>) {
+    if let Some(at) = found {
+        pane.search().found = Some(at);
+        pane.go(at);
+        return;
     }
+    let lit = pane.search().lit.take();
+    put_back_kept(pane);
+    let search = pane.search();
+    (search.lit, search.found) = (lit, None);
 }
 
 #[cfg(test)]
@@ -857,31 +853,17 @@ mod tests {
         assert!(!preview(&mut pane));
         pane.0.asked.clear();
         // The answer to what's no longer typed is dropped.
-        previewed(
-            &mut pane,
-            "ab",
-            Finding::Found {
-                at: 9,
-                wrapped: false,
-            },
-        );
+        previewed(&mut pane, "ab", Some(9));
         assert_eq!(pane.0.cursor, 5);
         assert!(preview(&mut pane));
-        previewed(
-            &mut pane,
-            "abc",
-            Finding::Found {
-                at: 9,
-                wrapped: false,
-            },
-        );
+        previewed(&mut pane, "abc", Some(9));
         assert_eq!(pane.0.cursor, 9);
         // Meanwhile the next stays where the last put it.
         pane.0.asked.clear();
         key(&mut pane, Stroke::char('d'));
         preview(&mut pane);
         assert_eq!((pane.0.cursor, pane.0.top), (9, 9));
-        previewed(&mut pane, "abcd", Finding::Missed(String::new()));
+        previewed(&mut pane, "abcd", None);
         assert_eq!((pane.0.cursor, pane.0.top), (5, 5));
         assert_eq!(pane.0.search.lit().map(String::as_str), Some("abcd"));
         // Enter asks for real, from where it started, and its answer lands.

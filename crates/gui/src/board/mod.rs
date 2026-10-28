@@ -68,6 +68,8 @@ struct Line {
 
 /// A pane showing a board.
 #[derive(Debug)]
+// Separate settings and flags, not states of one machine.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct BoardPane {
     board: BoardId,
     /// What the board is, once the daemon has said.
@@ -327,10 +329,9 @@ impl BoardPane {
         if moved || list::search_command(self, &command) {
             return;
         }
-        let own = match command.action {
-            Action::Own(own) => own,
-            // Nothing else is taken (see `BoardKeys::takes`).
-            _ => return,
+        // Nothing else is taken (see `BoardKeys::takes`).
+        let Action::Own(own) = command.action else {
+            return;
         };
         match own {
             BoardKey::Go(motion) => {
@@ -546,7 +547,7 @@ impl BoardPane {
         let found = self.search.found();
         let mut highlights = Vec::new();
         // The entry whose matches were last found, and them.
-        let mut matched: Option<(usize, Vec<(std::ops::Range<usize>, bool)>)> = None;
+        let mut matched: Option<(usize, list::LitIn)> = None;
         for (index, line) in self.lines[self.top..end].iter().enumerate() {
             let (Some(entry), Some(piece)) = (line.entry, &line.text) else {
                 continue;

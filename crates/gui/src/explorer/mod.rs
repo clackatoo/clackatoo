@@ -1030,10 +1030,9 @@ impl Explorer {
         if moved || list::search_command(self, &command) {
             return;
         }
-        let own = match command.action {
-            Action::Own(own) => own,
-            // Nothing else is taken (see `ExplorerKeys::takes`).
-            _ => return,
+        // Nothing else is taken (see `ExplorerKeys::takes`).
+        let Action::Own(own) = command.action else {
+            return;
         };
         match own {
             ExplorerKey::Go(motion) => {

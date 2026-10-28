@@ -340,6 +340,10 @@ pub(crate) fn search_command<O>(list: &mut impl Searched, command: &Command<O>) 
     true
 }
 
+/// The matches lit in an item's text: each one's bytes, and whether it's
+/// the one the search went to.
+pub(crate) type LitIn = Vec<(Range<usize>, bool)>;
+
 /// Where in `text`, the text of an item in view, the last search's
 /// matches are lit, from `list`'s search: each match's bytes, and whether
 /// it's the one the search went to, `found` saying whether this item is
@@ -347,7 +351,7 @@ pub(crate) fn search_command<O>(list: &mut impl Searched, command: &Command<O>) 
 /// [`MOST_LIT`]; without it, only the found item's first.
 ///
 /// [`MOST_LIT`]: crate::hlsearch::MOST_LIT
-pub(crate) fn lit_in(search: &Search<Items>, text: &str, found: bool) -> Vec<(Range<usize>, bool)> {
+pub(crate) fn lit_in(search: &Search<Items>, text: &str, found: bool) -> LitIn {
     let Some(pattern) = search.lit() else {
         return Vec::new();
     };
@@ -359,7 +363,7 @@ pub(crate) fn lit_in(search: &Search<Items>, text: &str, found: bool) -> Vec<(Ra
             .collect();
     }
     let spans = [(0, 0..text.len())];
-    let mut lit: Vec<(Range<usize>, bool)> = (pattern
+    let mut lit: LitIn = (pattern
         .matches_in(text, spans, crate::hlsearch::MOST_LIT)
         .into_iter())
     .map(|range| (range, false))

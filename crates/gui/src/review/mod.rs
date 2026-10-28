@@ -467,10 +467,9 @@ impl Review {
             return;
         }
         let count = command.times();
-        let own = match command.action {
-            Action::Own(own) => own,
-            // Nothing else is taken (see `ReviewKeys::takes`).
-            _ => return,
+        // Nothing else is taken (see `ReviewKeys::takes`).
+        let Action::Own(own) = command.action else {
+            return;
         };
         match own {
             ReviewKey::Go(motion) => {

@@ -211,11 +211,7 @@ impl Pane {
     /// Takes in where the daemon found `query`, asked of a search being
     /// typed (see [`search::previewed`]).
     pub(super) fn previewed(&mut self, query: &str, found: Option<Match>) {
-        let finding = found.map_or(Finding::Missed(String::new()), |at| Finding::Found {
-            at,
-            wrapped: false,
-        });
-        search::previewed(self, query, finding);
+        search::previewed(self, query, found);
     }
 
     /// Asks the daemon where the search being typed would go, as
