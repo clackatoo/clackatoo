@@ -2799,6 +2799,65 @@ fn plan_states(node: &ChatNode) -> String {
 }
 
 #[test]
+fn the_agents_slash_commands_show_as_it_last_gave_them_until_the_chat_moves_to_another() {
+    let daemon = with_two_agents();
+    let mut client = daemon.client();
+    let (chat, _) = start_chat_with(&mut client, "claude");
+    let node = ask(&mut client, chat, "commands compact review:what");
+    assert_eq!(last_words(&node), "commands given\n");
+    let shown: Vec<(&str, &str, Option<&str>)> = (node.commands.iter())
+        .map(|command| {
+            (
+                command.name.as_str(),
+                command.description.as_str(),
+                command.hint.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("compact", "Does compact", None),
+            ("review", "Does review", Some("what"))
+        ]
+    );
+    // Each list takes the place of the one before, and a window that
+    // attaches now is shown the same.
+    let node = ask(&mut client, chat, "commands init");
+    assert_eq!(node.commands.len(), 1);
+    let mut other = daemon.client();
+    let captured = other.capture(chat).unwrap().chat().unwrap().clone();
+    assert_eq!(captured.commands, node.commands);
+    // Another agent's commands are its own: none, until it says.
+    let node = switch_to(&mut client, chat, "codex", None);
+    assert!(node.commands.is_empty(), "{:?}", node.commands);
+}
+
+#[test]
+fn a_slash_command_after_a_move_goes_alone_and_the_digest_with_the_next_message() {
+    let daemon = with_two_agents();
+    let mut client = daemon.client();
+    let (chat, _) = start_chat_with(&mut client, "claude");
+    ask(&mut client, chat, "hello");
+    switch_to(&mut client, chat, "codex", None);
+    // Codex's adapter reads a command only from the prompt's first piece:
+    // it goes alone, with nothing carried before it.
+    assert_eq!(
+        last_words(&ask(&mut client, chat, "/review main")),
+        "echo: /review main\n"
+    );
+    assert!(carried(&daemon, "codex.log", "s1").is_empty());
+    // The next message carries the conversation, the command's turn too.
+    ask(&mut client, chat, "and now?");
+    let digests = carried(&daemon, "codex.log", "s1");
+    let [digest] = digests.as_slice() else {
+        panic!("{digests:#?}");
+    };
+    assert!(digest.contains("### User\nhello\n"), "{digest}");
+    assert!(digest.contains("/review main"), "{digest}");
+}
+
+#[test]
 fn the_agents_plan_shows_as_it_last_gave_it_until_the_next_message_after_its_all_done() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();

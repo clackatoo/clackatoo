@@ -38,6 +38,7 @@
 //! | `elicit-later` | Says `asking later` and ends its turn; 300 ms later asks the user to open a link, as an MCP server's sign-in asks between turns, and notes the answer as `answered later:` and the answer as JSON |
 //! | `elicit-cancel` | As `elicit`, but 300 ms later no longer waits for the answer (`$/cancel_request`) |
 //! | `approve-plan` | Asks permission to leave plan mode, as Claude Code's adapter asks a client that asks as AIR does: its plan in the tool's input, the options that leave plan mode; then says which option was picked |
+//! | `commands SPEC` | Gives its slash commands, as `available_commands_update`: a word of SPEC each, `NAME` or `NAME:HINT`, each described `Does NAME`; then `commands given` |
 //! | anything else | `echo:` and the message, in two pieces |
 //!
 //! Asked to stop a task (`_session/async_task/stop`), it says it stopped
@@ -487,6 +488,27 @@ fn tell_again(session: &str, cwd: &str, gap: Option<std::time::Duration>) {
     user("thanks");
     pause();
     say(session, "You're welcome.");
+}
+
+/// Gives the slash commands `spec` says in `session`, as `commands`
+/// does: a word each, `NAME` or `NAME:HINT`.
+fn give_commands(session: &str, spec: &str) {
+    let commands: Vec<Value> = (spec.split_whitespace())
+        .map(|word| {
+            let (name, hint) = word
+                .split_once(':')
+                .map_or((word, None), |(n, h)| (n, Some(h)));
+            let mut command = json!({ "name": name, "description": format!("Does {name}") });
+            if let Some(hint) = hint {
+                command["input"] = json!({ "hint": hint });
+            }
+            command
+        })
+        .collect();
+    update(
+        session,
+        &json!({ "sessionUpdate": "available_commands_update", "availableCommands": commands }),
+    );
 }
 
 /// Gives the plan `states` says in `session`, as `plan` does.
@@ -1331,6 +1353,11 @@ impl Fake {
             _ if text.starts_with("hang-up-until ") => {
                 let until = text.strip_prefix("hang-up-until ");
                 hang_up(&session, &id, until, &self.waits);
+            }
+            _ if text.starts_with("commands ") => {
+                give_commands(&session, &text["commands ".len()..]);
+                say(&session, "commands given\n");
+                done(&id, "end_turn");
             }
             _ if text.starts_with("plan ") => {
                 give_plan(&session, &text["plan ".len()..]);

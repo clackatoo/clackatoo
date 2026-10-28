@@ -33,6 +33,7 @@ use crate::agents::AgentSpec;
 use crate::handoff::{self, Changed, Digest, Step, StepState};
 use crate::handover;
 
+mod commands;
 mod elicit;
 mod limits;
 mod originals;
@@ -547,7 +548,7 @@ struct Journal {
 impl Journal {
     /// Keeps `patch`, and lets the oldest go past the journal's bounds, of
     /// changes and of bytes: a viewer that far behind gets the chat whole.
-    /// A whole plan or task list takes the place of the last change if
+    /// A whole plan, task list or list of commands takes the place of the last change if
     /// that's one of the same and no viewer has had it yet, so an agent
     /// that sends them fast doesn't push out what viewers still need.
     fn push(&mut self, patch: ChatPatch) {
@@ -556,6 +557,7 @@ impl Journal {
                 (last, &patch),
                 (ChatPatch::Plan(_), ChatPatch::Plan(_))
                     | (ChatPatch::Tasks(_), ChatPatch::Tasks(_))
+                    | (ChatPatch::Commands(_), ChatPatch::Commands(_))
             )
         };
         if self.end() > self.sent.get()
@@ -1461,12 +1463,24 @@ impl HostedChat {
     /// there are any. The session has seen them all once that's answered,
     /// without failing; a message sent with nothing to carry is seen as
     /// it's sent.
+    ///
+    /// A message that's a slash command goes alone, the role or digest
+    /// waiting for the next: Codex's adapter reads a command only from
+    /// the prompt's first block, Claude Code's own commands want it to be
+    /// the only one, and Claude Code itself reads one from the last, so
+    /// only a command alone is one to both. A command Codex's adapter
+    /// does, such as `/compact`, never shows the model the rest either,
+    /// and the digest would be counted as heard (CLACKA-189).
     fn prompt(&mut self, text: Prompt) -> Action {
+        let to = self.node.turns.len().saturating_sub(1);
+        let owed = self.role.is_some() || self.known < to;
+        if owed && clackatoo_protocol::slash_command(&text.text).is_some() {
+            return Action::Prompt(text);
+        }
         if let Some(role) = self.role.take() {
             self.known = self.node.turns.len();
             return Action::Briefed { role, text };
         }
-        let to = self.node.turns.len().saturating_sub(1);
         if self.known < to {
             self.heard = Some(self.node.turns.len());
             Action::Carry {
@@ -1539,9 +1553,11 @@ impl HostedChat {
         }
         // What it runs in the background goes with the agent it leaves,
         // and what that agent asked is answered as cancelled, as stopping
-        // does: it's still running, and still waits.
+        // does: it's still running, and still waits. Its commands go too:
+        // the next says its own.
         self.tasks_lost();
         self.forms_left();
+        self.forget_commands();
         self.set_native_steering(false);
         // The chat's own settings go with it to every agent: what it may
         // do with clackatoo's tools, whether it keeps Claude Code's Task
@@ -2469,8 +2485,11 @@ impl HostedChat {
             // Shown above the box, and kept for the next agent to hear
             // of.
             SessionUpdate::Plan(plan) => self.plan_said(plan),
-            // Its commands, which the chat doesn't show yet, and the
-            // user's own words, already kept.
+            // Offered as `/` is typed at the start of a message.
+            SessionUpdate::AvailableCommandsUpdate(update) => {
+                self.commands_said(update.available_commands);
+            }
+            // The user's own words, already kept.
             _ => {}
         }
         None
@@ -3330,6 +3349,13 @@ fn weight(patch: &ChatPatch) -> usize {
             .map(|choice| choice.name.len() + choice.value.len())
             .sum(),
         ChatPatch::Plan(plan) => plan.iter().map(|step| step.content.len() + 8).sum(),
+        ChatPatch::Commands(commands) => (commands.iter())
+            .map(|command| {
+                command.name.len()
+                    + command.description.len()
+                    + command.hint.as_ref().map_or(0, String::len)
+            })
+            .sum(),
         _ => 0,
     };
     // What each change takes, whatever's in it.
@@ -5696,6 +5722,82 @@ mod tests {
         assert_eq!(send(&mut chat, "two"), [carry("two", 3)]);
         chat.answered(Ok(StopReason::EndTurn));
         assert_eq!(send(&mut chat, "three"), [Action::Prompt("three".into())]);
+    }
+
+    #[test]
+    fn a_slash_command_goes_alone_and_the_digest_waits_for_the_next_message() {
+        let mut chat = chat();
+        moved_to_codex(&mut chat);
+        // The command alone, as both adapters read one only so.
+        assert_eq!(
+            send(&mut chat, "/review main"),
+            [Action::Prompt("/review main".into())]
+        );
+        chat.answered(Ok(StopReason::EndTurn));
+        // The digest goes with the next, telling the command's turn too.
+        assert_eq!(
+            send(&mut chat, "and now?"),
+            [Action::Carry {
+                text: "and now?".into(),
+                from: 0,
+                to: 3,
+            }]
+        );
+        chat.answered(Ok(StopReason::EndTurn));
+        // With nothing owed, a command is sent as any message is.
+        assert_eq!(
+            send(&mut chat, "/compact"),
+            [Action::Prompt("/compact".into())]
+        );
+        assert_eq!(
+            send_after(&mut chat, "more"),
+            [Action::Prompt("more".into())]
+        );
+    }
+
+    /// Sends `text` once the turn before has ended.
+    fn send_after(chat: &mut HostedChat, text: &str) -> Vec<Action> {
+        chat.answered(Ok(StopReason::EndTurn));
+        send(chat, text)
+    }
+
+    #[test]
+    fn a_profiles_role_waits_for_the_message_after_a_slash_command() {
+        let mut c = chat();
+        c.role = Some("Review only; do not edit files.".into());
+        connect(&mut c, "s");
+        assert_eq!(send(&mut c, "/init"), [Action::Prompt("/init".into())]);
+        let next = send_after(&mut c, "inspect");
+        assert!(
+            matches!(&next[..], [Action::Briefed { role, text }] if role.starts_with("Review only") && text.text == "inspect"),
+            "{next:?}"
+        );
+        // A path isn't a command: it goes with the role as any words do.
+        let mut c = chat();
+        c.role = Some("Be brief.".into());
+        connect(&mut c, "s");
+        let first = send(&mut c, "/etc/hosts is wrong");
+        assert!(matches!(&first[..], [Action::Briefed { .. }]), "{first:?}");
+    }
+
+    #[test]
+    fn the_agents_commands_show_until_the_chat_moves_to_another_agent() {
+        let mut chat = chat();
+        connect(&mut chat, "c");
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"available_commands_update","availableCommands":[
+                {"name":"compact","description":"Compact"},
+                {"name":"review","description":"Review","input":{"hint":"what"}}]}"#,
+        );
+        let names: Vec<&str> = (chat.node.commands.iter())
+            .map(|command| command.name.as_str())
+            .collect();
+        assert_eq!(names, ["compact", "review"]);
+        assert_eq!(chat.node.commands[1].hint.as_deref(), Some("what"));
+        let codex = crate::agents::AgentConfig::default().find("codex").unwrap();
+        chat.switch(&codex, None, None, handoff::BUDGET);
+        assert!(chat.node.commands.is_empty());
     }
 
     #[test]

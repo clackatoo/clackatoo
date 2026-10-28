@@ -91,6 +91,83 @@ pub struct ChatNode {
         deserialize_with = "wire::since::<{ wire::AGENT_PLAN }, _, _>"
     )]
     pub plan: Vec<PlanStep>,
+    /// The slash commands the agent offers, as it last said: its own,
+    /// its skills and its MCP servers' prompts, each typed as `/name`
+    /// at the start of a message. Empty until it has said.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::AGENT_COMMANDS }, _>",
+        deserialize_with = "wire::since::<{ wire::AGENT_COMMANDS }, _, _>"
+    )]
+    pub commands: Vec<AgentCommand>,
+}
+
+/// A slash command an agent offers, typed as `/name` at the start of a
+/// message, with what follows it as its input.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCommand {
+    /// Its name, without the `/`: "compact", "review".
+    pub name: String,
+    /// What it does, as the agent says, on one line.
+    pub description: String,
+    /// What to type after it, if it takes anything, as the agent hints
+    /// it: "branch name".
+    pub hint: Option<String>,
+}
+
+/// The slash command `text`, a message, starts with, if it starts with
+/// one, and what follows it: `/review main` is `("review", "main")`. A
+/// command's name is what follows the `/` up to white space, with no
+/// other `/` in it, so a path such as `/etc/hosts` isn't one. The
+/// agents' adapters read one so: from the start of the message, white
+/// space before it skipped.
+#[must_use]
+pub fn slash_command(text: &str) -> Option<(&str, &str)> {
+    let rest = text.trim_start().strip_prefix('/')?;
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let name = &rest[..end];
+    let valid = !name.is_empty() && !name.contains('/') && !name.chars().any(char::is_control);
+    valid.then(|| (name, rest[end..].trim()))
+}
+
+/// The commands Claude Code's and Codex's own interfaces have that their
+/// adapters don't: typed in a chat, they'd reach the model as words.
+/// Clients do what each is for themselves, or say what to use instead,
+/// unless the chat's agent offers a command of the name, which is the
+/// agent's.
+pub const INTERFACE_COMMANDS: &[&str] = &[
+    "clear",
+    "new",
+    "resume",
+    "rewind",
+    "context",
+    "status",
+    "cost",
+    "usage",
+    "diff",
+    "model",
+    "export",
+    "exit",
+    "quit",
+    "help",
+    "config",
+    "permissions",
+    "login",
+    "logout",
+    "theme",
+    "vim",
+    "terminal-setup",
+];
+
+/// The command a client does itself, of [`INTERFACE_COMMANDS`], that
+/// `text`, a message to a chat whose agent offers `offered`, starts
+/// with, if any: one the agent offers is the agent's.
+#[must_use]
+pub fn interface_command<'a>(text: &'a str, offered: &[AgentCommand]) -> Option<&'a str> {
+    let (name, _) = slash_command(text)?;
+    let ours = INTERFACE_COMMANDS.contains(&name);
+    let theirs = offered.iter().any(|command| command.name == name);
+    (ours && !theirs).then_some(name)
 }
 
 /// One step of an agent's plan.
@@ -1198,6 +1275,8 @@ pub enum ChatPatch {
     Tasks(Vec<AgentTask>),
     /// The agent's plan is now this.
     Plan(Vec<PlanStep>),
+    /// The slash commands the agent offers are now these.
+    Commands(Vec<AgentCommand>),
 }
 
 /// A small, decoded image for chat history. Shared by snapshots and paint
@@ -1500,6 +1579,7 @@ impl ChatNode {
             activities: self.activities.clone(),
             tasks: self.tasks.clone(),
             plan: self.plan.clone(),
+            commands: self.commands.clone(),
             first_turn: self
                 .first_turn
                 .saturating_add(u32::try_from(start).unwrap_or(u32::MAX)),
@@ -1581,6 +1661,7 @@ impl ChatNode {
             ChatPatch::Activities(activities) => self.activities = activities,
             ChatPatch::Tasks(tasks) => self.tasks = tasks,
             ChatPatch::Plan(plan) => self.plan = plan,
+            ChatPatch::Commands(commands) => self.commands = commands,
             ChatPatch::History {
                 first,
                 before,
@@ -1820,6 +1901,31 @@ impl Tool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_slash_command_is_a_word_after_a_slash_at_the_start() {
+        assert_eq!(slash_command("/compact"), Some(("compact", "")));
+        assert_eq!(
+            slash_command("  /review-branch  main \n"),
+            Some(("review-branch", "main"))
+        );
+        assert_eq!(slash_command("/mcp:git:log 3"), Some(("mcp:git:log", "3")));
+        for words in ["", "/", "/ x", "a /b", "/etc/hosts is wrong", "//x"] {
+            assert_eq!(slash_command(words), None, "{words:?}");
+        }
+    }
+
+    #[test]
+    fn an_interface_command_is_the_agents_if_it_offers_one_of_the_name() {
+        assert_eq!(interface_command("/clear", &[]), Some("clear"));
+        assert_eq!(interface_command("/compact", &[]), None);
+        let offered = [AgentCommand {
+            name: "clear".into(),
+            description: String::new(),
+            hint: None,
+        }];
+        assert_eq!(interface_command("/clear", &offered), None);
+    }
 
     #[test]
     fn history_pages_keep_absolute_patches_and_reject_gaps_or_duplicates() {

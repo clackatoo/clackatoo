@@ -1377,7 +1377,50 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             .into_iter()
             .map(|sample| (crate::wire::ELICITATION, sample)),
     );
+    samples.extend(
+        agent_commands()
+            .into_iter()
+            .map(|sample| (crate::wire::AGENT_COMMANDS, sample)),
+    );
     samples
+}
+
+/// Samples of protocol 114: the agent's slash commands, one with a hint
+/// and one without, in a snapshot and a patch, and a patch that empties
+/// them (CLACKA-189).
+fn agent_commands() -> Vec<Sample> {
+    use crate::AgentCommand;
+    let terminal = TerminalId(3);
+    let commands = vec![
+        AgentCommand {
+            name: "compact".into(),
+            description: "Summarise the conversation so far".into(),
+            hint: None,
+        },
+        AgentCommand {
+            name: "review-branch".into(),
+            description: "Review the changes against a branch".into(),
+            hint: Some("branch name".into()),
+        },
+    ];
+    vec![
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Commands(commands.clone()))]),
+        })),
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Commands(Vec::new()))]),
+        })),
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Snapshot(View {
+                title: "commands".into(),
+                cwd: None,
+                root: Node::Chat(Box::new(ChatNode { commands, ..chat() })),
+            }),
+        })),
+    ]
 }
 
 /// Samples of protocol 112: the agent's plan, with a step in every state,
@@ -3254,6 +3297,7 @@ fn chat() -> ChatNode {
         activities: Vec::new(),
         tasks: Vec::new(),
         plan: Vec::new(),
+        commands: Vec::new(),
         provider_usage: vec![crate::ProviderUsage {
             agent: "codex".into(),
             title: "Codex".into(),

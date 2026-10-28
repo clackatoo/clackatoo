@@ -77,13 +77,19 @@ pub(super) fn kept(steps: impl Iterator<Item = PlanStep>) -> Vec<PlanStep> {
         .collect()
 }
 
-/// `text` as a step's line shows it: on one line, every run of white
-/// space one space; what would hide or reorder text shown as other agent
-/// text reaching windows is (`server::unhidden`); cut to [`MOST_CHARS`].
+/// `text` as a step's line shows it (see [`one_line`]).
 fn shown(text: &str) -> String {
+    one_line(text, MOST_CHARS)
+}
+
+/// `text`, which an agent gave, as a line of a list shows it: on one
+/// line, every run of white space one space; what would hide or reorder
+/// text shown as other agent text reaching windows is
+/// (`server::unhidden`); cut to `most` characters and an ellipsis.
+pub(super) fn one_line(text: &str, most: usize) -> String {
     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let line = crate::server::unhidden(&line);
-    match line.char_indices().nth(MOST_CHARS) {
+    match line.char_indices().nth(most) {
         Some((at, _)) => format!("{}…", &line[..at]),
         None => line,
     }

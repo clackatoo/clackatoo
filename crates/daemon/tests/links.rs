@@ -5611,6 +5611,13 @@ fn a_chat_in_another_machines_workspace_goes_on_with_its_session_after_either_re
     let node = ask_chat(&mut window, again, "plan x>.");
     assert_eq!(node.plan.len(), 3, "{:?}", node.plan);
     assert_eq!(node.plan[1].state, clackatoo_protocol::PlanState::Doing);
+    // And so do its slash commands (CLACKA-189).
+    let node = ask_chat(&mut window, again, "commands compact review:what");
+    let names: Vec<&str> = (node.commands.iter())
+        .map(|command| command.name.as_str())
+        .collect();
+    assert_eq!(names, ["compact", "review"], "{:?}", node.commands);
+    assert_eq!(node.commands[1].hint.as_deref(), Some("what"));
 
     // Desk, the daemon showing it, restarts.
     drop(window);

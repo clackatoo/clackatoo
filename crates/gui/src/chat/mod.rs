@@ -2606,6 +2606,7 @@ fn touches(patch: &clackatoo_protocol::ChatPatch) -> Option<usize> {
         | ChatPatch::ProviderUsage(_)
         | ChatPatch::Tasks(_)
         | ChatPatch::Plan(_)
+        | ChatPatch::Commands(_)
         | ChatPatch::History { .. } => None,
     }
 }

@@ -283,6 +283,9 @@ gates! {
     /// `FieldValue`); and the plan a question about leaving planning
     /// carries, `Question`'s `plan`.
     ELICITATION = 113,
+    /// The slash commands the agent offers: `ChatNode`'s `commands`
+    /// (`AgentCommand`) and `ChatPatch::Commands`.
+    AGENT_COMMANDS = 114,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -454,6 +457,7 @@ impl Since for ChatPatch {
             Self::Activities(_) => HARNESS,
             Self::Tasks(_) => AGENT_TASKS,
             Self::Plan(_) => AGENT_PLAN,
+            Self::Commands(_) => AGENT_COMMANDS,
         }
     }
 }
@@ -1107,7 +1111,8 @@ fn without_optional_chat_updates(message: &ServerMessage, wire: u32) -> Option<S
         return None;
     };
     let unsupported = |patch: &Patch| {
-        matches!(patch, Patch::Chat(ChatPatch::Plan(_)) if wire < AGENT_PLAN)
+        matches!(patch, Patch::Chat(ChatPatch::Commands(_)) if wire < AGENT_COMMANDS)
+            || matches!(patch, Patch::Chat(ChatPatch::Plan(_)) if wire < AGENT_PLAN)
             || matches!(patch, Patch::Chat(ChatPatch::Tasks(_)) if wire < AGENT_TASKS)
             || matches!(patch, Patch::Chat(ChatPatch::Activities(_)) if wire < HARNESS)
             || matches!(patch, Patch::Chat(ChatPatch::History { .. }) if wire < CHAT_HISTORY)
@@ -1171,7 +1176,7 @@ impl Downgrade for ServerMessage {
         if let Some(edited) = reversed_as_edited(self) {
             return Downgraded::To(edited);
         }
-        if wire < AGENT_PLAN
+        if wire < AGENT_COMMANDS
             && let Some(older) = without_optional_chat_updates(self, wire)
         {
             return match older.downgrade(wire) {
