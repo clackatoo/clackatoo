@@ -515,7 +515,7 @@ What each turn changed in files lasts through an upgrade, so turns can still be 
 
 A chat that moved between agents keeps the sessions it had with each, and goes back to them after an upgrade too.
 
-When the daemon stops, a chat in a pane comes back with its workspace the next time it starts, on the same session: no agent starts until you look at the chat or send it a message, and then the agent tells the conversation so far, as going on with a [past session](#the-start-page) does, and nothing it tells acts again. The chat keeps its agent, model, tools and Browser settings; it starts in the agent's own starting mode, and as a chat of its own, not another's subagent. Chats in no pane don't come back, but the start page lists their sessions.
+When the daemon stops, a chat in a pane comes back with its workspace the next time it starts, on the same session: no agent starts until you look at the chat or send it a message, and then the agent tells the conversation so far, as going on with a [past session](#the-start-page) does, and nothing it tells acts again. A turn you stopped shows as stopped, as Claude Code keeps it; Codex keeps no note of a stop, so a stopped Codex turn shows as one that ended. The chat keeps its agent, model, tools and Browser settings; it starts in the agent's own starting mode, and as a chat of its own, not another's subagent. Chats in no pane don't come back, but the start page lists their sessions.
 
 `clackatoo capture` prints a chat as text: each message after a `>`, and what the agent said.
 

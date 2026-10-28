@@ -1031,6 +1031,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Subagents stay open until closed, agents message them freely, and hear when one finishes",
     },
+    News {
+        id: "stopped-turns-and-acp-trace",
+        date: "2026-10-28",
+        lesson: "agents",
+        what: "Stopped turns stay stopped when a chat comes back, and CLACKATOO_ACP_TRACE keeps agents' ACP traffic",
+    },
 ];
 
 impl News {
