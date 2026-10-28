@@ -215,8 +215,16 @@ impl Desk {
         }
     }
 
+    /// Starts the patience of keys waiting for a chat or a terminal again
+    /// from `now`, if they wait, as what they wait for has asked again.
+    pub(super) fn note_pane_asked_again(&mut self, now: std::time::Instant) {
+        if let Some((since, _)) = &mut self.pane_wait {
+            *since = now;
+        }
+    }
+
     /// The terminal of the pane keys wait for, if they wait.
-    fn waited_terminal(&self) -> Option<TerminalId> {
+    pub(super) fn waited_terminal(&self) -> Option<TerminalId> {
         let (_, pane) = self.pane_wait?;
         let (_, _, found) = self.workspaces.find_pane(pane)?;
         found.content.terminal()

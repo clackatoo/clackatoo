@@ -1323,6 +1323,7 @@ fn text_and_search_cover_history_and_screen() {
         from: at(0, 0),
         backward: false,
         exact: true,
+        count: None,
     });
     assert_eq!(
         found.unwrap(),
@@ -1330,6 +1331,39 @@ fn text_and_search_cover_history_and_screen() {
             start: at(20, 0),
             cells: 6,
         }))
+    );
+
+    // A count, in one answer: the second "1" after the first is the
+    // first of "11"; and before it, round the start, the "1" of "18".
+    let mut counted = |count, backward| {
+        client.request(&Request::Search {
+            terminal,
+            query: "1".into(),
+            from: at(0, 0),
+            backward,
+            exact: true,
+            count: Some(count),
+        })
+    };
+    assert_eq!(
+        counted(2, false).unwrap(),
+        Response::Searched {
+            found: Some(Match {
+                start: at(10, 0),
+                cells: 1,
+            }),
+            wrapped: false,
+        }
+    );
+    assert_eq!(
+        counted(2, true).unwrap(),
+        Response::Searched {
+            found: Some(Match {
+                start: at(17, 0),
+                cells: 1,
+            }),
+            wrapped: true,
+        }
     );
 }
 

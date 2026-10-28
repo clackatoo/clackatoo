@@ -1316,6 +1316,27 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ]
         .map(|sample| (crate::wire::ELSEWHERE, sample)),
     );
+    // A terminal's search for the match a count says (CLACKA-171).
+    samples.extend(
+        [
+            Client(ClientMessage::Request(Request::Search {
+                terminal: TerminalId(1),
+                query: "q".into(),
+                from: Position { line: 3, col: 4 },
+                backward: false,
+                exact: false,
+                count: Some(3),
+            })),
+            Server(ServerMessage::Response(Response::Searched {
+                found: Some(Match {
+                    start: Position { line: 1, col: 2 },
+                    cells: 1,
+                }),
+                wrapped: true,
+            })),
+        ]
+        .map(|sample| (crate::wire::SEARCH_COUNT, sample)),
+    );
     samples
 }
 
@@ -2149,6 +2170,7 @@ fn more() -> Vec<Sample> {
             from: Position { line: 3, col: 4 },
             backward: true,
             exact: true,
+            count: None,
         }),
         response(Response::Found(Some(Match {
             start: Position { line: 3, col: 4 },

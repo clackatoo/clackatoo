@@ -1668,8 +1668,15 @@ impl Desk {
                 };
                 let redraw = pane.answered(response);
                 let failed = pane.take_failed();
+                let waits = pane.waits_for_answer();
                 if let Some(yanked) = pane.take_yanked() {
                     self.pane_yanked(yanked);
+                }
+                // Answered, and asked on, as a count asked of an older
+                // daemon a match at a time: the keys held are patient
+                // again, as each answer may take as long.
+                if waits && self.waited_terminal() == Some(terminal) {
+                    self.note_pane_asked_again(std::time::Instant::now());
                 }
                 // A search or a block that found nothing stops a macro or
                 // a binding, as Vim's stops on a failing command.
@@ -2228,7 +2235,10 @@ impl Desk {
                     None => chat.paste(text),
                 }
             } else if let Some(pane) = self.focused_pane() {
-                pane.paste(text);
+                // Into the search being typed, if one is, not the program.
+                if !pane.paste_into_search(text) {
+                    pane.paste(text);
+                }
             }
         }
     }
@@ -9814,6 +9824,40 @@ mod tests {
     }
 
     #[test]
+    fn keys_waiting_for_a_count_asked_a_match_at_a_time_are_patient_at_each_ask() {
+        let mut desk = terminal_showing_cargo_test();
+        let found = || {
+            Response::Found(Some(clackatoo_term::Match {
+                start: clackatoo_protocol::Position { line: 0, col: 6 },
+                cells: 4,
+            }))
+        };
+        // Typed by a binding, so no preview is asked.
+        desk.lua_from(r#"client.keys.map("n", "<Space>c", "/test<CR>")"#);
+        type_text(&mut desk, " c");
+        desk.take_outbox();
+        desk.answered(found());
+        // Asked with a count, which a daemon older than protocol 108
+        // answers with the next alone.
+        type_text(&mut desk, "3nyy");
+        assert_eq!(searches_asked(&mut desk), ["test"]);
+        assert!(desk.holding());
+        let (since, pane) = desk.pane_wait.expect("waiting");
+        let long_ago = since
+            .checked_sub(super::macros::PATIENCE / 5 * 4)
+            .expect("an instant 4 s back");
+        desk.pane_wait = Some((long_ago, pane));
+        desk.answered(found());
+        // Asked again, the keys still wait, their patience begun afresh.
+        assert!(desk.holding());
+        let (since, _) = desk.pane_wait.expect("still waiting");
+        assert!(since > long_ago + super::macros::PATIENCE / 2);
+        assert_eq!(searches_asked(&mut desk), ["test"]);
+        desk.answered(found());
+        assert!(asked_to_copy(&mut desk), "went on once all were answered");
+    }
+
+    #[test]
     fn keys_given_up_on_go_in_turn_with_what_a_binding_among_them_types() {
         let mut desk = terminal_showing_cargo_test();
         desk.lua_from(r#"client.keys.map("n", "<Space>u", "iX")"#);
@@ -9891,6 +9935,24 @@ mod tests {
         assert_eq!(daemon_text(&daemons, 7), "x..\n");
         let said = desk.message.clone().unwrap_or_default();
         assert!(!said.contains("stopped"), "{said}");
+    }
+
+    #[test]
+    fn a_paste_while_a_terminals_search_is_typed_goes_into_the_search() {
+        let mut desk = terminal_showing_cargo_test();
+        type_text(&mut desk, "/te");
+        desk.paste("st");
+        assert!(sent_to_program(&mut desk).is_empty(), "not to the program");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(
+            searches_asked(&mut desk).last().map(String::as_str),
+            Some("test")
+        );
     }
 
     /// What the terminal asked the daemon to search for since this was

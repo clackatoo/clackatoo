@@ -191,38 +191,87 @@ impl Terminal {
         exact: bool,
     ) -> Option<Match> {
         let query: Vec<char> = query.chars().collect();
-        if query.is_empty() {
-            return None;
+        self.round(&query, from, backward, exact)
+            .next()
+            .map(|(found, _)| found)
+    }
+
+    /// The `count`th place `query` appears after `from`, or before it if
+    /// `backward`, as [`search`](Self::search) finds the next, and whether
+    /// it went round the document's ends to get there. A count past the
+    /// matches there are goes round as often as it says, which ends where
+    /// what's left over a time round does: so the document is gone
+    /// through twice at most, however big the count.
+    #[must_use]
+    pub fn search_nth(
+        &self,
+        query: &str,
+        from: Position,
+        backward: bool,
+        exact: bool,
+        count: usize,
+    ) -> Option<(Match, bool)> {
+        let query: Vec<char> = query.chars().collect();
+        let count = count.max(1);
+        let mut seen = 0;
+        for found in self.round(&query, from, backward, exact) {
+            seen += 1;
+            if seen == count {
+                return Some(found);
+            }
         }
+        // Fewer than the count: round as often as it takes.
+        let nth = (count - 1) % seen.max(1);
+        let (found, _) = self.round(&query, from, backward, exact).nth(nth)?;
+        Some((found, true))
+    }
+
+    /// Every match of `query` once, in the order a search from `from`
+    /// meets them, round the ends to `from` itself, each with whether it
+    /// went round to it.
+    fn round<'a>(
+        &'a self,
+        query: &'a [char],
+        from: Position,
+        backward: bool,
+        exact: bool,
+    ) -> impl Iterator<Item = (Match, bool)> + 'a {
         let (first, last) = self.document_bounds();
         let from_line = from.line.clamp(first, last);
         let lines = last - first + 1;
+        let steps = if query.is_empty() { 0 } else { lines + 1 };
         // Every line once, starting from `from`'s and going round, then
         // `from`'s line again for matches on the far side of `from`.
-        for step in 0..=lines {
-            let line = if backward {
-                first + (from_line - first + lines - step % lines) % lines
+        (0..steps).flat_map(move |step| {
+            let along = from_line - first;
+            let (line, round) = if backward {
+                (first + (along + lines - step % lines) % lines, step > along)
             } else {
-                first + (from_line - first + step) % lines
+                (first + (along + step) % lines, along + step >= lines)
             };
-            let Some(row) = self.document_line(line) else {
-                continue;
+            let matches = self
+                .document_line(line)
+                .map(|row| matches_in(&row, query, exact))
+                .unwrap_or_default();
+            let wanted = move |col: usize| match step {
+                0 if backward => col < from.col,
+                0 => col > from.col,
+                _ if step < lines => true,
+                _ if backward => col >= from.col,
+                _ => col <= from.col,
             };
-            let matches = matches_in(&row, &query, exact);
-            let found = match (step, backward) {
-                (0, false) => matches.into_iter().find(|&(col, _)| col > from.col),
-                (0, true) => matches.into_iter().rev().find(|&(col, _)| col < from.col),
-                (_, false) => matches.into_iter().next(),
-                (_, true) => matches.into_iter().next_back(),
-            };
-            if let Some((col, cells)) = found {
-                return Some(Match {
-                    start: Position { line, col },
-                    cells,
-                });
+            let mut found: Vec<(Match, bool)> = (matches.into_iter())
+                .filter(|&(col, _)| wanted(col))
+                .map(|(col, cells)| {
+                    let start = Position { line, col };
+                    (Match { start, cells }, round)
+                })
+                .collect();
+            if backward {
+                found.reverse();
             }
-        }
-        None
+            found
+        })
     }
 }
 
@@ -422,6 +471,40 @@ mod tests {
         assert_eq!(exact("Cat"), Some(3));
         assert_eq!(exact("cat"), Some(1));
         assert_eq!(exact("CAT"), None);
+    }
+
+    #[test]
+    fn a_count_finds_the_nth_going_round_at_most_once() {
+        // Matches at (0,0), (1,4), (3,0).
+        let t = terminal("cat\r\ndog cat\r\nbird\r\nCat");
+        let nth = |from, backward, count| {
+            t.search_nth("cat", from, backward, false, count)
+                .map(|(m, wrapped)| (m.start.line, m.start.col, wrapped))
+        };
+        assert_eq!(nth(at(0, 0), false, 1), Some((1, 4, false)));
+        assert_eq!(nth(at(0, 0), false, 2), Some((3, 0, false)));
+        assert_eq!(nth(at(0, 0), false, 3), Some((0, 0, true)));
+        // Past the matches there are: round as often, but said to wrap.
+        assert_eq!(nth(at(0, 0), false, 4), Some((1, 4, true)));
+        assert_eq!(nth(at(0, 0), false, 3_000_000_001), Some((1, 4, true)));
+        assert_eq!(nth(at(1, 4), true, 1), Some((0, 0, false)));
+        assert_eq!(nth(at(1, 4), true, 2), Some((3, 0, true)));
+        assert_eq!(nth(at(1, 4), true, 5), Some((3, 0, true)));
+        // From the middle of a line, its matches either side.
+        assert_eq!(nth(at(1, 2), false, 1), Some((1, 4, false)));
+        assert_eq!(nth(at(1, 6), true, 1), Some((1, 4, false)));
+        assert_eq!(t.search_nth("fish", at(0, 0), false, false, 3), None);
+        assert_eq!(t.search_nth("", at(0, 0), false, false, 3), None);
+        // A count of one is the next, as `search` finds it.
+        for from in [at(0, 0), at(1, 4), at(3, 0), at(2, 1)] {
+            for backward in [false, true] {
+                assert_eq!(
+                    t.search_nth("cat", from, backward, false, 1)
+                        .map(|(m, _)| m),
+                    t.search("cat", from, backward, false)
+                );
+            }
+        }
     }
 
     #[test]

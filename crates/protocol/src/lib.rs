@@ -128,7 +128,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 107;
+pub const PROTOCOL_VERSION: u32 = 108;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -738,6 +738,16 @@ pub enum Request {
         /// Match case exactly; otherwise case is ignored. The client
         /// decides, by its options, such as Vim's `smartcase`.
         exact: bool,
+        /// Which match to find, counting on from `from` round the ends, as
+        /// `3n` finds the third: answered with [`Response::Searched`],
+        /// which says whether it went round. `None` for the next, answered
+        /// with [`Response::Found`], and from a client older than protocol
+        /// 108, whose daemon answers any count with the next alone.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::SEARCH_COUNT }, _>",
+            deserialize_with = "wire::since::<{ wire::SEARCH_COUNT }, _, _>"
+        )]
+        count: Option<u32>,
     },
     /// Finds the block (the prompt, command and output of one command,
     /// as the shell marked them) at the document's line `line`, or the one
@@ -1590,6 +1600,15 @@ pub enum Response {
     /// Answers [`Request::WatchConnections`]: every connection, in the
     /// order they were asked for.
     Connections(Vec<Connection>),
+    /// Answers [`Request::Search`] with a `count`: where the match counted
+    /// to is, if there's any, and whether the search went round the
+    /// document's ends on the way there.
+    Searched {
+        /// The match, or `None` if there's none at all.
+        found: Option<Match>,
+        /// Whether it went round an end to get there.
+        wrapped: bool,
+    },
 }
 
 /// Where a daemon takes QUIC packets over UDP, and how a client finds out

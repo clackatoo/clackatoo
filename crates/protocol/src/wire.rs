@@ -261,6 +261,9 @@ gates! {
     /// (`LentBackground`), and brings back or says was seen,
     /// `Request::LentBackground` (`LentBackgroundAction`).
     ELSEWHERE = 107,
+    /// A terminal's search for the match a count says, in one answer:
+    /// `Request::Search`'s `count`, answered with `Response::Searched`.
+    SEARCH_COUNT = 108,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -618,6 +621,7 @@ pub fn newest(message: &ServerMessage) -> u32 {
             Response::Error(err) => err.since(),
             Response::Workspaces(workspaces) => newest_in_workspaces(workspaces),
             Response::View(view) => newest_in_node(&view.root),
+            Response::Searched { .. } => SEARCH_COUNT,
             _ => EARLIER,
         },
         ServerMessage::Event(event) => {
@@ -1246,6 +1250,11 @@ impl Downgrade for ServerMessage {
             Self::Response(Response::Error(err)) if wire >= FALLBACKS => Downgraded::To(
                 Self::Response(Response::Error(Error::Other(err.to_string()))),
             ),
+            // Only ever asked with a count, which an older peer doesn't
+            // send: as the next match, which is what it would have asked.
+            Self::Response(Response::Searched { found, .. }) => {
+                Downgraded::To(Self::Response(Response::Found(*found)))
+            }
             Self::Response(_) => Downgraded::Refused,
             _ if wire < FALLBACKS => Downgraded::Dropped,
             // What's newer than the fallbacks has no arm yet, so nothing is.
@@ -2289,5 +2298,29 @@ mod usage_tests {
             patches.as_slice(),
             [Patch::Chat(ChatPatch::Delivery(_))]
         ));
+    }
+}
+
+#[cfg(test)]
+mod search_count_tests {
+    use super::*;
+
+    /// A counted search's answer reaches an older peer as the next match,
+    /// which a relay's older peer asking with no count takes it for.
+    #[test]
+    fn a_counted_answer_goes_to_an_older_peer_as_the_next_match() {
+        let found = Some(crate::Match {
+            start: crate::Position { line: 1, col: 2 },
+            cells: 3,
+        });
+        let searched = ServerMessage::Response(Response::Searched {
+            found,
+            wrapped: true,
+        });
+        assert_eq!(searched.downgrade(SEARCH_COUNT), Downgraded::AsIs);
+        assert_eq!(
+            searched.downgrade(SEARCH_COUNT - 1),
+            Downgraded::To(ServerMessage::Response(Response::Found(found)))
+        );
     }
 }

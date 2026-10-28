@@ -1020,6 +1020,7 @@ impl Daemon {
                 from,
                 backward,
                 exact,
+                count,
             } => terminal(self, *local).map(|(at, terminal)| {
                 let search = Request::Search {
                     terminal,
@@ -1027,6 +1028,7 @@ impl Daemon {
                     from: *from,
                     backward: *backward,
                     exact: *exact,
+                    count: *count,
                 };
                 (at, Ok((search, Then::Pass)))
             }),

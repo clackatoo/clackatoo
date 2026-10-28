@@ -531,6 +531,7 @@ fn far_in_terminal(terminal: clackatoo_protocol::TerminalId) -> Vec<ClientMessag
             from: far,
             backward: true,
             exact: false,
+            count: Some(u32::MAX),
         }),
         request(Request::History {
             terminal,

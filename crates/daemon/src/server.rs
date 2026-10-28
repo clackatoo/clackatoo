@@ -3142,9 +3142,18 @@ impl Daemon {
                 from,
                 backward,
                 exact,
-            } => self
-                .grid(terminal)
-                .map(|grid| Response::Found(grid.search(&query, from, backward, exact))),
+                count,
+            } => self.grid(terminal).map(|grid| match count {
+                None => Response::Found(grid.search(&query, from, backward, exact)),
+                Some(count) => {
+                    let count = usize::try_from(count).unwrap_or(usize::MAX);
+                    let found = grid.search_nth(&query, from, backward, exact, count);
+                    Response::Searched {
+                        found: found.map(|(found, _)| found),
+                        wrapped: found.is_some_and(|(_, wrapped)| wrapped),
+                    }
+                }
+            }),
             Request::Block {
                 terminal,
                 line,

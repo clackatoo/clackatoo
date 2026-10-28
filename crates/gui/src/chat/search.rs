@@ -466,28 +466,20 @@ impl ChatView {
         backward: bool,
         count: usize,
     ) -> Result<(Position, bool), Spent<'p>> {
-        let (mut at, mut left, mut taken) = (from, count.max(1), 0);
-        let (mut first, mut found, mut wrapped) = (None, None, false);
-        let mut spent = Spent::new(pattern);
-        while left > 0 {
-            spent = Spent::new(pattern);
+        let mut steps = search::Steps::new(count);
+        let mut found = None;
+        loop {
+            let mut spent = Spent::new(pattern);
+            let at = found.unwrap_or(from);
             let Some((position, round)) = self.next_match(fonts, &mut spent, at, backward) else {
-                break;
+                // As far as it got, if it got anywhere.
+                return found.map(|found| (found, steps.wrapped())).ok_or(spent);
             };
-            taken += 1;
-            left -= 1;
-            match first {
-                None => first = Some(position),
-                // Round to the first again: the rest of the count goes
-                // round as many times, which ends where this many over.
-                Some(first) if first == position => left %= taken - 1,
-                Some(_) => {}
-            }
-            wrapped |= round;
-            at = position;
             found = Some(position);
+            if !steps.step(position, round) {
+                return Ok((position, steps.wrapped()));
+            }
         }
-        found.map(|found| (found, wrapped)).ok_or(spent)
     }
 
     /// The next match of `spent`'s pattern after `from`, or before it if

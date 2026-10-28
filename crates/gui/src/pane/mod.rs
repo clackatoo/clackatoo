@@ -475,6 +475,10 @@ impl Pane {
                 self.searched(found, asked);
                 true
             }
+            (Some(Pending::Search(asked)), Response::Searched { found, wrapped }) => {
+                self.counted(found, wrapped, asked);
+                true
+            }
             (Some(Pending::Preview(query)), Response::Found(found)) => {
                 self.previewed(&query, found);
                 true
@@ -1277,6 +1281,27 @@ mod tests {
         }
     }
 
+    /// Answers the pane's requests as a daemon older than protocol 108
+    /// would, a search's count dropped on the way.
+    fn serve_older(pane: &mut Pane, terminal: &Terminal) {
+        let mut outbox = pane.take_outbox();
+        while !outbox.is_empty() {
+            serve_once(pane, terminal, older(outbox));
+            outbox = pane.take_outbox();
+        }
+    }
+
+    /// `outbox` as a daemon older than protocol 108 reads it: searches
+    /// without their counts.
+    fn older(mut outbox: Vec<ClientMessage>) -> Vec<ClientMessage> {
+        for message in &mut outbox {
+            if let ClientMessage::Request(Request::Search { count, .. }) = message {
+                *count = None;
+            }
+        }
+        outbox
+    }
+
     fn serve_once(pane: &mut Pane, terminal: &Terminal, outbox: Vec<ClientMessage>) {
         for message in outbox {
             let response = match message {
@@ -1318,8 +1343,29 @@ mod tests {
                     from,
                     backward,
                     exact,
+                    count: None,
                     ..
                 }) => Response::Found(terminal.search(&query, from, backward, exact)),
+                ClientMessage::Request(Request::Search {
+                    query,
+                    from,
+                    backward,
+                    exact,
+                    count: Some(count),
+                    ..
+                }) => {
+                    let found = terminal.search_nth(
+                        &query,
+                        from,
+                        backward,
+                        exact,
+                        usize::try_from(count).unwrap_or(usize::MAX),
+                    );
+                    Response::Searched {
+                        found: found.map(|(found, _)| found),
+                        wrapped: found.is_some_and(|(_, wrapped)| wrapped),
+                    }
+                }
                 ClientMessage::Request(Request::Block { line, which, .. }) => {
                     Response::Block(terminal.block(line, which))
                 }
@@ -1876,6 +1922,23 @@ mod tests {
             }
             asked += searches_in(&outbox).len();
             serve_once(&mut pane, &terminal, outbox);
+        }
+        assert_eq!(cursor(&pane).1, 2);
+        assert_eq!(asked, 1, "the daemon counts");
+        // A daemon older than protocol 108 is asked a match at a time.
+        keys(&mut pane, "3n");
+        serve_older(&mut pane, &terminal);
+        assert_eq!(cursor(&pane).1, 2, "round to it again");
+        assert_eq!(pane.label().as_deref(), Some(WRAPPED_TO_TOP));
+        keys(&mut pane, "99999999N");
+        let mut asked = 0;
+        loop {
+            let outbox = pane.take_outbox();
+            if outbox.is_empty() {
+                break;
+            }
+            asked += searches_in(&outbox).len();
+            serve_once(&mut pane, &terminal, older(outbox));
         }
         assert_eq!(cursor(&pane).1, 2);
         assert!(asked <= 6, "{asked}");
@@ -3376,11 +3439,11 @@ mod tests {
         keys(&mut pane, "gg0/cat");
         named(&mut pane, NamedKey::Enter);
         serve(&mut pane, &terminal);
-        keys(&mut pane, "99999999n");
+        keys(&mut pane, "j99999999n");
         let outbox = pane.take_outbox();
         assert_eq!(searches_in(&outbox).len(), 1);
         pane.view_changed(&ViewUpdate::Snapshot(View::capture(&terminal)));
-        serve_once(&mut pane, &terminal, outbox);
+        serve_once(&mut pane, &terminal, older(outbox));
         let mut asked = 0;
         loop {
             let outbox = pane.take_outbox();
@@ -3388,10 +3451,14 @@ mod tests {
                 break;
             }
             asked += searches_in(&outbox).len();
-            serve_once(&mut pane, &terminal, outbox);
+            serve_once(&mut pane, &terminal, older(outbox));
         }
         assert_eq!(asked, 0, "no more asked after the answer that came");
         assert!(!pane.waits_for_answer());
+        // Where it was asked from is numbered as it was: whether it went
+        // round can't be told from it.
+        assert_eq!(cursor(&pane).1, 0);
+        assert_eq!(pane.label(), None);
     }
 
     #[test]

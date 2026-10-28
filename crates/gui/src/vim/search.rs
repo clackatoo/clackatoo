@@ -404,6 +404,58 @@ fn accept<P: Searcher>(pane: &mut P) {
     again(pane, false, typing.count.unwrap_or(1));
 }
 
+/// A count gone a match at a time, as a pane that finds one match at a
+/// time goes `3n`: how many are left, and once it's back at the first it
+/// found, only as many as are left over a time round, so no count goes
+/// round more than once, however big.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Steps<P> {
+    left: usize,
+    /// How many matches it's been to, and the first.
+    taken: usize,
+    first: Option<P>,
+    /// Whether it went round an end on the way.
+    wrapped: bool,
+}
+
+impl<P: Copy + PartialEq> Steps<P> {
+    /// `count` matches to go: one, for none.
+    pub(crate) fn new(count: usize) -> Self {
+        Self {
+            left: count.max(1),
+            taken: 0,
+            first: None,
+            wrapped: false,
+        }
+    }
+
+    /// How many matches are still to go.
+    pub(crate) fn left(&self) -> usize {
+        self.left
+    }
+
+    /// Whether it went round an end on the way.
+    pub(crate) fn wrapped(&self) -> bool {
+        self.wrapped
+    }
+
+    /// Goes on to the match at `at`, gone `round` an end to it if so.
+    /// Returns whether there are more to go.
+    pub(crate) fn step(&mut self, at: P, round: bool) -> bool {
+        self.taken += 1;
+        self.left = self.left.saturating_sub(1);
+        self.wrapped |= round;
+        match self.first {
+            None => self.first = Some(at),
+            // Round to the first again: the rest of the count goes round
+            // as many times, which ends where this many over.
+            Some(first) if first == at => self.left %= self.taken - 1,
+            Some(_) => {}
+        }
+        self.left > 0
+    }
+}
+
 /// Gives up the search being typed, if one is, as Esc and leaving the pane
 /// do: the cursor, the view and what was lit are put back.
 pub(crate) fn give_up<P: Restores>(pane: &mut P) {
