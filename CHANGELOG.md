@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.10.90 (2026-10-28)
+
+### Features
+
+- **daemon:** closing a subagent's pane sends it back to its card (CLACKA-179) (4dc8a151)
+- **gui:** subagents' panes say whose they are, :q sends them back, :bd closes them (CLACKA-179) (3b863f37)
+
+### Fixes
+
+- subagent panes' review fixes: older clients still close, kept chats stay, the bar waits (CLACKA-179) (fa2558a2)
+
 ## 2026.10.89 (2026-10-28)
 
 ### Features
