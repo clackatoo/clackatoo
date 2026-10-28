@@ -14001,14 +14001,16 @@ fn a_real_agent_messages_another_chat_and_waits_for_its_answer() {
     let mut client = daemon.client();
     let minute = Duration::from_mins(1);
     let a = start_tooled_chat(&mut client, AgentTools::Allow);
-    let b = start_tooled_chat(&mut client, AgentTools::Allow);
+    // In a's workspace: a chat in another isn't a's to message.
+    let b = start_tooled_chat_beside(&mut client, a, AgentTools::Allow, None);
     let text = format!(
         "Use the send_to_chat tool from the clackatoo MCP server to send chat {b} the message \
          \"What is 17 + 25? Reply with just the number.\", then its wait_for_chat tool to wait \
          for the answer, and reply with what chat {b} answered."
     );
     client.chat(a, ChatAction::Send(text)).unwrap();
-    // Every question is allowed: messaging the user's other chat asks.
+    // Any question is allowed, though messaging another chat of the
+    // workspace asks none (CLACKA-178).
     let mut asked = Vec::new();
     let node = loop {
         let node = wait_for_chat_for(&mut client, a, 2 * minute, |node| {
@@ -14025,9 +14027,7 @@ fn a_real_agent_messages_another_chat_and_waits_for_its_answer() {
         wait_for_chat_for(&mut client, a, minute, |now| now.question != node.question);
     };
     assert!(
-        asked
-            .iter()
-            .any(|title| title.starts_with("send `What is 17 + 25?")),
+        !(asked.iter()).any(|title| title.starts_with("send `What is 17 + 25?")),
         "{asked:?}\n{node:#?}"
     );
     let other = chat_now(&mut client, b);
