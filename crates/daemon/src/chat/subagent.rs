@@ -186,7 +186,7 @@ impl HostedChat {
     pub(crate) fn take_held_notice(&mut self) -> Option<Message> {
         let front = self.relations.inbox.front()?;
         front
-            .is_unfilled_notice()
+            .is_held_kind()
             .then(|| self.relations.inbox.pop_front())
             .flatten()
     }

@@ -279,6 +279,9 @@ pub(crate) struct Talk {
     pub(crate) held: Vec<Held>,
     /// The waits for chats the upgrade cut off, by the chat that waited.
     pub(crate) waits: Vec<CutWait>,
+    /// The chats whose user had asked them to stop as the upgrade came:
+    /// they aren't told what the upgrade stopped.
+    pub(crate) stopped: Vec<u32>,
 }
 
 /// What the chat `chat`'s agent runs in the background, in the session
@@ -348,12 +351,14 @@ pub(crate) struct Held {
     pub(crate) since: Option<u64>,
 }
 
-/// The chat `waiter` was waiting for the chats `chats` as the upgrade cut
-/// its wait off (see [`Talk::waits`]).
+/// The chat `waiter` was waiting for the chats `chats`, all of them or
+/// with `first` any one, as the upgrade cut its wait off (see
+/// [`Talk::waits`]).
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct CutWait {
     pub(crate) waiter: u32,
     pub(crate) chats: Vec<u32>,
+    pub(crate) first: bool,
 }
 
 /// Why the last message the chat `from` sent the chat `to` was dropped
@@ -4022,7 +4027,9 @@ mod tests {
                 waits: vec![CutWait {
                     waiter: 3,
                     chats: vec![2],
+                    first: true,
                 }],
+                stopped: vec![4],
             }),
             undo_states: vec![BufferUndo {
                 buffer: 1,
@@ -4329,6 +4336,8 @@ mod tests {
         assert_eq!((talk.starts[0].root, talk.starts[0].count), (3, 4));
         assert_eq!(talk.notice_turns[0].count, 100);
         assert_eq!(talk.held[0].chat, 3);
+        assert!(talk.waits[0].first);
+        assert_eq!(talk.stopped, [4]);
         assert_eq!(
             (talk.waits[0].waiter, talk.waits[0].chats.as_slice()),
             (3, &[2][..])

@@ -5730,13 +5730,13 @@ fn an_idle_chats_background_task_is_lost_through_a_real_upgrade_and_it_is_told()
         Some("ended by the daemon's upgrade")
     );
     let told = &node.turns[1];
-    assert!(told.prompt.starts_with("[daemon upgraded]"), "{told:#?}");
+    assert!(told.prompt.starts_with("[daemon restarted]"), "{told:#?}");
     assert!(
         told.prompt.contains("`Serve the docs (npm run dev)`"),
         "{told:#?}"
     );
     assert!(
-        last_words(&node).contains("echo: [daemon upgraded]"),
+        last_words(&node).contains("echo: [daemon restarted]"),
         "{node:#?}"
     );
 }

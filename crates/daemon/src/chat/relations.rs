@@ -69,7 +69,39 @@ impl Message {
     pub(crate) fn is_unfilled_notice(&self) -> bool {
         self.is_finished_notice() && self.text.is_empty()
     }
+
+    /// The notice, to the chat `chat`, of what the daemon restarting for
+    /// an upgrade stopped, saying `text`.
+    pub(crate) fn upgrade_notice(chat: TerminalId, text: String) -> Self {
+        Self {
+            from: Sender {
+                chat,
+                agent: NOTICE_AGENT.to_owned(),
+                title: UPGRADE_TITLE.to_owned(),
+            },
+            text,
+            hops: 0,
+            cause: None,
+        }
+    }
+
+    /// Whether it's the notice of what the daemon restarting for an
+    /// upgrade stopped.
+    pub(crate) fn is_upgrade_notice(&self) -> bool {
+        self.is_notice() && self.from.agent == NOTICE_AGENT && self.from.title == UPGRADE_TITLE
+    }
+
+    /// Whether it's a notice that can wait for the user, past the turns
+    /// notices may start (`MAX_NOTICE_TURNS`): that chats finished, still
+    /// to say what, or what an upgrade stopped.
+    pub(crate) fn is_held_kind(&self) -> bool {
+        self.is_unfilled_notice() || self.is_upgrade_notice()
+    }
 }
+
+/// What the notice of what an upgrade stopped is called, as the chat
+/// shows it.
+const UPGRADE_TITLE: &str = "Daemon restart";
 
 /// Who a notice from clackatoo itself is from, as the chat shows it.
 const NOTICE_AGENT: &str = "Clackatoo";

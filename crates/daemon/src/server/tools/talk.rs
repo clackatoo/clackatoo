@@ -132,10 +132,11 @@ pub(super) struct Talk {
     /// past [`MAX_NOTICE_TURNS`], and the last turn the user started in
     /// each as it began to: writing there again lets it go.
     held: BTreeMap<TerminalId, Option<usize>>,
-    /// The chats each chat was waiting for as an upgrade cut its wait
-    /// off, by the chat that waited: it hears when they finish, as when
-    /// chats it started do, until it has their answers.
-    waited_on: BTreeMap<TerminalId, Vec<TerminalId>>,
+    /// The waits for chats an upgrade cut off, by the chat that waited: it
+    /// hears when they settle after it, whoever started their turns, as
+    /// it would have had the wait gone on: each of them, or, for a wait
+    /// for the first, once.
+    waited_on: BTreeMap<TerminalId, Vec<CutWait>>,
     /// The chats agents started that may have just finished a turn, whose
     /// parents may need telling (see [`Daemon::tell_parents`]).
     pub(super) finished: BTreeSet<TerminalId>,
@@ -154,13 +155,25 @@ impl Talk {
         self.notice_turns.remove(&chat);
         self.held.remove(&chat);
         self.waited_on.remove(&chat);
-        for chats in self.waited_on.values_mut() {
-            chats.retain(|&waited| waited != chat);
+        for waits in self.waited_on.values_mut() {
+            for wait in waits.iter_mut() {
+                wait.chats.retain(|&waited| waited != chat);
+            }
+            waits.retain(|wait| !wait.chats.is_empty());
         }
+        self.waited_on.retain(|_, waits| !waits.is_empty());
         self.finished.remove(&chat);
         self.inboxes.remove(&chat);
         (self.undelivered).retain(|&(from, to), _| from != chat && to != chat);
     }
+}
+
+/// A wait for chats an upgrade cut off: for all of `chats`, or with
+/// `first`, any one.
+#[derive(Debug)]
+struct CutWait {
+    chats: Vec<TerminalId>,
+    first: bool,
 }
 
 /// How much `tools` lets an agent do, to compare: more is looser.
@@ -214,24 +227,28 @@ impl Daemon {
                 since: turn(since),
             })
             .collect();
-        let mut waits: BTreeMap<TerminalId, BTreeSet<TerminalId>> = BTreeMap::new();
+        let ids = |chats: &[TerminalId]| chats.iter().map(|chat| chat.0).collect();
         for waiting in &self.tools.waiting {
-            let chats = match &waiting.what {
-                Wait::Turn { chat, .. } => std::slice::from_ref(chat),
-                Wait::Chats { chats, .. } => chats.as_slice(),
+            let (chats, first) = match &waiting.what {
+                Wait::Turn { chat, .. } => (std::slice::from_ref(chat), false),
+                Wait::Chats { chats, first, .. } => (chats.as_slice(), *first),
                 _ => continue,
             };
-            waits.entry(waiting.chat).or_default().extend(chats);
+            talk.waits.push(handover::CutWait {
+                waiter: waiting.chat.0,
+                chats: ids(chats),
+                first,
+            });
         }
-        for (waiter, chats) in &talked.waited_on {
-            waits.entry(*waiter).or_default().extend(chats);
+        // And those an upgrade before cut off, still to be told.
+        for (waiter, waits) in &talked.waited_on {
+            talk.waits
+                .extend(waits.iter().map(|wait| handover::CutWait {
+                    waiter: waiter.0,
+                    chats: ids(&wait.chats),
+                    first: wait.first,
+                }));
         }
-        talk.waits = (waits.into_iter())
-            .map(|(waiter, chats)| handover::CutWait {
-                waiter: waiter.0,
-                chats: chats.into_iter().map(|chat| chat.0).collect(),
-            })
-            .collect();
         talk
     }
 
@@ -271,10 +288,18 @@ impl Daemon {
                     .filter(|&&chat| open(self, chat))
                     .map(|&chat| TerminalId(chat))
                     .collect();
+                if chats.is_empty() {
+                    continue;
+                }
                 // Each is looked at as it settles, as one that may have
                 // just finished.
                 self.tools.talk.finished.extend(chats.iter().copied());
-                (self.tools.talk.waited_on).insert(TerminalId(cut.waiter), chats);
+                let wait = CutWait {
+                    chats,
+                    first: cut.first,
+                };
+                let waits = self.tools.talk.waited_on.entry(TerminalId(cut.waiter));
+                waits.or_default().push(wait);
             }
         }
         for dropped in undelivered {
@@ -886,7 +911,7 @@ impl Daemon {
     fn holds_notice(&self, chat: TerminalId) -> bool {
         self.tools.talk.held.contains_key(&chat)
             && (self.chat_ref(chat)).is_some_and(|held| {
-                (held.relations().inbox.front()).is_some_and(Message::is_unfilled_notice)
+                (held.relations().inbox.front()).is_some_and(Message::is_held_kind)
             })
     }
 
@@ -934,7 +959,7 @@ impl Daemon {
                     self.collect_damage(id);
                 }
                 self.drop_unsendable(id);
-                let held = !self.fill_notice(id);
+                let held = !(self.fill_notice(id) && self.pass_upgrade_notice(id));
                 // A notice held for the user stays in front, and what waits
                 // behind it is checked and begins as if it weren't there.
                 let notice = if held {
@@ -1027,9 +1052,9 @@ impl Daemon {
                 if self.waited_by(listener, child) {
                     continue;
                 }
-                if !unheard(kid, listener, child) {
-                    // A cut-off wait whose answer was had since is over.
-                    self.forget_cut_wait(listener, child);
+                // A wait the upgrade cut off is told the chat settled,
+                // whoever started its turn, as the wait would have been.
+                if !self.wait_cut_off(listener, child) && !unheard(kid, listener, child) {
                     continue;
                 }
                 if let Some(of) = self.chat(listener) {
@@ -1045,9 +1070,9 @@ impl Daemon {
     /// started it, and those whose wait for it an upgrade cut off.
     fn listeners(&self, child: TerminalId) -> Vec<TerminalId> {
         let parent = self.chat_ref(child).and_then(|kid| kid.relations().parent);
-        let waiters = (self.tools.talk.waited_on.iter())
-            .filter(|(_, chats)| chats.contains(&child))
-            .map(|(&waiter, _)| waiter);
+        let waiters = (self.tools.talk.waited_on.keys())
+            .filter(|&&waiter| self.wait_cut_off(waiter, child))
+            .copied();
         let mut listeners: Vec<TerminalId> = parent.into_iter().chain(waiters).collect();
         listeners.sort_unstable();
         listeners.dedup();
@@ -1058,17 +1083,24 @@ impl Daemon {
     /// Whether the chat `chat`'s wait for `child` was cut off by an upgrade
     /// and isn't over.
     fn wait_cut_off(&self, chat: TerminalId, child: TerminalId) -> bool {
-        (self.tools.talk.waited_on.get(&chat)).is_some_and(|chats| chats.contains(&child))
+        (self.tools.talk.waited_on.get(&chat))
+            .is_some_and(|waits| waits.iter().any(|wait| wait.chats.contains(&child)))
     }
 
-    /// The chat `chat`'s wait for `child` that an upgrade cut off is over:
-    /// it has had the answer.
+    /// The chat `chat` is told `child` settled, which an upgrade cut its
+    /// wait for off: a wait for the first is over, and one for all waits
+    /// on for the rest. What's over is let go.
     fn forget_cut_wait(&mut self, chat: TerminalId, child: TerminalId) {
-        if let Some(chats) = self.tools.talk.waited_on.get_mut(&chat) {
-            chats.retain(|&waited| waited != child);
-            if chats.is_empty() {
-                self.tools.talk.waited_on.remove(&chat);
-            }
+        let Some(waits) = self.tools.talk.waited_on.get_mut(&chat) else {
+            return;
+        };
+        waits.retain(|wait| !(wait.first && wait.chats.contains(&child)));
+        for wait in waits.iter_mut() {
+            wait.chats.retain(|&waited| waited != child);
+        }
+        waits.retain(|wait| !wait.chats.is_empty());
+        if waits.is_empty() {
+            self.tools.talk.waited_on.remove(&chat);
         }
     }
 
@@ -1101,39 +1133,18 @@ impl Daemon {
         {
             return true;
         }
-        let root = (self.chat_ref(id))
-            .and_then(|chat| chat.relations().root)
-            .unwrap_or(id);
-        let since = self.chat_ref(root).and_then(users_last_turn);
-        let mut spent = match self.tools.talk.notice_turns.get(&root) {
-            Some(&(at, spent)) if at == since => spent,
-            _ => 0,
-        };
-        if spent >= MAX_NOTICE_TURNS {
-            let here = self.chat_ref(id).and_then(users_last_turn);
-            match self.tools.talk.held.get(&id) {
-                // The user has written here since it was held: it goes,
-                // and the count starts again.
-                Some(&at) if at != here => {
-                    spent = 0;
-                }
-                _ => {
-                    self.tools.talk.held.entry(id).or_insert(here);
-                    if let Some(chat) = self.chat(id) {
-                        chat.notices_held(MAX_NOTICE_TURNS, root);
-                    }
-                    self.collect_damage(id);
-                    return false;
-                }
-            }
+        if self.notice_waits_for_user(id) {
+            return false;
         }
-        self.tools.talk.held.remove(&id);
         let children: Vec<TerminalId> = (self.terminals.iter())
             .filter_map(|(&child, slot)| {
                 let kid = slot.terminal.chat_ref()?;
-                let ours = kid.relations().parent == Some(id) || self.wait_cut_off(id, child);
-                let told =
-                    ours && idle(kid) && unheard(kid, id, child) && !self.waited_by(id, child);
+                let cut = self.wait_cut_off(id, child);
+                let ours = kid.relations().parent == Some(id) || cut;
+                let told = ours
+                    && idle(kid)
+                    && (cut || unheard(kid, id, child))
+                    && !self.waited_by(id, child);
                 told.then_some(child)
             })
             .collect();
@@ -1147,10 +1158,13 @@ impl Daemon {
         let mut text = String::new();
         // However many finished, the notice stays a size to read.
         let share = (MOST_NOTICE / children.len()).min(MAX_READ);
-        for child in children {
+        let children: Vec<(TerminalId, bool)> = (children.into_iter())
+            .map(|child| (child, self.wait_cut_off(id, child)))
+            .collect();
+        for (child, cut) in children {
             let answer = self.answer_within(id, child, false, share);
-            let which = if self.wait_cut_off(id, child) {
-                "which this chat was waiting for as the daemon upgraded"
+            let which = if cut {
+                "which this chat was waiting for as the daemon restarted for an upgrade"
             } else {
                 "which this chat started"
             };
@@ -1170,11 +1184,78 @@ impl Daemon {
                  --- end of answer {tag:08x} ---\n\n"
             );
         }
-        (self.tools.talk.notice_turns).insert(root, (since, spent + 1));
+        self.charge_notice(id);
         if let Some(chat) = self.chat(id) {
             chat.fill_finished_notice(Some(text.trim_end().to_owned()));
         }
         true
+    }
+
+    /// The notice that the daemon restarted for an upgrade, if it's next
+    /// to begin in the chat `id`: it's charged as a notice that chats
+    /// finished is, and past [`MAX_NOTICE_TURNS`] waits for the user the
+    /// same way, as agents can upgrade the daemon themselves. Returns
+    /// whether it goes on: false if it's held.
+    fn pass_upgrade_notice(&mut self, id: TerminalId) -> bool {
+        let next = (self.chat_ref(id))
+            .filter(|chat| chat.next_message_from().is_some())
+            .and_then(|chat| chat.relations().inbox.front());
+        if !next.is_some_and(Message::is_upgrade_notice) {
+            return true;
+        }
+        if self.notice_waits_for_user(id) {
+            return false;
+        }
+        self.charge_notice(id);
+        true
+    }
+
+    /// The user's chat the chat `id` goes back to, and the last turn the
+    /// user started there, which notices' turns are counted since.
+    fn notice_count_of(&self, id: TerminalId) -> (TerminalId, Option<usize>, u32) {
+        let root = (self.chat_ref(id))
+            .and_then(|chat| chat.relations().root)
+            .unwrap_or(id);
+        let since = self.chat_ref(root).and_then(users_last_turn);
+        let spent = match self.tools.talk.notice_turns.get(&root) {
+            Some(&(at, spent)) if at == since => spent,
+            _ => 0,
+        };
+        (root, since, spent)
+    }
+
+    /// Whether a notice next to begin in the chat `id` waits for the user,
+    /// past [`MAX_NOTICE_TURNS`] under the user's chat since they last
+    /// wrote there: until they write there or in `id`, and the chat says
+    /// so. Writing in `id` since it was held lets it go, and the count
+    /// starts again.
+    fn notice_waits_for_user(&mut self, id: TerminalId) -> bool {
+        let (root, since, spent) = self.notice_count_of(id);
+        if spent >= MAX_NOTICE_TURNS {
+            let here = self.chat_ref(id).and_then(users_last_turn);
+            match self.tools.talk.held.get(&id) {
+                Some(&at) if at != here => {
+                    self.tools.talk.notice_turns.insert(root, (since, 0));
+                }
+                _ => {
+                    self.tools.talk.held.entry(id).or_insert(here);
+                    if let Some(chat) = self.chat(id) {
+                        chat.notices_held(MAX_NOTICE_TURNS, root);
+                    }
+                    self.collect_damage(id);
+                    return true;
+                }
+            }
+        }
+        self.tools.talk.held.remove(&id);
+        false
+    }
+
+    /// Counts one more turn a notice starts under the user's chat the chat
+    /// `id` goes back to.
+    fn charge_notice(&mut self, id: TerminalId) {
+        let (root, since, spent) = self.notice_count_of(id);
+        (self.tools.talk.notice_turns).insert(root, (since, spent + 1));
     }
 
     /// Drops the messages waiting for the chat `id` that would begin now
@@ -2593,8 +2674,8 @@ mod tests {
         let told = &turns[1];
         assert!(
             told.prompt.starts_with(
-                "[daemon upgraded] Clackatoo was upgraded, which ended your agent's process. The \
-                 upgrade also stopped what you ran in the background, which went with your \
+                "[daemon restarted] Clackatoo's daemon restarted for an upgrade, which ended your \
+                 agent's process. The upgrade also stopped what you ran in the background, which went with your \
                  process: `scripts/deploy --wait`. Start again whatever you still need."
             ),
             "{}",
@@ -2603,6 +2684,8 @@ mod tests {
         let from = told.from.as_ref().unwrap();
         assert_eq!((from.chat, from.agent.as_str()), (b, "Clackatoo"));
         assert_eq!(kid.relations().hops, hops, "no new chain of messages");
+        // Counted, as is the turn a takes as it hears b finished that one.
+        assert_eq!(resumed.tools.talk.notice_turns[&a].1, 2, "counted");
         // Once only: another upgrade with nothing going tells nothing.
         let mut again = upgraded(resumed);
         relay(&mut again);
@@ -2665,29 +2748,22 @@ mod tests {
     }
 
     /// A chat waiting for another, not one it started, as an upgrade cut
-    /// the wait off, hears when that one finishes, as a notice, as it
-    /// would from a chat it started (CLACKA-187).
+    /// the wait off, hears when that one settles, as a notice, as the wait
+    /// would have, whoever started the turn it settles from: here a asked
+    /// c, and b, c's sibling, waited for it (review of CLACKA-187).
     #[test]
-    fn a_chat_whose_wait_an_upgrade_cut_off_hears_when_the_chat_finishes() {
+    fn a_chat_whose_wait_an_upgrade_cut_off_hears_when_the_chat_settles() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
         let b = under(&mut daemon, 2, a, a);
         answers(&mut daemon, b, "waiting on my sibling");
+        // a asks c, and b waits for it.
         let c = under(&mut daemon, 3, a, a);
-        answers(&mut daemon, c, "first");
-        drop(daemon.answer_of(a, c, false));
-        // b asks its sibling c, and waits.
-        let message = daemon.message_from(b, "and the lexer?").unwrap();
-        drop(daemon.chat(c).unwrap().deliver(message).unwrap());
-        daemon.note_subagent(c);
-        assert!(
-            daemon
-                .wait_for_chat(call(), b, c, Duration::from_mins(10))
-                .is_none()
-        );
+        let waits = daemon.wait_for_chat(call(), b, c, Duration::from_mins(10));
+        assert!(waits.is_none());
         let mut resumed = upgraded(daemon);
         assert!(resumed.tools.waiting.is_empty(), "the wait went");
-        assert_eq!(resumed.tools.talk.waited_on[&b], [c]);
+        assert!(resumed.wait_cut_off(b, c));
         // c's turn ends (here failing, as no agent can start): b is told.
         relay(&mut resumed);
         let turns = &resumed.chat_ref(b).unwrap().node().turns;
@@ -2695,10 +2771,100 @@ mod tests {
         assert!(
             told.prompt.starts_with(
                 "[chat 3 finished] Chat 3, which this chat was waiting for as the daemon \
-                 upgraded, has finished."
+                 restarted for an upgrade, has finished."
             ),
             "{turns:#?}"
         );
-        assert!(!resumed.tools.talk.waited_on.contains_key(&b), "over");
+        assert!(
+            !resumed.tools.talk.waited_on.contains_key(&b),
+            "over, let go"
+        );
+    }
+
+    /// A cut-off wait for the first of several chats to finish wakes its
+    /// chat once, not once a chat.
+    #[test]
+    fn a_cut_off_wait_for_the_first_of_several_is_told_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = under(&mut daemon, 2, a, a);
+        let c = under(&mut daemon, 3, a, a);
+        let first = daemon.wait_for_chats(call(), a, vec![b, c], (true, Duration::from_mins(10)));
+        assert!(first.is_none());
+        let mut resumed = upgraded(daemon);
+        // Both settle (here failing, as no agent can start), and a, its
+        // own turn over too, is told once.
+        relay(&mut resumed);
+        let turns = &resumed.chat_ref(a).unwrap().node().turns;
+        let told = (turns.iter())
+            .filter(|turn| turn.prompt.starts_with("[chat "))
+            .count();
+        assert_eq!(told, 1, "{turns:#?}");
+        assert!(!resumed.tools.talk.waited_on.contains_key(&a));
+        // Told of one, a wait for the first is over; one for all goes on
+        // for the rest.
+        for first in [true, false] {
+            let wait = CutWait {
+                chats: vec![b, c],
+                first,
+            };
+            resumed.tools.talk.waited_on.insert(a, vec![wait]);
+            resumed.forget_cut_wait(a, b);
+            assert_eq!(resumed.wait_cut_off(a, c), !first, "first: {first}");
+        }
+    }
+
+    /// Agents can upgrade the daemon themselves, so the turn a notice of
+    /// what an upgrade stopped starts counts as one a notice started: past
+    /// the cap, it waits for the user. The tasks show lost either way.
+    #[test]
+    fn a_notice_of_what_an_upgrade_stopped_is_counted_and_held_past_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = building(&mut daemon, 2, a);
+        runs_in_background(&mut daemon, b, "npm run dev");
+        answers(&mut daemon, b, "serving");
+        let c = building(&mut daemon, 3, a);
+        runs_in_background(&mut daemon, c, "npm test");
+        answers(&mut daemon, c, "testing");
+        (daemon.tools.talk.notice_turns).insert(a, (Some(0), MAX_NOTICE_TURNS - 1));
+        let mut resumed = upgraded(daemon);
+        relay(&mut resumed);
+        // One goes, and is counted; the other waits for the user.
+        let told = |daemon: &Daemon, chat| daemon.chat_ref(chat).unwrap().node().turns.len() == 2;
+        assert!(told(&resumed, b) != told(&resumed, c), "one of them");
+        assert_eq!(
+            resumed.tools.talk.notice_turns[&a],
+            (Some(0), MAX_NOTICE_TURNS)
+        );
+        let held = if told(&resumed, b) { c } else { b };
+        assert!(resumed.holds_notice(held));
+        let lost = &resumed.chat_ref(held).unwrap().node().tasks[0];
+        assert_eq!(lost.state, clackatoo_protocol::AgentTaskState::Lost);
+    }
+
+    /// A turn the user had asked to stop as the upgrade came isn't told
+    /// of after, nor what it ran: its tasks show lost all the same.
+    #[test]
+    fn a_turn_the_user_asked_to_stop_isnt_told_of_after_an_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = building(&mut daemon, 2, a);
+        runs_in_background(&mut daemon, b, "npm run dev");
+        drop(
+            daemon
+                .chat(b)
+                .unwrap()
+                .act(clackatoo_protocol::ChatAction::Stop),
+        );
+        assert!(daemon.chat_ref(b).unwrap().is_answering(), "stopping");
+        let mut resumed = upgraded(daemon);
+        relay(&mut resumed);
+        let kid = resumed.chat_ref(b).unwrap();
+        assert_eq!(kid.node().turns.len(), 1, "{:#?}", kid.node().turns);
+        assert_eq!(
+            kid.node().tasks[0].state,
+            clackatoo_protocol::AgentTaskState::Lost
+        );
     }
 }

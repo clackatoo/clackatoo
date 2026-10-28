@@ -3,15 +3,13 @@
 
 use std::fmt::Write as _;
 
-use clackatoo_protocol::{
-    ChatImage, ChatPreview, ChatState, Item, Outcome, Sender, TerminalId, code_span,
-};
+use clackatoo_protocol::{ChatImage, ChatPreview, ChatState, Item, Outcome, TerminalId, code_span};
 
 use super::{HostedChat, Link, Message, Prompt};
 use crate::handover::{self, ChatContinuation, QueuedImage, ResumePrompt};
 
-const CONTINUE: &str = "Clackatoo resumed this session after a daemon upgrade interrupted \
-    the active turn. Continue the user's latest request from where you left off. \
+const CONTINUE: &str = "Clackatoo resumed this session after the daemon restarted for an \
+    upgrade, which interrupted the active turn. Continue the user's latest request from where you left off. \
     The upgrade may have interrupted a tool after it already acted: inspect its \
     result or current state before repeating it. Do not assume an interrupted \
     command failed or rerun completed actions. Keep the user's existing scope \
@@ -114,6 +112,10 @@ impl HostedChat {
     /// had.
     pub(crate) fn hand_over_standing(&self, talk: &mut handover::Talk) {
         talk.tasks.extend(self.hand_over_tasks());
+        // A turn the user asked to stop isn't told of after, nor what it ran.
+        if self.answering() && (self.stop_requested || self.skipping() || self.woken_stopping()) {
+            talk.stopped.push(self.id.0);
+        }
         let woke = (self.node.turns.iter().enumerate()).filter_map(|(turn, each)| {
             Some(handover::WokeTurn {
                 chat: self.id.0,
@@ -170,15 +172,18 @@ impl HostedChat {
     /// its own, what the upgrade stopped, if it isn't told as its turn goes
     /// on: the background tasks `stopped`, and the turn it had taken by
     /// itself, if the upgrade cut one off. One notice, once: it starts no
-    /// new chain of messages, and counts against nothing, but nothing
-    /// comes of it again. Returns whether there was anything to tell.
+    /// new chain of messages, but its turn counts as one a notice started
+    /// (see `Daemon::pass_upgrade_notice`). Nothing is told a chat whose
+    /// user had asked it to stop. The daemon may have restarted as the
+    /// same build, if the next one failed to start, so it says restarted.
+    /// Returns whether there was anything to tell.
     pub(crate) fn tell_upgrade(&mut self, stopped: &[String]) -> bool {
         let cut = self.cut_off_by_itself();
         if stopped.is_empty() && cut.is_none() {
             return false;
         }
-        let mut text = "[daemon upgraded] Clackatoo was upgraded, which ended your agent's \
-            process."
+        let mut text = "[daemon restarted] Clackatoo's daemon restarted for an upgrade, which \
+            ended your agent's process."
             .to_owned();
         if let Some((number, why)) = cut {
             let why = if why.is_empty() {
@@ -196,16 +201,7 @@ impl HostedChat {
             text.push(' ');
             text.push_str(&said);
         }
-        self.relations.inbox.push_back(Message {
-            from: Sender {
-                chat: self.id,
-                agent: "Clackatoo".to_owned(),
-                title: "Daemon upgrade".to_owned(),
-            },
-            text,
-            hops: 0,
-            cause: None,
-        });
+        (self.relations.inbox).push_back(Message::upgrade_notice(self.id, text));
         true
     }
 }

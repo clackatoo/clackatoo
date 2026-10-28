@@ -1267,7 +1267,11 @@ impl Daemon {
                     log::info!("chat {id}: its turn the upgrade cut off can't go on");
                 }
             }
-            if !told && chat.tell_upgrade(&stopped) {
+            // A turn the user had asked to stop isn't told of, nor what it
+            // ran: the tasks show lost all the same.
+            let asked_to_stop =
+                (standing.as_ref()).is_some_and(|standing| standing.stopped.contains(&id.0));
+            if !told && !asked_to_stop && chat.tell_upgrade(&stopped) {
                 log::info!(
                     "chat {id}: told what the upgrade stopped ({} background tasks)",
                     stopped.len()
