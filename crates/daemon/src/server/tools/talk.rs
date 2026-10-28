@@ -317,7 +317,7 @@ impl Daemon {
         }
         if !self.family(chat, to)
             && let (Some(ours), Some(theirs)) = (self.project_root(chat), self.project_root(to))
-            && !theirs.starts_with(&ours)
+            && !theirs.starts_with(ours)
         {
             return Some(format!(
                 "chat {to} works outside this chat's project ({}): ask the user to message it",

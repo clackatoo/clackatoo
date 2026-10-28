@@ -744,7 +744,7 @@ impl Daemon {
                     return None;
                 }
                 let root = self.project_root(chat)?;
-                (!resolved.starts_with(&root)).then(|| {
+                (!resolved.starts_with(root)).then(|| {
                     let what = format!(
                         "show {}, outside this chat's project ({}): opening a file there can \
                          start its language server, which may run that project's code",
@@ -784,12 +784,10 @@ impl Daemon {
     }
 
     /// The chat `chat`'s project: the git repository its working
-    /// directory is in, or else that directory. Its agent's tools show
-    /// what's in it without asking.
-    fn project_root(&self, chat: TerminalId) -> Option<PathBuf> {
-        let dir = PathBuf::from(self.chat_ref(chat)?.working_directory());
-        let dir = dir.canonicalize().unwrap_or(dir);
-        Some(clackatoo_syntax::git_root(&dir, &self.config.home).unwrap_or(dir))
+    /// directory is in, or else that directory, as worked out when it was
+    /// added. Its agent's tools show what's in it without asking.
+    fn project_root(&self, chat: TerminalId) -> Option<&Path> {
+        Some(self.chat_ref(chat)?.project())
     }
 
     /// The user answered the chat's question about the call numbered
@@ -1893,7 +1891,7 @@ impl Daemon {
         let only =
             path.map(|path| super::buffers::resolve(path, Path::new(&dir), &self.config.home));
         if let Some(only) = &only
-            && !only.starts_with(&root)
+            && !only.starts_with(root)
         {
             return format!(
                 "{} is outside this chat's project, {}.",
@@ -1901,9 +1899,8 @@ impl Daemon {
                 root.display()
             );
         }
-        let wanted = |file: &Path| {
-            file.starts_with(&root) && only.as_deref().is_none_or(|only| only == file)
-        };
+        let wanted =
+            |file: &Path| file.starts_with(root) && only.as_deref().is_none_or(|only| only == file);
         let mut found: Vec<(clackatoo_protocol::Severity, String, u64, usize, String)> = Vec::new();
         for (&buffer, slot) in &self.buffers {
             let Some(opened) = &slot.server else { continue };

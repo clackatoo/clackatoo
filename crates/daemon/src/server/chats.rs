@@ -443,7 +443,11 @@ impl Daemon {
         // The agent's folder can be one an agent chose, so nothing in it
         // may pass unseen in the line a new chat shows it on.
         let shown = super::tools::visible(&super::tools::homely(cwd, &self.config.home));
-        chat.show_cwd(shown);
+        // Worked out once, here, as it walks the disk: the chat's tools
+        // and messages ask for it often.
+        let dir = cwd.canonicalize().unwrap_or_else(|_| cwd.to_owned());
+        let project = clackatoo_syntax::git_root(&dir, &self.config.home).unwrap_or(dir);
+        chat.show_cwd(shown, project);
         self.terminals.insert(
             id,
             Slot {

@@ -332,7 +332,7 @@ impl Daemon {
             // Its project would be wherever it starts, so it would reach
             // what this chat's tools don't without asking.
             let dir = dir.canonicalize().unwrap_or(dir);
-            if !dir.starts_with(&project) {
+            if !dir.starts_with(project) {
                 return Err(format!(
                     "{} is outside this chat's project ({}): ask the user to start a chat there",
                     dir.display(),

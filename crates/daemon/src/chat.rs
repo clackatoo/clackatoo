@@ -11,6 +11,7 @@
 //! asking which agent it is, so a new agent that sends the same works too.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol_schema::MaybeUndefined;
@@ -338,6 +339,10 @@ pub(crate) struct HostedChat {
     /// folder its agent works in. Set by [`show_cwd`](Self::show_cwd)
     /// once the server has it; until then, `cwd` as it is.
     shown_cwd: Option<String>,
+    /// Its project: the git repository `cwd` is in, or else `cwd`. Set by
+    /// [`show_cwd`](Self::show_cwd) once the server has worked it out, as
+    /// that walks the disk; until then, `cwd` as it is.
+    project: PathBuf,
     /// The agent's name, which the server finds it by.
     agent: String,
     /// The agent's session, once it has made one.
@@ -544,6 +549,7 @@ impl HostedChat {
             id,
             size,
             title: agent.title.clone(),
+            project: PathBuf::from(&cwd),
             cwd,
             shown_cwd: None,
             agent: agent.name.clone(),
@@ -825,9 +831,16 @@ impl HostedChat {
     }
 
     /// Has its view say the folder it works in as `shown`: its working
-    /// directory as people write it.
-    pub(crate) fn show_cwd(&mut self, shown: String) {
+    /// directory as people write it. Its project is `project`.
+    pub(crate) fn show_cwd(&mut self, shown: String, project: PathBuf) {
         self.shown_cwd = Some(shown);
+        self.project = project;
+    }
+
+    /// Its project: the git repository its working directory is in, or
+    /// else that directory.
+    pub(crate) fn project(&self) -> &Path {
+        &self.project
     }
 
     pub(crate) fn view(&self) -> View {
