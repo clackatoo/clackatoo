@@ -249,7 +249,7 @@ While the mouse is over a turn the agent has finished, `Copy` shows under its an
 
 ### What it runs in the background
 
-Claude Code can leave a command running in the background, such as a dev server or a long build, and carry on with the turn. A shelf above the box lists what it runs: `In the background · 1 running`, then a line for each with its command and what it's for, how it's going, and for how long, as `● npm run dev · Start the dev server — running 2m 4s`. The seconds count while one runs. A watcher it started says `Watching:`, and a turn Claude Code takes by itself, with no message from you, such as to look at a shell that has finished, shows as `Claude is working` while it lasts.
+Claude Code can leave a command running in the background, such as a dev server or a long build, and carry on with the turn. A shelf above the box lists what it runs: `In the background · 1 running`, then a line for each with its command and what it's for, how it's going, and for how long, as `● npm run dev · Start the dev server — running 2m 4s`. The seconds count while one runs. A watcher it started says `Watching:`. When one ends, Claude Code may [go on by itself](#turns-the-agent-takes-by-itself) to look at it.
 
 The square at the end of a running line stops it, through the agent. From the keyboard, `:stoptask` stops the newest running, and `:stoptask 2` the second line. A watcher can't be stopped from here; ask the agent. The shelf lists at most three, newest first, with how many more there are.
 
@@ -260,6 +260,10 @@ A subagent's card says how many things its chats run in the background, and when
 Only Claude Code says what it runs in the background. The phone lists the same lines, without the buttons that stop them.
 
 Claude Code's adapter says so only to a client that asks as JetBrains' AIR does, and to such a client it sends a read or a search of files without its result: rows for Claude Code's Read, Grep and Glob show what they read or looked for, but not what they found. Commands' output, file changes and images are as before. To have that text rather than the shelf, set `tasks = false` for Claude Code in [`agents.toml`](#which-agent).
+
+### Turns the agent takes by itself
+
+An agent can go on with no message from you: Claude Code does when something it ran in the background ends, to look at what it printed, and may commit and write you a summary. That shows as a turn of its own, with no message, under a line such as `Claude Code went on by itself · Background command "npm test" completed`. The chat is at work while it lasts, a message you send waits for it, and Ctrl+C stops it. It ends when Claude Code says so; an agent that doesn't say is taken to have finished once it has been quiet for 20 seconds with no tool running. A chat that ends one while you aren't looking is marked unseen, a subagent's card says it's working again, and an agent waiting for the subagent with `wait_for_chat` gets what it said.
 
 ### When the agent asks
 
@@ -505,7 +509,7 @@ An upgrade stops the browser; the next page starts it again. An upgrade, or the 
 - Agents can't yet see what you've selected in an editor. Commands run with the agent's own tool, rather than `run_in_terminal`, show their output once they're done.
 - The account-usage modal is native-only. Gemini CLI and custom adapters do not yet have read-only subscription probes; the phone keeps its existing per-chat usage detail.
 - `/` commands aren't listed or completed as you type them.
-- What Claude Code says and does in a turn it takes by itself, with no message from you, such as when a shell it ran in the background ends, isn't shown yet: the shelf above the box says it's working, and its next answer to you carries on from it.
+- An upgrade forgets which turns an agent took by itself: they show as turns with no message.
 - Codex's commands in the background aren't listed: asking for them would change how Codex reports every command.
 - While clackatoo asks Claude Code what it runs in the background, its Read, Grep and Glob rows don't show what they found.
 - You can't click or type into a browser pane yourself.
