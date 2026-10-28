@@ -2249,9 +2249,11 @@ fn last_outcome(chat: &ChatNode) -> Option<&Outcome> {
 
 /// What the agent said in `chat`'s last turn.
 fn last_words(chat: &ChatNode) -> String {
-    let Some(turn) = chat.turns.last() else {
-        return String::new();
-    };
+    chat.turns.last().map_or_else(String::new, last_words_of)
+}
+
+/// What the agent said in `turn`.
+fn last_words_of(turn: &clackatoo_protocol::Turn) -> String {
     (turn.items.iter())
         .filter_map(|item| match item {
             Item::Words(words) => Some(words.as_str()),
@@ -13080,17 +13082,27 @@ fn chats_agents_start_are_limited_in_depth_and_number() {
         serde_json::json!({ "prompt": deepest })
     );
     let (kid, grandchild) = (a.0 + 1, a.0 + 2);
+    // As the grandchild finishes, the kid is told, and goes on with a turn
+    // of its own, which the last wait for the kid takes in. Without it, a
+    // would hear of that turn in a notice after its own, and a message sent
+    // it while that notice's turn runs is lost (CLACKA-186): the next ask
+    // timed out on a loaded machine.
     let prompt = format!(
         "mcp start_chat {}\nmcp wait_for_chat {{\"chat\":{kid}}}\n\
-         mcp wait_for_chat {{\"chat\":{grandchild}}}",
+         mcp wait_for_chat {{\"chat\":{grandchild}}}\nmcp wait_for_chat {{\"chat\":{kid}}}",
         serde_json::json!({ "prompt": middle })
     );
     let node = ask_for(&mut client, a, &prompt, Duration::from_secs(20));
-    let words = last_words(&node);
+    let started = chat_now(&mut client, TerminalId(kid));
     assert!(
-        words.contains(&format!(
+        last_words_of(&started.turns[0]).contains(&format!(
             "start_chat: Started chat {grandchild} (claude, as general)"
         )),
+        "{started:#?}"
+    );
+    let words = last_words(&node);
+    assert!(
+        words.contains(&format!("Chat {kid} went on by itself after your message")),
         "{words}"
     );
     assert!(
@@ -13100,6 +13112,8 @@ fn chats_agents_start_are_limited_in_depth_and_number() {
         ),
         "{words}"
     );
+    // a has heard all of it: no notice comes to take a turn.
+    assert_eq!(chat_now(&mut client, a).turns.len(), 1);
 
     // At most four chats agents started work at once: four that wait
     // for ever are let start, and a fifth is refused.
