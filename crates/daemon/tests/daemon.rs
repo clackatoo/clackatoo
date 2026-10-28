@@ -4879,6 +4879,69 @@ fn an_agents_write_to_lines_changed_and_not_saved_or_outside_its_project_is_refu
     );
 }
 
+/// Claude Code's AskUserQuestion tool, on the cheapest model: its adapter
+/// keeps it only for a client that can show forms, and asks it as one.
+/// Run by hand, as [`a_real_agent_answers_and_asks_before_running_commands`]
+/// is.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agents_question_comes_as_a_form_and_its_answer_goes_back() {
+    use clackatoo_protocol::{FieldInput, FieldValue, FormReply};
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
+    };
+    let daemon = TestDaemon::start_with_agent(|_| {
+        ["env", "ANTHROPIC_MODEL=haiku"]
+            .into_iter()
+            .chain(command.split_whitespace())
+            .map(Into::into)
+            .collect()
+    });
+    let mut client = daemon.client();
+    client.new_workspace(None, new_chat()).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minute = Duration::from_mins(1);
+    wait_for_chat_for(&mut client, chat, minute, |node| {
+        node.state == ChatState::Ready
+    });
+    let text = "Use your AskUserQuestion tool to ask me one question: which colour I prefer, \
+                with exactly two options, Red and Blue. Once I answer, reply with only the \
+                colour I picked, and use no other tools.";
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    let node = wait_for_chat_for(&mut client, chat, minute, |node| {
+        last_outcome(node).is_some() || node.question.is_some()
+    });
+    let question = node.question.expect("a question");
+    let form = question.form.expect("a form, not a question asking leave");
+    let (key, blue) = (form.fields().iter())
+        .find_map(|field| match &field.input {
+            FieldInput::One { options, .. } => (options.iter())
+                .find(|option| option.value.to_lowercase().contains("blue"))
+                .map(|option| (field.key.clone(), option.value.clone())),
+            _ => None,
+        })
+        .expect("a choice with Blue");
+    let reply = FormReply::Accept(vec![(key, FieldValue::Text(blue))]);
+    client
+        .chat(
+            chat,
+            ChatAction::Fill {
+                question: question.id,
+                reply,
+            },
+        )
+        .unwrap();
+    let node = wait_for_chat_for(&mut client, chat, minute, |node| {
+        last_outcome(node).is_some() && node.question.is_none()
+    });
+    assert!(
+        last_words(&node).to_lowercase().contains("blue"),
+        "{node:#?}"
+    );
+}
+
 /// Claude Code's Edit tool, on the cheapest model, changing a file open in
 /// a buffer with a change not saved. Run by hand, as
 /// [`a_real_agent_answers_and_asks_before_running_commands`] is.
