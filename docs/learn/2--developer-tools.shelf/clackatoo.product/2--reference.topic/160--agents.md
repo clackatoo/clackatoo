@@ -396,8 +396,11 @@ An agent can work with your other chats through more of clackatoo's tools.
 | `read_chat` | Reads a chat's last turns: 3, unless it asks for up to 20. |
 | `start_chat` | Starts a subagent: a chat with the agent, profile and folder it picks, sent a first message. It runs in the background, as a card in this chat, unless it asks for a pane. |
 | `start_chats` | Starts several at once. |
-| `wait_for_chat` | Waits until a chat has answered everything sent to it, for 5 minutes unless it asks for up to 30, and gives its answer. |
+| `close_chat` | Closes a chat it started, for good, as `:bd` does. Not one you opened and sent back to the background: that one is yours. |
+| `wait_for_chat` | Waits until a chat has answered everything sent to it, for 5 minutes unless it asks for up to 30, and gives every answer to its messages it hasn't had yet, oldest first, or else the last. If the chat still runs something in the background, it says so: the chat may go on by itself when that ends. |
 | `wait_for_chats` | Waits for several chats, all of them or the first to finish, and gives one summary: each one's status, final answer and files changed. |
+
+A chat that started another and isn't waiting for it hears when it finishes: a notice from clackatoo, starting `[chat 7 finished]`, with what the chat answered, comes to it as a message would, as a turn of its own if it's idle. It's framed as clackatoo's, not as a message the other chat's agent wrote, so no agent can pass one off. Several finishing while the chat is busy come as one notice. A turn you had with that chat yourself isn't told.
 
 Agents are told to use `start_chat` or `start_chats`, with a profile, for all subagent work. Claude Code's own Task tool, whose helpers work out of sight, is off unless you `:set claudetask`. A chat keeps its choice through an upgrade, and the chats it starts take it too.
 
@@ -421,7 +424,7 @@ Once back in the background it is like any other there: it closes with the chat 
 
 #### Closing
 
-Subagents in the background close with the chat that started them, unless they're still working or have changes you haven't reviewed: then they pass to the chat above, if there is one. Past 8 under one of your chats, the oldest close to make room, but only those that have finished, whose answers the agent that started them has read, with nothing waiting for your review and no subagents of their own, and never one you had in a pane and sent back: that one is yours to close, with `:bd`. A finished one in the background lets Claude Code's process go after 2 minutes, and its next message brings it back in about half a second.
+Subagents in the background close with the chat that started them, unless they're still working or have changes you haven't reviewed: then they pass to the chat above, if there is one. Otherwise a subagent stays open, finished or not, until you close it, with `:bd`, or the agent that started it does, with `close_chat`, so an agent can send its builder fixes for as long as the work takes. None is ever closed to make room: with 32 open under one of your chats, starting another is refused, and the agent is told to close those it's done with. One you had in a pane and sent back is yours: only you close it. A finished one in the background lets Claude Code's process go after 2 minutes, and its next message brings it back in about half a second.
 
 ### Profiles
 
@@ -460,7 +463,8 @@ Starting and messaging chats never asks you first. Instead, what an agent can't 
 - A chat is started only inside the project of the chat starting it, a folder linked from inside it to outside included.
 - A chat an agent starts gets its parent's Tools setting and limits (see [Profiles](#profiles)). With the same agent, it gets its parent's mode; with another, that agent's safest. An agent that offers no modes as session settings can't be held to its safest, so a chat started with one fails to start, and says so, whenever its session opens. Modes an agent offers only through ACP's older `modes` field aren't read.
 - What one agent sends another shows its control characters, and those that reorder the text around them, as `^G` or `<U+202E>`, so nothing in it hides from you. So do tag characters, which can spell out words unseen, unless they make a flag such as Scotland's, and variation selectors that follow nothing they could change. Joiners and other characters emoji and scripts such as Persian need are left as they are.
-- One message of yours can lead to at most 16 turns of agents' work across all chats, and a chat of yours can have at most 8 chats started under it (finished ones in the background close to make room), 4 of them working at once, a message waking one counting too, 2 deep. An agent can't wait for a chat that's waiting for it.
+- Agents send each other as many messages as the work needs. A chat of yours can have at most 32 chats started under it open at once, and 64 started under it in all (counted again after an upgrade), 4 of them working at once, a message waking one counting too, 2 deep. Two chats messaging each other back and forth stop after 6 messages, each sent in the turn the one before started. An agent can't wait for a chat that's waiting for it.
+- A notice from clackatoo, such as that a subagent finished or an [activity](#managed-activities-and-recovery) ended, always reaches the chat it's for, and counts against none of these.
 
 Which chat started which, and messages waiting their turn, last through an upgrade. Boards, shared between agents and you, have tools of their own: see [Boards](~clackatoo/reference/boards).
 

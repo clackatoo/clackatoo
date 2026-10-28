@@ -1025,6 +1025,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "The agent's to-do list shows above a chat's box, done of total and the step at work; click or :plan opens it",
     },
+    News {
+        id: "subagents-stay",
+        date: "2026-10-28",
+        lesson: "agents",
+        what: "Subagents stay open until closed, agents message them freely, and hear when one finishes",
+    },
 ];
 
 impl News {
