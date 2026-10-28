@@ -405,7 +405,7 @@ impl Pane {
             Some(old_end) if snapshot => {
                 self.history.clear();
                 self.forget_unplaced();
-                self.search_start_renumbered();
+                self.search_renumbered();
                 if follow {
                     self.scroll = (self.scroll + end).saturating_sub(old_end);
                 }
@@ -414,7 +414,7 @@ impl Pane {
             Some(old_end) if end < old_end => {
                 self.history.clear();
                 self.forget_unplaced();
-                self.search_start_renumbered();
+                self.search_renumbered();
                 self.scroll = 0;
             }
             // New lines scrolled into history.
@@ -3366,6 +3366,32 @@ mod tests {
         named(&mut pane, NamedKey::Enter);
         serve(&mut pane, &terminal);
         assert_eq!(cursor(&pane).0, "line 3");
+    }
+
+    #[test]
+    fn a_count_asked_a_match_at_a_time_ends_once_history_is_numbered_afresh() {
+        let terminal = terminal("cat\r\ncat\r\ncat");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg0/cat");
+        named(&mut pane, NamedKey::Enter);
+        serve(&mut pane, &terminal);
+        keys(&mut pane, "99999999n");
+        let outbox = pane.take_outbox();
+        assert_eq!(searches_in(&outbox).len(), 1);
+        pane.view_changed(&ViewUpdate::Snapshot(View::capture(&terminal)));
+        serve_once(&mut pane, &terminal, outbox);
+        let mut asked = 0;
+        loop {
+            let outbox = pane.take_outbox();
+            if outbox.is_empty() {
+                break;
+            }
+            asked += searches_in(&outbox).len();
+            serve_once(&mut pane, &terminal, outbox);
+        }
+        assert_eq!(asked, 0, "no more asked after the answer that came");
+        assert!(!pane.waits_for_answer());
     }
 
     #[test]

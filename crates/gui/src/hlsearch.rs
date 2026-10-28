@@ -1,5 +1,6 @@
 //! Every match of the last search in view lit up, as Vim's `hlsearch`
-//! lights them, in editors, in terminals' normal mode and in chats: from a
+//! lights them, in editors, in terminals' normal mode, in chats and in
+//! lists (see [`crate::vim::search`], which keeps what's lit): from a
 //! search, `n` or `N` until Esc or `:nohlsearch`, the match the search went
 //! to brighter than the rest, and none of the rest drawn over it. With the
 //! option off, only that one's lit. Matches are found one after another,

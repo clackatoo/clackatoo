@@ -223,8 +223,15 @@ impl Pane {
 
     /// History is numbered afresh: where the search being typed started
     /// is kept, as far as the lines go now, but not the view then, nor the
-    /// match found, which may be elsewhere now; and it's asked again.
-    pub(super) fn search_start_renumbered(&mut self) {
+    /// match found, which may be elsewhere now; and it's asked again. A
+    /// count being asked a match at a time ends at the next answer, as it
+    /// may never come back to its first match, numbered as it was.
+    pub(super) fn search_renumbered(&mut self) {
+        for pending in self.requests.pending_mut() {
+            if let Pending::Search(asked) = pending {
+                asked.left = asked.left.min(1);
+            }
+        }
         let (first, last) = Document(self).bounds();
         if let Some(start) = self.search.start_mut() {
             if let Some(cursor) = &mut start.cursor {
