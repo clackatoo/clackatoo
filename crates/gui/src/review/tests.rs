@@ -448,6 +448,30 @@ fn what_a_search_keeps_follows_the_lines_as_the_list_changes() {
 }
 
 #[test]
+fn a_comment_found_is_found_again_by_its_place_though_another_says_the_same() {
+    let mut twice = list();
+    let mut again = twice.comments[0].clone();
+    (again.id, again.path, again.shown, again.line) = (10, "/src/b.rs".into(), "b.rs".into(), 5);
+    twice.comments.push(again);
+    let mut review = Review::new(ReviewId(1), &Options::default());
+    review.resize(Size::new(60, 30).unwrap());
+    review.update(twice.clone());
+    let comment = |review: &Review, row: usize| match review.lines[row] {
+        Line::Comment { comment } => review.list.comments[comment].path.clone(),
+        _ => panic!("not a comment"),
+    };
+    // The second comment found: `n` from the first.
+    keys(&mut review, "/why<CR>n");
+    let found = review.search.found().expect("found");
+    assert_eq!(comment(&review, found), "/src/b.rs");
+    // The list sent again: still the one on b.rs, not the first that
+    // says the same.
+    review.update(twice);
+    let found = review.search.found().expect("still found");
+    assert_eq!(comment(&review, found), "/src/b.rs");
+}
+
+#[test]
 fn what_is_lit_is_looked_for_once_and_only_as_far_as_is_drawn() {
     let mut long = list();
     // A changed line far wider than the pane, matching all along it.

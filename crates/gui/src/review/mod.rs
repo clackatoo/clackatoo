@@ -212,7 +212,13 @@ enum Place {
         hunk: Option<u32>,
         past: usize,
     },
-    Comment(String),
+    /// A comment: the file it's on, its line and what it says, as two
+    /// may say the same.
+    Comment {
+        path: String,
+        line: u32,
+        text: String,
+    },
     Note(String),
 }
 
@@ -389,13 +395,17 @@ impl Review {
 
     /// What's on line `row`, to find again in a new list: a file's or a
     /// hunk's line by the file's path and the hunk's first line, a comment
-    /// or a note by what it says; nothing else.
+    /// by its file, line and what it says, a note by what it says; nothing
+    /// else.
     fn place_of(&self, row: usize) -> Option<Place> {
         let line = self.lines.get(row)?;
         if let Line::Comment { comment } = line {
-            return Some(Place::Comment(
-                self.list.comments.get(*comment)?.text.clone(),
-            ));
+            let comment = self.list.comments.get(*comment)?;
+            return Some(Place::Comment {
+                path: comment.path.clone(),
+                line: comment.line,
+                text: comment.text.clone(),
+            });
         }
         if let Line::Note(note) = line {
             return Some(Place::Note(note.clone()));
