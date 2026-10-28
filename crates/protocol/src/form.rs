@@ -328,7 +328,43 @@ pub fn url_host(url: &str) -> Option<&str> {
         .or_else(|| url.strip_prefix("http://"))?;
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let host = &rest[..end];
-    (!host.is_empty() && !host.contains('@') && !host.contains('\\')).then_some(host)
+    // `%` is decoded by browsers (`paypal.com%2eevil.com` goes to
+    // `paypal.com.evil.com`), and a number that isn't a plain dotted quad
+    // is read as some other address (`0x7f.1`, `2130706433`, `0177.0.0.1`).
+    let plain = !host.is_empty()
+        && !host.contains(['@', '\\', '%'])
+        && !misread_number(host.rsplit_once(':').map_or(host, |(name, _)| name));
+    plain.then_some(host)
+}
+
+/// Whether `name`, a host without its port, ends in a number, so browsers
+/// read it as an IPv4 address (its last label all digits, or `0x` and hex
+/// digits, as the URL standard has it), but isn't a plain dotted quad:
+/// four numbers to 255, none starting with 0. Those others are read in
+/// hex, octal or as one number, as some other address than they show.
+fn misread_number(name: &str) -> bool {
+    let last = name
+        .strip_suffix('.')
+        .unwrap_or(name)
+        .rsplit('.')
+        .next()
+        .unwrap_or("");
+    let hex = (last.strip_prefix("0x").or_else(|| last.strip_prefix("0X")))
+        .is_some_and(|digits| digits.chars().all(|ch| ch.is_ascii_hexdigit()));
+    let number = !last.is_empty() && (last.chars().all(|ch| ch.is_ascii_digit()) || hex);
+    if !number {
+        return false;
+    }
+    let parts: Vec<&str> = name.split('.').collect();
+    let quad = parts.len() == 4
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.len() <= 3
+                && part.chars().all(|ch| ch.is_ascii_digit())
+                && (part.len() == 1 || !part.starts_with('0'))
+                && part.parse::<u16>().is_ok_and(|number| number <= 255)
+        });
+    !quad
 }
 
 /// Whether `url` is a link that may be handed to a browser or the
@@ -469,6 +505,26 @@ mod tests {
             assert!(!plain_web_link(&url), "{url:?}");
         }
         assert!(plain_web_link("https://linear.app/oauth"));
+        // Decoded by browsers into another host.
+        assert_eq!(url_host("https://paypal.com%2eevil.com/"), None);
+        // Numbers browsers read as another address.
+        for host in [
+            "2130706433",
+            "0x7f.1",
+            "0177.0.0.1",
+            "127.1",
+            "0x7F.0.0.1",
+            "1.2.3.4.5",
+            "256.1.1.1",
+        ] {
+            assert_eq!(url_host(&format!("http://{host}/")), None, "{host}");
+            assert_eq!(url_host(&format!("http://{host}:8080/")), None, "{host}");
+        }
+        assert_eq!(url_host("http://127.0.0.1:8080/cb"), Some("127.0.0.1:8080"));
+        assert_eq!(url_host("http://10.0.0.1"), Some("10.0.0.1"));
+        assert_eq!(url_host("https://x.com"), Some("x.com"));
+        assert_eq!(url_host("https://cafe.example"), Some("cafe.example"));
+        assert_eq!(url_host("https://1password.com"), Some("1password.com"));
         assert!(!plain_web_link("https://lіnear.app/"));
     }
 
