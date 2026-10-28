@@ -259,6 +259,8 @@ A subagent's card says how many things its chats run in the background, and when
 
 Only Claude Code says what it runs in the background. The phone lists the same lines, without the buttons that stop them.
 
+Claude Code's adapter says so only to a client that asks as JetBrains' AIR does, and to such a client it sends a read or a search of files without its result: rows for Claude Code's Read, Grep and Glob show what they read or looked for, but not what they found. Commands' output, file changes and images are as before. To have that text rather than the shelf, set `tasks = false` for Claude Code in [`agents.toml`](#which-agent).
+
 ### When the agent asks
 
 In Manual mode, before it does anything that changes something, such as writing a file or running a command that isn't only reading, the agent asks. Other modes ask about less, and Auto leaves it to Claude. Its question takes the box's place, with an answer on each button: the first way to say yes in the accent colour, and the ways to say no quieter.
@@ -444,7 +446,7 @@ Which chat started which, and messages waiting their turn, last through an upgra
 
 A chat talks to Claude Code unless you name another: `claude`, `codex` (OpenAI's Codex), `antigravity` (Google Antigravity), or `gemini` (Gemini CLI for existing API-key setups). The chat says which in its box: "Message Codex".
 
-clackatoo speaks ACP, the [Agent Client Protocol](https://agentclientprotocol.com). Claude Code and Codex don't speak it themselves, so each runs through an ACP adapter, at a version tried with clackatoo. The daemon looks for an agent's adapter where clackatoo installs it, `~/.local/share/clackatoo/agents`, then on your `PATH`, then runs it with `npx`, which needs Node.js. While it runs from `PATH` or `npx`, the chat offers once to install it, which makes it start faster and work offline: Claude Code's takes about 540 MB and Codex's about 450 MB, each with its own copy of the agent, installed from a lock file so nothing it depends on can change. With none of the three, the chat asks to install it before it can start. A new build that moves to a newer adapter asks again, and removes the old one once nothing uses it.
+clackatoo speaks ACP, the [Agent Client Protocol](https://agentclientprotocol.com). Claude Code and Codex don't speak it themselves, so each runs through an ACP adapter, at a version tried with clackatoo. The daemon looks for an agent's adapter where clackatoo installs it, `~/.local/share/clackatoo/agents`, then on your `PATH`, then runs it with `npx`, which needs Node.js. While it runs from `PATH` or `npx`, the chat offers once to install it, which makes it start faster and work offline: Claude Code's takes about 620 MB and Codex's about 450 MB, each with its own copy of the agent, installed from a lock file so nothing it depends on can change. With none of the three, the chat asks to install it before it can start. A new build that moves to a newer adapter asks again, and removes the old one once nothing uses it.
 
 Each agent uses its own login: run `claude`, or `codex login`, once in a terminal. A chat with an agent no one's logged in to says what to run. With a subscription, chats count towards its limits.
 
@@ -466,6 +468,7 @@ mode = "build"               # the mode a new chat asks for, if offered
 
 [agents.claude]
 command = ["claude-agent-acp"]
+tasks = false                # don't ask what it runs in the background
 ```
 
 The daemon reads it whenever a chat starts. `CLACKATOO_AGENT` gives Claude Code another command, for the daemon it's set for.
@@ -504,6 +507,7 @@ An upgrade stops the browser; the next page starts it again. An upgrade, or the 
 - `/` commands aren't listed or completed as you type them.
 - What Claude Code says and does in a turn it takes by itself, with no message from you, such as when a shell it ran in the background ends, isn't shown yet: the shelf above the box says it's working, and its next answer to you carries on from it.
 - Codex's commands in the background aren't listed: asking for them would change how Codex reports every command.
+- While clackatoo asks Claude Code what it runs in the background, its Read, Grep and Glob rows don't show what they found.
 - You can't click or type into a browser pane yourself.
 - An upgrade forgets the cards of subagents that had already closed, so their changes drop out of the chat's and turn's reviews. They stay in `:Review base` and in the gutter, as `chat N`.
 
