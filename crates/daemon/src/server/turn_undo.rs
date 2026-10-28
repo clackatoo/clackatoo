@@ -1220,9 +1220,19 @@ pub(in crate::server) mod tests {
     /// Has tool `tool` of the chat's agent change line `line` of `big.txt`,
     /// `before`, itself, and say so, so the change is worked out off the
     /// loop. Returns the file's text after it.
-    fn change_big_file(world: &mut World, (tool, line): (&str, u32), before: &str) -> String {
+    fn change_big_file(world: &mut World, tool: (&str, u32), before: &str) -> String {
+        change_big(world, "big.txt", tool, before)
+    }
+
+    /// As [`change_big_file`], to the file `name`.
+    fn change_big(
+        world: &mut World,
+        name: &str,
+        (tool, line): (&str, u32),
+        before: &str,
+    ) -> String {
         let chat = world.chat;
-        let path = world.path("big.txt").display().to_string();
+        let path = world.path(name).display().to_string();
         start_tool(&mut world.daemon, chat, tool);
         let said = |done, diffs| Wrote {
             done,
@@ -1236,7 +1246,7 @@ pub(in crate::server) mod tests {
         world.daemon.take_written(chat, &said(false, vec![]));
         let (old, new) = (format!("line {line}\n"), format!("line #{line}\n"));
         let after = before.replacen(&old, &new, 1);
-        std::fs::write(world.path("big.txt"), &after).unwrap();
+        std::fs::write(world.path(name), &after).unwrap();
         let diff = RawDiff {
             path: path.clone(),
             old: Some(old),
@@ -1310,5 +1320,48 @@ pub(in crate::server) mod tests {
         change_big_file(&mut world, ("t3", 3), &third);
         world.daemon.settle_all_pending();
         assert!(!world.daemon.agent_files.diffing(world.chat));
+    }
+
+    #[test]
+    fn changes_given_a_worker_found_gone_are_noted_unknown() {
+        use crate::server::settling::GONE;
+        let mut world = World::new();
+        let first = big_file(&world);
+        std::fs::write(world.path("big2.txt"), &first).unwrap();
+        // The worker goes as it takes the first change, which it never
+        // gives back; the next change finds it gone.
+        world.daemon.agent_files.panic_next(GONE);
+        change_big_file(&mut world, ("t1", 1), &first);
+        // Give it time to go.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let chat = world.chat;
+        let path = world.path("big2.txt").display().to_string();
+        start_tool(&mut world.daemon, chat, "t2");
+        let said = |done, diffs| Wrote {
+            done,
+            turn: 0,
+            tool: "t2".into(),
+            order: 0,
+            paths: vec![path.clone()],
+            diffs,
+        };
+        world.daemon.take_written(chat, &said(false, vec![]));
+        let after = first.replacen("line 2\n", "line #2\n", 1);
+        std::fs::write(world.path("big2.txt"), &after).unwrap();
+        let diff = RawDiff {
+            path: path.clone(),
+            old: Some("line 2\n".into()),
+            new: "line #2\n".into(),
+        };
+        // Worked out now, and the first, which the worker had, is failed
+        // at once rather than left waiting.
+        world.daemon.take_written(chat, &said(true, vec![diff]));
+        assert!(!world.daemon.agent_files.diffing(chat));
+        world.end_turn();
+        let notice = world.undo(0, false, false);
+        assert!(
+            notice.contains("big.txt, what the file held before wasn't seen"),
+            "{notice}"
+        );
     }
 }

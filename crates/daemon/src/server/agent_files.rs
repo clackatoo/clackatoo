@@ -482,6 +482,8 @@ impl Daemon {
     /// Waits on the loop for every change to `path` still being worked out,
     /// taking each in, with whatever came before it: before anything else
     /// is done with the file, so the log and the review stay in order.
+    /// Changes given the worker after the last of `path`'s aren't waited
+    /// for, and at most [`super::settling`]'s cap of work is ahead of it.
     pub(super) fn settle_pending(&mut self, path: &Path) {
         while (self.agent_files.diffing.iter()).any(|diffing| diffing.path == path) {
             match self.agent_files.settler.wait() {
@@ -792,30 +794,13 @@ impl Daemon {
                     disk,
                     read_as,
                 };
-                let bytes = (settled.before.as_ref().map_or(0, String::len))
-                    + (settled.disk.as_ref().map_or(0, String::len));
-                let settled = if bytes > ON_LOOP {
-                    let maker = settled.maker.clone();
-                    match self.agent_files.settler.submit(settled, &self.waker) {
-                        None => {
-                            self.agent_files.diffing.push(Diffing {
-                                path: path.to_owned(),
-                                maker,
-                                again: false,
-                                last: false,
-                            });
-                            return;
-                        }
-                        Some(settled) => settled,
-                    }
-                } else {
-                    settled
-                };
-                let diffed = Diffed::between(
-                    settled.before.as_deref().unwrap_or_default(),
-                    settled.disk.as_deref().unwrap_or_default(),
-                );
-                self.settled_closed(settled, &diffed);
+                if let Some(settled) = self.settle_off_loop(settled) {
+                    let diffed = Diffed::between(
+                        settled.before.as_deref().unwrap_or_default(),
+                        settled.disk.as_deref().unwrap_or_default(),
+                    );
+                    self.settled_closed(settled, &diffed);
+                }
             }
             _ if last => {
                 forget(&mut self.agent_files);
@@ -823,6 +808,36 @@ impl Daemon {
                 self.refresh_files(chat, [maker.turn]);
             }
             _ => {}
+        }
+    }
+
+    /// Gives `settled`'s change to the worker, if it's big enough to be
+    /// worked out off the loop and the worker takes it; or else gives it
+    /// back, to be worked out now.
+    fn settle_off_loop(&mut self, settled: Settled) -> Option<Settled> {
+        let bytes = (settled.before.as_ref().map_or(0, String::len))
+            + (settled.disk.as_ref().map_or(0, String::len));
+        if bytes <= ON_LOOP {
+            return Some(settled);
+        }
+        let (path, maker) = (settled.path.clone(), settled.maker.clone());
+        match self.agent_files.settler.submit(settled, &self.waker) {
+            None => {
+                self.agent_files.diffing.push(Diffing {
+                    path,
+                    maker,
+                    again: false,
+                    last: false,
+                });
+                None
+            }
+            Some(settled) => {
+                // A worker found gone had changes it won't give back.
+                if self.agent_files.settler.lost() {
+                    self.settler_lost();
+                }
+                Some(settled)
+            }
         }
     }
 

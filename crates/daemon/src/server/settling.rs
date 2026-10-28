@@ -36,8 +36,9 @@ pub(super) const ON_LOOP: usize = 256 * 1024;
 
 /// The most bytes of text given the worker at once, before and after
 /// together. Past it, a change is worked out on the loop, rather than
-/// holding more in memory.
-const IN_FLIGHT: usize = 256 * 1024 * 1024;
+/// holding more in memory, or making whatever waits for the worker wait
+/// long: about a second's work for it in a debug build.
+const IN_FLIGHT: usize = 32 * 1024 * 1024;
 
 /// A change to a file not open being worked out off the loop, and what
 /// waits for it.
@@ -72,6 +73,9 @@ pub(super) struct Settler {
     worker: Option<Worker>,
     /// The bytes of text given the worker and not yet given back.
     in_flight: usize,
+    /// The worker was found gone as it was given a change: what it had
+    /// is to be failed (see [`lost`](Self::lost)).
+    gone: bool,
     /// Makes the worker panic as it works out the next change, if set, as
     /// a test's way of seeing what a panic does: [`CAUGHT`] in its guard,
     /// or [`GONE`], outside it, so the worker is lost.
@@ -158,9 +162,16 @@ impl Settler {
             Err(mpsc::SendError(settled)) => {
                 self.worker = None;
                 self.in_flight = 0;
+                self.gone = true;
                 Some(settled)
             }
         }
+    }
+
+    /// Whether the worker was found gone as it was given a change, since
+    /// last asked: what it had is to be failed.
+    pub(super) fn lost(&mut self) -> bool {
+        std::mem::take(&mut self.gone)
     }
 
     /// What the worker has done with since last asked, without waiting.
