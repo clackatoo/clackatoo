@@ -99,6 +99,7 @@ use language::{Pipe, ServerId, Servers};
 use offers::Installs;
 use signs::Signs;
 use tools::Tools;
+pub(crate) use tools::unhidden;
 
 const LISTENER: Token = Token(usize::MAX);
 const WAKER: Token = Token(usize::MAX - 1);

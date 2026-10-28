@@ -159,6 +159,9 @@ impl HostedChat {
                     return;
                 }
                 self.end_turn(Outcome::Done);
+                // As a message sent now would, it lets go of a plan all
+                // done.
+                self.forget_finished_plan();
                 self.push_replayed(text);
             }
             update @ (SessionUpdate::AgentMessageChunk(_)

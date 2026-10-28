@@ -515,12 +515,32 @@ struct Journal {
     patches: VecDeque<ChatPatch>,
     /// About how much the changes kept take, in bytes.
     bytes: usize,
+    /// The number of the first change no viewer has been sent, as a
+    /// change or within the chat whole: kept through `&self`, as viewers
+    /// catch up.
+    sent: std::cell::Cell<u64>,
 }
 
 impl Journal {
     /// Keeps `patch`, and lets the oldest go past the journal's bounds, of
     /// changes and of bytes: a viewer that far behind gets the chat whole.
+    /// A whole plan or task list takes the place of the last change if
+    /// that's one of the same and no viewer has had it yet, so an agent
+    /// that sends them fast doesn't push out what viewers still need.
     fn push(&mut self, patch: ChatPatch) {
+        let replaces = |last: &ChatPatch| {
+            matches!(
+                (last, &patch),
+                (ChatPatch::Plan(_), ChatPatch::Plan(_))
+                    | (ChatPatch::Tasks(_), ChatPatch::Tasks(_))
+            )
+        };
+        if self.end() > self.sent.get()
+            && self.patches.back().is_some_and(replaces)
+            && let Some(last) = self.patches.pop_back()
+        {
+            self.bytes -= weight(&last);
+        }
         self.bytes += weight(&patch);
         self.patches.push_back(patch);
         while self.patches.len() > 1 && (self.patches.len() > JOURNAL || self.bytes > JOURNAL_BYTES)
@@ -741,16 +761,16 @@ impl HostedChat {
             .collect();
         resumed.budget = usize::try_from(chat.budget).unwrap_or(handoff::BUDGET);
         resumed.plan_by = chat.plan_by;
-        resumed.node.plan = (chat.plan.into_iter())
-            .map(|step| Step {
-                content: step.content,
-                state: match step.state {
-                    handover::StepState::ToDo => StepState::ToDo,
-                    handover::StepState::Doing => StepState::Doing,
-                    handover::StepState::Done => StepState::Done,
-                },
-            })
-            .collect();
+        // Kept as a plan the agent gives now is, whatever the last build
+        // kept.
+        resumed.node.plan = plan::kept(chat.plan.into_iter().map(|step| Step {
+            content: step.content,
+            state: match step.state {
+                handover::StepState::ToDo => StepState::ToDo,
+                handover::StepState::Doing => StepState::Doing,
+                handover::StepState::Done => StepState::Done,
+            },
+        }));
         resumed.node.settings = (chat.settings.into_iter())
             .map(setting_from_handover)
             .collect();
@@ -884,6 +904,8 @@ impl HostedChat {
     /// behind. `None` if nothing changed.
     pub(crate) fn catch_up(&self, sent: &mut ChatSent) -> Option<ViewUpdate> {
         let end = self.journal.end();
+        // What's in the journal now has been sent, whole or as changes.
+        self.journal.sent.set(self.journal.sent.get().max(end));
         let Some(next) = sent.next.filter(|&next| next >= self.journal.first) else {
             sent.next = Some(end);
             self.title.clone_into(&mut sent.title);
@@ -1108,9 +1130,11 @@ impl HostedChat {
             .collect();
         self.make_preview_room(&previews);
         // What ended in the background was seen as the user wrote this,
-        // and so was a plan all done.
-        self.forget_ended_tasks();
-        self.forget_finished_plan();
+        // and so was a plan all done; not as another chat's agent did.
+        if from.is_none() {
+            self.forget_ended_tasks();
+            self.forget_finished_plan();
+        }
         self.push_turn(Turn {
             woke: None,
             previews,
@@ -4937,6 +4961,88 @@ mod tests {
         let resumed = HostedChat::resume(chat.hand_over(), &agent);
         assert_eq!(resumed.node.plan, shown);
         assert_eq!(resumed.plan_by.as_deref(), Some("Claude Code"));
+    }
+
+    const ALL_DONE: &str = r#"{"sessionUpdate":"plan","entries":[
+        {"content":"Read it","priority":"high","status":"completed"}]}"#;
+
+    #[test]
+    fn a_plan_all_done_and_tasks_ended_go_with_the_users_message_not_another_agents() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "plan it");
+        update(&mut chat, ALL_DONE);
+        chat.task_said(crate::agent::Task::Spawned {
+            id: "t1".into(),
+            kind: "shell".into(),
+            name: "Serve the docs".into(),
+            description: None,
+            can_stop: true,
+            tool: None,
+        });
+        chat.task_said(crate::agent::Task::State {
+            id: "t1".into(),
+            state: "completed".into(),
+            summary: None,
+        });
+        chat.answered(Ok(StopReason::EndTurn));
+        // Another chat's agent's message: the user hasn't seen them yet.
+        chat.deliver(message(7, "hi", 1)).unwrap();
+        assert_eq!(chat.node.plan.len(), 1);
+        assert_eq!(chat.node.tasks.len(), 1);
+        chat.answered(Ok(StopReason::EndTurn));
+        send(&mut chat, "thanks");
+        assert!(chat.node.plan.is_empty());
+        assert!(chat.node.tasks.is_empty());
+    }
+
+    #[test]
+    fn a_plan_all_done_told_again_goes_with_the_next_message_told_again() {
+        let mut chat = resuming();
+        replay_user(&mut chat, "plan it");
+        replay(&mut chat, ALL_DONE);
+        replay(
+            &mut chat,
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done."}}"#,
+        );
+        assert_eq!(chat.node.plan.len(), 1);
+        replay_user(&mut chat, "thanks");
+        assert!(chat.node.plan.is_empty(), "{:?}", chat.node.plan);
+    }
+
+    #[test]
+    fn plans_sent_fast_take_each_others_place_until_a_viewer_has_one() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "plan it");
+        let plan = |status: &str| {
+            format!(
+                r#"{{"sessionUpdate":"plan","entries":[{{"content":"Test it","priority":"high","status":"{status}"}}]}}"#
+            )
+        };
+        let mut sent = ChatSent::default();
+        chat.catch_up(&mut sent);
+        let before = chat.journal.end();
+        update(&mut chat, &plan("pending"));
+        update(&mut chat, &plan("in_progress"));
+        assert_eq!(chat.journal.end(), before + 1, "one change for both");
+        let Some(ViewUpdate::Patch(patches)) = chat.catch_up(&mut sent) else {
+            panic!("a patch");
+        };
+        assert!(matches!(
+            patches.as_slice(),
+            [Patch::Chat(ChatPatch::Plan(steps))] if steps[0].state == StepState::Doing
+        ));
+        // Once a viewer has had it, the next is a change of its own.
+        update(&mut chat, &plan("completed"));
+        assert_eq!(chat.journal.end(), before + 2);
+        let Some(ViewUpdate::Patch(patches)) = chat.catch_up(&mut sent) else {
+            panic!("a patch");
+        };
+        assert!(matches!(
+            patches.as_slice(),
+            [Patch::Chat(ChatPatch::Plan(steps))] if steps[0].state == StepState::Done
+        ));
     }
 
     fn upgrade_chat(mut chat: HostedChat) -> HostedChat {

@@ -11,7 +11,7 @@
 use agent_client_protocol_schema::v1::{Plan, PlanEntryStatus};
 use clackatoo_protocol::{ChatPatch, PlanState, PlanStep};
 
-use super::{HostedChat, clean_text};
+use super::HostedChat;
 
 /// The most steps a plan keeps: an agent's list is a screenful, and the
 /// rest of a longer one is cut.
@@ -55,27 +55,34 @@ impl HostedChat {
 
 /// The steps of the agent's `plan`, as many as are kept.
 fn steps(plan: Plan) -> Vec<PlanStep> {
-    (plan.entries.into_iter())
-        .take(MOST_STEPS)
-        .map(|entry| PlanStep {
-            content: cut(clean_text(&entry.content)),
-            state: match entry.status {
-                PlanEntryStatus::Completed => PlanState::Done,
-                PlanEntryStatus::InProgress => PlanState::Doing,
-                // Pending, or a state newer than this build knows.
-                _ => PlanState::ToDo,
-            },
+    kept(plan.entries.into_iter().map(|entry| PlanStep {
+        content: entry.content,
+        state: match entry.status {
+            PlanEntryStatus::Completed => PlanState::Done,
+            PlanEntryStatus::InProgress => PlanState::Doing,
+            // Pending, or a state newer than this build knows.
+            _ => PlanState::ToDo,
+        },
+    }))
+}
+
+/// The first [`MOST_STEPS`] of `steps`, each as windows are to show it
+/// (see [`shown`]): what an agent gives, or a build before handed over.
+pub(super) fn kept(steps: impl Iterator<Item = PlanStep>) -> Vec<PlanStep> {
+    (steps.take(MOST_STEPS))
+        .map(|step| PlanStep {
+            content: shown(&step.content),
+            state: step.state,
         })
         .collect()
 }
 
-/// `text` on one line, cut to [`MOST_CHARS`].
-fn cut(text: String) -> String {
-    let line = if text.contains(['\n', '\r']) {
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
-    } else {
-        text
-    };
+/// `text` as a step's line shows it: on one line, every run of white
+/// space one space; what would hide or reorder text shown as other agent
+/// text reaching windows is (`server::unhidden`); cut to [`MOST_CHARS`].
+fn shown(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = crate::server::unhidden(&line);
     match line.char_indices().nth(MOST_CHARS) {
         Some((at, _)) => format!("{}…", &line[..at]),
         None => line,
@@ -87,9 +94,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_step_is_one_line_and_cut_short() {
-        assert_eq!(cut("Write\nthe  tests".into()), "Write the tests");
-        let long = cut("é".repeat(MOST_CHARS + 10));
+    fn a_step_is_one_line_cut_short_hiding_nothing() {
+        assert_eq!(shown("Write\nthe \t tests\r\n"), "Write the tests");
+        // Bidi controls and tag letters show, as other agents' text does.
+        let hidden = shown("a\u{202E}b\u{E0041}c");
+        assert!(
+            !hidden.contains('\u{202E}') && !hidden.contains('\u{E0041}'),
+            "{hidden:?}"
+        );
+        assert_eq!(shown(&hidden), hidden, "showing it twice changes nothing");
+        let long = shown(&"é".repeat(MOST_CHARS + 10));
         assert_eq!(long.chars().count(), MOST_CHARS + 1);
         assert!(long.ends_with('…'));
     }
@@ -111,5 +125,12 @@ mod tests {
             [PlanState::ToDo, PlanState::Doing, PlanState::Done]
         );
         assert_eq!(steps[63].content, "Step 63");
+        // As one handed over by a build that kept more.
+        let handed = kept((0..100).map(|n| PlanStep {
+            content: format!("{n}\n{}", "x".repeat(MOST_CHARS)),
+            state: PlanState::ToDo,
+        }));
+        assert_eq!(handed.len(), MOST_STEPS);
+        assert!(handed[0].content.starts_with("0 x") && handed[0].content.ends_with('…'));
     }
 }

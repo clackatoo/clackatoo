@@ -2032,7 +2032,7 @@ pub(super) fn visible(text: &str) -> String {
 /// the one after an ideograph. Joiners, the other variation selectors and
 /// the like stay, as emoji and many scripts need them. `\r\n` becomes
 /// `\n`.
-pub(super) fn unhidden(text: &str) -> String {
+pub(crate) fn unhidden(text: &str) -> String {
     let text = text.replace("\r\n", "\n");
     let mut shown = String::with_capacity(text.len());
     // Whether the last character may take a supplementary variation
