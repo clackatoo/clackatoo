@@ -17980,6 +17980,15 @@ fn a_real_agent_sees_an_image_in_a_message() {
     );
 }
 
+/// An empty folder Codex's sandbox leaves, taken away when dropped.
+struct GitLeft(PathBuf);
+
+impl Drop for GitLeft {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}
+
 /// Codex, on its cheapest model, through scenarios 1 to 3 of the Claude
 /// Code ones above: turns with commands and an edit, each ending whole; a
 /// stop mid-command; and two messages queued meanwhile, each answered in
@@ -17998,21 +18007,16 @@ fn a_real_codex_session_stops_and_takes_queued_messages() {
         config.agents.custom = vec![custom_agent("codex", command)];
         config.agents.trace = Some(trace.clone());
     });
+    // Codex's sandbox leaves an empty `.git` in each folder it may write
+    // to, `$TMPDIR` among them, where it would make every test's folder
+    // look like part of a repository: it's taken away as the test ends.
+    let git = std::env::temp_dir().join(".git");
+    let _git = (!git.exists()).then(|| GitLeft(git));
     let mut client = daemon.client();
     let client = &mut client;
-    // In a folder of its own: Codex's sandbox leaves an empty `.git` in
-    // the folder above where it works, which mustn't be `$TMPDIR`.
-    let project = daemon.dir.path().join("project");
-    std::fs::create_dir(&project).unwrap();
-    let chat = PaneTerminal::Agent(NewAgent {
-        cwd: Some(project.display().to_string()),
-        agent: Some("codex".into()),
-        ..match new_chat() {
-            PaneTerminal::Agent(agent) => agent,
-            _ => unreachable!(),
-        }
-    });
-    client.new_workspace(None, chat).unwrap();
+    client
+        .new_workspace(None, new_chat_with(Some("codex")))
+        .unwrap();
     let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
     let minute = Duration::from_mins(1);
     wait_for_chat_for(client, chat, minute, |node| node.state == ChatState::Ready);
