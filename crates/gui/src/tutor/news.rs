@@ -1043,6 +1043,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "After an upgrade an agent is told which background tasks it stopped, and its chats' waits go on",
     },
+    News {
+        id: "agent-forms",
+        date: "2026-10-28",
+        lesson: "agents",
+        what: "Agents ask you questions as forms in the chat (j/k, numbers, Submit), and plans show before you approve them",
+    },
 ];
 
 impl News {

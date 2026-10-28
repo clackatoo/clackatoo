@@ -293,6 +293,32 @@ clackatoo's own questions about its tools say Reject, as Claude Code's do, and s
 
 What it asks about follows the agent's own settings. Claude Code reads its usual settings files, so commands you've allowed in Claude Code are allowed here too.
 
+### Questions, forms and plans
+
+An agent can ask you something rather than ask leave: Claude Code's multiple-choice questions (its AskUserQuestion tool), Codex's questions, an MCP server's form, a link to sign in to an MCP server, or whether to try again with another model when one turns a request down. ACP calls these elicitations. The question takes the box's place as a form: the agent's message, then each field's title and what it asks, then a row for each option, a yes-or-no, or a box to type in, and at the end Submit and Decline.
+
+- A choice of one shows a dot by each option (`◉` picked, `○` not); a choice of several a box to tick (`☑`, `☐`). Options are numbered, and an option's meaning shows under it.
+- `j` and `k`, the arrows, Tab and Shift+Tab, or Ctrl+N and Ctrl+P move between rows, in either mode: in normal mode they move through the form, not the conversation. The row picked is lit.
+- `1` to `9` pick that option of the field you're in. Space or `x` picks, ticks or flips the row picked. Enter does the same, moves on from a box, or presses Submit, Decline or Open the link.
+- In a box, in insert mode, keys type, Backspace, Ctrl+W and Ctrl+U delete, and Tab, Down, Up or Enter move on. In normal mode, `i`, `a` or Enter go into it. A secret shows as dots; a number's box takes only what a number holds. A paste goes into the box picked. Click a row to pick it, or a box to type in it.
+- Claude Code puts a box called Other after each of its questions: type your own answer there instead of picking, or a note beside what you picked.
+- Submit sends only answers that fit what the agent asked; otherwise the bar says what's missing or wrong. A required field shows `*`. clackatoo checks them again before the agent hears them.
+- Esc never declines a form: it goes to normal mode, as it does from the message box, so what you've typed stays. Decline says no, and the agent goes on without. Ctrl+C stops the agent, which takes the form away.
+- As with other questions, Submit, Decline and Open don't answer within half a second of the form coming, or of you arriving at its chat; the bar says to press again.
+
+A link to open, such as an MCP server's sign-in, shows whole, with Open the link, which hands it to your desktop's browser and tells the agent it's open, and Decline. It goes by itself once the agent says it's done with it. The browser opens on the window's machine; a sign-in whose page sends you back to `localhost` needs the window on the daemon's machine.
+
+When the agent asks to leave Plan mode, as Claude Code's ExitPlanMode or Codex's plan review do, the plan shows above the question as Markdown, in a frame at most half the pane high that scrolls with the wheel over it, or `j` and `k` in normal mode. The question says "Go ahead with this plan?", and the answers are the agent's own, such as "Yes, and use auto mode" or "No, keep planning".
+
+A form waits until it's answered, from this window or any other, the phone included, and is still there if the window reconnects or you open the chat elsewhere. It goes, answered as cancelled, if you stop the turn; it goes if the agent stops waiting for it, or if the agent or its session stops. One that comes between turns, as a sign-in can, waits past the end of the turn. A window older than these forms shows only a question naming what the agent asks, with one answer, Decline.
+
+ACP has no way to send words back with a "no". Claude Code takes a refusal of its plan as "keep planning", and stops the turn: send your feedback as the next message. For its questions, the Other box is where your own words go.
+
+Saying it can show forms changes what the agents do, beyond asking:
+
+- Claude Code keeps its AskUserQuestion tool, which its adapter takes away from a client that can't show forms, and passes on MCP servers' forms and sign-in links, and the consent asked before retrying with another model, which it otherwise declines.
+- Codex asks its questions (`request_user_input`), which it otherwise answers with nothing, and an MCP server's forms and links come as forms rather than as a question asking leave. It also offers signing in with a device code. A form about no chat, such as one asked while Codex is being logged in, is declined, as there's nowhere to show it.
+
 
 ### Selecting and copying
 

@@ -205,6 +205,14 @@ On a long task, Claude Code keeps a to-do list, and Codex a plan. It shows on a 
 
 If you have a chat open, ask it to plan a small change as a to-do list, then type `:plan` to open the list.
 
+## Questions, and leaving Plan mode
+
+An agent can ask you a question rather than ask leave: Claude Code's multiple-choice questions, Codex's, or a form from an MCP server. It takes the box's place, with a row for each option and a box to type in. `j` and `k` move between rows in either mode, `1` to `9` pick an option of the field you're on, Space ticks one, and Enter presses Submit or Decline. In a box, insert mode types; `i` goes into it from normal mode. Esc never declines a form: what you typed stays.
+
+When the agent asks to leave Plan mode, its plan shows above the question, scrolled with the wheel or `j` and `k`. Saying no keeps it planning: send what you'd change as your next message.
+
+If you have a chat open, ask it to ask you, with its question tool, which of two colours you'd like, and answer from the form.
+
 ## Continuing after upgrades
 
 If a daemon upgrade interrupts an answer, the agent reopens the same provider session and continues the same turn automatically. It is told to check interrupted tool results before repeating actions. Unsent messages and images are preserved. Idle, completed and manually stopped chats stay idle. This applies to planned upgrades, not crashes or ordinary restarts. The first upgrade from a build without continuation records still needs another message.
