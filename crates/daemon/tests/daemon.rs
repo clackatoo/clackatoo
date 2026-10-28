@@ -2588,6 +2588,45 @@ fn when_the_agent_stops_the_next_message_starts_it_again() {
     assert_eq!(last_words(&ask(&mut client, chat, "back")), "echo: back\n");
 }
 
+/// The states of `node`'s plan, a character a step, as the fake agent's
+/// `plan` takes them: `x` done, `>` in progress, `.` to do.
+fn plan_states(node: &ChatNode) -> String {
+    (node.plan.iter())
+        .map(|step| match step.state {
+            clackatoo_protocol::PlanState::Done => 'x',
+            clackatoo_protocol::PlanState::Doing => '>',
+            clackatoo_protocol::PlanState::ToDo => '.',
+        })
+        .collect()
+}
+
+#[test]
+fn the_agents_plan_shows_as_it_last_gave_it_until_the_next_message_after_its_all_done() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let node = ask(&mut client, chat, "plan >..");
+    assert_eq!(last_words(&node), "planned\n");
+    assert_eq!(plan_states(&node), ">..");
+    assert_eq!(node.plan[0].content, "Step 1");
+    // Each plan takes the place of the one before, steps and all.
+    let node = ask(&mut client, chat, "plan xx>.");
+    assert_eq!(plan_states(&node), "xx>.");
+    // It stays through messages while there's anything left to do.
+    let node = ask(&mut client, chat, "hello");
+    assert_eq!(plan_states(&node), "xx>.");
+    // All done, it shows done until the user's next message.
+    let node = ask(&mut client, chat, "plan xxxx");
+    assert_eq!(plan_states(&node), "xxxx");
+    let node = ask(&mut client, chat, "hello");
+    assert!(node.plan.is_empty(), "{:?}", node.plan);
+    // A window that attaches now is shown the same.
+    let node = ask(&mut client, chat, "plan x>");
+    let mut other = daemon.client();
+    let captured = other.capture(chat).unwrap().chat().unwrap().clone();
+    assert_eq!(captured.plan, node.plan);
+}
+
 #[test]
 fn a_shell_claude_runs_in_the_background_shows_until_it_ends_and_can_be_stopped() {
     let daemon = TestDaemon::start();
@@ -16234,6 +16273,17 @@ fn limits_told_again_with_a_loaded_session_never_take_the_place_of_those_heard_l
     );
     let node = client.capture(live).unwrap().chat().unwrap().clone();
     assert_eq!(five_hour(&node), heard);
+}
+
+#[test]
+fn a_loaded_session_shows_the_plan_its_agent_gave_last() {
+    let daemon = TestDaemon::start();
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    let resumed = open_resumed(&mut client, resumed_chat(&home, "past-1", None));
+    wait_for_log(&daemon, "agent.log", "told past-1");
+    let node = wait_for_chat(&mut client, resumed, |node| !node.plan.is_empty());
+    assert_eq!(plan_states(&node), "x>");
 }
 
 #[test]

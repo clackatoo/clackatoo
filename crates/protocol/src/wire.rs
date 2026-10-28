@@ -274,6 +274,9 @@ gates! {
     AGENT_TASKS = 110,
     /// Turns an agent takes by itself, with no message: `Turn`'s `woke`.
     AGENT_TURNS = 111,
+    /// The agent's plan, its to-do list: `ChatNode`'s `plan` (`PlanStep`,
+    /// `PlanState`) and `ChatPatch::Plan`.
+    AGENT_PLAN = 112,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -444,6 +447,7 @@ impl Since for ChatPatch {
             Self::History { .. } => CHAT_HISTORY,
             Self::Activities(_) => HARNESS,
             Self::Tasks(_) => AGENT_TASKS,
+            Self::Plan(_) => AGENT_PLAN,
         }
     }
 }
@@ -1096,7 +1100,8 @@ fn without_optional_chat_updates(message: &ServerMessage, wire: u32) -> Option<S
         return None;
     };
     let unsupported = |patch: &Patch| {
-        matches!(patch, Patch::Chat(ChatPatch::Tasks(_)) if wire < AGENT_TASKS)
+        matches!(patch, Patch::Chat(ChatPatch::Plan(_)) if wire < AGENT_PLAN)
+            || matches!(patch, Patch::Chat(ChatPatch::Tasks(_)) if wire < AGENT_TASKS)
             || matches!(patch, Patch::Chat(ChatPatch::Activities(_)) if wire < HARNESS)
             || matches!(patch, Patch::Chat(ChatPatch::History { .. }) if wire < CHAT_HISTORY)
             || matches!(patch, Patch::Chat(ChatPatch::Delivery(_)) if wire < CHAT_QUEUE)
@@ -1159,7 +1164,7 @@ impl Downgrade for ServerMessage {
         if let Some(edited) = reversed_as_edited(self) {
             return Downgraded::To(edited);
         }
-        if wire < AGENT_TASKS
+        if wire < AGENT_PLAN
             && let Some(older) = without_optional_chat_updates(self, wire)
         {
             return match older.downgrade(wire) {

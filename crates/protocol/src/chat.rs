@@ -82,6 +82,35 @@ pub struct ChatNode {
         deserialize_with = "wire::since::<{ wire::AGENT_TASKS }, _, _>"
     )]
     pub tasks: Vec<AgentTask>,
+    /// The agent's plan, as it last gave it: its to-do list, in order,
+    /// such as Claude Code's `TodoWrite` and Codex's plan. Empty if it
+    /// has none.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::AGENT_PLAN }, _>",
+        deserialize_with = "wire::since::<{ wire::AGENT_PLAN }, _, _>"
+    )]
+    pub plan: Vec<PlanStep>,
+}
+
+/// One step of an agent's plan.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanStep {
+    /// What the step is, as the agent says: "Write the tests".
+    pub content: String,
+    /// How far it's got.
+    pub state: PlanState,
+}
+
+/// How far a [`PlanStep`] has got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanState {
+    /// Not started.
+    ToDo,
+    /// Being worked on.
+    Doing,
+    /// Done.
+    Done,
 }
 
 /// Work an agent runs in the background of a chat, as the agent reports
@@ -1148,6 +1177,8 @@ pub enum ChatPatch {
     Activities(Vec<crate::Activity>),
     /// What the agent runs in the background is now this.
     Tasks(Vec<AgentTask>),
+    /// The agent's plan is now this.
+    Plan(Vec<PlanStep>),
 }
 
 /// A small, decoded image for chat history. Shared by snapshots and paint
@@ -1439,6 +1470,7 @@ impl ChatNode {
             provider_usage: self.provider_usage.clone(),
             activities: self.activities.clone(),
             tasks: self.tasks.clone(),
+            plan: self.plan.clone(),
             first_turn: self
                 .first_turn
                 .saturating_add(u32::try_from(start).unwrap_or(u32::MAX)),
@@ -1519,6 +1551,7 @@ impl ChatNode {
             ChatPatch::ProviderUsage(usage) => self.provider_usage = usage,
             ChatPatch::Activities(activities) => self.activities = activities,
             ChatPatch::Tasks(tasks) => self.tasks = tasks,
+            ChatPatch::Plan(plan) => self.plan = plan,
             ChatPatch::History {
                 first,
                 before,

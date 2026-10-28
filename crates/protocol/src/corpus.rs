@@ -1367,7 +1367,48 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             })]),
         })),
     ));
+    samples.extend(
+        agent_plan()
+            .into_iter()
+            .map(|sample| (crate::wire::AGENT_PLAN, sample)),
+    );
     samples
+}
+
+/// Samples of protocol 112: the agent's plan, with a step in every state,
+/// in a snapshot and a patch, and a patch that empties it (CLACKA-190).
+fn agent_plan() -> Vec<Sample> {
+    use crate::{PlanState, PlanStep};
+    let terminal = TerminalId(3);
+    let plan: Vec<PlanStep> = [
+        ("Read the code", PlanState::Done),
+        ("Write the tests", PlanState::Doing),
+        ("Make them pass", PlanState::ToDo),
+    ]
+    .into_iter()
+    .map(|(content, state)| PlanStep {
+        content: content.into(),
+        state,
+    })
+    .collect();
+    vec![
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Plan(plan.clone()))]),
+        })),
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Plan(Vec::new()))]),
+        })),
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Snapshot(View {
+                title: "plan".into(),
+                cwd: None,
+                root: Node::Chat(Box::new(ChatNode { plan, ..chat() })),
+            }),
+        })),
+    ]
 }
 
 /// Samples of protocol 110: what an agent runs in the background of a
@@ -3073,6 +3114,7 @@ fn chat() -> ChatNode {
         subagents: vec![subagent()],
         activities: Vec::new(),
         tasks: Vec::new(),
+        plan: Vec::new(),
         provider_usage: vec![crate::ProviderUsage {
             agent: "codex".into(),
             title: "Codex".into(),

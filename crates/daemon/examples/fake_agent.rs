@@ -30,6 +30,7 @@
 //! | `wake-wait` | As `wake`, but its turn goes on, saying `working`, until it's cancelled: then it says `late` as words in flight would, and that the turn stopped |
 //! | `wake-missed` | As `wake`, to a client that asked for AIR's `asyncTasks`, but as if what said the turn started went missing: it runs `git commit`, says `committed`, and says task `autonomous-turn-9` completed |
 //! | `look` | Reads `notes.txt` and searches for `needle`, as Claude Code's adapter says them to a client that asks as AIR does: each ends with nothing of what it found, which, if the session asked for raw messages (`_meta.claudeCode.emitRawSDKMessages`), comes before in a `_claude/sdkMessage`; then `done` |
+//! | `plan STATES` | Gives its plan, a step for each character of STATES, `Step 1` on: `x` done, `>` in progress, anything else to do; then `planned` |
 //! | anything else | `echo:` and the message, in two pieces |
 //!
 //! Asked to stop a task (`_session/async_task/stop`), it says it stopped
@@ -462,10 +463,31 @@ fn tell_again(session: &str, cwd: &str, gap: Option<std::time::Duration>) {
                  "locations": [{ "path": path, "line": 1 }] }),
     );
     pause();
+    // Its to-do list as it last gave it, which the chat shows again.
+    give_plan(session, "x>");
     say(session, "Fixed.");
     user("thanks");
     pause();
     say(session, "You're welcome.");
+}
+
+/// Gives the plan `states` says in `session`, as `plan` does.
+fn give_plan(session: &str, states: &str) {
+    let entries: Vec<Value> = (states.chars().enumerate())
+        .map(|(index, state)| {
+            let status = match state {
+                'x' => "completed",
+                '>' => "in_progress",
+                _ => "pending",
+            };
+            json!({ "content": format!("Step {}", index + 1), "priority": "medium",
+                    "status": status })
+        })
+        .collect();
+    update(
+        session,
+        &json!({ "sessionUpdate": "plan", "entries": entries }),
+    );
 }
 
 /// Hangs up in `session`, answering the message `id`, as `hang-up` says:
@@ -1234,6 +1256,11 @@ impl Fake {
             _ if text.starts_with("hang-up-until ") => {
                 let until = text.strip_prefix("hang-up-until ");
                 hang_up(&session, &id, until, &self.waits);
+            }
+            _ if text.starts_with("plan ") => {
+                give_plan(&session, &text["plan ".len()..]);
+                say(&session, "planned\n");
+                done(&id, "end_turn");
             }
             "tools" => {
                 let tools = self.tools.get(&session).cloned().unwrap_or_default();

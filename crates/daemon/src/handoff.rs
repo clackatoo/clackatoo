@@ -79,20 +79,9 @@ pub(crate) struct Changed {
     pub(crate) undone: bool,
 }
 
-/// One step of an agent's plan.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Step {
-    pub(crate) content: String,
-    pub(crate) state: StepState,
-}
-
-/// How far a plan's step has got.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StepState {
-    ToDo,
-    Doing,
-    Done,
-}
+/// One step of an agent's plan, and how far it's got: the chat's view
+/// holds the plan, for windows to show and a digest to tell.
+pub(crate) use clackatoo_protocol::{PlanState as StepState, PlanStep as Step};
 
 /// What a digest is made from.
 #[derive(Debug)]

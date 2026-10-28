@@ -35,6 +35,7 @@ use crate::handover;
 
 mod limits;
 mod originals;
+mod plan;
 pub(crate) mod queue;
 mod relations;
 mod resume;
@@ -395,9 +396,6 @@ pub(crate) struct HostedChat {
     /// About the most tokens a digest of the conversation takes, for an
     /// agent the chat moves to.
     budget: usize,
-    /// The agent's plan, as it last gave it, for a digest to tell the
-    /// next agent.
-    plan: Vec<Step>,
     /// What the chat moved from, until the new agent's session opens and
     /// its settings can be set to match.
     carry: Option<Carry>,
@@ -606,7 +604,6 @@ impl HostedChat {
             known: 0,
             parked: Vec::new(),
             budget: handoff::BUDGET,
-            plan: Vec::new(),
             carry: None,
             plan_by: None,
             heard: None,
@@ -686,7 +683,7 @@ impl HostedChat {
             switches,
             budget: u32::try_from(self.budget).unwrap_or(u32::MAX),
             plan_by: self.plan_by,
-            plan: (self.plan.into_iter())
+            plan: (self.node.plan.into_iter())
                 .map(|step| handover::PlanStep {
                     content: step.content,
                     state: match step.state {
@@ -744,7 +741,7 @@ impl HostedChat {
             .collect();
         resumed.budget = usize::try_from(chat.budget).unwrap_or(handoff::BUDGET);
         resumed.plan_by = chat.plan_by;
-        resumed.plan = (chat.plan.into_iter())
+        resumed.node.plan = (chat.plan.into_iter())
             .map(|step| Step {
                 content: step.content,
                 state: match step.state {
@@ -1110,8 +1107,10 @@ impl HostedChat {
             })
             .collect();
         self.make_preview_room(&previews);
-        // What ended in the background was seen as the user wrote this.
+        // What ended in the background was seen as the user wrote this,
+        // and so was a plan all done.
         self.forget_ended_tasks();
+        self.forget_finished_plan();
         self.push_turn(Turn {
             woke: None,
             previews,
@@ -1420,7 +1419,7 @@ impl HostedChat {
             catching_up: from > 0,
             cwd: &self.cwd,
             files,
-            plan: &self.plan,
+            plan: &self.node.plan,
             plan_by: self.plan_by.as_deref(),
             budget: self.budget.min(handoff::MOST).min(context),
             tag: fence_tag(self.id.0),
@@ -2361,11 +2360,9 @@ impl HostedChat {
                 five_hour: self.limits.five_hour,
                 weekly: self.limits.weekly,
             })),
-            // Not shown yet, but kept for the next agent to hear of.
-            SessionUpdate::Plan(plan) => {
-                self.plan = steps(plan);
-                self.plan_by = Some(self.node.agent.clone());
-            }
+            // Shown above the box, and kept for the next agent to hear
+            // of.
+            SessionUpdate::Plan(plan) => self.plan_said(plan),
             // Its commands, which the chat doesn't show yet, and the
             // user's own words, already kept.
             _ => {}
@@ -2683,8 +2680,7 @@ impl HostedChat {
             self.known = heard;
             // Another agent's plan has been told: it's for the user now.
             if self.plan_by.as_ref() != Some(&self.node.agent) {
-                self.plan.clear();
-                self.plan_by = None;
+                self.forget_plan();
             }
         }
         let turn = &mut self.node.turns[index];
@@ -3101,22 +3097,6 @@ impl HostedChat {
     }
 }
 
-/// The steps of the agent's `plan`.
-fn steps(plan: agent_client_protocol_schema::v1::Plan) -> Vec<Step> {
-    use agent_client_protocol_schema::v1::PlanEntryStatus;
-    (plan.entries.into_iter())
-        .map(|entry| Step {
-            content: clean_text(&entry.content),
-            state: match entry.status {
-                PlanEntryStatus::Completed => StepState::Done,
-                PlanEntryStatus::InProgress => StepState::Doing,
-                // Pending, or a state newer than this build knows.
-                _ => StepState::ToDo,
-            },
-        })
-        .collect()
-}
-
 /// A tag for the lines a message or a digest goes between, that whoever
 /// wrote what's between them can't know, so it can't end itself early and
 /// go on as if clackatoo said what follows: from the clock's nanoseconds,
@@ -3239,6 +3219,7 @@ fn weight(patch: &ChatPatch) -> usize {
             })
             .map(|choice| choice.name.len() + choice.value.len())
             .sum(),
+        ChatPatch::Plan(plan) => plan.iter().map(|step| step.content.len() + 8).sum(),
         _ => 0,
     };
     // What each change takes, whatever's in it.
@@ -4936,6 +4917,28 @@ mod tests {
         assert_eq!(resumed.node.state, ChatState::Ready);
     }
 
+    #[test]
+    fn a_chat_handed_over_shows_its_agents_plan_still() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "plan it");
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"plan","entries":[
+                {"content":"Read it","priority":"high","status":"completed"},
+                {"content":"Test it","priority":"high","status":"in_progress"}]}"#,
+        );
+        let shown = chat.node.plan.clone();
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[1].state, StepState::Doing);
+        let agent = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        let resumed = HostedChat::resume(chat.hand_over(), &agent);
+        assert_eq!(resumed.node.plan, shown);
+        assert_eq!(resumed.plan_by.as_deref(), Some("Claude Code"));
+    }
+
     fn upgrade_chat(mut chat: HostedChat) -> HostedChat {
         let continuation = chat.prepare_upgrade().expect("active turn");
         let queue = chat.hand_over_queue();
@@ -5291,7 +5294,7 @@ mod tests {
             "{digest}"
         );
         chat.answered(Ok(StopReason::EndTurn));
-        assert!(chat.plan.is_empty());
+        assert!(chat.node.plan.is_empty());
     }
 
     #[test]

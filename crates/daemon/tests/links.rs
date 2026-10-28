@@ -5532,8 +5532,10 @@ fn a_chat_in_another_machines_workspace_goes_on_with_its_session_after_either_re
     let shown = wait_for_workspaces(&mut window, |shown| theirs(shown, "work").is_some());
     let chat = first_terminal(theirs(&shown, "work").unwrap());
     attach_to(&mut window, chat);
-    // Its session's conversation so far is told as it loads.
+    // Its session's conversation so far is told as it loads, and the
+    // plan its agent gave last shows through desk (CLACKA-190).
     wait_for_chat(&mut window, chat, |node| !node.turns.is_empty());
+    wait_for_chat(&mut window, chat, |node| node.plan.len() == 2);
     wait_for_kept(&world, "laptop", "past-1");
 
     // Laptop, the chat's machine, restarts.
@@ -5551,6 +5553,11 @@ fn a_chat_in_another_machines_workspace_goes_on_with_its_session_after_either_re
     });
     let node = ask_chat(&mut window, again, "settings");
     assert!(last_words(&node).contains("haiku"), "{node:#?}");
+    assert_eq!(node.plan.len(), 2, "told again with the session");
+    // A new plan reaches desk's window as the agent gives it.
+    let node = ask_chat(&mut window, again, "plan x>.");
+    assert_eq!(node.plan.len(), 3, "{:?}", node.plan);
+    assert_eq!(node.plan[1].state, clackatoo_protocol::PlanState::Doing);
 
     // Desk, the daemon showing it, restarts.
     drop(window);
