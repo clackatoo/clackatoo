@@ -492,12 +492,16 @@ impl Desk {
         }
     }
 
-    /// The search or name being typed in the focused editor or terminal,
-    /// if one is, and which lines typed before it goes back through.
+    /// The search or name being typed in the focused pane, if one is, and
+    /// which lines typed before it goes back through.
     fn focused_prompt_line(&mut self) -> Option<(&mut Line, Option<Kind>)> {
         let shown = self.shown?;
         if self.focused_editor().is_some() {
             return self.editor_prompt_line(shown.pane);
+        }
+        if self.focused_list_mut().is_some() {
+            let line = self.focused_list_mut()?.search_mut().line()?;
+            return Some((line, Some(Kind::Search)));
         }
         let terminal = self.focused_terminal()?;
         let line = match self.chats.get_mut(&terminal) {

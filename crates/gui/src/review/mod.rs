@@ -44,7 +44,8 @@ use crate::colors;
 use crate::motion::Motion;
 use crate::options::{Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
-use crate::vim::list::{self, ListRows, ListSearch};
+use crate::vim::list::{self, ListRows, Searching};
+use crate::vim::search::{self, Search};
 use crate::vim::{Action, Command, Dialect, Keys, Mode, Paging, Parsed, Read, Reader, Stroke};
 
 #[cfg(test)]
@@ -166,14 +167,19 @@ pub(crate) struct Review {
     keys: Keys,
     /// How far its scrolling keys go.
     paging: Paging,
-    /// The search being typed, and the last.
-    search: ListSearch,
+    /// The search being typed, the last, and what's lit.
+    search: Search<list::Items>,
+    /// The last search's matches in view, as of the last settle.
+    matches_lit: Vec<Highlight>,
     /// How a search matches case, as the editor's do.
     case: Case,
     /// What to ask the desk, oldest first.
     asks: Vec<Ask>,
     /// What the bar says until the next key.
     message: Option<String>,
+    /// A search failed since the desk last asked, as Vim beeps: a macro or
+    /// a binding typing keys stops.
+    failed: bool,
 }
 
 impl Review {
@@ -196,10 +202,12 @@ impl Review {
             cursor_cell: None,
             keys: Keys::default(),
             paging: Paging::default(),
-            search: ListSearch::default(),
+            search: Search::of(options),
+            matches_lit: Vec::new(),
             case: Case::of(options),
             asks: Vec::new(),
             message: None,
+            failed: false,
         };
         made.flatten();
         made
@@ -224,6 +232,7 @@ impl Review {
         self.tabstop = options.tabstop as usize;
         self.cursorline = options.cursorline;
         self.case = Case::of(options);
+        self.search.set_options(options);
     }
 
     pub(crate) fn resize(&mut self, size: Size) {
@@ -264,7 +273,7 @@ impl Review {
     /// half typed, and a search being typed.
     pub(crate) fn leave(&mut self) {
         self.keys.clear();
-        self.search.give_up();
+        search::give_up(&mut Searching(self));
     }
 
     /// What the bar says but for keys half typed: a message, or where the
@@ -435,10 +444,7 @@ impl Review {
     /// Does what `stroke` does. Returns whether it should be drawn again.
     pub(crate) fn stroke(&mut self, stroke: Stroke) -> bool {
         let had_message = self.message.take().is_some();
-        if self.search.typing() {
-            if self.search.key(stroke) == list::Typed::Done {
-                self.search_again(false, 1);
-            }
+        if list::search_stroke(self, stroke) {
             return true;
         }
         let was_pending = self.keys.pending();
@@ -457,13 +463,11 @@ impl Review {
         let mut paging = self.paging;
         let moved = list::go(self, &mut paging, &command);
         self.paging = paging;
-        if moved {
+        if moved || list::search_command(self, &command) {
             return;
         }
         let count = command.times();
         let own = match command.action {
-            Action::Search { backward } => return self.search.start(backward),
-            Action::SearchAgain { reverse } => return self.search_again(reverse, count),
             Action::Own(own) => own,
             // Nothing else is taken (see `ReviewKeys::takes`).
             _ => return,
@@ -495,30 +499,6 @@ impl Review {
                 self.asks.push(Ask::Act(ReviewAction::Refresh(review)));
             }
             ReviewKey::Close => self.asks.push(Ask::Close),
-        }
-    }
-
-    /// `n`, or `N` if `reverse`: to the `count`th line the last search
-    /// matches, the way it went, round the ends.
-    fn search_again(&mut self, reverse: bool, count: usize) {
-        let pattern = match self.search.pattern(self.case) {
-            None => return,
-            Some(Err(why)) => {
-                self.message = Some(why);
-                return;
-            }
-            Some(Ok(pattern)) => pattern,
-        };
-        let matches = |at: usize| {
-            self.searched(&self.lines[at])
-                .is_some_and(|text| pattern.find_at(text, 0).is_some())
-        };
-        let len = self.lines.len();
-        if let Some(at) = self.search.again(reverse, count, len, self.cursor, matches) {
-            self.cursor = at;
-        } else {
-            let query = self.search.query().unwrap_or_default();
-            self.message = Some(format!("no line matches {query}"));
         }
     }
 
@@ -685,7 +665,9 @@ impl Review {
         let end = (self.top + height + self.scroll_extra).min(self.lines.len());
         let mut rows = Vec::with_capacity(height);
         let mut lit = Vec::with_capacity(height);
+        let mut matches_lit = Vec::new();
         self.cursor_cell = None;
+        let found = self.search.found();
         for (index, line) in self.lines[self.top..end].iter().enumerate() {
             let (row, kind, col) = self.draw(line);
             if self.top + index == self.cursor {
@@ -693,7 +675,33 @@ impl Review {
             }
             rows.push(row);
             lit.push(kind);
+            // The last search's matches in what it looks in, where that's
+            // drawn, from `col`, a changed line's tabs as wide as drawn.
+            let Some(text) = self.searched(line) else {
+                continue;
+            };
+            let cells = |upto: &str| match line {
+                Line::Text { .. } => crate::render::mono_width(&expand_tabs(upto, self.tabstop)),
+                _ => crate::render::mono_width(upto),
+            };
+            let brighter = found == Some(self.top + index);
+            for (bytes, found) in list::lit_in(&self.search, text, brighter) {
+                let (start, end) = (
+                    col + cells(&text[..bytes.start]),
+                    col + cells(&text[..bytes.end]),
+                );
+                matches_lit.push(Highlight {
+                    line: index,
+                    cols: start.min(self.width)..end.min(self.width),
+                    kind: if found {
+                        HighlightKind::Match
+                    } else {
+                        HighlightKind::OtherMatch
+                    },
+                });
+            }
         }
+        self.matches_lit = matches_lit;
         while rows.len() < self.height + self.scroll_extra {
             rows.push(RowBuilder::new(self.width).finish(false));
             lit.push(None);
@@ -856,6 +864,7 @@ impl Review {
                 kind: HighlightKind::CursorLine,
             });
         }
+        highlights.extend(self.matches_lit.iter().cloned());
         highlights
     }
 }
@@ -1107,6 +1116,42 @@ impl Dialect for ReviewKeys {
     }
 }
 
+/// A review's search goes through its changed lines, its files' names and
+/// its comments.
+impl list::Searched for Review {
+    fn search(&self) -> &Search<list::Items> {
+        &self.search
+    }
+
+    fn search_mut(&mut self) -> &mut Search<list::Items> {
+        &mut self.search
+    }
+
+    fn matches(&self, line: usize, pattern: &crate::editor::Pattern) -> bool {
+        (self.searched(&self.lines[line])).is_some_and(|text| pattern.find_at(text, 0).is_some())
+    }
+
+    fn case(&self) -> Case {
+        self.case
+    }
+
+    fn missed(&self, query: &str) -> String {
+        format!("no line matches {query}")
+    }
+
+    fn say(&mut self, said: String) {
+        self.message = Some(said);
+    }
+
+    fn fail(&mut self) {
+        self.failed = true;
+    }
+
+    fn take_failed(&mut self) -> bool {
+        std::mem::take(&mut self.failed)
+    }
+}
+
 impl ListRows for Review {
     fn len(&self) -> usize {
         self.lines.len()
@@ -1150,8 +1195,8 @@ impl crate::vim::ListKeys for Review {
 
 impl Review {
     pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
-        if let Some(typed) = self.search.typed() {
-            return crate::cmdline::simple::help("Review search", typed);
+        if let Some(context) = self.search.shortcuts("Review search") {
+            return context;
         }
         crate::vim::shortcuts::context("Review", &self.keys, Mode::Normal, &ReviewKeys)
     }

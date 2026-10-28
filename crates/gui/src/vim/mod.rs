@@ -11,6 +11,7 @@
 mod command;
 mod grammar;
 pub(crate) mod list;
+pub(crate) mod search;
 pub(crate) mod shortcuts;
 mod stroke;
 

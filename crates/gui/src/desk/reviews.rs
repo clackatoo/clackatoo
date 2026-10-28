@@ -160,7 +160,7 @@ impl Desk {
             return false;
         };
         let mut redraw = false;
-        for stroke in crate::vim::plain_strokes(press, review.prompting()) {
+        for stroke in crate::vim::list::strokes(press, &*review) {
             redraw |= review.stroke(stroke);
         }
         let asks = review.take_asks();

@@ -324,6 +324,8 @@ fn searches_find_lines_files_and_comments() {
     assert_eq!(review.label(), "no line matches nowhere");
     // `?` goes back; `n` the way it went, `N` the other.
     keys(&mut review, "gg?\\.rs<CR>");
+    assert_eq!(review.label(), "search wrapped to bottom");
+    keys(&mut review, "<Esc>");
     assert_eq!(review.label(), "b.rs  1 hunk");
     keys(&mut review, "n");
     assert_eq!(review.label(), "a.rs  2 hunks");
@@ -356,4 +358,47 @@ fn a_key_that_does_nothing_still_clears_a_message_and_redraws() {
     assert_eq!(review.label(), "no line matches nowhere");
     assert!(review.stroke(Stroke::Escape), "drawn again");
     assert_ne!(review.label(), "no line matches nowhere");
+}
+
+#[test]
+fn a_search_lights_what_it_matches_where_its_drawn() {
+    let mut review = review();
+    keys(&mut review, "/r");
+    crate::vim::search::preview(&mut Searching(&mut review));
+    assert_eq!(review.label(), "/r▏");
+    keys(&mut review, "<CR>");
+    review.settle();
+    let shown = rows(&mut review);
+    let lit: Vec<(String, HighlightKind)> = (review.highlights().into_iter())
+        .filter(|highlight| {
+            matches!(
+                highlight.kind,
+                HighlightKind::Match | HighlightKind::OtherMatch
+            )
+        })
+        .map(|highlight| {
+            let row: Vec<char> = shown[highlight.line].chars().collect();
+            (row[highlight.cols].iter().collect(), highlight.kind)
+        })
+        .collect();
+    // In files' names, changed lines and comments, the one gone to
+    // brighter.
+    assert!(lit.contains(&("r".into(), HighlightKind::Match)), "{lit:?}");
+    assert_eq!(
+        lit.iter()
+            .filter(|(_, kind)| *kind == HighlightKind::Match)
+            .count(),
+        1
+    );
+    assert_eq!(lit.len(), 3, "{lit:?}");
+    assert!(lit.iter().all(|(text, _)| text == "r"), "{lit:?}");
+    // `:nohlsearch`'s Esc puts them out.
+    keys(&mut review, "<Esc>");
+    review.settle();
+    assert!(
+        review
+            .highlights()
+            .iter()
+            .all(|highlight| highlight.kind != HighlightKind::OtherMatch)
+    );
 }

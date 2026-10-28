@@ -64,7 +64,8 @@ use crate::colors;
 use crate::motion::Motion;
 use crate::options::{Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
-use crate::vim::list::{self, ListRows, ListSearch};
+use crate::vim::list::{self, ListRows, Searching};
+use crate::vim::search::{self, Search};
 use crate::vim::{Action, Command, Dialect, Keys, Paging, Parsed, Read, Reader, Stroke};
 
 mod editing;
@@ -230,8 +231,8 @@ pub(crate) struct Explorer {
     /// How far its scrolling keys go.
     paging: Paging,
     prompt: Option<Prompt>,
-    /// The search being typed, and the last.
-    search: ListSearch,
+    /// The search being typed, the last, and what's lit.
+    search: Search<list::Items>,
     case: Case,
     cursorline: bool,
     /// A path to put the cursor on once it shows, expanding what it's in.
@@ -243,6 +244,9 @@ pub(crate) struct Explorer {
     /// What the bar says until the next key, such as why a key did
     /// nothing.
     message: Option<String>,
+    /// A search failed since the desk last asked, as Vim beeps: a macro or
+    /// a binding typing keys stops.
+    failed: bool,
     /// The directory it may not go above, nor change anything outside, as
     /// a lesson's explorer may not leave the lesson's scratch directory.
     fence: Option<String>,
@@ -305,13 +309,14 @@ impl Explorer {
             keys: Keys::default(),
             paging: Paging::default(),
             prompt: None,
-            search: ListSearch::default(),
+            search: Search::of(options),
             case: Case::of(options),
             cursorline: options.cursorline,
             reveal: None,
             outbox: Vec::new(),
             asks: Vec::new(),
             message: None,
+            failed: false,
             fence: None,
             fence_name: None,
             help: false,
@@ -365,6 +370,7 @@ impl Explorer {
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.case = Case::of(options);
+        self.search.set_options(options);
         self.cursorline = options.cursorline;
     }
 
@@ -476,7 +482,7 @@ impl Explorer {
     /// typed stays, to finish.
     pub(crate) fn leave(&mut self) {
         self.keys.clear();
-        self.search.give_up();
+        search::give_up(&mut Searching(self));
     }
 
     /// The name at the cursor, as shown: `..` on the way up.
@@ -1002,10 +1008,7 @@ impl Explorer {
             self.prompt_stroke(stroke);
             return true;
         }
-        if self.search.typing() {
-            if self.search.key(stroke) == list::Typed::Done {
-                self.search_again(false, 1);
-            }
+        if list::search_stroke(self, stroke) {
             return true;
         }
         let was_pending = self.keys.pending();
@@ -1024,14 +1027,10 @@ impl Explorer {
         let mut paging = self.paging;
         let moved = list::go(self, &mut paging, &command);
         self.paging = paging;
-        if moved {
+        if moved || list::search_command(self, &command) {
             return;
         }
         let own = match command.action {
-            Action::Search { backward } => return self.search.start(backward),
-            Action::SearchAgain { reverse } => {
-                return self.search_again(reverse, command.times());
-            }
             Action::Own(own) => own,
             // Nothing else is taken (see `ExplorerKeys::takes`).
             _ => return,
@@ -1385,32 +1384,6 @@ impl Explorer {
         if dir { " and everything in it" } else { "" }
     }
 
-    /// `n`: goes to the `count`th name shown the last search matches,
-    /// after the cursor, or before it if it went backward, or the other
-    /// way if `reverse`, round from the end to the start.
-    fn search_again(&mut self, reverse: bool, count: usize) {
-        let pattern = match self.search.pattern(self.case) {
-            None => return,
-            Some(Err(why)) => {
-                self.message = Some(why);
-                return;
-            }
-            Some(Ok(pattern)) => pattern,
-        };
-        // Rows, of which `..`, having no name, is passed over.
-        let matches = |row: usize| {
-            self.line_at(row)
-                .is_some_and(|line| pattern.find_at(&line.entry().name, 0).is_some())
-        };
-        let found = (self.search).again(reverse, count, self.rows_len(), self.row(), matches);
-        if let Some(row) = found {
-            self.go_to_row(row);
-        } else {
-            let query = self.search.query().unwrap_or_default();
-            self.message = Some(format!("no name shown matches {query}"));
-        }
-    }
-
     // --- The mouse ----------------------------------------------------------
 
     /// A click on row `row` of the pane, a double one if `double`: the
@@ -1676,25 +1649,26 @@ impl Explorer {
                 kind: HighlightKind::CursorLine,
             });
         }
-        let pattern = self.search.pattern(self.case).and_then(Result::ok);
-        if let Some(pattern) = pattern {
-            for (index, &col) in self.name_cols.iter().enumerate() {
-                let Some(line) = self.line_at(self.top + index) else {
-                    continue;
-                };
-                let name = &line.entry().name;
-                let Some(found) = pattern
-                    .find_at(name, 0)
-                    .filter(|found| found.end > found.start)
-                else {
-                    continue;
-                };
-                let start = col + crate::render::mono_width(&name[..found.start]);
-                let end = start + crate::render::mono_width(&name[found.start..found.end]);
+        // The last search's matches in the names shown, the one it went
+        // to brighter.
+        let found = self.search.found();
+        for (index, &col) in self.name_cols.iter().enumerate() {
+            let row = self.top + index;
+            let Some(line) = self.line_at(row) else {
+                continue;
+            };
+            let name = &line.entry().name;
+            for (bytes, brighter) in list::lit_in(&self.search, name, found == Some(row)) {
+                let start = col + crate::render::mono_width(&name[..bytes.start]);
+                let end = start + crate::render::mono_width(&name[bytes]);
                 highlights.push(Highlight {
                     line: index + 1,
                     cols: start..end.min(self.width),
-                    kind: HighlightKind::Match,
+                    kind: if brighter {
+                        HighlightKind::Match
+                    } else {
+                        HighlightKind::OtherMatch
+                    },
                 });
             }
         }
@@ -1982,6 +1956,42 @@ impl Dialect for ExplorerKeys {
     }
 }
 
+/// An explorer's search goes through the names shown.
+impl list::Searched for Explorer {
+    fn search(&self) -> &Search<list::Items> {
+        &self.search
+    }
+
+    fn search_mut(&mut self) -> &mut Search<list::Items> {
+        &mut self.search
+    }
+
+    fn matches(&self, row: usize, pattern: &crate::editor::Pattern) -> bool {
+        // `..`, having no name, is passed over.
+        (self.line_at(row)).is_some_and(|line| pattern.find_at(&line.entry().name, 0).is_some())
+    }
+
+    fn case(&self) -> Case {
+        self.case
+    }
+
+    fn missed(&self, query: &str) -> String {
+        format!("no name shown matches {query}")
+    }
+
+    fn say(&mut self, said: String) {
+        self.message = Some(said);
+    }
+
+    fn fail(&mut self) {
+        self.failed = true;
+    }
+
+    fn take_failed(&mut self) -> bool {
+        std::mem::take(&mut self.failed)
+    }
+}
+
 /// An explorer is a list of its rows: `..`'s, if it shows, then the
 /// tree's lines.
 impl ListRows for Explorer {
@@ -2043,8 +2053,8 @@ impl Explorer {
             }
             None => {}
         }
-        if let Some(typed) = self.search.typed() {
-            return crate::cmdline::simple::help("File explorer search", typed);
+        if let Some(context) = self.search.shortcuts("File explorer search") {
+            return context;
         }
         let mode = crate::vim::Mode::Normal;
         crate::vim::shortcuts::context("Explorer", &self.keys, mode, &ExplorerKeys)

@@ -30,7 +30,8 @@ use crate::colors;
 use crate::motion::Motion;
 use crate::options::{Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
-use crate::vim::list::{self, ListRows, ListSearch};
+use crate::vim::list::{self, ListRows, Searching};
+use crate::vim::search::{self, Search};
 use crate::vim::{Action, Command, Dialect, Keys, Mode, Paging, Parsed, Read, Reader, Stroke};
 
 #[cfg(test)]
@@ -59,6 +60,9 @@ enum Prompt {
 #[derive(Clone, Debug)]
 struct Line {
     entry: Option<usize>,
+    /// The bytes of the entry's text it draws, if it draws them, after
+    /// [`INDENT`].
+    text: Option<std::ops::Range<usize>>,
     row: Row,
 }
 
@@ -99,8 +103,8 @@ pub(crate) struct BoardPane {
     keys: Keys,
     /// How far its scrolling keys go.
     paging: Paging,
-    /// The search being typed, and the last.
-    search: ListSearch,
+    /// The search being typed, the last, and what's lit.
+    search: Search<list::Items>,
     /// How a search matches case, as the editor's do.
     case: Case,
     prompt: Option<Prompt>,
@@ -111,6 +115,11 @@ pub(crate) struct BoardPane {
     /// What the bar says until the next key, such as why something
     /// couldn't be done.
     message: Option<String>,
+    /// A search failed since the desk last asked, as Vim beeps: a macro or
+    /// a binding typing keys stops.
+    failed: bool,
+    /// The last search's matches in view, as of the last settle.
+    lit: Vec<Highlight>,
 }
 
 impl BoardPane {
@@ -135,13 +144,15 @@ impl BoardPane {
             laid_at: 0,
             keys: Keys::default(),
             paging: Paging::default(),
-            search: ListSearch::default(),
+            search: Search::of(options),
             case: Case::of(options),
             prompt: None,
             cursorline: options.cursorline,
             outbox: Vec::new(),
             asks: Vec::new(),
             message: None,
+            failed: false,
+            lit: Vec::new(),
         }
     }
 
@@ -153,6 +164,7 @@ impl BoardPane {
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.cursorline = options.cursorline;
         self.case = Case::of(options);
+        self.search.set_options(options);
     }
 
     pub(crate) fn resize(&mut self, size: Size) {
@@ -189,7 +201,7 @@ impl BoardPane {
     /// to finish.
     pub(crate) fn leave(&mut self) {
         self.keys.clear();
-        self.search.give_up();
+        search::give_up(&mut Searching(self));
     }
 
     /// What the window's title says: "Board:" and the board's name, as
@@ -293,10 +305,7 @@ impl BoardPane {
             self.prompt_stroke(stroke);
             return true;
         }
-        if self.search.typing() {
-            if self.search.key(stroke) == list::Typed::Done {
-                self.search_again(false, 1);
-            }
+        if list::search_stroke(self, stroke) {
             return true;
         }
         let was_pending = self.keys.pending();
@@ -315,14 +324,10 @@ impl BoardPane {
         let mut paging = self.paging;
         let moved = list::go(self, &mut paging, &command);
         self.paging = paging;
-        if moved {
+        if moved || list::search_command(self, &command) {
             return;
         }
         let own = match command.action {
-            Action::Search { backward } => return self.search.start(backward),
-            Action::SearchAgain { reverse } => {
-                return self.search_again(reverse, command.times());
-            }
             Action::Own(own) => own,
             // Nothing else is taken (see `BoardKeys::takes`).
             _ => return,
@@ -342,28 +347,6 @@ impl BoardPane {
                 }
             }
             BoardKey::Close => self.asks.push(Ask::Close),
-        }
-    }
-
-    /// `n`, or `N` if `reverse`: to the `count`th entry the last search
-    /// matches, the way it went, round the ends.
-    fn search_again(&mut self, reverse: bool, count: usize) {
-        let pattern = match self.search.pattern(self.case) {
-            None => return,
-            Some(Err(why)) => {
-                self.message = Some(why);
-                return;
-            }
-            Some(Ok(pattern)) => pattern,
-        };
-        let matches = |at: usize| pattern.find_at(&self.entries[at].text, 0).is_some();
-        if let Some(at) =
-            (self.search).again(reverse, count, self.entries.len(), self.cursor, matches)
-        {
-            self.go_to(at);
-        } else {
-            let query = self.search.query().unwrap_or_default();
-            self.message = Some(format!("no entry matches {query}"));
         }
     }
 
@@ -549,6 +532,53 @@ impl BoardPane {
         }
         rows.truncate(self.height + self.scroll_extra);
         self.rows = rows;
+        self.lit = self.matches_in_view(end);
+    }
+
+    /// The last search's matches in the entries' text in view, the lines
+    /// from the top to `end`, each on the row it's drawn in, while they're
+    /// lit: every match, with `hlsearch`, and the entry the search went
+    /// to's first brighter.
+    fn matches_in_view(&self, end: usize) -> Vec<Highlight> {
+        if self.search.lit().is_none() {
+            return Vec::new();
+        }
+        let found = self.search.found();
+        let mut highlights = Vec::new();
+        // The entry whose matches were last found, and them.
+        let mut matched: Option<(usize, Vec<(std::ops::Range<usize>, bool)>)> = None;
+        for (index, line) in self.lines[self.top..end].iter().enumerate() {
+            let (Some(entry), Some(piece)) = (line.entry, &line.text) else {
+                continue;
+            };
+            let text = &self.entries[entry].text;
+            let lit = match &matched {
+                Some((was, lit)) if *was == entry => lit,
+                _ => {
+                    let lit = list::lit_in(&self.search, text, found == Some(entry));
+                    &matched.insert((entry, lit)).1
+                }
+            };
+            for (bytes, brighter) in lit {
+                let start = bytes.start.max(piece.start);
+                let stop = bytes.end.min(piece.end);
+                if start >= stop {
+                    continue;
+                }
+                let col = INDENT + crate::render::mono_width(&text[piece.start..start]);
+                let cols = col..col + crate::render::mono_width(&text[start..stop]);
+                highlights.push(Highlight {
+                    line: index + 1,
+                    cols: cols.start.min(self.width)..cols.end.min(self.width),
+                    kind: if *brighter {
+                        HighlightKind::Match
+                    } else {
+                        HighlightKind::OtherMatch
+                    },
+                });
+            }
+        }
+        highlights
     }
 
     /// The pane's first row: the board's name, whose it is, and how many
@@ -593,6 +623,7 @@ impl BoardPane {
             );
             lines.push(Line {
                 entry: None,
+                text: None,
                 row: row.finish(false),
             });
         }
@@ -600,12 +631,14 @@ impl BoardPane {
             if index > 0 {
                 lines.push(Line {
                     entry: None,
+                    text: None,
                     row: RowBuilder::new(self.width).finish(false),
                 });
             }
-            for row in self.entry_rows(entry, now) {
+            for (row, text) in self.entry_rows(entry, now) {
                 lines.push(Line {
                     entry: Some(index),
+                    text,
                     row,
                 });
             }
@@ -614,8 +647,12 @@ impl BoardPane {
     }
 
     /// The rows of `entry` at `now`: its heading, what it says, and what
-    /// it points to.
-    fn entry_rows(&self, entry: &BoardEntry, now: u64) -> Vec<Row> {
+    /// it points to; with each row of what it says, the bytes of it drawn.
+    fn entry_rows(
+        &self,
+        entry: &BoardEntry,
+        now: u64,
+    ) -> Vec<(Row, Option<std::ops::Range<usize>>)> {
         let faint = colors::line_number(false);
         let mut rows = Vec::new();
         let mut heading = RowBuilder::new(self.width);
@@ -651,7 +688,7 @@ impl BoardPane {
             };
             heading.push(&state, &style, true);
         }
-        rows.push(heading.finish(false));
+        rows.push((heading.finish(false), None));
         let wide = self.width.saturating_sub(INDENT).max(8);
         let indent = " ".repeat(INDENT);
         if let Some(subject) = &entry.subject {
@@ -662,15 +699,26 @@ impl BoardPane {
             for piece in wrap(subject, wide) {
                 let mut row = RowBuilder::new(self.width);
                 row.push(&indent, &Style::DEFAULT, true);
-                row.push(&piece, &style, true);
-                rows.push(row.finish(false));
+                row.push(&subject[piece], &style, true);
+                rows.push((row.finish(false), None));
             }
         }
-        for piece in entry.text.lines().flat_map(|line| wrap(line, wide)) {
-            let mut row = RowBuilder::new(self.width);
-            row.push(&indent, &Style::DEFAULT, true);
-            row.push(&piece, &Style::DEFAULT, true);
-            rows.push(row.finish(false));
+        // Its lines, each as `str::lines` has them, wrapped.
+        let mut at = 0;
+        for chunk in entry.text.split_inclusive('\n') {
+            let start = at;
+            at += chunk.len();
+            let line = chunk.strip_suffix('\n').unwrap_or(chunk);
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            for piece in wrap(line, wide) {
+                let mut row = RowBuilder::new(self.width);
+                row.push(&indent, &Style::DEFAULT, true);
+                row.push(&line[piece.clone()], &Style::DEFAULT, true);
+                rows.push((
+                    row.finish(false),
+                    Some(start + piece.start..start + piece.end),
+                ));
+            }
         }
         for link in &entry.links {
             let text = match link {
@@ -684,7 +732,7 @@ impl BoardPane {
             let mut row = RowBuilder::new(self.width);
             row.push(&indent, &Style::DEFAULT, true);
             row.push(&text, &faint, true);
-            rows.push(row.finish(false));
+            rows.push((row.finish(false), None));
         }
         rows
     }
@@ -699,18 +747,17 @@ impl BoardPane {
         (self.rows.iter().collect(), cursor)
     }
 
-    /// What's highlighted in view: the cursor's entry, every line of it.
+    /// What's highlighted in view: the cursor's entry, every line of it,
+    /// and the last search's matches.
     pub(crate) fn highlights(&self) -> Vec<Highlight> {
-        if !self.cursorline {
-            return Vec::new();
-        }
-        (self.cursor_rows.clone())
+        let cursor = (self.cursor_rows.clone())
+            .filter(|_| self.cursorline)
             .map(|line| Highlight {
                 line,
                 cols: 0..self.width,
                 kind: HighlightKind::CursorLine,
-            })
-            .collect()
+            });
+        cursor.chain(self.lit.iter().cloned()).collect()
     }
 }
 
@@ -748,41 +795,47 @@ fn span(ms: u64) -> String {
 }
 
 /// `text` cut into lines of at most `width` cells, at spaces where it
-/// can be, and anywhere where it can't.
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    let mut cells = 0;
+/// can be, and anywhere where it can't: the bytes of each.
+fn wrap(text: &str, width: usize) -> Vec<std::ops::Range<usize>> {
+    let mut pieces = Vec::new();
+    // The piece being filled, and how wide it is.
+    let (mut piece, mut cells) = (0..0, 0);
+    let mut at = 0;
     for word in text.split(' ') {
+        let start = at;
+        at += word.len() + 1;
         let wide = crate::render::mono_width(word);
-        let gap = usize::from(!line.is_empty());
+        let gap = usize::from(!piece.is_empty());
         if cells + gap + wide <= width {
-            if gap == 1 {
-                line.push(' ');
+            if piece.is_empty() {
+                piece = start..start;
             }
-            line.push_str(word);
+            piece.end = start + word.len();
             cells += gap + wide;
             continue;
         }
-        if !line.is_empty() {
-            lines.push(std::mem::take(&mut line));
+        if !piece.is_empty() {
+            pieces.push(std::mem::replace(&mut piece, 0..0));
             cells = 0;
         }
         // Too long for a line of its own: cut where it reaches the edge.
-        for ch in word.chars() {
+        for (offset, ch) in word.char_indices() {
             let wide = crate::render::mono_width(ch.encode_utf8(&mut [0; 4]));
-            if cells + wide > width && !line.is_empty() {
-                lines.push(std::mem::take(&mut line));
+            if cells + wide > width && !piece.is_empty() {
+                pieces.push(std::mem::replace(&mut piece, 0..0));
                 cells = 0;
             }
-            line.push(ch);
+            if piece.is_empty() {
+                piece = start + offset..start + offset;
+            }
+            piece.end = start + offset + ch.len_utf8();
             cells += wide;
         }
     }
-    if !line.is_empty() || lines.is_empty() {
-        lines.push(line);
+    if !piece.is_empty() || pieces.is_empty() {
+        pieces.push(piece);
     }
-    lines
+    pieces
 }
 
 /// Now, in milliseconds since the Unix epoch.
@@ -872,6 +925,41 @@ impl BoardPane {
     }
 }
 
+/// A board's search goes through what its entries say.
+impl list::Searched for BoardPane {
+    fn search(&self) -> &Search<list::Items> {
+        &self.search
+    }
+
+    fn search_mut(&mut self) -> &mut Search<list::Items> {
+        &mut self.search
+    }
+
+    fn matches(&self, entry: usize, pattern: &crate::editor::Pattern) -> bool {
+        pattern.find_at(&self.entries[entry].text, 0).is_some()
+    }
+
+    fn case(&self) -> Case {
+        self.case
+    }
+
+    fn missed(&self, query: &str) -> String {
+        format!("no entry matches {query}")
+    }
+
+    fn say(&mut self, said: String) {
+        self.message = Some(said);
+    }
+
+    fn fail(&mut self) {
+        self.failed = true;
+    }
+
+    fn take_failed(&mut self) -> bool {
+        std::mem::take(&mut self.failed)
+    }
+}
+
 /// A board is a list of its entries, each as many lines as it's laid out
 /// in, as of the last settle.
 impl ListRows for BoardPane {
@@ -949,8 +1037,8 @@ impl BoardPane {
             };
             return crate::cmdline::simple::help("Board entry", text);
         }
-        if let Some(typed) = self.search.typed() {
-            return crate::cmdline::simple::help("Board search", typed);
+        if let Some(context) = self.search.shortcuts("Board search") {
+            return context;
         }
         crate::vim::shortcuts::context("Board", &self.keys, Mode::Normal, &BoardKeys)
     }

@@ -1868,11 +1868,28 @@ impl Desk {
     }
 
     /// Has each terminal asked the daemon where the search being typed in
-    /// it would go, if that's changed and it's not still answering, as
-    /// `incsearch` shows it: once before the window sends what it has, not
-    /// at every key. Returns whether the window must be redrawn.
+    /// it would go, if that's changed and it's not still answering, and
+    /// each explorer, board and review shown where its goes, as
+    /// `incsearch` shows them: once before the window sends what it has,
+    /// not at every key. (Editors' and chats' are shown as they settle.)
+    /// Returns whether the window must be redrawn.
     pub(crate) fn preview_searches(&mut self) -> bool {
-        (self.panes.values_mut()).fold(false, |redraw, pane| pane.preview_search() | redraw)
+        use crate::vim::{list::Searching, search::preview};
+
+        let mut redraw = false;
+        for pane in self.panes.values_mut() {
+            redraw |= pane.preview_search();
+        }
+        for explorer in self.explorers.panes.values_mut() {
+            redraw |= preview(&mut Searching(explorer));
+        }
+        for board in self.boards.panes.values_mut() {
+            redraw |= preview(&mut Searching(board));
+        }
+        for review in self.reviews.panes.values_mut() {
+            redraw |= preview(&mut Searching(review));
+        }
+        redraw
     }
 
     /// Takes the messages waiting for the daemon: the window's, then each
@@ -2160,12 +2177,32 @@ impl Desk {
         if !list {
             return None;
         }
-        Some(
-            self.stop_recording_in_pane(press)
-                || self.explorer_key(press)
-                || self.board_key(press)
-                || self.review_key(press),
-        )
+        let redraw = self.stop_recording_in_pane(press)
+            || self.explorer_key(press)
+            || self.board_key(press)
+            || self.review_key(press);
+        // A search that found nothing stops a macro or a binding, as
+        // Vim's beep does.
+        let failed = self
+            .focused_list_mut()
+            .is_some_and(|list| list.take_failed());
+        if failed && self.frames_typing() {
+            self.stop_macro(None);
+        }
+        Some(redraw)
+    }
+
+    /// The focused explorer, board or review, as a list that's searched.
+    pub(super) fn focused_list_mut(&mut self) -> Option<&mut dyn crate::vim::list::Searched> {
+        let pane = self.shown?.pane;
+        if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
+            return Some(explorer);
+        }
+        if let Some(board) = self.boards.panes.get_mut(&pane) {
+            return Some(board);
+        }
+        let review = self.reviews.panes.get_mut(&pane)?;
+        Some(review)
     }
 
     /// Pastes `text` into the command line, if it's open, or else the focused pane.

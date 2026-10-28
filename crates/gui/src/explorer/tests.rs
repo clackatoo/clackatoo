@@ -245,11 +245,18 @@ fn slash_searches_the_names_shown_and_n_goes_on() {
     assert_eq!(at(&mut explorer), "/p/alpha.rs", "round from the end");
     keys(&mut explorer, "N");
     assert_eq!(at(&mut explorer), "/p/Delta.RS");
-    let matches: Vec<usize> = (explorer.highlights().iter())
-        .filter(|highlight| highlight.kind == HighlightKind::Match)
-        .map(|highlight| highlight.line)
-        .collect();
-    assert_eq!(matches, [2, 4, 5], "below the root's row and ..'s");
+    let lit = |kind| -> Vec<usize> {
+        (explorer.highlights().iter())
+            .filter(|highlight| highlight.kind == kind)
+            .map(|highlight| highlight.line)
+            .collect()
+    };
+    assert_eq!(lit(HighlightKind::Match), [5], "the one gone to");
+    assert_eq!(
+        lit(HighlightKind::OtherMatch),
+        [2, 4],
+        "below the root's row and ..'s"
+    );
     keys(&mut explorer, "/zzz<CR>");
     assert_eq!(explorer.label(), "no name shown matches zzz");
     assert_eq!(at(&mut explorer), "/p/Delta.RS");

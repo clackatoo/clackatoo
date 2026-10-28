@@ -294,6 +294,29 @@ fn a_count_alone_in_an_explorer_leaves_the_next_key_to_the_bindings_too() {
 }
 
 #[test]
+fn an_explorers_search_is_edited_and_goes_back_through_searches_as_every_bars() {
+    let mut desk = desk(one_tab(files_pane(1, 1)));
+    answer_all(&mut desk);
+    normal_mode(&mut desk);
+    type_keys(&mut desk, "/abc");
+    key(&mut desk, NamedKey::Enter);
+    type_keys(&mut desk, "/x");
+    ctrl(&mut desk, "w");
+    assert_eq!(text(&desk), "/▏");
+    // Alt and a key types it, as in every bar.
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+    press(&mut desk, Key::Character("q".into()), None, alt);
+    assert_eq!(text(&desk), "/q▏");
+    ctrl(&mut desk, "w");
+    key(&mut desk, NamedKey::ArrowUp);
+    assert_eq!(text(&desk), "/abc▏");
+    key(&mut desk, NamedKey::Escape);
+}
+
+#[test]
 fn huge_counts_neither_hang_nor_overflow() {
     let mut desk = terminal_desk();
     type_keys(&mut desk, "99999999999999999999999H");

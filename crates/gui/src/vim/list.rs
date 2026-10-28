@@ -4,11 +4,12 @@
 //! between lines, `j` `k` `gg` `G` `H` `M` `L`, with counts, and the
 //! scrolling keys, Ctrl+E Ctrl+Y Ctrl+D Ctrl+U Ctrl+F and the pages, and
 //! `zt` `zz` `zb`, all done here once for every list ([`go`]); and `/` `?`
-//! `n` `N`, searching the items shown ([`ListSearch`]). The rest of their
+//! `n` `N`, searching the items shown ([`Searching`]). The rest of their
 //! keys are their own, through their [`Dialect`](super::Dialect)'s hooks.
 
 use std::ops::Range;
 
+use super::search::{Find, Finding, Kinds, Last, Search, Searcher};
 use super::{Action, Command, Keys, Paging, Scroll, Stroke, ViewAt};
 use crate::editor::{Matching, Pattern};
 use crate::motion::{Motion, Words};
@@ -135,7 +136,7 @@ pub(crate) fn wheel(list: &mut impl ListRows, lines: i64) -> bool {
 }
 
 /// Scrolls `list` as little as puts the cursor's item in view.
-fn follow(list: &mut impl ListRows) {
+fn follow<L: ListRows + ?Sized>(list: &mut L) {
     let shown = list.shown();
     let cursor = list.cursor();
     if cursor < shown.start {
@@ -185,119 +186,187 @@ fn scrolled(list: &mut impl ListRows, paging: &mut Paging, scroll: Scroll, count
     list.set_cursor(cursor.max(first).min(bottom).min(final_item));
 }
 
-/// What a list's search is: being typed in the bar, and the last one
-/// done, for `n` and `N`, and whether each goes backward.
-#[derive(Debug, Default)]
-pub(crate) struct ListSearch {
-    typing: Option<(String, bool)>,
-    last: Option<(String, bool)>,
+/// The kinds a list's search works in: the cursor and the top as items,
+/// the item a match is in, and Vim's patterns.
+#[derive(Debug)]
+pub(crate) struct Items;
+
+impl Kinds for Items {
+    type Start = (usize, usize);
+    type Found = usize;
+    type Lit = Pattern;
+    // A list lights what it draws as it draws it, a view of short rows.
+    type LitKey = ();
+    type LitMatch = ();
 }
 
-/// What a key typed into a list's search did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Typed {
-    /// It was typed, or the search was given up.
-    Edited,
-    /// Enter: the search is the last now, to go to with
-    /// [`ListSearch::again`].
-    Done,
+/// A list that's searched, item by item (see [`Searching`]).
+pub(crate) trait Searched: ListRows + super::ListKeys {
+    /// Its search.
+    fn search(&self) -> &Search<Items>;
+
+    /// Its search, to change.
+    fn search_mut(&mut self) -> &mut Search<Items>;
+
+    /// Whether item `item` holds a match of `pattern`.
+    fn matches(&self, item: usize, pattern: &Pattern) -> bool;
+
+    /// How searches treat case, as the options say.
+    fn case(&self) -> Case;
+
+    /// What the bar says when no item matches `query`.
+    fn missed(&self, query: &str) -> String;
+
+    /// Says `said` in the bar till the next key.
+    fn say(&mut self, said: String);
+
+    /// Notes that a search failed, as Vim beeps, stopping a macro.
+    fn fail(&mut self);
+
+    /// Whether a search failed since this was last asked.
+    fn take_failed(&mut self) -> bool;
 }
 
-impl ListSearch {
-    /// `/`, or `?` if `backward`: starts typing a search.
-    pub(crate) fn start(&mut self, backward: bool) {
-        self.typing = Some((String::new(), backward));
+/// A list as the shared search drives it (see [`super::search`]): it finds
+/// the `count`th item that matches from an item, round the list's ends,
+/// looking at each item once however big the count, and goes there.
+pub(crate) struct Searching<'a, L: ?Sized>(pub(crate) &'a mut L);
+
+impl<L: Searched + ?Sized> Searcher for Searching<'_, L> {
+    type Kinds = Items;
+
+    fn search(&mut self) -> &mut Search<Items> {
+        self.0.search_mut()
     }
 
-    /// Whether a search is being typed, which takes every key.
-    pub(crate) fn typing(&self) -> bool {
-        self.typing.is_some()
+    fn keep(&self) -> (usize, usize) {
+        (self.0.cursor(), self.0.top())
     }
 
-    /// What the bar says while it's typed: `/` or `?`, and what's typed.
-    pub(crate) fn label(&self) -> Option<String> {
-        let (query, backward) = self.typing.as_ref()?;
-        Some(format!("{}{query}▏", if *backward { '?' } else { '/' }))
-    }
-
-    /// What's typed so far, for its keys' help.
-    pub(crate) fn typed(&self) -> Option<&str> {
-        self.typing.as_ref().map(|(query, _)| query.as_str())
-    }
-
-    /// Takes `stroke` for the search being typed. Enter makes it the last,
-    /// or with nothing typed, the last again the way this one goes.
-    pub(crate) fn key(&mut self, stroke: Stroke) -> Typed {
-        let Some((query, _)) = &mut self.typing else {
-            return Typed::Edited;
-        };
-        match crate::cmdline::simple::key(query, stroke) {
-            crate::cmdline::simple::Outcome::Accept => {
-                let Some((query, backward)) = self.typing.take() else {
-                    return Typed::Edited;
-                };
-                if query.is_empty() {
-                    match &mut self.last {
-                        Some((_, last)) => *last = backward,
-                        None => return Typed::Edited,
-                    }
-                } else {
-                    self.last = Some((query, backward));
-                }
-                Typed::Done
-            }
-            crate::cmdline::simple::Outcome::Cancel => {
-                self.typing = None;
-                Typed::Edited
-            }
-            _ => Typed::Edited,
+    fn put_back(&mut self, &mut (cursor, top): &mut (usize, usize), keep_view: bool) {
+        let final_item = self.0.len().saturating_sub(1);
+        self.0.set_cursor(cursor.min(final_item));
+        if !keep_view {
+            self.0.set_top(top.min(final_item));
         }
     }
 
-    /// Pastes `text` into the search being typed, if one is, its line
-    /// breaks as spaces, as the bar is one line. Returns whether one was.
-    pub(crate) fn paste(&mut self, text: &str) -> bool {
-        let Some((query, _)) = &mut self.typing else {
-            return false;
+    fn compile(&self, last: &Last) -> Result<Pattern, String> {
+        let case = self.0.case();
+        let matching = if last.word {
+            Matching::Always(case)
+        } else {
+            Matching::Typed(case)
         };
-        paste_into(query, text);
-        true
+        Pattern::new(&last.query, matching, "", Words::NONE)
     }
 
-    /// Forgets the search being typed, as leaving the pane does.
-    pub(crate) fn give_up(&mut self) {
-        self.typing = None;
+    fn find(&mut self, find: Find<'_, Items>) -> Finding<usize> {
+        let from = find
+            .preview
+            .map_or(self.0.cursor(), |&mut (cursor, _)| cursor);
+        let list = &*self.0;
+        let found = round(list.len(), from, find.count, find.backward, |item| {
+            list.matches(item, find.lit)
+        });
+        match found {
+            Some(at) => Finding::Found {
+                at,
+                wrapped: if find.backward {
+                    at >= from
+                } else {
+                    at <= from
+                },
+            },
+            None => Finding::Missed(list.missed(&find.last.query)),
+        }
     }
 
-    /// The last search, as typed.
-    pub(crate) fn query(&self) -> Option<&str> {
-        self.last.as_ref().map(|(query, _)| query.as_str())
+    fn go(&mut self, found: usize) {
+        self.0.set_cursor(found);
+        follow(self.0);
     }
 
-    /// The last search as a pattern, with case as `case` says, as the
-    /// editor's typed patterns are: `None` if there's been none, `Err`
-    /// saying why if it can't be matched.
-    pub(crate) fn pattern(&self, case: Case) -> Option<Result<Pattern, String>> {
-        let query = self.query()?;
-        Some(Pattern::new(query, Matching::Typed(case), "", Words::NONE))
+    fn say(&mut self, said: String) {
+        self.0.say(said);
     }
 
-    /// `n`, or `N` if `reverse`: the `count`th of `len` items that
-    /// `matches` after item `at`, or before it if the last search went
-    /// backward, or the other way if `reverse`, round from the end to the
-    /// start; `None` if none does. Looks at each item once, however big
-    /// the count.
-    pub(crate) fn again(
-        &self,
-        reverse: bool,
-        count: usize,
-        len: usize,
-        at: usize,
-        matches: impl Fn(usize) -> bool,
-    ) -> Option<usize> {
-        let backward = self.last.as_ref().is_some_and(|(_, backward)| *backward) != reverse;
-        round(len, at, count, backward, matches)
+    fn fail(&mut self) {
+        self.0.fail();
     }
+}
+
+/// Takes `stroke` for `list`'s search, before its other keys: every key
+/// while one's typed, and Esc with nothing typed before it, which puts
+/// out what the last search lit, as `:nohlsearch` does. Returns whether it
+/// took it.
+pub(crate) fn search_stroke(list: &mut impl Searched, stroke: Stroke) -> bool {
+    if list.search().typing() {
+        super::search::key(&mut Searching(list), stroke);
+        return true;
+    }
+    if stroke == Stroke::Escape && !list.keys().pending() && list.search().lit().is_some() {
+        list.search_mut().unlight();
+        return true;
+    }
+    false
+}
+
+/// The strokes `press` makes in `list`: a prompt's while a search is typed,
+/// as in every pane's bar, so Alt and a key types it and Ctrl+Backspace
+/// deletes a word; else a list's (see [`super::plain_strokes`]).
+pub(crate) fn strokes(press: &crate::input::KeyPress<'_>, list: &impl Searched) -> Vec<Stroke> {
+    if list.search().typing() {
+        super::prompt_strokes(press)
+    } else {
+        super::plain_strokes(press, super::ListKeys::prompting(list))
+    }
+}
+
+/// `/` and `?`, and `n` and `N`, in `list`, as `command` asks, if it's
+/// one of them, with its count. Returns whether it was.
+pub(crate) fn search_command<O>(list: &mut impl Searched, command: &Command<O>) -> bool {
+    match command.action {
+        Action::Search { backward } => {
+            super::search::start(&mut Searching(list), backward, command.count);
+        }
+        Action::SearchAgain { reverse } => {
+            super::search::again(&mut Searching(list), reverse, command.times());
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// Where in `text`, the text of an item in view, the last search's
+/// matches are lit, from `list`'s search: each match's bytes, and whether
+/// it's the one the search went to, `found` saying whether this item is
+/// that one. With `hlsearch`, every match, one after another, no more than
+/// [`MOST_LIT`]; without it, only the found item's first.
+///
+/// [`MOST_LIT`]: crate::hlsearch::MOST_LIT
+pub(crate) fn lit_in(search: &Search<Items>, text: &str, found: bool) -> Vec<(Range<usize>, bool)> {
+    let Some(pattern) = search.lit() else {
+        return Vec::new();
+    };
+    if !search.every {
+        let first = (pattern.find_at(text, 0)).filter(|_| found);
+        return first
+            .map(|first| (first.start..first.end, true))
+            .into_iter()
+            .collect();
+    }
+    let spans = [(0, 0..text.len())];
+    let mut lit: Vec<(Range<usize>, bool)> = (pattern
+        .matches_in(text, spans, crate::hlsearch::MOST_LIT)
+        .into_iter())
+    .map(|range| (range, false))
+    .collect();
+    // The first in the item the search went to is the one found.
+    if found && let Some(first) = lit.first_mut() {
+        first.1 = true;
+    }
+    lit
 }
 
 /// Puts `text` at the end of what's typed in a list's bar, `typed`: its
@@ -625,38 +694,161 @@ mod tests {
         wheel(&mut Stale, 2);
     }
 
-    fn searched(text: &str) -> ListSearch {
-        let mut search = ListSearch::default();
-        search.start(text.starts_with('?'));
-        for ch in text[1..].chars() {
-            assert_eq!(search.key(Stroke::char(ch)), Typed::Edited);
+    /// [`Rows`] of names, searched.
+    #[derive(Default)]
+    struct Named {
+        names: Vec<&'static str>,
+        cursor: usize,
+        top: usize,
+        keys: Keys,
+        search: Search<Items>,
+        said: Option<String>,
+        failed: bool,
+    }
+
+    impl ListRows for Named {
+        fn len(&self) -> usize {
+            self.names.len()
         }
-        search
+        fn cursor(&self) -> usize {
+            self.cursor
+        }
+        fn set_cursor(&mut self, item: usize) {
+            self.cursor = item;
+        }
+        fn top(&self) -> usize {
+            self.top
+        }
+        fn set_top(&mut self, item: usize) {
+            self.top = item;
+        }
+        fn shown(&self) -> Range<usize> {
+            self.top..(self.top + 3).min(self.names.len())
+        }
+    }
+
+    impl super::super::ListKeys for Named {
+        fn keys(&self) -> &Keys {
+            &self.keys
+        }
+        fn keys_mut(&mut self) -> &mut Keys {
+            &mut self.keys
+        }
+        fn prompting(&self) -> bool {
+            self.search.typing()
+        }
+    }
+
+    impl Searched for Named {
+        fn search(&self) -> &Search<Items> {
+            &self.search
+        }
+        fn search_mut(&mut self) -> &mut Search<Items> {
+            &mut self.search
+        }
+        fn matches(&self, item: usize, pattern: &Pattern) -> bool {
+            pattern.find_at(self.names[item], 0).is_some()
+        }
+        fn case(&self) -> Case {
+            Case::default()
+        }
+        fn missed(&self, query: &str) -> String {
+            format!("no name matches {query}")
+        }
+        fn say(&mut self, said: String) {
+            self.said = Some(said);
+        }
+        fn fail(&mut self) {
+            self.failed = true;
+        }
+        fn take_failed(&mut self) -> bool {
+            std::mem::take(&mut self.failed)
+        }
+    }
+
+    fn named(names: &[&'static str]) -> Named {
+        Named {
+            names: names.to_vec(),
+            ..Named::default()
+        }
+    }
+
+    fn typed(list: &mut Named, keys: &str) {
+        for ch in keys.chars() {
+            assert!(search_stroke(list, Stroke::char(ch)));
+        }
     }
 
     #[test]
-    fn a_search_typed_is_the_last_once_entered_and_the_last_again_if_empty() {
-        let mut search = searched("/ab");
-        assert!(search.typing());
-        assert_eq!(search.label().as_deref(), Some("/ab▏"));
-        assert_eq!(search.query(), None);
-        assert_eq!(search.key(Stroke::Enter), Typed::Done);
-        assert!(!search.typing());
-        assert_eq!(search.query(), Some("ab"));
-        // `?` and Enter: the last again, backward.
-        search.start(true);
-        assert_eq!(search.key(Stroke::Enter), Typed::Done);
-        assert_eq!(search.query(), Some("ab"));
-        assert_eq!(search.again(false, 1, 10, 5, |item| item == 2), Some(2));
-        // Esc gives up, keeping the last.
-        search.start(false);
-        search.key(Stroke::char('x'));
-        assert_eq!(search.key(Stroke::Escape), Typed::Edited);
-        assert_eq!(search.query(), Some("ab"));
-        // Nothing to search again with none before.
-        let mut fresh = ListSearch::default();
-        fresh.start(false);
-        assert_eq!(fresh.key(Stroke::Enter), Typed::Edited);
+    fn a_search_shows_where_it_goes_as_its_typed_and_counts() {
+        let mut list = named(&["a", "bx", "c", "dx", "e", "fx", "g"]);
+        search_command(
+            &mut list,
+            &command(Some(2), Action::Search { backward: false }),
+        );
+        assert_eq!(list.search.label().as_deref(), Some("/▏"));
+        typed(&mut list, "x");
+        super::super::search::preview(&mut Searching(&mut list));
+        assert_eq!(list.cursor, 3);
+        // Lit, the item found's first match the one found.
+        assert_eq!(
+            lit_in(&list.search, "xox", true),
+            [(0..1, true), (2..3, false)]
+        );
+        assert_eq!(
+            lit_in(&list.search, "xox", false),
+            [(0..1, false), (2..3, false)]
+        );
+        // Esc puts it back.
+        assert!(search_stroke(&mut list, Stroke::Escape));
+        assert_eq!((list.cursor, list.search.lit().is_none()), (0, true));
+        // Enter goes there.
+        search_command(
+            &mut list,
+            &command(Some(2), Action::Search { backward: false }),
+        );
+        typed(&mut list, "x");
+        search_stroke(&mut list, Stroke::Enter);
+        assert_eq!(list.cursor, 3);
+        assert!(!list.search.typing());
+        // `N` back, and round.
+        search_command(
+            &mut list,
+            &command(Some(2), Action::SearchAgain { reverse: true }),
+        );
+        assert_eq!(
+            (list.cursor, list.said.as_deref()),
+            (5, Some(super::super::WRAPPED_TO_BOTTOM))
+        );
+        // Esc with nothing typed puts out what's lit.
+        assert!(search_stroke(&mut list, Stroke::Escape));
+        assert!(list.search.lit().is_none());
+        assert!(!search_stroke(&mut list, Stroke::Escape));
+        // A search that finds nothing fails.
+        search_command(
+            &mut list,
+            &command(None, Action::Search { backward: false }),
+        );
+        typed(&mut list, "zz");
+        search_stroke(&mut list, Stroke::Enter);
+        assert_eq!(
+            (list.failed, list.said.as_deref()),
+            (true, Some("no name matches zz"))
+        );
+    }
+
+    #[test]
+    fn without_hlsearch_only_the_match_found_is_lit() {
+        let mut list = named(&["ax", "bx"]);
+        list.search.every = false;
+        search_command(
+            &mut list,
+            &command(None, Action::Search { backward: false }),
+        );
+        typed(&mut list, "x");
+        search_stroke(&mut list, Stroke::Enter);
+        assert_eq!(lit_in(&list.search, "bx", true), [(1..2, true)]);
+        assert!(lit_in(&list.search, "ax", false).is_empty());
     }
 
     #[test]
@@ -668,19 +860,17 @@ mod tests {
 
     #[test]
     fn searching_again_goes_round_counts_without_walking_them() {
-        let mut search = searched("/x");
-        search.key(Stroke::Enter);
         let matches = |item: usize| [2, 5, 9].contains(&item);
-        assert_eq!(search.again(false, 1, 12, 0, matches), Some(2));
-        assert_eq!(search.again(false, 1, 12, 2, matches), Some(5));
-        assert_eq!(search.again(false, 2, 12, 2, matches), Some(9));
-        assert_eq!(search.again(false, 1, 12, 9, matches), Some(2));
-        assert_eq!(search.again(true, 1, 12, 5, matches), Some(2));
-        assert_eq!(search.again(true, 1, 12, 2, matches), Some(9));
-        assert_eq!(search.again(true, 3, 12, 6, matches), Some(9));
+        assert_eq!(round(12, 0, 1, false, matches), Some(2));
+        assert_eq!(round(12, 2, 1, false, matches), Some(5));
+        assert_eq!(round(12, 2, 2, false, matches), Some(9));
+        assert_eq!(round(12, 9, 1, false, matches), Some(2));
+        assert_eq!(round(12, 5, 1, true, matches), Some(2));
+        assert_eq!(round(12, 2, 1, true, matches), Some(9));
+        assert_eq!(round(12, 6, 3, true, matches), Some(9));
         // A count as big as there is: once round is the same as none.
-        assert_eq!(search.again(false, 99_999_999, 12, 2, matches), Some(2));
-        assert_eq!(search.again(false, 3, 12, 2, matches), Some(2));
-        assert_eq!(search.again(false, 1, 12, 0, |_| false), None);
+        assert_eq!(round(12, 2, 99_999_999, false, matches), Some(2));
+        assert_eq!(round(12, 2, 3, false, matches), Some(2));
+        assert_eq!(round(12, 0, 1, false, |_| false), None);
     }
 }

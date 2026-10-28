@@ -234,9 +234,15 @@ fn the_cursor_moves_by_entries_and_stays_where_it_was_put() {
 
 #[test]
 fn text_wraps_at_spaces_and_cuts_what_is_too_long() {
-    assert_eq!(wrap("a bb ccc", 4), ["a bb", "ccc"]);
-    assert_eq!(wrap("abcdefgh", 3), ["abc", "def", "gh"]);
-    assert_eq!(wrap("", 3), [""]);
+    let wrapped = |text: &str, width| -> Vec<String> {
+        (wrap(text, width).into_iter())
+            .map(|piece| text[piece].to_owned())
+            .collect()
+    };
+    assert_eq!(wrapped("a bb ccc", 4), ["a bb", "ccc"]);
+    assert_eq!(wrapped("abcdefgh", 3), ["abc", "def", "gh"]);
+    assert_eq!(wrapped("", 3), [""]);
+    assert_eq!(wrapped("a  bb c", 4), ["a ", "bb c"]);
     assert_eq!(span(90_000), "1m");
     assert_eq!(span(3_600_000 + 120_000), "1h 2m");
     assert_eq!(span(3 * 86_400_000), "3d");
@@ -331,8 +337,9 @@ fn a_paste_goes_into_what_is_typed_in_the_bar() {
     let mut pane = ten();
     assert!(!pane.paste("x"), "nothing typed");
     keys(&mut pane, "/entry");
+    // On one line, as in every bar, a line break at its end left out.
     assert!(pane.paste(" 7\n"));
-    assert_eq!(pane.label(), "/entry 7 ▏");
+    assert_eq!(pane.label(), "/entry 7▏");
     keys(&mut pane, "<Esc>i");
     assert!(pane.paste("a\tb"));
     assert_eq!(pane.label(), "post a note: a b▏");
@@ -345,4 +352,54 @@ fn a_key_that_does_nothing_still_clears_a_message_and_redraws() {
     assert_eq!(pane.label(), "no entry matches nothing");
     assert!(pane.stroke(Stroke::Escape), "drawn again");
     assert_ne!(pane.label(), "no entry matches nothing");
+}
+
+#[test]
+fn a_search_shows_where_it_goes_and_lights_the_text_it_matches() {
+    let mut pane = pane(vec![
+        entry(1, PostKind::Note, "the first plan"),
+        entry(2, PostKind::Note, "nothing"),
+        entry(
+            3,
+            PostKind::Note,
+            "a long line about the plan, wrapped at forty cells, plan",
+        ),
+    ]);
+    pane.go_to(0);
+    typed(&mut pane, "/plan");
+    assert!(crate::vim::search::preview(&mut Searching(&mut pane)));
+    assert_eq!(pane.cursor, 2, "to the next entry it's in");
+    pane.settle();
+    let shown = text(&pane);
+    let lit: Vec<(String, HighlightKind)> = (pane.highlights().into_iter())
+        .filter(|highlight| highlight.kind != HighlightKind::CursorLine)
+        .map(|highlight| {
+            let row: Vec<char> = shown[highlight.line].chars().collect();
+            (row[highlight.cols].iter().collect(), highlight.kind)
+        })
+        .collect();
+    let (other, found) = (HighlightKind::OtherMatch, HighlightKind::Match);
+    assert_eq!(
+        lit,
+        [
+            ("plan".into(), other),
+            ("plan".into(), found),
+            ("plan".into(), other)
+        ],
+        "{shown:?}"
+    );
+    // Esc puts the cursor back and lights nothing.
+    pane.stroke(Stroke::Escape);
+    assert_eq!(pane.cursor, 0);
+    pane.settle();
+    assert!(
+        pane.highlights()
+            .iter()
+            .all(|highlight| highlight.kind == HighlightKind::CursorLine)
+    );
+    // A count before it goes as far.
+    typed(&mut pane, "2/plan");
+    pane.stroke(Stroke::Enter);
+    assert_eq!(pane.cursor, 0, "round to the first");
+    assert_eq!(pane.label(), "search wrapped to top");
 }
