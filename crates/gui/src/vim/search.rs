@@ -452,6 +452,11 @@ impl<P: Copy + PartialEq> Steps<P> {
         self.wrapped
     }
 
+    /// The first match it went to, once it has.
+    pub(crate) fn first(&self) -> Option<P> {
+        self.first
+    }
+
     /// Goes on to the match at `at`, gone `round` an end to it if so.
     /// Returns whether there are more to go.
     pub(crate) fn step(&mut self, at: P, round: bool) -> bool {

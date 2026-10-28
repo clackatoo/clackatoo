@@ -1954,6 +1954,68 @@ mod tests {
         assert_eq!(cursor(&pane), ("bird cat".into(), 1, 5));
     }
 
+    /// A match of `cat` at `line`, `col`.
+    fn cat_at(line: u64, col: usize) -> Response {
+        Response::Found(Some(Match {
+            start: clackatoo_protocol::Position { line, col },
+            cells: 3,
+        }))
+    }
+
+    #[test]
+    fn a_count_asked_a_match_at_a_time_ends_once_its_first_match_is_gone() {
+        let terminal = terminal("cat dog\r\nbird cat\r\nfish cat");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg0/cat");
+        named(&mut pane, NamedKey::Enter);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane).1, 1);
+        // Asked of a daemon older than protocol 108, from the second line.
+        keys(&mut pane, "5n");
+        let outbox = older(pane.take_outbox());
+        assert_eq!(searches_in(&outbox).len(), 1);
+        pane.answered(cat_at(2, 5));
+        assert_eq!(searches_in(&pane.take_outbox()).len(), 1, "on to the next");
+        pane.answered(cat_at(0, 0));
+        assert_eq!(searches_in(&pane.take_outbox()).len(), 1, "round the end");
+        pane.answered(cat_at(1, 5));
+        assert_eq!(searches_in(&pane.take_outbox()).len(), 1);
+        // The first match, on the third line, written over meanwhile: the
+        // next goes round past where it was, and the count, never to come
+        // back to it, ends there.
+        pane.answered(cat_at(0, 0));
+        assert!(searches_in(&pane.take_outbox()).is_empty());
+        assert_eq!(cursor(&pane).1, 0);
+        assert!(!pane.waits_for_answer());
+    }
+
+    #[test]
+    fn a_count_asked_a_match_at_a_time_ends_when_it_has_gone_on_too_long() {
+        let terminal = terminal("cat dog\r\nbird cat\r\nfish cat");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg0/cat");
+        named(&mut pane, NamedKey::Enter);
+        serve(&mut pane, &terminal);
+        keys(&mut pane, "5n");
+        pane.take_outbox();
+        pane.answered(cat_at(2, 5));
+        assert_eq!(searches_in(&pane.take_outbox()).len(), 1);
+        // Asked first long enough ago: it ends at the match it's got to.
+        for pending in pane.requests.pending_mut() {
+            if let Pending::Search(asked) = pending {
+                asked.began = (asked.began)
+                    .checked_sub(search::LONGEST)
+                    .expect("an instant long enough back");
+            }
+        }
+        pane.answered(cat_at(0, 0));
+        assert!(searches_in(&pane.take_outbox()).is_empty());
+        assert_eq!(cursor(&pane).1, 0);
+        assert!(!pane.waits_for_answer());
+    }
+
     #[test]
     fn a_pill_says_how_far_back_the_view_is_where_it_fits() {
         let output = numbered_lines("line ");

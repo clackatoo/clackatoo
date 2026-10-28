@@ -9,7 +9,9 @@
 //! the first, when only as many as are left of a time round are asked
 //! (see [`search::Steps`]). Keys typed meanwhile wait for the answer (see
 //! [`Pane::waits_for_answer`]), the window's patience starting again at
-//! each.
+//! each, but never for longer than [`LONGEST`] in all; and a first match
+//! gone meanwhile, trimmed off the top of history or written over, which
+//! it would never come back to, ends it where it is.
 //!
 //! What's typed is asked once the window has handled what came in, just
 //! before it sends what it has (see [`crate::desk::Desk::preview_searches`]),
@@ -19,6 +21,8 @@
 //! typed is lit and the cursor and the view stay where the last answer put
 //! them, so they don't flicker back at each key. Nothing waits for these
 //! answers. A count before `/` isn't shown till it's searched for.
+
+use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{Match, Request};
 
@@ -45,6 +49,11 @@ pub(crate) struct Start {
     scroll: Option<u64>,
 }
 
+/// The longest a count asked a match at a time goes on, from its first
+/// ask: four times as long as keys wait for any one answer. It ends at
+/// the match it's got to by then.
+pub(super) const LONGEST: Duration = Duration::from_secs(20);
+
 /// A search asked of the daemon.
 #[derive(Debug)]
 pub(crate) struct Asked {
@@ -59,6 +68,8 @@ pub(crate) struct Asked {
     /// History's numbering when it was asked: numbered afresh since, its
     /// lines may be elsewhere now.
     generation: u64,
+    /// When it was first asked, to end by [`LONGEST`] after.
+    pub(super) began: Instant,
 }
 
 /// Where a match starts.
@@ -125,6 +136,7 @@ impl Searcher for Pane {
             backward: find.backward,
             steps: search::Steps::new(find.count),
             generation: self.history.generation(),
+            began: Instant::now(),
         });
         Finding::Asked
     }
@@ -199,7 +211,20 @@ impl Pane {
             } else {
                 at <= asked.from
             };
-        if asked.steps.step(at, round) && !renumbered {
+        // Gone past where the first match was without finding it: it's
+        // gone, trimmed off the top or written over, so it'll never come
+        // round to it. Matches between where it went from and the one
+        // found were skipped, or outside them, if it went round an end.
+        let lost = (asked.steps.first()).is_some_and(|first| {
+            let (low, high) = (asked.from.min(at), asked.from.max(at));
+            if round {
+                first < low || first > high
+            } else {
+                low < first && first < high
+            }
+        });
+        let more = asked.steps.step(at, round);
+        if more && !renumbered && !lost && asked.began.elapsed() < LONGEST {
             asked.from = at;
             return self.ask_next(asked);
         }
