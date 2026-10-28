@@ -155,12 +155,19 @@ impl Desk {
         for _ in 0..MOST_ROUNDS {
             #[cfg(test)]
             SETTLE_ROUNDS.with(|rounds| rounds.set(rounds.get() + 1));
-            let (mut copied, mut yanked) = (Vec::new(), Vec::new());
+            let (mut copied, mut yanked, mut commands) = (Vec::new(), Vec::new(), Vec::new());
             for chat in self.chats.values_mut() {
                 redraw |= chat.settle(fonts);
                 copied.extend(chat.take_copies());
                 self.opened.extend(chat.take_opened());
                 yanked.extend(chat.take_yanks());
+                commands.extend(chat.take_commands());
+            }
+            // What a chat's `/clear` or `/diff` is for, as the window
+            // does it (see `chat::slash`).
+            for command in commands {
+                self.run(command);
+                redraw = true;
             }
             for (text, to) in copied {
                 self.copied(text, to);

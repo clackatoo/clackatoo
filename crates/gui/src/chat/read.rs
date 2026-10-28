@@ -819,7 +819,7 @@ impl ChatView {
     /// that turn's in view and has something to undo or redo; or else the
     /// last turn that has, or the first to redo. The bar says which, or
     /// that none has.
-    fn undo_key(&mut self, redo: bool) {
+    pub(super) fn undo_key(&mut self, redo: bool) {
         // The cursor's turn only if it's in view: what's undone is never
         // out of sight.
         let here = (self.cursor.map(|cursor| cursor.text.turn)).filter(|&turn| {

@@ -20,6 +20,7 @@ mod plan;
 mod queue;
 mod select;
 mod shelf;
+mod slash;
 mod tables;
 mod tasks;
 mod usage;
@@ -340,16 +341,23 @@ impl ChatView {
                 [column, view_height],
             );
         }
-        // The menu goes over everything, the box included, and the
-        // meter's detail too, unless the menu's open.
-        if let Some(anchor) = self.menu_anchor.take() {
-            self.draw_menu(&mut paint, fonts, m, place, anchor);
-        } else if let Some(anchor) = self.detail_anchor.take() {
-            self.draw_detail(&mut paint, fonts, m, place, anchor);
-        }
-        self.draw_image_viewer(&mut paint, fonts, m, place);
-        self.draw_usage_modal(&mut paint, fonts, m, place);
+        self.draw_over(&mut paint, fonts, m, place);
         paint
+    }
+
+    /// Draws what goes over everything, the box included: the settings
+    /// menu, or else the `/` menu, or else the meter's detail; then an
+    /// image being viewed, and the usage limits.
+    fn draw_over(&mut self, paint: &mut TextPaint, fonts: &mut Fonts, m: Measures, place: Place) {
+        if let Some(anchor) = self.menu_anchor.take() {
+            self.draw_menu(paint, fonts, m, place, anchor);
+        } else if self.slash.showing() {
+            self.draw_slash(paint, fonts, m, place, self.box_top);
+        } else if let Some(anchor) = self.detail_anchor.take() {
+            self.draw_detail(paint, fonts, m, place, anchor);
+        }
+        self.draw_image_viewer(paint, fonts, m, place);
+        self.draw_usage_modal(paint, fonts, m, place);
     }
 
     /// Draws `turns`, with the column's left and the conversation's top
@@ -1199,6 +1207,7 @@ impl ChatView {
             pad,
             attachments_height: image_height,
         };
+        self.box_top = frame.top;
         let mut canvas = Canvas {
             paint,
             fonts,

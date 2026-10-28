@@ -26,6 +26,7 @@ mod queue;
 mod read;
 mod search;
 mod shortcuts;
+pub(crate) mod slash;
 mod viewer;
 mod yank;
 
@@ -113,6 +114,9 @@ pub(crate) struct Settled {
     /// What normal and visual mode yanked, for the registers, as a
     /// terminal's yanks go there, oldest first.
     pub(crate) yanks: Vec<Yanked>,
+    /// What the window is to do for a command typed in place of sending
+    /// it, as `/clear` opens the start page (see [`slash`]).
+    pub(crate) commands: Vec<crate::command::Command>,
 }
 
 /// Something in the chat that does something when clicked.
@@ -190,6 +194,8 @@ enum Hit {
     /// The meter of how much context the chat fills, which shows its
     /// detail.
     Usage,
+    /// A command in the `/` menu, by its line in view.
+    Slash(usize),
 }
 
 /// What the mouse pointer looks like over a chat.
@@ -257,6 +263,8 @@ pub(crate) struct ChatView {
     /// Whether the agent's plan's shelf above the box is open, listing
     /// every step, rather than folded to a line.
     plan_open: bool,
+    /// The `/` menu of the agent's commands, over the box.
+    slash: slash::Slash,
     /// Enter waits until the clipboard worker has delivered its result.
     pub(crate) pasting: bool,
     /// The size the editor's text was last styled at, and the fonts'
@@ -297,6 +305,9 @@ pub(crate) struct ChatView {
     /// Where the chip that opened the menu was drawn, for the menu to open
     /// from, while drawing.
     menu_anchor: Option<[f32; 4]>,
+    /// The top of the box, from the window's top, when last drawn: the
+    /// `/` menu opens upward from it.
+    box_top: f32,
     /// The tools whose cards are open, showing all they have, by their
     /// IDs.
     open_cards: std::collections::HashSet<String>,
@@ -503,6 +514,7 @@ impl ChatView {
             queue_supported: false,
             queue_page: 0,
             plan_open: false,
+            slash: slash::Slash::default(),
             pasting: false,
             editor_size: 0.0,
             editor_fonts: 0,
@@ -523,6 +535,7 @@ impl ChatView {
             sliding: None,
             menu: None,
             menu_anchor: None,
+            box_top: 0.0,
             open_cards: std::collections::HashSet::new(),
             said: None,
             folds: std::collections::HashMap::new(),
@@ -1448,7 +1461,11 @@ impl ChatView {
             self.answer_key(key, text, modifiers, settled);
             return;
         }
-        self.composer_key(key, modifiers, fonts, text, settled);
+        self.refresh_slash();
+        if !self.slash_key(key, modifiers, fonts) {
+            self.composer_key(key, modifiers, fonts, text, settled);
+        }
+        self.refresh_slash();
     }
 
     crate::shortcuts::bindings::described_keys! {
@@ -1625,6 +1642,9 @@ impl ChatView {
     /// Sends the message typed, unless the agent is still answering the
     /// last.
     fn send_or_steer(&mut self, steer: bool, settled: &mut Settled) {
+        if self.native_command(settled) {
+            return;
+        }
         if steer && self.queue_supported {
             self.submit_draft(true, settled);
         } else {
@@ -2263,6 +2283,10 @@ impl ChatView {
                     favorites::save(key, selected);
                 }
             }
+            Some(Hit::Slash(row)) => {
+                self.slash.click(row);
+                self.complete_slash(fonts);
+            }
             Some(Hit::Chip(settings)) => {
                 if self.toggle_menu(settings) {
                     settled.actions.push(ChatAction::LearnModels);
@@ -2811,6 +2835,139 @@ mod tests {
         // Nothing typed: nothing sent.
         enter(&mut view, false);
         assert_eq!(view.settle(&mut fonts).actions, []);
+    }
+
+    fn with_commands() -> ChatView {
+        let node = ChatNode {
+            commands: vec![
+                clackatoo_protocol::AgentCommand {
+                    name: "compact".into(),
+                    description: "Compact".into(),
+                    hint: None,
+                },
+                clackatoo_protocol::AgentCommand {
+                    name: "review".into(),
+                    description: "Review".into(),
+                    hint: Some("what".into()),
+                },
+            ],
+            ..ChatNode::default()
+        };
+        ChatView::new(String::new(), node)
+    }
+
+    fn named(view: &mut ChatView, key: NamedKey) {
+        press(view, &Key::Named(key), None, Modifiers::default());
+    }
+
+    #[test]
+    fn a_slash_opens_the_agents_commands_and_tab_puts_the_one_picked_in() {
+        let mut fonts = fonts();
+        let mut view = with_commands();
+        typed(&mut view, "/");
+        view.settle(&mut fonts);
+        assert!(view.slash.showing());
+        assert_eq!(view.slash.picked().unwrap().name, "compact");
+        named(&mut view, NamedKey::ArrowDown);
+        named(&mut view, NamedKey::Tab);
+        let settled = view.settle(&mut fonts);
+        assert!(settled.actions.is_empty());
+        assert_eq!(view.editor.raw_text(), "/review ");
+        assert!(!view.slash.showing());
+        typed(&mut view, "main");
+        enter(&mut view, false);
+        let settled = view.settle(&mut fonts);
+        assert_eq!(settled.actions, [ChatAction::Send("/review main".into())]);
+    }
+
+    #[test]
+    fn enter_completes_a_name_half_typed_and_sends_one_typed_whole() {
+        let mut fonts = fonts();
+        let mut view = with_commands();
+        typed(&mut view, "/comp");
+        enter(&mut view, false);
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert_eq!(view.editor.raw_text(), "/compact ");
+        let mut view = with_commands();
+        typed(&mut view, "/compact");
+        enter(&mut view, false);
+        let settled = view.settle(&mut fonts);
+        assert_eq!(settled.actions, [ChatAction::Send("/compact".into())]);
+    }
+
+    #[test]
+    fn esc_closes_the_menu_and_stays_in_insert_mode() {
+        let mut fonts = fonts();
+        let mut view = with_commands();
+        typed(&mut view, "/co");
+        view.settle(&mut fonts);
+        let escape = KeyPress {
+            key: &Key::Named(NamedKey::Escape),
+            text: None,
+            location: winit::keyboard::KeyLocation::Standard,
+            code: None,
+            modifiers: Modifiers::default(),
+        };
+        assert!(!view.leaves_composer(&escape));
+        view.key(&escape);
+        view.settle(&mut fonts);
+        assert!(!view.slash.showing());
+        assert!(
+            view.leaves_composer(&escape),
+            "closed, Esc goes to normal mode"
+        );
+        assert_eq!(view.editor.raw_text(), "/co");
+    }
+
+    #[test]
+    fn the_interfaces_commands_do_what_they_are_for_here_and_are_never_sent() {
+        let mut fonts = fonts();
+        let mut view = with_commands();
+        typed(&mut view, "/diff");
+        enter(&mut view, false);
+        // `/diff` alone: Enter sends it (it's whole), which does `:Review`.
+        let settled = view.settle(&mut fonts);
+        assert!(settled.actions.is_empty(), "{:?}", settled.actions);
+        assert!(matches!(
+            settled.commands[..],
+            [crate::command::Command::Review(_)]
+        ));
+        assert_eq!(view.editor.raw_text(), "");
+        typed(&mut view, "/clear");
+        enter(&mut view, false);
+        let settled = view.settle(&mut fonts);
+        assert!(matches!(
+            settled.commands[..],
+            [crate::command::Command::Open {
+                kind: crate::command::Kind::Agent,
+                agent: None,
+                ..
+            }]
+        ));
+        typed(&mut view, "/exit");
+        enter(&mut view, false);
+        let settled = view.settle(&mut fonts);
+        assert!(settled.actions.is_empty() && settled.commands.is_empty());
+        assert!(
+            view.said.as_deref().unwrap().contains(":q"),
+            "{:?}",
+            view.said
+        );
+        typed(&mut view, "/export");
+        enter(&mut view, false);
+        let settled = view.settle(&mut fonts);
+        assert_eq!(settled.copied.len(), 1);
+        // One the agent offers is the agent's.
+        let mut view = with_commands();
+        view.node.commands.push(clackatoo_protocol::AgentCommand {
+            name: "clear".into(),
+            description: "Clear".into(),
+            hint: None,
+        });
+        typed(&mut view, "/clear");
+        enter(&mut view, false);
+        let settled = view.settle(&mut fonts);
+        assert_eq!(settled.actions, [ChatAction::Send("/clear".into())]);
     }
 
     #[test]

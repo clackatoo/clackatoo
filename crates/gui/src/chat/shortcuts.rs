@@ -6,10 +6,14 @@ use crate::shortcuts::{
 use crate::vim::Mode;
 
 impl ChatView {
+    /// Whether `press`, in insert mode, goes to normal mode: Esc does,
+    /// unless a question with no form waits, which it says no to, or the
+    /// `/` menu shows, which it closes.
     pub(crate) fn leaves_composer(&self, press: &crate::input::KeyPress<'_>) -> bool {
         crate::vim::enters_normal_mode(press)
             || (*press.key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
-                && (self.node.question.as_ref()).is_none_or(|question| question.form.is_some()))
+                && (self.node.question.as_ref()).is_none_or(|question| question.form.is_some())
+                && !self.slash.showing())
     }
 
     pub(crate) fn exclusive_shortcuts(&self) -> Option<Context> {
@@ -64,8 +68,11 @@ impl ChatView {
                 context
             } else {
                 let mut context = bindings::from_presses("Agent composer", |press| {
+                    let slash = self.describe_slash_key(press.key, press.modifiers);
                     if self.leaves_composer(press) {
                         Hint::Action("Enter normal mode")
+                    } else if slash != Hint::None {
+                        slash
                     } else {
                         self.describe_composer_key(press.key, press.modifiers)
                     }

@@ -56,6 +56,9 @@ pub(crate) struct ChatPane {
     copies: Vec<(String, Copy)>,
     /// What it yanked, for the registers, oldest first.
     yanks: Vec<Yanked>,
+    /// What the window is to do for commands typed in place of sending
+    /// them, oldest first (see [`super::slash`]).
+    commands: Vec<crate::command::Command>,
 }
 
 impl ChatPane {
@@ -75,6 +78,7 @@ impl ChatPane {
             carryover: Options::default().carryover,
             copies: Vec::new(),
             yanks: Vec::new(),
+            commands: Vec::new(),
         };
         chat.requests.changed();
         chat
@@ -235,6 +239,8 @@ impl ChatPane {
     ) -> TextPaint {
         self.settle(fonts);
         self.view.reading = self.mode != Mode::Insert;
+        // The mode or the agent's commands may have changed.
+        self.view.refresh_slash();
         let paint = self.view.paint(fonts, origin, size, caret);
         if let Some(before) = self.view.older_request() {
             let terminal = self.terminal();
@@ -295,6 +301,7 @@ impl ChatPane {
         }
         self.copies.extend(settled.copied);
         self.yanks.extend(settled.yanks);
+        self.commands.extend(settled.commands);
         settled.redraw
     }
 
@@ -327,6 +334,12 @@ impl ChatPane {
     /// Takes what it yanked, oldest first, for the registers.
     pub(crate) fn take_yanks(&mut self) -> Vec<Yanked> {
         std::mem::take(&mut self.yanks)
+    }
+
+    /// Takes what the window is to do for commands typed in place of
+    /// sending them, oldest first.
+    pub(crate) fn take_commands(&mut self) -> Vec<crate::command::Command> {
+        std::mem::take(&mut self.commands)
     }
 
     /// Whether a search is being typed in it, in the bar.

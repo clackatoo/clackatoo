@@ -25,6 +25,7 @@ mod clipboard_image;
 mod cmdline;
 mod colors;
 mod command;
+mod complete;
 mod connect;
 mod desk;
 mod desktop;
@@ -75,7 +76,8 @@ use anyhow::Context;
 pub use app::look;
 use clackatoo_daemon::RuntimeDir;
 use clackatoo_daemon::remote::Remote;
-pub use editor::{EditorBench, Ranking};
+pub use complete::Ranking;
+pub use editor::EditorBench;
 pub use fonts::FontOptions;
 use winit::event_loop::EventLoop;
 

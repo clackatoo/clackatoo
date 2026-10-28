@@ -1,0 +1,29 @@
+# The `/` menu: the agent's commands, then clackatoo's own, over the box,
+# narrowed as a name is typed, with a hint; in a wide pane and a narrow one.
+size 1100x900
+keys <C-;>:Agent claude<CR>
+keys i
+type commands compact review-branch:branch-name init log:count
+keys <CR>
+wait-for commands given
+sleep 300
+type /
+sleep 300
+shot slash-all
+type rev
+sleep 300
+shot slash-narrowed
+keys <Tab>
+sleep 300
+shot slash-completed
+keys <C-a><BS>
+size 480x640
+type /
+sleep 300
+shot slash-narrow
+keys <Down><Down><Down>
+sleep 300
+shot slash-narrow-picked
+keys <Esc>
+sleep 300
+shot slash-closed

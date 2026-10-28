@@ -79,7 +79,6 @@ use clackatoo_text::{Bias, Diagnostic, Hunk, StepPlace, StepState, StepVisual};
 
 use actions::{ActionMenu, MenuKey, MenuStroke};
 pub use bench::EditorBench;
-pub use complete::Ranking;
 use complete::{Completion, Resolved};
 /// The daemon's side of a buffer, for the desk's tests.
 #[cfg(test)]
@@ -3702,7 +3701,7 @@ impl Editor {
             let moved = self
                 .completion
                 .as_ref()
-                .is_some_and(|completion| completion.moved);
+                .is_some_and(Completion::moved);
             let accepts = match stroke {
                 Stroke::Char {
                     ch: 'y',

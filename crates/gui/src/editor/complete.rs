@@ -18,10 +18,9 @@ use std::collections::HashMap;
 
 use clackatoo_protocol::{CompletionItem, Edit};
 use clackatoo_text::{Bias, Expanded, Rope, Snippet, Stop};
-use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
-use nucleo_matcher::{Config, Matcher, Utf32String};
 
 use super::panel::{Line, Panel, Placed, Run};
+use crate::complete::{Choice, Ranking};
 use crate::render::{Ink, mono_cells, mono_width};
 
 /// The most items the menu shows at once. More are scrolled to.
@@ -48,129 +47,6 @@ const DOCS_WIDTH: usize = 60;
 /// back over, for the start of what it names (see [`already_there`]).
 const MOST_BEFORE: usize = 256;
 
-/// Completion items ranked against what's typed: those that match it,
-/// best first, by how well they match, then as the language server sorts
-/// them. Public for its benchmark.
-#[derive(Debug)]
-pub struct Ranking {
-    matcher: Matcher,
-    /// Each item's text to match, as the matcher reads it.
-    haystacks: Vec<Utf32String>,
-    /// Each item's place in the server's order: those it would have picked
-    /// first, then by their sort text.
-    order: Vec<u32>,
-    /// What was typed when last ranked.
-    query: String,
-    /// The items that match it, best first, by index.
-    shown: Vec<u32>,
-}
-
-impl Ranking {
-    /// Ranks items, each given as the text to match it by, the text to sort
-    /// it by, and whether the server would have it picked first; all of
-    /// them shown, in the server's order, until [`narrow`](Self::narrow)
-    /// says what's typed.
-    pub fn new<'a>(items: impl IntoIterator<Item = (&'a str, &'a str, bool)>) -> Self {
-        let mut haystacks = Vec::new();
-        let mut keys: Vec<(bool, &str)> = Vec::new();
-        for (filter, sort, preselect) in items {
-            haystacks.push(Utf32String::from(filter));
-            keys.push((!preselect, sort));
-        }
-        let mut by_order: Vec<u32> = (0..index(keys.len())).collect();
-        by_order.sort_by(|&a, &b| keys[a as usize].cmp(&keys[b as usize]));
-        let mut order = vec![0; keys.len()];
-        for (place, &item) in (0..).zip(&by_order) {
-            order[item as usize] = place;
-        }
-        let mut config = Config::DEFAULT;
-        // What's typed is mostly the start of what's wanted.
-        config.prefer_prefix = true;
-        Self {
-            matcher: Matcher::new(config),
-            haystacks,
-            order,
-            query: String::new(),
-            shown: by_order,
-        }
-    }
-
-    /// Ranks the items against `query`, what's typed. When it's what was
-    /// typed before with more after, only those that matched that are
-    /// looked at, as nothing else can match it.
-    pub fn narrow(&mut self, query: &str) {
-        if query == self.query {
-            return;
-        }
-        let looked_at: Vec<u32> = if !self.query.is_empty() && query.starts_with(&self.query) {
-            std::mem::take(&mut self.shown)
-        } else {
-            (0..index(self.haystacks.len())).collect()
-        };
-        query.clone_into(&mut self.query);
-        if query.is_empty() {
-            let mut all = looked_at;
-            all.sort_by_key(|&index| self.order[index as usize]);
-            self.shown = all;
-            return;
-        }
-        let atom = atom(query);
-        let typed: Vec<char> = query.chars().collect();
-        let mut scored: Vec<(bool, u16, u32, u32)> = Vec::with_capacity(looked_at.len());
-        for index in looked_at {
-            let haystack = self.haystacks[index as usize].slice(..);
-            if let Some(score) = atom.score(haystack, &mut self.matcher) {
-                // What starts with exactly what's typed, case and all,
-                // comes before what only matches it.
-                let prefix = haystack.len() >= typed.len()
-                    && haystack.chars().zip(&typed).all(|(ch, typed)| ch == *typed);
-                scored.push((prefix, score, self.order[index as usize], index));
-            }
-        }
-        // Best first, then as the server sorts them.
-        scored.sort_unstable_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)).then(a.2.cmp(&b.2)));
-        self.shown = scored.into_iter().map(|(.., index)| index).collect();
-    }
-
-    /// The items matching what's typed, best first, by index.
-    #[must_use]
-    pub fn shown(&self) -> &[u32] {
-        &self.shown
-    }
-
-    /// The characters of `text` that match what's typed, by index, as
-    /// they're highlighted in the menu.
-    fn matched(&mut self, text: &str) -> Vec<u32> {
-        let mut indices = Vec::new();
-        if self.query.is_empty() {
-            return indices;
-        }
-        let mut chars = Vec::new();
-        let haystack = nucleo_matcher::Utf32Str::new(text, &mut chars);
-        atom(&self.query).indices(haystack, &mut self.matcher, &mut indices);
-        indices.sort_unstable();
-        indices.dedup();
-        indices
-    }
-}
-
-/// `count`, as an item's index: there are never more than fit.
-fn index(count: usize) -> u32 {
-    u32::try_from(count).unwrap_or(u32::MAX)
-}
-
-/// `query` as the matcher reads it: fuzzily, ignoring case unless it has
-/// a capital.
-fn atom(query: &str) -> Atom {
-    Atom::new(
-        query,
-        CaseMatching::Smart,
-        Normalization::Smart,
-        AtomKind::Fuzzy,
-        false,
-    )
-}
-
 /// What the language server says of an item when it's resolved.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Resolved {
@@ -195,12 +71,9 @@ pub(crate) struct Completion {
     /// shorter now needs asking again, as the server may have left out what
     /// it didn't start with.
     pub(crate) asked: usize,
-    /// The item picked, as a place in those shown, and whether it was
-    /// moved to with a key, rather than being the first.
-    selected: usize,
-    pub(crate) moved: bool,
-    /// The first of those shown that's in view.
-    top: usize,
+    /// The item picked, as a place in those shown, whether it was moved
+    /// to with a key, and the first in view.
+    choice: Choice,
     /// The edits made since the items came, which their places are moved
     /// through when one is accepted.
     since: Vec<Edit>,
@@ -259,9 +132,7 @@ impl Completion {
             ranking,
             incomplete,
             asked: 0,
-            selected: 0,
-            moved: false,
-            top: 0,
+            choice: Choice::default(),
             since: Vec::new(),
             resolved: HashMap::new(),
             resolving: None,
@@ -290,7 +161,7 @@ impl Completion {
             })
             .collect();
         let mut completion = Self::new(0, start, items, false);
-        completion.ranking.shown.sort_unstable();
+        completion.ranking.keep_given_order();
         completion.choices = true;
         completion
     }
@@ -302,9 +173,7 @@ impl Completion {
         let count = self.ranking.shown().len();
         self.ranking.narrow(query);
         if self.ranking.shown().first().copied() != before || self.ranking.shown().len() != count {
-            self.selected = 0;
-            self.top = 0;
-            self.moved = false;
+            self.choice.restart();
         }
     }
 
@@ -330,30 +199,23 @@ impl Completion {
     /// going round the ends.
     pub(crate) fn pick(&mut self, down: bool) {
         let count = self.ranking.shown().len();
-        if count == 0 {
-            return;
-        }
-        self.selected = if down {
-            (self.selected + 1) % count
-        } else {
-            (self.selected + count - 1) % count
-        };
-        self.moved = true;
-        if self.selected < self.top {
-            self.top = self.selected;
-        } else if self.selected >= self.top + MENU_HEIGHT {
-            self.top = self.selected + 1 - MENU_HEIGHT;
-        }
+        self.choice.step(down, count, MENU_HEIGHT);
+    }
+
+    /// Whether the item picked was moved to with a key, rather than being
+    /// the first.
+    pub(crate) fn moved(&self) -> bool {
+        self.choice.moved()
     }
 
     /// The index of the item picked, if any's shown.
     pub(crate) fn picked(&self) -> Option<u32> {
-        self.ranking.shown().get(self.selected).copied()
+        self.ranking.shown().get(self.choice.selected()).copied()
     }
 
     /// The label of the item picked, if one was moved to with a key.
     pub(crate) fn moved_to(&self) -> Option<&str> {
-        let index = self.picked().filter(|_| self.moved)?;
+        let index = self.picked().filter(|_| self.choice.moved())?;
         Some(&self.items[index as usize].label)
     }
 
@@ -366,11 +228,7 @@ impl Completion {
         else {
             return;
         };
-        self.selected = place;
-        self.moved = true;
-        if self.selected < self.top || self.selected >= self.top + MENU_HEIGHT {
-            self.top = self.selected.saturating_sub(MENU_HEIGHT - 1);
-        }
+        self.choice.go_to(place, MENU_HEIGHT);
     }
 
     /// The item at `index`.
@@ -515,9 +373,7 @@ impl Completion {
         if shown == 0 || cols < 6 {
             return;
         }
-        self.top = self.top.min(shown.saturating_sub(MENU_HEIGHT));
-        let in_view = self.top..(self.top + MENU_HEIGHT).min(shown);
-        let rows_wanted = in_view.len();
+        let rows_wanted = self.choice.in_view(shown, MENU_HEIGHT).len();
         // Below the cursor if it fits, or else above, or else wherever
         // there's more room.
         let below = rows.saturating_sub(row + 1);
@@ -534,11 +390,7 @@ impl Completion {
         if height == 0 {
             return;
         }
-        let in_view = self.top..self.top + height;
-        if self.selected >= in_view.end {
-            self.top = self.selected + 1 - height;
-        }
-        let in_view = self.top..self.top + height;
+        let in_view = self.choice.in_view(shown, height);
         let room = (cols - 2).min(MENU_WIDTH);
         let indices: Vec<u32> = self.ranking.shown()[in_view.clone()].to_vec();
         // The kinds make a column at the right, as wide as the widest,
@@ -562,7 +414,7 @@ impl Completion {
             .min(room);
         self.lines = (indices.iter().enumerate())
             .map(|(offset, &index)| {
-                let picked = self.top + offset == self.selected;
+                let picked = in_view.start + offset == self.choice.selected();
                 self.line(index, (width, kinds), picked)
             })
             .collect();
@@ -665,7 +517,7 @@ impl Completion {
             placed,
             beside: None,
             lines: &self.lines,
-            first: self.top,
+            first: self.choice.top(),
             total: self.ranking.shown().len(),
         })
     }
