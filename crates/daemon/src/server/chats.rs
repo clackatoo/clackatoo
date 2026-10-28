@@ -1455,7 +1455,12 @@ impl Daemon {
             |why| format!("it stopped, saying: {why}"),
         );
         self.fail_listings(&name, &stopped);
-        self.stop_agent(id);
+        // Nothing can talk to what it started now, such as the Claude Code
+        // its adapter ran, which would otherwise go on with the session as
+        // the next message starts the agent again on it: its group is told
+        // to stop at once. Only this agent's: another of its name started
+        // since has a group of its own.
+        self.kill_agent(id);
         let mut chats = Vec::new();
         let held = &self.agents.held;
         for (&id, slot) in &mut self.terminals {

@@ -3636,6 +3636,52 @@ fn an_agent_added_in_agents_toml_is_found_when_a_chat_starts() {
     );
 }
 
+/// Whether process `pid` is gone, or only waits to be reaped.
+fn process_gone(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, rest)| rest.starts_with('Z'))
+    })
+}
+
+/// An agent that dies leaves what it started, as Claude Code's adapter
+/// leaves Claude Code, with nothing to talk to: it's stopped at once, not
+/// left running on beside the agent the next message starts.
+#[test]
+fn what_an_agent_that_died_started_is_stopped_at_once() {
+    let daemon = TestDaemon::start_with_agent(|dir| {
+        let script = format!(
+            "sleep 1000 & echo $! > {dir}/left.pid; exec {fake} --log {dir}/agent.log",
+            dir = dir.display(),
+            fake = fake_agent().display()
+        );
+        vec!["sh".into(), "-c".into(), script.into()]
+    });
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let left = std::fs::read_to_string(daemon.dir.path().join("left.pid")).unwrap();
+    let left = left.trim();
+    assert!(!process_gone(left));
+    let agent = child_processes_in(daemon.dir.path());
+    assert_eq!(agent.len(), 1, "{agent:?}");
+    let killed = std::process::Command::new("kill")
+        .args(["-KILL", &agent[0]])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let killed = Instant::now();
+    // Well before the two seconds a stopped agent's group is given.
+    while !process_gone(left) {
+        assert!(
+            killed.elapsed() < Duration::from_secs(1),
+            "{left} still runs"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The next message starts the agent again, which answers.
+    assert_eq!(last_words(&ask(&mut client, chat, "hi")), "echo: hi\n");
+}
+
 /// Claude Code, through its adapter, on the cheapest model. Run by hand,
 /// with the adapter's command in `CLACKATOO_REAL_AGENT`, such as
 /// `~/.local/share/clackatoo/agents/claude-0.98.0/claude-agent-acp/node_modules/.bin/claude-agent-acp`,
