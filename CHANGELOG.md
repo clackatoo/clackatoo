@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026.10.89 (2026-10-28)
+
+### Features
+
+- **gui:** one shared search, lists first: incsearch, hlsearch, counts and the full bar (CLACKA-171) (d73c1c19)
+- **protocol:** a terminal's counted search answered in one round trip (CLACKA-171) (400abb43)
+
+### Fixes
+
+- **gui:** a terminal's count asked a match at a time ends once history is numbered afresh (CLACKA-171) (cecc61f1)
+- **gui:** lists' kept rows follow their names, and lighting is bounded (CLACKA-171) (1c7ee7fb)
+- **gui:** a terminal's count asked a match at a time is bounded, and ends once its first match is gone (CLACKA-171) (913f840a)
+- **gui:** lists light a match the top edge cuts, and the found item's first wherever it's drawn from (CLACKA-171) (8c8c662f)
+- **gui:** a review's comment is found again by its file and line, not only what it says (CLACKA-171) (c0f076d6)
+- **daemon:** the relay passes a counted search's answer on (CLACKA-171) (4e14ec51)
+
 ## 2026.10.88 (2026-10-28)
 
 ### Fixes
