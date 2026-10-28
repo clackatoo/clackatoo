@@ -124,11 +124,11 @@ pub(crate) const KNOWN: &[Known] = &[
         title: "Claude Code",
         adapter: KnownServer {
             program: "claude-agent-acp",
-            source: locked!("claude", "@agentclientprotocol/claude-agent-acp@0.88.0"),
+            source: locked!("claude", "@agentclientprotocol/claude-agent-acp@0.98.0"),
         },
-        version: "0.88.0",
+        version: "0.98.0",
         args: &[],
-        size: "540 MB",
+        size: "620 MB",
         // Auto decides itself what needs asking about (jack, 2026-10-08).
         starting_mode: Some("auto"),
         login: "claude",

@@ -1018,7 +1018,7 @@ fn safe_steering(result: &Value) -> bool {
             ),
             (
                 Some("@agentclientprotocol/claude-agent-acp"),
-                Some("0.88.0")
+                Some("0.98.0")
             ) | (
                 Some("@agentclientprotocol/codex-acp"),
                 Some("2.2.2+clackatoo.1")
@@ -1031,7 +1031,7 @@ mod steering_tests {
     use super::*;
     #[test]
     fn steering_requires_the_verified_idle_race_contract() {
-        let mut v = json!({"_meta": {"steering": {"supported": true}}, "agentInfo": {"name": "@agentclientprotocol/claude-agent-acp", "version": "0.88.0"}});
+        let mut v = json!({"_meta": {"steering": {"supported": true}}, "agentInfo": {"name": "@agentclientprotocol/claude-agent-acp", "version": "0.98.0"}});
         assert!(safe_steering(&v));
         v["agentInfo"]["name"] = json!("@agentclientprotocol/codex-acp");
         assert!(!safe_steering(&v));

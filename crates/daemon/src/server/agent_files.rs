@@ -469,9 +469,10 @@ impl Daemon {
             });
         }
         if steps.len() != reports.len() || text != disk {
-            // Claude Code's adapter says a tab-indented file's changes with
-            // spaces for each leading tab, two in 0.88.0, so they make the
-            // file only with its tabs so too. Then the file's text is what the tools
+            // Claude Code says a tab-indented file's changes with spaces
+            // for each leading tab (its patches are for showing, and its
+            // adapter passes them on as they are, still in 0.98.0), so they
+            // make the file only with its tabs so too. Then the file's text is what the tools
             // made, as one change, since what each made can't be told
             // exactly. Not if something else changed the file too, which
             // the spaces could hide.
@@ -820,7 +821,7 @@ fn apply(text: &str, diffs: &[RawDiff]) -> Option<String> {
 }
 
 /// How many spaces an agent that shows a file's tabs as spaces may show
-/// each leading tab as: Claude Code's adapter 0.88.0 shows two.
+/// each leading tab as: Claude Code showed two under its adapter 0.88.0.
 const TAB_WIDTHS: [usize; 3] = [2, 4, 8];
 
 /// Whether the changes `reports` said, made in turn to `saved`, make

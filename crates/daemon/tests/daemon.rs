@@ -3363,8 +3363,8 @@ fn an_agent_added_in_agents_toml_is_found_when_a_chat_starts() {
 
 /// Claude Code, through its adapter, on the cheapest model. Run by hand,
 /// with the adapter's command in `CLACKATOO_REAL_AGENT`, such as
-/// `~/.local/share/clackatoo/agents/claude-0.88.0/claude-agent-acp/node_modules/.bin/claude-agent-acp`,
-/// where a chat installs it, or `npx --yes @agentclientprotocol/claude-agent-acp@0.88.0`:
+/// `~/.local/share/clackatoo/agents/claude-0.98.0/claude-agent-acp/node_modules/.bin/claude-agent-acp`,
+/// where a chat installs it, or `npx --yes @agentclientprotocol/claude-agent-acp@0.98.0`:
 /// it uses the account `claude` is logged in to.
 #[test]
 #[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
