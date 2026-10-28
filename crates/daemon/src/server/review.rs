@@ -105,6 +105,12 @@ pub(super) struct Reviews {
 }
 
 impl Reviews {
+    /// Whether agent hunks are kept for the file `path`, not open.
+    #[cfg(test)]
+    pub(super) fn keeps_closed(&self, path: &Path) -> bool {
+        self.closed.contains_key(path)
+    }
+
     /// The number the next review gets.
     pub(super) fn next_number(&self) -> u32 {
         self.next
@@ -460,6 +466,11 @@ impl Daemon {
     /// Buffer `id` has opened: it takes the agent hunks kept for its file,
     /// those that still fit it.
     pub(super) fn opened_in_review(&mut self, id: BufferId) {
+        // A change to it still being worked out is taken in first, as the
+        // file not open it was made to.
+        if let Some(path) = (self.buffers.get(&id)).map(|slot| slot.buffer.path().to_owned()) {
+            self.settle_pending(&path);
+        }
         let Some(slot) = self.buffers.get_mut(&id) else {
             return;
         };
@@ -518,6 +529,7 @@ impl Daemon {
         (before, after): (&str, &str),
         stamp: Option<DiskStamp>,
     ) {
+        self.settle_pending(path);
         let mut chats = self.move_closed_comments(path, before, after);
         let reviews = &mut self.reviews;
         if let Some(closed) = reviews.closed.get_mut(path) {
@@ -753,6 +765,9 @@ impl Daemon {
 
     /// Answers [`Request::Review`](clackatoo_protocol::Request::Review).
     pub(super) fn serve_review(&mut self, action: ReviewAction) -> Result<Response, Error> {
+        // What the review acts on includes every change still being worked
+        // out.
+        self.settle_all_pending();
         match action {
             ReviewAction::Keep(hunks) => self.keep_hunks(&hunks),
             ReviewAction::Reject { hunks, force } => self.reject_hunks(&hunks, force),
@@ -1583,6 +1598,7 @@ impl Daemon {
     /// read if it's changed since, and those that no longer fit dropped.
     /// `None` if it can't be read, or none still fit.
     fn closed_text(&mut self, path: &Path) -> Option<Rope> {
+        self.settle_pending(path);
         let stamp = DiskStamp::now(path).ok().flatten();
         let closed = self.reviews.closed.get_mut(path)?;
         if let Some(text) = &closed.text

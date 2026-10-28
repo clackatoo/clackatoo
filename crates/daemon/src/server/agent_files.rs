@@ -53,7 +53,7 @@ use super::Daemon;
 use super::buffers::resolve;
 use super::chats::AgentId;
 use super::edit_log::{Diffed, EditLog, Maker, edit_bytes};
-use super::settling::{Diffing, ON_LOOP, Settler};
+use super::settling::{Diffing, ON_LOOP, Settler, Worked};
 use crate::agent::{FAILED, NOT_FOUND};
 use crate::buffer::{self, Buffer, DiskStamp, Made, Refused};
 use crate::chat::{RawDiff, Wrote};
@@ -96,10 +96,17 @@ pub(super) struct AgentFiles {
 }
 
 impl AgentFiles {
+    /// Has the worker panic as it works out the next change, as
+    /// [`Settler::panic`] says.
+    #[cfg(test)]
+    pub(super) fn panic_next(&self, how: u8) {
+        (self.settler.panic).store(how, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Whether a change the agent in `chat` made to a file is still being
     /// worked out, so the edit log doesn't have it yet.
     pub(super) fn diffing(&self, chat: TerminalId) -> bool {
-        self.diffing.iter().any(|diffing| diffing.chat == chat)
+        self.diffing.iter().any(|diffing| diffing.chat() == chat)
     }
 }
 
@@ -303,6 +310,8 @@ impl Daemon {
         content: &str,
     ) -> Result<(), (i64, String)> {
         let (chat, path) = self.agent_path(name, session, path)?;
+        // What was done to it before is taken in first.
+        self.settle_pending(&path);
         if self
             .chat(chat)
             .is_some_and(|chat| chat.limits().read_only())
@@ -461,36 +470,99 @@ impl Daemon {
     /// order, then settles again what waited for each, and lets go of
     /// what's kept of turns that ended meanwhile.
     pub(super) fn take_settled(&mut self) {
-        for (settled, diffed) in self.agent_files.settler.take() {
-            let (chat, path) = (settled.chat, settled.path.clone());
-            let files = &mut self.agent_files;
-            let Some(at) = (files.diffing.iter())
-                .position(|diffing| diffing.chat == chat && diffing.path == path)
-            else {
-                continue;
-            };
-            let diffing = files.diffing.remove(at);
-            // A chat closed meanwhile has nothing to take it in.
-            if self.chat(chat).is_none() {
-                self.agent_files.ending.retain(|&ending| ending != chat);
-                continue;
+        let taken = self.agent_files.settler.take();
+        for worked in taken.worked {
+            self.took_settled(worked);
+        }
+        if taken.lost {
+            self.settler_lost();
+        }
+    }
+
+    /// Waits on the loop for every change to `path` still being worked out,
+    /// taking each in, with whatever came before it: before anything else
+    /// is done with the file, so the log and the review stay in order.
+    pub(super) fn settle_pending(&mut self, path: &Path) {
+        while (self.agent_files.diffing.iter()).any(|diffing| diffing.path == path) {
+            match self.agent_files.settler.wait() {
+                Some(worked) => self.took_settled(worked),
+                None => self.settler_lost(),
             }
-            self.settled_closed(settled, &diffed);
-            if diffing.again {
-                match self.buffer_of(&path) {
-                    Some(id) => self.settle(chat, &path, id, diffing.last),
-                    None => self.settle_closed(chat, &path, diffing.last),
-                }
+        }
+    }
+
+    /// As [`settle_pending`](Self::settle_pending), for every file.
+    pub(super) fn settle_all_pending(&mut self) {
+        while !self.agent_files.diffing.is_empty() {
+            match self.agent_files.settler.wait() {
+                Some(worked) => self.took_settled(worked),
+                None => self.settler_lost(),
             }
-            let files = &mut self.agent_files;
-            if files.ending.contains(&chat) && !files.diffing(chat) {
-                files.ending.retain(|&ending| ending != chat);
-                // A turn begun since keeps what it's using.
-                if !self.chat(chat).is_some_and(|hosted| hosted.answering()) {
-                    let files = &mut self.agent_files;
-                    files.reports.retain(|report| report.chat != chat);
-                    files.captures.retain(|capture| capture.chat != chat);
-                }
+        }
+    }
+
+    /// Takes in a change the worker has done with.
+    fn took_settled(&mut self, (settled, diffed): Worked) {
+        let (chat, path) = (settled.chat, settled.path.clone());
+        let files = &mut self.agent_files;
+        let Some(at) = (files.diffing.iter())
+            .position(|diffing| diffing.chat() == chat && diffing.path == path)
+        else {
+            return;
+        };
+        let diffing = files.diffing.remove(at);
+        // A chat closed meanwhile has nothing to take it in.
+        if self.chat(chat).is_none() {
+            self.agent_files.ending.retain(|&ending| ending != chat);
+            return;
+        }
+        match diffed {
+            Some(diffed) => self.settled_closed(settled, &diffed),
+            None => self.unknown(&diffing),
+        }
+        self.after_diffing(diffing);
+    }
+
+    /// The worker's gone, with every change it had: each is noted unknown,
+    /// and what waited for it goes on.
+    fn settler_lost(&mut self) {
+        log::warn!("settling: the worker is gone; what it had is noted as unknown");
+        for diffing in std::mem::take(&mut self.agent_files.diffing) {
+            if self.chat(diffing.chat()).is_some() {
+                self.unknown(&diffing);
+                self.after_diffing(diffing);
+            }
+        }
+        self.agent_files.ending.clear();
+    }
+
+    /// Notes `diffing`'s change as unknown: its text before wasn't seen, so
+    /// it can't be undone.
+    fn unknown(&mut self, diffing: &Diffing) {
+        self.agent_files
+            .log
+            .note_unknown(&diffing.maker, &diffing.path);
+        self.refresh_files(diffing.chat(), [diffing.maker.turn]);
+    }
+
+    /// Goes on with what waited for `diffing` to be taken in: its chat's
+    /// tools' later changes to the file, and the end of its turn.
+    fn after_diffing(&mut self, diffing: Diffing) {
+        let (chat, path) = (diffing.chat(), diffing.path);
+        if diffing.again {
+            match self.buffer_of(&path) {
+                Some(id) => self.settle(chat, &path, id, diffing.last),
+                None => self.settle_closed(chat, &path, diffing.last),
+            }
+        }
+        let files = &mut self.agent_files;
+        if files.ending.contains(&chat) && !files.diffing(chat) {
+            files.ending.retain(|&ending| ending != chat);
+            // A turn begun since keeps what it's using.
+            if !self.chat(chat).is_some_and(|hosted| hosted.answering()) {
+                let files = &mut self.agent_files;
+                files.reports.retain(|report| report.chat != chat);
+                files.captures.retain(|capture| capture.chat != chat);
             }
         }
     }
@@ -513,6 +585,7 @@ impl Daemon {
     /// `last`, as the agent's turn ends, the user is told the file changed
     /// some other way; without, more may yet be said.
     fn settle(&mut self, chat: TerminalId, path: &Path, id: BufferId, last: bool) {
+        self.settle_pending(path);
         let forget = |files: &mut AgentFiles| {
             (files.reports).retain(|report| report.chat != chat || report.path != path);
         };
@@ -649,12 +722,14 @@ impl Daemon {
         // What the chat's tools did before is still being worked out: this
         // waits for it, as it goes from what that leaves.
         if let Some(diffing) = (self.agent_files.diffing.iter_mut())
-            .find(|diffing| diffing.chat == chat && diffing.path == path)
+            .find(|diffing| diffing.chat() == chat && diffing.path == path)
         {
             diffing.again = true;
             diffing.last |= last;
             return;
         }
+        // Another chat's change to it is taken in first.
+        self.settle_pending(path);
         let reports = self.reports_of(chat, path);
         let Some(first) = reports.first() else {
             return;
@@ -720,11 +795,12 @@ impl Daemon {
                 let bytes = (settled.before.as_ref().map_or(0, String::len))
                     + (settled.disk.as_ref().map_or(0, String::len));
                 let settled = if bytes > ON_LOOP {
+                    let maker = settled.maker.clone();
                     match self.agent_files.settler.submit(settled, &self.waker) {
                         None => {
                             self.agent_files.diffing.push(Diffing {
-                                chat,
                                 path: path.to_owned(),
+                                maker,
                                 again: false,
                                 last: false,
                             });

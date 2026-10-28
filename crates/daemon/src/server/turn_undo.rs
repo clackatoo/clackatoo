@@ -74,14 +74,9 @@ impl Daemon {
     /// changed in files, and says how that went in the chat. If a file
     /// can't be, none is, unless `force`, which does the rest.
     pub(super) fn undo_turn(&mut self, chat: TerminalId, turn: usize, redo: bool, force: bool) {
-        // The log doesn't have a change to a big file still being worked
-        // out: undoing now would leave it.
-        if self.agent_files.diffing(chat) {
-            if let Some(hosted) = self.chat(chat) {
-                hosted.notify("Still taking in the agent's changes: try again in a moment.".into());
-            }
-            return;
-        }
+        // Changes to big files still being worked out are taken in
+        // first, so the log has them all, in order.
+        self.settle_all_pending();
         let notice = self.reverse_turn(chat, turn, redo, force);
         if let Some(hosted) = self.chat(chat) {
             hosted.notify(notice);
@@ -1208,5 +1203,112 @@ pub(in crate::server) mod tests {
         buffer.save(false).unwrap();
         assert_eq!(world.undo(0, false, false), "Undid turn 1: a.txt.");
         assert_eq!(world.undo(0, true, false), "Turn 1 has nothing to redo.");
+    }
+
+    /// A file of 300,000 lines, as `big.txt` in `world`: more than is
+    /// worked out on the loop. Returns its text.
+    fn big_file(world: &World) -> String {
+        let mut text = String::new();
+        for n in 1..=300_000 {
+            use std::fmt::Write as _;
+            writeln!(text, "line {n}").unwrap();
+        }
+        std::fs::write(world.path("big.txt"), &text).unwrap();
+        text
+    }
+
+    /// Has tool `tool` of the chat's agent change line `line` of `big.txt`,
+    /// `before`, itself, and say so, so the change is worked out off the
+    /// loop. Returns the file's text after it.
+    fn change_big_file(world: &mut World, (tool, line): (&str, u32), before: &str) -> String {
+        let chat = world.chat;
+        let path = world.path("big.txt").display().to_string();
+        start_tool(&mut world.daemon, chat, tool);
+        let said = |done, diffs| Wrote {
+            done,
+            turn: 0,
+            tool: tool.into(),
+            order: 0,
+            paths: vec![path.clone()],
+            diffs,
+        };
+        // About to change it: its text before is kept.
+        world.daemon.take_written(chat, &said(false, vec![]));
+        let (old, new) = (format!("line {line}\n"), format!("line #{line}\n"));
+        let after = before.replacen(&old, &new, 1);
+        std::fs::write(world.path("big.txt"), &after).unwrap();
+        let diff = RawDiff {
+            path: path.clone(),
+            old: Some(old),
+            new,
+        };
+        world.daemon.take_written(chat, &said(true, vec![diff]));
+        assert!(
+            world.daemon.agent_files.diffing(chat),
+            "worked out off the loop"
+        );
+        after
+    }
+
+    #[test]
+    fn a_write_while_a_big_change_is_worked_out_is_logged_after_it() {
+        let mut world = World::new();
+        let first = big_file(&world);
+        change_big_file(&mut world, ("t1", 1), &first);
+        // Another write to the file, through the daemon, waits for it.
+        world.write("big.txt", "small\n");
+        assert!(!world.daemon.agent_files.diffing(world.chat));
+        world.daemon.take_settled();
+        world.end_turn();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.disk("big.txt"), Some(first));
+    }
+
+    #[test]
+    fn opening_a_file_whose_big_change_is_worked_out_takes_it_in_first() {
+        let mut world = World::new();
+        let first = big_file(&world);
+        let second = change_big_file(&mut world, ("t1", 1), &first);
+        let id = world.open("big.txt");
+        assert!(!world.daemon.agent_files.diffing(world.chat));
+        assert!(!world.daemon.reviews.keeps_closed(&world.path("big.txt")));
+        assert!(
+            !world.daemon.buffers[&id].agents.is_empty(),
+            "its hunk came along"
+        );
+        assert_eq!(world.text(id), second);
+        world.end_turn();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.text(id), first);
+    }
+
+    #[test]
+    fn a_big_change_the_worker_fails_at_is_noted_unknown() {
+        use crate::server::settling::{CAUGHT, GONE};
+        let mut world = World::new();
+        let first = big_file(&world);
+        // It panics working it out.
+        world.daemon.agent_files.panic_next(CAUGHT);
+        let second = change_big_file(&mut world, ("t1", 1), &first);
+        world.daemon.settle_all_pending();
+        assert!(!world.daemon.agent_files.diffing(world.chat));
+        world.end_turn();
+        assert_eq!(
+            world.undo(0, false, false),
+            "Couldn't undo turn 1, so nothing was: in big.txt, what the file held before \
+             wasn't seen."
+        );
+        // The worker itself goes: what it had is unknown, nothing waits on.
+        world.next_turn();
+        world.daemon.agent_files.panic_next(GONE);
+        let third = change_big_file(&mut world, ("t2", 2), &second);
+        world.daemon.settle_all_pending();
+        assert!(!world.daemon.agent_files.diffing(world.chat));
+        // And the next turn's is worked out by a new one.
+        world.end_turn();
+        world.next_turn();
+        change_big_file(&mut world, ("t3", 3), &third);
+        world.daemon.settle_all_pending();
+        assert!(!world.daemon.agent_files.diffing(world.chat));
     }
 }

@@ -1384,6 +1384,9 @@ impl Daemon {
     /// servers are waited for until `servers_until`.
     #[allow(clippy::too_many_lines, reason = "each part of the state in turn")]
     fn hand_over(&mut self, servers_until: Instant) -> io::Result<Handover> {
+        // Agents' changes to big files still being worked out go into the
+        // edit log first, so the next build has them.
+        self.settle_all_pending();
         // Written, for the next build to keep on from, before anything
         // goes over to it.
         self.keep_last();
