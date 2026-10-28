@@ -2921,6 +2921,7 @@ impl Desk {
             } => self.open_explorer_beside(dir, edit, side),
             Command::AgentUndo { turn, redo, force } => self.agent_undo(turn, redo, force),
             Command::StopTask(line) => self.stop_task(line),
+            Command::Plan => self.toggle_plan(),
             Command::Board { place, name } => self.open_board(name, place),
             Command::Browser(place) => self.open_browser(place),
             Command::Review(review) => self.run_review(review),

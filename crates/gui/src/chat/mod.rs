@@ -138,6 +138,8 @@ enum Hit {
     /// the agent's name for it.
     StopTask(String),
     QueuePage(i8),
+    /// The heading of the agent's plan's shelf, which opens and folds it.
+    Plan,
     Stop,
     /// One of the answers to the agent's question, by its ID.
     Choice(String),
@@ -249,6 +251,9 @@ pub(crate) struct ChatView {
     pub(crate) handoff_supported: bool,
     pub(crate) queue_supported: bool,
     queue_page: usize,
+    /// Whether the agent's plan's shelf above the box is open, listing
+    /// every step, rather than folded to a line.
+    plan_open: bool,
     /// Enter waits until the clipboard worker has delivered its result.
     pub(crate) pasting: bool,
     /// The size the editor's text was last styled at, and the fonts'
@@ -479,6 +484,7 @@ impl ChatView {
             handoff_supported: cfg!(test),
             queue_supported: false,
             queue_page: 0,
+            plan_open: false,
             pasting: false,
             editor_size: 0.0,
             editor_fonts: 0,
@@ -2278,6 +2284,7 @@ impl ChatView {
             }
             Some(Hit::RemoveQueued(id)) => settled.actions.push(ChatAction::RemoveQueued { id }),
             Some(Hit::StopTask(id)) => settled.actions.push(ChatAction::StopTask { id }),
+            Some(Hit::Plan) => self.plan_open = !self.plan_open,
             Some(Hit::SendQueued(id)) => settled.actions.push(ChatAction::SendQueued {
                 id,
                 steer: self.busy(),

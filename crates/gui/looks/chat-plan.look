@@ -1,0 +1,24 @@
+# The agent's plan: folded to a line above the box, opened by a click on
+# it, under what the agent runs in the background, and in a narrow pane.
+size 1100x900
+keys <C-;>:Agent claude<CR>
+keys i
+type plan xx>....
+keys <CR>
+wait-for planned
+sleep 300
+shot plan-folded
+keys <C-;>:plan<CR>
+sleep 300
+shot plan-open
+keys i
+type background
+keys <CR>
+wait-for started
+sleep 300
+shot plan-and-tasks
+size 480x640
+shot plan-narrow
+keys <C-;>:plan<CR>
+sleep 300
+shot plan-narrow-folded

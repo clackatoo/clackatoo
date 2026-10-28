@@ -992,6 +992,41 @@ fn sheet(title: &str, close: Action, content: Element) -> Element {
         )
 }
 
+/// The agent's plan, its to-do list: how many steps are done, then each
+/// step, ☐ to do, ◐ being worked on, ☑ done and dimmed. The list scrolls
+/// within the card, as the queue's does.
+#[must_use]
+pub fn plan(node: &ChatNode) -> Element {
+    use clackatoo_protocol::PlanState;
+    let mut list = el("div").class("queue");
+    if node.plan.is_empty() {
+        return list;
+    }
+    let done = (node.plan.iter())
+        .filter(|step| step.state == PlanState::Done)
+        .count();
+    list = list.child(
+        el("div")
+            .class("queue-heading")
+            .text(format!("Plan · {done}/{} done", node.plan.len())),
+    );
+    for step in &node.plan {
+        let (mark, class) = match step.state {
+            PlanState::ToDo => ("☐", "queued-text"),
+            PlanState::Doing => ("◐", "queued-text"),
+            PlanState::Done => ("☑", "queued-text muted"),
+        };
+        list = list.child(
+            el("div").class("queued-message").child(
+                el("div")
+                    .class(class)
+                    .text(format!("{mark} {}", step.content)),
+            ),
+        );
+    }
+    list
+}
+
 /// What the agent runs in the background, such as shells Claude Code
 /// started, and how each is going: to read, as the window has the buttons
 /// that stop them.
@@ -1403,6 +1438,39 @@ mod tests {
             active,
             profile: None,
         }
+    }
+
+    #[test]
+    fn the_agents_plan_lists_its_steps_dimming_those_done() {
+        use clackatoo_protocol::{PlanState, PlanStep};
+        assert!(plan(&ChatNode::default()).all_text().is_empty());
+        let node = ChatNode {
+            plan: vec![
+                PlanStep {
+                    content: "Read it".into(),
+                    state: PlanState::Done,
+                },
+                PlanStep {
+                    content: "Test it".into(),
+                    state: PlanState::Doing,
+                },
+                PlanStep {
+                    content: "Ship it".into(),
+                    state: PlanState::ToDo,
+                },
+            ],
+            ..ChatNode::default()
+        };
+        let card = plan(&node);
+        assert_eq!(
+            card.all_text(),
+            "Plan · 1/3 done☑ Read it◐ Test it☐ Ship it"
+        );
+        let dimmed: Vec<String> = (card.find_all("class").iter())
+            .filter(|element| element.get("class") == Some("queued-text muted"))
+            .map(|element| element.all_text())
+            .collect();
+        assert_eq!(dimmed, ["☑ Read it"]);
     }
 
     fn open() -> OpenChat {

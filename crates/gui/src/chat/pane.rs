@@ -186,6 +186,12 @@ impl ChatPane {
         Ok(())
     }
 
+    /// Opens the agent's plan's shelf above the box, or folds it, or says
+    /// why not.
+    pub(crate) fn toggle_plan(&mut self) -> Result<(), String> {
+        self.view.toggle_plan()
+    }
+
     pub(crate) fn undo_turn(
         &mut self,
         turn: Option<usize>,

@@ -155,6 +155,7 @@ impl ChatPage {
             || el("div"),
             |n| {
                 el("div")
+                    .child(view::plan(n))
                     .child(view::background(n))
                     .child(view::queue(n, state.online))
             },

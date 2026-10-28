@@ -30,7 +30,8 @@
 //! after it, or else the last, and `agentredo` makes it again; with `!`,
 //! in the files that can be, though others can't. `stoptask` asks the
 //! agent to stop what it runs in the background, the line's number on the
-//! shelf above the box after it, or else the newest running.
+//! shelf above the box after it, or else the newest running. `plan`
+//! opens the agent's plan above the box, or folds it.
 //! `devices` lists the devices paired with the daemon's web app; `devices
 //! allow CODE` allows the one asking to pair that shows `CODE`, `devices
 //! deny` turns down those asking, `devices revoke N` unpairs one, and
@@ -230,6 +231,9 @@ pub(crate) enum Command {
     /// the background on line `line` of the shelf above the box, counting
     /// from 0, or the newest running.
     StopTask(Option<usize>),
+    /// `:plan`: open the focused chat's plan's shelf above the box, or
+    /// fold it.
+    Plan,
     /// `:update`: install the latest release of clackatoo on this machine,
     /// or with a name, on that machine, the one the window's daemon is on.
     Update(Option<String>),
@@ -412,6 +416,12 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "connect" => return connect_command(argument),
         "disconnect" => return Ok(Command::Disconnect(argument.map(str::to_owned))),
         "Capabilities" => return Ok(Command::Capabilities),
+        "plan" => {
+            return match argument {
+                Some(argument) => Err(format!("plan takes nothing after it, but has {argument:?}")),
+                None => Ok(Command::Plan),
+            };
+        }
         "agentaccess" => return match argument {
             Some("off") => Ok(Command::AgentAccess(clackatoo_protocol::NativeAccess::Off)),
             Some("inspect") => Ok(Command::AgentAccess(clackatoo_protocol::NativeAccess::Inspect)),
@@ -894,6 +904,7 @@ command_names! {
     "agentundo" => "Undo file changes from an agent turn",
     "agentredo" => "Redo file changes from an agent turn",
     "stoptask" => "Stop what the agent runs in the background",
+    "plan" => "Open or fold the agent's plan",
     "Review" => "Review changes made by agents",
     "reviewkeep" => "Keep the selected agent changes",
     "reviewreject" => "Reject the selected agent changes",
@@ -1090,6 +1101,7 @@ mod tests {
         ("agentundo", ""),
         ("agentredo", ""),
         ("stoptask", ""),
+        ("plan", ""),
         ("Review", ""),
         ("reviewsend", ""),
         ("blame", ""),
@@ -1585,6 +1597,7 @@ mod tests {
         assert_eq!(parse("stoptask").unwrap(), Command::StopTask(None));
         assert_eq!(parse("stoptask 2").unwrap(), Command::StopTask(Some(1)));
         assert!(parse("stoptask 0").is_err());
+        assert_eq!(parse("plan").unwrap(), Command::Plan);
         assert_eq!(parse("agentundo").unwrap(), undo(None, false, false));
         assert_eq!(parse("agentundo 3").unwrap(), undo(Some(2), false, false));
         assert_eq!(parse("agentundo! 1").unwrap(), undo(Some(0), false, true));

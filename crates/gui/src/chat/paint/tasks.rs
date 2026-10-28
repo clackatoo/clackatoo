@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::{AgentTask, AgentTaskKind, AgentTaskState};
 
 use super::fold::duration;
-use super::{BoxFrame, Canvas, ChatView, Fill, Hit, Measures, Paint, Tone};
+use super::shelf::{Shelf, ShelfRow};
+use super::{BoxFrame, Canvas, ChatView, Hit, Measures, Tone};
 
 /// The most tasks the shelf has a line for: the rest it counts.
 const SHOWN: usize = 3;
@@ -35,104 +36,25 @@ impl ChatView {
         above: f32,
     ) -> f32 {
         let now = self.now();
-        let shown: Vec<(String, Tone, Option<String>)> = shelf_order(&self.node.tasks)
+        let rows: Vec<ShelfRow> = shelf_order(&self.node.tasks)
             .into_iter()
             .take(SHOWN)
-            .map(|task| {
-                let stop = (task.can_stop && task.state == AgentTaskState::Running)
-                    .then(|| task.id.clone());
-                (task_row(task, now), task_tone(task), stop)
+            .map(|task| ShelfRow {
+                text: task_row(task, now),
+                tone: task_tone(task),
+                stop: (task.can_stop && task.state == AgentTaskState::Running)
+                    .then(|| Hit::StopTask(task.id.clone())),
             })
             .collect();
-        if shown.is_empty() {
+        if rows.is_empty() {
             return 0.0;
         }
-        let row = m.em(1.9);
-        let header = m.em(1.65);
-        let pad = m.em(0.45);
-        let gap = m.em(0.45);
-        let rows = f32::from(u8::try_from(shown.len()).unwrap_or(u8::MAX));
-        let panel = header + row * rows + pad * 2.0;
-        let mut top = frame.top - above - panel - gap;
-        let left = frame.left + m.em(0.65);
-        let width = frame.place.column - m.em(1.3);
-        canvas.fill(
-            Fill::rounded([left, top, width, panel], Paint::Raised, m.em(0.9))
-                .bordered(1.0, Paint::RaisedEdge),
-        );
-        let inner_left = left + m.em(0.8);
-        let inner_width = width - m.em(1.6);
-        top += pad;
-        let small = Measures::of(m.em(0.85));
-        let heading = shelf_heading(&self.node.tasks);
-        self.queue_text(
-            canvas,
-            small,
-            &heading,
-            [inner_left, top, inner_width, header],
-            Tone::Muted,
-        );
-        top += header;
-        for (index, (text, tone, stop)) in shown.into_iter().enumerate() {
-            if index > 0 {
-                canvas.fill(Fill::solid(
-                    [inner_left, top, inner_width, 1.0],
-                    Paint::RaisedEdge,
-                ));
-            }
-            let button = m.em(1.8);
-            let text_width = (inner_width - button - m.em(0.5)).max(0.0);
-            self.queue_text(
-                canvas,
-                small,
-                &text,
-                [inner_left, top, text_width, row],
-                tone,
-            );
-            if let Some(id) = stop {
-                let rect = [
-                    inner_left + inner_width - button,
-                    top + (row - button) / 2.0,
-                    button,
-                    button,
-                ];
-                self.draw_stop_task(canvas, m, frame, rect, id);
-            }
-            top += row;
-        }
-        panel + gap
-    }
-
-    /// Draws the button that stops task `id`, in `rect`: the square the
-    /// chat's own Stop is.
-    fn draw_stop_task(
-        &mut self,
-        canvas: &mut Canvas<'_>,
-        m: Measures,
-        frame: &BoxFrame,
-        rect: [f32; 4],
-        id: String,
-    ) {
-        let side = rect[2];
-        if self
-            .mouse
-            .is_some_and(|p| super::super::contains(frame.place.in_pane(rect), p))
-        {
-            canvas.fill(Fill::rounded(rect, Paint::ChatHover, side / 2.0));
-        }
-        let extent = m.em(0.5);
-        canvas.fill(Fill::rounded(
-            [
-                rect[0] + (side - extent) / 2.0,
-                rect[1] + (side - extent) / 2.0,
-                extent,
-                extent,
-            ],
-            Paint::Icon,
-            m.em(0.1),
-        ));
-        self.hits
-            .push((Hit::StopTask(id), frame.place.in_pane(rect)));
+        let shelf = Shelf {
+            heading: shelf_heading(&self.node.tasks),
+            heading_hit: None,
+            rows,
+        };
+        self.draw_shelf(canvas, m, frame, above, shelf)
     }
 
     /// When the shelf next counts on a second, if anything on it is

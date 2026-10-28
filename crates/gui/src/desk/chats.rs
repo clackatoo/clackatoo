@@ -396,6 +396,17 @@ impl Desk {
         }
     }
 
+    /// Opens the focused chat's plan's shelf, or folds it.
+    pub(super) fn toggle_plan(&mut self) {
+        let toggled = (self.focused_chat_mut()).map_or_else(
+            || Err("that's for a chat with an agent".to_owned()),
+            super::super::chat::ChatPane::toggle_plan,
+        );
+        if let Err(why) = toggled {
+            self.refuse(why);
+        }
+    }
+
     /// Local image viewing owns input even when the daemon is offline.
     pub(crate) fn chat_modal_key(&mut self, press: &KeyPress<'_>) -> bool {
         self.focused_chat_mut()
