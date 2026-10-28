@@ -3528,8 +3528,17 @@ impl Daemon {
             self.undo_turn(id, turn, redo, force);
             return Ok(());
         }
+        // A message sent while the agent answers waits its turn in the
+        // queue, as the window's does, rather than going nowhere.
+        let busy = (chat.answering() && !chat.loading()) || chat.node().delivery.sending.is_some();
         // Other agents are the server's.
         match action {
+            ChatAction::Send(text) if busy => {
+                return self.submit_chat(id, text, Vec::new(), None, false);
+            }
+            ChatAction::SendImages { text, images } if busy => {
+                return self.submit_chat(id, text, images, None, false);
+            }
             ChatAction::RefreshUsage { force } => {
                 self.refresh_usage(force);
                 return Ok(());

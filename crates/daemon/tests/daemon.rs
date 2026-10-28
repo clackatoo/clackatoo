@@ -21249,6 +21249,32 @@ fn a_shell_that_starts_another_says_so_and_types_nothing() {
     assert!(!screen.contains("echo wrapped"), "{screen}");
 }
 
+/// A message sent, not submitted, while the agent answers, as an older
+/// window or another caller sends it, is queued as the window's are, not
+/// dropped.
+#[test]
+fn a_message_sent_while_the_agent_answers_is_queued() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    client.chat(chat, ChatAction::Send("wait".into())).unwrap();
+    wait_for_chat(&mut client, chat, |node| node.state == ChatState::Answering);
+    client.chat(chat, ChatAction::Send("after".into())).unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| !node.delivery.queued.is_empty());
+    assert_eq!(node.delivery.queued[0].text, "after");
+    // Once the turn's done, it goes.
+    let id = node.delivery.queued[0].id;
+    client.chat(chat, ChatAction::Stop).unwrap();
+    wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    client
+        .chat(chat, ChatAction::SendQueued { id, steer: false })
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.turns.len() == 2 && last_outcome(node).is_some()
+    });
+    assert_eq!(last_words(&node), "echo: after\n");
+}
+
 #[test]
 fn user_queue_and_native_steering_deliver_once_across_clients() {
     check_native_steering("--steering");
