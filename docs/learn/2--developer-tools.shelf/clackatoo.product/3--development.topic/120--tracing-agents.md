@@ -33,7 +33,7 @@ A trace is meant to be shareable, so obvious secrets are replaced by `[redacted]
 
 This is a safety net, not a guarantee: files' text and your messages are in a trace as they were sent, so read one before you share it.
 
-A message over 1 MiB, such as an edit to a big file, whose diff carries the whole file, is traced as its first 64 KiB and its length.
+A message over 1 MiB, such as an edit to a big file, whose diff carries the whole file, is traced as its first 64 KiB and its length. Smaller ones are checked for secrets as they pass, which costs the daemon a little time on each, so leave the trace off when you aren't using it.
 
 ## How big it gets
 
