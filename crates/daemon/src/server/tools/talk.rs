@@ -1419,4 +1419,290 @@ mod tests {
         assert_eq!(tail("héllo", 4), "[the start is cut off]\nllo");
         assert_eq!(tail("abc", 4), "abc");
     }
+
+    // --- CLACKA-185: what a PM agent running builders and reviewers hits --
+    //
+    // Each test below that's ignored fails today and says what it shows;
+    // `cargo test -p clackatoo-daemon --lib clacka_185 -- --include-ignored`
+    // runs them all.
+
+    /// The agent says `text`.
+    fn said(text: &str) -> agent_client_protocol_schema::v1::SessionUpdate {
+        serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": text },
+        }))
+        .unwrap()
+    }
+
+    /// The chat `chat` answers the turn it's on with `text`.
+    fn answers(daemon: &mut Daemon, chat: TerminalId, text: &str) {
+        let chat = daemon.chat(chat).unwrap();
+        chat.update(said(text));
+        chat.answered(Ok(agent_client_protocol_schema::v1::StopReason::EndTurn));
+    }
+
+    /// A shell the chat `chat`'s agent runs in the background, `t1`, as
+    /// Claude Code's adapter says one.
+    fn runs_in_background(daemon: &mut Daemon, chat: TerminalId, name: &str) {
+        let task = crate::agent::Task::Spawned {
+            id: "t1".to_owned(),
+            kind: "shell".to_owned(),
+            name: name.to_owned(),
+            description: None,
+            can_stop: true,
+            tool: None,
+        };
+        assert_eq!(daemon.chat(chat).unwrap().task_said(task), None);
+        assert!(daemon.chat_ref(chat).unwrap().has_tasks_going());
+    }
+
+    /// Hands `daemon` over to the next build, as an upgrade does.
+    fn upgraded(mut daemon: Daemon) -> Daemon {
+        let config = daemon.config.clone();
+        let handover = daemon.hand_over(std::time::Instant::now()).unwrap();
+        drop(daemon);
+        Daemon::resume(handover, config).unwrap()
+    }
+
+    /// The call `wait_for_chat` makes, on a connection that isn't there.
+    fn call() -> (mio::Token, Value) {
+        (mio::Token(99), Value::from(1))
+    }
+
+    /// Problem 1: a PM's builders and reviewers, finished and heard, are
+    /// closed, oldest first, as soon as a ninth chat starts under the
+    /// user's chat, though the PM goes on sending them fixes. None of them
+    /// is running: only running chats should count against a cap.
+    #[test]
+    #[ignore = "CLACKA-185: finished subagents are closed to make room"]
+    fn clacka_185_a_ninth_subagent_starts_without_closing_a_finished_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        for id in 2..2 + u32::try_from(MAX_CHILDREN).unwrap() {
+            let kid = answered_chat(&mut daemon, id, (a, a, 1));
+            // Its parent waited for its answer, as wait_for_chat does.
+            drop(daemon.answer_of(a, kid, false));
+        }
+        let start = Tool::StartChat(Box::new(NewChat {
+            prompt: "x".to_owned(),
+            ..NewChat::default()
+        }));
+        assert_eq!(daemon.talk_refused(a, &start), None);
+        // start_chats closes these, oldest first, "to make room".
+        assert_eq!(
+            daemon.closable(a),
+            [],
+            "the chats a ninth start would close, each one the PM may still message"
+        );
+    }
+
+    /// Problem 2: a PM going round a review loop with its builder, a
+    /// message and a wait at a time, is refused its ninth message in one
+    /// turn (MAX_PER_TURN), and its seventeenth turn of other agents' work
+    /// in one turn of the user's (MAX_CAUSED), though nothing runs away:
+    /// each message is answered before the next.
+    #[test]
+    #[ignore = "CLACKA-185: 8 messages per turn, 16 per user turn"]
+    fn clacka_185_a_pm_sends_its_builder_twenty_messages_in_one_long_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = answered_chat(&mut daemon, 2, (a, a, 1));
+        for round in 0..20 {
+            assert_eq!(daemon.talk_refused(a, &send(b)), None, "round {round}");
+            daemon.spend(a);
+            let message = daemon.message_from(a, "fix this").unwrap();
+            drop(daemon.chat(b).unwrap().deliver(message).unwrap());
+            answers(&mut daemon, b, "fixed");
+        }
+    }
+
+    /// Problem 3, a wait made after the answer came: not a race. It gets
+    /// the answer to the caller's last message at once, however many
+    /// turns came after it.
+    #[test]
+    fn clacka_185_a_wait_made_after_the_answer_came_gets_that_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = idle_chat(&mut daemon, 2);
+        daemon.chat(b).unwrap().started_by(a, a, 1, None);
+        let message = daemon.message_from(a, "build it").unwrap();
+        drop(daemon.chat(b).unwrap().deliver(message).unwrap());
+        answers(&mut daemon, b, "built it");
+        // The user types in the builder too.
+        let chat = daemon.chat(b).unwrap();
+        chat.act(clackatoo_protocol::ChatAction::Send("and you?".to_owned()));
+        answers(&mut daemon, b, "the user's answer");
+        let answer = (daemon.wait_for_chat(call(), a, b, Duration::from_secs(60)))
+            .expect("answered at once")
+            .unwrap();
+        assert!(
+            answer.contains("answer to your message, turn 1:\nbuilt it"),
+            "{answer}"
+        );
+        assert!(
+            answer.contains("[it has had 1 more turns since"),
+            "{answer}"
+        );
+        assert!(daemon.tools.waiting.is_empty());
+    }
+
+    /// Problem 3, two messages: the second waits its turn, and the wait
+    /// answers with the second's answer alone. The answer to the first,
+    /// which the PM asked for in the same breath, is never given back.
+    #[test]
+    #[ignore = "CLACKA-185: a wait after two messages drops the first answer"]
+    fn clacka_185_a_wait_after_two_messages_gives_both_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = idle_chat(&mut daemon, 2);
+        daemon.chat(b).unwrap().started_by(a, a, 1, None);
+        for text in ["review the parser", "and the lexer"] {
+            let message = daemon.message_from(a, text).unwrap();
+            drop(daemon.chat(b).unwrap().deliver(message).unwrap());
+        }
+        let waits = daemon.wait_for_chat(call(), a, b, Duration::from_secs(60));
+        assert!(waits.is_none(), "it waits for both");
+        answers(&mut daemon, b, "parser: two bugs");
+        drop(daemon.chat(b).unwrap().deliver_next());
+        answers(&mut daemon, b, "lexer: fine");
+        let answer = daemon.answer_of(a, b, false);
+        assert!(answer.contains("lexer: fine"), "{answer}");
+        assert!(answer.contains("parser: two bugs"), "{answer}");
+    }
+
+    /// Problem 3, a turn the agent takes by itself: a builder answers
+    /// "the gate runs in the background" and ends its turn. A wait made
+    /// now, or again and again, answers at once with that, saying nothing
+    /// of the shell still going, whose end will wake the builder to say
+    /// how the gate went.
+    #[test]
+    #[ignore = "CLACKA-185: a wait ignores the target's background tasks"]
+    fn clacka_185_a_wait_on_a_chat_with_a_background_task_going_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = idle_chat(&mut daemon, 2);
+        daemon.chat(b).unwrap().started_by(a, a, 1, None);
+        let message = daemon.message_from(a, "run the gate").unwrap();
+        drop(daemon.chat(b).unwrap().deliver(message).unwrap());
+        runs_in_background(&mut daemon, b, "Run the gate");
+        answers(&mut daemon, b, "The gate runs in the background.");
+        let answer = (daemon.wait_for_chat(call(), a, b, Duration::from_secs(60)))
+            .expect("answered at once, as the chat is idle")
+            .unwrap();
+        assert!(answer.contains("Run the gate"), "{answer}");
+    }
+
+    /// Problem 3, a turn the agent took by itself, after an upgrade: the
+    /// handover doesn't keep `Turn.woke`, so the turn reads as the user's,
+    /// and a wait answers with the answer before it, stale.
+    #[test]
+    #[ignore = "CLACKA-185: agent-started turns aren't handed over"]
+    fn clacka_185_what_a_chat_went_on_to_do_by_itself_still_answers_after_an_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = idle_chat(&mut daemon, 2);
+        daemon.chat(b).unwrap().started_by(a, a, 1, None);
+        let message = daemon.message_from(a, "run the gate").unwrap();
+        drop(daemon.chat(b).unwrap().deliver(message).unwrap());
+        answers(&mut daemon, b, "The gate runs in the background.");
+        assert!(
+            daemon
+                .chat(b)
+                .unwrap()
+                .wake(Some("the gate ended".to_owned()))
+        );
+        answers(&mut daemon, b, "Committed: the gate passed.");
+        assert!(daemon.answer_of(a, b, false).contains("the gate passed"));
+        let resumed = upgraded(daemon);
+        let answer = resumed.answer_of(a, b, false);
+        assert!(
+            answer.contains("went on by itself") && answer.contains("the gate passed"),
+            "{answer}"
+        );
+    }
+
+    /// Problem 3, the target restarted by an upgrade mid-turn: not a race
+    /// in the daemon's bookkeeping. Its turn is continued, the same turn,
+    /// so a wait made after the upgrade is for it. But if the continuation
+    /// can't start its agent (here, none is installed; live, an adapter
+    /// that fails to load the session), the turn ends failed, and every
+    /// wait answers at once with "[failed: …]", the wrapper the PM saw.
+    #[test]
+    fn clacka_185_a_target_cut_off_by_an_upgrade_is_continued_or_fails_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = idle_chat(&mut daemon, 2);
+        daemon.chat(b).unwrap().started_by(a, a, 1, None);
+        let message = daemon.message_from(a, "build it").unwrap();
+        drop(daemon.chat(b).unwrap().deliver(message).unwrap());
+        let mut resumed = upgraded(daemon);
+        let turns = &resumed.chat_ref(b).unwrap().node().turns;
+        assert_eq!(turns.len(), 1, "the same turn");
+        assert!(
+            (turns[0].items.iter())
+                .any(|item| *item == Item::Other("Continuing after a daemon upgrade.".into())),
+            "{turns:#?}"
+        );
+        let answer = (resumed.wait_for_chat(call(), a, b, Duration::from_secs(60)))
+            .expect("the continuation couldn't start its agent here")
+            .unwrap();
+        assert!(
+            answer.contains("[failed: Claude Code couldn't start"),
+            "{answer}"
+        );
+    }
+
+    /// Problems 3 and 5, the waiter restarted: the PM waits for its
+    /// builder; an upgrade ends the PM's agent and its tools' connection,
+    /// and the wait with them. The builder finishes after; nothing tells
+    /// the PM, which hears only if its continued turn happens to wait
+    /// again. A parent that wasn't waiting never hears at all.
+    #[test]
+    #[ignore = "CLACKA-185: a parent isn't told its subagent finished"]
+    fn clacka_185_a_parent_waiting_through_an_upgrade_hears_its_subagent_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = idle_chat(&mut daemon, 2);
+        daemon.chat(b).unwrap().started_by(a, a, 1, None);
+        let message = daemon.message_from(a, "build it").unwrap();
+        drop(daemon.chat(b).unwrap().deliver(message).unwrap());
+        let waits = daemon.wait_for_chat(call(), a, b, Duration::from_secs(600));
+        assert!(waits.is_none());
+        let mut resumed = upgraded(daemon);
+        assert!(
+            resumed.tools.waiting.is_empty(),
+            "the wait went with the upgrade"
+        );
+        answers(&mut resumed, b, "built it");
+        resumed.relay_chats();
+        let told = (resumed.chat_ref(a).unwrap().relations().inbox.iter())
+            .any(|message| message.from.chat == b && message.text.contains("built it"));
+        assert!(told, "chat {a} is never told chat {b} finished");
+    }
+
+    /// Problem 4 (b): an idle chat with a shell going in the background.
+    /// The upgrade ends its agent, and the shell with it; the handover
+    /// doesn't carry the chat's tasks, so after it the shelf is empty, not
+    /// marked lost, and the agent, idle, is never told.
+    #[test]
+    #[ignore = "CLACKA-185: background tasks vanish in an upgrade, untold"]
+    fn clacka_185_an_idle_chats_background_task_shows_lost_after_an_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = idle_chat(&mut daemon, 2);
+        daemon.chat(b).unwrap().started_by(a, a, 1, None);
+        let message = daemon.message_from(a, "deploy").unwrap();
+        drop(daemon.chat(b).unwrap().deliver(message).unwrap());
+        runs_in_background(&mut daemon, b, "scripts/deploy --wait");
+        answers(&mut daemon, b, "Deploying in the background.");
+        let resumed = upgraded(daemon);
+        let tasks = &resumed.chat_ref(b).unwrap().node().tasks;
+        assert!(
+            (tasks.iter())
+                .any(|task| task.id == "t1"
+                    && task.state == clackatoo_protocol::AgentTaskState::Lost),
+            "{tasks:#?}"
+        );
+    }
 }
