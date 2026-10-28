@@ -57,6 +57,7 @@ use serde_json::Value;
 
 use super::{Wait, Waiting};
 use crate::chat::{Cause, HostedChat, MAX_INBOX, Message};
+use crate::handover;
 use crate::mcp::{NewChat, Tool};
 use crate::server::Daemon;
 
@@ -130,9 +131,30 @@ impl Daemon {
         self.terminals.get(&id)?.terminal.chat_ref()
     }
 
+    /// Why messages chats sent others were dropped as their turns came,
+    /// for the next build: see [`Self::resume_talk`].
+    pub(in crate::server) fn hand_over_talk(&self) -> Vec<handover::Undelivered> {
+        (self.tools.talk.undelivered.iter())
+            .map(|(&(from, to), why)| handover::Undelivered {
+                from: from.0,
+                to: to.0,
+                why: why.clone(),
+            })
+            .collect()
+    }
+
     /// Picks up where chats stood among the others after an upgrade: the
-    /// messages waiting in their inboxes are sent as their turns end.
-    pub(in crate::server) fn resume_talk(&mut self) {
+    /// messages waiting in their inboxes are sent as their turns end, and
+    /// each sender whose message was dropped, `undelivered`, is still told
+    /// why.
+    pub(in crate::server) fn resume_talk(&mut self, undelivered: &[handover::Undelivered]) {
+        let open = |daemon: &Self, id: u32| daemon.chat_ref(TerminalId(id)).is_some();
+        for dropped in undelivered {
+            if open(self, dropped.from) && open(self, dropped.to) {
+                let key = (TerminalId(dropped.from), TerminalId(dropped.to));
+                self.tools.talk.undelivered.insert(key, dropped.why.clone());
+            }
+        }
         let waiting: Vec<TerminalId> = (self.terminals.iter())
             .filter_map(|(&id, slot)| {
                 let chat = slot.terminal.chat_ref()?;
@@ -1216,6 +1238,26 @@ mod tests {
             hops: 1,
             cause: None,
         }
+    }
+
+    #[test]
+    fn a_sender_is_still_told_its_message_was_dropped_after_an_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = idle_chat(&mut daemon, 2);
+        let gone = TerminalId(9);
+        (daemon.tools.talk.undelivered).insert((a, b), "it moved".to_owned());
+        (daemon.tools.talk.undelivered).insert((gone, b), "it closed".to_owned());
+        let config = daemon.config.clone();
+        let handover = daemon.hand_over(std::time::Instant::now()).unwrap();
+        drop(daemon);
+        let resumed = Daemon::resume(handover, config).unwrap();
+        assert_eq!(
+            resumed.undelivered(a, b).as_deref(),
+            Some("Your last message to chat 2 waited its turn, and wasn't sent: it moved\n")
+        );
+        // Nothing is kept for a chat that's gone.
+        assert_eq!(resumed.tools.talk.undelivered.len(), 1);
     }
 
     #[test]

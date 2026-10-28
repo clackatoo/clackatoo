@@ -1288,7 +1288,7 @@ impl Daemon {
         }
         daemon.resume_files(state.next_files, explorers);
         // Messages waiting in chats' inboxes go as their turns end.
-        daemon.resume_talk();
+        daemon.resume_talk(&state.undelivered);
         daemon.resume_activities(&state.activities);
         daemon.agent_files.log = edit_log::EditLog::resume(edits);
         daemon.resume_reviews(reviews);
@@ -1488,6 +1488,7 @@ impl Daemon {
                 chat_continuations,
                 activities,
                 lent_background: self.workspaces.hand_over_lent_background(),
+                undelivered: self.hand_over_talk(),
                 orphans,
                 workspaces,
                 next_buffer: self.next_buffer,
