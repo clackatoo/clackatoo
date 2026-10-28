@@ -77,6 +77,10 @@ fn a_subagents_pane_says_what_it_is_and_goes_to_the_chat_that_started_it() {
     assert_eq!(desk.shown().unwrap().pane, PaneId(3), "the chat's own");
     click(&mut desk, cell_point(0, 3), Modifiers::default());
     assert_eq!(desk.shown().unwrap().pane, PaneId(2));
+
+    // The key the band names is the one bound, and with none, none.
+    desk.lua_from(r#"client.keys.unmap("niv", "<C-b>u")"#);
+    assert_eq!(band_says(&desk, 3), "↳ subagent of chat 2 · explore");
 }
 
 #[test]
@@ -97,6 +101,12 @@ fn a_subagent_whose_chat_closed_says_so_and_goes_nowhere() {
         answer_all(&mut desk),
         [Request::ClosePane { pane: PaneId(3) }]
     );
+    desk.chats_changed(Vec::new());
+    desk.workspaces_changed(workspaces(vec![workspace(
+        1,
+        "work",
+        vec![tab(1, pane(2))],
+    )]));
     assert!(!note(&desk).contains("background"), "{}", note(&desk));
 }
 
@@ -109,17 +119,19 @@ fn closing_a_subagents_pane_says_where_it_goes_and_bd_closes_it_for_good() {
         answer_all(&mut desk),
         [Request::ClosePane { pane: PaneId(3) }]
     );
-    assert_eq!(
-        note(&desk),
-        "chat 3 goes on in the background, as a card in chat 2: :bd closes it"
-    );
-    // The daemon took its pane away, and it goes on: the window stops
-    // following it, as one that closed would have stopped by itself.
+    assert!(!note(&desk).contains("background"), "not before it's gone");
+    // The daemon took its pane away, and it goes on: the bar says where,
+    // and the window stops following it, as one that closed would have
+    // stopped by itself.
     desk.workspaces_changed(workspaces(vec![workspace(
         1,
         "work",
         vec![tab(1, pane(2))],
     )]));
+    assert_eq!(
+        note(&desk),
+        "chat 3 goes on in the background, as a card in chat 2: :bd closes it"
+    );
     assert!(answer_all(&mut desk).contains(&Request::Detach {
         terminal: TerminalId(3)
     }));

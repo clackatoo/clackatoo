@@ -256,19 +256,9 @@ impl Daemon {
             return false;
         }
         log::info!("chat {chat} goes to the background, as a card in chat {parent}");
-        // A window older than protocol 108 takes the pane's going for the
-        // chat's closing, and never stops following it: it stops here.
-        let older: Vec<Token> = (self.terminals.get(&chat).into_iter())
-            .flat_map(|slot| slot.viewers.iter().copied())
-            .filter(|token| match self.sources.get(token.0) {
-                Some(crate::server::Source::Client(client)) => {
-                    client.wire < clackatoo_protocol::wire::SUBAGENT_PROFILE
-                }
-                _ => false,
-            })
-            .collect();
-        for token in older {
-            self.detach(token, chat);
+        // The user's now, as one they chose to keep.
+        if let Some(kid) = self.chat(chat) {
+            kid.keep_for_user();
         }
         // Its card says so.
         self.workspaces_changed();
@@ -278,7 +268,8 @@ impl Daemon {
     /// The chats under the user's chat `root` that can close to make room
     /// for new ones, oldest first: in the background, finished, asking
     /// nothing, with no chats of their own, their answers had by the chat
-    /// that started them, and none of their changes waiting for review.
+    /// that started them, none of their changes waiting for review, and
+    /// never one the user had in a pane and sent back, which is theirs.
     /// Closing one loses nothing anyone is waiting on.
     pub(super) fn closable(&self, root: TerminalId) -> Vec<TerminalId> {
         let workspaces = self.workspaces.get();
@@ -295,7 +286,9 @@ impl Daemon {
                         chat.subagent_status(),
                         SubagentStatus::Done | SubagentStatus::Failed(_)
                     );
+                // One the user had in a pane and sent back is theirs.
                 let spent = done
+                    && !chat.kept_by_user()
                     && chat.parent_has_heard()
                     && !parents.contains(&id)
                     && !self.awaits_review(id);

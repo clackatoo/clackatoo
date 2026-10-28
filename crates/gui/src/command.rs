@@ -561,9 +561,9 @@ fn unknown(mark: &str, name: &str, at: &str, place: Place) -> String {
     }
 }
 
-/// The commands that close a pane, which a slip is never offered, as
-/// running one by mistake loses the pane.
-const CLOSING: [&str; 2] = ["quit", "wq"];
+/// The commands that close a pane, or a chat, which a slip is never
+/// offered, as running one by mistake loses the pane, or the chat.
+const CLOSING: [&str; 3] = ["quit", "wq", "bdelete"];
 
 /// `:devices`, with what to do as `argument` says.
 /// `:connect`'s argument: a machine, if any, and `--no-share` or
@@ -1447,6 +1447,7 @@ mod tests {
         // What closes a pane isn't offered for a slip, only for its case.
         assert_eq!(err("wqq"), "no command ‘wqq’");
         assert_eq!(err("quiy"), "no command ‘quiy’");
+        assert!(!err("bdelet").contains(":bdelete"), "{}", err("bdelet"));
         assert_eq!(parse("QUIT"), Ok(Command::Quit { force: false }));
         assert_eq!(err(""), "no command: Tab lists them");
         assert_eq!(

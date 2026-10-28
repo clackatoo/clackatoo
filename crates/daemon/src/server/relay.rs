@@ -1166,6 +1166,13 @@ impl Daemon {
                 return self.close_held(local).unwrap_or(Routed::Here(request));
             }
             &Request::ClosePane { pane: local } => match self.relayed_pane(local) {
+                // To a client older than protocol 109, closing a
+                // subagent's pane closes its chat, as the daemon there
+                // won't do for this one, newer.
+                Some((at, _)) if let Some(chat) = self.older_closes_subagent(token, at, local) => {
+                    let close = Request::CloseTerminal { terminal: chat };
+                    Some((at, Ok((close, Then::Pass))))
+                }
                 Some((at, pane)) => Some((at, Ok((Request::ClosePane { pane }, Then::Pass)))),
                 // A pane borrowed from another machine closes there,
                 // which closes it here once the daemon there says so; or
@@ -1646,6 +1653,25 @@ impl Daemon {
     }
 
     /// As [`relayed_terminal`](Self::relayed_terminal), for a pane.
+    /// The chat an agent started that the pane `local`, of the daemon
+    /// linked at `at`, shows, by that daemon's number: if the client at
+    /// `token` is older than protocol 109, to which closing that pane
+    /// means closing the chat.
+    fn older_closes_subagent(&self, token: Token, at: usize, local: PaneId) -> Option<TerminalId> {
+        if self.sends_subagents_back(token) {
+            return None;
+        }
+        let mirror = &self.links.list.get(at)?.relayed.mirror;
+        let chat = (mirror.workspaces.iter())
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| tab.layout.panes())
+            .find(|pane| pane.id == local)?
+            .content
+            .terminal()?;
+        (mirror.chats.iter()).find(|summary| summary.chat == chat && summary.parent.is_some())?;
+        mirror.terminal_numbers.remote(chat.0).map(TerminalId)
+    }
+
     pub(super) fn relayed_pane(&self, local: PaneId) -> Option<(usize, PaneId)> {
         (self.links.list.iter().enumerate()).find_map(|(at, linked)| {
             let remote = linked.relayed.mirror.pane_numbers.remote(local.0)?;

@@ -243,7 +243,7 @@ impl Daemon {
         };
         let id = workspace.id;
         if let Ok(panes) = self.workspaces.workspace_panes(id) {
-            let _ = self.close_panes(&panes);
+            let _ = self.close_panes(&panes, true);
         }
     }
 
@@ -495,7 +495,7 @@ impl Daemon {
         let panes: Vec<clackatoo_protocol::Pane> = (held.iter())
             .filter_map(|&pane| Some(self.workspaces.get().find_pane(pane)?.2))
             .collect();
-        let _ = self.close_panes(&panes);
+        let _ = self.close_panes(&panes, true);
     }
 
     /// Whether what's lent as `lent` says is in a layout this daemon's own
@@ -597,7 +597,7 @@ impl Daemon {
             };
             return Err(crate::server::buffers::blank_kept(wire));
         }
-        self.close_panes(&panes)
+        self.close_panes(&panes, self.sends_subagents_back(token))
     }
 
     /// After a connection to another machine was made or lost: what's

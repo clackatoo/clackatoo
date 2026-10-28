@@ -302,6 +302,9 @@ pub(crate) struct Desk {
     pointed: Option<(PaneId, std::time::Instant)>,
     /// The chats, as a list, to mark the tabs and workspaces with.
     watched: badges::Watched,
+    /// A subagent whose pane this window asked to close, until the
+    /// workspaces show it gone: then the bar says where it went.
+    sending_back: Option<TerminalId>,
     /// What's shown, once connected.
     shown: Option<Shown>,
     /// Panes by the terminal each shows: those of the workspace shown, and
@@ -1537,6 +1540,7 @@ impl Desk {
         self.close_leftovers();
         self.settle_lesson();
         self.relist_background();
+        self.say_where_subagent_went();
     }
 
     /// A view update for `terminal` from a newer daemon couldn't be read,

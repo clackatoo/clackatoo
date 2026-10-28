@@ -379,13 +379,13 @@ A subagent in a pane, one its agent asked to show or one you opened from its car
 | `:bd` (`:bdelete`) | Closes the focused chat for good, pane and all, a subagent's too. `clackatoo close N` does the same from a shell, and the card then says it's closed. |
 | Ctrl+B `u` | Goes from a subagent's pane to the chat that started it. |
 
-The daemon decides, so every window and client, and another machine's daemon relaying for its windows, all close a subagent's pane the same way. A subagent whose chat has closed has no card to go back to: its band says so, and closing its pane closes it, as for any chat. A daemon older than protocol 108 closes the chat with its pane, and its windows' bands don't name the profile.
+The daemon decides, so every window and client, and another machine's daemon relaying for its windows, all close a subagent's pane the same way. A subagent whose chat has closed has no card to go back to: its band says so, and closing its pane closes it, as for any chat. A daemon older than protocol 109 closes the chat with its pane, and its windows' bands don't name the profile; so does a window older than 109, to which closing a pane meant closing its chat, as it still does.
 
 Once back in the background it is like any other there: it closes with the chat that started it, lets its agent's process go once finished, and lasts through an upgrade but not a restart, as [below](#what-lasts).
 
 #### Closing
 
-Subagents in the background close with the chat that started them, unless they're still working or have changes you haven't reviewed: then they pass to the chat above, if there is one. Past 8 under one of your chats, the oldest close to make room, but only those that have finished, whose answers the agent that started them has read, with nothing waiting for your review and no subagents of their own. A finished one in the background lets Claude Code's process go after 2 minutes, and its next message brings it back in about half a second.
+Subagents in the background close with the chat that started them, unless they're still working or have changes you haven't reviewed: then they pass to the chat above, if there is one. Past 8 under one of your chats, the oldest close to make room, but only those that have finished, whose answers the agent that started them has read, with nothing waiting for your review and no subagents of their own, and never one you had in a pane and sent back: that one is yours to close, with `:bd`. A finished one in the background lets Claude Code's process go after 2 minutes, and its next message brings it back in about half a second.
 
 ### Profiles
 

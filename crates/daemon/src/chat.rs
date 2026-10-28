@@ -111,6 +111,11 @@ const PROFILE_SETTING: &str = "clackatoo.profile";
 /// names, so each session opens with them again.
 const LIMITS_SETTING: &str = "clackatoo.limits";
 
+/// The ID a chat an agent started keeps, with the values chosen, once
+/// the user has had it in a pane and sent it back to the background: it
+/// never closes to make room for others, as the user chose to keep it.
+const KEPT_SETTING: &str = "clackatoo.kept";
+
 /// The ID of the chat's own setting for whether its agent gets tools that
 /// drive clackatoo's browser (see [`crate::browser`]). Shown with the
 /// agent's settings, as the tools setting is, and never sent to the
@@ -147,6 +152,7 @@ fn chat_wide(id: &str) -> bool {
         TASK_SETTING,
         PROFILE_SETTING,
         LIMITS_SETTING,
+        KEPT_SETTING,
         BROWSER_SETTING,
         BROWSING_SETTING,
     ]

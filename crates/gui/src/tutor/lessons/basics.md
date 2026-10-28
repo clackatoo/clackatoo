@@ -101,7 +101,7 @@ mode insert
 
 ## Close the new pane
 
-Close the new pane, where you are, with Ctrl+B and then `x`, or `:close` from normal mode. Closing a pane hangs up its program.
+Close the new pane, where you are, with Ctrl+B and then `x`, or `:close` from normal mode. Closing a pane hangs up its program; only a subagent's chat, one an agent started, goes on in the background (see the agents lesson).
 
 Close the new one, not the practice terminal: closing that ends the lesson.
 

@@ -12,9 +12,11 @@
 //! watches (see [`super::badges`]), so a subagent's pane is marked
 //! wherever the chat that started it is, in another tab or none.
 
-use clackatoo_protocol::{ChatSummary, PaneId, Request, TerminalId, wire};
+use clackatoo_protocol::{ChatSummary, PaneId, Request, TerminalId};
 
+use super::bindings::{Action, Binding};
 use super::{Asked, Desk};
+use crate::keymap::{Chord, KeyMode};
 use crate::render::Ink;
 
 /// What the band across the top of a subagent's pane says of it.
@@ -28,6 +30,9 @@ pub(crate) struct Band {
     /// Whether the chat that started it is still open: if not, there's
     /// nowhere to go, and closing the pane closes the chat.
     pub(crate) open: bool,
+    /// The keys that go there, written short, as `^B u`, if any are
+    /// bound.
+    pub(crate) keys: Option<String>,
 }
 
 impl Band {
@@ -50,8 +55,10 @@ impl Band {
         if let Some(profile) = &self.profile {
             parts.push((format!(" · {profile}"), Ink::Muted));
         }
-        if self.open {
-            parts.push(("   ^B u parent chat".to_owned(), Ink::Muted));
+        if self.open
+            && let Some(keys) = &self.keys
+        {
+            parts.push((format!("   {keys} parent chat"), Ink::Muted));
         }
         parts
     }
@@ -67,7 +74,25 @@ impl Desk {
             parent,
             profile: summary.profile.clone(),
             open: self.watched_chat(parent).is_some(),
+            keys: self.parent_chat_keys(),
         })
+    }
+
+    /// The keys bound to going from a subagent to the chat that started
+    /// it, in normal mode, as the bar writes keys waiting: `^B u`.
+    fn parent_chat_keys(&self) -> Option<String> {
+        let parent = |binding: &Binding| matches!(binding, Binding::Window(Action::ParentChat));
+        let keys = self
+            .keymap
+            .keys_for(KeyMode::Normal, parent)
+            .into_iter()
+            .next()?;
+        Some(
+            (keys.iter())
+                .map(Chord::short)
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
     }
 
     /// How tall the band across the top of the pane of chat `terminal`
@@ -122,24 +147,33 @@ impl Desk {
         }
     }
 
-    /// Before `pane` closes: if it's a subagent's, whose chat is open, and
-    /// the daemon sends it back to the background rather than close it,
-    /// the bar says where it went, and how to close it for good.
+    /// Before `pane` closes: if it's a subagent's, the window watches for
+    /// it to go, to say where (see
+    /// [`say_where_subagent_went`](Self::say_where_subagent_went)).
     pub(super) fn closing_pane(&mut self, pane: PaneId) {
         let Some((_, _, shown)) = self.workspaces.find_pane(pane) else {
             return;
         };
-        let Some(terminal) = shown.content.terminal() else {
+        self.sending_back = (shown.content.terminal())
+            .filter(|&terminal| self.chats.contains_key(&terminal))
+            .filter(|&terminal| self.subagent_band(terminal).is_some());
+    }
+
+    /// The workspaces have changed: if the subagent whose pane this window
+    /// asked to close is in no pane now, and still open, as the daemon
+    /// sent it back to the background, the bar says where it went, and
+    /// how to close it for good. Closed instead, it says nothing.
+    pub(super) fn say_where_subagent_went(&mut self) {
+        let Some(chat) = self.sending_back else {
             return;
         };
-        let band = self.subagent_band(terminal).filter(|band| band.open);
-        if let Some(band) = band
-            && self.chats.contains_key(&terminal)
-            && self.daemon_has(wire::SUBAGENT_PROFILE)
-        {
+        if self.workspaces.pane_showing(chat).is_some() {
+            return;
+        }
+        self.sending_back = None;
+        if let Some(parent) = self.watched_chat(chat).and_then(|summary| summary.parent) {
             self.say(format!(
-                "chat {terminal} goes on in the background, as a card in chat {}: :bd closes it",
-                band.parent
+                "chat {chat} goes on in the background, as a card in chat {parent}: :bd closes it"
             ));
         }
     }

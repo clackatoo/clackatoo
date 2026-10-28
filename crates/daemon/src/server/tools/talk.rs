@@ -1066,6 +1066,20 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_the_user_had_in_a_pane_and_sent_back_never_closes_to_make_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = answered_chat(&mut daemon, 2, (a, a, 1));
+        drop(daemon.summary(a, &[b]));
+        assert_eq!(daemon.closable(a), [b]);
+        daemon.chat(b).unwrap().keep_for_user();
+        assert_eq!(daemon.closable(a), []);
+        // It's kept as a setting of the chat's own, which an upgrade hands
+        // over and no agent hears of.
+        assert!(daemon.chat_ref(b).unwrap().kept_by_user());
+    }
+
+    #[test]
     fn a_chat_still_going_goes_to_the_chat_above_as_the_one_that_started_it_closes() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());

@@ -226,8 +226,9 @@ Up and Down go back through the commands you've typed, in this window and others
 | `:workspace NAME`, `:ws NAME` | Switches to the workspace called NAME, making it if there's none. Without a name, makes a new workspace, named with the lowest number no workspace has. `:ws new@desk NAME` makes one on desk, as does `:ws NAME@desk` if desk has none of that name. |
 | `:rename NAME` | Renames the workspace shown. |
 | `:bg`, `:bgpane`, `:Background` | Sends the tab shown, or the focused pane, to the [background](#background-tabs), or lists the background tabs. |
-| `:close` | Closes the focused pane, hanging up its program. |
+| `:close` | Closes the focused pane, hanging up its program. A [subagent's](~clackatoo/reference/agents#subagents) pane only closes: the chat goes on in the background, a card in the chat that started it. |
 | `:q` | The same, unless the pane is the last showing a file with changes that aren't written. `:q!` closes it anyway, throwing them away. |
+| `:bd`, `:bdelete` | Closes the focused chat for good, pane and all: a subagent's too, which `:q` and `:close` only send back to the background. |
 | `:w`, `:wq`, `:e!`… | Write the focused pane's file, and the rest of Vim's commands for files: see [Editing files](~clackatoo/reference/editor#writing). |
 | `:reload` | Runs the [config](~clackatoo/reference/config) again, from the start. |
 | `:set nonu`, `:set rnu!`… | Changes [options](~clackatoo/reference/config#options), or shows them, as Vim's `:set` does. |
@@ -281,7 +282,8 @@ Ctrl+B and one more key work in either mode, as tmux's prefix does. While Ctrl+B
 | `h` `j` `k` `l` | Moves to the pane to the left, below, above or right. |
 | `\|` `-` | Splits the pane, with the new one to the right or below. |
 | `a` | Opens a [chat with an agent](~clackatoo/reference/agents) to the right. |
-| `x` | Closes the pane. |
+| `x` | Closes the pane; a subagent's goes back to the background. |
+| `u` | From a [subagent's](~clackatoo/reference/agents#subagents) pane, goes to the chat that started it. |
 | `w` | Opens the workspace picker. |
 | `o` `i` | Back and forward through the tab's places, as Ctrl+O and Ctrl+I do in normal mode. |
 | `b`, then `t` `p` `l` | Sends the tab or the pane to the [background](#background-tabs), or lists the background tabs. |

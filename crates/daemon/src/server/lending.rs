@@ -475,7 +475,7 @@ impl Daemon {
                 })
             });
         if idle {
-            self.close_panes(&panes)?;
+            self.close_panes(&panes, true)?;
             return Ok(Response::Text(
                 "closed it, as its shell was running nothing".into(),
             ));

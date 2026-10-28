@@ -15,7 +15,7 @@ use clackatoo_protocol::{
     ChatPatch, ChatState, Outcome, SettingKind, Subagent, SubagentStatus, TerminalId, ToolKind,
 };
 
-use super::{HostedChat, LIMITS_SETTING, PROFILE_SETTING, tool_kind};
+use super::{HostedChat, KEPT_SETTING, LIMITS_SETTING, PROFILE_SETTING, tool_kind};
 use crate::profiles::{self, Limits};
 
 /// The most of a chat's first message a card shows as its task, in
@@ -42,6 +42,19 @@ impl HostedChat {
         (self.chosen.iter())
             .find(|(id, _)| id == PROFILE_SETTING)
             .map(|(_, value)| value.as_str())
+    }
+
+    /// Whether the user had it in a pane and sent it back to the
+    /// background: it's theirs to close, never closed to make room.
+    pub(crate) fn kept_by_user(&self) -> bool {
+        (self.chosen.iter()).any(|(id, _)| id == KEPT_SETTING)
+    }
+
+    /// The user had it in a pane, and sent it back to the background.
+    pub(crate) fn keep_for_user(&mut self) {
+        if !self.kept_by_user() {
+            (self.chosen).push((KEPT_SETTING.to_owned(), "yes".to_owned()));
+        }
     }
 
     /// What it may do, beyond its agent's own settings.

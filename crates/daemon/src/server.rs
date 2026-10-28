@@ -2498,23 +2498,42 @@ impl Daemon {
         }
     }
 
-    /// Closes `panes`, as closing their tab or workspace does: their
-    /// terminals, and their buffers that have no changes to save.
     /// Closes `pane`, which shows the terminal `terminal`: ends its
-    /// program, or its chat. But a chat an agent started, whose chat is
-    /// still open, only loses its pane: it goes on in the background, as
-    /// a card in that chat again, as if it had never been shown.
-    fn close_terminal_pane(&mut self, pane: PaneId, terminal: TerminalId) -> Result<(), Error> {
-        if self.send_subagent_back(pane, terminal) {
+    /// program, or its chat. But if `back`, a chat an agent started, whose
+    /// chat is still open, only loses its pane: it goes on in the
+    /// background, as a card in that chat again, as if it had never been
+    /// shown.
+    fn close_terminal_pane(
+        &mut self,
+        pane: PaneId,
+        terminal: TerminalId,
+        back: bool,
+    ) -> Result<(), Error> {
+        if back && self.send_subagent_back(pane, terminal) {
             return Ok(());
         }
         self.close_terminal(terminal)
     }
 
-    fn close_panes(&mut self, panes: &[Pane]) -> Result<Response, Error> {
+    /// Whether closing a pane for the client at `token` sends a
+    /// subagent's chat back to the background rather than closing it:
+    /// for a client of protocol 109 on, as to an older one it means
+    /// closing it, and for the daemon itself.
+    pub(super) fn sends_subagents_back(&self, token: Token) -> bool {
+        match self.sources.get(token.0) {
+            Some(Source::Client(client)) => client.wire >= wire::SUBAGENT_PROFILE,
+            _ => true,
+        }
+    }
+
+    /// Closes `panes`, as closing their tab or workspace does: their
+    /// terminals, and their buffers that have no changes to save. A
+    /// subagent's chat goes back to the background if `back`, as
+    /// [`close_terminal_pane`](Self::close_terminal_pane) says.
+    fn close_panes(&mut self, panes: &[Pane], back: bool) -> Result<Response, Error> {
         for pane in panes {
             match pane.content {
-                Content::Terminal(terminal) => self.close_terminal_pane(pane.id, terminal)?,
+                Content::Terminal(terminal) => self.close_terminal_pane(pane.id, terminal, back)?,
                 Content::Buffer(buffer) => self.close_buffer_pane(pane.id, buffer),
                 Content::Files(files) | Content::Folder(files) => {
                     self.close_files_pane(pane.id, files);
@@ -3373,7 +3392,8 @@ impl Daemon {
             } => self.split_tab(tab, side, terminal, share),
             Request::ClosePane { pane } => match self.workspaces.check_pane(pane)? {
                 Content::Terminal(terminal) => {
-                    (self.close_terminal_pane(pane, terminal)).map(|()| Response::Done)
+                    let back = self.sends_subagents_back(token);
+                    (self.close_terminal_pane(pane, terminal, back)).map(|()| Response::Done)
                 }
                 Content::Buffer(buffer) => {
                     self.close_buffer_pane(pane, buffer);
@@ -3417,14 +3437,14 @@ impl Daemon {
             Request::BlankHere { pane, blank } => self.blank_here(pane, &blank),
             Request::CloseTab { tab } => {
                 let panes = self.workspaces.tab_panes(tab)?;
-                self.close_panes(&panes)
+                self.close_panes(&panes, self.sends_subagents_back(token))
             }
             Request::CloseWorkspace { workspace } => {
                 // Its background tabs first: none takes the place of its
                 // last tab as that closes.
                 let mut panes = self.workspaces.background_panes(workspace)?;
                 panes.extend(self.workspaces.workspace_panes(workspace)?);
-                self.close_panes(&panes)
+                self.close_panes(&panes, self.sends_subagents_back(token))
             }
             other => unreachable!("{other:?} isn't about workspaces"),
         }

@@ -12779,9 +12779,28 @@ fn closing_a_subagents_pane_sends_it_back_to_its_card_until_its_chat_is_closed()
     assert_eq!(card_of(&mut client, a)[0].status, SubagentStatus::Closed);
     assert_eq!(tab_contents(&mut client), [Content::Terminal(a)]);
 
+    // To a window older than protocol 109, closing the pane meant
+    // closing the chat, and still does.
+    let old = TerminalId(a.0 + 2);
+    ask_for(&mut client, a, show, Duration::from_secs(10));
+    wait_for_chat(&mut client, old, |node| last_outcome(node).is_some());
+    let panes = first_tab_panes(&client.watch_workspaces().unwrap());
+    let wire = wire::SUBAGENT_PROFILE - 1;
+    let mut raw = Raw::open(&daemon, wire);
+    raw.hello(wire);
+    raw.request(Request::ClosePane { pane: panes[1] });
+    let answer = loop {
+        if let ServerMessage::Response(response) = raw.next().expect("an answer") {
+            break response;
+        }
+    };
+    assert_eq!(answer, Response::Done);
+    assert!(!alive(&mut client).contains(&old));
+    assert_eq!(card_of(&mut client, a)[1].status, SubagentStatus::Closed);
+
     // One whose chat has closed has no card to go back to: closing its
     // pane closes it, as for any chat.
-    let other = TerminalId(a.0 + 2);
+    let other = TerminalId(a.0 + 3);
     ask_for(&mut client, a, show, Duration::from_secs(10));
     wait_for_chat(&mut client, other, |node| last_outcome(node).is_some());
     client.close_terminal(a).unwrap();

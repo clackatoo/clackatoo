@@ -579,6 +579,17 @@ impl<T: Clone> Keymap<T> {
             .collect()
     }
 
+    /// The keys bound in `mode` to what `wanted` picks, shortest first,
+    /// whatever keys are waiting: to say which to press for it.
+    pub(crate) fn keys_for(&self, mode: KeyMode, wanted: impl Fn(&T) -> bool) -> Vec<&[Chord]> {
+        let mut keys: Vec<&[Chord]> = (self.modes[mode.index()].iter())
+            .filter(|(_, entry)| wanted(&entry.action))
+            .map(|(keys, _)| keys.as_slice())
+            .collect();
+        keys.sort_by_key(|keys| keys.len());
+        keys
+    }
+
     pub(crate) fn intercepts(&self, mode: KeyMode, keys: &[Chord]) -> bool {
         self.modes[mode.index()]
             .keys()
