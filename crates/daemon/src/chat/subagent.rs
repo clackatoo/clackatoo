@@ -145,7 +145,7 @@ impl HostedChat {
                 .relations
                 .inbox
                 .front()
-                .is_some_and(Message::is_finished_notice)
+                .is_some_and(Message::is_unfilled_notice)
     }
 
     /// The notice that chats it started have finished, next, says `text`,
@@ -162,29 +162,38 @@ impl HostedChat {
     }
 
     /// Notices that chats finished have started `turns` turns under the
-    /// user's chat since they last wrote there, as many as may be: the
-    /// next waits for them, and the chat says so.
-    pub(crate) fn notices_held(&mut self, turns: u32) {
+    /// user's chat `root` since they last wrote there, or here, as many as
+    /// may be: the next waits for them, and the chat says so.
+    pub(crate) fn notices_held(&mut self, turns: u32, root: TerminalId) {
+        let place = if root == self.id {
+            "here".to_owned()
+        } else {
+            format!("here or in chat {root}")
+        };
         let said = format!(
             "What subagents found waits for you: their notices have started {turns} turns since \
-             you last wrote. Send a message to go on."
+             you last wrote. Write {place} to go on."
         );
         if self.node.notice.as_deref() != Some(said.as_str()) {
             self.set_notice(Some(said));
         }
     }
 
-    /// The notice that chats it started have finished, next, waits on for
-    /// the user: anything else waiting goes first. Returns whether
-    /// anything else waits.
-    pub(crate) fn hold_finished_notice(&mut self) -> bool {
-        if self.relations.inbox.len() < 2 {
-            return false;
-        }
-        if let Some(notice) = self.relations.inbox.pop_front() {
-            self.relations.inbox.push_back(notice);
-        }
-        true
+    /// Takes the notice that chats it started have finished out from in
+    /// front of what else waits, as it waits for the user, so the next
+    /// message behind it can be checked and begin: put it back with
+    /// [`Self::put_back_notice`].
+    pub(crate) fn take_held_notice(&mut self) -> Option<Message> {
+        let front = self.relations.inbox.front()?;
+        front
+            .is_unfilled_notice()
+            .then(|| self.relations.inbox.pop_front())
+            .flatten()
+    }
+
+    /// Puts back the notice [`Self::take_held_notice`] took, in front.
+    pub(crate) fn put_back_notice(&mut self, notice: Message) {
+        self.relations.inbox.push_front(notice);
     }
 
     /// Where its agent's mode is among the modes it offers, from 0, the

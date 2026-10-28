@@ -49,8 +49,8 @@ impl Message {
         Self {
             from: Sender {
                 chat,
-                agent: "Clackatoo".to_owned(),
-                title: "Subagents finished".to_owned(),
+                agent: NOTICE_AGENT.to_owned(),
+                title: FINISHED_TITLE.to_owned(),
             },
             text: String::new(),
             hops: 0,
@@ -58,12 +58,25 @@ impl Message {
         }
     }
 
-    /// Whether it's the notice that chats started have finished, still
-    /// waiting to say what.
+    /// Whether it's the notice that chats started have finished, whether
+    /// or not it says what yet, rather than an activity's.
     pub(crate) fn is_finished_notice(&self) -> bool {
-        self.is_notice() && self.text.is_empty()
+        self.is_notice() && self.from.agent == NOTICE_AGENT && self.from.title == FINISHED_TITLE
+    }
+
+    /// Whether it's the notice that chats started have finished, still
+    /// waiting to say what: never begun so (see `HostedChat::deliver_next`).
+    pub(crate) fn is_unfilled_notice(&self) -> bool {
+        self.is_finished_notice() && self.text.is_empty()
     }
 }
+
+/// Who a notice from clackatoo itself is from, as the chat shows it.
+const NOTICE_AGENT: &str = "Clackatoo";
+
+/// What the notice that chats started have finished is called, as the
+/// chat shows it: activities' notices are called otherwise.
+const FINISHED_TITLE: &str = "Subagents finished";
 
 /// A chat's place among the others.
 #[derive(Debug, Default)]

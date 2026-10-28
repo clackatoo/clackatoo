@@ -524,7 +524,7 @@ impl Daemon {
     /// Whether the chats `chats` have finished: all of them, or with
     /// `first`, any. A chat that's closed has.
     pub(super) fn chats_finished(&self, chats: &[TerminalId], first: bool) -> bool {
-        let done = |chat: &TerminalId| self.chat_ref(*chat).is_none_or(super::talk::idle);
+        let done = |chat: &TerminalId| self.settled(*chat);
         if first {
             chats.iter().any(done)
         } else {
@@ -535,9 +535,7 @@ impl Daemon {
     /// One summary of the chats `chats`, for the chat `chat`'s agent: how
     /// each is going, its final answer, and the files it changed.
     pub(super) fn summary(&self, chat: TerminalId, chats: &[TerminalId]) -> String {
-        let finished = (chats.iter())
-            .filter(|&&other| self.chat_ref(other).is_none_or(super::talk::idle))
-            .count();
+        let finished = (chats.iter()).filter(|&&other| self.settled(other)).count();
         let mut text = match chats.len() {
             1 => String::new(),
             count => format!(
@@ -594,7 +592,7 @@ impl Daemon {
         if let Some(note) = self.undelivered(chat, to) {
             text.insert_str(0, &note);
         }
-        if !super::talk::idle(other) {
+        if !self.settled(to) {
             return text;
         }
         let answer = (turns.iter()).rfind(|turn| turn.switch.is_none() && turn.end.is_some());
@@ -624,6 +622,10 @@ impl Daemon {
         }
         if let Some(going) = going_note(other) {
             text.push_str(&going);
+            text.push('\n');
+        }
+        if let Some(held) = self.held_note(to) {
+            text.push_str(&held);
             text.push('\n');
         }
         let changed = self.agent_files.log.changed_in(to, 0..turns.len());

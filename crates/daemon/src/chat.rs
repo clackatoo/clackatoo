@@ -1234,6 +1234,13 @@ impl HostedChat {
         if self.next_message_from().is_none() {
             return Vec::new();
         }
+        // The notice that chats finished says what only as the server
+        // fills it in; until then it's never begun, saying nothing.
+        let unfilled = (self.relations.inbox.front()).is_some_and(Message::is_unfilled_notice);
+        debug_assert!(!unfilled, "chat {}: an unfilled notice is next", self.id);
+        if unfilled {
+            return Vec::new();
+        }
         match self.relations.inbox.pop_front() {
             Some(message) => self.begin_message(message),
             None => Vec::new(),
@@ -1243,11 +1250,18 @@ impl HostedChat {
     /// Starts a turn with `message`, from another agent.
     fn begin_message(&mut self, message: Message) -> Vec<Action> {
         let mut actions = Vec::new();
-        // A notice from clackatoo starts a new chain of messages, as the
-        // user's own message does: a PM going round with its builder isn't
-        // two agents answering each other. What bounds those turns is
-        // the server's (`MAX_NOTICE_TURNS`).
-        self.relations.hops = message.hops;
+        debug_assert!(!message.is_unfilled_notice(), "chat {}", self.id);
+        if message.is_unfilled_notice() {
+            return actions;
+        }
+        // The notice that chats finished starts a new chain of messages,
+        // as the user's own message does: a PM going round with its
+        // builder isn't two agents answering each other, and what bounds
+        // those turns is the server's (`MAX_NOTICE_TURNS`). An activity's
+        // notice, which nothing else bounds, leaves the chain as it was.
+        if !message.is_notice() || message.is_finished_notice() {
+            self.relations.hops = message.hops;
+        }
         self.relations.cause = message.cause.or(self.relations.cause);
         let prompt = relations::prompt_for(&message);
         self.begin(
