@@ -24,8 +24,8 @@ use clackatoo_protocol::{
     Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode,
     ClientMessage, Connection, ConnectionState, Content, Done, Edit, Error, Event, FileOp,
     FilesAction, FilesId, FilesUpdate, Forwarding, Found, Item, MachineId, NewAgent, NewTerminal,
-    OpenFile, OpenFiles, PaneId, PaneTerminal, Query, Request, Response, Search, ServerMessage,
-    Side, Size, TerminalId, View, ViewUpdate, Workspace, Workspaces,
+    OpenFile, OpenFiles, PaneId, PaneTerminal, Position, Query, Request, Response, Search,
+    ServerMessage, Side, Size, TerminalId, View, ViewUpdate, Workspace, Workspaces,
 };
 
 /// How long anything here may take, on a busy machine.
@@ -1173,6 +1173,49 @@ fn another_machines_workspaces_come_in_and_its_terminals_answer_through_this_dae
     }
     assert!(matches!(answers[0], Response::History(_)), "{answers:?}");
     assert!(matches!(answers[1], Response::Text(_)), "{answers:?}");
+
+    // Searched, it's searched there, and found where laptop finds it: the
+    // next match, and a count's.
+    let mut at_laptop = laptop.client();
+    let theirs = first_terminal(theirs_of(&at_laptop.watch_workspaces().unwrap(), "work"));
+    let search = |terminal, count| Request::Search {
+        terminal,
+        query: "relayed".into(),
+        from: Position { line: 0, col: 0 },
+        backward: false,
+        exact: true,
+        count,
+    };
+    for count in [None, Some(2), Some(3)] {
+        let relayed = window.request(&search(terminal, count)).unwrap();
+        let direct = at_laptop.request(&search(theirs, count)).unwrap();
+        match (&relayed, count) {
+            (Response::Found(Some(_)), None) => {}
+            (
+                Response::Searched {
+                    found: Some(_),
+                    wrapped,
+                },
+                Some(2),
+            ) => assert!(!wrapped),
+            (
+                Response::Searched {
+                    found: Some(_),
+                    wrapped,
+                },
+                Some(3),
+            ) => assert!(wrapped),
+            _ => panic!("{count:?}: {relayed:?}"),
+        }
+        assert_eq!(relayed, direct, "{count:?}");
+    }
+}
+
+/// The workspace named `name` among `workspaces`.
+fn theirs_of<'a>(workspaces: &'a Workspaces, name: &str) -> &'a Workspace {
+    (workspaces.list.iter())
+        .find(|workspace| workspace.name == name)
+        .expect("the workspace")
 }
 
 #[test]

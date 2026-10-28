@@ -2657,6 +2657,7 @@ impl Daemon {
                 | Response::History(_)
                 | Response::Text(_)
                 | Response::Found(_)
+                | Response::Searched { .. }
                 | Response::Block(_)),
             )
             | (Then::Recovered, response @ (Response::Done | Response::Text(_)))
