@@ -253,7 +253,7 @@ In Manual mode, before it does anything that changes something, such as writing 
 
 Click an answer to give it. In insert mode, press an answer's number to give it, or Esc to say no. In normal mode, a number picks its answer out with a ring, and the bar says what it is: the same number again, or Enter, gives it, from a third of a second after to five seconds after, so a count such as `22j` typed in one go can't answer by chance; any other key, a click, the wheel or leaving the window drops it, and Esc leaves the question be. A number pressed within half a second of the question coming, of you arriving at its chat, or of the last key you typed, doesn't answer it; the bar says to press it again. Ctrl+C says no and stops the answer. Other keys go nowhere while it asks, and the bar says which numbers answer it.
 
-clackatoo's own questions about its tools say Reject, as Claude Code's do, name a new chat's profile ("with the general profile"), write folders from your home as `~/…`, and show what the agent wrote as code, each message quoted on its own, so nothing in it can pass for clackatoo's words.
+clackatoo's own questions about its tools say Reject, as Claude Code's do, and show what the agent wrote as code, so nothing in it can pass for clackatoo's words.
 
 What it asks about follows the agent's own settings. Claude Code reads its usual settings files, so commands you've allowed in Claude Code are allowed here too.
 
@@ -316,7 +316,7 @@ The first pane an agent opens goes to its chat's right, and the next ones stack 
 
 No tool marks a terminal to [keep running](~clackatoo/reference/window#keeping-a-terminal-running), and `run_in_terminal` and `run_in_background` refuse a command line that runs `clackatoo keep` or `clackatoo bg`. That's a guard against mistakes, not a boundary: whatever an agent types into a terminal, or a script it runs there, follows the rules below, and could do what you could at that shell.
 
-Before running a command or typing into a terminal, the agent asks: Allow, Always allow, or Reject. The question shows exactly what would be typed, with keys such as Enter shown as `⏎` and nothing cut short; long text goes in the conversation, in full. Always allow lets the agent run commands in terminals it started without asking; typing into a terminal you opened always asks, and so does showing a file or folder outside the chat's project. The tools that only show or read inside the project never ask.
+Before running a command or typing into a terminal, the agent asks: Allow, Always allow, or Reject. The question shows exactly what would be typed, with keys such as Enter shown as `⏎` and nothing cut short; long text goes in the conversation, in full. Always allow lets the agent run commands in terminals it started without asking; typing into a terminal you opened always asks, and so does showing a file or folder outside the chat's project. The tools that only show or read inside the project, and those that start and message chats, never ask.
 
 The chat's box has a Tools setting, Ask, Allow or Off, that you can change at any time. The `agenttools` option sets it for new chats, `ask` to begin with, and `CLACKATOO_AGENT_TOOLS=off` for the daemon gives no agent any tools.
 
@@ -359,7 +359,7 @@ An agent can work with your other chats through more of clackatoo's tools.
 | `send_to_chat` | Sends a chat a message. |
 | `read_chat` | Reads a chat's last turns: 3, unless it asks for up to 20. |
 | `start_chat` | Starts a subagent: a chat with the agent, profile and folder it picks, sent a first message. It runs in the background, as a card in this chat, unless it asks for a pane. |
-| `start_chats` | Starts several at once, asking you once for all of them. |
+| `start_chats` | Starts several at once. |
 | `wait_for_chat` | Waits until a chat has answered everything sent to it, for 5 minutes unless it asks for up to 30, and gives its answer. |
 | `wait_for_chats` | Waits for several chats, all of them or the first to finish, and gives one summary: each one's status, final answer and files changed. |
 
@@ -415,11 +415,11 @@ prompt = "You review changes for bugs. Say what's wrong, briefly."
 
 A message from another chat shows with "From chat 3 · Claude Code · …" over it, and reaches the agent framed as another agent's request, not yours: it's told to ask you before anything destructive or outside its task. If the chat is busy, the message waits until its answer ends; up to 8 can wait, and stopping the chat drops them, and says so.
 
-An agent can never gain, through another chat, what its own chat isn't allowed:
+Starting and messaging chats never asks you first, as in other agent harnesses, but an agent can never gain, through another chat, what its own chat isn't allowed:
 
-- A message goes without asking only to a chat in its own family, the chat that started it, the chats it started and their siblings, and only if that chat's Tools setting isn't looser than its own. Otherwise you're asked: Allow, Always allow for that chat, or Deny.
-- Starting a chat asks you first unless the chat's Tools setting is Allow, and always asks for a folder outside the project. Starting several asks once, listing each one's agent, profile and folder. The new chat gets its parent's Tools setting and mode, and its limits (see [Profiles](#profiles)).
-- Reading or waiting on a chat needs the same workspace, the same family, or a pair you've allowed.
+- A message to a chat whose Tools setting is looser than the sender's, or whose [limits](#profiles) are fewer, is refused.
+- A chat an agent starts gets its parent's Tools setting and mode, and its limits (see [Profiles](#profiles)), so its own tools ask whatever its parent's would.
+- Reading or waiting on a chat needs the same workspace or the same family: the chat that started it, the chats it started and their siblings. Of any other chat, an agent waits only for the answers to its own messages.
 - One message of yours can lead to at most 16 turns of agents' work across all chats, and a chat of yours can have at most 8 chats started under it (finished ones in the background close to make room), 4 of them working at once, a message waking one counting too, 2 deep. An agent can't wait for a chat that's waiting for it.
 
 Which chat started which, and messages waiting their turn, last through an upgrade. Boards, shared between agents and you, have tools of their own: see [Boards](~clackatoo/reference/boards).
