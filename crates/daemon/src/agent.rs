@@ -262,6 +262,22 @@ const MOST_TASK_TEXT: usize = 300;
 /// output.
 const AIR_CAPABILITIES: &[&str] = &["asyncTasks"];
 
+/// What the agent's notification `method`, with `params`, says of what it
+/// asked: that it no longer waits for a request (`$/cancel_request`), or
+/// that a link it asked to be opened is done with
+/// (`elicitation/complete`).
+fn elicitation_notice(method: &str, params: &Value) -> Option<Incoming> {
+    match method {
+        "$/cancel_request" => Some(Incoming::Cancelled {
+            request: params.get("requestId")?.clone(),
+        }),
+        "elicitation/complete" => Some(Incoming::Completed {
+            id: params.get("elicitationId")?.as_str()?.to_owned(),
+        }),
+        _ => None,
+    }
+}
+
 /// A session the agent kept, as it listed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Listed {
@@ -719,16 +735,8 @@ impl Agent {
             (Some(method), None) => {
                 if method == "_clackatoo/login_required" && self.name() == "agent antigravity" {
                     self.peer.require_login();
-                } else if method == "$/cancel_request" {
-                    if let Some(request) = message.params.get("requestId") {
-                        incoming.push(Incoming::Cancelled {
-                            request: request.clone(),
-                        });
-                    }
-                } else if method == "elicitation/complete" {
-                    if let Some(id) = message.params.get("elicitationId").and_then(Value::as_str) {
-                        incoming.push(Incoming::Completed { id: id.to_owned() });
-                    }
+                } else if let Some(notice) = elicitation_notice(&method, &message.params) {
+                    incoming.push(notice);
                 } else if method == "_claude/sdkMessage" {
                     if let Some((session, results)) = tool_results(&message.params) {
                         incoming.push(Incoming::ToolResults { session, results });
@@ -776,22 +784,9 @@ impl Agent {
                                 options: request.options,
                             })
                     }
-                    "elicitation/create" => match crate::elicit::read(&params) {
-                        Ok(asked) => Some(Incoming::Elicit {
-                            request: id.clone(),
-                            asked: Box::new(asked),
-                        }),
-                        // Nowhere to show it, or not something this build
-                        // can: no, as the protocol says a client answers
-                        // what it can't show.
-                        Err(why) => {
-                            log::debug!("agent: declining an elicitation: {why:?}");
-                            return self.reply(&json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "result": { "action": "decline" },
-                            }));
-                        }
+                    "elicitation/create" => match self.elicited(&id, &params) {
+                        Some(asked) => Some(asked),
+                        None => return,
                     },
                     "fs/read_text_file" => serde_json::from_value::<ReadTextFileRequest>(params)
                         .ok()
@@ -838,6 +833,28 @@ impl Agent {
                 self.answered(pending, result, incoming);
             }
             (None, None) => {}
+        }
+    }
+
+    /// What the agent asks the user in an `elicitation/create` request
+    /// `id`, with `params`, to show; or `None` if it's been declined at
+    /// once, as it can't be shown: about no session, or not something
+    /// this build can show, which the protocol has a client decline.
+    fn elicited(&mut self, id: &Value, params: &Value) -> Option<Incoming> {
+        match crate::elicit::read(params) {
+            Ok(asked) => Some(Incoming::Elicit {
+                request: id.clone(),
+                asked: Box::new(asked),
+            }),
+            Err(why) => {
+                log::debug!("agent: declining an elicitation: {why:?}");
+                self.reply(&json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "action": "decline" },
+                }));
+                None
+            }
         }
     }
 

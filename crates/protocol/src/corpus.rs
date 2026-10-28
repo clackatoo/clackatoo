@@ -1419,6 +1419,7 @@ fn agent_plan() -> Vec<Sample> {
 /// Samples of protocol 113: forms an agent asks to be filled in, with a
 /// field of every kind, and a link to open; a plan to approve; and every
 /// kind of answer (CLACKA-191).
+#[allow(clippy::too_many_lines, reason = "one sample of each kind of field")]
 fn elicitation() -> Vec<Sample> {
     use crate::{Field, FieldInput, FieldOption, FieldValue, Form, FormAsk, FormReply, Question};
     use Sample::{Client, Server};

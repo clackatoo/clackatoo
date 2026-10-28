@@ -60,12 +60,12 @@ impl HostedChat {
             plan: None,
         };
         self.next_question += 1;
-        let asker = Asker::Elicit {
+        let held = Asker::Elicit {
             request,
             form: Box::new(asked.form),
             url_id: asked.url_id,
         };
-        self.asking.push_back((asker, question));
+        self.asking.push_back((held, question));
         self.show_question();
         true
     }
