@@ -1268,6 +1268,8 @@ mod tests {
             title: "Write notes.txt".into(),
             choices: Vec::new(),
             own: false,
+            form: None,
+            plan: None,
         };
         state.receive(patch(vec![ChatPatch::Question(Some(question.clone()))]));
         assert_eq!(state.dirty.turns, BTreeSet::from([1]), "its line says so");

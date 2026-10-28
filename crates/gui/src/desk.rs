@@ -4184,6 +4184,8 @@ mod tests {
             title: "Run ls".into(),
             choices: Vec::new(),
             own: false,
+            form: None,
+            plan: None,
         };
         for (terminal, node) in [(2, chat(None)), (3, chat(Some(question)))] {
             // Asking in a tab not shown: drawn, for its name to say so.

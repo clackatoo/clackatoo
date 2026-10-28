@@ -398,6 +398,8 @@ mod tests {
             title: "Run ls".into(),
             choices: Vec::new(),
             own: false,
+            form: None,
+            plan: None,
         });
         let mut chat = ChatView::new(String::new(), node);
         assert_eq!(drawn(&mut chat, &mut fonts, SENT, true), None);

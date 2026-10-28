@@ -1588,6 +1588,8 @@ mod tests {
                     title: own.into(),
                     choices: Vec::new(),
                     own: own_question,
+                    form: None,
+                    plan: None,
                 }),
                 ..ChatNode::default()
             };
@@ -1607,6 +1609,8 @@ mod tests {
                 title: "send `` look at the `parser` `` to a new chat".into(),
                 choices: Vec::new(),
                 own: false,
+                form: None,
+                plan: None,
             }),
             ..ChatNode::default()
         };
@@ -1650,6 +1654,8 @@ mod tests {
                     })
                     .collect(),
                 own: false,
+                form: None,
+                plan: None,
             }),
             ..ChatNode::default()
         };
@@ -1936,6 +1942,8 @@ mod tests {
             title: "run ls".into(),
             choices: Vec::new(),
             own: false,
+            form: None,
+            plan: None,
         });
         assert_eq!(said(&node, 13_400), None);
         // The turn's own line says so instead, in the accent colour.

@@ -879,6 +879,8 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
             })
             .into(),
             own: false,
+            form: None,
+            plan: None,
         }),
         settings: claude_settings(),
         usage: Some(clackatoo_protocol::Usage {

@@ -1372,6 +1372,11 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             .into_iter()
             .map(|sample| (crate::wire::AGENT_PLAN, sample)),
     );
+    samples.extend(
+        elicitation()
+            .into_iter()
+            .map(|sample| (crate::wire::ELICITATION, sample)),
+    );
     samples
 }
 
@@ -1408,6 +1413,138 @@ fn agent_plan() -> Vec<Sample> {
                 root: Node::Chat(Box::new(ChatNode { plan, ..chat() })),
             }),
         })),
+    ]
+}
+
+/// Samples of protocol 113: forms an agent asks to be filled in, with a
+/// field of every kind, and a link to open; a plan to approve; and every
+/// kind of answer (CLACKA-191).
+fn elicitation() -> Vec<Sample> {
+    use crate::{Field, FieldInput, FieldOption, FieldValue, Form, FormAsk, FormReply, Question};
+    use Sample::{Client, Server};
+    let terminal = TerminalId(3);
+    let option = |value: &str, description: Option<&str>| FieldOption {
+        value: value.into(),
+        title: value.to_uppercase(),
+        description: description.map(Into::into),
+    };
+    let field = |key: &str, required, input| Field {
+        key: key.into(),
+        title: Some(key.to_uppercase()),
+        description: None,
+        required,
+        input,
+    };
+    let fields = vec![
+        field(
+            "db",
+            true,
+            FieldInput::One {
+                options: vec![option("pg", Some("Server")), option("lite", None)],
+                default: Some("pg".into()),
+            },
+        ),
+        field(
+            "note",
+            false,
+            FieldInput::Text {
+                default: Some("none".into()),
+                min: Some(1),
+                max: Some(200),
+                secret: true,
+                format: Some("email".into()),
+            },
+        ),
+        field(
+            "count",
+            false,
+            FieldInput::Number {
+                integer: true,
+                min: Some("1".into()),
+                max: Some("9".into()),
+                default: Some("3".into()),
+            },
+        ),
+        field(
+            "go",
+            false,
+            FieldInput::Toggle {
+                default: Some(true),
+            },
+        ),
+        field(
+            "also",
+            false,
+            FieldInput::Many {
+                options: vec![option("tests", None), option("docs", Some("Learn"))],
+                min: Some(0),
+                max: Some(2),
+                default: vec!["tests".into()],
+            },
+        ),
+    ];
+    let decline = Choice {
+        id: "decline".into(),
+        name: "Decline".into(),
+        kind: ChoiceKind::RejectOnce,
+    };
+    let question = |id, form| Question {
+        id,
+        title: "ask you something this window is too old to answer: `Which?`".into(),
+        choices: vec![decline.clone()],
+        own: false,
+        form: Some(form),
+        plan: None,
+    };
+    let asked = |question| {
+        Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Question(Some(question)))]),
+        }))
+    };
+    let fill = |question, reply| {
+        Client(ClientMessage::Request(Request::Chat {
+            terminal,
+            action: ChatAction::Fill { question, reply },
+        }))
+    };
+    vec![
+        asked(question(
+            7,
+            Form {
+                message: "Which database?".into(),
+                ask: FormAsk::Fields {
+                    fields,
+                    complete: true,
+                },
+            },
+        )),
+        asked(question(
+            8,
+            Form {
+                message: "Authenticate with MCP server linear".into(),
+                ask: FormAsk::Url("https://linear.app/oauth/authorize?state=x".into()),
+            },
+        )),
+        asked(Question {
+            id: 9,
+            title: "Approve Plan".into(),
+            choices: vec![decline],
+            own: false,
+            form: None,
+            plan: Some("## Plan\n\n1. Write the tests.".into()),
+        }),
+        fill(
+            7,
+            FormReply::Accept(vec![
+                ("db".into(), FieldValue::Text("pg".into())),
+                ("count".into(), FieldValue::Number("4".into())),
+                ("go".into(), FieldValue::Toggle(false)),
+                ("also".into(), FieldValue::Many(vec!["docs".into()])),
+            ]),
+        ),
+        fill(8, FormReply::Decline),
+        fill(8, FormReply::Cancel),
     ]
 }
 
@@ -3197,6 +3334,8 @@ fn question() -> Question {
             kind: ChoiceKind::AllowOnce,
         }],
         own: true,
+        form: None,
+        plan: None,
     }
 }
 

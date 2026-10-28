@@ -872,6 +872,25 @@ pub struct Question {
     /// an agent can word one like the daemon's.
     #[serde(default)]
     pub own: bool,
+    /// What the agent asks the user to fill in or open, if it's that
+    /// rather than whether it may use a tool (ACP's elicitation), answered
+    /// with [`ChatAction::Fill`]. Its `choices` then only decline: a
+    /// window older than protocol 113 shows the title and those.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::ELICITATION }, _>",
+        deserialize_with = "wire::since::<{ wire::ELICITATION }, _, _>"
+    )]
+    pub form: Option<crate::Form>,
+    /// The plan the agent asks to go ahead with, in Markdown, if the tool
+    /// it asks about is one that leaves planning, as Claude Code's
+    /// `ExitPlanMode`: to show above the choices.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::ELICITATION }, _>",
+        deserialize_with = "wire::since::<{ wire::ELICITATION }, _, _>"
+    )]
+    pub plan: Option<String>,
 }
 
 /// A block of code in an agent's words, to colour: see
@@ -1379,6 +1398,16 @@ pub enum ChatAction {
     StopTask {
         /// The task, by the agent's name for it.
         id: String,
+    },
+    /// Answer the agent's question numbered `question`, a form it asks to
+    /// be filled in or a link to open (see [`Question::form`]). An answer
+    /// to a question no longer asked, or that doesn't fit the form, is
+    /// ignored. Requires `wire::ELICITATION`.
+    Fill {
+        /// The question's number.
+        question: u64,
+        /// The answer.
+        reply: crate::FormReply,
     },
 }
 
@@ -2051,6 +2080,8 @@ mod tests {
             title: "Run ls".into(),
             choices: Vec::new(),
             own: false,
+            form: None,
+            plan: None,
         });
         assert!(chat.asking() && !chat.working() && chat.doing().is_none());
         chat.question = None;
@@ -2096,6 +2127,8 @@ mod tests {
             title: "Install Claude Code's adapter?".into(),
             choices: Vec::new(),
             own: true,
+            form: None,
+            plan: None,
         });
         assert!(chat.working() && !chat.asking());
         assert_eq!(chat.doing().as_deref(), Some("Working"));
@@ -2154,6 +2187,8 @@ mod tests {
                 title: title.to_owned(),
                 choices: Vec::new(),
                 own: false,
+                form: None,
+                plan: None,
             }
             .said()
         };

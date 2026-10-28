@@ -33,6 +33,7 @@ use crate::agents::AgentSpec;
 use crate::handoff::{self, Changed, Digest, Step, StepState};
 use crate::handover;
 
+mod elicit;
 mod limits;
 mod originals;
 mod plan;
@@ -280,6 +281,9 @@ pub(crate) enum Action {
     /// Ask the agent to stop the task it runs in the background that it
     /// calls this.
     StopTask(String),
+    /// Answer the agent's request `request`, a form it asked the user to
+    /// fill in or a link to open, with `result`.
+    Elicited { request: Value, result: Value },
 }
 
 /// The answer to an install offer that installs.
@@ -495,6 +499,14 @@ enum Asker {
     Suggest,
     /// The daemon: what to do about a session the agent is slow to open.
     Slow,
+    /// The agent, asking the user to fill in `form` or open the link it
+    /// holds, in the request with this JSON-RPC ID; `url_id` is the
+    /// agent's ID for a link, which says when it's done with.
+    Elicit {
+        request: Value,
+        form: Box<clackatoo_protocol::Form>,
+        url_id: Option<String>,
+    },
 }
 
 /// The answers to the question asked when the agent is slow to open a
@@ -1033,6 +1045,7 @@ impl HostedChat {
             | ChatAction::LearnModels
             | ChatAction::Open { .. } => {}
             ChatAction::StopTask { id } => self.stop_task(&id, &mut actions),
+            ChatAction::Fill { question, reply } => self.fill(question, &reply, &mut actions),
             // Only a value the agent offers is kept, and asked for.
             ChatAction::Set { setting, value } => {
                 if self.set_value(&setting, &value) {
@@ -1511,6 +1524,7 @@ impl HostedChat {
         }
         // What it runs in the background goes with the agent it leaves.
         self.tasks_lost();
+        self.elicitations_lost();
         self.set_native_steering(false);
         // The chat's own settings go with it to every agent: what it may
         // do with clackatoo's tools, whether it keeps Claude Code's Task
@@ -1634,6 +1648,7 @@ impl HostedChat {
     /// conversation with the next message, rather than failing.
     pub(crate) fn session_lost(&mut self) {
         self.tasks_lost();
+        self.elicitations_lost();
         self.session = None;
         self.known = 0;
         self.link = Link::Opening;
@@ -1775,6 +1790,8 @@ impl HostedChat {
                 },
             ],
             own: true,
+            form: None,
+            plan: None,
         };
         self.next_question += 1;
         self.asking.push_back((asker, question));
@@ -1813,6 +1830,8 @@ impl HostedChat {
                 })
                 .collect(),
             own: true,
+            form: None,
+            plan: None,
         };
         self.next_question += 1;
         // First: it's why the chat is stuck, and a suggestion to install
@@ -1909,6 +1928,7 @@ impl HostedChat {
     /// it again, as after the agent stopped.
     pub(crate) fn agent_restarted(&mut self) -> bool {
         self.tasks_lost();
+        self.elicitations_lost();
         match self.link {
             Link::Opening => {
                 self.load_cut_off(Held::Send);
@@ -1930,6 +1950,7 @@ impl HostedChat {
             return Vec::new();
         }
         self.tasks_lost();
+        self.elicitations_lost();
         if self.queued.is_some() {
             self.link = Link::Opening;
             vec![Action::Connect]
@@ -2019,6 +2040,7 @@ impl HostedChat {
     /// started, `why` says why, as far as it said.
     pub(crate) fn disconnected(&mut self, why: Option<&str>) {
         self.tasks_lost();
+        self.elicitations_lost();
         self.queue_disconnected();
         self.clear_slow();
         self.load_cut_off(Held::End(Outcome::Failed("the agent stopped".to_owned())));
@@ -2167,6 +2189,8 @@ impl HostedChat {
             title: clean(&title),
             choices,
             own: false,
+            form: None,
+            plan: elicit::plan(tool, options),
         };
         self.next_question += 1;
         self.asking.push_back((Asker::Agent(request), question));
@@ -2218,6 +2242,8 @@ impl HostedChat {
             title: what.to_owned(),
             choices,
             own: false,
+            form: None,
+            plan: None,
         };
         self.next_question += 1;
         self.asking.push_back((Asker::Tool(call), question));
@@ -2240,6 +2266,19 @@ impl HostedChat {
         let install = option.as_deref() == Some(INSTALL);
         match asker {
             Asker::Agent(request) => Some(Action::Answer { request, option }),
+            // The only choice a window older than forms is offered says no;
+            // none is not now.
+            Asker::Elicit { request, form, .. } => {
+                let reply = if option.as_deref() == Some(elicit::DECLINE) {
+                    clackatoo_protocol::FormReply::Decline
+                } else {
+                    clackatoo_protocol::FormReply::Cancel
+                };
+                Some(Action::Elicited {
+                    request,
+                    result: crate::elicit::result(&form, &reply),
+                })
+            }
             Asker::Tool(call) => {
                 let option = option.as_deref();
                 if option == Some("always") {
@@ -2533,8 +2572,12 @@ impl HostedChat {
         if self.told_again() {
             return false;
         }
-        let asked = (self.asking.iter())
-            .any(|(asker, _)| matches!(asker, Asker::Agent(_) | Asker::Tool(_)));
+        let asked = (self.asking.iter()).any(|(asker, _)| {
+            matches!(
+                asker,
+                Asker::Agent(_) | Asker::Tool(_) | Asker::Elicit { .. }
+            )
+        });
         let Some(turn) = self.answering_turn().filter(|_| !asked) else {
             return false;
         };
@@ -4532,6 +4575,137 @@ mod tests {
             Some(ViewUpdate::Snapshot(_))
         ));
         assert_eq!(viewer.view.as_ref(), Some(&chat.view()));
+    }
+
+    /// What Claude Code's adapter asks for its `AskUserQuestion` tool:
+    /// one question of two options, and a box of its own words.
+    fn question_form(session: &str) -> crate::elicit::Asked {
+        crate::elicit::read(&serde_json::json!({
+            "mode": "form", "sessionId": session, "toolCallId": "toolu_1",
+            "message": "Which database?",
+            "requestedSchema": { "type": "object", "properties": {
+                "question_0": { "type": "string", "title": "Database",
+                    "oneOf": [{ "const": "Postgres", "title": "Postgres" },
+                              { "const": "SQLite", "title": "SQLite" }] },
+                "question_0_custom": { "type": "string", "title": "Other" },
+            } },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_form_is_asked_and_only_a_fitting_answer_goes_back() {
+        use clackatoo_protocol::{FieldValue, FormReply};
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        assert!(chat.elicit(Value::from(9), question_form("s")));
+        let question = chat.node.question.clone().expect("a question");
+        let form = question.form.clone().expect("a form");
+        assert_eq!(form.message, "Which database?");
+        assert_eq!(form.fields().len(), 2);
+        // A window too old for forms is offered only to decline.
+        assert_eq!(question.choices.len(), 1);
+        assert!(question.title.contains("`Which database?`"));
+        // An answer that doesn't fit, or to another question, changes
+        // nothing.
+        let pick = |value: &str| {
+            FormReply::Accept(vec![("question_0".into(), FieldValue::Text(value.into()))])
+        };
+        let fill = |question, reply| ChatAction::Fill { question, reply };
+        assert_eq!(chat.act(fill(question.id, pick("MySQL"))), []);
+        assert_eq!(chat.act(fill(question.id + 1, pick("SQLite"))), []);
+        assert!(chat.node.question.is_some());
+        assert_eq!(
+            chat.act(fill(question.id, pick("SQLite"))),
+            [Action::Elicited {
+                request: Value::from(9),
+                result: serde_json::json!({ "action": "accept",
+                                            "content": { "question_0": "SQLite" } }),
+            }]
+        );
+        assert_eq!(chat.node.question, None);
+        // From an older window: its one choice declines, and none cancels.
+        for (option, action) in [(Some("decline"), "decline"), (None, "cancel")] {
+            chat.elicit(Value::from(10), question_form("s"));
+            let id = chat.node.question.as_ref().unwrap().id;
+            let answered = chat.act(ChatAction::Answer {
+                question: id,
+                option: option.map(str::to_owned),
+            });
+            assert_eq!(
+                answered,
+                [Action::Elicited {
+                    request: Value::from(10),
+                    result: serde_json::json!({ "action": action }),
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn a_form_goes_when_the_agent_no_longer_waits() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        // Stopped: answered as cancelled.
+        chat.elicit(Value::from(1), question_form("s"));
+        let stopped = chat.act(ChatAction::Stop);
+        assert!(stopped.contains(&Action::Elicited {
+            request: Value::from(1),
+            result: serde_json::json!({ "action": "cancel" }),
+        }));
+        assert_eq!(chat.node.question, None);
+        // Cancelled by the agent, as is a question about a tool.
+        chat.answered(Ok(StopReason::Cancelled));
+        send(&mut chat, "again");
+        chat.elicit(Value::from(2), question_form("s"));
+        assert!(!chat.withdraw_request(&Value::from(3)));
+        assert!(chat.withdraw_request(&Value::from(2)));
+        assert_eq!(chat.node.question, None);
+        // A link the agent says is done with.
+        let link = crate::elicit::read(&serde_json::json!({
+            "mode": "url", "sessionId": "s", "message": "Sign in",
+            "url": "https://example.com/oauth", "elicitationId": "e1" }))
+        .unwrap();
+        chat.elicit(Value::from(4), link);
+        assert_eq!(chat.link_done("e2"), None);
+        assert_eq!(chat.link_done("e1"), Some(Value::from(4)));
+        // A form outlasts the turn, as one to sign in comes between them,
+        // but not the agent.
+        chat.elicit(Value::from(5), question_form("s"));
+        chat.answered(Ok(StopReason::EndTurn));
+        assert!(chat.node.question.is_some());
+        chat.disconnected(None);
+        assert_eq!(chat.node.question, None);
+    }
+
+    #[test]
+    fn a_question_about_leaving_planning_carries_the_plan() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        // As Claude Code's adapter asks a client that asks as AIR does:
+        // no kind, and the options that leave plan mode.
+        let options: Vec<PermissionOption> = serde_json::from_str(
+            r#"[{"optionId":"exit-plan-auto","name":"Yes, and use auto mode","kind":"allow_always"},
+                {"optionId":"reject","name":"No, keep planning","kind":"reject_once"}]"#,
+        )
+        .unwrap();
+        let tool: ToolCallUpdate = serde_json::from_str(
+            r##"{"toolCallId":"t","title":"Ready to code?","rawInput":{"plan":"# Plan\n\n1. Test\u0007"}}"##,
+        )
+        .unwrap();
+        chat.ask(Value::from(7), &tool, &options);
+        let plan = chat.node.question.as_ref().unwrap().plan.clone();
+        assert_eq!(plan.as_deref(), Some("# Plan\n\n1. Test"));
+        // Any other tool with a plan in its input is asked about as ever.
+        let tool: ToolCallUpdate =
+            serde_json::from_str(r#"{"toolCallId":"u","rawInput":{"plan":"x"}}"#).unwrap();
+        chat.answered(Ok(StopReason::EndTurn));
+        send(&mut chat, "again");
+        chat.ask(Value::from(8), &tool, &[]);
+        assert_eq!(chat.node.question.as_ref().unwrap().plan, None);
     }
 
     #[test]

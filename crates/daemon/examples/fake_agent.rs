@@ -31,6 +31,11 @@
 //! | `wake-missed` | As `wake`, to a client that asked for AIR's `asyncTasks`, but as if what said the turn started went missing: it runs `git commit`, says `committed`, and says task `autonomous-turn-9` completed |
 //! | `look` | Reads `notes.txt` and searches for `needle`, as Claude Code's adapter says them to a client that asks as AIR does: each ends with nothing of what it found, which, if the session asked for raw messages (`_meta.claudeCode.emitRawSDKMessages`), comes before in a `_claude/sdkMessage`; then `done` |
 //! | `plan STATES` | Gives its plan, a step for each character of STATES, `Step 1` on: `x` done, `>` in progress, anything else to do; then `planned` |
+//! | `elicit` | Asks the user, as Claude Code's adapter asks its `AskUserQuestion` tool's questions (`elicitation/create`, `e1`), and some more: a choice of one, a box of words, a choice of several, a whole number from 1 to 9 and a yes-or-no; then says `answered:` and the answer as JSON, or the error. To a client that can't show forms, says `no forms` |
+//! | `elicit-url` | As `elicit`, but asks the user to open `https://example.com/oauth`, elicitation `u1` |
+//! | `elicit-done` | As `elicit-url`, but 300 ms later says the link is done with (`elicitation/complete`) |
+//! | `elicit-cancel` | As `elicit`, but 300 ms later no longer waits for the answer (`$/cancel_request`) |
+//! | `approve-plan` | Asks permission to leave plan mode, as Claude Code's adapter asks a client that asks as AIR does: its plan in the tool's input, the options that leave plan mode; then says which option was picked |
 //! | anything else | `echo:` and the message, in two pieces |
 //!
 //! Asked to stop a task (`_session/async_task/stop`), it says it stopped
@@ -146,6 +151,8 @@ fn main() {
         codex: flag("--codex"),
         async_tasks: false,
         notices: false,
+        forms: false,
+        elicited: None,
         woken: None,
         logged_out: flag("--logged-out"),
         mute_init: first && flag("--mute-init"),
@@ -213,6 +220,11 @@ struct Fake {
     async_tasks: bool,
     /// Whether the client can show notices.
     notices: bool,
+    /// Whether the client can show forms and links to open.
+    forms: bool,
+    /// A message waiting on the user's answer to what it asked: its
+    /// request's ID and session.
+    elicited: Option<(Value, String)>,
     /// The session whose turn it took by itself waits to be cancelled.
     woken: Option<String>,
     images: Vec<tempfile::TempPath>,
@@ -315,6 +327,10 @@ fn image_results(session: &str) -> tempfile::TempPath {
     }
     path
 }
+
+/// The plan `plan` asks to go ahead with.
+const PLAN: &str =
+    "## Plan\n\n1. Write the failing test.\n2. Fix `parse_line`.\n3. Run `cargo test`.";
 
 fn send(message: &Value) {
     let mut out = std::io::stdout().lock();
@@ -649,6 +665,9 @@ impl Fake {
                 self.notices = params
                     .pointer("/clientCapabilities/session/notices")
                     .is_some_and(Value::is_object);
+                self.forms = params
+                    .pointer("/clientCapabilities/elicitation/form")
+                    .is_some_and(Value::is_object);
                 self.initialize(&id);
             }
             Some("_session/async_task/stop") => {
@@ -880,6 +899,17 @@ impl Fake {
                     done(&id, "end_turn");
                 }
             }
+            // The answer to what it asked the user.
+            None if id == "e1" => {
+                if let Some((id, session)) = self.elicited.take() {
+                    let answer = match &message["error"] {
+                        Value::Object(error) => format!("error {}", error["code"]),
+                        _ => message["result"].to_string(),
+                    };
+                    say(&session, &format!("answered: {answer}\n"));
+                    done(&id, "end_turn");
+                }
+            }
             // The answer to the permission asked for.
             None if id == "p1" => {
                 let picked = message["result"]["outcome"]["optionId"]
@@ -989,7 +1019,7 @@ impl Fake {
             return true;
         }
         // How much context it uses, as the adapter says before it answers.
-        if !matches!(text, "ask" | "wait" | "exit") {
+        if !matches!(text, "ask" | "wait" | "exit") && !text.starts_with("elicit") {
             let usage = json!({ "sessionUpdate": "usage_update", "used": 1000, "size": 200_000 });
             update(&session, &usage);
         }
@@ -1249,6 +1279,28 @@ impl Fake {
                 );
                 self.waiting = Some((id, session));
             }
+            "elicit" | "elicit-url" | "elicit-done" | "elicit-cancel" => {
+                self.elicit(id, session, text);
+            }
+            "approve-plan" => {
+                update(
+                    &session,
+                    &json!({ "sessionUpdate": "tool_call", "toolCallId": "tp", "title": "Approve Plan",
+                             "kind": "switch_mode", "status": "pending" }),
+                );
+                send(
+                    &json!({ "jsonrpc": "2.0", "id": "p1", "method": "session/request_permission",
+                    "params": { "sessionId": session,
+                        "toolCall": { "toolCallId": "tp", "title": "Approve Plan",
+                                      "rawInput": { "plan": PLAN } },
+                        "options": [
+                            { "optionId": "exit-plan-auto", "name": "Yes, and use auto mode", "kind": "allow_always" },
+                            { "optionId": "exit-plan-default", "name": "Yes, and manually approve edits", "kind": "allow_once" },
+                            { "optionId": "reject", "name": "No, keep planning", "kind": "reject_once" },
+                        ] } }),
+                );
+                self.waiting = Some((id, session));
+            }
             "wait" => self.waits.push((id, session)),
             "busy" => self.busy(id, session),
             "exit" => return false,
@@ -1287,6 +1339,65 @@ impl Fake {
             }
         }
         true
+    }
+
+    /// Asks the user what `script` says (see the table above), for the
+    /// message `id` in `session`.
+    fn elicit(&mut self, id: Value, session: String, script: &str) {
+        if !self.forms {
+            say(&session, "no forms\n");
+            done(&id, "end_turn");
+            return;
+        }
+        let params = if script == "elicit" || script == "elicit-cancel" {
+            update(
+                &session,
+                &json!({ "sessionUpdate": "tool_call", "toolCallId": "te",
+                         "title": "Asking for your input", "kind": "other", "status": "pending" }),
+            );
+            json!({ "mode": "form", "sessionId": session, "toolCallId": "te",
+                "message": "Please answer the following questions.",
+                "requestedSchema": { "type": "object", "required": ["count"], "properties": {
+                    "question_0": { "type": "string", "title": "Database",
+                        "description": "Which database should the app use?",
+                        "oneOf": [
+                            { "const": "Postgres", "title": "Postgres", "description": "A server, for many users" },
+                            { "const": "SQLite", "title": "SQLite", "description": "One file, no server" },
+                        ] },
+                    "question_0_custom": { "type": "string", "title": "Other",
+                        "description": "Type your own answer, or add a note to the option you chose above (optional)." },
+                    "question_1": { "type": "array", "title": "Extras",
+                        "description": "What else should it set up?",
+                        "items": { "anyOf": [
+                            { "const": "Tests", "title": "Tests" },
+                            { "const": "Docs", "title": "Docs" },
+                            { "const": "CI", "title": "CI" },
+                        ] } },
+                    "count": { "type": "integer", "title": "Workers", "minimum": 1, "maximum": 9, "default": 2 },
+                    "go": { "type": "boolean", "title": "Start now", "default": true },
+                } } })
+        } else {
+            json!({ "mode": "url", "sessionId": session, "elicitationId": "u1",
+                    "message": "Authenticate with MCP server linear",
+                    "url": "https://example.com/oauth" })
+        };
+        send(
+            &json!({ "jsonrpc": "2.0", "id": "e1", "method": "elicitation/create", "params": params }),
+        );
+        self.elicited = Some((id, session));
+        let later = match script {
+            "elicit-done" => Some(json!({ "jsonrpc": "2.0", "method": "elicitation/complete",
+                                          "params": { "elicitationId": "u1" } })),
+            "elicit-cancel" => Some(json!({ "jsonrpc": "2.0", "method": "$/cancel_request",
+                                            "params": { "requestId": "e1" } })),
+            _ => None,
+        };
+        if let Some(later) = later {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                send(&later);
+            });
+        }
     }
 
     /// Makes each of `calls`, `mcp NAME ARGS`, a line each, in turn,

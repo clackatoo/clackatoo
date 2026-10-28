@@ -165,6 +165,20 @@ pub(crate) enum Incoming {
         tool: Box<ToolCallUpdate>,
         options: Vec<PermissionOption>,
     },
+    /// The agent asks the user to fill in a form or open a link (ACP's
+    /// elicitation), and waits for the answer.
+    Elicit {
+        /// The request's JSON-RPC ID, which the answer gives back.
+        request: Value,
+        asked: Box<crate::elicit::Asked>,
+    },
+    /// The agent no longer waits for its request `request`, as a question
+    /// it asked the user (`$/cancel_request`): it's to be answered at once
+    /// as cancelled.
+    Cancelled { request: Value },
+    /// The agent says the link it asked the user to open, its
+    /// elicitation `id`, has done what it was for (`elicitation/complete`).
+    Completed { id: String },
     /// The agent asks for the text of a file, from line `line` (counting
     /// from 1) and at most `limit` lines, and waits for it.
     ReadFile {
@@ -349,6 +363,10 @@ impl Agent {
             // own. Codex's says its warnings so too: it isn't asked.
             capabilities["session"] = json!({ "notices": {} });
         }
+        // Claude Code's adapter takes its AskUserQuestion tool away from a
+        // client that can't show forms; Codex's can't ask its questions.
+        // See `elicit` for what else asking for them changes.
+        capabilities["elicitation"] = json!({ "form": {}, "url": {} });
         capabilities["_meta"] = meta;
         agent.request(
             Pending::Initialize,
@@ -701,6 +719,16 @@ impl Agent {
             (Some(method), None) => {
                 if method == "_clackatoo/login_required" && self.name() == "agent antigravity" {
                     self.peer.require_login();
+                } else if method == "$/cancel_request" {
+                    if let Some(request) = message.params.get("requestId") {
+                        incoming.push(Incoming::Cancelled {
+                            request: request.clone(),
+                        });
+                    }
+                } else if method == "elicitation/complete" {
+                    if let Some(id) = message.params.get("elicitationId").and_then(Value::as_str) {
+                        incoming.push(Incoming::Completed { id: id.to_owned() });
+                    }
                 } else if method == "_claude/sdkMessage" {
                     if let Some((session, results)) = tool_results(&message.params) {
                         incoming.push(Incoming::ToolResults { session, results });
@@ -748,6 +776,23 @@ impl Agent {
                                 options: request.options,
                             })
                     }
+                    "elicitation/create" => match crate::elicit::read(&params) {
+                        Ok(asked) => Some(Incoming::Elicit {
+                            request: id.clone(),
+                            asked: Box::new(asked),
+                        }),
+                        // Nowhere to show it, or not something this build
+                        // can: no, as the protocol says a client answers
+                        // what it can't show.
+                        Err(why) => {
+                            log::debug!("agent: declining an elicitation: {why:?}");
+                            return self.reply(&json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": { "action": "decline" },
+                            }));
+                        }
+                    },
                     "fs/read_text_file" => serde_json::from_value::<ReadTextFileRequest>(params)
                         .ok()
                         .map(|request| Incoming::ReadFile {

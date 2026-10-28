@@ -2561,6 +2561,159 @@ fn tool_calls_are_kept_and_the_agent_asks_before_using_one() {
     assert_eq!(node.question, None);
 }
 
+/// Fills in the form `chat`'s question shows with `reply`.
+fn fill(client: &mut Client, chat: TerminalId, reply: clackatoo_protocol::FormReply) {
+    let view = client.capture(chat).expect("capture");
+    let shown = view.chat().and_then(|node| node.question.as_ref());
+    let question = shown.map_or(u64::MAX, |question| question.id);
+    client
+        .chat(chat, ChatAction::Fill { question, reply })
+        .unwrap();
+}
+
+#[test]
+fn an_agents_form_waits_for_any_window_and_only_a_fitting_answer_goes_back() {
+    use clackatoo_protocol::{FieldInput, FieldValue, FormAsk, FormReply};
+    let daemon = TestDaemon::start();
+    let mut first = daemon.client();
+    let chat = start_chat(&mut first);
+    first
+        .chat(chat, ChatAction::Send("elicit".to_owned()))
+        .unwrap();
+    let node = wait_for_chat(&mut first, chat, |node| node.question.is_some());
+    let form = node.question.unwrap().form.expect("a form");
+    assert_eq!(form.message, "Please answer the following questions.");
+    let FormAsk::Fields { fields, complete } = &form.ask else {
+        panic!("{form:#?}");
+    };
+    assert!(complete);
+    let keys: Vec<&str> = fields.iter().map(|field| field.key.as_str()).collect();
+    assert_eq!(
+        keys,
+        [
+            "question_0",
+            "question_0_custom",
+            "question_1",
+            "count",
+            "go"
+        ]
+    );
+    assert!(matches!(&fields[0].input, FieldInput::One { options, .. } if options.len() == 2));
+    assert!(fields[3].required);
+    // The window that saw it goes; another answers it.
+    drop(first);
+    let mut second = daemon.client();
+    let node = wait_for_chat(&mut second, chat, |node| node.question.is_some());
+    assert!(node.question.unwrap().form.is_some());
+    // Without the required field, it isn't answered.
+    let picks = vec![
+        ("question_0".to_owned(), FieldValue::Text("SQLite".into())),
+        (
+            "question_1".to_owned(),
+            FieldValue::Many(vec!["Tests".into(), "CI".into()]),
+        ),
+    ];
+    fill(&mut second, chat, FormReply::Accept(picks.clone()));
+    std::thread::sleep(Duration::from_millis(200));
+    let node = wait_for_chat(&mut second, chat, |_| true);
+    assert!(node.question.is_some(), "an answer that doesn't fit");
+    let mut answers = picks;
+    answers.push(("count".to_owned(), FieldValue::Number("4".into())));
+    answers.push(("go".to_owned(), FieldValue::Toggle(false)));
+    fill(&mut second, chat, FormReply::Accept(answers));
+    let node = wait_for_chat(&mut second, chat, |node| last_outcome(node).is_some());
+    assert_eq!(node.question, None);
+    let said = last_words(&node);
+    let answered: serde_json::Value =
+        serde_json::from_str(said.trim().strip_prefix("answered: ").unwrap()).unwrap();
+    assert_eq!(
+        answered,
+        serde_json::json!({ "action": "accept", "content": {
+            "question_0": "SQLite", "question_1": ["Tests", "CI"], "count": 4, "go": false } })
+    );
+    // Declined, the agent hears so.
+    second
+        .chat(chat, ChatAction::Send("elicit".to_owned()))
+        .unwrap();
+    wait_for_chat(&mut second, chat, |node| node.question.is_some());
+    fill(&mut second, chat, FormReply::Decline);
+    let node = wait_for_chat(&mut second, chat, |node| {
+        last_outcome(node).is_some() && node.turns.len() == 2
+    });
+    assert_eq!(last_words(&node), "answered: {\"action\":\"decline\"}\n");
+}
+
+#[test]
+fn an_agents_form_goes_when_it_stops_waiting_or_the_turn_is_stopped() {
+    use clackatoo_protocol::{FormAsk, FormReply};
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    // The agent no longer waits: the question goes, and the agent is told
+    // its request was cancelled, as the protocol has it answered still.
+    client
+        .chat(chat, ChatAction::Send("elicit-cancel".to_owned()))
+        .unwrap();
+    wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert_eq!(node.question, None);
+    assert_eq!(last_words(&node), "answered: error -32800\n");
+    // A link, opened, is answered without content.
+    client
+        .chat(chat, ChatAction::Send("elicit-url".to_owned()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let form = node.question.unwrap().form.unwrap();
+    assert_eq!(form.ask, FormAsk::Url("https://example.com/oauth".into()));
+    fill(&mut client, chat, FormReply::Accept(Vec::new()));
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.turns.len() == 2 && last_outcome(node).is_some()
+    });
+    assert_eq!(last_words(&node), "answered: {\"action\":\"accept\"}\n");
+    // A link the agent says is done with goes by itself.
+    client
+        .chat(chat, ChatAction::Send("elicit-done".to_owned()))
+        .unwrap();
+    wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.turns.len() == 3 && last_outcome(node).is_some()
+    });
+    assert_eq!(node.question, None);
+    assert_eq!(last_words(&node), "answered: {\"action\":\"accept\"}\n");
+    // Stopping the turn answers it as cancelled.
+    client
+        .chat(chat, ChatAction::Send("elicit".to_owned()))
+        .unwrap();
+    wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    client.chat(chat, ChatAction::Stop).unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.turns.len() == 4 && last_outcome(node).is_some()
+    });
+    assert_eq!(node.question, None);
+}
+
+#[test]
+fn a_question_about_leaving_planning_shows_the_plan() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    client
+        .chat(chat, ChatAction::Send("approve-plan".to_owned()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let question = node.question.unwrap();
+    assert!(
+        question
+            .plan
+            .unwrap()
+            .starts_with("## Plan\n\n1. Write the failing test.")
+    );
+    assert_eq!(question.choices.len(), 3);
+    answer(&mut client, chat, Some("exit-plan-default".into()));
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert_eq!(last_words(&node), "picked exit-plan-default\n");
+}
+
 #[test]
 fn stopping_ends_the_answer() {
     let daemon = TestDaemon::start();

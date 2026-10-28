@@ -25,6 +25,7 @@ mod changes;
 mod chat;
 pub mod client;
 pub mod display;
+mod elicit;
 mod explorer;
 mod find;
 pub mod forward;

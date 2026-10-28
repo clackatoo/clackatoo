@@ -397,6 +397,8 @@ fn node(id: TerminalId) -> ChatNode {
                     kind: ChoiceKind::RejectOnce,
                 },
             ],
+            form: None,
+            plan: None,
         });
     }
     node

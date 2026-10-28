@@ -61,6 +61,7 @@ pub mod corpus;
 mod devices;
 mod files;
 mod find;
+mod form;
 mod forward;
 pub mod frame;
 mod machines;
@@ -111,6 +112,10 @@ pub use files::{
     GitMark, OpenFiles,
 };
 pub use find::{Done, Found, FoundBuffer, FoundLine, FoundSymbol, Search};
+pub use form::{
+    Field, FieldInput, FieldOption, FieldValue, Form, FormAsk, FormReply, MOST_ANSWER, MOST_FIELDS,
+    MOST_LABEL, MOST_MESSAGE, MOST_OPTIONS, MOST_URL, parse_number,
+};
 pub use forward::{Forward, ForwardFailure, Forwarding};
 pub use machines::{BadMachineId, Connection, ConnectionState, Machine, MachineId, Passed, Secret};
 pub use review::{
@@ -129,7 +134,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 112;
+pub const PROTOCOL_VERSION: u32 = 113;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

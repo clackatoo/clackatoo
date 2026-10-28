@@ -476,6 +476,15 @@ impl Daemon {
             ChatAction::Answer { option, .. } => {
                 format!("answered chat {chat}'s question with {option:?}")
             }
+            // The fields answered, never what: a field may hold a secret.
+            ChatAction::Fill { reply, .. } => match reply {
+                clackatoo_protocol::FormReply::Accept(answers) => {
+                    let keys: Vec<&str> = answers.iter().map(|(key, _)| key.as_str()).collect();
+                    format!("answered chat {chat}'s form, filling in {keys:?}")
+                }
+                clackatoo_protocol::FormReply::Decline => format!("declined chat {chat}'s form"),
+                clackatoo_protocol::FormReply::Cancel => format!("cancelled chat {chat}'s form"),
+            },
             ChatAction::Send(text) => format!("sent chat {chat} a message of {} bytes", text.len()),
             ChatAction::Stop => format!("stopped chat {chat}"),
             ChatAction::Set { setting, value } => format!("set chat {chat}'s {setting} to {value}"),

@@ -27,7 +27,9 @@ pub(super) fn changes_authority(message: &ClientMessage) -> bool {
             | ClientMessage::Login { .. }
             | ClientMessage::Request(
                 Request::Chat {
-                    action: ChatAction::Answer { .. } | ChatAction::Set { .. },
+                    action: ChatAction::Answer { .. }
+                        | ChatAction::Fill { .. }
+                        | ChatAction::Set { .. },
                     ..
                 } | Request::AnswerPairing { .. }
             )

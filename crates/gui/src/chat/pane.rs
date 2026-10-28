@@ -654,6 +654,8 @@ mod tests {
                 kind: ChoiceKind::AllowOnce,
             }],
             own: false,
+            form: None,
+            plan: None,
         });
         let mut pane = ChatPane::of_snapshot(TerminalId(1), &snapshot(node));
         pane.enter_normal_mode();

@@ -2847,6 +2847,8 @@ mod tests {
                     choice("no", ChoiceKind::RejectOnce),
                 ],
                 own: false,
+                form: None,
+                plan: None,
             }),
             ..ChatNode::default()
         };

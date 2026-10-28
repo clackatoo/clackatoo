@@ -334,6 +334,8 @@ mod tests {
             title: "Write notes.txt".into(),
             choices: Vec::new(),
             own,
+            form: None,
+            plan: None,
         };
         chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Question(
             Some(question(false)),

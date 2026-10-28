@@ -277,6 +277,12 @@ gates! {
     /// The agent's plan, its to-do list: `ChatNode`'s `plan` (`PlanStep`,
     /// `PlanState`) and `ChatPatch::Plan`.
     AGENT_PLAN = 112,
+    /// What an agent asks the user to fill in or open (ACP's elicitation):
+    /// `Question`'s `form` (`Form`, `FormAsk`, `Field`, `FieldInput`,
+    /// `FieldOption`) and answering it, `ChatAction::Fill` (`FormReply`,
+    /// `FieldValue`); and the plan a question about leaving planning
+    /// carries, `Question`'s `plan`.
+    ELICITATION = 113,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -1026,6 +1032,7 @@ impl Downgrade for ClientMessage {
 fn chat_action_since(action: &crate::ChatAction) -> u32 {
     use crate::ChatAction;
     match action {
+        ChatAction::Fill { .. } => ELICITATION,
         ChatAction::StopTask { .. } => AGENT_TASKS,
         ChatAction::RefreshUsage { .. } => PROVIDER_USAGE,
         ChatAction::Submit { .. }

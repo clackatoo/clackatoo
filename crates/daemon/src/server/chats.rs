@@ -779,6 +779,9 @@ impl Daemon {
                 (Action::Answer { request, option }, Some(slot), _) => {
                     slot.agent.answer_permission(&request, option.as_deref());
                 }
+                (Action::Elicited { request, result }, Some(slot), _) => {
+                    slot.agent.answer(&request, Ok(result));
+                }
                 (Action::Permit { call, allow }, _, _) => self.permitted(call, allow),
                 (Action::Browser(on), _, _) => self.browser_turned(id, on),
                 (Action::Abandon, slot, _) => {
@@ -1295,6 +1298,51 @@ impl Daemon {
                     return;
                 }
                 chat.ask(request, &tool, &options);
+                id
+            }
+            Incoming::Elicit { request, asked } => {
+                let asked = *asked;
+                let shown = (self.chat_in(name, &asked.session))
+                    .and_then(|(id, chat)| chat.elicit(request.clone(), asked).then_some(id));
+                let Some(id) = shown else {
+                    // No chat to show it in, one told again, or too many
+                    // waiting: no, at once.
+                    if let Some(slot) = self.agents.running.get_mut(&agent) {
+                        slot.agent
+                            .answer(&request, Ok(serde_json::json!({ "action": "decline" })));
+                    }
+                    return;
+                };
+                id
+            }
+            Incoming::Cancelled { request } => {
+                let withdrawn = (self.terminals.iter_mut()).find_map(|(&id, slot)| {
+                    let chat = slot.terminal.chat()?;
+                    (chat.agent() == name && chat.withdraw_request(&request)).then_some(id)
+                });
+                let Some(id) = withdrawn else {
+                    return;
+                };
+                // The protocol has a request answered even once cancelled:
+                // the agent waits for that.
+                if let Some(slot) = self.agents.running.get_mut(&agent) {
+                    slot.agent
+                        .answer(&request, Err((-32800, "Request cancelled".to_owned())));
+                }
+                id
+            }
+            Incoming::Completed { id: link } => {
+                let done = (self.terminals.iter_mut()).find_map(|(&id, slot)| {
+                    let chat = slot.terminal.chat().filter(|chat| chat.agent() == name)?;
+                    chat.link_done(&link).map(|request| (id, request))
+                });
+                let Some((id, request)) = done else {
+                    return;
+                };
+                if let Some(slot) = self.agents.running.get_mut(&agent) {
+                    slot.agent
+                        .answer(&request, Ok(serde_json::json!({ "action": "accept" })));
+                }
                 id
             }
         };
