@@ -1270,10 +1270,10 @@ fn clackatoo_tools() -> Value {
                         "description": "The entry's number on the board, as board_read gives it." });
     let new_chat = json!({
         "profile": { "type": "string", "description": "What it's started as: explore, plan, general, or one the user added, as this server's instructions list them. Sets its role, its limits, and its default agent and model. Defaults to general." },
-        "agent": { "type": "string", "description": "The agent, by name: claude, codex, or one the user added. Defaults to the profile's, or this chat's own." },
+        "agent": { "type": "string", "description": "The agent, by name: claude, codex, or one the user added. Defaults to the profile's, or this chat's own. Another agent starts in its safest mode, and one that offers no modes fails to start." },
         "model": { "type": "string", "description": "The model, by name, such as haiku. Defaults to the profile's." },
         "prompt": { "type": "string", "description": "The first message." },
-        "cwd": { "type": "string", "description": "The directory it works in, such as a git worktree. Defaults to this chat's." },
+        "cwd": { "type": "string", "description": "The directory it works in, such as a git worktree, inside this chat's project. Defaults to this chat's." },
         "show": { "type": "boolean", "description": "Give it a pane of its own, rather than a card in this chat. Defaults to false." },
     });
     json!([
@@ -1396,9 +1396,10 @@ fn clackatoo_tools() -> Value {
         {
             "name": "list_chats",
             "title": "List chats",
-            "description": "Lists the user's chats with agents, in every workspace: each one's number, \
-                agent, title, working directory, workspace, and whether it's idle, working, or \
-                waiting for the user. This chat is among them.",
+            "description": "Lists the chats with agents in this chat's workspace, and the chats it \
+                started or was started by: each one's number, agent, title, working directory, \
+                workspace, and whether it's idle, working, or waiting for the user. This chat is \
+                among them. Only these can be messaged, read and waited for.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true, "openWorldHint": false },
         },

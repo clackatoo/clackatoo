@@ -10,19 +10,23 @@
 //! the next as each turn ends, and answers the calls waiting for chats to
 //! finish.
 //!
-//! The user isn't asked before an agent messages or starts a chat, as
-//! they aren't in other harnesses, but no agent gains, through another
-//! chat, what its own chat isn't allowed:
+//! The user isn't asked before an agent messages or starts a chat. What
+//! the popup guarded is refused instead, so no agent gains, through
+//! another chat, what its own chat isn't allowed:
 //!
-//! - a message to a chat whose Tools setting is looser than the
-//!   sender's, or whose limits are fewer, is refused;
-//! - the chat `start_chat` starts gets the sender's Tools setting and
-//!   mode, and its limits, if its profile's are fewer (see
-//!   `subagents.rs`);
-//! - a chat reads, and waits for, only chats in its workspace or family
-//!   (the chat that started it, the chats it started, and the chats its
-//!   own started), and of others, the answers to its own messages. It
-//!   lists other workspaces' chats by number and title alone.
+//! - a chat lists, messages, reads and waits for only chats in its
+//!   workspace or family (the chat that started it, the chats it
+//!   started, and the chats its own started);
+//! - a message to a chat that may do more is refused: one whose Tools
+//!   setting is looser, whose limits, its mode's included, are fewer, or
+//!   whose mode comes later among those its agent offers (see
+//!   [`Daemon::unmessageable`]);
+//! - `start_chat` starts chats only inside the sender's project, and with
+//!   another agent only if it offers modes; the chat started gets the
+//!   sender's Tools setting and mode, or that agent's safest, and its
+//!   limits, if its profile's are fewer (see `subagents.rs`);
+//! - what a message says reaches the other chat with its control and
+//!   bidi characters shown, so none hides anything from the user.
 //!
 //! Limits keep agents from running away with each other:
 //!
@@ -41,7 +45,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{AgentTools, ChatState, Item, Outcome, TerminalId, ToolStatus, Turn};
+use clackatoo_protocol::{
+    AgentTools, ChatState, Item, Outcome, TerminalId, ToolStatus, Turn, WorkspaceId,
+};
 use mio::Token;
 use serde_json::Value;
 
@@ -141,7 +147,8 @@ impl Daemon {
     }
 
     /// The name of the workspace the chat `chat` is in, if it's in one: a
-    /// chat in the background is in its anchor's.
+    /// chat in the background is in its anchor's. Lent workspaces have
+    /// none: never compare these, compare [`Self::chat_workspace_id`]s.
     pub(super) fn chat_workspace(&self, chat: TerminalId) -> Option<String> {
         let workspaces = self.workspaces.get();
         let pane = self.anchor_pane(chat)?;
@@ -149,11 +156,20 @@ impl Daemon {
         Some(workspace.name.clone())
     }
 
-    /// Whether the chat `chat`'s agent may read the chat `to`: one in its
-    /// workspace or family.
+    /// The workspace the chat `chat` is in, if it's in one, as
+    /// [`Self::chat_workspace`] finds it.
+    fn chat_workspace_id(&self, chat: TerminalId) -> Option<WorkspaceId> {
+        let workspaces = self.workspaces.get();
+        let pane = self.anchor_pane(chat)?;
+        let (workspace, _, _) = workspaces.find_pane(pane)?;
+        Some(workspace.id)
+    }
+
+    /// Whether the chat `chat`'s agent may list, message, read and wait
+    /// for the chat `to`: one in its workspace or family.
     pub(super) fn may_see(&self, chat: TerminalId, to: TerminalId) -> bool {
-        let workspace = self.chat_workspace(chat);
-        (workspace.is_some() && workspace == self.chat_workspace(to)) || self.family(chat, to)
+        let workspace = self.chat_workspace_id(chat);
+        (workspace.is_some() && workspace == self.chat_workspace_id(to)) || self.family(chat, to)
     }
 
     /// The user's turn what the chat `chat`'s agent does now comes of.
@@ -264,19 +280,41 @@ impl Daemon {
     }
 
     /// Why the chat `chat`, which is `own`, can't message the chat `to`,
-    /// if it can't: it isn't another chat, or its agent may do more, which
-    /// this one's would gain through it.
-    fn unmessageable(&self, own: &HostedChat, chat: TerminalId, to: TerminalId) -> Option<String> {
+    /// if it can't: it isn't another chat, it's out of sight, or its agent
+    /// may do more, which this one's would gain through it. More is a
+    /// looser Tools setting, fewer limits, its mode's included, or a mode
+    /// later among those its agent offers, the first being the safest; an
+    /// agent offering no modes is no looser only if it's this one's, and
+    /// this one's offers none either.
+    pub(super) fn unmessageable(
+        &self,
+        own: &HostedChat,
+        chat: TerminalId,
+        to: TerminalId,
+    ) -> Option<String> {
         let target = match self.other_chat(chat, to) {
             Ok(target) => target,
             Err(why) => return Some(why),
         };
-        (reach(target.tools()) > reach(own.tools()) || target.limits() < own.limits()).then(|| {
-            format!(
-                "chat {to}'s agent may do more than this one, so this chat can't message it: \
-                 ask the user to"
-            )
-        })
+        if !self.may_see(chat, to) {
+            return Some(format!(
+                "chat {to} is in another workspace, and not of this chat's family: ask the user \
+                 to message it"
+            ));
+        }
+        let limits = |chat: &HostedChat| chat.limits().max(chat.mode_limits());
+        let mode_looser = match (own.mode_rank(), target.mode_rank()) {
+            (Some(own), Some(theirs)) => theirs > own,
+            (None, Some(theirs)) => theirs > 0,
+            (own_rank, None) => own_rank.is_some() || target.agent() != own.agent(),
+        };
+        (reach(target.tools()) > reach(own.tools()) || limits(target) < limits(own) || mode_looser)
+            .then(|| {
+                format!(
+                    "chat {to}'s agent may do more than this one, so this chat can't message \
+                     it: ask the user to"
+                )
+            })
     }
 
     /// Why a message can't go to the chat `to`, if it can't: it would wake
@@ -350,19 +388,18 @@ impl Daemon {
     }
 
     /// The message `text` from the chat `chat`, as it's sent.
-    pub(super) fn message_from(&self, chat: TerminalId, text: String) -> Option<Message> {
+    pub(super) fn message_from(&self, chat: TerminalId, text: &str) -> Option<Message> {
         let own = self.chat_ref(chat)?;
         Some(Message {
             from: own.sender(),
-            text,
+            text: super::unhidden(text),
             hops: own.relations().hops + 1,
             cause: self.cause_of(chat),
         })
     }
 
-    /// `list_chats`: every chat, with where it is and what it's doing. A
-    /// chat in another workspace, and not of this one's family, is listed
-    /// by its number and title alone.
+    /// `list_chats`: every chat in this one's workspace or family, with
+    /// where it is and what it's doing.
     pub(super) fn list_chats(&self, chat: TerminalId) -> String {
         let workspaces = self.workspaces.get();
         let mut text = format!("This chat is chat {chat}.\n");
@@ -371,11 +408,6 @@ impl Daemon {
                 continue;
             };
             if id != chat && !self.may_see(chat, id) {
-                let _ = writeln!(
-                    text,
-                    "- chat {id}: {:?}, in another workspace",
-                    other.info().title
-                );
                 continue;
             }
             let place = match (workspaces.pane_showing(id), self.chat_workspace(id)) {
@@ -413,7 +445,7 @@ impl Daemon {
         &mut self,
         chat: TerminalId,
         to: TerminalId,
-        message: String,
+        message: &str,
     ) -> Result<String, String> {
         let tool = Tool::SendToChat {
             chat: to,
@@ -462,8 +494,8 @@ impl Daemon {
         let target = self.other_chat(chat, to)?;
         if !self.may_see(chat, to) {
             return Err(format!(
-                "chat {to} is in another workspace: message it, and the user is asked; then \
-                 wait_for_chat gives its answer"
+                "chat {to} is in another workspace, and not of this chat's family: ask the user \
+                 about it"
             ));
         }
         let node = target.node();
@@ -505,8 +537,8 @@ impl Daemon {
 
     /// `wait_for_chat`: answers at once if the chat `to` has nothing to
     /// finish, or else waits, until `timeout`, for the call `id` on the
-    /// connection at `token`. A chat out of the caller's sight is waited
-    /// for only for the answer to a message the caller sent it.
+    /// connection at `token`. A chat out of the caller's sight isn't
+    /// waited for.
     pub(super) fn wait_for_chat(
         &mut self,
         (token, id): (Token, Value),
@@ -518,12 +550,10 @@ impl Daemon {
             Ok(target) => target,
             Err(why) => return Some(Err(why)),
         };
-        let sent = (target.node().turns.iter())
-            .any(|turn| turn.from.as_ref().is_some_and(|from| from.chat == chat))
-            || (target.relations().inbox.iter()).any(|message| message.from.chat == chat);
-        if !self.may_see(chat, to) && !sent {
+        if !self.may_see(chat, to) {
             return Some(Err(format!(
-                "chat {to} is in another workspace: wait only for its answers to your messages"
+                "chat {to} is in another workspace, and not of this chat's family: ask the user \
+                 about it"
             )));
         }
         if idle(target) || timeout.is_zero() {
@@ -587,19 +617,18 @@ impl Daemon {
 
     /// The chat `to`'s last answer, as the chat `chat`'s agent is told it:
     /// to its last message, if it sent one, or else the last answer, if
-    /// the chat may see it. `late` if it hasn't finished.
+    /// the chat may still see it. `late` if it hasn't finished.
     fn answer_of(&self, chat: TerminalId, to: TerminalId, late: bool) -> String {
         let Some(target) = self.chat_ref(to) else {
             return format!("Chat {to} has closed.");
         };
+        if !self.may_see(chat, to) {
+            return format!("Chat {to} has moved out of this chat's workspace.");
+        }
         let turns = &target.node().turns;
         let asked = (turns.iter().enumerate().rev())
             .find(|(_, turn)| turn.from.as_ref().is_some_and(|from| from.chat == chat));
-        let last = || {
-            (self.may_see(chat, to))
-                .then(|| (turns.iter().enumerate()).rfind(|(_, turn)| turn.switch.is_none()))
-                .flatten()
-        };
+        let last = || (turns.iter().enumerate()).rfind(|(_, turn)| turn.switch.is_none());
         let mut text = String::new();
         if late {
             let _ = writeln!(
@@ -626,7 +655,7 @@ impl Daemon {
         text.push('\n');
         text.push_str(&ending(turn));
         let later = turns.len() - index - 1;
-        if later > 0 && self.may_see(chat, to) {
+        if later > 0 {
             let _ = write!(
                 text,
                 "\n[it has had {later} more turns since: read_chat reads them]"
@@ -862,11 +891,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
         let b = idle_chat(&mut daemon, 2);
+        // Of a's family, so the two may talk.
+        daemon.chat(b).unwrap().started_by(a, a, 1, None);
         // The user's first turn in a: what comes of it is counted against
         // it, and goes with the message to the chat that takes it.
         let cause = daemon.cause_of(a).unwrap();
         assert_eq!(cause, (a, 0));
-        let message = daemon.message_from(a, "go on".to_owned()).unwrap();
+        let message = daemon.message_from(a, "go on").unwrap();
         assert_eq!(message.cause, Some(cause));
         daemon.chat(b).unwrap().deliver(message).unwrap();
         assert_eq!(daemon.cause_of(b), Some(cause));
@@ -992,6 +1023,31 @@ mod tests {
     }
 
     #[test]
+    fn chats_in_two_lent_workspaces_are_never_in_one_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = idle_chat(&mut daemon, 2);
+        let c = idle_chat(&mut daemon, 3);
+        let lent = |key| clackatoo_protocol::Lent {
+            to: clackatoo_protocol::MachineId([7; 16]),
+            key,
+            placed: true,
+            background: None,
+        };
+        (daemon.workspaces).new_lent(lent(1), clackatoo_protocol::Content::Terminal(a));
+        (daemon.workspaces).new_lent(lent(2), clackatoo_protocol::Content::Terminal(b));
+        let name = daemon.workspaces.name_for_new(None).unwrap();
+        (daemon.workspaces).new_workspace(name, clackatoo_protocol::Content::Terminal(c));
+        // Both are called nothing, but they're two workspaces.
+        assert_eq!(daemon.chat_workspace(a), daemon.chat_workspace(b));
+        assert!(!daemon.may_see(a, b) && !daemon.may_see(b, a));
+        assert!(!daemon.may_see(a, c) && !daemon.may_see(c, a));
+        let refused = daemon.talk_refused(a, &send(b)).unwrap();
+        assert!(refused.contains("is in another workspace"), "{refused}");
+        assert!(!daemon.list_chats(a).contains("chat 2"));
+    }
+
+    #[test]
     fn a_chat_in_the_background_keeps_its_limits_its_anchor_and_its_card_through_an_upgrade() {
         use crate::chat::Wanted;
         use crate::profiles::Limits;
@@ -1054,7 +1110,7 @@ mod tests {
         let b = idle_chat(&mut daemon, 2);
         daemon.chat(b).unwrap().started_by(a, a, 1, None);
         // a is answering, so b's message to it waits.
-        let message = daemon.message_from(b, "later".to_owned()).unwrap();
+        let message = daemon.message_from(b, "later").unwrap();
         daemon.chat(a).unwrap().deliver(message).unwrap();
         let config = daemon.config.clone();
         let handover = daemon.hand_over(std::time::Instant::now()).unwrap();

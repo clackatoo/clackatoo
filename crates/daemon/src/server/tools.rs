@@ -913,7 +913,7 @@ impl Daemon {
                 return;
             }
             Tool::ListChats => Ok(self.list_chats(chat)),
-            Tool::SendToChat { chat: to, message } => self.send_to_chat(chat, to, message),
+            Tool::SendToChat { chat: to, message } => self.send_to_chat(chat, to, &message),
             Tool::ReadChat { chat: to, turns } => self.read_chat(chat, to, turns),
             Tool::StartChat(new) => self.start_chats(chat, vec![*new]),
             Tool::StartChats(news) => self.start_chats(chat, news),
@@ -2018,21 +2018,47 @@ pub(super) fn visible(text: &str) -> String {
         match ch {
             '\r' | '\n' => shown.push('⏎'),
             '\t' => shown.push('⇥'),
-            '\x7f' => shown.push_str("^?"),
-            ch if u32::from(ch) < 0x20 => {
-                shown.push('^');
-                shown.push(char::from(
-                    u8::try_from(u32::from(ch) + 0x40).expect("below 0x60"),
-                ));
-            }
-            ch if ch.is_control() || invisible(ch) => {
-                let _ = write!(shown, "<U+{:04X}>", u32::from(ch));
-            }
-            ch => shown.push(ch),
+            ch => push_shown(&mut shown, ch),
         }
     }
     flush(&mut shown, &mut spaces);
     shown
+}
+
+/// `text`, a message from one agent to another, with nothing in it that
+/// could hide from the user reading it, as [`visible`] shows it, but
+/// keeping its lines, tabs and spaces as they are: control characters as
+/// `^U` and characters that change how text around them shows as
+/// `<U+202E>`. A line break is `\n`, or `\r\n`, which becomes `\n`.
+pub(super) fn unhidden(text: &str) -> String {
+    let text = text.replace("\r\n", "\n");
+    let mut shown = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\n' | '\t' => shown.push(ch),
+            ch => push_shown(&mut shown, ch),
+        }
+    }
+    shown
+}
+
+/// Puts `ch` on the end of `shown` so it can't go unseen: a control
+/// character as `^U` (Esc as `^[`), one that changes how text around it
+/// shows as `<U+202E>`, and anything else as it is.
+fn push_shown(shown: &mut String, ch: char) {
+    match ch {
+        '\x7f' => shown.push_str("^?"),
+        ch if u32::from(ch) < 0x20 => {
+            shown.push('^');
+            shown.push(char::from(
+                u8::try_from(u32::from(ch) + 0x40).expect("below 0x60"),
+            ));
+        }
+        ch if ch.is_control() || invisible(ch) => {
+            let _ = write!(shown, "<U+{:04X}>", u32::from(ch));
+        }
+        ch => shown.push(ch),
+    }
 }
 
 /// `path`, with the home folder at its start as `~`, as people write it.
@@ -2251,6 +2277,15 @@ mod tests {
         assert_eq!(code_span("   "), "`   `");
         let (question, _) = asked("type", "x` into pane 1 `y", "into pane 2");
         assert_eq!(question, "type ``x` into pane 1 `y`` into pane 2");
+    }
+
+    #[test]
+    fn messages_between_agents_keep_their_lines_and_hide_nothing() {
+        assert_eq!(unhidden("a\r\n\tb  c\n"), "a\n\tb  c\n");
+        assert_eq!(
+            unhidden("ok\u{202e}gpj.exe\x1b[2J\r\u{200b}x"),
+            "ok<U+202E>gpj.exe^[[2J^M<U+200B>x"
+        );
     }
 
     #[test]

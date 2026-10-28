@@ -546,13 +546,20 @@ impl Fake {
         }
     }
 
-    /// A session's settings, as the agent impersonated gives them.
+    /// A session's settings, as the agent impersonated gives them: with
+    /// `--no-modes`, none of them a mode.
     fn options(&self, settings: &(String, String)) -> Value {
-        if self.codex {
+        let mut options = if self.codex {
             codex_options(settings)
         } else {
             config_options(settings)
+        };
+        if std::env::args().any(|arg| arg == "--no-modes")
+            && let Some(options) = options.as_array_mut()
+        {
+            options.retain(|option| option["category"] != "mode");
         }
+        options
     }
 
     /// Answers `initialize`, and as Codex's adapter does, says who's

@@ -20,9 +20,12 @@
 //! oldest that have finished, in the background, close to make room for
 //! new ones: the agent that started them has had their answers.
 //!
-//! `start_chats` starts several at once, asking the user once for all of
-//! them, and `wait_for_chats` waits for all of them, or the first, and
-//! gives back one summary.
+//! A chat is started only inside its parent's project, and with an agent
+//! other than its parent's only if that agent offers modes, so it starts
+//! in its safest (see [`Daemon::unheld`]).
+//!
+//! `start_chats` starts several at once, and `wait_for_chats` waits for
+//! all of them, or the first, and gives back one summary.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -314,6 +317,7 @@ impl Daemon {
             return Err(why);
         }
         let home = self.chat_dir(chat)?;
+        let project = self.project_root(chat).ok_or("the chat has closed")?;
         let mut planned = Vec::new();
         for new in chats {
             let dir = match &new.cwd {
@@ -324,6 +328,16 @@ impl Daemon {
             };
             if !dir.is_dir() {
                 return Err(format!("there's no directory {}", dir.display()));
+            }
+            // Its project would be wherever it starts, so it would reach
+            // what this chat's tools don't without asking.
+            let dir = dir.canonicalize().unwrap_or(dir);
+            if !dir.starts_with(&project) {
+                return Err(format!(
+                    "{} is outside this chat's project ({}): ask the user to start a chat there",
+                    dir.display(),
+                    project.display()
+                ));
             }
             let profile = (self.config.agents)
                 .profile(new.profile.as_deref().unwrap_or(profiles::DEFAULT))?;
@@ -385,7 +399,7 @@ impl Daemon {
         profile: &profiles::Profile,
         dir: &Path,
     ) -> Result<String, String> {
-        let message = (self.message_from(chat, new.prompt)).ok_or("the chat has closed")?;
+        let message = (self.message_from(chat, &new.prompt)).ok_or("the chat has closed")?;
         let own = self.chat_ref(chat).ok_or("the chat has closed")?;
         let name =
             (new.agent.or_else(|| profile.agent.clone())).unwrap_or_else(|| own.agent().to_owned());
@@ -609,27 +623,50 @@ impl Daemon {
         text
     }
 
-    /// Checks the chat `chat`'s agent may wait for `to`: one in its sight,
-    /// or one it sent a message.
+    /// Why the chat `chat`, which an agent started, can't go on with the
+    /// session `opened`, if it can't: it has an agent other than the chat
+    /// that started it, which offers no modes, so it can't be held to its
+    /// safest. A chat whose parent has closed is taken to have another.
+    pub(in crate::server) fn unheld(
+        &self,
+        chat: TerminalId,
+        opened: &crate::agent::Opened,
+    ) -> Option<String> {
+        let own = self.chat_ref(chat)?;
+        let parent = own.relations().parent?;
+        let same = (self.chat_ref(parent)).is_some_and(|parent| parent.agent() == own.agent());
+        if same || opened.session.is_empty() {
+            return None;
+        }
+        let offers_modes = (opened.settings.as_deref()).is_some_and(HostedChat::offers_modes);
+        (!offers_modes).then(|| {
+            format!(
+                "{} offers no modes, so a chat an agent started with it can't be kept to what the \
+                 chat that started it may do",
+                own.agent_title()
+            )
+        })
+    }
+
+    /// Checks the chat `chat`'s agent may wait for `to`: one in its sight.
     fn waitable(&self, chat: TerminalId, to: TerminalId) -> Result<(), String> {
         if to == chat {
             return Err(format!("chat {to} is this chat"));
         }
-        let Some(target) = self.chat_ref(to) else {
+        if self.chat_ref(to).is_none() {
             // Closed, it has finished: the summary says so, if it was this
             // chat's.
             return (self.chat_ref(chat))
                 .and_then(|own| own.subagent(to))
                 .map(|_| ())
                 .ok_or_else(|| format!("there's no chat {to}: list_chats lists them"));
-        };
-        let sent = (target.node().turns.iter())
-            .any(|turn| turn.from.as_ref().is_some_and(|from| from.chat == chat));
-        if self.may_see(chat, to) || sent {
+        }
+        if self.may_see(chat, to) {
             Ok(())
         } else {
             Err(format!(
-                "chat {to} is in another workspace: wait only for its answers to your messages"
+                "chat {to} is in another workspace, and not of this chat's family: ask the user \
+                 about it"
             ))
         }
     }

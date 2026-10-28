@@ -1223,10 +1223,20 @@ impl Daemon {
             .running
             .get(&agent)
             .is_some_and(|s| s.agent.can_steer());
+        let unheld = (result.as_ref().ok()).and_then(|opened| self.unheld(terminal, opened));
+        if let (Some(why), Ok(opened)) = (&unheld, &result) {
+            log::info!("chat {terminal}: {why}");
+            if let Some(slot) = self.agents.running.get_mut(&agent)
+                && !opened.session.is_empty()
+            {
+                slot.agent.close_session(&opened.session);
+            }
+        }
         let Some(chat) = self.chat(terminal) else {
             return false;
         };
         match result {
+            Ok(_) if let Some(why) = unheld => chat.failed_to_connect(&why),
             Ok(opened) => {
                 chat.set_native_steering(native);
                 chat.opened_again(loaded);

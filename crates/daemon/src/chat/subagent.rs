@@ -10,7 +10,9 @@
 //! and mode it asks for are chosen as its first session opens, once the
 //! agent has said what it offers.
 
-use agent_client_protocol_schema::v1::{PermissionOption, PermissionOptionKind, ToolCallUpdate};
+use agent_client_protocol_schema::v1::{
+    PermissionOption, PermissionOptionKind, SessionConfigOption, ToolCallUpdate,
+};
 use clackatoo_protocol::{
     ChatPatch, ChatState, Outcome, SettingKind, Subagent, SubagentStatus, TerminalId, ToolKind,
 };
@@ -87,6 +89,21 @@ impl HostedChat {
         } else {
             Limits::None
         }
+    }
+
+    /// Whether an agent offering `options` as a session's settings
+    /// offers modes, one of which can be chosen.
+    pub(crate) fn offers_modes(options: &[SessionConfigOption]) -> bool {
+        (super::settings_of(options).iter())
+            .any(|setting| setting.kind == SettingKind::Mode && !setting.choices.is_empty())
+    }
+
+    /// Where its agent's mode is among the modes it offers, from 0, the
+    /// safest, which comes first, as Manual or Read-only: later ones may
+    /// do more. None if it offers no modes, or hasn't said yet.
+    pub(crate) fn mode_rank(&self) -> Option<usize> {
+        let setting = self.setting_of(SettingKind::Mode)?;
+        (setting.choices.iter()).position(|choice| choice.value == setting.value)
     }
 
     /// It's started as the profile `profile`, with `limits`: `role` goes
