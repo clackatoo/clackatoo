@@ -17,8 +17,8 @@
 //! line, as a list's bar takes it (see [`crate::vim::list::paste_into`]).
 //!
 //! What's typed is only ever added to or deleted from the end: a picker
-//! has no caret, so Home and End are the list's, as they are in a list
-//! pane.
+//! has no caret to move, so Home and End are the list's, as they are in a
+//! list pane.
 //!
 //! How many rows there are is each picker's own, as some have rows besides
 //! those matching what's typed (the start page's new chat, the machine
@@ -98,7 +98,7 @@ impl Shared {
 }
 
 /// What's typed into a picker, the row picked and the first row shown.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Picker {
     query: String,
     /// The row picked.
@@ -107,6 +107,12 @@ pub(crate) struct Picker {
     top: usize,
     /// How many rows the list showed last, for paging.
     rows: usize,
+}
+
+impl Default for Picker {
+    fn default() -> Self {
+        Self::new(String::new())
+    }
 }
 
 impl Picker {
@@ -158,7 +164,8 @@ impl Picker {
             Shared::Last => self.go_to(len.saturating_sub(1)),
             Shared::Edit => {
                 // Ctrl+U, Ctrl+W and Backspace only ever delete, and
-                // typing only adds: as long is unchanged.
+                // typing only adds, so a query as long as before is the
+                // same query.
                 let before = self.query.len();
                 simple::key(&mut self.query, stroke);
                 if self.query.len() == before {
@@ -256,15 +263,62 @@ impl Picker {
     }
 }
 
+/// What a key does to a picker, as the picker says it to the window.
+pub(crate) trait Outcome: Sized {
+    /// Nothing to show.
+    const NOTHING: Self;
+    /// Something shown changed.
+    const CHANGED: Self;
+
+    /// How much it changed, for the outcome of a key that makes several
+    /// strokes to be the most any made, as a grep searched for once all
+    /// is typed; `None` if it's an end, as closing, which the strokes
+    /// after it don't get to change.
+    fn weight(&self) -> Option<u8>;
+}
+
+impl Keyed {
+    /// What the picker says to the window of what the core did: `typed`
+    /// says it once what's typed changed.
+    pub(crate) fn outcome<O: Outcome>(self, typed: impl FnOnce() -> O) -> O {
+        match self {
+            Self::Nothing => O::NOTHING,
+            Self::Moved => O::CHANGED,
+            Self::Typed => typed(),
+        }
+    }
+}
+
+/// Does each stroke `press` makes in a picker with `stroke`: the most any
+/// changed, or the first that ended it (see [`Outcome::weight`]).
+pub(crate) fn press<O: Outcome>(press: &KeyPress<'_>, mut stroke: impl FnMut(Stroke) -> O) -> O {
+    let mut outcome = O::NOTHING;
+    for made in strokes(press) {
+        let next = stroke(made);
+        match next.weight() {
+            None => return next,
+            Some(weight) if weight > outcome.weight().unwrap_or(0) => outcome = next,
+            Some(_) => {}
+        }
+    }
+    outcome
+}
+
 /// The strokes `press` makes in a picker: what it types, as in a list's
-/// bar, and its keys. With Shift, Ctrl and a letter are none of a
+/// bar, and its keys, Ctrl and a letter as the letter's small one, so Caps
+/// Lock changes nothing. With Shift, Ctrl and a letter are none of a
 /// picker's: Ctrl+Shift+C and the like are the terminal's.
 pub(crate) fn strokes(press: &KeyPress<'_>) -> Vec<Stroke> {
     let modifiers = press.modifiers;
     if modifiers.ctrl && modifiers.shift && matches!(press.key, Key::Character(_)) {
         return Vec::new();
     }
-    plain_strokes(press, true)
+    (plain_strokes(press, true).into_iter())
+        .map(|stroke| match stroke {
+            Stroke::Char { ch, ctrl: true } => Stroke::ctrl(ch.to_ascii_lowercase()),
+            stroke => stroke,
+        })
+        .collect()
 }
 
 /// The query as a picker draws it, with its caret at the end.
@@ -408,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_shift_and_a_letter_are_no_pickers() {
+    fn ctrl_shift_and_a_letter_are_no_pickers_and_caps_lock_changes_nothing() {
         use crate::input::Modifiers;
         let key = Key::Character("C".into());
         let press = |modifiers| KeyPress {
@@ -427,6 +481,7 @@ mod tests {
             ..ctrl
         };
         assert_eq!(strokes(&press(shifted)), Vec::new());
-        assert_eq!(strokes(&press(ctrl)), vec![Stroke::ctrl('C')]);
+        // Caps Lock on, Ctrl and a letter are still that letter's keys.
+        assert_eq!(strokes(&press(ctrl)), vec![Stroke::ctrl('c')]);
     }
 }

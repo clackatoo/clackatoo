@@ -26,11 +26,11 @@ The host is anything `ssh` accepts: a hostname, `user@host`, `host:port`, or a n
 - each `Host` in `~/.ssh/config`, and the files it includes, that names one machine: patterns with `*`, `?` or `!`, and everything under `Match`, are left out;
 - Tailscale's peers that are online, if Tailscale is installed, by their MagicDNS name (or address, without MagicDNS). Phones are left out.
 
-Type a few letters to narrow them, or a machine that isn't listed, such as `jack@server:2222`, and Enter connects, as `--remote` would. What's typed is edited, and the machines moved through, with [the finder's keys](~clackatoo/reference/window#the-finder). If it can't, the picker opens again saying why, so you can pick another. Esc closes the window.
+Type a few letters to narrow them, or a machine that isn't listed, such as `jack@server:2222`, and Enter connects, as `--remote` would. If it can't, the picker opens again saying why, so you can pick another. What's typed is edited, and the machines moved through, with [the finder's keys](~clackatoo/reference/window#the-finder). Esc, Ctrl+C, Ctrl+;, Shift+Esc or Ctrl+\ closes the window.
 
 Your app launcher offers this as "Connect to…" when you right-click clackatoo, along with the last three machines you connected to (see [desktop](~clackatoo/reference/cli#desktop)).
 
-In a window, `:connect`, or Ctrl+B r, opens the same picker over your panes. Picking a machine opens a new window on it and leaves this one as it is.
+In a window, `:connect`, or Ctrl+B r, opens the same picker over your panes. Picking a machine opens a new window on it and leaves this one as it is, and the keys that close the window above close only the picker.
 
 Each window remembers the machines it connects to, in `clackatoo/remotes` under `$XDG_STATE_HOME` (`~/.local/state`), a line each, up to 20.
 

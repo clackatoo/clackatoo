@@ -1567,6 +1567,9 @@ impl App {
                     connect::Outcome::Nothing
                 }
             }
+        } else if crate::vim::enters_normal_mode(press) {
+            // Ctrl+; goes by where the key is, which the picker isn't told.
+            connect::Outcome::Close
         } else {
             picker.key(&input::KeyPress {
                 code: None,

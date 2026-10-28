@@ -95,6 +95,19 @@ pub(crate) enum Outcome {
     },
 }
 
+impl picker::Outcome for Outcome {
+    const NOTHING: Self = Self::Nothing;
+    const CHANGED: Self = Self::Changed;
+
+    fn weight(&self) -> Option<u8> {
+        match self {
+            Self::Nothing => Some(0),
+            Self::Changed => Some(1),
+            _ => None,
+        }
+    }
+}
+
 /// One of the new chat's pickers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Field {
@@ -326,15 +339,7 @@ impl StartPage {
     /// Handles a key.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> Outcome {
         self.said = None;
-        let mut outcome = Outcome::Nothing;
-        for stroke in picker::strokes(press) {
-            match self.stroke(stroke) {
-                Outcome::Nothing => {}
-                Outcome::Changed => outcome = Outcome::Changed,
-                done => return done,
-            }
-        }
-        outcome
+        picker::press(press, |stroke| self.stroke(stroke))
     }
 
     crate::shortcuts::bindings::described_keys! {
@@ -383,7 +388,7 @@ impl StartPage {
                     Some(keyed) => {
                         // A letter typed starts typing; deleting doesn't.
                         self.typing |= stroke.plain().is_some();
-                        self.did(keyed)
+                        keyed.outcome(|| self.retyped())
                     }
                     None => Outcome::Nothing,
                 };
@@ -403,40 +408,34 @@ impl StartPage {
         if keyed == Keyed::Typed {
             self.typing = true;
         }
-        self.did(keyed)
+        keyed.outcome(|| self.retyped())
     }
 
-    /// What the picker did with a key: what's typed changed, so the list
-    /// is matched against it again, and the best match picked, if
-    /// anything's typed.
-    fn did(&mut self, keyed: Keyed) -> Outcome {
-        match keyed {
-            Keyed::Nothing => Outcome::Nothing,
-            Keyed::Moved => Outcome::Changed,
-            Keyed::Typed => {
-                self.ranking.set_query(self.picker.query(), &self.items);
-                let typed = !self.picker.query().is_empty() && self.ranking.len() > 0;
-                self.picker.set_selected(usize::from(typed));
-                Outcome::Changed
-            }
-        }
+    /// What's typed changed: the list is matched against it again, and
+    /// the best match picked, if anything's typed.
+    fn retyped(&mut self) -> Outcome {
+        self.ranking.set_query(self.picker.query(), &self.items);
+        let typed = !self.picker.query().is_empty() && self.ranking.len() > 0;
+        self.picker.set_selected(usize::from(typed));
+        Outcome::Changed
     }
 
-    /// Esc: what's typed goes, or else the page.
+    /// Esc: what's typed goes, and the new chat is picked again, or else
+    /// the page goes.
     fn escape(&mut self) -> Outcome {
         if !self.typing && self.picker.query().is_empty() {
             return Outcome::Close;
         }
         self.typing = false;
-        let keyed = self.picker.clear();
-        self.did(keyed);
-        Outcome::Changed
+        self.picker.clear();
+        self.picker.restart();
+        self.retyped()
     }
 
     /// Moves what's picked by `by` rows, as `j` and `k` do.
     fn go(&mut self, by: isize) -> Outcome {
         let keyed = self.picker.go(by, self.len());
-        self.did(keyed)
+        keyed.outcome(|| self.retyped())
     }
 
     /// Moves what's picked by `by` rows, as the mouse's wheel does.

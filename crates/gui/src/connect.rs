@@ -25,9 +25,11 @@
 //! | Page Down, Page Up | A page further or back |
 //! | Home, End | The first machine or the last |
 //! | Enter | Connects to it |
-//! | Esc, Ctrl+C | Closes the picker |
+//! | Esc, Ctrl+C; Ctrl+;, Shift+Esc, Ctrl+\\ | Closes the picker |
 //!
-//! All but Enter and Esc are every picker's (see [`crate::picker`]).
+//! All but Enter, Esc and Ctrl+C are every picker's (see
+//! [`crate::picker`]). Ctrl+; is the window's to read, as it goes by
+//! where the key is (see `App::picker_key`).
 
 use crate::shortcuts::bindings::Hint;
 
@@ -38,7 +40,7 @@ use crate::finder::view::{FinderView, Row, fit};
 use crate::hosts;
 use crate::input::KeyPress;
 use crate::options::Case;
-use crate::picker::{self, Keyed, Picker};
+use crate::picker::{self, Picker};
 use crate::render::Ink;
 use crate::vim::Stroke;
 
@@ -130,6 +132,19 @@ pub(crate) enum Outcome {
     Close,
     /// It's to close, connecting to this machine.
     Connect(String),
+}
+
+impl picker::Outcome for Outcome {
+    const NOTHING: Self = Self::Nothing;
+    const CHANGED: Self = Self::Changed;
+
+    fn weight(&self) -> Option<u8> {
+        match self {
+            Self::Nothing => Some(0),
+            Self::Changed => Some(1),
+            _ => None,
+        }
+    }
 }
 
 /// The picker's state.
@@ -244,15 +259,7 @@ impl HostPicker {
 
     /// Handles a key.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> Outcome {
-        let mut outcome = Outcome::Nothing;
-        for stroke in picker::strokes(press) {
-            match self.stroke(stroke) {
-                Outcome::Nothing => {}
-                Outcome::Changed => outcome = Outcome::Changed,
-                done => return done,
-            }
-        }
-        outcome
+        picker::press(press, |stroke| self.stroke(stroke))
     }
 
     crate::shortcuts::bindings::described_keys! {
@@ -267,7 +274,7 @@ impl HostPicker {
             _ =>
                 Picker::hint(stroke, "Search machines"),
                 match self.picker.key(stroke, self.len()) {
-                    Some(keyed) => self.did(keyed),
+                    Some(keyed) => keyed.outcome(|| self.retyped()),
                     None => Outcome::Nothing,
                 };
         }
@@ -283,26 +290,19 @@ impl HostPicker {
     /// Types `text`.
     pub(crate) fn paste(&mut self, text: &str) -> Outcome {
         let keyed = self.picker.paste(text);
-        self.did(keyed)
+        keyed.outcome(|| self.retyped())
     }
 
-    /// What the picker did with a key: what's typed changed, so the list
-    /// is matched against it again.
-    fn did(&mut self, keyed: Keyed) -> Outcome {
-        match keyed {
-            Keyed::Nothing => Outcome::Nothing,
-            Keyed::Moved => Outcome::Changed,
-            Keyed::Typed => {
-                self.ranking.set_query(self.picker.query(), &self.items);
-                Outcome::Changed
-            }
-        }
+    /// What's typed changed: the list is matched against it again.
+    fn retyped(&mut self) -> Outcome {
+        self.ranking.set_query(self.picker.query(), &self.items);
+        Outcome::Changed
     }
 
     /// Moves what's picked by `by` rows, as the mouse's wheel does.
     pub(crate) fn scroll(&mut self, by: isize) -> Outcome {
         let keyed = self.picker.go(by, self.len());
-        self.did(keyed)
+        keyed.outcome(|| self.retyped())
     }
 
     /// Picks the machine shown in row `row` of the list, as a click does,

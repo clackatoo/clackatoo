@@ -21,7 +21,7 @@ impl Desk {
         }
         if let Some(page) = &self.start {
             let mut context = page.shortcut_context();
-            crate::shortcuts::bindings::normal(&mut context, "Clear query, or close the page");
+            crate::shortcuts::bindings::normal(&mut context, "Close the page");
             crate::shortcuts::bindings::paste(&mut context, "Paste into query");
             return context;
         }

@@ -376,3 +376,21 @@ fn the_pages_help_says_its_own_keys_and_every_pickers() {
         "{rows:#?}"
     );
 }
+
+#[test]
+fn esc_after_slash_with_nothing_typed_picks_the_new_chat_again() {
+    let sessions = vec![
+        session("a", "Fix the parser", None),
+        session("b", "Write the docs", None),
+    ];
+    let mut page = page(LastChat::default(), Vec::new(), sessions);
+    named(&mut page, NamedKey::ArrowDown);
+    named(&mut page, NamedKey::ArrowDown);
+    type_text(&mut page, "/");
+    assert_eq!(named(&mut page, NamedKey::Escape), Outcome::Changed);
+    assert_eq!(page.view((10, 80), None).selected, Some(0));
+    assert!(matches!(
+        named(&mut page, NamedKey::Enter),
+        Outcome::Start(_)
+    ));
+}

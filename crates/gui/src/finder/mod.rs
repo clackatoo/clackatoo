@@ -47,7 +47,7 @@ use clackatoo_protocol::{
 use crate::command::Place;
 use crate::input::KeyPress;
 use crate::options::Case;
-use crate::picker::{self, Keyed, Picker};
+use crate::picker::{self, Picker};
 use crate::render::Ink;
 use crate::vim::Stroke;
 use rank::{Items, Ranking};
@@ -180,6 +180,22 @@ pub(crate) enum Outcome {
     /// The ports the background tab picked listens on, by what
     /// [`Opening::path`] would say, are to be forwarded here.
     Forward(String),
+}
+
+impl picker::Outcome for Outcome {
+    const NOTHING: Self = Self::Nothing;
+    const CHANGED: Self = Self::Changed;
+
+    // What a grep looks for changing outweighs the rest: it's searched
+    // for once, after all a key types.
+    fn weight(&self) -> Option<u8> {
+        match self {
+            Self::Nothing => Some(0),
+            Self::Changed => Some(1),
+            Self::Search => Some(2),
+            _ => None,
+        }
+    }
 }
 
 /// A preview of the file picked.
@@ -642,17 +658,7 @@ impl Finder {
 
     /// Handles a key.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> Outcome {
-        let mut outcome = Outcome::Nothing;
-        for stroke in picker::strokes(press) {
-            match self.stroke(stroke) {
-                Outcome::Nothing => {}
-                // What a grep looks for changed: it's searched for, once.
-                Outcome::Changed if outcome == Outcome::Search => {}
-                changed @ (Outcome::Changed | Outcome::Search) => outcome = changed,
-                done => return done,
-            }
-        }
-        outcome
+        picker::press(press, |stroke| self.stroke(stroke))
     }
 
     crate::shortcuts::bindings::described_keys! {
@@ -695,7 +701,7 @@ impl Finder {
             _ =>
                 Picker::hint(stroke, "Search items"),
                 match self.picker.key(stroke, self.ranking.len()) {
-                    Some(keyed) => self.did(keyed),
+                    Some(keyed) => keyed.outcome(|| self.retyped()),
                     None => Outcome::Nothing,
                 };
         }
@@ -709,27 +715,23 @@ impl Finder {
     /// Types `text`.
     pub(crate) fn paste(&mut self, text: &str) -> Outcome {
         let keyed = self.picker.paste(text);
-        self.did(keyed)
+        keyed.outcome(|| self.retyped())
     }
 
-    /// What the picker did with a key: what's typed changed, so the list
-    /// is matched against it again, or for a grep, it's searched for.
-    fn did(&mut self, keyed: Keyed) -> Outcome {
-        match keyed {
-            Keyed::Nothing => Outcome::Nothing,
-            Keyed::Moved => Outcome::Changed,
-            Keyed::Typed if self.kind.searched() => Outcome::Search,
-            Keyed::Typed => {
-                self.ranking.set_query(self.picker.query(), &self.items);
-                Outcome::Changed
-            }
+    /// What's typed changed: the list is matched against it again, or
+    /// for a grep, it's searched for.
+    fn retyped(&mut self) -> Outcome {
+        if self.kind.searched() {
+            return Outcome::Search;
         }
+        self.ranking.set_query(self.picker.query(), &self.items);
+        Outcome::Changed
     }
 
     /// Moves what's picked by `by` things, as the mouse's wheel does.
     pub(crate) fn scroll(&mut self, by: isize) -> Outcome {
         let keyed = self.picker.go(by, self.ranking.len());
-        self.did(keyed)
+        keyed.outcome(|| self.retyped())
     }
 
     /// Picks the thing shown in row `row` of the list, as a click does,
