@@ -1065,7 +1065,8 @@ fn mark(dirty: &mut Dirty, patch: &Patch) {
         | ChatPatch::Settings(_)
         | ChatPatch::Providers(_)
         | ChatPatch::Delivery(_)
-        | ChatPatch::ProviderUsage(_) => dirty.footer = true,
+        | ChatPatch::ProviderUsage(_)
+        | ChatPatch::Tasks(_) => dirty.footer = true,
     }
 }
 

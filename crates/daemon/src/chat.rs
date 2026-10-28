@@ -38,6 +38,7 @@ mod originals;
 pub(crate) mod queue;
 mod relations;
 mod resume;
+mod tasks;
 mod upgrade;
 
 use resume::Held;
@@ -273,6 +274,9 @@ pub(crate) enum Action {
     /// The agent is slow to open the chat's session: start it again, and
     /// ask again.
     Retry,
+    /// Ask the agent to stop the task it runs in the background that it
+    /// calls this.
+    StopTask(String),
 }
 
 /// The answer to an install offer that installs.
@@ -984,6 +988,7 @@ impl HostedChat {
             | ChatAction::RefreshUsage { .. }
             | ChatAction::LearnModels
             | ChatAction::Open { .. } => {}
+            ChatAction::StopTask { id } => self.stop_task(&id, &mut actions),
             // Only a value the agent offers is kept, and asked for.
             ChatAction::Set { setting, value } => {
                 if self.set_value(&setting, &value) {
@@ -1550,6 +1555,7 @@ impl HostedChat {
     /// was asked to: the chat starts a new one, which hears the whole
     /// conversation with the next message, rather than failing.
     pub(crate) fn session_lost(&mut self) {
+        self.tasks_lost();
         self.session = None;
         self.known = 0;
         self.link = Link::Opening;
@@ -1798,7 +1804,11 @@ impl HostedChat {
     /// chat keeps its ID: its next message opens it again, as after an
     /// upgrade.
     pub(crate) fn park(&mut self) -> Option<String> {
-        let idle = !self.answering() && self.asking.is_empty() && self.relations.inbox.is_empty();
+        // Letting it go would end what the agent runs in the background.
+        let idle = !self.answering()
+            && self.asking.is_empty()
+            && self.relations.inbox.is_empty()
+            && !self.has_tasks_going();
         if self.link != Link::Open || !idle {
             return None;
         }
@@ -1820,6 +1830,7 @@ impl HostedChat {
     /// still. Any other session it had is gone, and its next message opens
     /// it again, as after the agent stopped.
     pub(crate) fn agent_restarted(&mut self) -> bool {
+        self.tasks_lost();
         match self.link {
             Link::Opening => {
                 self.load_cut_off(Held::Send);
@@ -1840,6 +1851,7 @@ impl HostedChat {
         if self.link != Link::Closing {
             return Vec::new();
         }
+        self.tasks_lost();
         if self.queued.is_some() {
             self.link = Link::Opening;
             vec![Action::Connect]
@@ -1928,6 +1940,7 @@ impl HostedChat {
     /// The agent has gone: it exited, or stopped answering. If it never
     /// started, `why` says why, as far as it said.
     pub(crate) fn disconnected(&mut self, why: Option<&str>) {
+        self.tasks_lost();
         self.queue_disconnected();
         self.clear_slow();
         self.load_cut_off(Held::End(Outcome::Failed("the agent stopped".to_owned())));
@@ -2571,6 +2584,16 @@ impl HostedChat {
         })
     }
 
+    /// The tool with ID `id` in the last turn, whether or not it's still
+    /// being answered.
+    fn tool_anywhere(&self, id: &str) -> Option<&Tool> {
+        let turn = self.node.turns.last()?;
+        turn.items.iter().find_map(|item| match item {
+            Item::Tool(tool) if tool.id == id => Some(tool),
+            _ => None,
+        })
+    }
+
     // --- Changes ------------------------------------------------------------
 
     /// Whether a message has been sent and not yet answered: the agent's
@@ -2911,6 +2934,7 @@ impl HostedChat {
 
     fn push_turn(&mut self, turn: Turn) {
         self.diffs.clear();
+        self.forget_ended_tasks();
         self.node.turns.push(turn);
         self.patch_turn(self.node.turns.len() - 1);
     }
@@ -5333,6 +5357,33 @@ mod tests {
         chat.park();
         chat.parked_without_closing();
         assert_eq!(send(&mut chat, "now"), [Action::Connect]);
+    }
+
+    #[test]
+    fn a_chat_running_something_in_the_background_keeps_its_session_and_says_so_on_its_card() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        chat.task_said(crate::agent::Task::Spawned {
+            id: "t1".into(),
+            kind: "shell".into(),
+            name: "Serve the docs".into(),
+            description: None,
+            can_stop: true,
+            tool: None,
+        });
+        // Letting it go would end Claude Code's process, and the shell.
+        assert_eq!(chat.park(), None);
+        let card = chat.as_subagent(0, false);
+        assert_eq!(card.tasks.len(), 1);
+        assert!(!chat.outdates(&card, false));
+        chat.task_said(crate::agent::Task::State {
+            id: "t1".into(),
+            state: "completed".into(),
+            summary: None,
+        });
+        assert!(chat.outdates(&card, false), "the card says it's going");
+        assert!(chat.as_subagent(0, false).tasks.is_empty());
+        assert_eq!(chat.park().as_deref(), Some("s"));
     }
 
     #[test]

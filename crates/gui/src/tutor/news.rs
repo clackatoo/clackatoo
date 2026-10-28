@@ -1007,6 +1007,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Agents start and message other chats without asking you first",
     },
+    News {
+        id: "background-shells",
+        date: "2026-10-28",
+        lesson: "agents",
+        what: "What Claude Code runs in the background shows above a chat's box, counting, and stops with a click or :stoptask",
+    },
 ];
 
 impl News {

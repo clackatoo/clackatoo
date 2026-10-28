@@ -984,6 +984,44 @@ fn sheet(title: &str, close: Action, content: Element) -> Element {
         )
 }
 
+/// What the agent runs in the background, such as shells Claude Code
+/// started, and how each is going: to read, as the window has the buttons
+/// that stop them.
+#[must_use]
+pub fn background(node: &ChatNode) -> Element {
+    use clackatoo_protocol::AgentTaskState as State;
+    let mut list = el("div").class("queue");
+    if node.tasks.is_empty() {
+        return list;
+    }
+    let going = node.tasks.iter().filter(|task| task.going()).count();
+    list = list.child(
+        el("div")
+            .class("queue-heading")
+            .text(format!("In the background · {going} running")),
+    );
+    for task in node.tasks.iter().rev() {
+        let state = match task.state {
+            State::Running => "running",
+            State::Paused => "paused",
+            State::Stopping => "stopping",
+            State::Done => "done",
+            State::Failed => "failed",
+            State::Stopped => "stopped",
+            State::Lost => "ended with its agent",
+        };
+        let what = task.command.as_ref().unwrap_or(&task.title);
+        list = list.child(
+            el("div").class("queued-message").child(
+                el("div")
+                    .class("queued-text")
+                    .text(format!("{what} — {state}")),
+            ),
+        );
+    }
+    list
+}
+
 /// Shared daemon queue, with stable IDs so stale taps cannot affect another item.
 #[must_use]
 pub fn queue(node: &ChatNode, online: Online) -> Element {

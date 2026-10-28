@@ -98,12 +98,14 @@ impl ChatView {
     }
 
     /// Notes when the chat must next be drawn by itself: for the line
-    /// above the box that says what the agent is doing, or a card that
-    /// counts its subagents' seconds, if either was drawn.
+    /// above the box that says what the agent is doing, a card that
+    /// counts its subagents' seconds, or the shelf that counts what the
+    /// agent runs in the background, if any was drawn.
     pub(super) fn note_live(&mut self) {
         let now = self.now();
         self.live = (self.working_wake(now).into_iter())
             .chain(self.agents_live())
+            .chain(self.tasks_live())
             .min();
     }
 

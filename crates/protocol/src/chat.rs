@@ -73,6 +73,87 @@ pub struct ChatNode {
         deserialize_with = "wire::since::<{ wire::HARNESS }, _, _>"
     )]
     pub activities: Vec<crate::Activity>,
+    /// What the agent left running in the background, such as shells it
+    /// started, newest last: those still running, and those that ended
+    /// since the user last sent a message.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::AGENT_TASKS }, _>",
+        deserialize_with = "wire::since::<{ wire::AGENT_TASKS }, _, _>"
+    )]
+    pub tasks: Vec<AgentTask>,
+}
+
+/// Work an agent runs in the background of a chat, as the agent reports
+/// it: a shell Claude Code started with `run_in_background`, a monitor, or
+/// a turn it took by itself, such as to answer a shell that finished.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTask {
+    /// The agent's name for it, which asking to stop it gives back.
+    pub id: String,
+    /// What kind of work it is.
+    pub kind: AgentTaskKind,
+    /// What it's for, as the agent says: "Start the dev server".
+    pub title: String,
+    /// The command it runs, if it's a shell and the chat saw the tool call
+    /// that started it.
+    pub command: Option<String>,
+    /// How it's going.
+    pub state: AgentTaskState,
+    /// What the agent said of how it ended, if it said anything.
+    pub summary: Option<String>,
+    /// When the daemon heard of it, in milliseconds since the Unix epoch.
+    pub started: u64,
+    /// When it ended, if it has.
+    pub ended: Option<u64>,
+    /// Whether the agent can be asked to stop it.
+    pub can_stop: bool,
+}
+
+impl AgentTask {
+    /// Whether it's still going: running, paused or being stopped.
+    #[must_use]
+    pub fn going(&self) -> bool {
+        matches!(
+            self.state,
+            AgentTaskState::Running | AgentTaskState::Paused | AgentTaskState::Stopping
+        )
+    }
+}
+
+/// What kind of background work an [`AgentTask`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentTaskKind {
+    /// A shell command.
+    Shell,
+    /// Something the agent watches, such as a command's output.
+    Monitor,
+    /// A workflow of the agent's own.
+    Workflow,
+    /// A turn the agent took by itself, with no message from the user.
+    Turn,
+    /// Something else.
+    Other,
+}
+
+/// How an [`AgentTask`] is going.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentTaskState {
+    /// It's running.
+    Running,
+    /// The agent paused it.
+    Paused,
+    /// The user asked for it to stop, and the agent hasn't said it has.
+    Stopping,
+    /// It finished.
+    Done,
+    /// It failed.
+    Failed,
+    /// It was stopped.
+    Stopped,
+    /// Its agent stopped, or the chat started again, before it said how
+    /// it ended.
+    Lost,
 }
 
 /// One provider account's quota readings. Context belongs to the chat, not here.
@@ -167,6 +248,13 @@ pub struct Subagent {
     pub turn: u32,
     /// Whether it's in a pane of its own, rather than in the background.
     pub shown: bool,
+    /// What its agent runs in the background now, for the card to say.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::AGENT_TASKS }, _>",
+        deserialize_with = "wire::since::<{ wire::AGENT_TASKS }, _, _>"
+    )]
+    pub tasks: Vec<AgentTask>,
 }
 
 /// How a chat another chat's agent started is going.
@@ -1049,6 +1137,8 @@ pub enum ChatPatch {
     },
     /// Complete bounded activity list for this chat.
     Activities(Vec<crate::Activity>),
+    /// What the agent runs in the background is now this.
+    Tasks(Vec<AgentTask>),
 }
 
 /// A small, decoded image for chat history. Shared by snapshots and paint
@@ -1244,6 +1334,12 @@ pub enum ChatAction {
         /// Ask to refresh a cached reading, subject to the minimum interval.
         force: bool,
     },
+    /// Ask the agent to stop work it runs in the background. Requires
+    /// `wire::AGENT_TASKS`.
+    StopTask {
+        /// The task, by the agent's name for it.
+        id: String,
+    },
 }
 
 /// The number turn `index` of `turns` goes by, as people count them: from
@@ -1333,6 +1429,7 @@ impl ChatNode {
             delivery: self.delivery.clone(),
             provider_usage: self.provider_usage.clone(),
             activities: self.activities.clone(),
+            tasks: self.tasks.clone(),
             first_turn: self
                 .first_turn
                 .saturating_add(u32::try_from(start).unwrap_or(u32::MAX)),
@@ -1412,6 +1509,7 @@ impl ChatNode {
             ChatPatch::Delivery(delivery) => self.delivery = delivery,
             ChatPatch::ProviderUsage(usage) => self.provider_usage = usage,
             ChatPatch::Activities(activities) => self.activities = activities,
+            ChatPatch::Tasks(tasks) => self.tasks = tasks,
             ChatPatch::History {
                 first,
                 before,

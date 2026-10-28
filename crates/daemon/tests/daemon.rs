@@ -16,16 +16,16 @@ use clackatoo_daemon::{
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::wire;
 use clackatoo_protocol::{
-    AgentTools, Answer, Author, Axis, BlockMarks, BufferId, BufferSnapshot, BufferUpdate, Change,
-    ChatAction, ChatNode, ChatState, ClientMessage, CompletionItem, Construct, Content, Diff, Done,
-    Edit, Error, Event, FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesId,
-    FilesUpdate, Found, FoundBuffer, FoundLine, FoundSymbol, GitMark, InlayHint, InlayHintKind,
-    Item, Kind, Layout, Limit, Location, NewAgent, NewTerminal, OpenBlank, OpenFile, OpenFiles,
-    Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, Place, ProviderModels, Query,
-    Request, Response, Restored, Resume, Search, Selection, ServerFeatures, ServerMessage, Side,
-    Size, Span, SubagentStatus, Symbol, TerminalId, TerminalStatus, TextChange, Tool, ToolContent,
-    ToolKind, ToolStatus, Trigger, TurnFiles, TurnFilesState, Usage, Use, UseKind, View,
-    ViewUpdate, Workspaces,
+    AgentTaskKind, AgentTaskState, AgentTools, Answer, Author, Axis, BlockMarks, BufferId,
+    BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode, ChatState, ClientMessage,
+    CompletionItem, Construct, Content, Diff, Done, Edit, Error, Event, FileLocation, FileOp,
+    FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate, Found, FoundBuffer, FoundLine,
+    FoundSymbol, GitMark, InlayHint, InlayHintKind, Item, Kind, Layout, Limit, Location, NewAgent,
+    NewTerminal, OpenBlank, OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal,
+    Patch, Piece, Place, ProviderModels, Query, Request, Response, Restored, Resume, Search,
+    Selection, ServerFeatures, ServerMessage, Side, Size, Span, SubagentStatus, Symbol, TerminalId,
+    TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, TurnFiles,
+    TurnFilesState, Usage, Use, UseKind, View, ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -2584,6 +2584,76 @@ fn when_the_agent_stops_the_next_message_starts_it_again() {
         Some(&Outcome::Failed("the agent stopped".into()))
     );
     assert_eq!(last_words(&ask(&mut client, chat, "back")), "echo: back\n");
+}
+
+#[test]
+fn a_shell_claude_runs_in_the_background_shows_until_it_ends_and_can_be_stopped() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    // Asked for, as Claude Code's adapter sends them only to a client
+    // that asks.
+    let node = ask(&mut client, chat, "background");
+    assert_eq!(last_words(&node), "started\n");
+    let [task] = node.tasks.as_slice() else {
+        panic!("one task: {:#?}", node.tasks);
+    };
+    assert_eq!(task.id, "t1");
+    assert_eq!(task.kind, AgentTaskKind::Shell);
+    assert_eq!(task.title, "Serve the docs");
+    assert_eq!(task.command.as_deref(), Some("npm run dev"));
+    assert_eq!(task.state, AgentTaskState::Running);
+    assert!(task.can_stop && task.ended.is_none());
+
+    // It ends, saying how; the next message lets it go.
+    let node = ask(&mut client, chat, "finish");
+    assert_eq!(node.tasks[0].state, AgentTaskState::Done);
+    assert_eq!(node.tasks[0].summary.as_deref(), Some("exit code 0"));
+    assert!(node.tasks[0].ended.is_some());
+    let node = ask(&mut client, chat, "hello");
+    assert!(node.tasks.is_empty(), "{:#?}", node.tasks);
+
+    // Stopped by the user, through the agent.
+    ask(&mut client, chat, "background");
+    client
+        .chat(chat, ChatAction::StopTask { id: "t1".into() })
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.tasks.first().is_some_and(|task| !task.going())
+    });
+    assert_eq!(node.tasks[0].state, AgentTaskState::Stopped);
+    assert_eq!(node.notice, None);
+}
+
+#[test]
+fn a_background_task_never_runs_on_after_its_agent_stops() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    ask(&mut client, chat, "background");
+    let node = ask(&mut client, chat, "exit");
+    assert_eq!(node.tasks[0].state, AgentTaskState::Lost);
+    assert!(node.tasks[0].ended.is_some());
+    // Nothing to stop: the agent isn't asked.
+    client
+        .chat(chat, ChatAction::StopTask { id: "t1".into() })
+        .unwrap();
+    let node = ask(&mut client, chat, "back");
+    assert!(node.tasks.is_empty(), "{:#?}", node.tasks);
+}
+
+#[test]
+fn only_claude_code_is_asked_for_its_background_tasks() {
+    // Codex's adapter would leave out its commands' output for a client
+    // that asks as AIR does.
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent("other", vec![fake_agent().into()])];
+    });
+    let mut client = daemon.client();
+    let (chat, _) = start_chat_with(&mut client, "other");
+    let node = ask(&mut client, chat, "background");
+    assert_eq!(last_words(&node), "no tasks\n");
+    assert!(node.tasks.is_empty());
 }
 
 #[test]
@@ -16174,6 +16244,49 @@ fn a_real_agent_lists_the_sessions_it_kept() {
     let mut client = daemon.client();
     let listed = sessions(&mut client, 1, "claude", &scratch);
     assert_eq!(listed, Ok(Vec::new()), "a new folder has none");
+}
+
+/// A shell Claude Code runs in the background shows in the chat while it
+/// runs, as the command it is, and as done once it ends: Claude Code's
+/// adapter says so to a client that asks for AIR's `asyncTasks`. As
+/// [`a_real_agent_answers_and_asks_before_running_commands`].
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agents_background_shell_shows_until_it_ends() {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
+    };
+    let daemon = TestDaemon::start_with_agent(|_| {
+        ["env", "ANTHROPIC_MODEL=haiku"]
+            .into_iter()
+            .chain(command.split_whitespace())
+            .map(Into::into)
+            .collect()
+    });
+    let mut client = daemon.client();
+    client.new_workspace(None, new_chat()).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minute = Duration::from_mins(1);
+    wait_for_chat_for(&mut client, chat, minute, |node| {
+        node.state == ChatState::Ready
+    });
+    let text = "Use the Bash tool once, with run_in_background set to true, to run exactly: \
+                sleep 5; echo finished. Then reply with the single word started.";
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    let node = wait_for_chat_for(&mut client, chat, minute, |node| !node.tasks.is_empty());
+    let task = &node.tasks[0];
+    assert_eq!(task.kind, AgentTaskKind::Shell, "{task:#?}");
+    assert_eq!(task.command.as_deref(), Some("sleep 5; echo finished"));
+    assert!(task.can_stop);
+    let node = wait_for_chat_for(&mut client, chat, minute, |node| {
+        node.tasks
+            .iter()
+            .any(|task| task.kind == AgentTaskKind::Shell && !task.going())
+    });
+    let shell = (node.tasks.iter()).find(|task| task.kind == AgentTaskKind::Shell);
+    assert_eq!(shell.map(|task| task.state), Some(AgentTaskState::Done));
 }
 
 /// A daemon whose agent is the fake one with `flags`, noting what it does

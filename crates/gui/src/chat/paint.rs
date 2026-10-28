@@ -18,6 +18,7 @@ mod models;
 mod queue;
 mod select;
 mod tables;
+mod tasks;
 mod usage;
 mod usage_modal;
 mod working;
@@ -1190,7 +1191,8 @@ impl ChatView {
         self.draw_send(&mut canvas, m, &frame);
         self.draw_controls(&mut canvas, m, &frame);
         let queued = self.draw_queue(&mut canvas, m, &frame);
-        height + footer + queued
+        let tasks = self.draw_tasks(&mut canvas, m, &frame, queued);
+        height + footer + queued + tasks
     }
 
     /// One draft thumbnail and its remove button, above the image pass.

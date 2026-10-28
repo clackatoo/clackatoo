@@ -28,7 +28,9 @@
 //! lessons, a lesson by its name, or with `new`, what's new. In a chat, `agentundo`
 //! undoes what a turn of the agent's changed in files, the turn's number
 //! after it, or else the last, and `agentredo` makes it again; with `!`,
-//! in the files that can be, though others can't.
+//! in the files that can be, though others can't. `stoptask` asks the
+//! agent to stop what it runs in the background, the line's number on the
+//! shelf above the box after it, or else the newest running.
 //! `devices` lists the devices paired with the daemon's web app; `devices
 //! allow CODE` allows the one asking to pair that shows `CODE`, `devices
 //! deny` turns down those asking, `devices revoke N` unpairs one, and
@@ -224,6 +226,10 @@ pub(crate) enum Command {
         redo: bool,
         force: bool,
     },
+    /// `:stoptask`: ask the focused chat's agent to stop what it runs in
+    /// the background on line `line` of the shelf above the box, counting
+    /// from 0, or the newest running.
+    StopTask(Option<usize>),
     /// `:update`: install the latest release of clackatoo on this machine,
     /// or with a name, on that machine, the one the window's daemon is on.
     Update(Option<String>),
@@ -424,7 +430,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
     let (place, rest) = place(word);
     let command = (marked_pane(rest, place, argument))
         .or_else(|| file_command(word, argument))
-        .or_else(|| agent_undo(word, argument))
+        .or_else(|| agent_undo(word, argument).or_else(|| stop_task(word, argument)))
         .or_else(|| review_command(word, argument));
     if let Some(command) = command {
         return command;
@@ -731,6 +737,19 @@ fn agent_undo(word: &str, argument: Option<&str>) -> Option<Result<Command, Stri
     }))
 }
 
+/// `:stoptask`, if `word` is it, and the line's number after it, from 1,
+/// if there is one.
+fn stop_task(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
+    if word != "stoptask" {
+        return None;
+    }
+    Some(match argument.map(str::parse::<usize>) {
+        None => Ok(Command::StopTask(None)),
+        Some(Ok(number)) if number > 0 => Ok(Command::StopTask(Some(number - 1))),
+        Some(_) => Err("stoptask takes a line's number, from 1: :stoptask 2".to_owned()),
+    })
+}
+
 /// The explorer or the review `rest` names, after the mark saying where
 /// it goes, `place`, if it's one: kinds of pane that open without a mark
 /// too, as the tab's explorer and a review to the right.
@@ -874,6 +893,7 @@ command_names! {
     "markdown" => "Toggle the rendered Markdown view",
     "agentundo" => "Undo file changes from an agent turn",
     "agentredo" => "Redo file changes from an agent turn",
+    "stoptask" => "Stop what the agent runs in the background",
     "Review" => "Review changes made by agents",
     "reviewkeep" => "Keep the selected agent changes",
     "reviewreject" => "Reject the selected agent changes",
@@ -1069,6 +1089,7 @@ mod tests {
         ("markdown", ""),
         ("agentundo", ""),
         ("agentredo", ""),
+        ("stoptask", ""),
         ("Review", ""),
         ("reviewsend", ""),
         ("blame", ""),
@@ -1561,6 +1582,9 @@ mod tests {
     #[test]
     fn agent_undo_takes_a_turn_from_one_and_a_bang_to_force() {
         let undo = |turn, redo, force| Command::AgentUndo { turn, redo, force };
+        assert_eq!(parse("stoptask").unwrap(), Command::StopTask(None));
+        assert_eq!(parse("stoptask 2").unwrap(), Command::StopTask(Some(1)));
+        assert!(parse("stoptask 0").is_err());
         assert_eq!(parse("agentundo").unwrap(), undo(None, false, false));
         assert_eq!(parse("agentundo 3").unwrap(), undo(Some(2), false, false));
         assert_eq!(parse("agentundo! 1").unwrap(), undo(Some(0), false, true));

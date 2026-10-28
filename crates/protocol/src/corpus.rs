@@ -1346,7 +1346,76 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         crate::wire::SUBAGENT_PROFILE,
         Server(ServerMessage::Event(Event::Chats(vec![profiled]))),
     ));
+    samples.extend(
+        agent_tasks()
+            .into_iter()
+            .map(|sample| (crate::wire::AGENT_TASKS, sample)),
+    );
     samples
+}
+
+/// Samples of protocol 110: what an agent runs in the background of a
+/// chat, of every kind and state, in a snapshot, a patch and a subagent's
+/// card, and asking to stop one (CLACKA-177).
+fn agent_tasks() -> Vec<Sample> {
+    use Sample::{Client, Server};
+
+    use crate::{AgentTaskKind, AgentTaskState};
+    let terminal = TerminalId(3);
+    let kinds = [
+        AgentTaskKind::Shell,
+        AgentTaskKind::Monitor,
+        AgentTaskKind::Workflow,
+        AgentTaskKind::Turn,
+        AgentTaskKind::Other,
+    ];
+    let states = [
+        AgentTaskState::Running,
+        AgentTaskState::Paused,
+        AgentTaskState::Stopping,
+        AgentTaskState::Done,
+        AgentTaskState::Failed,
+        AgentTaskState::Stopped,
+        AgentTaskState::Lost,
+    ];
+    let mut tasks: Vec<crate::AgentTask> = (kinds.iter())
+        .map(|&kind| agent_task(kind, AgentTaskState::Running))
+        .chain(
+            states
+                .iter()
+                .map(|&state| agent_task(AgentTaskKind::Shell, state)),
+        )
+        .collect();
+    tasks[0].command = None;
+    tasks[0].summary = None;
+    tasks[1].ended = Some(1_760_000_009);
+    tasks[2].can_stop = false;
+    let mut card = subagent();
+    card.tasks = vec![agent_task(AgentTaskKind::Shell, AgentTaskState::Running)];
+    vec![
+        Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Tasks(tasks.clone()))]),
+        })),
+        Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Subagents(vec![card]))]),
+        })),
+        Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Snapshot(View {
+                title: "tasks".into(),
+                cwd: None,
+                root: Node::Chat(Box::new(ChatNode { tasks, ..chat() })),
+            }),
+        })),
+        Client(ClientMessage::Request(Request::Chat {
+            terminal,
+            action: ChatAction::StopTask {
+                id: "bh1jmizrr".into(),
+            },
+        })),
+    ]
 }
 
 /// Samples of protocol 106: undo steps that keep where the cursor was and
@@ -2987,6 +3056,7 @@ fn chat() -> ChatNode {
         providers: vec![provider()],
         subagents: vec![subagent()],
         activities: Vec::new(),
+        tasks: Vec::new(),
         provider_usage: vec![crate::ProviderUsage {
             agent: "codex".into(),
             title: "Codex".into(),
@@ -3127,6 +3197,22 @@ fn subagent() -> Subagent {
         ended: Some(1_760_000_030),
         turn: 0,
         shown: true,
+        tasks: Vec::new(),
+    }
+}
+
+/// A shell an agent runs in the background, `state`.
+fn agent_task(kind: crate::AgentTaskKind, state: crate::AgentTaskState) -> crate::AgentTask {
+    crate::AgentTask {
+        id: "bh1jmizrr".into(),
+        kind,
+        title: "Start the dev server".into(),
+        command: Some("npm run dev".into()),
+        state,
+        summary: Some("exit code 0".into()),
+        started: 1_760_000_000,
+        ended: None,
+        can_stop: true,
     }
 }
 

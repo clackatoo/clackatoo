@@ -383,6 +383,19 @@ impl Desk {
         }
     }
 
+    /// Asks the focused chat's agent to stop what it runs in the
+    /// background on line `line` of the chat's shelf, or the newest
+    /// running.
+    pub(super) fn stop_task(&mut self, line: Option<usize>) {
+        let asked = (self.focused_chat_mut()).map_or_else(
+            || Err("that's for a chat with an agent".to_owned()),
+            |chat| chat.stop_task(line),
+        );
+        if let Err(why) = asked {
+            self.refuse(why);
+        }
+    }
+
     /// Local image viewing owns input even when the daemon is offline.
     pub(crate) fn chat_modal_key(&mut self, press: &KeyPress<'_>) -> bool {
         self.focused_chat_mut()

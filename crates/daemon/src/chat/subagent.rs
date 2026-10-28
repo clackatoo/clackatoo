@@ -297,6 +297,11 @@ impl HostedChat {
             || entry.model.as_deref() != self.model_name()
             || entry.agent != self.node.agent
             || entry.status != self.subagent_status()
+            || entry.tasks.len() != self.node.tasks.iter().filter(|task| task.going()).count()
+            || entry
+                .tasks
+                .iter()
+                .any(|task| !self.node.tasks.contains(task))
     }
 
     /// It, as the card of the chat that started it shows it: started in
@@ -323,6 +328,7 @@ impl HostedChat {
             ended,
             turn,
             shown,
+            tasks: self.tasks_going(),
         }
     }
 

@@ -92,12 +92,13 @@ pub use buffer::{
     Symbol, TextChange, Trigger, Use, UseKind,
 };
 pub use chat::{
-    AMBER, AgentSession, ChatAction, ChatChoices, ChatDelivery, ChatImage, ChatNode, ChatPatch,
-    ChatPreview, ChatState, ChatSummary, ChatTarget, Choice, ChoiceKind, Code, Diff, Fullness,
-    Item, Limit, Location, Outcome, Provider, ProviderModels, ProviderUsage, Question,
-    QueuedMessage, RED, ResumeSession, Said, Sender, Setting, SettingChoice, SettingKind, Subagent,
-    SubagentStatus, Switch, Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles,
-    TurnFilesState, Usage, UsageLimit, UsageLine, code_span, tokens, turn_number, turn_numbered,
+    AMBER, AgentSession, AgentTask, AgentTaskKind, AgentTaskState, ChatAction, ChatChoices,
+    ChatDelivery, ChatImage, ChatNode, ChatPatch, ChatPreview, ChatState, ChatSummary, ChatTarget,
+    Choice, ChoiceKind, Code, Diff, Fullness, Item, Limit, Location, Outcome, Provider,
+    ProviderModels, ProviderUsage, Question, QueuedMessage, RED, ResumeSession, Said, Sender,
+    Setting, SettingChoice, SettingKind, Subagent, SubagentStatus, Switch, Tool, ToolContent,
+    ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, TurnFilesState, Usage, UsageLimit, UsageLine,
+    code_span, tokens, turn_number, turn_numbered,
 };
 pub use clackatoo_text::{
     AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
@@ -128,7 +129,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 109;
+pub const PROTOCOL_VERSION: u32 = 110;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

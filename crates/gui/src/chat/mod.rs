@@ -134,6 +134,9 @@ enum Hit {
     Steer,
     RemoveQueued(u64),
     SendQueued(u64),
+    /// The button that stops a task the agent runs in the background, by
+    /// the agent's name for it.
+    StopTask(String),
     QueuePage(i8),
     Stop,
     /// One of the answers to the agent's question, by its ID.
@@ -2274,6 +2277,7 @@ impl ChatView {
                 self.queue_page = self.queue_page.saturating_add_signed(isize::from(delta));
             }
             Some(Hit::RemoveQueued(id)) => settled.actions.push(ChatAction::RemoveQueued { id }),
+            Some(Hit::StopTask(id)) => settled.actions.push(ChatAction::StopTask { id }),
             Some(Hit::SendQueued(id)) => settled.actions.push(ChatAction::SendQueued {
                 id,
                 steer: self.busy(),
@@ -2544,6 +2548,7 @@ fn touches(patch: &clackatoo_protocol::ChatPatch) -> Option<usize> {
         | ChatPatch::Delivery(_)
         | ChatPatch::Activities(_)
         | ChatPatch::ProviderUsage(_)
+        | ChatPatch::Tasks(_)
         | ChatPatch::History { .. } => None,
     }
 }

@@ -151,7 +151,14 @@ impl ChatPage {
     ) -> bool {
         let node = open.view.as_ref().and_then(|v| v.chat());
         self.photos.draw(document, state, open.id);
-        let queue = node.map_or_else(|| el("div"), |n| view::queue(n, state.online));
+        let queue = node.map_or_else(
+            || el("div"),
+            |n| {
+                el("div")
+                    .child(view::background(n))
+                    .child(view::queue(n, state.online))
+            },
+        );
         if queue != self.shown_queue {
             dom::replace_children(document, &self.queue, &el("div").child(queue.clone()));
             self.shown_queue = queue;

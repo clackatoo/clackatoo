@@ -234,7 +234,7 @@ impl ChatView {
         self.hits.push((Hit::Stop, frame.place.in_pane(stop)));
     }
 
-    fn queue_text(
+    pub(super) fn queue_text(
         &mut self,
         canvas: &mut Canvas<'_>,
         m: Measures,

@@ -1,0 +1,26 @@
+# What the agent runs in the background: the shelf above the box, under a
+# queued message, a stop, and the shelf after the shell ends.
+size 1100x900
+keys <C-;>:Agent claude<CR>
+keys i
+type background
+keys <CR>
+wait-for started
+sleep 1200
+shot tasks-running
+type wait
+keys <CR>
+sleep 300
+type Then check the docs build.
+keys <CR>
+sleep 300
+shot tasks-and-queue
+keys <C-c>
+sleep 300
+type finish
+keys <CR>
+wait-for finished
+sleep 300
+shot tasks-done
+size 480x640
+shot tasks-narrow

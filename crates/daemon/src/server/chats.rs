@@ -755,6 +755,9 @@ impl Daemon {
                 (Action::Set { setting, value }, Some(slot), Some(session)) => {
                     slot.agent.set_setting(id, &session, &setting, &value);
                 }
+                (Action::StopTask(task), Some(slot), Some(session)) => {
+                    slot.agent.stop_task(id, &session, &task);
+                }
                 (Action::Answer { request, option }, Some(slot), _) => {
                     slot.agent.answer_permission(&request, option.as_deref());
                 }
@@ -799,6 +802,9 @@ impl Daemon {
                 chat.disconnected(None);
             }
             Action::Set { .. } => chat.settings_changed(Err("its agent is stopping".to_owned())),
+            Action::StopTask(task) => {
+                chat.task_stop_answered(task, Err("its agent is stopping".to_owned()));
+            }
             Action::Cancel => {
                 chat.answered(Ok(agent_client_protocol_schema::v1::StopReason::Cancelled));
                 self.settle_turn(id);
@@ -1151,6 +1157,31 @@ impl Daemon {
                 if !self.prompt_answered(terminal, result, gone) {
                     return;
                 }
+                terminal
+            }
+            Incoming::Task { session, task } => {
+                let Some((id, chat)) = self.chat_in(name, &session) else {
+                    return;
+                };
+                // A load tells of tasks that ended long ago, and those
+                // going then went with the process that ran them; and what
+                // one that has gone says, the chat has stopped listening
+                // for.
+                if chat.loading() || chat.skipping() || (gone && !chat.is_connected()) {
+                    return;
+                }
+                chat.task_said(task);
+                id
+            }
+            Incoming::TaskStopped {
+                terminal,
+                task,
+                result,
+            } => {
+                let Some(chat) = self.chat(terminal).filter(|c| c.agent() == name) else {
+                    return;
+                };
+                chat.task_stop_answered(&task, result);
                 terminal
             }
             Incoming::Permission {

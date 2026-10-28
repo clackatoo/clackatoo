@@ -24,6 +24,11 @@
 //! | `run PATH`, a line's end, then text | Writes the text to the file in a command, as `sed -i` would, saying nothing of what it changed, and says `ran` |
 //! | `stream N`, and anything after a space | Says the numbers from 0 to N − 1, each followed by a space, in N updates, all in one write, as an agent streaming fast; then `done` |
 //! | `bounce`, from another chat | Sends that chat `bounce` back with `send_to_chat`, and says what it answered |
+//! | `background` | Runs `npm run dev` in the background, as Claude Code's adapter says one to a client that asked for AIR's `asyncTasks`: a command that finishes at once, then a task, `t1`, "Serve the docs", that goes on; and says `started`, or `no tasks` to a client that didn't ask |
+//! | `finish` | Says task `t1` completed, then `finished` |
+//!
+//! Asked to stop a task (`_session/async_task/stop`), it says it stopped
+//! `t1`, and that it did; any other it says it didn't.
 //! | anything else | `echo:` and the message, in two pieces |
 //!
 //! A message from another chat's agent comes framed as clackatoo frames
@@ -132,6 +137,7 @@ fn main() {
     let mut agent = Fake {
         log: value("--log"),
         codex: flag("--codex"),
+        async_tasks: false,
         logged_out: flag("--logged-out"),
         mute_init: first && flag("--mute-init"),
         answers: (flag("--mute").then_some(0))
@@ -194,6 +200,8 @@ fn main() {
     reason = "each a flag it was started with"
 )]
 struct Fake {
+    /// Whether the client asked for AIR's `asyncTasks`.
+    async_tasks: bool,
     images: Vec<tempfile::TempPath>,
     log: Option<String>,
     /// Sends what Codex's adapter sends.
@@ -599,7 +607,24 @@ impl Fake {
         let session = params["sessionId"].as_str().unwrap_or_default().to_owned();
         match message.get("method").and_then(Value::as_str) {
             Some("initialize") if self.mute_init => {}
-            Some("initialize") => self.initialize(&id),
+            Some("initialize") => {
+                self.async_tasks = (params.pointer("/clientCapabilities/_meta/jetbrains/air"))
+                    .filter(|air| air["version"] == 1)
+                    .and_then(|air| air["capabilities"].as_array())
+                    .is_some_and(|asked| asked.iter().any(|asked| asked == "asyncTasks"));
+                self.initialize(&id);
+            }
+            Some("_session/async_task/stop") => {
+                let stopped = params["asyncTaskId"] == "t1";
+                if stopped {
+                    update(
+                        &session,
+                        &json!({ "sessionUpdate": "async_task_state_update",
+                                 "asyncTaskId": "t1", "state": "stopped" }),
+                    );
+                }
+                reply(&id, &json!({ "stopped": stopped }));
+            }
             Some("session/new" | "session/resume" | "session/load")
                 if std::env::args().any(|a| a.starts_with("--antigravity-login")) =>
             {
@@ -976,6 +1001,35 @@ impl Fake {
             }
             "cwd" => {
                 say(&session, &format!("in {}\n", self.sessions[&session]));
+                done(&id, "end_turn");
+            }
+            "background" if !self.async_tasks => {
+                say(&session, "no tasks\n");
+                done(&id, "end_turn");
+            }
+            "background" => {
+                update(
+                    &session,
+                    &json!({ "sessionUpdate": "tool_call", "toolCallId": "bg", "title": "npm run dev",
+                             "kind": "execute", "status": "completed" }),
+                );
+                update(
+                    &session,
+                    &json!({ "sessionUpdate": "async_task_spawned", "asyncTaskId": "t1",
+                             "name": "Serve the docs", "taskType": "shell",
+                             "description": "Serve the docs", "showInTranscript": false,
+                             "canStop": true, "toolCallId": "bg" }),
+                );
+                say(&session, "started\n");
+                done(&id, "end_turn");
+            }
+            "finish" => {
+                update(
+                    &session,
+                    &json!({ "sessionUpdate": "async_task_state_update", "asyncTaskId": "t1",
+                             "state": "completed", "summary": "exit code 0" }),
+                );
+                say(&session, "finished\n");
                 done(&id, "end_turn");
             }
             "limits" => {

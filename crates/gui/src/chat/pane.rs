@@ -165,6 +165,27 @@ impl ChatPane {
     /// undone, or the first that can be redone, as `u` and Ctrl+R do.
     /// `force` does what can be done though some files can't be. Says why
     /// not, if it can't be asked.
+    /// Asks the agent to stop what it runs in the background on line
+    /// `line` of the shelf above the box, counting from 0, or the newest
+    /// running, or says why it can't.
+    pub(crate) fn stop_task(&mut self, line: Option<usize>) -> Result<(), String> {
+        let listed = self.view.shelf();
+        let task = match line {
+            Some(line) => *listed
+                .get(line)
+                .ok_or(format!("there's no line {} above the box", line + 1))?,
+            None => *(listed.iter())
+                .find(|task| task.going())
+                .ok_or("the agent runs nothing in the background")?,
+        };
+        if task.state != clackatoo_protocol::AgentTaskState::Running || !task.can_stop {
+            return Err(format!("{} can't be stopped now", task.title));
+        }
+        let id = task.id.clone();
+        self.ask(ChatAction::StopTask { id }, Pending::Other);
+        Ok(())
+    }
+
     pub(crate) fn undo_turn(
         &mut self,
         turn: Option<usize>,

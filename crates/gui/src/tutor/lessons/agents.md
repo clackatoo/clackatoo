@@ -191,6 +191,12 @@ In the chat, press `i`, ask it to add the line `tutor: hello` to notes.txt, and 
 has "tutor: hello"
 ```
 
+## Shells in the background
+
+Claude Code can leave a command running in the background, such as a dev server, and carry on. A shelf above the box lists what it runs, with its command, how it's going and for how long, counting while it runs. The square at the end of a running line stops it; `:stoptask` does the same from the keyboard, for the newest running, and `:stoptask 2` for the second line. Once one ends, its line says done, failed or stopped until your next message.
+
+If you have a chat open, ask it to run `sleep 30` in the background, watch the shelf count, then stop it with `:stoptask`.
+
 ## Continuing after upgrades
 
 If a daemon upgrade interrupts an answer, the agent reopens the same provider session and continues the same turn automatically. It is told to check interrupted tool results before repeating actions. Unsent messages and images are preserved. Idle, completed and manually stopped chats stay idle. This applies to planned upgrades, not crashes or ordinary restarts. The first upgrade from a build without continuation records still needs another message.

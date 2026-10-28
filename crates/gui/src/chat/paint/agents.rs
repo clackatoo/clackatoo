@@ -5,7 +5,8 @@
 //! They run in the background, in no pane, so the card is where they're
 //! seen: a click on one's line, or Enter on it, opens it as a pane beside
 //! the chat. One that asks the user something says so, as it must be
-//! opened to answer. While any works, the card counts the seconds.
+//! opened to answer. What one runs in the background goes under its line.
+//! While any works, or runs anything, the card counts the seconds.
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -14,6 +15,7 @@ use clackatoo_protocol::{Subagent, SubagentStatus, TerminalId};
 
 use super::fold::{duration, height};
 use super::select::TextKey;
+use super::tasks::task_row;
 use super::{AGENTS, Canvas, Drawn, Laid, Look, Measures, draw_laid, intersection, lay_out};
 use crate::chat::{ChatView, Hit, Tone};
 use crate::fonts::Fonts;
@@ -120,7 +122,17 @@ impl ChatView {
             let header = agents_label(&entries, open, now);
             let rows: Vec<(TerminalId, String, Tone)> = if open {
                 (entries.iter())
-                    .map(|entry| (entry.chat, agent_row(entry, now), row_tone(&entry.status)))
+                    .flat_map(|entry| {
+                        let own = (entry.chat, agent_row(entry, now), row_tone(&entry.status));
+                        let tasks = (entry.tasks.iter()).map(|task| {
+                            (
+                                entry.chat,
+                                format!("  {}", task_row(task, now)),
+                                Tone::Muted,
+                            )
+                        });
+                        std::iter::once(own).chain(tasks)
+                    })
                     .collect()
             } else {
                 Vec::new()
@@ -231,9 +243,15 @@ impl ChatView {
         (self.shown.iter())
             .filter(|shown| shown.key.piece == AGENTS && shown.at[1] < self.view_height)
             .flat_map(|shown| self.subagents_in(shown.key.turn))
-            .filter(|entry| entry.status.going())
-            .map(|entry| {
-                let into = now.saturating_sub(entry.started) % 1000;
+            .flat_map(|entry| {
+                let own = entry.status.going().then_some(entry.started);
+                let tasks = (entry.tasks.iter())
+                    .filter(|task| task.going())
+                    .map(|task| task.started);
+                own.into_iter().chain(tasks)
+            })
+            .map(|started| {
+                let into = now.saturating_sub(started) % 1000;
                 Instant::now() + Duration::from_millis(1000 - into)
             })
             .min()
@@ -251,7 +269,10 @@ impl ChatView {
         let now = self.now();
         let entries = self.subagents_in(turn);
         let mut lines = vec![agents_label(&entries, false, now)];
-        lines.extend(entries.iter().map(|entry| agent_row(entry, now)));
+        for entry in entries {
+            lines.push(agent_row(entry, now));
+            lines.extend((entry.tasks.iter()).map(|task| format!("  {}", task_row(task, now))));
+        }
         lines.join("\n")
     }
 }
@@ -294,6 +315,12 @@ fn agents_label(entries: &[&Subagent], open: bool, now: u64) -> String {
     }
     if failed > 0 {
         let _ = write!(label, " · {failed} failed");
+    }
+    let background: usize = (entries.iter())
+        .map(|entry| entry.tasks.iter().filter(|task| task.going()).count())
+        .sum();
+    if background > 0 {
+        let _ = write!(label, " · {background} in the background");
     }
     format!("{label}  {chevron}")
 }
@@ -365,6 +392,7 @@ mod tests {
             ended: None,
             turn: 0,
             shown: false,
+            tasks: Vec::new(),
         }
     }
 

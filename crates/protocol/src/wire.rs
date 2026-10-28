@@ -267,6 +267,11 @@ gates! {
     /// The profile a chat an agent started was started as, for windows to
     /// mark its pane by: `ChatSummary`'s `profile`.
     SUBAGENT_PROFILE = 109,
+    /// What an agent runs in the background of a chat: `ChatNode`'s and
+    /// `Subagent`'s `tasks` (`AgentTask`, `AgentTaskKind`,
+    /// `AgentTaskState`), `ChatPatch::Tasks`, and stopping one,
+    /// `ChatAction::StopTask`.
+    AGENT_TASKS = 110,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -436,6 +441,7 @@ impl Since for ChatPatch {
             Self::ProviderUsage(_) => PROVIDER_USAGE,
             Self::History { .. } => CHAT_HISTORY,
             Self::Activities(_) => HARNESS,
+            Self::Tasks(_) => AGENT_TASKS,
         }
     }
 }
@@ -994,59 +1000,42 @@ impl Downgrade for ClientMessage {
                 _ => {}
             }
         }
-        if wire < PROVIDER_USAGE
-            && matches!(
-                self,
-                Self::Request(crate::Request::Chat {
-                    action: crate::ChatAction::RefreshUsage { .. },
-                    ..
-                })
-            )
-        {
-            return Downgraded::Refused;
-        }
-        if wire < CHAT_QUEUE
-            && matches!(
-                self,
-                Self::Request(crate::Request::Chat {
-                    action: crate::ChatAction::Submit { .. }
-                        | crate::ChatAction::RemoveQueued { .. }
-                        | crate::ChatAction::SendQueued { .. },
-                    ..
-                })
-            )
-        {
-            return Downgraded::Refused;
-        }
-        if wire < CHAT_HANDOFF
-            && matches!(
-                self,
-                Self::Request(crate::Request::Chat {
-                    action: crate::ChatAction::SendTo { .. },
-                    ..
-                })
-            )
+        if let Self::Request(crate::Request::Chat { action, .. }) = self
+            && wire < chat_action_since(action)
         {
             return Downgraded::Refused;
         }
         if wire < CHAT_ORIGINALS
             && matches!(self, Self::Request(crate::Request::ChatOriginal { .. }))
         {
-            return Downgraded::Refused;
-        }
-        if wire < CHAT_IMAGES
-            && matches!(
-                self,
-                Self::Request(crate::Request::Chat {
-                    action: crate::ChatAction::SendImages { .. },
-                    ..
-                })
-            )
-        {
             Downgraded::Refused
         } else {
             Downgraded::AsIs
         }
+    }
+}
+
+/// The oldest protocol whose daemons take `action`: an older one would
+/// drop it, or what it carries, so it's refused instead.
+fn chat_action_since(action: &crate::ChatAction) -> u32 {
+    use crate::ChatAction;
+    match action {
+        ChatAction::StopTask { .. } => AGENT_TASKS,
+        ChatAction::RefreshUsage { .. } => PROVIDER_USAGE,
+        ChatAction::Submit { .. }
+        | ChatAction::RemoveQueued { .. }
+        | ChatAction::SendQueued { .. } => CHAT_QUEUE,
+        ChatAction::SendTo { .. } => CHAT_HANDOFF,
+        ChatAction::SendImages { .. } => CHAT_IMAGES,
+        ChatAction::Send(_)
+        | ChatAction::Stop
+        | ChatAction::Answer { .. }
+        | ChatAction::Set { .. }
+        | ChatAction::Undo { .. }
+        | ChatAction::Redo { .. }
+        | ChatAction::Switch { .. }
+        | ChatAction::LearnModels
+        | ChatAction::Open { .. } => EARLIER,
     }
 }
 
@@ -1105,7 +1094,8 @@ fn without_optional_chat_updates(message: &ServerMessage, wire: u32) -> Option<S
         return None;
     };
     let unsupported = |patch: &Patch| {
-        matches!(patch, Patch::Chat(ChatPatch::Activities(_)) if wire < HARNESS)
+        matches!(patch, Patch::Chat(ChatPatch::Tasks(_)) if wire < AGENT_TASKS)
+            || matches!(patch, Patch::Chat(ChatPatch::Activities(_)) if wire < HARNESS)
             || matches!(patch, Patch::Chat(ChatPatch::History { .. }) if wire < CHAT_HISTORY)
             || matches!(patch, Patch::Chat(ChatPatch::Delivery(_)) if wire < CHAT_QUEUE)
             || matches!(patch, Patch::Chat(ChatPatch::ProviderUsage(_)) if wire < PROVIDER_USAGE)
@@ -1167,7 +1157,7 @@ impl Downgrade for ServerMessage {
         if let Some(edited) = reversed_as_edited(self) {
             return Downgraded::To(edited);
         }
-        if wire < HARNESS
+        if wire < AGENT_TASKS
             && let Some(older) = without_optional_chat_updates(self, wire)
         {
             return match older.downgrade(wire) {

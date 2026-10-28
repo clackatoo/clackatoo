@@ -80,6 +80,9 @@ enum Pending {
     /// The sessions the agent kept, for the server's listing with this
     /// number.
     Listing(u64),
+    /// Stopping the task of the chat in this terminal the agent calls
+    /// this.
+    StopTask(TerminalId, String),
     /// Nothing waits for the answer.
     Ignored,
 }
@@ -136,6 +139,16 @@ pub(crate) enum Incoming {
         terminal: TerminalId,
         result: Result<StopReason, String>,
     },
+    /// Work the agent runs in the background of a session started,
+    /// changed or ended (see [`Task`]).
+    Task { session: String, task: Task },
+    /// The agent answered asking it to stop task `task` of the chat in
+    /// `terminal`: whether it stopped it, or why it couldn't say.
+    TaskStopped {
+        terminal: TerminalId,
+        task: String,
+        result: Result<bool, String>,
+    },
     /// The agent asks whether it may use a tool, and waits for the answer.
     Permission {
         session: String,
@@ -180,6 +193,51 @@ pub(crate) struct Opened {
     /// Its settings, if the agent offers any.
     pub(crate) settings: Option<Vec<SessionConfigOption>>,
 }
+
+/// What an agent says of work it runs in the background of a session,
+/// such as a shell Claude Code started with `run_in_background`: one of
+/// the `async_task_*` updates of the AIR extensions to ACP (`JetBrains`'), which
+/// Claude Code's adapter sends to a client that asks for them.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Task {
+    /// It started.
+    Spawned {
+        id: String,
+        /// What it is, as the agent says: `shell`, `monitor`, `workflow`,
+        /// `turn`…
+        kind: String,
+        name: String,
+        description: Option<String>,
+        can_stop: bool,
+        /// The tool call that started it, if one did.
+        tool: Option<String>,
+    },
+    /// What it's for changed, if `description`.
+    Progress {
+        id: String,
+        description: Option<String>,
+    },
+    /// It's `state` now: `running`, `paused`, `completed`, `failed` or
+    /// `stopped`, with what the agent said of it.
+    State {
+        id: String,
+        state: String,
+        summary: Option<String>,
+    },
+}
+
+/// The longest task ID, in bytes, kept: longer is no agent's.
+const MOST_TASK_ID: usize = 256;
+
+/// The most characters kept of what's said of a task.
+const MOST_TASK_TEXT: usize = 300;
+
+/// The capabilities of the AIR extensions to ACP (`JetBrains`') clackatoo asks
+/// for, of Claude Code's adapter only: asking for any makes the adapter
+/// treat clackatoo as AIR, which changes how it reports tools a little
+/// for Claude Code (checked with its live tests), and a lot for Codex's,
+/// which then leaves out a command's output.
+const AIR_CAPABILITIES: &[&str] = &["asyncTasks"];
 
 /// A session the agent kept, as it listed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -257,6 +315,13 @@ impl Agent {
         // client tool when fs is advertised. Keep its native file tools; their
         // ACP diffs/permissions still flow through the common chat machinery.
         let client_files = name != "antigravity";
+        // Codex's adapter streams commands' output in this, which the
+        // daemon adds to the tool's.
+        let mut meta = json!({ "terminal_output_delta": true });
+        if name == "claude" {
+            meta["jetbrains"] =
+                json!({ "air": { "version": 1, "capabilities": AIR_CAPABILITIES } });
+        }
         agent.request(
             Pending::Initialize,
             "initialize",
@@ -265,9 +330,7 @@ impl Agent {
                 "clientCapabilities": {
                     "fs": { "readTextFile": client_files, "writeTextFile": client_files },
                     "terminal": false,
-                    // Codex's adapter streams commands' output in this,
-                    // which the daemon adds to the tool's.
-                    "_meta": { "terminal_output_delta": true },
+                    "_meta": meta,
                 },
                 "clientInfo": { "name": "clackatoo", "version": env!("CARGO_PKG_VERSION") },
             }),
@@ -423,6 +486,16 @@ impl Agent {
             Pending::Setting(terminal),
             "session/set_config_option",
             &json!({ "sessionId": session, "configId": setting, "value": value }),
+        );
+    }
+
+    /// Asks the agent to stop `task`, which it runs in the background of
+    /// `session`, the session of the chat in `terminal`.
+    pub(crate) fn stop_task(&mut self, terminal: TerminalId, session: &str, task: &str) {
+        self.request(
+            Pending::StopTask(terminal, task.to_owned()),
+            "_session/async_task/stop",
+            &json!({ "sessionId": session, "asyncTaskId": task }),
         );
     }
 
@@ -591,6 +664,11 @@ impl Agent {
                 if method == "_clackatoo/login_required" && self.name() == "agent antigravity" {
                     self.peer.require_login();
                 } else if method == "session/update" {
+                    // Not ACP's own, so its schema doesn't know them.
+                    if let Some((session, task)) = task(&message.params) {
+                        incoming.push(Incoming::Task { session, task });
+                        return;
+                    }
                     match serde_json::from_value::<SessionNotification>(message.params) {
                         Ok(notification) => incoming.push(Incoming::Update {
                             session: notification.session_id.0.to_string(),
@@ -782,6 +860,11 @@ impl Agent {
                         .map_err(|err| format!("the agent's answer made no sense: {err}"))
                 }),
             }),
+            Pending::StopTask(terminal, task) => incoming.push(Incoming::TaskStopped {
+                terminal,
+                task,
+                result: result.map(|result| result.get("stopped") == Some(&Value::Bool(true))),
+            }),
             Pending::Closing(terminal) => {
                 if let Err(err) = &result {
                     log::warn!("agent: chat {terminal}'s session couldn't be ended: {err}");
@@ -857,6 +940,7 @@ impl Agent {
             | Pending::Prompt(terminal)
             | Pending::Steer(terminal, _)
             | Pending::Setting(terminal)
+            | Pending::StopTask(terminal, _)
             | Pending::Closing(terminal) => Some(*terminal),
             Pending::Initialize
             | Pending::Probe
@@ -977,6 +1061,46 @@ fn listed(result: &Value) -> Vec<Listed> {
     listed.sort_by(|a, b| b.updated.cmp(&a.updated));
     listed.truncate(MOST_LISTED);
     listed
+}
+
+/// The session and what it says, if `params`, a `session/update`'s, say
+/// of a task the agent runs in the background (see [`Task`]). What's said
+/// of it is cut short, and one with no ID, or a long one, is left out.
+fn task(params: &Value) -> Option<(String, Task)> {
+    let update = params.get("update")?;
+    let kind = update.get("sessionUpdate")?.as_str()?;
+    if !kind.starts_with("async_task_") {
+        return None;
+    }
+    let session = params.get("sessionId")?.as_str()?;
+    let id = (update.get("asyncTaskId")?.as_str()).filter(|id| {
+        !id.is_empty() && id.len() <= MOST_TASK_ID && !id.contains(char::is_control)
+    })?;
+    let text = |key: &str| {
+        let text = update.get(key)?.as_str()?;
+        Some(one_line(text, MOST_TASK_TEXT)).filter(|text| !text.is_empty())
+    };
+    let task = match kind {
+        "async_task_spawned" => Task::Spawned {
+            id: id.to_owned(),
+            kind: text("taskType").unwrap_or_default(),
+            name: text("name").unwrap_or_default(),
+            description: text("description"),
+            can_stop: update.get("canStop") == Some(&Value::Bool(true)),
+            tool: text("toolCallId"),
+        },
+        "async_task_progress" => Task::Progress {
+            id: id.to_owned(),
+            description: text("description"),
+        },
+        "async_task_state_update" => Task::State {
+            id: id.to_owned(),
+            state: text("state")?,
+            summary: text("summary"),
+        },
+        _ => return None,
+    };
+    Some((session.to_owned(), task))
 }
 
 /// `text` on one line, its runs of spaces, line breaks and other controls
