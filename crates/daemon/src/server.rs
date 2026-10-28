@@ -1185,6 +1185,7 @@ impl Daemon {
         let explorers = std::mem::take(&mut handover.state.explorers);
         let edits = std::mem::take(&mut handover.state.edits);
         let reviews = std::mem::take(&mut handover.state.reviews);
+        let mut standing = handover.state.talk.take();
         let state = &handover.state;
         let fds = &mut handover.fds;
         let listener = std::os::unix::net::UnixListener::from(fds.take(state.listener)?);
@@ -1250,11 +1251,27 @@ impl Daemon {
             chat.resume_tool_previews(&mut tool_previews);
             chat.resume_originals(&mut image_originals);
             chat.resume_queue(&mut chat_queues);
+            // What it ran in the background went with its agent: it's told
+            // so, as its turn goes on, or else in a turn of its own.
+            let stopped = (standing.as_mut())
+                .map(|standing| chat.resume_standing(standing))
+                .unwrap_or_default();
+            let id = chat.info().id;
+            let mut told = false;
             if let Some(continuation) = continuation {
-                let id = TerminalId(continuation.chat);
-                if chat.continue_after_upgrade(continuation) {
+                if chat.continue_after_upgrade(continuation, &stopped) {
+                    log::info!("chat {id}: its turn goes on after the upgrade");
                     continuing.push(id);
+                    told = true;
+                } else {
+                    log::info!("chat {id}: its turn the upgrade cut off can't go on");
                 }
+            }
+            if !told && chat.tell_upgrade(&stopped) {
+                log::info!(
+                    "chat {id}: told what the upgrade stopped ({} background tasks)",
+                    stopped.len()
+                );
             }
             daemon.add_chat(chat);
         }
@@ -1290,7 +1307,7 @@ impl Daemon {
         }
         daemon.resume_files(state.next_files, explorers);
         // Messages waiting in chats' inboxes go as their turns end.
-        daemon.resume_talk(&state.undelivered);
+        daemon.resume_talk(&state.undelivered, standing.as_ref());
         daemon.resume_activities(&state.activities);
         daemon.agent_files.log = edit_log::EditLog::resume(edits);
         daemon.resume_reviews(reviews);
@@ -1403,6 +1420,7 @@ impl Daemon {
         let mut image_originals = Vec::new();
         let mut chat_queues = Vec::new();
         let mut chat_continuations = Vec::new();
+        let mut standing = handover::Talk::default();
         self.abandon_clipboard_asks();
         self.put_back_fits();
         for slot in std::mem::take(&mut self.terminals).into_values() {
@@ -1429,6 +1447,7 @@ impl Daemon {
                 }
                 Hosted::Chat(mut chat) => {
                     let continuation = chat.prepare_upgrade();
+                    chat.hand_over_standing(&mut standing);
                     chat_previews.push(chat.hand_over_previews());
                     tool_previews.extend(chat.hand_over_tool_previews());
                     image_originals.push(chat.hand_over_originals());
@@ -1494,6 +1513,7 @@ impl Daemon {
                 activities,
                 lent_background: self.workspaces.hand_over_lent_background(),
                 undelivered: self.hand_over_talk(),
+                talk: Some(self.hand_over_counts(standing)),
                 orphans,
                 workspaces,
                 next_buffer: self.next_buffer,

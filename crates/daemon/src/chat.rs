@@ -649,7 +649,7 @@ impl HostedChat {
     pub(crate) fn hand_over(mut self) -> handover::Chat {
         self.hand_over_loading();
         if self.answering() {
-            self.end_turn(Outcome::Failed("cut off by an upgrade".to_owned()));
+            self.end_turn(Outcome::Failed(upgrade::CUT_OFF.to_owned()));
         }
         let failure = match self.node.state {
             ChatState::Failed(why) => Some(why),
@@ -5095,7 +5095,7 @@ mod tests {
             .unwrap();
         let mut resumed = HostedChat::resume(chat.hand_over(), &agent);
         resumed.resume_queue(&mut [queue]);
-        assert!(resumed.continue_after_upgrade(continuation));
+        assert!(resumed.continue_after_upgrade(continuation, &[]));
         resumed
     }
 
@@ -5124,6 +5124,58 @@ mod tests {
         c.answered(Ok(StopReason::EndTurn));
         assert_eq!(c.next_user(), Some(next));
         assert!(c.prepare_upgrade().is_none());
+    }
+
+    /// What the chat's agent ran in the background went with it in the
+    /// upgrade: the turn that goes on says which, and they show lost,
+    /// ended by the upgrade (CLACKA-187).
+    #[test]
+    fn a_turn_that_goes_on_after_an_upgrade_says_what_it_stopped() {
+        let mut c = chat();
+        connect(&mut c, "s");
+        send(&mut c, "work");
+        let task = crate::agent::Task::Spawned {
+            id: "t1".to_owned(),
+            kind: "shell".to_owned(),
+            name: "Serve the docs".to_owned(),
+            description: None,
+            can_stop: true,
+            tool: None,
+        };
+        assert_eq!(c.task_said(task), None);
+        let continuation = c.prepare_upgrade().expect("active turn");
+        let mut standing = crate::handover::Talk::default();
+        c.hand_over_standing(&mut standing);
+        let agent = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        let mut resumed = HostedChat::resume(c.hand_over(), &agent);
+        let stopped = resumed.resume_standing(&mut standing);
+        assert_eq!(stopped, ["Serve the docs"]);
+        let task = &resumed.node.tasks[0];
+        assert_eq!(task.state, clackatoo_protocol::AgentTaskState::Lost);
+        assert_eq!(task.summary.as_deref(), Some(tasks::ENDED_BY_UPGRADE));
+        assert!(resumed.continue_after_upgrade(continuation, &stopped));
+        let actions = connect(&mut resumed, "s");
+        let prompt = (actions.iter())
+            .find_map(|action| match action {
+                Action::Prompt(prompt) => Some(prompt.text.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            prompt.contains("inspect its result or current state"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.ends_with(
+                "The upgrade also stopped what you ran in the background, which went with your \
+                 process: `Serve the docs`. Start again whatever you still need."
+            ),
+            "{prompt}"
+        );
+        // It's told in that turn: there's no notice besides.
+        assert!(!resumed.tell_upgrade(&[]));
     }
 
     #[test]
@@ -5246,32 +5298,37 @@ mod tests {
         let handed = c.hand_over();
         let mut c = HostedChat::resume(handed, &agent);
         marker.turn += 1;
-        assert!(
-            !c.continue_after_upgrade(crate::handover::ChatContinuation {
+        assert!(!c.continue_after_upgrade(
+            crate::handover::ChatContinuation {
                 chat: marker.chat,
                 turn: marker.turn,
                 pending: None,
                 queue_paused: marker.queue_paused
-            })
-        );
+            },
+            &[]
+        ));
         marker.turn -= 1;
         c.session = None;
-        assert!(
-            !c.continue_after_upgrade(crate::handover::ChatContinuation {
+        assert!(!c.continue_after_upgrade(
+            crate::handover::ChatContinuation {
                 chat: marker.chat,
                 turn: marker.turn,
                 pending: None,
                 queue_paused: marker.queue_paused
-            })
-        );
+            },
+            &[]
+        ));
         c.session = Some("s".into());
-        assert!(c.continue_after_upgrade(crate::handover::ChatContinuation {
-            chat: marker.chat,
-            turn: marker.turn,
-            pending: None,
-            queue_paused: marker.queue_paused
-        }));
-        assert!(!c.continue_after_upgrade(marker));
+        assert!(c.continue_after_upgrade(
+            crate::handover::ChatContinuation {
+                chat: marker.chat,
+                turn: marker.turn,
+                pending: None,
+                queue_paused: marker.queue_paused
+            },
+            &[]
+        ));
+        assert!(!c.continue_after_upgrade(marker, &[]));
     }
 
     #[test]

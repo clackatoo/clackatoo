@@ -14,6 +14,7 @@ use clackatoo_protocol::{AgentTask, AgentTaskKind, AgentTaskState, ChatPatch};
 
 use super::{Action, HostedChat, now};
 use crate::agent::Task;
+use crate::handover;
 
 /// The most tasks a chat keeps: the oldest that ended go first, then the
 /// oldest going.
@@ -253,6 +254,103 @@ impl HostedChat {
             self.journal.push(ChatPatch::Tasks(tasks));
         }
     }
+}
+
+/// What a task ended by the daemon's upgrade says, as its agent went with
+/// it.
+pub(crate) const ENDED_BY_UPGRADE: &str = "ended by the daemon's upgrade";
+
+impl HostedChat {
+    /// What the chat's agent runs in the background, for the next build.
+    pub(crate) fn hand_over_tasks(&self) -> Option<handover::ChatTasks> {
+        (!self.node.tasks.is_empty()).then(|| handover::ChatTasks {
+            chat: self.id.0,
+            session: self.tasks_session.clone(),
+            tasks: (self.node.tasks.iter()).map(task_out).collect(),
+        })
+    }
+
+    /// Takes back what the chat's agent ran in the background, `kept`, as
+    /// the last build handed it over. The upgrade ended the agent, and
+    /// with it all it ran: those still going are lost, and ended by the
+    /// upgrade. Returns what each of those was, to tell the agent.
+    pub(crate) fn resume_tasks(&mut self, kept: handover::ChatTasks) -> Vec<String> {
+        self.tasks_session = kept.session;
+        let ended = now();
+        let mut lost = Vec::new();
+        let mut tasks: Vec<AgentTask> = kept.tasks.into_iter().filter_map(task_in).collect();
+        for task in tasks.iter_mut().filter(|task| task.going()) {
+            task.state = AgentTaskState::Lost;
+            task.summary = Some(ENDED_BY_UPGRADE.to_owned());
+            task.ended = Some(ended);
+            lost.push(match &task.command {
+                Some(command) if *command != task.title => {
+                    format!("{} ({})", task.title, command)
+                }
+                _ => task.title.clone(),
+            });
+        }
+        bound(&mut tasks);
+        self.set_tasks(tasks);
+        lost
+    }
+}
+
+/// `task`, as the handover keeps it.
+fn task_out(task: &AgentTask) -> handover::ChatTask {
+    handover::ChatTask {
+        id: task.id.clone(),
+        kind: match task.kind {
+            AgentTaskKind::Shell => "shell",
+            AgentTaskKind::Monitor => "monitor",
+            AgentTaskKind::Workflow => "workflow",
+            AgentTaskKind::Turn => "turn",
+            AgentTaskKind::Other => "other",
+        }
+        .to_owned(),
+        title: task.title.clone(),
+        command: task.command.clone(),
+        state: match task.state {
+            AgentTaskState::Running => "running",
+            AgentTaskState::Paused => "paused",
+            AgentTaskState::Stopping => "stopping",
+            AgentTaskState::Done => "done",
+            AgentTaskState::Failed => "failed",
+            AgentTaskState::Stopped => "stopped",
+            AgentTaskState::Lost => "lost",
+        }
+        .to_owned(),
+        summary: task.summary.clone(),
+        started: task.started,
+        ended: task.ended,
+        can_stop: task.can_stop,
+    }
+}
+
+/// A task the handover kept, unless it's in a state this build doesn't
+/// know.
+fn task_in(task: handover::ChatTask) -> Option<AgentTask> {
+    let state = match task.state.as_str() {
+        "running" => AgentTaskState::Running,
+        "paused" => AgentTaskState::Paused,
+        "stopping" => AgentTaskState::Stopping,
+        "done" => AgentTaskState::Done,
+        "failed" => AgentTaskState::Failed,
+        "stopped" => AgentTaskState::Stopped,
+        "lost" => AgentTaskState::Lost,
+        _ => return None,
+    };
+    Some(AgentTask {
+        id: task.id,
+        kind: task_kind(&task.kind),
+        title: task.title,
+        command: task.command,
+        state,
+        summary: task.summary,
+        started: task.started,
+        ended: task.ended,
+        can_stop: task.can_stop,
+    })
 }
 
 /// How Claude Code's adapter names the task that stands for a turn it

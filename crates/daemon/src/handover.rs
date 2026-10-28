@@ -77,6 +77,13 @@
 //!     cursor was and the last selection, for each step; which steps
 //!     change nothing; and whether older steps were let go.
 //! 35. Workspaces lent as background tabs of the daemons they're lent to.
+//! 36. Why messages chats sent others, which waited their turns, were
+//!     dropped.
+//! 37. Where chats stand among the others (CLACKA-187): what each runs in
+//!     the background, the turns agents took by themselves, which answers
+//!     each chat has had from each other, the counts agents' work is held
+//!     to, and the waits for chats the upgrade cut off. Before, all of it
+//!     was lost.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -89,12 +96,12 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 36;
+pub(crate) const VERSION: u32 = 37;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-    27, 28, 29, 30, 31, 32, 33, 34, 35, VERSION,
+    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -247,6 +254,106 @@ pub(crate) struct State {
     /// dropped as they came, so each sender is still told why. Since
     /// version 36; before, none was.
     pub(crate) undelivered: Vec<Undelivered>,
+    /// Where chats stand among the others: see [`Talk`]. Since version
+    /// 37; `None` before, from a build that couldn't hand it over.
+    pub(crate) talk: Option<Talk>,
+}
+
+/// Where chats stand among the others, beyond what [`Chat`] keeps: since
+/// version 37. Each chat is by its terminal's number.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct Talk {
+    /// What each chat's agent runs in the background.
+    pub(crate) tasks: Vec<ChatTasks>,
+    /// The turns agents took by themselves, with no message.
+    pub(crate) woke: Vec<WokeTurn>,
+    /// How many of each chat's turns another has had the answers to.
+    pub(crate) heard: Vec<Heard>,
+    /// How many chats agents have started under each of the user's chats.
+    pub(crate) starts: Vec<Starts>,
+    /// How many turns notices that chats finished have started under each
+    /// of the user's chats, since which of the user's turns there.
+    pub(crate) notice_turns: Vec<NoticeTurns>,
+    /// The chats holding such a notice for the user, with the last turn
+    /// the user started there as they began to.
+    pub(crate) held: Vec<Held>,
+    /// The waits for chats the upgrade cut off, by the chat that waited.
+    pub(crate) waits: Vec<CutWait>,
+}
+
+/// What the chat `chat`'s agent runs in the background, in the session
+/// `session` (see [`Talk::tasks`]).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatTasks {
+    pub(crate) chat: u32,
+    pub(crate) session: Option<String>,
+    pub(crate) tasks: Vec<ChatTask>,
+}
+
+/// One of the things an agent runs in the background, as the chat shows
+/// it (see `clackatoo_protocol::AgentTask`), its kind and state by name.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatTask {
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) title: String,
+    pub(crate) command: Option<String>,
+    pub(crate) state: String,
+    pub(crate) summary: Option<String>,
+    pub(crate) started: u64,
+    pub(crate) ended: Option<u64>,
+    pub(crate) can_stop: bool,
+}
+
+/// Turn `turn` of the chat `chat`, which its agent took by itself, saying
+/// `why` if it said (see [`Talk::woke`]).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct WokeTurn {
+    pub(crate) chat: u32,
+    pub(crate) turn: u64,
+    pub(crate) why: String,
+}
+
+/// The chat `by` has had the answers to the chat `chat`'s first `turns`
+/// turns (see [`Talk::heard`]).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Heard {
+    pub(crate) chat: u32,
+    pub(crate) by: u32,
+    pub(crate) turns: u64,
+}
+
+/// `count` chats have been started under the user's chat `root` (see
+/// [`Talk::starts`]).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Starts {
+    pub(crate) root: u32,
+    pub(crate) count: u32,
+}
+
+/// Notices have started `count` turns under the user's chat `root` since
+/// the user's turn `since` there (see [`Talk::notice_turns`]).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct NoticeTurns {
+    pub(crate) root: u32,
+    pub(crate) since: Option<u64>,
+    pub(crate) count: u32,
+}
+
+/// The chat `chat` holds a notice for the user, since the user's turn
+/// `since` there (see [`Talk::held`]).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Held {
+    pub(crate) chat: u32,
+    pub(crate) since: Option<u64>,
+}
+
+/// The chat `waiter` was waiting for the chats `chats` as the upgrade cut
+/// its wait off (see [`Talk::waits`]).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct CutWait {
+    pub(crate) waiter: u32,
+    pub(crate) chats: Vec<u32>,
 }
 
 /// Why the last message the chat `from` sent the chat `to` was dropped
@@ -1128,6 +1235,7 @@ impl State {
             33 => Ok(postcard::from_bytes::<v33::State>(body)?.into()),
             34 => Ok(postcard::from_bytes::<v34::State>(body)?.into()),
             35 => Ok(postcard::from_bytes::<v35::State>(body)?.into()),
+            36 => Ok(postcard::from_bytes::<v36::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -1221,6 +1329,7 @@ mod v31 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -1312,6 +1421,7 @@ mod v30 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -1402,6 +1512,7 @@ mod v29 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -1491,6 +1602,7 @@ mod v28 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -1578,6 +1690,7 @@ mod v27 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -1668,6 +1781,7 @@ mod v26 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -1755,6 +1869,7 @@ mod v25 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -1840,6 +1955,7 @@ mod v24 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -1923,6 +2039,7 @@ mod v23 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -2019,6 +2136,7 @@ mod v22 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -2098,6 +2216,7 @@ mod v21 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -2175,6 +2294,7 @@ mod v20 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -2248,6 +2368,7 @@ mod v19 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -2321,6 +2442,7 @@ mod v18 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -2859,6 +2981,7 @@ mod v7 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -2956,6 +3079,7 @@ mod v8 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -3023,6 +3147,7 @@ mod v9 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -3092,6 +3217,7 @@ mod v11 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -3210,6 +3336,7 @@ mod v15 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -3282,6 +3409,7 @@ mod v14 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -3352,6 +3480,7 @@ mod v13 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -3464,6 +3593,7 @@ mod v12 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -3574,6 +3704,7 @@ mod v10 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -3852,6 +3983,47 @@ mod tests {
                 to: 3,
                 why: "chat 3 has moved".to_owned(),
             }],
+            talk: Some(Talk {
+                tasks: vec![ChatTasks {
+                    chat: 2,
+                    session: Some("s2".to_owned()),
+                    tasks: vec![ChatTask {
+                        id: "t1".to_owned(),
+                        kind: "shell".to_owned(),
+                        title: "Serve the docs".to_owned(),
+                        command: Some("npm run dev".to_owned()),
+                        state: "running".to_owned(),
+                        summary: None,
+                        started: 5,
+                        ended: None,
+                        can_stop: true,
+                    }],
+                }],
+                woke: vec![WokeTurn {
+                    chat: 2,
+                    turn: 1,
+                    why: "the gate ended".to_owned(),
+                }],
+                heard: vec![Heard {
+                    chat: 2,
+                    by: 3,
+                    turns: 1,
+                }],
+                starts: vec![Starts { root: 3, count: 4 }],
+                notice_turns: vec![NoticeTurns {
+                    root: 3,
+                    since: Some(0),
+                    count: 100,
+                }],
+                held: vec![Held {
+                    chat: 3,
+                    since: None,
+                }],
+                waits: vec![CutWait {
+                    waiter: 3,
+                    chats: vec![2],
+                }],
+            }),
             undo_states: vec![BufferUndo {
                 buffer: 1,
                 authors: vec![AuthorUndo {
@@ -4138,6 +4310,33 @@ mod tests {
     }
 
     #[test]
+    fn version_37_keeps_where_chats_stand_among_the_others() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v37.bin"))
+            .unwrap();
+        let read = State::read(&mut file).unwrap();
+        let talk = read.talk.expect("kept");
+        assert_eq!(talk.tasks[0].tasks[0].title, "Serve the docs");
+        assert_eq!(talk.tasks[0].session.as_deref(), Some("s2"));
+        assert_eq!(
+            (talk.woke[0].turn, talk.woke[0].why.as_str()),
+            (1, "the gate ended")
+        );
+        assert_eq!(
+            (talk.heard[0].chat, talk.heard[0].by, talk.heard[0].turns),
+            (2, 3, 1)
+        );
+        assert_eq!((talk.starts[0].root, talk.starts[0].count), (3, 4));
+        assert_eq!(talk.notice_turns[0].count, 100);
+        assert_eq!(talk.held[0].chat, 3);
+        assert_eq!(
+            (talk.waits[0].waiter, talk.waits[0].chats.as_slice()),
+            (3, &[2][..])
+        );
+        assert_eq!(read.undelivered.len(), 1);
+    }
+
+    #[test]
     fn version_36_keeps_why_messages_were_dropped() {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v36.bin"))
@@ -4149,6 +4348,8 @@ mod tests {
         assert_eq!((dropped.from, dropped.to), (2, 3));
         assert_eq!(dropped.why, "chat 3 has moved");
         assert_eq!(read.lent_background.len(), 1);
+        // Where chats stood among the others it couldn't hand over.
+        assert!(read.talk.is_none());
     }
 
     #[test]
@@ -4551,11 +4752,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v36.bin"]
+    #[ignore = "writes tests/fixtures/handover-v37.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v36.bin"
+            "/tests/fixtures/handover-v37.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();
@@ -5100,6 +5301,7 @@ mod v32 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -5256,6 +5458,7 @@ mod v33 {
                 undo_states: Vec::new(),
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -5415,6 +5618,7 @@ mod v34 {
                 undo_states: state.undo_states,
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
+                talk: None,
             }
         }
     }
@@ -5577,6 +5781,173 @@ mod v35 {
                 undo_states: state.undo_states,
                 lent_background: state.lent_background,
                 undelivered: Vec::new(),
+                talk: None,
+            }
+        }
+    }
+}
+
+/// Version 36, before what chats ran in the background, which answers
+/// each had, and where agents talking to each other stood were handed
+/// over. Keep this shape frozen.
+mod v36 {
+    use super::{
+        Applied, Background, Borrower, Buffer, BufferUndo, Chat, ChatContinuation, ChatPreviews,
+        ChatQueue, Connection, Deserialize, EditLog, Exe, Files, ImageOriginals, Kept, Known,
+        Lender, Lent, LentBackground, Process, Restored, Reviews, Sharing, Shell, Terminal,
+        ToolPreviews, Trusted, Undelivered, Workspaces,
+    };
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        /// The listening socket.
+        listener: u32,
+        /// The runtime directory's lock, set by whoever holds it.
+        lock: Option<u32>,
+        /// The ID the next terminal gets.
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        /// Chats with agents, which are terminals too: their IDs are
+        /// terminals' IDs.
+        chats: Vec<Chat>,
+        /// Closed terminals' programs that haven't exited yet, and agents that
+        /// were stopped.
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        /// The ID the next buffer gets.
+        next_buffer: u32,
+        /// Files being edited.
+        buffers: Vec<Buffer>,
+        /// The ID the next file explorer gets.
+        next_files: u32,
+        /// File explorers.
+        explorers: Vec<Files>,
+        /// What agents changed in files.
+        edits: EditLog,
+        /// The last change each window sent each buffer. Since version 14.
+        applied: Vec<Applied>,
+        /// The daemon's own number, chosen at random when it first started:
+        /// see [`BufferSnapshot::daemon`](clackatoo_protocol::BufferSnapshot).
+        /// Since version 14; 0 before, for the build reading it to choose one.
+        daemon: u64,
+        /// What agents changed that the user hasn't reviewed, and reviews.
+        reviews: Reviews,
+        /// The lock on the recovery files, if the daemon keeps them (see
+        /// `crate::recovery`). Since version 19.
+        recovery_lock: Option<u32>,
+        /// The secrets of the terminals' shells that have one. Since version
+        /// 20; before, no shell had one.
+        shells: Vec<Shell>,
+        /// Which machine the daemon is: its ID (see
+        /// [`MachineId`](clackatoo_protocol::MachineId)). Since version 21;
+        /// `None` before, for the build reading it to take the one its state
+        /// directory keeps.
+        machine: Option<[u8; 16]>,
+        /// The daemon's connections to the daemons on other machines. Since
+        /// version 21; before, there were none.
+        connections: Vec<Connection>,
+        /// The workspaces lent to the daemons on other machines. Since version
+        /// 22; before, there were none.
+        lent: Vec<Lent>,
+        /// The machines they're lent to. Since version 22.
+        borrowers: Vec<Borrower>,
+        /// What the machines the panes borrowed are on are called. Since
+        /// version 23; before, none were known.
+        lenders: Vec<Lender>,
+        /// Which of the connections aren't passed on, and the machine each
+        /// was last connected to, by host. Since version 24; before, every
+        /// one was passed on, and none's machine was known.
+        sharing: Vec<Sharing>,
+        /// The seed of the machine's identity key (see `crate::machine`).
+        /// Since version 24; before, the next build reads it from the
+        /// `machine` file, or chooses one.
+        key: Option<[u8; 32]>,
+        /// The identity keys of other machines the daemon knows. Since version
+        /// 24; before, none were known.
+        keys: Vec<Known>,
+        /// The workspaces' background tabs. Since version 25; before, there
+        /// were none.
+        background: Vec<Background>,
+        /// The terminals the user marked to keep running. Since version 26;
+        /// before, none was. How running each again was going isn't handed
+        /// over: it starts again.
+        kept: Vec<Kept>,
+        /// Each terminal's blocks whose commands its shell's integration said,
+        /// with its secret, so the command a shell ran last is still known to
+        /// be its own: [`Shell::trusted`] says only the latest block's. Since
+        /// version 26; before, only that one was.
+        trusted: Vec<Trusted>,
+        /// The program each terminal was started as, so one its shell has
+        /// become another program in, as with `exec`, is still known to have
+        /// no shell to type into. Since version 26; before, none was known.
+        exes: Vec<Exe>,
+        /// What panes made again as the daemon last started afresh still have
+        /// to show for it (see
+        /// [`Workspaces::restored`](clackatoo_protocol::Workspaces::restored)).
+        /// Since version 27: `None` from a build before, which couldn't hand
+        /// them over, as distinct from one that had none to.
+        restored: Option<Vec<Restored>>,
+        /// Small image previews retained by chat and turn, since version 28.
+        chat_previews: Vec<ChatPreviews>,
+        /// Thumbnails attached to tools, since version 29.
+        tool_previews: Vec<ToolPreviews>,
+        /// Compressed originals and thumbnail handles, since version 30.
+        image_originals: Vec<ImageOriginals>,
+        /// Pending drafts, resumed paused unless continuing a turn, since version 31.
+        chat_queues: Vec<ChatQueue>,
+        /// Only work interrupted by this upgrade, since version 32.
+        chat_continuations: Vec<ChatContinuation>,
+        /// Versioned managed-operation records, since version 33.
+        activities: Vec<u8>,
+        /// What the buffers' undo steps keep, since version 34.
+        undo_states: Vec<BufferUndo>,
+        /// The workspaces lent as background tabs, since version 35.
+        lent_background: Vec<LentBackground>,
+        /// Why waiting messages were dropped, since version 36.
+        undelivered: Vec<Undelivered>,
+    }
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: state.recovery_lock,
+                shells: state.shells,
+                machine: state.machine,
+                connections: state.connections,
+                lent: state.lent,
+                borrowers: state.borrowers,
+                lenders: state.lenders,
+                sharing: state.sharing,
+                key: state.key,
+                keys: state.keys,
+                background: state.background,
+                kept: state.kept,
+                trusted: state.trusted,
+                exes: state.exes,
+                restored: state.restored,
+                chat_previews: state.chat_previews,
+                tool_previews: state.tool_previews,
+                image_originals: state.image_originals,
+                chat_queues: state.chat_queues,
+                chat_continuations: state.chat_continuations,
+                activities: state.activities,
+                undo_states: state.undo_states,
+                lent_background: state.lent_background,
+                undelivered: state.undelivered,
+                talk: None,
             }
         }
     }

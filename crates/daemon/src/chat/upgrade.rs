@@ -1,10 +1,14 @@
 //! Only planned upgrades continue work automatically. The handover carries
 //! explicit intent, so a historical failure never becomes a new instruction.
 
-use clackatoo_protocol::{ChatImage, ChatPreview, ChatState, Item};
+use std::fmt::Write as _;
 
-use super::{HostedChat, Link, Prompt};
-use crate::handover::{ChatContinuation, QueuedImage, ResumePrompt};
+use clackatoo_protocol::{
+    ChatImage, ChatPreview, ChatState, Item, Outcome, Sender, TerminalId, code_span,
+};
+
+use super::{HostedChat, Link, Message, Prompt};
+use crate::handover::{self, ChatContinuation, QueuedImage, ResumePrompt};
 
 const CONTINUE: &str = "Clackatoo resumed this session after a daemon upgrade interrupted \
     the active turn. Continue the user's latest request from where you left off. \
@@ -51,7 +55,13 @@ impl HostedChat {
     /// Reopens the same visible turn, preparing one prompt for the usual
     /// session/connect path. The server calls this once, after restoring
     /// images and queues, and starts connections after restoring all state.
-    pub(crate) fn continue_after_upgrade(&mut self, continuation: ChatContinuation) -> bool {
+    /// `stopped` are the background tasks the upgrade ended, which the
+    /// agent is told of with the prompt that goes on.
+    pub(crate) fn continue_after_upgrade(
+        &mut self,
+        continuation: ChatContinuation,
+        stopped: &[String],
+    ) -> bool {
         let Some(index) = self.node.turns.len().checked_sub(1) else {
             return false;
         };
@@ -69,7 +79,7 @@ impl HostedChat {
             return false;
         }
         self.role = continuation.pending.as_ref().and_then(|p| p.role.clone());
-        let prompt = match continuation.pending {
+        let mut prompt = match continuation.pending {
             Some(pending) => Prompt {
                 text: pending.text,
                 images: pending.images.into_iter().map(restore_image).collect(),
@@ -79,6 +89,10 @@ impl HostedChat {
                 images: Vec::new(),
             },
         };
+        if let Some(said) = stopped_tasks(stopped) {
+            prompt.text.push_str("\n\n");
+            prompt.text.push_str(&said);
+        }
         let turn = &mut self.node.turns[index];
         turn.end = None;
         turn.items
@@ -91,6 +105,126 @@ impl HostedChat {
         self.set_state(ChatState::Starting);
         true
     }
+}
+
+impl HostedChat {
+    /// Where the chat stands, beyond what [`Self::hand_over`] keeps, into
+    /// `talk`, for the next build: what its agent runs in the background,
+    /// the turns it took by itself, and which of its answers each chat has
+    /// had.
+    pub(crate) fn hand_over_standing(&self, talk: &mut handover::Talk) {
+        talk.tasks.extend(self.hand_over_tasks());
+        let woke = (self.node.turns.iter().enumerate()).filter_map(|(turn, each)| {
+            Some(handover::WokeTurn {
+                chat: self.id.0,
+                turn: turn as u64,
+                why: each.woke.clone()?,
+            })
+        });
+        talk.woke.extend(woke);
+        let heard = self.answers_heard.borrow();
+        talk.heard
+            .extend(heard.iter().map(|(&by, &turns)| handover::Heard {
+                chat: self.id.0,
+                by: by.0,
+                turns: turns as u64,
+            }));
+    }
+
+    /// Takes back where the chat stood, from `talk`, as the last build
+    /// handed it over. Returns the background tasks the upgrade stopped,
+    /// to tell the agent.
+    pub(crate) fn resume_standing(&mut self, talk: &mut handover::Talk) -> Vec<String> {
+        let id = self.id.0;
+        for woke in (talk.woke.iter()).filter(|woke| woke.chat == id) {
+            let at = usize::try_from(woke.turn).unwrap_or(usize::MAX);
+            if let Some(turn) = self.node.turns.get_mut(at) {
+                turn.woke = Some(woke.why.clone());
+            }
+        }
+        for heard in (talk.heard.iter()).filter(|heard| heard.chat == id) {
+            let turns = usize::try_from(heard.turns).unwrap_or(usize::MAX);
+            self.heard_by(TerminalId(heard.by), turns.min(self.node.turns.len()));
+        }
+        match talk.tasks.iter().position(|tasks| tasks.chat == id) {
+            Some(at) => self.resume_tasks(talk.tasks.swap_remove(at)),
+            None => Vec::new(),
+        }
+    }
+
+    /// The turn the agent took by itself that the upgrade cut off, if its
+    /// last was one: its number, and why it took it, if it said.
+    fn cut_off_by_itself(&self) -> Option<(usize, String)> {
+        let index = self.node.turns.len().checked_sub(1)?;
+        let turn = &self.node.turns[index];
+        let cut = matches!(
+            turn.end.as_ref().map(|end| &end.outcome),
+            Some(Outcome::Failed(why)) if why == CUT_OFF
+        );
+        let why = turn.woke.clone().filter(|_| cut)?;
+        let number = clackatoo_protocol::turn_number(&self.node.turns, index).unwrap_or(index + 1);
+        Some((number, why))
+    }
+
+    /// Tells the agent, as a notice from clackatoo that starts a turn of
+    /// its own, what the upgrade stopped, if it isn't told as its turn goes
+    /// on: the background tasks `stopped`, and the turn it had taken by
+    /// itself, if the upgrade cut one off. One notice, once: it starts no
+    /// new chain of messages, and counts against nothing, but nothing
+    /// comes of it again. Returns whether there was anything to tell.
+    pub(crate) fn tell_upgrade(&mut self, stopped: &[String]) -> bool {
+        let cut = self.cut_off_by_itself();
+        if stopped.is_empty() && cut.is_none() {
+            return false;
+        }
+        let mut text = "[daemon upgraded] Clackatoo was upgraded, which ended your agent's \
+            process."
+            .to_owned();
+        if let Some((number, why)) = cut {
+            let why = if why.is_empty() {
+                String::new()
+            } else {
+                format!(", after {}", code_span(&why))
+            };
+            let _ = write!(
+                text,
+                " It cut off turn {number}, which you had taken by yourself{why}: look at where \
+                 it got to before going on."
+            );
+        }
+        if let Some(said) = stopped_tasks(stopped) {
+            text.push(' ');
+            text.push_str(&said);
+        }
+        self.relations.inbox.push_back(Message {
+            from: Sender {
+                chat: self.id,
+                agent: "Clackatoo".to_owned(),
+                title: "Daemon upgrade".to_owned(),
+            },
+            text,
+            hops: 0,
+            cause: None,
+        });
+        true
+    }
+}
+
+/// How a turn the upgrade ended says it ended.
+pub(crate) const CUT_OFF: &str = "cut off by an upgrade";
+
+/// What the agent is told of the background tasks `stopped`, which the
+/// upgrade ended, if there are any.
+fn stopped_tasks(stopped: &[String]) -> Option<String> {
+    if stopped.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = stopped.iter().map(|name| code_span(name)).collect();
+    Some(format!(
+        "The upgrade also stopped what you ran in the background, which went with your \
+         process: {}. Start again whatever you still need.",
+        names.join(", ")
+    ))
 }
 
 fn keep_image(image: &ChatImage) -> QueuedImage {
