@@ -11,16 +11,17 @@
 //! daemon does the copying and searching, since it holds all of history
 //! and the window only the lines it has shown.
 
-use clackatoo_protocol::{Match, Position, Request};
+use clackatoo_protocol::Position;
 use winit::keyboard::Key;
 
 use super::{CopyTo, Document, Lines, Mode, Pane, Pending, Selection};
-use crate::cmdline::{Keyed, Line};
+use crate::cmdline::Line;
 use crate::input::KeyPress;
 use crate::motion::{Block, Cursor, Motion, Point, start_of_cell};
+use crate::vim::search;
 use crate::vim::{
     Action, Command, Dialect, Entry, Operator, Parsed, Read, Reader, Scroll, Stroke, Target,
-    ViewAt, WRAPPED_TO_BOTTOM, WRAPPED_TO_TOP, strokes,
+    ViewAt, strokes,
 };
 
 /// Where a motion left the cursor on a line of history not fetched yet,
@@ -53,13 +54,6 @@ enum Place {
 pub(super) struct Unplacements {
     pub(super) cursor: Option<Unplaced>,
     pub(super) anchor: Option<Unplaced>,
-}
-
-/// A search being typed.
-#[derive(Debug)]
-pub(super) struct Prompt {
-    pub(super) line: Line,
-    pub(super) backward: bool,
 }
 
 /// A command of a terminal's own.
@@ -192,8 +186,15 @@ impl Dialect for TerminalKeys {
 impl Pane {
     /// A key pressed in normal or visual mode.
     pub(super) fn normal_key(&mut self, press: &KeyPress<'_>) -> bool {
-        if self.prompt.is_some() {
-            return self.prompt_key(press);
+        if self.search.typing() {
+            // Edited as the command line is (see [`crate::cmdline`]); the
+            // desk has Up, Down and a register's name after Ctrl+R first.
+            for stroke in crate::vim::prompt_strokes(press) {
+                if search::key(self, stroke) == search::Typed::Not {
+                    break;
+                }
+            }
+            return true;
         }
         self.status = None;
         // Ctrl+C always reaches the program, and Ctrl+Shift+C copies what's
@@ -276,14 +277,14 @@ impl Pane {
             }
             Action::OtherEnd | Action::OtherCorner => self.other_end(),
             Action::Search { backward } => {
-                self.prompt = Some(Prompt {
-                    line: Line::default(),
-                    backward,
-                });
-                self.start_search_preview();
+                search::start(self, backward, count);
                 true
             }
-            Action::SearchAgain { reverse } => self.search_again(reverse),
+            // Answered later.
+            Action::SearchAgain { reverse } => {
+                search::again(self, reverse, command.times());
+                false
+            }
             Action::Scroll(scroll) => self.scroll(scroll, count),
             Action::View(at) => self.view_at(at, count),
             Action::Own(TerminalAction::Escape) => {
@@ -388,34 +389,6 @@ impl Pane {
         true
     }
 
-    /// Takes in where a search from `from` found its text, if anywhere,
-    /// going backward if `backward`. One that went round the end says so,
-    /// as Vim does.
-    pub(super) fn searched(&mut self, found: Option<Match>, (from, backward): (Point, bool)) {
-        let Some(found) = found else {
-            let query = self.search.as_ref().map_or("", |(query, _)| query);
-            self.status = Some(format!("not found: {query}"));
-            self.failed = true;
-            return;
-        };
-        let at = Point {
-            line: found.start.line,
-            col: found.start.col,
-        };
-        // A match back where it started went all the way round.
-        if !backward && at <= from {
-            self.status = Some(WRAPPED_TO_TOP.into());
-        } else if backward && at >= from {
-            self.status = Some(WRAPPED_TO_BOTTOM.into());
-        }
-        self.found = Some(found);
-        self.cursor = Some(Cursor::new(Point {
-            line: found.start.line,
-            col: found.start.col,
-        }));
-        self.follow_cursor();
-    }
-
     /// The characters of a visual selection on each line, as the start and
     /// end of the selected range, ends included: for a block, its top left
     /// and bottom right corners, the last at `usize::MAX` after `$`.
@@ -439,70 +412,10 @@ impl Pane {
         Some((start, end, kind))
     }
 
-    /// A key typed into the search prompt, edited as the command line is
-    /// (see [`crate::cmdline`]); the desk has Up, Down and a register's
-    /// name after Ctrl+R first.
-    fn prompt_key(&mut self, press: &KeyPress<'_>) -> bool {
-        let Some(prompt) = &mut self.prompt else {
-            return false;
-        };
-        match crate::vim::prompt_strokes(press)
-            .first()
-            .map(|stroke| crate::cmdline::controls::Control::read(*stroke).0)
-        {
-            Some(crate::cmdline::controls::Control::Accept) => {
-                let mut prompt = self.prompt.take().expect("a prompt is open");
-                // From where it started, as without `incsearch`, so it
-                // finds what was shown, the view kept.
-                self.end_search_preview(true);
-                if !prompt.line.is_empty() {
-                    self.search = Some((prompt.line.take(), prompt.backward));
-                    self.search_again(false);
-                }
-            }
-            Some(crate::cmdline::controls::Control::Cancel) => {
-                self.end_search_preview(false);
-                self.prompt = None;
-            }
-            _ => {
-                if prompt.line.key(press) == Keyed::Emptied {
-                    self.end_search_preview(false);
-                    self.prompt = None;
-                }
-            }
-        }
-        true
-    }
-
     /// The search being typed, for the desk to put a register in, or a
     /// search typed before.
     pub(crate) fn search_line(&mut self) -> Option<&mut Line> {
-        self.prompt.as_mut().map(|prompt| &mut prompt.line)
-    }
-
-    /// Searches for the last query again, the same way or, if `reverse`,
-    /// the other way.
-    fn search_again(&mut self, reverse: bool) -> bool {
-        let (Some((query, backward)), Some(cursor)) = (self.search.clone(), self.cursor) else {
-            // No search before, as Vim's E35.
-            self.failed = true;
-            return false;
-        };
-        let backward = backward != reverse;
-        let exact = self.case.exact(&query);
-        // Its matches are lit from now, found or not, as a chat's are.
-        self.matching = Some((query.chars().collect(), exact));
-        self.request(
-            Request::Search {
-                terminal: self.terminal(),
-                exact,
-                query,
-                from: position(cursor.at),
-                backward,
-            },
-            Pending::Search(cursor.at, backward),
-        );
-        false
+        self.search.line()
     }
 
     fn toggle_visual(&mut self, kind: Selection) -> bool {
@@ -582,20 +495,12 @@ impl Pane {
         true
     }
 
-    /// Stops lighting up the last search's matches, as `:nohlsearch` does,
-    /// until the next search.
-    pub(crate) fn forget_match(&mut self) {
-        self.found = None;
-        self.matching = None;
-        self.matches_kept.forget();
-    }
-
     /// The mode the bar shows: visual while text selected with the mouse
     /// is what `y` would yank, as Vim takes a mouse selection as a visual
     /// one, with nothing typed but a count or a register.
     pub(crate) fn shown_mode(&self) -> Mode {
         let selecting = self.mode == Mode::Normal
-            && self.prompt.is_none()
+            && !self.search.typing()
             && crate::vim::only_count_and_register(self.keys.so_far());
         match self.mouse_selected() {
             Some((_, _, kind)) if selecting => Mode::Visual(kind),
@@ -612,7 +517,7 @@ impl Pane {
         // An operator typed before, as `y` waiting for its motion, has the
         // key, as it did before the drag; and a search being typed has it.
         if self.mode != Mode::Normal
-            || self.prompt.is_some()
+            || self.search.typing()
             || self.mouse_selected().is_none()
             || !crate::vim::only_count_and_register(self.keys.so_far())
         {

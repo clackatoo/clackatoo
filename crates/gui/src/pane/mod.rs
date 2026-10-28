@@ -28,7 +28,6 @@ use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 use crate::screen::Screen;
 use crate::vim::{self, Mode, Selection, enters_normal_mode, is_ctrl_backslash};
 
-mod incsearch;
 mod links;
 mod marks;
 mod mouse;
@@ -36,6 +35,7 @@ mod normal;
 mod operator;
 mod predict;
 mod requests;
+mod search;
 mod yank;
 
 pub(crate) use mouse::{Copy, PaneMouse};
@@ -65,14 +65,14 @@ enum Pending {
     History(Range<u64>, u64),
     /// Text to copy, where to, and what of.
     Text(yank::Copying),
-    /// A search, from where, and whether it went backward.
-    Search(Point, bool),
+    /// A search, a match at a time (see [`search`]).
+    Search(search::Asked),
     /// A block, and what for.
     Block(operator::BlockUse),
     /// Input for the program, numbered by the [`Predictor`].
     Input(u64),
     /// Where a search being typed would go, asked as it's typed, for
-    /// what was typed then (see [`incsearch`]).
+    /// what was typed then (see [`search`]).
     Preview(String),
     /// Anything answered with just "done" or an error.
     Other,
@@ -114,10 +114,8 @@ pub(crate) struct Pane {
     /// The last visual selection, for `gv`: where it started, where the
     /// cursor was, and by what.
     last_visual: Option<(Point, Point, Selection)>,
-    /// A search being typed.
-    prompt: Option<normal::Prompt>,
-    /// The last search, and whether it went backward.
-    search: Option<(String, bool)>,
+    /// The search being typed, the last, and what's lit.
+    search: vim::search::Search<search::Terminal>,
     /// How searches treat case, as the options say.
     case: Case,
     /// `gg`, `G`, `H`, `M` and `L` go to a line's first non-blank
@@ -133,25 +131,9 @@ pub(crate) struct Pane {
     /// Which finished commands are marked at the end of their prompt's
     /// line, as the options say.
     blockmarks: BlockMarks,
-    /// The last match found, highlighted until Esc.
-    found: Option<Match>,
-    /// Every match of the last search in view is lit in normal mode, not
-    /// only the one found (`hlsearch`).
-    hlsearch: bool,
-    /// A search being typed shows where it goes (`incsearch`).
-    incsearch: bool,
-    /// Where the search being typed started, with `incsearch`.
-    search_start: Option<incsearch::Start>,
-    /// The last search, while its matches are lit: from a search, `n` or
-    /// `N` until Esc or `:nohlsearch`. What it looks for, and whether it
-    /// matches case.
-    matching: Option<(Vec<char>, bool)>,
     /// How many times what the pane shows has changed, its screen or its
     /// history, for what's lit to be kept against.
     changes: u64,
-    /// The matches of the last search last found in view, and what they
-    /// were found in.
-    matches_kept: crate::hlsearch::Memo<MatchesIn, Match>,
     /// A short message for the label, until the next key.
     status: Option<String>,
     /// A command failed since the desk last asked, as Vim beeps: a motion
@@ -199,21 +181,14 @@ impl Pane {
             cursor: None,
             anchor: None,
             last_visual: None,
-            prompt: None,
-            search: None,
+            search: vim::search::Search::default(),
             case: Case::default(),
             startofline: Options::default().startofline,
             paging: vim::Paging::default(),
             finds: vim::Finds::default(),
             unplaced: normal::Unplacements::default(),
             blockmarks: Options::default().blockmarks,
-            found: None,
-            hlsearch: Options::default().hlsearch,
-            incsearch: Options::default().incsearch,
-            search_start: None,
-            matching: None,
             changes: 0,
-            matches_kept: crate::hlsearch::Memo::default(),
             status: None,
             failed: false,
             yanked: None,
@@ -240,8 +215,7 @@ impl Pane {
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.case = Case::of(options);
         self.startofline = options.startofline;
-        self.hlsearch = options.hlsearch;
-        self.incsearch = options.incsearch;
+        self.search.set_options(options);
         self.blockmarks = options.blockmarks;
         self.predictor.set_choice(options.predictecho);
         self.refresh_overlay();
@@ -320,7 +294,7 @@ impl Pane {
 
     /// Whether a search is being typed, which takes every key.
     pub(crate) fn prompting(&self) -> bool {
-        self.prompt.is_some()
+        self.search.typing()
     }
 
     /// Whether a two-key command is half typed, such as `y` waiting for
@@ -368,8 +342,7 @@ impl Pane {
         self.leave_visual();
         self.keys.clear();
         self.after_ctrl_backslash = false;
-        self.end_search_preview(false);
-        self.prompt = None;
+        vim::search::give_up(self);
     }
 
     /// Starts over on a new connection to the daemon, which sends a fresh
@@ -498,8 +471,8 @@ impl Pane {
                 self.copied(text, copying);
                 true
             }
-            (Some(Pending::Search(from, backward)), Response::Found(found)) => {
-                self.searched(found, (from, backward));
+            (Some(Pending::Search(asked)), Response::Found(found)) => {
+                self.searched(found, asked);
                 true
             }
             (Some(Pending::Preview(query)), Response::Found(found)) => {
@@ -525,18 +498,16 @@ impl Pane {
     ///
     /// [`MOST_LIT`]: crate::hlsearch::MOST_LIT
     fn matches_in_view(&self, top: u64, height: usize) -> Vec<Match> {
-        let Some((query, exact)) =
-            (self.matching.as_ref()).filter(|_| self.hlsearch && self.mode != Mode::Insert)
-        else {
+        if self.mode == Mode::Insert {
             return Vec::new();
-        };
-        let key = MatchesIn {
+        }
+        let key = |(query, exact): &(Vec<char>, bool)| MatchesIn {
             search: (query.clone(), *exact),
             changes: self.changes,
             top,
             height,
         };
-        self.matches_kept.get(key, || {
+        self.search.lit_in_view(key, |(query, exact)| {
             let document = Document(self);
             let mut lit = Vec::new();
             for line in top..top + height as u64 {
@@ -618,8 +589,7 @@ impl Pane {
             _ if to_normal => {
                 self.leave_visual();
                 self.mode = Mode::Normal;
-                self.end_search_preview(false);
-                self.prompt = None;
+                vim::search::give_up(self);
                 self.keys.clear();
                 true
             }
@@ -811,7 +781,7 @@ impl Pane {
         // None drawn over the one found, as `n` can go to a match that
         // overlaps those found one after another along a line.
         let apart = |lit: &Match| {
-            self.found.is_none_or(|found| {
+            self.search.found().is_none_or(|found| {
                 found.start.line != lit.start.line
                     || lit.start.col + lit.cells <= found.start.col
                     || lit.start.col >= found.start.col + found.cells
@@ -826,7 +796,7 @@ impl Pane {
                 });
             }
         }
-        if let Some(found) = self.found
+        if let Some(found) = self.search.found()
             && (top..bottom).contains(&found.start.line)
         {
             highlights.push(Highlight {
@@ -908,9 +878,8 @@ impl Pane {
     /// The note for the bottom bar: a search being typed, or a message,
     /// with how far up the view is scrolled.
     pub(crate) fn label(&self) -> Option<String> {
-        if let Some(prompt) = &self.prompt {
-            let slash = if prompt.backward { '?' } else { '/' };
-            return Some(format!("{slash}{}", prompt.line.shown()));
+        if let Some(label) = self.search.label() {
+            return Some(label);
         }
         let mut label = self.status.clone();
         // The pill over the pane says it, where it fits.
@@ -968,10 +937,9 @@ impl Pane {
     /// Back to insert mode, at the live screen.
     fn insert(&mut self) -> bool {
         self.leave_visual();
-        self.end_search_preview(false);
+        vim::search::give_up(self);
         self.mode = Mode::Insert;
         self.cursor = None;
-        self.prompt = None;
         self.keys.clear();
         self.status = None;
         self.scroll = 0;
@@ -1206,7 +1174,7 @@ impl vim::KeyState for Pane {
 /// whether it matches case, so `n` doesn't look again; after how many
 /// changes to what the pane shows; and the view's top line and height.
 #[derive(Debug, PartialEq, Eq)]
-struct MatchesIn {
+pub(crate) struct MatchesIn {
     search: (Vec<char>, bool),
     changes: u64,
     top: u64,
@@ -1882,6 +1850,40 @@ mod tests {
         serve(&mut pane, &terminal);
         assert_eq!(cursor(&pane), ("cat dog".into(), 0, 4));
         assert_eq!(pane.label().as_deref(), Some(WRAPPED_TO_TOP));
+    }
+
+    #[test]
+    fn a_count_goes_as_many_matches_on_and_round_no_more_than_once() {
+        let terminal = terminal("cat dog\r\nbird cat\r\nfish cat");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg02/cat");
+        named(&mut pane, NamedKey::Enter);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("fish cat".into(), 2, 5));
+        keys(&mut pane, "3n");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane).1, 2, "round to it again");
+        assert_eq!(pane.label().as_deref(), Some(WRAPPED_TO_TOP));
+        // As many times round as there are matches is no further, and asks
+        // no more than once round and what's left.
+        keys(&mut pane, "99999999N");
+        let mut asked = 0;
+        loop {
+            let outbox = pane.take_outbox();
+            if outbox.is_empty() {
+                break;
+            }
+            asked += searches_in(&outbox).len();
+            serve_once(&mut pane, &terminal, outbox);
+        }
+        assert_eq!(cursor(&pane).1, 2);
+        assert!(asked <= 6, "{asked}");
+        // Enter with nothing typed is the last search again, this way.
+        keys(&mut pane, "?");
+        named(&mut pane, NamedKey::Enter);
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("bird cat".into(), 1, 5));
     }
 
     #[test]
@@ -3759,8 +3761,8 @@ mod mouse_tests {
         for typed in ["2", "\"", "y"] {
             key(&mut pane, typed);
         }
-        let prompt = pane.prompt.as_ref().expect("still searching");
-        assert_eq!(prompt.line.text(), "2\"y");
+        let line = pane.search.line().expect("still searching");
+        assert_eq!(line.text(), "2\"y");
         assert_eq!(copied(&mut pane, &terminal), None);
     }
 
@@ -3938,8 +3940,8 @@ mod mouse_tests {
 impl Pane {
     pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
         use crate::shortcuts::Context;
-        if let Some(prompt) = &self.prompt {
-            return crate::shortcuts::prompt("Terminal search", &prompt.line, true);
+        if let Some(context) = self.search.shortcuts("Terminal search") {
+            return context;
         }
         let mut context = if self.mode == Mode::Insert {
             Context::new(
