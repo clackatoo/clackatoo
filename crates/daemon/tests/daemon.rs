@@ -17829,7 +17829,7 @@ fn an_agents_rewrite_of_a_big_file_not_open_leaves_the_daemon_answering() {
 }
 
 #[test]
-#[ignore = "CLACKA-200: a multi-megabyte rewrite of an open buffer still stalls the loop (fails)"]
+#[ignore = "CLACKA-201: a multi-megabyte rewrite of an open buffer stalls the loop (fails)"]
 fn an_agents_rewrite_of_a_big_file_open_leaves_the_daemon_answering() {
     let slowest = slowest_answer_while_a_big_file_is_rewritten(true);
     assert!(slowest < Duration::from_millis(150), "{slowest:?}");
