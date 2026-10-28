@@ -310,13 +310,15 @@ When nothing matches what you type, the list says so once it has finished lookin
 | Key | Does |
 |---|---|
 | Down, Ctrl+N; Up, Ctrl+P | The next or previous one |
+| Page Down, Page Up | A page further or back |
+| Home, End | The first or the last |
 | Enter | Opens it in place of the focused pane's file, as `:e` does |
 | Ctrl+V, Ctrl+X | Opens it beside the focused pane, or below |
 | Ctrl+T | Opens it in a new tab |
-| Ctrl+U, Ctrl+W | Deletes what's typed, or its last word |
+| Ctrl+U, Ctrl+W | Deletes what's typed, or its last word: its last letters and digits, and anything after them, as in a list's prompts |
 | Esc | Closes the finder |
 
-A click picks one, a double click opens it, and the wheel moves through them. Beside the list, if the window is wide enough, is the file round the line picked, coloured as an editor colours it, with a grep's match picked out in its line. A file that's open is coloured as its buffer is; one that isn't is coloured by the language its name ends in. A name with no ending such as `Makefile`, a language that isn't installed, or a daemon older than protocol 84 leaves it plain, and a preview from the middle of a file can be coloured wrongly inside a long comment. An empty file says so. Opening one is a [jump](~clackatoo/reference/editor#jumps), so Ctrl+O comes back. Space starts these keys in normal mode, so Space alone no longer moves the cursor, unless a command is half typed, as in `d<Space>`.
+A click picks one, a double click opens it, and the wheel moves through them. A paste is typed on one line, its line breaks as spaces. The [machine picker](~clackatoo/reference/remote#picking-a-machine) and the [start page](~clackatoo/reference/agents#the-start-page) take the same keys for what's typed, for moving, and for the mouse. Beside the list, if the window is wide enough, is the file round the line picked, coloured as an editor colours it, with a grep's match picked out in its line. A file that's open is coloured as its buffer is; one that isn't is coloured by the language its name ends in. A name with no ending such as `Makefile`, a language that isn't installed, or a daemon older than protocol 84 leaves it plain, and a preview from the middle of a file can be coloured wrongly inside a long comment. An empty file says so. Opening one is a [jump](~clackatoo/reference/editor#jumps), so Ctrl+O comes back. Space starts these keys in normal mode, so Space alone no longer moves the cursor, unless a command is half typed, as in `d<Space>`.
 
 ## Typing
 

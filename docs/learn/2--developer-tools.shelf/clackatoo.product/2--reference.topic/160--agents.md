@@ -30,13 +30,15 @@ Its first row is a new chat, with its agent, model and folder. They start as the
 |---|---|
 | Enter | Starts the new chat, shows the chat picked, or goes on with the session picked in a new chat. |
 | `n` | Starts the new chat, whatever is picked. |
-| `j`, `k`, Down, Up | The next or previous row. |
+| `j`, `k`, Down, Up, Ctrl+N, Ctrl+P | The next or previous row. |
+| Page Down, Page Up | A page further or back. |
+| Home, End | The new chat, or the last row. |
 | Tab, Shift+Tab | The new chat's next or previous picker: agent, model, folder. |
 | `l`, `h`, Right, Left | The picker's next or previous choice. |
-| `/`, then typing | Filters the chats and sessions, as the finder does. |
+| `/`, then typing | Filters the chats and sessions, as the finder does: Backspace, Ctrl+U and Ctrl+W delete as [the finder's](~clackatoo/reference/window#the-finder) do. |
 | Esc | Clears what's typed, or closes the page. |
 
-`j`, `k`, `n`, `h` and `l` are keys only while nothing's typed: any other letter starts the filter, and `/` types one of them.
+`j`, `k`, `n`, `h` and `l` are keys only while nothing's typed: any other letter starts the filter, and `/` types one of them. A paste starts the filter too. Ctrl+? lists the page's keys.
 
 Going on with a session shows its conversation so far as the chat's turns, where the agent can tell it, as Claude Code and Codex can. Nothing in those turns changes your files again, asks you anything, or runs anything: they're only shown. An agent that can't goes on from where it was, and the chat says the turns before aren't shown. A message sent while the turns are coming waits until they've all come. A session another chat has open goes to that chat; one open in another workspace's chat is refused, saying where it is.
 

@@ -977,6 +977,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "substitute",
         what: "/ and ? go to the match and light it as you type; Esc goes back, Enter keeps it (incsearch)",
     },
+    News {
+        id: "picker-keys",
+        date: "2026-10-28",
+        lesson: "finder",
+        what: "Pickers take Home and End; Ctrl+W deletes a word as in prompts, and a paste's line breaks are spaces",
+    },
 ];
 
 impl News {
