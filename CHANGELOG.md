@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026.10.91 (2026-10-28)
+
+### Features
+
+- **daemon:** agents start and message chats without asking (CLACKA-178) (501ad15a)
+
+### Fixes
+
+- **daemon:** refuse what the chat asks used to guard (CLACKA-178) (8921a28e)
+- **daemon:** close the re-review's gaps in chats messaging chats (CLACKA-178) (467077cc)
+- **daemon:** show tag characters agents send each other but in a flag (CLACKA-178) (a46719f8)
+- **daemon:** hand over why a waiting message was dropped (CLACKA-178) (17e16115)
+
+### Speed
+
+- **daemon:** work out each chat's project once, as it's added (CLACKA-178) (ed403df5)
+
 ## 2026.10.90 (2026-10-28)
 
 ### Features
