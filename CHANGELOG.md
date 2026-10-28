@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026.10.94 (2026-10-28)
+
+### Fixes
+
+- **daemon:** subagents stay open, agents message freely, and parents hear (CLACKA-186) (43d92273)
+- **daemon:** quote messages by characters and retell a subagent that ended mid-turn (CLACKA-186) (3e8d4200)
+- **daemon:** notices say what's unheard as they begin, and are bounded (CLACKA-186) (c12682c4)
+- **daemon:** a held notice stays held and holds nothing else up (CLACKA-186) (a91046c2)
+- **daemon:** a chat with the user's message pending hasn't settled for waits (CLACKA-186) (6e868f1b)
+
 ## 2026.10.93 (2026-10-28)
 
 ### Features
