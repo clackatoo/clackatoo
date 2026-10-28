@@ -814,11 +814,13 @@ impl Daemon {
 
     /// Whether the chat `chat` has nothing to finish, for a chat waiting
     /// for it: it's closed, or idle, or all it has waiting is a notice it
-    /// holds for the user, which nothing but the user moves on.
+    /// holds for the user, which nothing but the user moves on, with no
+    /// answer under way and no message of the user's own pending (see
+    /// [`HostedChat::next_message_from`]).
     pub(super) fn settled(&self, chat: TerminalId) -> bool {
         self.chat_ref(chat).is_none_or(|other| {
             idle(other)
-                || (!other.is_answering()
+                || (other.next_message_from().is_some()
                     && other.relations().inbox.len() == 1
                     && self.holds_notice(chat))
         })
@@ -2290,6 +2292,10 @@ mod tests {
         );
         let summary = daemon.summary(a, &[pm]);
         assert!(summary.contains("own subagents' results wait"), "{summary}");
+        // With a message of the user's own about to go there, it hasn't.
+        assert!(daemon.settled(pm));
+        drop(daemon.chat(pm).unwrap().steer_restart(1));
+        assert!(!daemon.settled(pm), "the user's message is pending");
     }
 
     /// An activity's notice leaves the chain of messages a chat is in as
