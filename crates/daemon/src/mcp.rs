@@ -1407,8 +1407,8 @@ fn clackatoo_tools() -> Value {
             "title": "Message another chat",
             "description": "Sends another chat's agent a message, as if the user typed it, marked in both \
                 chats as from this one. If that agent is busy answering, the message waits its turn. \
-                Its answer is what wait_for_chat returns. The user is asked first about a chat they \
-                started, the first time this chat messages it.",
+                Its answer is what wait_for_chat returns. A chat whose agent may do more than this \
+                one can't be messaged.",
             "inputSchema": { "type": "object", "properties": {
                 "chat": chat,
                 "message": { "type": "string", "description": "The message." },
@@ -1434,7 +1434,7 @@ fn clackatoo_tools() -> Value {
                 first message, marked as from this chat. It runs in the background, shown as a card \
                 in this chat that the user can open, unless show is true. Returns at once with its \
                 number: then wait_for_chat waits for its answer. Give it everything it needs to \
-                know: it sees nothing of this conversation. The user may be asked first.",
+                know: it sees nothing of this conversation.",
             "inputSchema": { "type": "object", "properties": new_chat.clone(), "required": ["prompt"] },
             "annotations": { "destructiveHint": false, "openWorldHint": true },
         },

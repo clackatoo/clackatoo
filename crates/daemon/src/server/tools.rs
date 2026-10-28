@@ -669,7 +669,6 @@ impl Daemon {
         let call = self.tools.next_call;
         self.tools.next_call += 1;
         let offered = match tool {
-            Tool::SendToChat { .. } | Tool::StartChat(_) | Tool::StartChats(_) => Choices::Talk,
             Tool::Browser(_) => Choices::Browser,
             _ => Choices::Tool,
         };
@@ -755,9 +754,6 @@ impl Daemon {
                     (what, None)
                 })
             }
-            Tool::SendToChat { .. } | Tool::StartChat(_) | Tool::StartChats(_) => {
-                self.talk_question(chat, tool, tools)
-            }
             // The first page is asked about, whatever the Tools setting:
             // turning the browser on isn't the same as letting it go
             // where the agent likes.
@@ -798,7 +794,7 @@ impl Daemon {
 
     /// The user answered the chat's question about the call numbered
     /// `call`: it goes ahead if `allow`, and is refused if not.
-    pub(super) fn permitted(&mut self, call: u64, allow: bool, pair: bool) {
+    pub(super) fn permitted(&mut self, call: u64, allow: bool) {
         let Some(at) = (self.tools.waiting.iter()).position(
             |waiting| matches!(waiting.what, Wait::Permission { call: asked, .. } if asked == call),
         ) else {
@@ -814,7 +810,6 @@ impl Daemon {
             return;
         };
         if allow {
-            self.talk_permitted(chat, &tool, pair);
             self.carry_out(token, chat, id, tool);
         } else {
             let refused =
@@ -1999,35 +1994,6 @@ fn asked(verb: &str, text: &str, then: &str) -> (String, Option<String>) {
     (question, Some(shown))
 }
 
-/// The question, finishing "Allow the agent to …?", for doing `verb` with
-/// each of `texts`, to its own chat, `then`: "send [to 1] `a` [to 2] `b`
-/// to 2 new chats". Each text is quoted on its own, as [`asked`] quotes
-/// one, with which chat it's for outside the quote, so no text can pass
-/// for another's. Over [`MAX_ASKED`] bytes, they go in the conversation,
-/// returned beside the question.
-fn asked_each(verb: &str, texts: &[&str], then: &str) -> (String, Option<String>) {
-    let shown: Vec<String> = (texts.iter().enumerate())
-        .map(|(number, text)| format!("[to {}] {}", number + 1, code_span(&visible(text))))
-        .collect();
-    let shown = shown.join(" ");
-    if shown.len() <= MAX_ASKED {
-        return (format!("{verb} {shown} {then}"), None);
-    }
-    let whole: Vec<String> = (texts.iter().enumerate())
-        .map(|(number, text)| format!("[to {}] {}", number + 1, visible(text)))
-        .collect();
-    let size = texts
-        .iter()
-        .map(|text| text.len())
-        .sum::<usize>()
-        .div_ceil(1024);
-    let question = format!(
-        "{verb} {size} KB of text {then}? It's long: read it in full in the conversation above \
-         first"
-    );
-    (question, Some(whole.join("\n")))
-}
-
 /// `text` with nothing in it that could go unseen: line breaks as `⏎`,
 /// tabs as `⇥`, control characters as `^U` (Esc as `^[`), characters that
 /// change how text around them shows, such as the right-to-left
@@ -2283,26 +2249,8 @@ mod tests {
         assert_eq!(code_span("a ``b`` c"), "```a ``b`` c```");
         assert_eq!(code_span(" both "), "`  both  `");
         assert_eq!(code_span("   "), "`   `");
-        let (question, _) = asked("send", "x` to chat 1 `y", "to chat 2");
-        assert_eq!(question, "send ``x` to chat 1 `y`` to chat 2");
-    }
-
-    #[test]
-    fn several_texts_are_each_quoted_with_which_chat_outside_the_quotes() {
-        let (question, long) =
-            asked_each("send", &["look `here`", "a` [to 1] `b"], "to 2 new chats");
-        assert_eq!(
-            question,
-            "send [to 1] `` look `here` `` [to 2] ``a` [to 1] `b`` to 2 new chats"
-        );
-        assert_eq!(long, None);
-        let big = "x".repeat(MAX_ASKED);
-        let (question, long) = asked_each("send", &[&big, "y"], "to 2 new chats");
-        assert!(
-            question.starts_with("send 3 KB of text to 2 new chats?"),
-            "{question}"
-        );
-        assert_eq!(long.unwrap(), format!("[to 1] {big}\n[to 2] y"));
+        let (question, _) = asked("type", "x` into pane 1 `y", "into pane 2");
+        assert_eq!(question, "type ``x` into pane 1 `y`` into pane 2");
     }
 
     #[test]

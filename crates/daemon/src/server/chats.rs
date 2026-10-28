@@ -754,7 +754,7 @@ impl Daemon {
                 (Action::Answer { request, option }, Some(slot), _) => {
                     slot.agent.answer_permission(&request, option.as_deref());
                 }
-                (Action::Permit { call, allow, pair }, _, _) => self.permitted(call, allow, pair),
+                (Action::Permit { call, allow }, _, _) => self.permitted(call, allow),
                 (Action::Browser(on), _, _) => self.browser_turned(id, on),
                 (Action::Abandon, slot, _) => {
                     if let Some(slot) = slot {

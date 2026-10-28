@@ -12373,23 +12373,13 @@ fn chats_list_message_read_and_wait_for_each_other() {
          mcp wait_for_chat {{\"chat\":{b}}}\n\
          mcp read_chat {{\"chat\":{b},\"turns\":1}}"
     );
+    // The other chat is the user's, in another workspace, and its agent
+    // may do no more than this one's: it's messaged without asking.
     client.chat(a, ChatAction::Send(prompt)).unwrap();
-    // The other chat is the user's, in another workspace: they're asked
-    // first, in the sender's, and allowing once is for this message.
-    let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
-    let question = asking.question.unwrap();
-    assert_eq!(
-        question.title,
-        format!("send `hello there` to chat {b} (Claude Code, \"Claude Code\"), which you started")
-    );
-    let names: Vec<&str> = (question.choices.iter())
-        .map(|choice| choice.name.as_str())
-        .collect();
-    assert_eq!(names, ["Allow", "Always allow for that chat", "Reject"]);
-    answer(&mut client, a, Some("allow".to_owned()));
     let node = wait_for_chat_for(&mut client, a, Duration::from_secs(10), |node| {
         last_outcome(node).is_some()
     });
+    assert!(node.question.is_none(), "nothing is asked");
     let words = last_words(&node);
     assert!(
         words.contains(&format!("This chat is chat {a}.")),
@@ -12429,26 +12419,13 @@ fn chats_list_message_read_and_wait_for_each_other() {
     assert_eq!(sent.prompt, "hello there");
     assert_eq!(sent.from.as_ref().unwrap().agent, "Claude Code");
 
-    // Allowed always, for that chat alone, it's messaged and read without
-    // asking; the sender's own Tools setting is as it was.
+    // Itself, and chats that aren't there, it can't message or read.
     let again = format!(
-        "mcp send_to_chat {{\"chat\":{b},\"message\":\"again\"}}\n\
-         mcp read_chat {{\"chat\":{b},\"turns\":1}}\n\
-         mcp send_to_chat {{\"chat\":{a},\"message\":\"me\"}}\n\
+        "mcp send_to_chat {{\"chat\":{a},\"message\":\"me\"}}\n\
          mcp read_chat {{\"chat\":99}}"
     );
-    client.chat(a, ChatAction::Send(again.clone())).unwrap();
-    wait_for_chat(&mut client, a, |node| node.question.is_some());
-    answer(&mut client, a, Some("pair".to_owned()));
-    let node = wait_for_chat_for(&mut client, a, Duration::from_secs(10), |node| {
-        node.turns.last().is_some_and(|turn| turn.prompt == again) && last_outcome(node).is_some()
-    });
+    let node = ask_for(&mut client, a, &again, Duration::from_secs(10));
     let words = last_words(&node);
-    assert!(words.contains("send_to_chat: Sent"), "{words}");
-    assert!(
-        words.contains(&format!("read_chat: Chat {b} (Claude Code")),
-        "{words}"
-    );
     assert!(
         words.contains(&format!("send_to_chat: failed: chat {a} is this chat")),
         "{words}"
@@ -12456,18 +12433,6 @@ fn chats_list_message_read_and_wait_for_each_other() {
     assert!(
         words.contains("read_chat: failed: there's no chat 99"),
         "{words}"
-    );
-    let tools = (node.settings.iter()).find(|setting| setting.id == "clackatoo.tools");
-    assert_eq!(tools.map(|setting| setting.value.as_str()), Some("allow"));
-    let node = ask_for(
-        &mut client,
-        a,
-        &format!("mcp send_to_chat {{\"chat\":{b},\"message\":\"third\"}}"),
-        Duration::from_secs(10),
-    );
-    assert!(
-        last_words(&node).contains("Sent"),
-        "no question the third time"
     );
 }
 
@@ -12486,8 +12451,6 @@ fn a_message_to_a_busy_chat_waits_for_its_turn_to_end() {
          mcp wait_for_chat {{\"chat\":{b},\"timeout\":20}}"
     );
     client.chat(a, ChatAction::Send(prompt)).unwrap();
-    wait_for_chat(&mut client, a, |node| node.question.is_some());
-    answer(&mut client, a, Some("allow".to_owned()));
     let words = last_words(&wait_for_chat(&mut client, a, |node| {
         last_words(node).contains("send_to_chat")
     }));
@@ -12517,24 +12480,13 @@ fn a_message_to_a_busy_chat_waits_for_its_turn_to_end() {
 }
 
 #[test]
-fn starting_a_chat_asks_then_opens_it_beside_with_the_message() {
+fn starting_a_chat_opens_it_beside_with_the_message_without_asking() {
     let daemon = TestDaemon::with_tools();
     let mut client = daemon.client();
+    // Even with tools that ask, starting a chat doesn't.
     let a = start_tooled_chat(&mut client, AgentTools::Ask);
     let prompt = "mcp start_chat {\"prompt\":\"hi kid\",\"show\":true}";
-    client.chat(a, ChatAction::Send(prompt.to_owned())).unwrap();
-    let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
-    let title = asking.question.unwrap().title;
-    assert!(
-        title.starts_with(
-            "send `hi kid` to a new Claude Code chat it starts, with the general profile, in `"
-        ),
-        "{title}"
-    );
-    assert!(title.ends_with('`'), "the folder is quoted: {title}");
-    assert_eq!(tab_contents(&mut client).len(), 1, "nothing starts first");
-    answer(&mut client, a, Some("allow".to_owned()));
-    let node = wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
+    let node = ask_for(&mut client, a, prompt, Duration::from_secs(10));
     let words = last_words(&node);
     let contents = tab_contents(&mut client);
     assert_eq!(contents.len(), 2, "beside the chat: {words}");
@@ -12548,8 +12500,7 @@ fn starting_a_chat_asks_then_opens_it_beside_with_the_message() {
     let started = wait_for_chat(&mut client, kid, |node| last_outcome(node).is_some());
     assert_eq!(turn_from(&started, a).unwrap().prompt, "hi kid");
     assert_eq!(last_words(&started), "echo: hi kid\n");
-    // It's an agent's: messages to it don't ask, and it lists as started
-    // by the chat that started it.
+    // It lists as started by the chat that started it.
     let talk = format!(
         "mcp send_to_chat {{\"chat\":{kid},\"message\":\"more\"}}\n\
          mcp wait_for_chat {{\"chat\":{kid}}}\nmcp list_chats"
@@ -12618,11 +12569,6 @@ fn chats_answering_each_other_stop_after_six_messages() {
     let b = start_tooled_chat(&mut client, AgentTools::Allow);
     let bounce = format!("mcp send_to_chat {{\"chat\":{b},\"message\":\"bounce\"}}");
     client.chat(a, ChatAction::Send(bounce)).unwrap();
-    // Each is asked once about messaging the other, the user's.
-    wait_for_chat(&mut client, a, |node| node.question.is_some());
-    answer(&mut client, a, Some("pair".to_owned()));
-    wait_for_chat(&mut client, b, |node| node.question.is_some());
-    answer(&mut client, b, Some("pair".to_owned()));
     let node = wait_for_chat_for(&mut client, a, Duration::from_secs(20), |node| {
         node.turns.len() == 4 && last_outcome(node).is_some()
     });
@@ -13709,7 +13655,7 @@ fn set_chat(client: &mut Client, chat: TerminalId, setting: &str, value: &str) {
 }
 
 #[test]
-fn a_chat_started_gets_its_parents_mode_and_only_its_family_goes_unasked() {
+fn a_chat_started_gets_its_parents_mode_and_no_chat_messages_a_looser_one() {
     let daemon = TestDaemon::with_tools();
     let mut client = daemon.client();
     let a = start_tooled_chat(&mut client, AgentTools::Allow);
@@ -13731,69 +13677,27 @@ fn a_chat_started_gets_its_parents_mode_and_only_its_family_goes_unasked() {
     assert_eq!(turn_from(&kid, second).unwrap().prompt, "hi sibling");
     assert_eq!(mode_of(&kid), Some("default"), "its parent's mode");
 
-    // A chat in the family whose agent may do more is asked about.
+    // A chat whose agent may do more is refused, family or not.
     set_chat(&mut client, a, "clackatoo.tools", "ask");
+    let before = chat_now(&mut client, first).turns.len();
     let looser = format!("mcp send_to_chat {{\"chat\":{first},\"message\":\"do it\"}}");
-    client.chat(a, ChatAction::Send(looser)).unwrap();
-    let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
-    let title = asking.question.unwrap().title;
+    let words = last_words(&ask_for(&mut client, a, &looser, Duration::from_secs(10)));
     assert!(
-        title.ends_with(&format!(
-            "started by chat {a}, whose agent may do more than this one"
+        words.contains(&format!(
+            "send_to_chat: failed: chat {first}'s agent may do more than this one"
         )),
-        "{title}"
+        "{words}"
     );
-    answer(&mut client, a, Some("reject".to_owned()));
-    wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
+    assert_eq!(
+        chat_now(&mut client, first).turns.len(),
+        before,
+        "nothing sent"
+    );
 
-    // Starting a chat outside the project asks, even when tools are
-    // allowed.
-    set_chat(&mut client, a, "clackatoo.tools", "allow");
-    client
-        .chat(
-            a,
-            ChatAction::Send("mcp start_chat {\"prompt\":\"x\",\"cwd\":\"/\"}".to_owned()),
-        )
-        .unwrap();
-    let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
-    let title = asking.question.as_ref().unwrap().title.clone();
-    assert!(
-        title.contains("in `/`, outside this chat's project ("),
-        "{title}"
-    );
-    assert_project_quoted(&asking, "outside this chat's project (");
-    answer(&mut client, a, Some("reject".to_owned()));
-    wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
-
-    // So does starting several, one of them outside.
-    let chats = serde_json::json!({ "chats": [{ "prompt": "x" }, { "prompt": "y", "cwd": "/" }] });
-    (client.chat(a, ChatAction::Send(format!("mcp start_chats {chats}")))).unwrap();
-    let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
-    assert_project_quoted(&asking, "some outside this chat's project (");
-    answer(&mut client, a, Some("reject".to_owned()));
-    wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
-}
-
-/// Checks the question `node` asks names the chat's project after `words`
-/// as code, quoted as the folders an agent names are, between `words` and
-/// a closing bracket.
-fn assert_project_quoted(node: &ChatNode, words: &str) {
-    use clackatoo_protocol::Said;
-    let question = node.question.as_ref().unwrap();
-    let said = question.said();
-    let at = (said.iter())
-        .position(|piece| matches!(piece, Said::Words(text) if text.ends_with(words)))
-        .unwrap_or_else(|| panic!("{:?}", question.title));
-    assert!(
-        matches!(&said[at + 1], Said::Code(root) if !root.is_empty() && root != "/"),
-        "the project, quoted: {:?}",
-        question.title
-    );
-    assert!(
-        matches!(said.get(at + 2), Some(Said::Words(text)) if text.starts_with(')')),
-        "{:?}",
-        question.title
-    );
+    // A chat outside the project starts without asking.
+    let outside = "mcp start_chat {\"prompt\":\"x\",\"cwd\":\"/\"}";
+    let words = last_words(&ask_for(&mut client, a, outside, Duration::from_secs(10)));
+    assert!(words.contains("start_chat: Started chat"), "{words}");
 }
 
 // --- Moving a chat between agents ------------------------------------------

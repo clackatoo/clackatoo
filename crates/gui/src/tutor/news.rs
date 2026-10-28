@@ -1001,6 +1001,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "A subagent's pane says whose it is (Ctrl+B u goes there); :q sends it back to its card, :bd closes it",
     },
+    News {
+        id: "chats-unasked",
+        date: "2026-10-28",
+        lesson: "agents",
+        what: "Agents start and message other chats without asking you first",
+    },
 ];
 
 impl News {

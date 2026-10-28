@@ -177,20 +177,6 @@ const TOOL_CHOICES: [(&str, &str, ChoiceKind); 3] = [
     ("reject", "Reject", ChoiceKind::RejectOnce),
 ];
 
-/// The answers to a question about the agent messaging or starting
-/// another chat. "Always" is for this chat and that one alone: it never
-/// changes the chat's Tools setting, so no chat gains, through another,
-/// what its own setting doesn't give it.
-const TALK_CHOICES: [(&str, &str, ChoiceKind); 3] = [
-    ("allow", "Allow", ChoiceKind::AllowOnce),
-    (
-        "pair",
-        "Always allow for that chat",
-        ChoiceKind::AllowAlways,
-    ),
-    ("reject", "Reject", ChoiceKind::RejectOnce),
-];
-
 /// The answers to the question asked before an agent first opens a page in
 /// the browser. Allowing is for the chat, from then on: it's the first
 /// page that's asked about, not each.
@@ -205,8 +191,6 @@ pub(crate) enum Choices {
     /// Allow, Always allow, which lets the agent run commands in its own
     /// terminals, and Reject.
     Tool,
-    /// Allow, Always allow for the chat it's about, and Reject.
-    Talk,
     /// Allow for this chat, which lets its agent open pages in the
     /// browser from then on, and Reject.
     Browser,
@@ -273,9 +257,8 @@ pub(crate) enum Action {
         option: Option<String>,
     },
     /// Let a call to one of clackatoo's tools go ahead, numbered as the
-    /// server numbered it, or refuse it; with `pair`, a call about another
-    /// chat goes ahead without asking from now on, for that chat.
-    Permit { call: u64, allow: bool, pair: bool },
+    /// server numbered it, or refuse it.
+    Permit { call: u64, allow: bool },
     /// Change one of the agent's settings for the chat.
     Set { setting: String, value: String },
     /// Install the chat's agent, as the user agreed to.
@@ -2110,7 +2093,6 @@ impl HostedChat {
         }
         let choices: &[(&str, &str, ChoiceKind)] = match offered {
             Choices::Tool => &TOOL_CHOICES,
-            Choices::Talk => &TALK_CHOICES,
             Choices::Browser => &BROWSER_CHOICES,
         };
         let choices = (choices.iter())
@@ -2145,8 +2127,7 @@ impl HostedChat {
     /// What to do about the answer `option` to `asker`'s question.
     /// "Always allow" for clackatoo's tools lets the agent run commands in
     /// its own terminals without asking from then on, until the user
-    /// changes the chat's Tools setting back. "Always allow for that
-    /// chat" is the server's to remember, and changes no setting.
+    /// changes the chat's Tools setting back.
     fn answer(&mut self, asker: Asker, option: Option<String>) -> Option<Action> {
         let install = option.as_deref() == Some(INSTALL);
         match asker {
@@ -2162,8 +2143,7 @@ impl HostedChat {
                 }
                 Some(Action::Permit {
                     call,
-                    allow: matches!(option, Some("allow" | "always" | "pair" | "browse")),
-                    pair: option == Some("pair"),
+                    allow: matches!(option, Some("allow" | "always" | "browse")),
                 })
             }
             Asker::Install if install => {
@@ -4456,7 +4436,6 @@ mod tests {
             [Action::Permit {
                 call: 8,
                 allow: true,
-                pair: false,
             }]
         );
         assert_eq!(
@@ -4553,7 +4532,6 @@ mod tests {
             [Action::Permit {
                 call: 2,
                 allow: true,
-                pair: false,
             }]
         );
         assert_eq!(chat.act(once), []);
@@ -4615,7 +4593,6 @@ mod tests {
             [Action::Permit {
                 call: 4,
                 allow: true,
-                pair: false
             }]
         );
         assert!(chat.browsing());
@@ -4669,7 +4646,6 @@ mod tests {
                 Action::Permit {
                     call: 3,
                     allow: false,
-                    pair: false,
                 },
                 Action::Cancel
             ]
@@ -5424,28 +5400,6 @@ mod tests {
         send(&mut chat, "mine");
         assert_eq!(chat.relations().hops, 0);
         assert_eq!(chat.node.turns.last().unwrap().from, None);
-    }
-
-    #[test]
-    fn always_allowing_a_message_is_for_that_chat_and_never_the_tools_setting() {
-        let mut chat = chat();
-        connect(&mut chat, "s");
-        send(&mut chat, "work");
-        assert!(chat.ask_for_tool(4, "send `hi` to chat 2", None, Choices::Talk));
-        let question = chat.node.question.clone().unwrap();
-        let names: Vec<&str> = (question.choices.iter())
-            .map(|choice| choice.name.as_str())
-            .collect();
-        assert_eq!(names, ["Allow", "Always allow for that chat", "Reject"]);
-        assert_eq!(
-            answer(&mut chat, Some("pair".into())),
-            [Action::Permit {
-                call: 4,
-                allow: true,
-                pair: true,
-            }]
-        );
-        assert_eq!(chat.tools(), AgentTools::Ask, "the setting is as it was");
     }
 
     #[test]

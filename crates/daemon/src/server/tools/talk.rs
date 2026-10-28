@@ -10,21 +10,19 @@
 //! the next as each turn ends, and answers the calls waiting for chats to
 //! finish.
 //!
-//! No agent gains, through another chat, what its own chat isn't allowed:
+//! The user isn't asked before an agent messages or starts a chat, as
+//! they aren't in other harnesses, but no agent gains, through another
+//! chat, what its own chat isn't allowed:
 //!
-//! - a message goes without asking the user only to a chat of the
-//!   sender's family (the chat that started it, the chats it started, and
-//!   the chats its own started), and only if that chat's Tools setting is
-//!   no looser than the sender's, and its limits no fewer; any other
-//!   message asks, until the user allows that pair of chats always;
-//! - `start_chat` asks, unless the chat's tools are allowed, and always
-//!   for a chat working outside the sender's project; the chat started
-//!   gets the sender's Tools setting and mode, and its limits, if its
-//!   profile's are fewer (see `subagents.rs`);
-//! - a chat reads, and waits for, only chats in its workspace or family,
-//!   or that the user let it message always, and of others, the answers
-//!   to its own messages. It lists other workspaces' chats by number and
-//!   title alone.
+//! - a message to a chat whose Tools setting is looser than the
+//!   sender's, or whose limits are fewer, is refused;
+//! - the chat `start_chat` starts gets the sender's Tools setting and
+//!   mode, and its limits, if its profile's are fewer (see
+//!   `subagents.rs`);
+//! - a chat reads, and waits for, only chats in its workspace or family
+//!   (the chat that started it, the chats it started, and the chats its
+//!   own started), and of others, the answers to its own messages. It
+//!   lists other workspaces' chats by number and title alone.
 //!
 //! Limits keep agents from running away with each other:
 //!
@@ -41,16 +39,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{
-    AgentTools, ChatState, Item, Outcome, TerminalId, ToolStatus, Turn, code_span,
-};
+use clackatoo_protocol::{AgentTools, ChatState, Item, Outcome, TerminalId, ToolStatus, Turn};
 use mio::Token;
 use serde_json::Value;
 
-use super::{Wait, Waiting, asked, asked_each, homely, visible};
+use super::{Wait, Waiting};
 use crate::chat::{Cause, HostedChat, MAX_INBOX, Message};
 use crate::mcp::{NewChat, Tool};
 use crate::server::Daemon;
@@ -87,9 +82,6 @@ const MAX_PROMPT: usize = 2048;
 /// What the daemon keeps for agents talking to each other.
 #[derive(Debug, Default)]
 pub(super) struct Talk {
-    /// The pairs of chats the user let talk always: the sender, and the
-    /// chat it messages, reads and waits for.
-    allowed: BTreeSet<(TerminalId, TerminalId)>,
     /// What each chat's agent has spent of its turn's messages: the turn,
     /// by its index, and how many.
     spent: BTreeMap<TerminalId, (usize, u32)>,
@@ -102,7 +94,6 @@ pub(super) struct Talk {
 impl Talk {
     /// Forgets the chat `chat`, which has closed.
     pub(super) fn forget(&mut self, chat: TerminalId) {
-        (self.allowed).retain(|&(from, to)| from != chat && to != chat);
         self.spent.remove(&chat);
         self.inboxes.remove(&chat);
         self.caused.retain(|&(root, _), _| root != chat);
@@ -159,12 +150,10 @@ impl Daemon {
     }
 
     /// Whether the chat `chat`'s agent may read the chat `to`: one in its
-    /// workspace or family, or one the user let it talk to always.
+    /// workspace or family.
     pub(super) fn may_see(&self, chat: TerminalId, to: TerminalId) -> bool {
         let workspace = self.chat_workspace(chat);
-        (workspace.is_some() && workspace == self.chat_workspace(to))
-            || self.family(chat, to)
-            || self.tools.talk.allowed.contains(&(chat, to))
+        (workspace.is_some() && workspace == self.chat_workspace(to)) || self.family(chat, to)
     }
 
     /// The user's turn what the chat `chat`'s agent does now comes of.
@@ -175,8 +164,8 @@ impl Daemon {
     }
 
     /// Why the chat `chat`'s agent can't make `tool`, a call to talk to
-    /// other chats, if it can't: checked before the user is asked, and
-    /// again before it's made.
+    /// other chats, if it can't: checked as it's called, and again before
+    /// it's made.
     pub(super) fn talk_refused(&self, chat: TerminalId, tool: &Tool) -> Option<String> {
         let starts: &[NewChat] = match tool {
             Tool::SendToChat { .. } => &[],
@@ -191,7 +180,7 @@ impl Daemon {
             .filter(|(turn, _)| *turn == own.working_on().0)
             .map_or(0, |(_, spent)| *spent);
         if let Tool::SendToChat { chat: to, .. } = tool
-            && let Err(why) = self.other_chat(chat, *to)
+            && let Some(why) = self.unmessageable(own, chat, *to)
         {
             return Some(why);
         }
@@ -274,6 +263,22 @@ impl Daemon {
         self.unstartable(own.agent(), starts)
     }
 
+    /// Why the chat `chat`, which is `own`, can't message the chat `to`,
+    /// if it can't: it isn't another chat, or its agent may do more, which
+    /// this one's would gain through it.
+    fn unmessageable(&self, own: &HostedChat, chat: TerminalId, to: TerminalId) -> Option<String> {
+        let target = match self.other_chat(chat, to) {
+            Ok(target) => target,
+            Err(why) => return Some(why),
+        };
+        (reach(target.tools()) > reach(own.tools()) || target.limits() < own.limits()).then(|| {
+            format!(
+                "chat {to}'s agent may do more than this one, so this chat can't message it: \
+                 ask the user to"
+            )
+        })
+    }
+
     /// Why a message can't go to the chat `to`, if it can't: it would wake
     /// an idle chat an agent started, which counts towards those working
     /// at once, as a new one would, with as many working already.
@@ -314,132 +319,6 @@ impl Daemon {
             }
         }
         None
-    }
-
-    /// What the user is asked before the chat `chat`'s agent makes
-    /// `tool`, a call to talk to other chats, allowed `tools`, if they're
-    /// asked: as [`question_for`](Daemon::question_for) says.
-    pub(super) fn talk_question(
-        &mut self,
-        chat: TerminalId,
-        tool: &Tool,
-        tools: AgentTools,
-    ) -> Option<(String, Option<String>)> {
-        match tool {
-            Tool::SendToChat { chat: to, message } => {
-                if self.tools.talk.allowed.contains(&(chat, *to)) {
-                    return None;
-                }
-                let target = self.chat_ref(*to)?;
-                let own = self.chat_ref(chat)?.limits();
-                let looser = reach(target.tools()) > reach(tools) || target.limits() < own;
-                if self.family(chat, *to) && !looser {
-                    return None;
-                }
-                let whose = match target.relations().parent {
-                    None => "which you started".to_owned(),
-                    Some(parent) => format!("started by chat {parent}"),
-                };
-                let mut then = format!(
-                    "to chat {to} ({}, {}), {whose}",
-                    target.agent_title(),
-                    visible(&format!("{:?}", target.info().title))
-                );
-                if looser {
-                    then.push_str(", whose agent may do more than this one");
-                }
-                Some(asked("send", message, &then))
-            }
-            Tool::StartChat(new) => {
-                let (title, dir, outside) = self.start_place(chat, new)?;
-                let root = self.project_root(chat)?;
-                if tools == AgentTools::Allow && !outside {
-                    return None;
-                }
-                let profile = new.profile.as_deref().unwrap_or(crate::profiles::DEFAULT);
-                // The folder, which the agent may have named, is quoted too.
-                let mut then = format!(
-                    "to a new {title} chat it starts, with the {} profile, in {}",
-                    visible(profile),
-                    code_span(&visible(&homely(&dir, &self.config.home)))
-                );
-                if outside {
-                    let _ = write!(
-                        then,
-                        ", outside this chat's project ({})",
-                        code_span(&visible(&homely(&root, &self.config.home)))
-                    );
-                }
-                Some(asked("send", &new.prompt, &then))
-            }
-            Tool::StartChats(news) => {
-                // What each chat is, and where, goes outside what the agent
-                // wrote, which is quoted, so no message can pass for
-                // another chat: messages only say which chat they're for.
-                let mut outside = false;
-                let mut each = Vec::new();
-                let mut places = Vec::new();
-                for (number, new) in news.iter().enumerate() {
-                    let (title, dir, out) = self.start_place(chat, new)?;
-                    outside |= out;
-                    let profile = new.profile.as_deref().unwrap_or(crate::profiles::DEFAULT);
-                    places.push(format!(
-                        "{}. {title}, with the {} profile, in {}",
-                        number + 1,
-                        visible(profile),
-                        code_span(&visible(&homely(&dir, &self.config.home)))
-                    ));
-                    each.push(new.prompt.as_str());
-                }
-                if tools == AgentTools::Allow && !outside {
-                    return None;
-                }
-                let root = self.project_root(chat)?;
-                let mut then = format!(
-                    "to {} new chats it starts ({})",
-                    news.len(),
-                    places.join("; ")
-                );
-                if outside {
-                    let _ = write!(
-                        then,
-                        ", some outside this chat's project ({})",
-                        code_span(&visible(&homely(&root, &self.config.home)))
-                    );
-                }
-                Some(asked_each("send", &each, &then))
-            }
-            _ => None,
-        }
-    }
-
-    /// The user let the chat `chat`'s agent make `tool`, and with `pair`,
-    /// any such call about the same chat from now on.
-    pub(super) fn talk_permitted(&mut self, chat: TerminalId, tool: &Tool, pair: bool) {
-        if pair && let Tool::SendToChat { chat: to, .. } = tool {
-            self.tools.talk.allowed.insert((chat, *to));
-        }
-    }
-
-    /// Where `new`, a chat the chat `chat`'s agent asks to start, would
-    /// start: its agent's title, its directory, and whether that's outside
-    /// the chat's project.
-    fn start_place(&mut self, chat: TerminalId, new: &NewChat) -> Option<(String, PathBuf, bool)> {
-        let own = self.chat_ref(chat)?;
-        let profile = new.profile.as_deref().unwrap_or(crate::profiles::DEFAULT);
-        let by_profile =
-            (self.config.agents.profile(profile).ok()).and_then(|profile| profile.agent);
-        let name = (new.agent.clone().or(by_profile)).unwrap_or_else(|| own.agent().to_owned());
-        let title = self.agent_spec(&name).title;
-        let home = self.chat_dir(chat).ok()?;
-        let dir = new.cwd.as_ref().map_or_else(
-            || Path::new(&home).to_owned(),
-            |cwd| crate::server::buffers::resolve(cwd, Path::new(&home), &self.config.home),
-        );
-        let dir = dir.canonicalize().unwrap_or(dir);
-        let root = self.project_root(chat)?;
-        let outside = !dir.starts_with(&root);
-        Some((title, dir, outside))
     }
 
     /// Checks `to` is a chat other than `chat`.
