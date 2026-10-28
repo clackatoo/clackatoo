@@ -278,7 +278,8 @@ impl Daemon {
     /// started, for good, as the user's `:bd` does: the chats it started
     /// in turn close with it, or pass up, as they would then. Only a chat
     /// the caller started, and never one the user had in a pane and sent
-    /// back, which is theirs.
+    /// back, which is theirs, one they have in a pane now, or one with
+    /// changes or comments waiting for their review.
     pub(super) fn close_child(
         &mut self,
         chat: TerminalId,
@@ -299,6 +300,17 @@ impl Daemon {
             return Err(format!(
                 "the user opened chat {to} and sent it back to the background, so it's theirs: \
                  ask them to close it"
+            ));
+        }
+        if self.workspaces.get().pane_showing(to).is_some() {
+            return Err(format!(
+                "the user has chat {to} open in a pane: they close it"
+            ));
+        }
+        if self.awaits_review(to) {
+            return Err(format!(
+                "chat {to} has changes or review comments waiting for the user: they close it \
+                 once they've reviewed them"
             ));
         }
         let working = !super::talk::idle(target);

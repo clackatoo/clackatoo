@@ -40,6 +40,29 @@ impl Message {
     pub(crate) fn is_notice(&self) -> bool {
         self.hops == 0
     }
+
+    /// The notice, to the chat `chat`, that chats it started have
+    /// finished, while it waits its turn: it says nothing yet, as what it
+    /// will say is worked out as it begins, from the answers the chat
+    /// hasn't had by then (see `Daemon::fill_notice`).
+    pub(crate) fn finished_notice(chat: TerminalId) -> Self {
+        Self {
+            from: Sender {
+                chat,
+                agent: "Clackatoo".to_owned(),
+                title: "Subagents finished".to_owned(),
+            },
+            text: String::new(),
+            hops: 0,
+            cause: None,
+        }
+    }
+
+    /// Whether it's the notice that chats started have finished, still
+    /// waiting to say what.
+    pub(crate) fn is_finished_notice(&self) -> bool {
+        self.is_notice() && self.text.is_empty()
+    }
 }
 
 /// A chat's place among the others.

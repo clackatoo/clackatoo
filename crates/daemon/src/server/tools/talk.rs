@@ -45,13 +45,23 @@
 //! - chats agents start go at most [`MAX_DEPTH`] deep;
 //! - a chain of messages, each sent in the turn the one before started,
 //!   ends after [`MAX_HOPS`], so two chats can't answer each other for
-//!   ever.
+//!   ever;
+//! - at most [`MAX_NOTICE_TURNS`] turns are started by notices that chats
+//!   finished under one of the user's chats between two of the user's
+//!   messages there: past it, the notice still comes, but waits for the
+//!   user to write again, and the chat says so.
 //!
 //! A chat that started another is told when that one finishes a turn it
 //! hasn't had the answer to, and no wait of its is about to give it: a
 //! notice from clackatoo, not a message the other chat's agent wrote,
 //! which waits its turn as a message does, and starts one if the chat is
-//! idle (see [`Daemon::tell_parents`]). Notices count against no limit.
+//! idle (see [`Daemon::tell_parents`]). There's one at most waiting in a
+//! chat, which says, as it begins, every answer of its chats it hasn't
+//! had by then, each between lines of its own, or goes if there's none
+//! (see [`Daemon::fill_notice`]). A turn a notice starts begins a new
+//! chain of messages, as the user's does: a PM going round with its
+//! builder isn't two chats answering each other; [`MAX_NOTICE_TURNS`]
+//! bounds that instead.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -90,6 +100,11 @@ pub(super) const MAX_DEPTH: u8 = 2;
 /// started.
 pub(super) const MAX_HOPS: u8 = 6;
 
+/// The most turns notices that chats finished start under one of the
+/// user's chats between two of the user's messages there: a backstop for
+/// a parent and child that would otherwise go round for ever.
+pub(super) const MAX_NOTICE_TURNS: u32 = 100;
+
 /// The most `read_chat` and `wait_for_chat` give back, in bytes.
 const MAX_READ: usize = 16 * 1024;
 
@@ -102,6 +117,10 @@ pub(super) struct Talk {
     /// How many chats agents have started under each of the user's chats.
     /// Not handed over: an upgrade starts each count again.
     starts: BTreeMap<TerminalId, u32>,
+    /// How many turns notices that chats finished have started under each
+    /// of the user's chats, and since which of the user's turns there, by
+    /// its index. Not handed over.
+    notice_turns: BTreeMap<TerminalId, (Option<usize>, u32)>,
     /// The chats agents started that may have just finished a turn, whose
     /// parents may need telling (see [`Daemon::tell_parents`]).
     pub(super) finished: BTreeSet<TerminalId>,
@@ -117,6 +136,7 @@ impl Talk {
     /// Forgets the chat `chat`, which has closed.
     pub(super) fn forget(&mut self, chat: TerminalId) {
         self.starts.remove(&chat);
+        self.notice_turns.remove(&chat);
         self.finished.remove(&chat);
         self.inboxes.remove(&chat);
         (self.undelivered).retain(|&(from, to), _| from != chat && to != chat);
@@ -179,11 +199,22 @@ impl Daemon {
             };
             let turns = &chat.node().turns;
             let finished = turns.len() - usize::from(chat.is_answering());
-            for sender in turns.iter().filter_map(|turn| turn.from.as_ref()) {
-                chat.heard_by(sender.chat, finished);
-            }
-            if let Some(parent) = chat.relations().parent {
-                chat.heard_by(parent, finished);
+            let parent = chat.relations().parent;
+            // Unless a notice that chats finished waits in the parent: it
+            // says what it hasn't had as it begins.
+            let notice_waits =
+                parent
+                    .and_then(|parent| self.chat_ref(parent))
+                    .is_some_and(|parent| {
+                        (parent.relations().inbox.iter()).any(Message::is_finished_notice)
+                    });
+            let senders = turns
+                .iter()
+                .filter_map(|turn| Some(turn.from.as_ref()?.chat));
+            for by in senders.chain(parent) {
+                if !(notice_waits && Some(by) == parent) {
+                    chat.heard_by(by, finished);
+                }
             }
         }
         // The cards of the chats agents started, which the handover
@@ -680,7 +711,7 @@ impl Daemon {
         }
         let mut text = self.undelivered(chat, to).unwrap_or_default();
         let turns = &target.node().turns;
-        let answers = answers_to(turns, chat);
+        let answers = answers_to(turns, chat, to);
         if late {
             let _ = writeln!(
                 text,
@@ -759,8 +790,13 @@ impl Daemon {
                     self.collect_damage(id);
                 }
                 self.drop_unsendable(id);
+                let goes = self.fill_notice(id);
                 let Some(chat) = self.chat(id) else { continue };
-                let actions = chat.deliver_next();
+                let actions = if goes {
+                    chat.deliver_next()
+                } else {
+                    Vec::new()
+                };
                 if chat.has_user_queue() || !chat.relations().inbox.is_empty() {
                     self.tools.talk.inboxes.insert(id);
                 }
@@ -806,12 +842,11 @@ impl Daemon {
 
     /// Tells each chat that started one that has just finished, and
     /// hasn't had its answer, with no wait of its own about to give it:
-    /// what it answered the chat's messages, or went on to do by itself
-    /// after, as a notice from clackatoo, "[chat N finished]". The notice
-    /// waits its turn as a message does, and starts one if the chat is
-    /// idle, as Claude Code tells its agent when a helper in the
-    /// background finishes. A turn the user had with the chat that
-    /// finished isn't told. Cheap when nothing has finished.
+    /// a notice from clackatoo waits its turn as a message does, and
+    /// starts one if the chat is idle, as Claude Code tells its agent when
+    /// a helper in the background finishes. What it says is worked out as
+    /// it begins (see [`Self::fill_notice`]). A turn the user had with the
+    /// chat that finished isn't told. Cheap when nothing has finished.
     fn tell_parents(&mut self) {
         if self.tools.talk.finished.is_empty() {
             return;
@@ -834,59 +869,100 @@ impl Daemon {
                 later.push(child);
                 continue;
             }
-            let waited = (self.tools.waiting.iter()).any(|waiting| {
-                waiting.chat == parent
-                    && match &waiting.what {
-                        Wait::Turn { chat, .. } => *chat == child,
-                        Wait::Chats { chats, .. } => chats.contains(&child),
-                        _ => false,
-                    }
-            });
-            let turns = &kid.node().turns;
-            let heard = kid.turns_heard_by(parent);
-            let unheard = (answers_to(turns, parent).into_iter())
-                .any(|(_, end)| end >= heard && turns[end].end.is_some());
-            if waited || !unheard {
+            if self.waited_by(parent, child) || !unheard(kid, parent, child) {
                 continue;
             }
-            let sender = kid.sender();
-            let answer = self.answer_of(parent, child, false);
-            let text = format!(
-                "[chat {child} finished] Chat {child}, which this chat started, has finished. \
-                 This is clackatoo telling you, not a message its agent wrote.\n{answer}"
-            );
-            self.notify(parent, sender, text);
+            if let Some(of) = self.chat(parent) {
+                of.mark_finished();
+            }
+            self.tools.talk.inboxes.insert(parent);
         }
         self.tools.talk.finished.extend(later);
     }
 
-    /// Gives the chat `chat` a notice from clackatoo, `text`, about the
-    /// chat `about`: added to a notice already waiting its turn, so several
-    /// go as one, or else as a message of its own, which starts a turn if
-    /// the chat is idle.
-    fn notify(&mut self, chat: TerminalId, about: clackatoo_protocol::Sender, text: String) {
-        let Some(to) = self.chat(chat) else {
-            return;
-        };
-        if to.add_to_notice(&text) {
-            return;
-        }
-        let notice = Message {
-            from: about,
-            text,
-            hops: 0,
-            cause: None,
-        };
-        match to.deliver(notice) {
-            Ok(actions) => {
-                if !to.relations().inbox.is_empty() {
-                    self.tools.talk.inboxes.insert(chat);
+    /// Whether a wait of the chat `chat`'s for `child` is under way, which
+    /// gives it the answer as `child` finishes.
+    fn waited_by(&self, chat: TerminalId, child: TerminalId) -> bool {
+        (self.tools.waiting.iter()).any(|waiting| {
+            waiting.chat == chat
+                && match &waiting.what {
+                    Wait::Turn { chat, .. } => *chat == child,
+                    Wait::Chats { chats, .. } => chats.contains(&child),
+                    _ => false,
                 }
-                self.act(chat, actions);
-                self.collect_damage(chat);
-            }
-            Err(_) => log::warn!("chat {chat}: a notice is dropped, as its inbox is full"),
+        })
+    }
+
+    /// The notice that chats the chat `id` started have finished, if it's
+    /// next to begin: it says, now, every answer of theirs that `id`
+    /// hasn't had and no wait of its is about to give, each between lines
+    /// of its own that what it quotes can't end, and they count as had;
+    /// or, if there's none left, it goes. Past [`MAX_NOTICE_TURNS`] under
+    /// the user's chat since they last wrote there, it waits for them
+    /// instead, behind anything else waiting, and the chat says so.
+    /// Returns whether the next message may begin.
+    fn fill_notice(&mut self, id: TerminalId) -> bool {
+        if !self
+            .chat_ref(id)
+            .is_some_and(HostedChat::finished_notice_next)
+        {
+            return true;
         }
+        let root = (self.chat_ref(id))
+            .and_then(|chat| chat.relations().root)
+            .unwrap_or(id);
+        let since = self.chat_ref(root).and_then(users_last_turn);
+        let spent = match self.tools.talk.notice_turns.get(&root) {
+            Some(&(at, spent)) if at == since => spent,
+            _ => 0,
+        };
+        if spent >= MAX_NOTICE_TURNS {
+            let Some(chat) = self.chat(id) else {
+                return false;
+            };
+            if chat.hold_finished_notice() {
+                self.drop_unsendable(id);
+                return true;
+            }
+            chat.notices_held(MAX_NOTICE_TURNS);
+            self.collect_damage(id);
+            return false;
+        }
+        let children: Vec<TerminalId> = (self.terminals.iter())
+            .filter_map(|(&child, slot)| {
+                let kid = slot.terminal.chat_ref()?;
+                let told = kid.relations().parent == Some(id)
+                    && idle(kid)
+                    && unheard(kid, id, child)
+                    && !self.waited_by(id, child);
+                told.then_some(child)
+            })
+            .collect();
+        if children.is_empty() {
+            if let Some(chat) = self.chat(id) {
+                chat.fill_finished_notice(None);
+            }
+            self.drop_unsendable(id);
+            return true;
+        }
+        let mut text = String::new();
+        for child in children {
+            let answer = self.answer_of(id, child, false);
+            let salt = child.0 ^ u32::try_from(text.len()).unwrap_or(u32::MAX);
+            let tag = crate::chat::fence_tag(salt);
+            let _ = write!(
+                text,
+                "[chat {child} finished] Chat {child}, which this chat started, has finished. \
+                 What it answered is between the lines.\n\
+                 --- answer {tag:08x} from chat {child} ---\n{answer}\n\
+                 --- end of answer {tag:08x} ---\n\n"
+            );
+        }
+        (self.tools.talk.notice_turns).insert(root, (since, spent + 1));
+        if let Some(chat) = self.chat(id) {
+            chat.fill_finished_notice(Some(text.trim_end().to_owned()));
+        }
+        true
     }
 
     /// Drops the messages waiting for the chat `id` that would begin now
@@ -935,20 +1011,29 @@ impl Daemon {
 
 /// The answers in `turns` to the chat `chat`'s messages, oldest first:
 /// each as the index of the turn its message started, and of the last
-/// turn of its answer. What the agent went on to do by itself straight
-/// after answering, as when something it ran in the background ended,
-/// answers the message too.
-fn answers_to(turns: &[Turn], chat: TerminalId) -> Vec<(usize, usize)> {
+/// turn of its answer. What the agent of `own`, the chat the turns are
+/// of, went on to do straight after answering, by itself, as when
+/// something it ran in the background ended, or told by clackatoo, as
+/// that chats it started finished, answers the message too: so what
+/// those found reaches the chat that asked.
+fn answers_to(turns: &[Turn], chat: TerminalId, own: TerminalId) -> Vec<(usize, usize)> {
     (turns.iter().enumerate())
         .filter(|(_, turn)| turn.from.as_ref().is_some_and(|from| from.chat == chat))
         .map(|(asked, _)| {
             let end = (turns.iter().enumerate().skip(asked + 1))
-                .take_while(|(_, later)| later.woke.is_some())
+                .take_while(|(_, later)| went_on(later, own))
                 .last()
                 .map_or(asked, |(end, _)| end);
             (asked, end)
         })
         .collect()
+}
+
+/// Whether `turn`, of the chat `own`, is one its agent went on with by
+/// itself, or told by clackatoo itself, whose notices name the chat
+/// they're for as their sender: no message from anyone else started it.
+fn went_on(turn: &Turn, own: TerminalId) -> bool {
+    turn.woke.is_some() || turn.from.as_ref().is_some_and(|from| from.chat == own)
 }
 
 /// The first line of `prompt`, a message, to quote: at most 80 characters
@@ -968,7 +1053,7 @@ fn quote(prompt: &str) -> String {
 fn answer_text(turns: &[Turn], to: TerminalId, index: usize, whose: &str, max: usize) -> String {
     let turn = &turns[index];
     let number = clackatoo_protocol::turn_number(turns, index).unwrap_or(index + 1);
-    let mut text = if turn.woke.is_some() {
+    let mut text = if went_on(turn, to) {
         format!("Chat {to} went on by itself after {whose}, in turn {number}:\n")
     } else {
         format!("Chat {to}'s answer to {whose}, turn {number}:\n")
@@ -999,6 +1084,20 @@ pub(super) fn going_note(chat: &HostedChat) -> Option<String> {
          wait_for_chat again later to hear what it does.]",
         titles.join(", ")
     ))
+}
+
+/// Whether `kid`, the chat `child`, has finished an answer to the chat
+/// `parent`'s messages that `parent` hasn't had.
+fn unheard(kid: &HostedChat, parent: TerminalId, child: TerminalId) -> bool {
+    let turns = &kid.node().turns;
+    let heard = kid.turns_heard_by(parent);
+    (answers_to(turns, parent, child).into_iter())
+        .any(|(_, end)| end >= heard && turns[end].end.is_some())
+}
+
+/// The index of the last turn the user started in `chat`, if any.
+fn users_last_turn(chat: &HostedChat) -> Option<usize> {
+    (chat.node().turns.iter()).rposition(|turn| turn.from.is_none() && turn.woke.is_none())
 }
 
 /// Whether `chat` has nothing to finish: no answer under way, and no
@@ -1310,6 +1409,25 @@ mod tests {
         let kept = daemon.close_child(a, b).unwrap_err();
         assert!(kept.contains("so it's theirs"), "{kept}");
         assert!(daemon.chat_ref(b).unwrap().kept_by_user());
+        // So is one the user has open in a pane now (review of CLACKA-186).
+        let shown = answered_chat(&mut daemon, 7, (a, a, 1));
+        let name = daemon.workspaces.name_for_new(None).unwrap();
+        (daemon.workspaces).new_workspace(name, clackatoo_protocol::Content::Terminal(shown));
+        let open = daemon.close_child(a, shown).unwrap_err();
+        assert!(
+            open.contains("the user has chat 7 open in a pane"),
+            "{open}"
+        );
+        // And one whose changes wait for the user's review.
+        let changed = answered_chat(&mut daemon, 8, (a, a, 1));
+        let maker = clackatoo_text::Maker {
+            chat: changed.0,
+            turn: 0,
+        };
+        let path = dir.path().join("a.txt");
+        daemon.agent_changed_file(&path, (Some("a\n"), Some("b\n")), maker, None);
+        let review = daemon.close_child(a, changed).unwrap_err();
+        assert!(review.contains("waiting for the user"), "{review}");
         // Its own it closes, and those it started close with it.
         let own = answered_chat(&mut daemon, 5, (a, a, 1));
         let under = answered_chat(&mut daemon, 6, (own, a, 2));
@@ -1837,11 +1955,20 @@ mod tests {
         );
     }
 
+    /// Every chat in `daemon` moves on as far as it can: messages and
+    /// notices waiting begin, waits are answered, parents are told.
+    fn relay(daemon: &mut Daemon) {
+        for _ in 0..3 {
+            daemon.relay_chats();
+        }
+    }
+
     /// A chat that started another is told when it finishes, and no wait
     /// of its gives the answer: a notice from clackatoo, never a message
     /// the other chat's agent wrote, waiting its turn while the chat is
-    /// busy. Several go as one. A wait about to answer, or an answer had
-    /// already, needs none.
+    /// busy. There's one at most, which says as it begins every answer
+    /// the chat hasn't had then, each between lines of its own. A wait
+    /// about to answer, or an answer had already, needs none.
     #[test]
     fn a_parent_is_told_when_a_chat_it_started_finishes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1850,80 +1977,164 @@ mod tests {
         let b = building(&mut daemon, 2, a);
         let c = building(&mut daemon, 3, a);
         finishes(&mut daemon, b, "built it");
-        daemon.relay_chats();
-        let inbox = &daemon.chat_ref(a).unwrap().relations().inbox;
-        assert_eq!(inbox.len(), 1, "{inbox:#?}");
-        let notice = &inbox[0];
-        assert!(notice.is_notice() && notice.from.chat == b, "{notice:#?}");
-        assert!(
-            notice.text.starts_with(
-                "[chat 2 finished] Chat 2, which this chat started, has finished. This is \
-                 clackatoo telling you, not a message its agent wrote.\n\
-                 Chat 2's answer to your message, turn 1:\nbuilt it\n[finished]"
-            ),
-            "{}",
-            notice.text
-        );
-        // It counts as had: a wait now gives it as the last answer, and
-        // the next finish tells only what's new.
-        assert_eq!(daemon.chat_ref(b).unwrap().turns_heard_by(a), 1);
-        // A second finishing joins the notice waiting.
+        relay(&mut daemon);
         finishes(&mut daemon, c, "built that");
-        daemon.relay_chats();
+        relay(&mut daemon);
         let inbox = &daemon.chat_ref(a).unwrap().relations().inbox;
-        assert_eq!(inbox.len(), 1, "one notice");
-        assert!(
-            inbox[0].text.contains("[chat 3 finished]"),
-            "{}",
-            inbox[0].text
-        );
-        // It goes whatever the chats may do, as the next turn.
+        assert_eq!(inbox.len(), 1, "one notice: {inbox:#?}");
+        assert!(inbox[0].is_finished_notice(), "{inbox:#?}");
+        // Nothing counts as had until it begins.
+        assert_eq!(daemon.chat_ref(b).unwrap().turns_heard_by(a), 0);
+        // It goes whatever the chats may do, as the next turn, as
+        // clackatoo's.
         answers(&mut daemon, a, "done");
-        daemon.relay_chats();
+        relay(&mut daemon);
         let node = daemon.chat_ref(a).unwrap().node();
         assert_eq!(node.turns.len(), 2, "the notice is a turn");
-        assert!(node.turns[1].prompt.starts_with("[chat 2 finished]"));
+        let told = &node.turns[1];
+        let from = told.from.as_ref().unwrap();
+        assert_eq!((from.chat, from.agent.as_str()), (a, "Clackatoo"));
+        assert!(
+            told.prompt.starts_with(
+                "[chat 2 finished] Chat 2, which this chat started, has finished. What it \
+                 answered is between the lines.\n--- answer "
+            ),
+            "{}",
+            told.prompt
+        );
+        for said in [
+            "built it",
+            "[chat 3 finished]",
+            "built that",
+            "--- end of answer ",
+        ] {
+            assert!(told.prompt.contains(said), "{said}: {}", told.prompt);
+        }
+        assert_eq!(daemon.chat_ref(b).unwrap().turns_heard_by(a), 1);
+        assert_eq!(daemon.chat_ref(c).unwrap().turns_heard_by(a), 1);
         // A chat waited for gets no notice: the wait gives the answer.
         answers(&mut daemon, a, "noted");
         let message = daemon.message_from(a, "again").unwrap();
         drop(daemon.chat(b).unwrap().deliver(message).unwrap());
         daemon.note_subagent(b);
-        assert!(
-            daemon
-                .wait_for_chat(call(), a, b, Duration::from_mins(1))
-                .is_none()
-        );
+        let waits = daemon.wait_for_chat(call(), a, b, Duration::from_mins(1));
+        assert!(waits.is_none());
         finishes(&mut daemon, b, "built it again");
-        daemon.relay_chats();
+        relay(&mut daemon);
         assert!(daemon.tools.waiting.is_empty(), "the wait was answered");
         assert!(daemon.chat_ref(a).unwrap().relations().inbox.is_empty());
-        assert_eq!(
-            daemon.chat_ref(a).unwrap().node().turns.len(),
-            2,
-            "no notice"
-        );
+        assert_eq!(daemon.chat_ref(a).unwrap().node().turns.len(), 2);
     }
 
-    /// A notice that starts a turn is no message between agents: the chain
-    /// of messages the chat was in goes on as it was, neither started
-    /// again nor one longer.
+    /// The notice waits while the chat is busy, and the chat's agent waits
+    /// for the chat that finished meanwhile, which gives it the answer:
+    /// the notice then has nothing to say, and goes, rather than start a
+    /// turn telling it again (review of CLACKA-186).
     #[test]
-    fn a_notice_leaves_the_chain_of_messages_a_chat_is_in_as_it_was() {
+    fn a_wait_after_a_notice_is_waiting_isnt_told_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = building(&mut daemon, 2, a);
+        finishes(&mut daemon, b, "built it");
+        relay(&mut daemon);
+        let answer = (daemon.wait_for_chat(call(), a, b, Duration::from_mins(1)))
+            .expect("answered at once")
+            .unwrap();
+        assert!(answer.contains("built it"), "{answer}");
+        answers(&mut daemon, a, "done");
+        relay(&mut daemon);
+        let parent = daemon.chat_ref(a).unwrap();
+        assert_eq!(parent.node().turns.len(), 1, "{:#?}", parent.node().turns);
+        assert!(parent.relations().inbox.is_empty());
+    }
+
+    /// A turn a notice starts begins a new chain of messages, as the
+    /// user's does: a PM woken as its builder finishes may message it
+    /// again, however long the chain it was in.
+    #[test]
+    fn a_turn_a_notice_starts_begins_a_new_chain_of_messages() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
         let pm = idle_chat(&mut daemon, 2);
-        let third = Message {
-            hops: 3,
+        let last = Message {
+            hops: MAX_HOPS,
             ..message(a.0, "lead the builders")
         };
-        drop(daemon.chat(pm).unwrap().deliver(third).unwrap());
+        drop(daemon.chat(pm).unwrap().deliver(last).unwrap());
         let builder = building(&mut daemon, 3, pm);
+        let refused = daemon.talk_refused(pm, &send(builder)).unwrap();
+        assert!(refused.contains("gone back and forth"), "{refused}");
         answers(&mut daemon, pm, "started a builder");
         finishes(&mut daemon, builder, "built it");
-        daemon.relay_chats();
+        relay(&mut daemon);
         let node = daemon.chat_ref(pm).unwrap().node();
         assert!(node.turns[1].prompt.starts_with("[chat 3 finished]"));
-        assert_eq!(daemon.chat_ref(pm).unwrap().relations().hops, 3);
+        assert_eq!(daemon.chat_ref(pm).unwrap().relations().hops, 0);
+        assert_eq!(daemon.talk_refused(pm, &send(builder)), None);
+    }
+
+    /// Notices start so many turns at most under one of the user's chats
+    /// between two of the user's messages there: then the next waits for
+    /// the user, and the chat says so. Nothing is lost: once the user has
+    /// written, it comes.
+    #[test]
+    fn notices_start_so_many_turns_at_most_between_two_of_the_users_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        (daemon.tools.talk.notice_turns).insert(a, (Some(0), MAX_NOTICE_TURNS));
+        answers(&mut daemon, a, "done");
+        let b = building(&mut daemon, 2, a);
+        finishes(&mut daemon, b, "built it");
+        relay(&mut daemon);
+        let parent = daemon.chat_ref(a).unwrap();
+        assert_eq!(
+            parent.node().turns.len(),
+            1,
+            "no turn: {:#?}",
+            parent.node().turns
+        );
+        assert!(parent.relations().inbox[0].is_finished_notice());
+        let said = parent.node().notice.clone().unwrap_or_default();
+        assert!(said.contains("Send a message to go on"), "{said}");
+        assert_eq!(daemon.chat_ref(b).unwrap().turns_heard_by(a), 0, "not lost");
+        // The user writes: once that's answered, the notice comes.
+        let chat = daemon.chat(a).unwrap();
+        chat.act(clackatoo_protocol::ChatAction::Send("go on".to_owned()));
+        answers(&mut daemon, a, "going on");
+        relay(&mut daemon);
+        let node = daemon.chat_ref(a).unwrap().node();
+        assert_eq!(node.turns.len(), 3, "{:#?}", node.turns);
+        assert!(node.turns[2].prompt.starts_with("[chat 2 finished]"));
+        assert_eq!(daemon.tools.talk.notice_turns[&a], (Some(1), 1));
+    }
+
+    /// A asks B, which starts C and ends its turn. C finishes, and the
+    /// notice wakes B, which reports what C found: that answers A too, as
+    /// what B went on to do by itself would, so A hears it.
+    #[test]
+    fn what_a_subagents_own_subagent_found_reaches_the_chat_above() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = building(&mut daemon, 2, a);
+        let c = building(&mut daemon, 3, b);
+        finishes(&mut daemon, b, "started chat 3");
+        finishes(&mut daemon, c, "found it");
+        relay(&mut daemon);
+        assert_eq!(daemon.chat_ref(b).unwrap().node().turns.len(), 2, "b told");
+        finishes(&mut daemon, b, "chat 3 found it");
+        relay(&mut daemon);
+        answers(&mut daemon, a, "done");
+        relay(&mut daemon);
+        let node = daemon.chat_ref(a).unwrap().node();
+        let told = &node.turns.last().unwrap().prompt;
+        assert!(
+            told.contains(
+                "Chat 2 went on by itself after your message, in turn 2:\nchat 3 found it"
+            ),
+            "{told}"
+        );
+        let answer = daemon.answer_of(a, b, false);
+        assert!(answer.contains("chat 3 found it"), "{answer}");
     }
 
     /// A turn the user had with a chat an agent started is the user's: the
@@ -1934,15 +2145,15 @@ mod tests {
         let (mut daemon, a) = daemon_with_chat(dir.path());
         let b = building(&mut daemon, 2, a);
         finishes(&mut daemon, b, "built it");
-        daemon.relay_chats();
+        relay(&mut daemon);
         answers(&mut daemon, a, "done");
-        daemon.relay_chats();
+        relay(&mut daemon);
         answers(&mut daemon, a, "noted");
         let turns = daemon.chat_ref(a).unwrap().node().turns.len();
         let chat = daemon.chat(b).unwrap();
         chat.act(clackatoo_protocol::ChatAction::Send("and you?".to_owned()));
         finishes(&mut daemon, b, "the user's answer");
-        daemon.relay_chats();
+        relay(&mut daemon);
         assert_eq!(daemon.chat_ref(a).unwrap().node().turns.len(), turns);
         assert!(daemon.chat_ref(a).unwrap().relations().inbox.is_empty());
     }
@@ -1962,10 +2173,9 @@ mod tests {
             resumed.tools.waiting.is_empty(),
             "the wait went with the upgrade"
         );
-        resumed.relay_chats();
+        relay(&mut resumed);
         let parent = resumed.chat_ref(a).unwrap();
-        let waiting = (parent.relations().inbox.iter())
-            .any(|message| message.from.chat == b && message.text.contains("[chat 2 finished]"));
+        let waiting = (parent.relations().inbox.iter()).any(Message::is_finished_notice);
         let taken = (parent.node().turns.last())
             .is_some_and(|turn| turn.prompt.starts_with("[chat 2 finished]"));
         assert!(waiting || taken, "{:#?}", parent.node().turns);

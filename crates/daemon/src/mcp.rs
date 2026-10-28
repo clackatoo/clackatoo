@@ -1448,7 +1448,8 @@ fn clackatoo_tools() -> Value {
                 first message, marked as from this chat. It runs in the background, shown as a card \
                 in this chat that the user can open, unless show is true. Returns at once with its \
                 number: then wait_for_chat waits for its answer. If you don't wait, this chat gets \
-                a notice from clackatoo, \"[chat N finished]\", when it finishes. It stays open, to \
+                a notice from clackatoo, \"[chat N finished]\", with its answer, when it finishes, \
+                as a turn of its own if this chat is idle. It stays open, to \
                 be messaged again, until you close it with close_chat or the user does. Give it \
                 everything it needs to know: it sees nothing of this conversation.",
             "inputSchema": { "type": "object", "properties": new_chat.clone(), "required": ["prompt"] },
@@ -1474,8 +1475,8 @@ fn clackatoo_tools() -> Value {
                 as the user's :bd does: the chats it started close with it, or pass to this chat if \
                 they're still working. Close the ones whose work is done and that you won't message \
                 again: a limited number may be open under one of the user's chats, and none is ever \
-                closed for you. A chat the user opened and sent back to the background is theirs, \
-                and can't be closed here.",
+                closed for you. A chat the user has open in a pane, or opened and sent back to the \
+                background, or whose changes wait for their review, is theirs to close.",
             "inputSchema": { "type": "object", "properties": {
                 "chat": chat,
             }, "required": ["chat"] },

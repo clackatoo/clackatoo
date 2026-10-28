@@ -116,8 +116,9 @@ const PROFILE_SETTING: &str = "clackatoo.profile";
 const LIMITS_SETTING: &str = "clackatoo.limits";
 
 /// The ID a chat an agent started keeps, with the values chosen, once
-/// the user has had it in a pane and sent it back to the background: it
-/// never closes to make room for others, as the user chose to keep it.
+/// the user has had it in a pane and sent it back to the background: the
+/// agent that started it can't close it (`close_chat`), as the user chose
+/// to keep it.
 const KEPT_SETTING: &str = "clackatoo.kept";
 
 /// The ID of the chat's own setting for whether its agent gets tools that
@@ -1212,7 +1213,13 @@ impl HostedChat {
     /// server must do to send it, if it went.
     pub(crate) fn deliver(&mut self, message: Message) -> Result<Vec<Action>, Message> {
         if self.answering() || !self.relations.inbox.is_empty() {
-            if self.relations.inbox.len() >= MAX_INBOX {
+            // Notices from clackatoo don't count: there's at most one that
+            // subagents finished (see `mark_finished`), and activities'
+            // are bounded by the activities.
+            let waiting = (self.relations.inbox.iter())
+                .filter(|waiting| !waiting.is_notice())
+                .count();
+            if waiting >= MAX_INBOX && !message.is_notice() {
                 return Err(message);
             }
             self.relations.inbox.push_back(message);
@@ -1236,11 +1243,11 @@ impl HostedChat {
     /// Starts a turn with `message`, from another agent.
     fn begin_message(&mut self, message: Message) -> Vec<Action> {
         let mut actions = Vec::new();
-        // A notice from clackatoo itself is no message between agents: the
-        // chain of messages the chat is in goes on as it was.
-        if !message.is_notice() {
-            self.relations.hops = message.hops;
-        }
+        // A notice from clackatoo starts a new chain of messages, as the
+        // user's own message does: a PM going round with its builder isn't
+        // two agents answering each other. What bounds those turns is
+        // the server's (`MAX_NOTICE_TURNS`).
+        self.relations.hops = message.hops;
         self.relations.cause = message.cause.or(self.relations.cause);
         let prompt = relations::prompt_for(&message);
         self.begin(

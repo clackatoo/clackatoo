@@ -17,17 +17,12 @@ use clackatoo_protocol::{
     ChatPatch, ChatState, Outcome, SettingKind, Subagent, SubagentStatus, TerminalId, ToolKind,
 };
 
-use super::{HostedChat, KEPT_SETTING, LIMITS_SETTING, PROFILE_SETTING, tool_kind};
+use super::{HostedChat, KEPT_SETTING, LIMITS_SETTING, Message, PROFILE_SETTING, tool_kind};
 use crate::profiles::{self, Limits};
 
 /// The most of a chat's first message a card shows as its task, in
 /// characters.
 const TASK: usize = 80;
-
-/// The longest notices from clackatoo waiting a chat's turn grow to as
-/// more are added to them, in bytes: a little more than four subagents'
-/// answers, as `wait_for_chat` gives them.
-const MOST_NOTICE: usize = 64 * 1024;
 
 /// The settings a chat started as a profile asks for as its first
 /// session opens, where its agent offers them.
@@ -134,17 +129,61 @@ impl HostedChat {
         self.relations.inbox.pop_front();
     }
 
-    /// Adds `text` to a notice from clackatoo already waiting its turn, so
-    /// several go as one, unless that would make it longer than
-    /// [`MOST_NOTICE`]. Returns whether it did.
-    pub(crate) fn add_to_notice(&mut self, text: &str) -> bool {
-        let waiting = (self.relations.inbox.iter_mut())
-            .find(|message| message.is_notice() && message.text.len() + text.len() < MOST_NOTICE);
-        let Some(notice) = waiting else {
+    /// Chats it started have finished: the notice that says so waits its
+    /// turn, one only however many finish, whatever else waits.
+    pub(crate) fn mark_finished(&mut self) {
+        if !(self.relations.inbox.iter()).any(Message::is_finished_notice) {
+            (self.relations.inbox).push_back(Message::finished_notice(self.id));
+        }
+    }
+
+    /// Whether the next message to begin, now, is the notice that chats it
+    /// started have finished, still to say what.
+    pub(crate) fn finished_notice_next(&self) -> bool {
+        self.next_message_from().is_some()
+            && self
+                .relations
+                .inbox
+                .front()
+                .is_some_and(Message::is_finished_notice)
+    }
+
+    /// The notice that chats it started have finished, next, says `text`,
+    /// or with none, goes: there's nothing left it hasn't heard.
+    pub(crate) fn fill_finished_notice(&mut self, text: Option<String>) {
+        match text {
+            Some(text) => {
+                if let Some(notice) = self.relations.inbox.front_mut() {
+                    notice.text = text;
+                }
+            }
+            None => drop(self.relations.inbox.pop_front()),
+        }
+    }
+
+    /// Notices that chats finished have started `turns` turns under the
+    /// user's chat since they last wrote there, as many as may be: the
+    /// next waits for them, and the chat says so.
+    pub(crate) fn notices_held(&mut self, turns: u32) {
+        let said = format!(
+            "What subagents found waits for you: their notices have started {turns} turns since \
+             you last wrote. Send a message to go on."
+        );
+        if self.node.notice.as_deref() != Some(said.as_str()) {
+            self.set_notice(Some(said));
+        }
+    }
+
+    /// The notice that chats it started have finished, next, waits on for
+    /// the user: anything else waiting goes first. Returns whether
+    /// anything else waits.
+    pub(crate) fn hold_finished_notice(&mut self) -> bool {
+        if self.relations.inbox.len() < 2 {
             return false;
-        };
-        notice.text.push_str("\n\n");
-        notice.text.push_str(text);
+        }
+        if let Some(notice) = self.relations.inbox.pop_front() {
+            self.relations.inbox.push_back(notice);
+        }
         true
     }
 

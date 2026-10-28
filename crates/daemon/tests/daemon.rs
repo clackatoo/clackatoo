@@ -13330,7 +13330,9 @@ fn a_chat_is_told_when_one_it_started_finishes_and_closes_it_when_done() {
         )),
         "{told:#?}"
     );
-    assert_eq!(told.from.as_ref().map(|from| from.chat), Some(kid));
+    // It's clackatoo's, not the other chat's.
+    let from = told.from.as_ref().unwrap();
+    assert_eq!((from.chat, from.agent.as_str()), (a, "Clackatoo"));
     assert!(last_words(&node).contains("echo: hi kid"), "{node:#?}");
     // Done with it, it closes it, and only its own.
     let close = format!("mcp close_chat {{\"chat\":{kid}}}\nmcp close_chat {{\"chat\":{a}}}");
