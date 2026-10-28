@@ -1019,6 +1019,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "A turn an agent takes by itself, as when a background shell ends, shows in the chat instead of being lost",
     },
+    News {
+        id: "agent-plan",
+        date: "2026-10-28",
+        lesson: "agents",
+        what: "The agent's to-do list shows above a chat's box, done of total and the step at work; click or :plan opens it",
+    },
 ];
 
 impl News {

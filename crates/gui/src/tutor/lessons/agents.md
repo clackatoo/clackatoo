@@ -199,6 +199,12 @@ When one ends, Claude Code may go on by itself to look at it: that shows as a tu
 
 If you have a chat open, ask it to run `sleep 30` in the background, watch the shelf count, then stop it with `:stoptask`.
 
+## The agent's plan
+
+On a long task, Claude Code keeps a to-do list, and Codex a plan. It shows on a shelf above the box, folded to one line: how many steps are done, and the one being worked on, as `Plan · 2/5 done · ◐ Write the tests`. Click it, or type `:plan`, to open it: a line a step, ☐ to do, ◐ being worked on, ☑ done and dimmed. Click or `:plan` again folds it. Each time the agent changes its list, the shelf follows. Once every step is done, the list stays until your next message. It survives an upgrade, and a chat going on with an old session shows the list as its agent last gave it. The phone shows it too.
+
+If you have a chat open, ask it to plan a small change as a to-do list, then type `:plan` to open the list.
+
 ## Continuing after upgrades
 
 If a daemon upgrade interrupts an answer, the agent reopens the same provider session and continues the same turn automatically. It is told to check interrupted tool results before repeating actions. Unsent messages and images are preserved. Idle, completed and manually stopped chats stay idle. This applies to planned upgrades, not crashes or ordinary restarts. The first upgrade from a build without continuation records still needs another message.

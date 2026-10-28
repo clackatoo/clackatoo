@@ -271,6 +271,14 @@ Claude Code's adapter says so only to a client that asks as JetBrains' AIR does,
 
 Commands' output, file changes and images are as before. To have none of this and no shelf, set `tasks = false` for Claude Code in [`agents.toml`](#which-agent).
 
+### The agent's plan
+
+On a long task, an agent keeps a to-do list: Claude Code's TodoWrite, Codex's plan. It shows on a shelf above the box, over what the agent runs in the background, folded to one line: how many steps are done, and the one being worked on, or else the next to do, as `Plan · 2/5 done · ◐ Write the tests`.
+
+Click that line, or type `:plan`, to open it: a line a step, `☐` to do, `◐` being worked on, `☑` done and dimmed. Click or `:plan` again to fold it. Each time the agent changes its list it sends the whole list again, and the shelf follows. A long list shows the steps around the first one not done, as many as fit in two fifths of the pane, at least three and at most eight, and its heading says which, as `steps 5–12`. The daemon keeps 64 steps at most, each cut to 500 characters on one line.
+
+Once every step is done, the list stays, as `Plan · all 5 done`, until your next message. An agent's plan is shown, not acted on: when a chat [moves to another agent](#moving-a-chat-to-another-agent), the new agent is told the old one's unfinished plan once, and then it's no longer shown. The phone shows the same list, every step, without the click.
+
 ### Turns the agent takes by itself
 
 An agent can go on with no message from you: Claude Code does when something it ran in the background ends, to look at what it printed, and may commit and write you a summary. That shows as a turn of its own, with no message, under a line such as `Claude Code went on by itself · Background command "npm test" completed`. The chat is at work while it lasts, and a message you send waits for it. It ends when Claude Code says so. Ctrl+C stops it: Claude Code is asked to stop, and the turn ends once it says it has, after anything still on its way, or after 5 seconds at most. Something Claude Code says with no turn of its own, such as `Task stopped by user` after you stop a task, shows as a notice above the box, not as a turn; only the latest shows. An agent that doesn't say when it starts or ends such a turn opens one with whatever it says while the chat is idle, except what's shaped as its notices, such as Codex's `Warning: …`, which shows as a notice too. Its turn is taken to have finished once it has been quiet for 60 seconds with no tool running; Ctrl+C ends it at once. A daemon upgrade in the middle of such a turn ends it there, rather than carrying it on. A chat that ends one while you aren't looking is marked unseen, a subagent's card says it's working again, and an agent waiting for the subagent with `wait_for_chat` gets what it said.
@@ -506,6 +514,8 @@ A chat that moved between agents keeps the sessions it had with each, and goes b
 When the daemon stops, a chat in a pane comes back with its workspace the next time it starts, on the same session: no agent starts until you look at the chat or send it a message, and then the agent tells the conversation so far, as going on with a [past session](#the-start-page) does, and nothing it tells acts again. The chat keeps its agent, model, tools and Browser settings; it starts in the agent's own starting mode, and as a chat of its own, not another's subagent. Chats in no pane don't come back, but the start page lists their sessions.
 
 `clackatoo capture` prints a chat as text: each message after a `>`, and what the agent said.
+
+The agent's [plan](#the-agent-s-plan) lasts through an upgrade. After the daemon stops, a chat going on with its session shows the plan again once the agent has told the conversation so far, if the agent tells its plans as it does: Claude Code does.
 
 An upgrade stops the browser; the next page starts it again. An upgrade, or the daemon stopping, ends what agents run in the background, as it ends the agents.
 
