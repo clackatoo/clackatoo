@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026.10.95 (2026-10-28)
+
+### Features
+
+- **daemon:** trace agents' ACP traffic with CLACKATOO_ACP_TRACE (CLACKA-200) (ecef770d)
+
+### Fixes
+
+- **daemon:** a turn Claude Code kept as stopped is told again as stopped (CLACKA-200) (d9197270)
+- **daemon:** work out agents' changes to big files off the loop (CLACKA-200) (fce139f0)
+- **daemon:** stop what a dead agent started at once (CLACKA-200) (3b5314fd)
+- **daemon:** queue a message sent while the agent answers (CLACKA-200) (228395cd)
+- **daemon:** keep agents' big-file changes in order per file, not per chat (CLACKA-200) (dceb4b0d)
+- **daemon:** take secrets out of assignments and URL queries in traces (CLACKA-200) (c312069c)
+- **daemon:** make agent trace files new, in a directory that's safe (CLACKA-200) (11d6228e)
+- **daemon:** bound the wait for big-file changes, and fail a gone worker's at once (CLACKA-200) (90a0b623)
+- **daemon:** tell secret names by their words, and catch headers and more key prefixes in traces (CLACKA-200) (533b5b0b)
+
 ## 2026.10.94 (2026-10-28)
 
 ### Fixes
