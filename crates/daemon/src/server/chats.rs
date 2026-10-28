@@ -35,7 +35,7 @@ use super::groups::End;
 use super::language::Pipe;
 use super::stopping::AGENT_STOP_WAIT;
 use super::{Daemon, FIRST_LOOK, Flood, Hosted, OUTPUT_BUDGET, Orphan, Reading, Slot, Source};
-use crate::agent::{Agent, Incoming, Listed, Opened, Opening, Refused};
+use crate::agent::{Agent, Answer, Failure, Incoming, Listed, Opened, Opening, Refused};
 use crate::agents::{self, AgentSpec, Launch, Start};
 use crate::chat::{Action, HostedChat, Limits, settings_of};
 use crate::pty::Process;
@@ -827,7 +827,7 @@ impl Daemon {
             }
         } else {
             self.agents.woken.remove(&id);
-            self.prompt_answered(id, Ok(StopReason::Cancelled), false);
+            self.prompt_answered(id, Ok(Answer::stopped(StopReason::Cancelled)), false);
         }
     }
 
@@ -1104,7 +1104,7 @@ impl Daemon {
     fn prompt_answered(
         &mut self,
         terminal: TerminalId,
-        result: Result<agent_client_protocol_schema::v1::StopReason, String>,
+        result: Result<Answer, Failure>,
         gone: bool,
     ) -> bool {
         let Some(chat) = (self.chat(terminal)).filter(|chat| !gone || chat.is_connected()) else {
@@ -1115,10 +1115,16 @@ impl Daemon {
         if chat.writing() {
             self.writing_ended(terminal);
         }
+        // Looked for on PATH, so only for a failure, which may be that no
+        // one's signed in.
+        let failed = result.is_err() || result.as_ref().is_ok_and(|answer| answer.failure.is_some());
+        let login = (self.chat(terminal).filter(|_| failed))
+            .map(|chat| chat.agent().to_owned())
+            .and_then(|name| self.login_of(&name));
         let Some(chat) = self.chat(terminal) else {
             return false;
         };
-        chat.answered(result);
+        chat.answered_by(result, login.as_deref());
         if self
             .agents
             .usage
@@ -1238,7 +1244,7 @@ impl Daemon {
                 }
                 if let Some(ended) = ended {
                     self.agents.woken.remove(&id);
-                    self.prompt_answered(id, Ok(ended), false);
+                    self.prompt_answered(id, Ok(Answer::stopped(ended)), false);
                 }
                 id
             }
@@ -1268,6 +1274,7 @@ impl Daemon {
                 request,
                 tool,
                 options,
+                unknown,
             } => {
                 // One asked as a conversation is told again was asked long
                 // ago: no one's there to answer it.
@@ -1282,13 +1289,18 @@ impl Daemon {
                 // Ruled out by the chat's limits, or about clackatoo's own
                 // tools, which ask the user themselves: answered at once.
                 // Limits first, so nothing passing as ours gets past them.
+                // Only an answer of a kind known is ever chosen for the
+                // user.
                 let interaction =
                     name == "antigravity" && tool.tool_call_id.0.starts_with("interaction_");
+                let known: Vec<_> = (options.iter())
+                    .filter(|option| !unknown.iter().any(|id| *option.option_id.0 == **id))
+                    .cloned()
+                    .collect();
                 let answered = if interaction {
                     None
                 } else {
-                    (chat.turned_down(&tool, &options))
-                        .or_else(|| chat.about_own_tools(&tool, &options))
+                    (chat.turned_down(&tool, &known)).or_else(|| chat.about_own_tools(&tool, &known))
                 };
                 if let Some(option) = answered {
                     if let Some(slot) = self.agents.running.get_mut(&agent) {
@@ -1297,7 +1309,7 @@ impl Daemon {
                     self.collect_damage(id);
                     return;
                 }
-                chat.ask(request, &tool, &options);
+                chat.ask(request, &tool, &options, &unknown);
                 id
             }
             Incoming::Elicit { request, asked } => {
@@ -1413,6 +1425,12 @@ impl Daemon {
                 // Its session may be a new one.
                 self.keep_soon();
             }
+            // The session is open in another of the agent's clients: it's
+            // still there, so no new one is made in its place.
+            Err(refused) if refused.in_use => {
+                let why = crate::chat::failure::in_use(chat.agent_title());
+                chat.failed_to_connect(&why);
+            }
             // The session it had is gone, as one closed long ago may be: it
             // starts a new one, which hears the whole conversation.
             Err(refused) if !refused.login && chat.session().is_some() => {
@@ -1474,6 +1492,13 @@ impl Daemon {
             slot.agent.answer(request, result);
         }
         self.flush_agent(agent);
+    }
+
+    /// The command that logs in to the agent called `name`, if it's
+    /// running and one clackatoo knows how to log in to.
+    fn login_of(&self, name: &str) -> Option<String> {
+        let slot = (self.agents.running.values()).find(|slot| slot.spec.name == name)?;
+        agents::login_command(&slot.spec, self.config.agents.dir.as_deref())
     }
 
     /// What to tell a chat whose agent `agent` needs logging in to, if
@@ -1904,7 +1929,7 @@ impl Daemon {
             };
             if chat.woken_stopping() {
                 log::info!("chat {id}: its agent didn't say the turn it was asked to stop ended");
-                if self.prompt_answered(id, Ok(StopReason::Cancelled), false) {
+                if self.prompt_answered(id, Ok(Answer::stopped(StopReason::Cancelled)), false) {
                     self.collect_damage(id);
                 }
                 continue;
@@ -1918,7 +1943,7 @@ impl Daemon {
                 continue;
             }
             log::info!("chat {id}: the turn its agent took by itself has gone quiet");
-            if self.prompt_answered(id, Ok(StopReason::EndTurn), false) {
+            if self.prompt_answered(id, Ok(Answer::stopped(StopReason::EndTurn)), false) {
                 self.collect_damage(id);
             }
         }
@@ -2505,7 +2530,9 @@ mod tests {
         assert_eq!(daemon.chat(id).unwrap().node().provider_usage, vec![cached]);
         assert!(daemon.prompt_answered(
             id,
-            Ok(agent_client_protocol_schema::v1::StopReason::EndTurn),
+            Ok(Answer::stopped(
+                agent_client_protocol_schema::v1::StopReason::EndTurn
+            )),
             false
         ));
         assert!(

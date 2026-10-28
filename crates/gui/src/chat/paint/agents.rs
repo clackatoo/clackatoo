@@ -496,6 +496,8 @@ mod tests {
         turn.end = Some(TurnEnd {
             at: 161_000,
             outcome: Outcome::Done,
+            raw: None,
+            spent: None,
         });
         chat.apply(&ViewUpdate::Patch(vec![
             Patch::Chat(ChatPatch::Turn { index: 0, turn }),

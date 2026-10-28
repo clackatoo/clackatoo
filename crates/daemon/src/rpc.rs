@@ -113,6 +113,9 @@ pub(crate) struct RpcError {
     #[serde(default)]
     pub(crate) code: i64,
     pub(crate) message: String,
+    /// What else it says, as the peer gives it.
+    #[serde(default)]
+    pub(crate) data: Option<serde_json::Value>,
 }
 
 /// A running program, and the messages on their way to and from it.

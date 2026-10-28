@@ -24,7 +24,7 @@ use clackatoo_protocol::{
     AgentTools, ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item,
     Location, Node, Outcome, Patch, Provider, ProviderModels, Question, Sender, Setting,
     SettingChoice, SettingKind, Size, Switch, TerminalId, TerminalInfo, TerminalStatus, Tool,
-    ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, Usage, View, ViewUpdate,
+    Spent, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, Usage, View, ViewUpdate,
 };
 use serde_json::Value;
 
@@ -35,6 +35,8 @@ use crate::handover;
 
 mod commands;
 mod elicit;
+mod facts;
+pub(crate) mod failure;
 mod limits;
 mod originals;
 mod plan;
@@ -462,6 +464,9 @@ pub(crate) struct HostedChat {
     /// changes.
     limits: Limits,
     user_queue: queue::Queue,
+    /// What it keeps to say what the agent says of a turn beyond its
+    /// words (see `chat/facts.rs`).
+    facts: facts::Facts,
 }
 
 /// A session a chat had with another agent, which it can go back to.
@@ -665,6 +670,7 @@ impl HostedChat {
             own_tools: VecDeque::new(),
             limits: Limits::default(),
             user_queue: queue::Queue::default(),
+            facts: facts::Facts::default(),
         }
     }
 
@@ -1059,6 +1065,7 @@ impl HostedChat {
             | ChatAction::Open { .. } => {}
             ChatAction::StopTask { id } => self.stop_task(&id, &mut actions),
             ChatAction::Fill { question, reply } => self.fill(question, &reply, &mut actions),
+            ChatAction::Resend => self.resend(&mut actions),
             // Only a value the agent offers is kept, and asked for.
             ChatAction::Set { setting, value } => {
                 if self.set_value(&setting, &value) {
@@ -1164,6 +1171,7 @@ impl HostedChat {
             self.forget_finished_plan();
             self.told_too_big = false;
         }
+        let own = from.is_none();
         self.push_turn(Turn {
             woke: None,
             previews,
@@ -1175,6 +1183,9 @@ impl HostedChat {
             from,
             switch: None,
         });
+        if own {
+            self.remember_prompt(self.node.turns.len() - 1, &prompt);
+        }
         match self.link {
             Link::Open => {
                 self.set_state(ChatState::Answering);
@@ -1640,6 +1651,8 @@ impl HostedChat {
             end: Some(TurnEnd {
                 at: now(),
                 outcome: Outcome::Done,
+                raw: None,
+                spent: None,
             }),
             files: None,
             from: None,
@@ -2106,19 +2119,12 @@ impl HostedChat {
 
     /// The agent finished answering, or failed to.
     pub(crate) fn answered(&mut self, result: Result<StopReason, String>) {
-        let outcome = match result {
-            Ok(StopReason::Cancelled) => Outcome::Stopped,
-            Ok(StopReason::MaxTokens) => {
-                Outcome::Failed("the answer hit its length limit".to_owned())
-            }
-            Ok(StopReason::MaxTurnRequests) => {
-                Outcome::Failed("the answer took too many steps".to_owned())
-            }
-            Ok(StopReason::Refusal) => Outcome::Failed("the agent refused".to_owned()),
-            // Done, or a reason newer than this build knows.
-            Ok(_) => Outcome::Done,
-            Err(err) => Outcome::Failed(format!("the agent failed: {err}")),
-        };
+        self.answered_as(facts::outcome_of(&result), None, None);
+    }
+
+    /// The agent finished answering as `outcome` says, or failed to, in
+    /// its own words `raw`, having spent `spent`.
+    fn answered_as(&mut self, outcome: Outcome, raw: Option<String>, spent: Option<Spent>) {
         if matches!(outcome, Outcome::Failed(_)) {
             self.user_queue.restart = None;
         }
@@ -2131,7 +2137,7 @@ impl HostedChat {
             self.hold_wake();
         }
         if self.answering() {
-            self.end_turn(outcome);
+            self.end_turn_with(outcome, raw, spent);
         }
         self.set_state(ChatState::Ready);
     }
@@ -2199,6 +2205,7 @@ impl HostedChat {
         request: Value,
         tool: &ToolCallUpdate,
         options: &[PermissionOption],
+        unknown: &[String],
     ) {
         // The tool's own title, if it's been seen: Codex's questions call
         // every command "Run command", but its tool call has the command.
@@ -2212,11 +2219,16 @@ impl HostedChat {
                 id: option.option_id.0.to_string(),
                 name: option.name.clone(),
                 kind: match option.kind {
+                    // A kind newer than this build knows: what it means
+                    // isn't known, so it's never taken for yes or no.
+                    _ if unknown.iter().any(|id| *option.option_id.0 == **id) => {
+                        ChoiceKind::Other
+                    }
+                    PermissionOptionKind::AllowOnce => ChoiceKind::AllowOnce,
                     PermissionOptionKind::AllowAlways => ChoiceKind::AllowAlways,
                     PermissionOptionKind::RejectOnce => ChoiceKind::RejectOnce,
                     PermissionOptionKind::RejectAlways => ChoiceKind::RejectAlways,
-                    // Allowing once, or a kind newer than this build knows.
-                    _ => ChoiceKind::AllowOnce,
+                    _ => ChoiceKind::Other,
                 },
             })
             .collect();
@@ -2257,6 +2269,7 @@ impl HostedChat {
                 kind: ToolKind::Other,
                 content: vec![ToolContent::Text(format!("```\n{whole}\n```"))],
                 locations: Vec::new(),
+                exit: None,
             });
         }
         let choices: &[(&str, &str, ChoiceKind)] = match offered {
@@ -2365,9 +2378,17 @@ impl HostedChat {
     #[allow(clippy::too_many_lines, reason = "one arm per ACP update")]
     pub(crate) fn update(&mut self, update: SessionUpdate) -> Option<Wrote> {
         match update {
-            SessionUpdate::AgentMessageChunk(chunk) => self.write(&chunk.content, false),
-            SessionUpdate::AgentThoughtChunk(chunk) => self.write(&chunk.content, true),
+            SessionUpdate::AgentMessageChunk(chunk) => {
+                self.progressed();
+                self.message_image(&chunk.content);
+                self.write(&chunk.content, false);
+            }
+            SessionUpdate::AgentThoughtChunk(chunk) => {
+                self.progressed();
+                self.write(&chunk.content, true);
+            }
             SessionUpdate::ToolCall(call) => {
+                self.progressed();
                 self.revoke_image(&call.tool_call_id.0);
                 self.note_diffs(&call.tool_call_id.0, &call.content);
                 self.note_own_tool(&call.tool_call_id.0, call.raw_input.as_ref());
@@ -2378,6 +2399,11 @@ impl HostedChat {
                     kind: tool_kind(call.kind),
                     content: tool_content(&call.content),
                     locations: tool_locations(&call.locations),
+                    exit: facts::exit_code(
+                        call.meta.as_ref(),
+                        call.raw_output.as_ref(),
+                        tool_kind(call.kind),
+                    ),
                 };
                 if self.agent == "antigravity" {
                     native_output(&mut tool, call.raw_output.as_ref());
@@ -2385,9 +2411,11 @@ impl HostedChat {
                 let (id, wrote) = (tool.id.clone(), self.wrote(&tool));
                 self.set_tool(tool);
                 self.add_output(&id, call.meta.as_ref());
+                self.compaction(&id, call.meta.as_ref(), call.raw_output.as_ref());
                 return wrote;
             }
             SessionUpdate::ToolCallUpdate(update) => {
+                self.progressed();
                 if let Some(content) = &update.fields.content {
                     self.revoke_image(&update.tool_call_id.0);
                     self.note_diffs(&update.tool_call_id.0, content);
@@ -2402,6 +2430,7 @@ impl HostedChat {
                     kind: ToolKind::Other,
                     content: Vec::new(),
                     locations: Vec::new(),
+                    exit: None,
                 });
                 if let Some(title) = &update.fields.title {
                     tool.title = clean(title);
@@ -2425,6 +2454,10 @@ impl HostedChat {
                 if let Some(locations) = &update.fields.locations {
                     tool.locations = tool_locations(locations);
                 }
+                let raw = update.fields.raw_output.as_ref();
+                if let Some(exit) = facts::exit_code(update.meta.as_ref(), raw, tool.kind) {
+                    tool.exit = Some(exit);
+                }
                 if self.agent == "antigravity" {
                     native_output(&mut tool, update.fields.raw_output.as_ref());
                 }
@@ -2442,6 +2475,7 @@ impl HostedChat {
                     self.set_tool(tool);
                 }
                 self.add_output(&id, update.meta.as_ref());
+                self.compaction(&id, update.meta.as_ref(), raw);
                 return wrote;
             }
             SessionUpdate::SessionInfoUpdate(info) => {
@@ -2454,6 +2488,8 @@ impl HostedChat {
                         self.title.push('…');
                     }
                 }
+                // A failure, or the agent trying again.
+                self.session_info(info.meta.as_ref());
             }
             SessionUpdate::ConfigOptionUpdate(update) => {
                 self.set_settings(settings_of(&update.config_options));
@@ -2479,12 +2515,18 @@ impl HostedChat {
             // What it says of its account's limits the daemon has taken
             // in already, for every chat of the agent: see
             // `Daemon::limits_heard`.
-            SessionUpdate::UsageUpdate(usage) => self.set_usage(Some(Usage {
-                used: usage.used.min(limits::MOST_TOKENS),
-                size: usage.size.min(limits::MOST_TOKENS),
-                five_hour: self.limits.five_hour,
-                weekly: self.limits.weekly,
-            })),
+            SessionUpdate::UsageUpdate(usage) => {
+                let cost = (usage.cost.as_ref())
+                    .and_then(|cost| clackatoo_protocol::Cost::of(cost.amount, &cost.currency));
+                let cost = self.cost_said(cost);
+                self.set_usage(Some(Usage {
+                    used: usage.used.min(limits::MOST_TOKENS),
+                    size: usage.size.min(limits::MOST_TOKENS),
+                    five_hour: self.limits.five_hour,
+                    weekly: self.limits.weekly,
+                    cost,
+                }));
+            }
             // Shown above the box, and kept for the next agent to hear
             // of.
             SessionUpdate::Plan(plan) => self.plan_said(plan),
@@ -2680,6 +2722,9 @@ impl HostedChat {
         let Some(index) = self.answering_turn() else {
             return;
         };
+        if !thinking && self.codex_compacted(&text.text) {
+            return;
+        }
         let text = clean_text(&text.text);
         let items = &mut self.node.turns[index].items;
         let continues = match items.last() {
@@ -2802,6 +2847,13 @@ impl HostedChat {
     /// Ends the turn being answered. Tools still running then never
     /// finished.
     fn end_turn(&mut self, outcome: Outcome) {
+        self.end_turn_with(outcome, None, None);
+    }
+
+    /// Ends the turn being answered, as [`end_turn`](Self::end_turn), a
+    /// failure in the agent's own words `raw`, having spent `spent`.
+    fn end_turn_with(&mut self, outcome: Outcome, raw: Option<String>, spent: Option<Spent>) {
+        self.set_retrying(None);
         let Some(index) = self.answering_turn() else {
             return;
         };
@@ -2823,7 +2875,12 @@ impl HostedChat {
                 tool.status = ToolStatus::Failed;
             }
         }
-        turn.end = Some(TurnEnd { at: now(), outcome });
+        turn.end = Some(TurnEnd {
+            at: now(),
+            outcome,
+            raw,
+            spent,
+        });
         self.patch_turn(index);
         // The agent's questions went with the turn. Those of clackatoo's
         // tools wait for their calls to be answered or cancelled, and an
@@ -2877,6 +2934,14 @@ impl HostedChat {
     ) -> Option<(String, Vec<crate::tool_images::Source>)> {
         if let Some(images) = crate::tool_images::extract(update) {
             return Some(images);
+        }
+        // An image in the agent's words, shown in a row of its own (see
+        // `message_image`), as the turn answering takes it.
+        if self.answering()
+            && !self.told_again()
+            && let Some(source) = crate::tool_images::extract_message(update)
+        {
+            return Some((self.next_image(), vec![source]));
         }
         if self.agent != "antigravity" {
             return None;
@@ -3125,6 +3190,7 @@ impl HostedChat {
     fn push_turn(&mut self, turn: Turn) {
         self.diffs.clear();
         self.woken_stopping = false;
+        self.facts_begin();
         self.node.turns.push(turn);
         self.patch_turn(self.node.turns.len() - 1);
     }
@@ -3278,7 +3344,9 @@ fn merge(last: &mut ChatPatch, patch: &ChatPatch) -> bool {
 /// About how many bytes `patch` takes.
 fn weight(patch: &ChatPatch) -> usize {
     let item = |item: &Item| match item {
-        Item::Words(text) | Item::Thought(text) | Item::Other(text) => text.len(),
+        Item::Words(text) | Item::Thought(text) | Item::Other(text) | Item::Compacted(text) => {
+            text.len()
+        }
         Item::Tool(tool) => {
             let content: usize = (tool.content.iter())
                 .map(|content| match content {
@@ -3700,6 +3768,12 @@ fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
             .map(|item| match item {
                 // The daemon makes no Other: it's what a newer one sends.
                 Item::Words(words) | Item::Other(words) => handover::ChatItem::Words(words),
+                // The handover keeps no line across: it goes as words,
+                // while exit codes, what a turn spent and failures in the
+                // agent's own words aren't handed over (no new version).
+                Item::Compacted(details) => {
+                    handover::ChatItem::Words(format!("*{}*", Item::compacted_label(&details)))
+                }
                 Item::Thought(words) => handover::ChatItem::Thought(words),
                 Item::Tool(tool) => handover::ChatItem::Tool {
                     id: tool.id,
@@ -3807,6 +3881,7 @@ fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
                             line: location.line,
                         })
                         .collect(),
+                    exit: None,
                 }),
             })
             .collect(),
@@ -3817,6 +3892,8 @@ fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
                 handover::ChatOutcome::Stopped => Outcome::Stopped,
                 handover::ChatOutcome::Failed(why) => Outcome::Failed(why),
             },
+            raw: None,
+            spent: None,
         }),
         files: None,
         // Put back from the chat's relations, if another agent sent it.
@@ -4442,6 +4519,7 @@ mod tests {
                     kind: ToolKind::Other,
                     content: Vec::new(),
                     locations: Vec::new(),
+                    exit: None,
                 }),
                 Item::Words("Done.".into()),
             ]
@@ -4770,7 +4848,7 @@ mod tests {
             r##"{"toolCallId":"t","title":"Ready to code?","rawInput":{"plan":"# Plan\n\n1. Test\u0007"}}"##,
         )
         .unwrap();
-        chat.ask(Value::from(7), &tool, &options);
+        chat.ask(Value::from(7), &tool, &options, &[]);
         let plan = chat.node.question.as_ref().unwrap().plan.clone();
         assert_eq!(plan.as_deref(), Some("# Plan\n\n1. Test"));
         // Any other tool with a plan in its input is asked about as ever.
@@ -4778,7 +4856,7 @@ mod tests {
             serde_json::from_str(r#"{"toolCallId":"u","rawInput":{"plan":"x"}}"#).unwrap();
         chat.answered(Ok(StopReason::EndTurn));
         send(&mut chat, "again");
-        chat.ask(Value::from(8), &tool, &[]);
+        chat.ask(Value::from(8), &tool, &[], &[]);
         assert_eq!(chat.node.question.as_ref().unwrap().plan, None);
     }
 
@@ -4794,7 +4872,7 @@ mod tests {
         .unwrap();
         let tool: ToolCallUpdate =
             serde_json::from_str(r#"{"toolCallId":"t","title":"run\nls"}"#).unwrap();
-        chat.ask(Value::from(7), &tool, &options);
+        chat.ask(Value::from(7), &tool, &options, &[]);
         let question = chat.node.question.clone().expect("a question");
         assert_eq!(question.title, "run ls");
         assert_eq!(question.choices[1].kind, ChoiceKind::RejectOnce);
@@ -4817,7 +4895,7 @@ mod tests {
         send(&mut chat, "go");
         let tool: ToolCallUpdate =
             serde_json::from_str(r#"{"toolCallId":"t","title":"Write a"}"#).unwrap();
-        chat.ask(Value::from(1), &tool, &[]);
+        chat.ask(Value::from(1), &tool, &[], &[]);
         chat.ask_for_tool(7, "run `make` in a terminal", None, Choices::Tool);
         chat.ask_for_tool(8, "run `ls` in a terminal", None, Choices::Tool);
         assert_eq!(chat.node.question.as_ref().unwrap().title, "Write a");
@@ -5160,7 +5238,7 @@ mod tests {
         connect(&mut chat, "s");
         send(&mut chat, "go");
         let tool: ToolCallUpdate = serde_json::from_str(r#"{"toolCallId":"t"}"#).unwrap();
-        chat.ask(Value::from(3), &tool, &[]);
+        chat.ask(Value::from(3), &tool, &[], &[]);
         assert_eq!(
             chat.act(ChatAction::Stop),
             [
@@ -5866,6 +5944,7 @@ mod tests {
             size: 40_000,
             five_hour: None,
             weekly: None,
+            cost: None,
         }));
         let quarter = chat.digest(0, to, &[]).unwrap();
         assert!(
@@ -6408,6 +6487,7 @@ mod tests {
             size: 1_000_000,
             five_hour: None,
             weekly: None,
+            cost: None,
         };
         assert_eq!(chat.node.usage, Some(usage));
         // Its account's limits, as the daemon heard them, go with it, and
@@ -6440,6 +6520,7 @@ mod tests {
                 size: 0,
                 five_hour,
                 weekly: None,
+                cost: None,
             })
         );
         chat.settings_changed(Ok(claude_settings("sonnet")));
@@ -6608,7 +6689,7 @@ mod tests {
                 "options":[{"optionId":"a","name":"Yes","kind":"allow_once"}]}"#,
         )
         .unwrap();
-        chat.ask(Value::from(1), &request.tool_call, &request.options);
+        chat.ask(Value::from(1), &request.tool_call, &request.options, &[]);
         assert_eq!(chat.node.question.as_ref().unwrap().title, "rm -r build");
         answer(&mut chat, Some("a".into()));
         // One it hasn't said anything of goes by the question's.
@@ -6616,7 +6697,7 @@ mod tests {
             r#"{"sessionId":"s","toolCall":{"toolCallId":"u","title":"Write a"},"options":[]}"#,
         )
         .unwrap();
-        chat.ask(Value::from(2), &request.tool_call, &request.options);
+        chat.ask(Value::from(2), &request.tool_call, &request.options, &[]);
         assert_eq!(chat.node.question.as_ref().unwrap().title, "Write a");
     }
 

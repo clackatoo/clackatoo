@@ -20,6 +20,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
 use super::{Canvas, LINE, Look, Measures, draw_laid, lay_out};
+use crate::markdown::layout::Laid;
 use crate::chat::{ChatView, Tone};
 use crate::fonts::Fonts;
 use crate::render::{Fill, Paint};
@@ -143,24 +144,22 @@ impl ChatView {
             return;
         };
         let column = self.cache.width;
-        let middle = (origin[1] + height(m) / 2.0).round();
-        let left = origin[0] + ((column - laid.width) / 2.0).round();
-        draw_laid(
-            canvas,
-            m,
-            laid,
-            [left, origin[1] + (height(m) - laid.height) / 2.0],
-            laid.width,
-        );
-        let gap = m.em(0.8);
-        let rules = [
-            [origin[0], left - gap],
-            [left + laid.width + gap, origin[0] + column],
-        ];
-        for [from, to] in rules {
-            if to > from {
-                canvas.fill(Fill::solid([from, middle, to - from, 1.0], Paint::Divider));
-            }
+        draw_rule(canvas, m, laid, [origin[0], origin[1], column, height(m)]);
+    }
+}
+
+/// Draws a line across `row`, its left, top, width and height, with
+/// `label` in its middle.
+pub(super) fn draw_rule(canvas: &mut Canvas<'_>, m: Measures, label: &Laid, row: [f32; 4]) {
+    let [x, y, column, tall] = row;
+    let middle = (y + tall / 2.0).round();
+    let left = x + ((column - label.width) / 2.0).round();
+    draw_laid(canvas, m, label, [left, y + (tall - label.height) / 2.0], label.width);
+    let gap = m.em(0.8);
+    let rules = [[x, left - gap], [left + label.width + gap, x + column]];
+    for [from, to] in rules {
+        if to > from {
+            canvas.fill(Fill::solid([from, middle, to - from, 1.0], Paint::Divider));
         }
     }
 }
@@ -212,6 +211,8 @@ mod tests {
             turn.end = Some(TurnEnd {
                 at: at + MINUTE,
                 outcome: Outcome::Done,
+                raw: None,
+                spent: None,
             });
         }
         node
@@ -300,6 +301,8 @@ mod tests {
             turn.end = Some(TurnEnd {
                 at,
                 outcome: Outcome::Done,
+                raw: None,
+                spent: None,
             });
             chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
                 index: 0,

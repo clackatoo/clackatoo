@@ -645,6 +645,7 @@ mod tests {
             kind: ToolKind::Execute,
             content: vec![ToolContent::Output("All tests passed".into())],
             locations: vec![],
+            exit: None,
         })];
         let mut chat = ChatView::new(String::new(), node);
         chat.open_fold(0);
@@ -692,6 +693,7 @@ mod tests {
             kind: ToolKind::Execute,
             content: vec![ToolContent::Output("Error: test failed".into())],
             locations: vec![],
+            exit: None,
         };
         let card = chat.card(&mut fonts, Measures::of(16.0), None, &tool, 500.0);
         assert!(!card.open);

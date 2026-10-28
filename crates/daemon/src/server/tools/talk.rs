@@ -1447,6 +1447,9 @@ fn turn_text(number: Option<usize>, turn: &Turn) -> String {
             }
             // Its thinking is its own.
             Item::Thought(_) => {}
+            Item::Compacted(details) => {
+                let _ = writeln!(text, "[{}]", Item::compacted_label(details));
+            }
             Item::Tool(tool) => {
                 let how = match tool.status {
                     ToolStatus::Running => "running",
@@ -1949,6 +1952,8 @@ mod tests {
             end: Some(TurnEnd {
                 at: 1,
                 outcome: Outcome::Done,
+                raw: None,
+                spent: None,
             }),
             from: Some(Sender {
                 chat: TerminalId(4),
@@ -1966,6 +1971,7 @@ mod tests {
             kind: ToolKind::Read,
             content: Vec::new(),
             locations: Vec::new(),
+            exit: None,
         })
     }
 

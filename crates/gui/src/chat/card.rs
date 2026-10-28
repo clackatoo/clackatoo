@@ -246,6 +246,7 @@ mod tests {
             kind,
             content,
             locations: Vec::new(),
+            exit: None,
         }
     }
 

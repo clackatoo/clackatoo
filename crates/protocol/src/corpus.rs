@@ -734,6 +734,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     used: 100,
                     resets: Some(1_760_400_000_000),
                 }),
+                cost: None,
             })))]),
         })),
     ));
@@ -1382,6 +1383,11 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             .into_iter()
             .map(|sample| (crate::wire::AGENT_COMMANDS, sample)),
     );
+    samples.extend(
+        chat_facts()
+            .into_iter()
+            .map(|sample| (crate::wire::CHAT_FACTS, sample)),
+    );
     samples
 }
 
@@ -1419,6 +1425,97 @@ fn agent_commands() -> Vec<Sample> {
                 cwd: None,
                 root: Node::Chat(Box::new(ChatNode { commands, ..chat() })),
             }),
+        })),
+    ]
+}
+
+/// Samples of protocol 115: what an agent says of a turn beyond its words
+/// (CLACKA-196). A chat trying again, with a line where it compacted its
+/// context, a command that failed with its exit code, a failure in plain
+/// words with the agent's own, what the turn spent and what the session
+/// cost, and an answer of a kind the daemon doesn't know; that in patches;
+/// and sending a failed message again.
+fn chat_facts() -> Vec<Sample> {
+    use crate::{Cost, Spent};
+    let terminal = TerminalId(3);
+    let cost = Cost::of(0.0421, "USD");
+    let spent = Spent {
+        input: 12_000,
+        output: 800,
+        cached: 9_000,
+        cost: Some(Cost {
+            micros: 31_000,
+            currency: *b"USD",
+        }),
+    };
+    let turn = Turn {
+        items: vec![
+            Item::Compacted("automatic · 182k → 31k tokens".into()),
+            Item::Tool(Tool {
+                id: "t2".into(),
+                title: "cargo test".into(),
+                status: ToolStatus::Failed,
+                kind: ToolKind::Execute,
+                content: vec![ToolContent::Output("failed\n".into())],
+                locations: Vec::new(),
+                exit: Some(101),
+            }),
+        ],
+        end: Some(TurnEnd {
+            at: 1_760_000_090,
+            outcome: Outcome::Failed("Claude is overloaded: send it again in a moment".into()),
+            raw: Some("Internal error: API Error: 529 overloaded".into()),
+            spent: Some(spent),
+        }),
+        ..turn()
+    };
+    let question = Question {
+        choices: vec![
+            Choice {
+                id: "allow".into(),
+                name: "Allow".into(),
+                kind: ChoiceKind::AllowOnce,
+            },
+            Choice {
+                id: "allow_session".into(),
+                name: "Allow for this session".into(),
+                kind: ChoiceKind::Other,
+            },
+        ],
+        ..question()
+    };
+    vec![
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Snapshot(View {
+                title: "facts".into(),
+                cwd: None,
+                root: Node::Chat(Box::new(ChatNode {
+                    turns: vec![turn.clone()],
+                    question: Some(question.clone()),
+                    usage: Some(Usage { cost, ..usage() }),
+                    retrying: Some("Retrying Claude, attempt 2 of 10.".into()),
+                    ..chat()
+                })),
+            }),
+        })),
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![
+                Patch::Chat(ChatPatch::Retrying(Some("Reconnecting... 1/5".into()))),
+                Patch::Chat(ChatPatch::Item {
+                    turn: 0,
+                    item: 0,
+                    value: Item::Compacted(String::new()),
+                }),
+                Patch::Chat(ChatPatch::Turn { index: 0, turn }),
+                Patch::Chat(ChatPatch::Question(Some(question))),
+                Patch::Chat(ChatPatch::Retrying(None)),
+            ]),
+        })),
+        Sample::Client(ClientMessage::Request(Request::Chat {
+            terminal,
+            action: ChatAction::Resend,
         })),
     ]
 }
@@ -2602,6 +2699,8 @@ fn more() -> Vec<Sample> {
                         end: Some(TurnEnd {
                             at: 1,
                             outcome: Outcome::Done,
+                            raw: None,
+                            spent: None,
                         }),
                         files: Some(TurnFiles {
                             count: 1,
@@ -3314,6 +3413,7 @@ fn chat() -> ChatNode {
         delivery: crate::ChatDelivery::default(),
         first_turn: 0,
         first_message: 0,
+        retrying: None,
     }
 }
 
@@ -3331,6 +3431,8 @@ fn turn() -> Turn {
         end: Some(TurnEnd {
             at: 1_760_000_060,
             outcome: Outcome::Failed("stopped".into()),
+            raw: None,
+            spent: None,
         }),
         files: Some(files()),
         from: Some(Sender {
@@ -3367,6 +3469,7 @@ fn tool() -> Tool {
             path: "/src/main.rs".into(),
             line: Some(1),
         }],
+        exit: None,
     }
 }
 
@@ -3411,6 +3514,7 @@ fn usage() -> Usage {
         // there.
         five_hour: None,
         weekly: None,
+        cost: None,
     }
 }
 

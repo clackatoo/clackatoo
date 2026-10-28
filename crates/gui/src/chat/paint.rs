@@ -75,7 +75,8 @@ pub(super) const AGENTS: usize = usize::MAX;
 
 /// Whether `item`, item `index` of a turn shaped `shape`, is folded away:
 /// folded, only the answer shows of a turn's work, and what's neither
-/// words nor tools, and tools that gave images.
+/// words nor tools (such as the line where the agent compacted its
+/// context), and tools that gave images.
 pub(super) fn folded_away(shape: fold::Shape, index: usize, item: &Item) -> bool {
     let image = |tool: &clackatoo_protocol::Tool| {
         (tool.content.iter())
@@ -83,7 +84,7 @@ pub(super) fn folded_away(shape: fold::Shape, index: usize, item: &Item) -> bool
     };
     index < shape.answer
         && !shape.open
-        && !matches!(item, Item::Other(_))
+        && !matches!(item, Item::Other(_) | Item::Compacted(_))
         && !matches!(item, Item::Tool(tool) if image(tool))
 }
 
@@ -654,6 +655,20 @@ impl ChatView {
             let key = ITEMS + item_index;
             let last = laid.spans.last().map(|span| span.piece);
             let follows = last.is_some_and(|piece| piece != Piece::Prompt);
+            // A line across, with what it says in its middle.
+            if let Item::Compacted(details) = item {
+                let label = Item::compacted_label(details);
+                let look = Look::Plain(Tone::Muted);
+                let piece = self.reuse(fonts, m, old_pieces.remove(&key), &label, look, column * 0.8);
+                if follows {
+                    y += m.em(0.75);
+                }
+                let height = piece.height.max(divider::height(m));
+                laid.spans.push(Span::of(Piece::Rule(key), y, height));
+                laid.pieces.insert(key, piece);
+                y += height;
+                continue;
+            }
             if let Item::Tool(tool) = item {
                 if follows {
                     y += m.em(0.15);
@@ -668,7 +683,8 @@ impl ChatView {
             let (text, look) = match item {
                 Item::Words(words) | Item::Other(words) => (words.as_str(), Look::Words),
                 Item::Thought(words) => (words.as_str(), Look::Thought),
-                Item::Tool(_) => continue, // Laid out as a card above.
+                // Laid out above.
+                Item::Tool(_) | Item::Compacted(_) => continue,
             };
             if text.trim().is_empty() {
                 continue;
@@ -1097,6 +1113,14 @@ impl ChatView {
                     }
                 }
                 Piece::Divider => self.draw_divider(canvas, m, index, [origin[0], top]),
+                Piece::Rule(piece) => {
+                    if let Some(label) = laid.pieces.get(&piece) {
+                        let height = span.bottom - span.top;
+                        divider::draw_rule(canvas, m, label, [origin[0], top, column, height]);
+                        let at = [origin[0] + ((column - label.width) / 2.0).round(), top];
+                        drawn.note_laid(label, at, (index, piece));
+                    }
+                }
                 Piece::Footer => {
                     // Only while the mouse is over the turn, or it says it
                     // copied: its place is kept, so nothing moves.
@@ -1326,6 +1350,9 @@ impl ChatView {
             let tone = match choice.kind {
                 _ if primary => Tone::OnAccent,
                 ChoiceKind::AllowOnce | ChoiceKind::AllowAlways => Tone::Plain,
+                // An answer whose meaning isn't known: plain, never the
+                // one to press.
+                ChoiceKind::Other => Tone::Plain,
                 ChoiceKind::RejectOnce | ChoiceKind::RejectAlways => Tone::Muted,
             };
             let text = format!("{}  {}", index + 1, choice.name);
@@ -2253,6 +2280,9 @@ enum Piece {
     /// The time it was sent, over it, as it was long after the turn
     /// before.
     Divider,
+    /// A line across it, by piece, with what it says in its middle: where
+    /// the agent compacted its context.
+    Rule(usize),
 }
 
 impl Span {
@@ -2423,7 +2453,7 @@ fn guess(m: Measures, column: f32, turn: &Turn, open: bool, divided: bool) -> f3
             Item::Words(text) | Item::Thought(text) | Item::Other(text) => {
                 lines(text, column) * line + m.em(0.75)
             }
-            Item::Tool(_) => line + m.em(0.85),
+            Item::Tool(_) | Item::Compacted(_) => line + m.em(0.85),
         };
     }
     // The line with the button that copies its answer, and what it
@@ -3021,6 +3051,8 @@ mod tests {
             end: Some(clackatoo_protocol::TurnEnd {
                 at: 1,
                 outcome: Outcome::Done,
+                raw: None,
+                spent: None,
             }),
             files: None,
             from: None,
@@ -3182,6 +3214,7 @@ mod tests {
                 kind: ToolKind::Execute,
                 content: vec![ToolContent::Output(output)],
                 locations: Vec::new(),
+                exit: None,
             }),
         );
         let mut chat = ChatView::new("chat".into(), node);
@@ -3246,6 +3279,7 @@ mod tests {
                 status: clackatoo_protocol::ToolStatus::Done,
                 locations: Vec::new(),
                 content: vec![clackatoo_protocol::ToolContent::Image(preview)],
+                exit: None,
             }),
         );
         let mut chat = ChatView::new("chat".into(), node);
@@ -3303,6 +3337,7 @@ mod tests {
                             status: clackatoo_protocol::ToolStatus::Done,
                             locations: Vec::new(),
                             content: vec![clackatoo_protocol::ToolContent::Image(preview.clone())],
+                            exit: None,
                         }),
                     );
                 }
@@ -3421,6 +3456,7 @@ mod tests {
                                 status: clackatoo_protocol::ToolStatus::Done,
                                 locations: Vec::new(),
                                 content: vec![clackatoo_protocol::ToolContent::Image(preview)],
+                                exit: None,
                             }),
                         );
                     }

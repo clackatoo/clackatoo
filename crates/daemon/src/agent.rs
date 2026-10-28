@@ -79,8 +79,14 @@ enum Pending {
     /// opens again only once the agent has answered.
     Closing(TerminalId),
     /// The sessions the agent kept, for the server's listing with this
-    /// number.
-    Listing(u64),
+    /// number, in `cwd`: the pages before, if the agent gave its list in
+    /// pages, and how many there were.
+    Listing {
+        listing: u64,
+        cwd: String,
+        got: Vec<Listed>,
+        pages: usize,
+    },
     /// Stopping the task of the chat in this terminal the agent calls
     /// this.
     StopTask(TerminalId, String),
@@ -135,10 +141,11 @@ pub(crate) enum Incoming {
     /// The session the chat in `terminal` let go has ended, or the agent
     /// couldn't end it: either way, it can be opened again.
     Closed { terminal: TerminalId },
-    /// The chat in `terminal` finished answering a message.
+    /// The chat in `terminal` finished answering a message, or the agent
+    /// refused it.
     Answered {
         terminal: TerminalId,
-        result: Result<StopReason, String>,
+        result: Result<Answer, Failure>,
     },
     /// Work the agent runs in the background of a session started,
     /// changed or ended (see [`Task`]).
@@ -164,6 +171,9 @@ pub(crate) enum Incoming {
         request: Value,
         tool: Box<ToolCallUpdate>,
         options: Vec<PermissionOption>,
+        /// Those of `options`, by their IDs, of a kind this build doesn't
+        /// know, which are none of yes or no (see [`known_kinds`]).
+        unknown: Vec<String>,
     },
     /// The agent asks the user to fill in a form or open a link (ACP's
     /// elicitation), and waits for the answer.
@@ -208,6 +218,55 @@ pub(crate) struct Refused {
     pub(crate) message: String,
     /// It needs logging in to first.
     pub(crate) login: bool,
+    /// The session is open in another of the agent's own clients, as
+    /// Codex's adapter says (`thread_active_writer`): it's still there,
+    /// so no new one is made in its place.
+    pub(crate) in_use: bool,
+}
+
+/// How the agent answered a message.
+#[derive(Debug)]
+pub(crate) struct Answer {
+    /// Why it stopped.
+    pub(crate) stop: StopReason,
+    /// What the turn spent, as ACP's unstable `usage` says it, if it
+    /// says.
+    pub(crate) usage: Option<Value>,
+    /// The failure it ended with, if it said one as AIR's
+    /// `sessionFailure`, as Claude Code's adapter does to a client that
+    /// asks for that: the turn still ends as if well.
+    pub(crate) failure: Option<Value>,
+}
+
+impl Answer {
+    /// An answer that says no more than why it stopped.
+    pub(crate) fn stopped(stop: StopReason) -> Self {
+        Self {
+            stop,
+            usage: None,
+            failure: None,
+        }
+    }
+}
+
+/// An agent's refusal of a message, as JSON-RPC's error says it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Failure {
+    pub(crate) code: i64,
+    pub(crate) message: String,
+    /// What else it says: Claude Code's adapter's `errorKind`, Codex's
+    /// `codexErrorInfo` and its words.
+    pub(crate) data: Option<Value>,
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self {
+            code: 0,
+            message,
+            data: None,
+        }
+    }
 }
 
 /// A session made or opened again.
@@ -263,7 +322,12 @@ const MOST_TASK_TEXT: usize = 300;
 /// as AIR for the whole connection: Claude Code's then sends Read, Grep
 /// and Glob results with no text, and Codex's leaves out commands'
 /// output.
-const AIR_CAPABILITIES: &[&str] = &["asyncTasks"];
+///
+/// `sessionFailure` has Claude Code's adapter say that it's trying its
+/// request to the model again, and why a turn failed by kind, as AIR's
+/// `sessionFailure` (see `chat/failure.rs`): a turn that fails then ends
+/// as if well, with the failure in its answer's `_meta`.
+const AIR_CAPABILITIES: &[&str] = &["asyncTasks", "sessionFailure"];
 
 /// What the agent's notification `method`, with `params`, says of what it
 /// asked: that it no longer waits for a request (`$/cancel_request`), or
@@ -449,11 +513,30 @@ impl Agent {
     /// server's listing numbered `listing`. An agent that can't list them
     /// says so, as an error.
     pub(crate) fn list_sessions(&mut self, listing: u64, cwd: &str) {
-        self.request(
-            Pending::Listing(listing),
-            "session/list",
-            &json!({ "cwd": cwd }),
-        );
+        self.list_page(listing, cwd.to_owned(), Vec::new(), 1, None);
+    }
+
+    /// Asks for page `pages` of the sessions the agent kept in `cwd`, at
+    /// `cursor`, as the page before said, having `got` those before.
+    fn list_page(
+        &mut self,
+        listing: u64,
+        cwd: String,
+        got: Vec<Listed>,
+        pages: usize,
+        cursor: Option<&str>,
+    ) {
+        let mut params = json!({ "cwd": cwd });
+        if let Some(cursor) = cursor {
+            params["cursor"] = cursor.into();
+        }
+        let pending = Pending::Listing {
+            listing,
+            cwd,
+            got,
+            pages,
+        };
+        self.request(pending, "session/list", &params);
     }
 
     /// Asks for a session in `cwd` only to learn the settings the agent
@@ -496,7 +579,7 @@ impl Agent {
     /// the agent.
     pub(crate) fn probing(&self) -> bool {
         (self.pending.values())
-            .any(|pending| matches!(pending, Pending::Probe | Pending::Listing(_)))
+            .any(|pending| matches!(pending, Pending::Probe | Pending::Listing { .. }))
     }
 
     /// Whether initialization advertised image prompts.
@@ -788,6 +871,8 @@ impl Agent {
                 let params = message.params;
                 let asked = match method.as_str() {
                     "session/request_permission" => {
+                        let mut params = params;
+                        let unknown = known_kinds(&mut params);
                         serde_json::from_value::<RequestPermissionRequest>(params)
                             .ok()
                             .map(|request| Incoming::Permission {
@@ -795,6 +880,7 @@ impl Agent {
                                 request: id.clone(),
                                 tool: Box::new(request.tool_call),
                                 options: request.options,
+                                unknown,
                             })
                     }
                     "fs/read_text_file" => serde_json::from_value::<ReadTextFileRequest>(params)
@@ -837,6 +923,7 @@ impl Agent {
                     (None, None) => Err(RpcError {
                         code: 0,
                         message: "the agent's answer was empty".to_owned(),
+                        data: None,
                     }),
                 };
                 self.answered(pending, result, incoming);
@@ -940,6 +1027,9 @@ impl Agent {
                 })
                 .map_err(|error| Refused {
                     login: error.code == AUTH_REQUIRED,
+                    in_use: (error.data.as_ref())
+                        .and_then(|data| data.get("reason"))
+                        .is_some_and(|reason| reason == "thread_active_writer"),
                     message: error.message,
                 });
             incoming.push(match pending {
@@ -952,13 +1042,65 @@ impl Agent {
             });
             return;
         }
+        if let Pending::Prompt(terminal) = pending {
+            let result = result
+                .map_err(|error| Failure {
+                    code: error.code,
+                    message: error.message,
+                    data: error.data,
+                })
+                .and_then(|mut result| {
+                    let usage = result.get_mut("usage").map(Value::take);
+                    let failure = (result.pointer_mut("/_meta/jetbrains/air/sessionFailure"))
+                        .map(Value::take);
+                    serde_json::from_value::<PromptResponse>(result)
+                        .map(|response| Answer {
+                            stop: response.stop_reason,
+                            usage: usage.filter(Value::is_object),
+                            failure: failure.filter(Value::is_object),
+                        })
+                        .map_err(|err| format!("the agent's answer made no sense: {err}").into())
+                });
+            incoming.push(Incoming::Answered { terminal, result });
+            return;
+        }
         let result = result.map_err(|error| error.message);
         match pending {
             Pending::Initialize => self.initialized(&result, incoming),
-            Pending::Listing(listing) => incoming.push(Incoming::Listed {
+            Pending::Listing {
                 listing,
-                result: result.map(|result| listed(&result)),
-            }),
+                cwd,
+                mut got,
+                pages,
+            } => match result {
+                Ok(result) => {
+                    got.extend(listed_page(&result));
+                    let next = (result.get("nextCursor").and_then(Value::as_str))
+                        .filter(|next| !next.is_empty() && next.len() <= MOST_CURSOR);
+                    // More, up to as many pages as are read.
+                    match next {
+                        Some(next) if pages < MOST_PAGES && got.len() < MOST_READ => {
+                            self.list_page(listing, cwd, got, pages + 1, Some(next));
+                        }
+                        _ => incoming.push(Incoming::Listed {
+                            listing,
+                            result: Ok(newest(got)),
+                        }),
+                    }
+                }
+                // A page after the first that fails leaves those read.
+                Err(err) if pages > 1 => {
+                    log::info!("agent: a page of sessions after the first failed: {err}");
+                    incoming.push(Incoming::Listed {
+                        listing,
+                        result: Ok(newest(got)),
+                    });
+                }
+                Err(err) => incoming.push(Incoming::Listed {
+                    listing,
+                    result: Err(err),
+                }),
+            },
             Pending::Setting(terminal) => incoming.push(Incoming::Settings {
                 terminal,
                 result: result.map(|result| settings(&result).unwrap_or_default()),
@@ -973,14 +1115,7 @@ impl Agent {
                         .ok_or_else(|| "Missing steering outcome".into())
                 }),
             }),
-            Pending::Prompt(terminal) => incoming.push(Incoming::Answered {
-                terminal,
-                result: result.and_then(|result| {
-                    serde_json::from_value::<PromptResponse>(result)
-                        .map(|response| response.stop_reason)
-                        .map_err(|err| format!("the agent's answer made no sense: {err}"))
-                }),
-            }),
+            Pending::Prompt(_) => unreachable!("answered above"),
             Pending::StopTask(terminal, task) => incoming.push(Incoming::TaskStopped {
                 terminal,
                 task,
@@ -1009,7 +1144,7 @@ impl Agent {
         let Some(id) = message["id"].as_u64() else {
             return;
         };
-        if let Some(Pending::Listing(listing)) = self.pending.remove(&id) {
+        if let Some(Pending::Listing { listing, .. }) = self.pending.remove(&id) {
             incoming.push(Incoming::Listed {
                 listing,
                 result: Err("it can't list the sessions it kept".to_owned()),
@@ -1027,7 +1162,7 @@ impl Agent {
     /// it comes, goes nowhere.
     pub(crate) fn forget_listing(&mut self, listing: u64) {
         for pending in self.pending.values_mut() {
-            if matches!(pending, Pending::Listing(asked) if *asked == listing) {
+            if matches!(pending, Pending::Listing { listing: asked, .. } if *asked == listing) {
                 *pending = Pending::Ignored;
             }
         }
@@ -1065,7 +1200,7 @@ impl Agent {
             | Pending::Closing(terminal) => Some(*terminal),
             Pending::Initialize
             | Pending::Probe
-            | Pending::Listing(_)
+            | Pending::Listing { .. }
             | Pending::Abandoned(..)
             | Pending::Ignored => None,
         })
@@ -1159,9 +1294,58 @@ fn session_params(cwd: &str, opening: Opening) -> Value {
 /// The sessions an answer to `session/list` lists, newest first, at most
 /// [`MOST_LISTED`]: those it lists without an ID or a directory are left
 /// out.
-fn listed(result: &Value) -> Vec<Listed> {
-    let sessions = result.get("sessions").and_then(Value::as_array);
-    let mut listed: Vec<Listed> = (sessions.into_iter().flatten())
+/// The most pages of sessions read of an agent that lists them in pages,
+/// as ACP's `nextCursor` says: Claude Code's adapter gives up to 1000 a
+/// page, so this is plenty.
+const MOST_PAGES: usize = 10;
+
+/// The most sessions read, over every page, before the newest are kept.
+const MOST_READ: usize = 5000;
+
+/// The longest cursor, in bytes, followed: longer is no agent's.
+const MOST_CURSOR: usize = 4096;
+
+/// The newest of the sessions `got` over a listing's pages, newest first,
+/// as many as a listing keeps.
+fn newest(mut got: Vec<Listed>) -> Vec<Listed> {
+    // Times in RFC 3339, in UTC, sort as text; in other zones only
+    // nearly, which does for a list.
+    got.sort_by(|a, b| b.updated.cmp(&a.updated));
+    got.truncate(MOST_LISTED);
+    got
+}
+
+/// The kinds of answer to a question ACP has, which this build knows.
+const KNOWN_KINDS: [&str; 4] = ["allow_once", "allow_always", "reject_once", "reject_always"];
+
+/// Makes the options of `params`, a `session/request_permission`'s, of a
+/// kind newer than this build knows readable, as `reject_once`, and
+/// returns their IDs: the question is still asked, with them as answers
+/// named as the agent names them that mean neither yes nor no (see
+/// `ChoiceKind::Other`), where otherwise the whole question couldn't be
+/// read. Only as many as a question offers are looked at.
+fn known_kinds(params: &mut Value) -> Vec<String> {
+    let mut unknown = Vec::new();
+    let options = (params.get_mut("options").and_then(Value::as_array_mut)).into_iter();
+    for option in options.flatten().take(64) {
+        let known = (option.get("kind").and_then(Value::as_str))
+            .is_some_and(|kind| KNOWN_KINDS.contains(&kind));
+        let id = option.get("optionId").and_then(Value::as_str);
+        if let (false, Some(id)) = (known, id) {
+            unknown.push(id.to_owned());
+            option["kind"] = "reject_once".into();
+        }
+    }
+    unknown
+}
+
+/// The sessions one page of an agent's list holds, those it can show.
+fn listed_page(result: &Value) -> Vec<Listed> {
+    let sessions = (result.get("sessions").and_then(Value::as_array)).map(|sessions| {
+        let most = MOST_READ.min(sessions.len());
+        &sessions[..most]
+    });
+    (sessions.into_iter().flatten())
         .filter_map(|session| {
             let text = |key: &str| session.get(key).and_then(Value::as_str);
             let id = text("sessionId").filter(|id| {
@@ -1176,12 +1360,7 @@ fn listed(result: &Value) -> Vec<Listed> {
                 updated: updated.map(str::to_owned),
             })
         })
-        .collect();
-    // Times in RFC 3339, in UTC, sort as text; in other zones only
-    // nearly, which does for a list.
-    listed.sort_by(|a, b| b.updated.cmp(&a.updated));
-    listed.truncate(MOST_LISTED);
-    listed
+        .collect()
 }
 
 /// The most bytes of what a tool found shown, as many as a chat keeps of

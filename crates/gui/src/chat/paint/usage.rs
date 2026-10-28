@@ -88,6 +88,7 @@ impl ChatView {
                 size: 0,
                 five_hour: None,
                 weekly: None,
+                cost: None,
             },
             None => return,
         };

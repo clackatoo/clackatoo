@@ -40,6 +40,8 @@ pub(crate) fn talk(pairs: &[(&str, &str)]) -> ChatNode {
                 end: Some(TurnEnd {
                     at: 1000 * index as u64 + 500,
                     outcome: Outcome::Done,
+                    raw: None,
+                    spent: None,
                 }),
                 files: None,
                 switch: None,
@@ -121,6 +123,8 @@ pub(crate) fn long_chat(turns: usize) -> ChatNode {
             end: (!last).then(|| TurnEnd {
                 at: sent + 42_000,
                 outcome: Outcome::Done,
+                raw: None,
+                spent: None,
             }),
             files: None,
             switch: None,
@@ -139,6 +143,7 @@ fn work(index: usize) -> Vec<Item> {
             kind: ToolKind::Read,
             content: Vec::new(),
             locations: Vec::new(),
+            exit: None,
         })
     };
     let (mut output, mut old) = (String::new(), String::new());
@@ -172,6 +177,7 @@ fn work(index: usize) -> Vec<Item> {
             kind: ToolKind::Execute,
             content: vec![ToolContent::Text(format!("```console\n{output}```"))],
             locations: Vec::new(),
+            exit: None,
         }),
         Item::Tool(Tool {
             id: format!("{index}-edit"),
@@ -187,6 +193,7 @@ fn work(index: usize) -> Vec<Item> {
                 path: "/src/lib.rs".into(),
                 line: Some(10),
             }],
+            exit: None,
         }),
         Item::Words(
             "The build fails on CI because `--all-features` turns on `vendored`, \

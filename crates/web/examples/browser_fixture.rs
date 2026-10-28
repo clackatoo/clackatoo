@@ -296,7 +296,7 @@ fn node(id: TerminalId) -> ChatNode {
         woke: None,
         prompt: if i == 39 { "Make the remote experience feel as good as the desktop, especially on my phone.".into() } else { format!("Check the behavior in case {i}.") },
         sent: now().saturating_sub(30_000), items: vec![Item::Words("The layout now keeps the conversation readable and the controls within reach.\n\n- Review changes without losing your place\n- Keep drafts when you switch chats\n- Respond to an approval from your phone\n\n```rust\nlet message = queue.submit(draft);\n```".into())],
-        end: Some(TurnEnd { at: now().saturating_sub(8_000), outcome: Outcome::Done }), files: None, from: None, switch: None, previews: if i == 39 { vec![ChatPreview { width: 64, height: 40, rgba: [35, 90, 65, 255].repeat(64 * 40).into(), original: 0 }] } else { vec![] },
+        end: Some(TurnEnd { at: now().saturating_sub(8_000), outcome: Outcome::Done, raw: None, spent: None }), files: None, from: None, switch: None, previews: if i == 39 { vec![ChatPreview { width: 64, height: 40, rgba: [35, 90, 65, 255].repeat(64 * 40).into(), original: 0 }] } else { vec![] },
     }
     };
     let mut node = ChatNode {
@@ -341,6 +341,7 @@ fn node(id: TerminalId) -> ChatNode {
             size: 258_000,
             five_hour: None,
             weekly: None,
+            cost: None,
         }),
         delivery: ChatDelivery {
             native_steering: true,

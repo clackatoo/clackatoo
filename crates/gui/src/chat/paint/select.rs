@@ -203,7 +203,7 @@ impl ChatView {
             Piece::Prompt => key.piece == PROMPT,
             Piece::Fold => key.piece == FOLD,
             Piece::Agents => key.piece == AGENTS,
-            Piece::Item(piece) | Piece::Card(piece) => key.piece == piece,
+            Piece::Item(piece) | Piece::Card(piece) | Piece::Rule(piece) => key.piece == piece,
             Piece::Handoff
             | Piece::Previews
             | Piece::Note
@@ -297,7 +297,7 @@ impl ChatView {
                     AGENTS,
                     slot.agents.as_ref().map_or(0, |card| 1 + card.rows.len()),
                 ),
-                Piece::Item(piece) => add(
+                Piece::Item(piece) | Piece::Rule(piece) => add(
                     piece,
                     laid.pieces.get(&piece).map_or(0, |laid| laid.blocks.len()),
                 ),
@@ -417,6 +417,7 @@ impl ChatView {
             .filter(|&(at, _)| at >= shape.answer || shape.open)
             .map(|(_, item)| match item {
                 Item::Words(text) | Item::Thought(text) | Item::Other(text) => blocks_text(text),
+                Item::Compacted(details) => Item::compacted_label(details),
                 Item::Tool(tool) => Card::of(tool).map_or_else(
                     || super::tool_text(tool.status, &tool.title),
                     |card| card.text(),

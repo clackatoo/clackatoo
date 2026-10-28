@@ -3637,6 +3637,8 @@ mod tests {
             end: Some(TurnEnd {
                 at: 2_000,
                 outcome: Outcome::Done,
+                raw: None,
+                spent: None,
             }),
             ..turn
         };
@@ -9465,6 +9467,8 @@ mod tests {
                 end: Some(TurnEnd {
                     at: 1,
                     outcome: Outcome::Done,
+                    raw: None,
+                    spent: None,
                 }),
                 files: None,
                 switch: None,

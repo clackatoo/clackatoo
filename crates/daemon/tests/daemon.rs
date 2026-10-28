@@ -2519,6 +2519,7 @@ fn tool_calls_are_kept_and_the_agent_asks_before_using_one() {
                 kind: ToolKind::Other,
                 content: Vec::new(),
                 locations: Vec::new(),
+                exit: None,
             }),
             // Its output in place of what it was for.
             Item::Tool(Tool {
@@ -2528,6 +2529,7 @@ fn tool_calls_are_kept_and_the_agent_asks_before_using_one() {
                 kind: ToolKind::Execute,
                 content: vec![ToolContent::Text("```console\nnotes.txt\n```".into())],
                 locations: Vec::new(),
+                exit: None,
             }),
             Item::Tool(Tool {
                 id: "t4".into(),
@@ -2543,6 +2545,7 @@ fn tool_calls_are_kept_and_the_agent_asks_before_using_one() {
                     path: "/notes.txt".into(),
                     line: Some(3),
                 }],
+                exit: None,
             }),
             Item::Words("done\n".into()),
         ]
@@ -2882,6 +2885,204 @@ fn the_agents_plan_shows_as_it_last_gave_it_until_the_next_message_after_its_all
     let mut other = daemon.client();
     let captured = other.capture(chat).unwrap().chat().unwrap().clone();
     assert_eq!(captured.plan, node.plan);
+}
+
+/// How `chat`'s last turn failed, in plain words, and in the agent's own.
+fn last_failure(chat: &ChatNode) -> (String, Option<String>) {
+    let end = chat.turns.last().and_then(|turn| turn.end.as_ref());
+    match end {
+        Some(clackatoo_protocol::TurnEnd {
+            outcome: Outcome::Failed(why),
+            raw,
+            ..
+        }) => (why.clone(), raw.clone()),
+        other => panic!("the turn didn't fail: {other:?}"),
+    }
+}
+
+#[test]
+fn a_failed_turn_says_why_in_plain_words_and_what_to_do_keeping_the_agents_own() {
+    let daemon = with_fake_codex(&[]);
+    let mut client = daemon.client();
+    let (claude, _) = start_chat_with(&mut client, "claude");
+    // Claude Code's adapter, asked for AIR's `sessionFailure`, ends the
+    // turn as if well, with the failure in its answer.
+    let node = ask(&mut client, claude, "usage-limit");
+    assert_eq!(
+        last_failure(&node),
+        (
+            "the account's usage limit is reached: You've hit your limit · resets 3pm".to_owned(),
+            Some("You've hit your limit · resets 3pm".to_owned())
+        )
+    );
+    // A sign-in that ran out mid-turn says how to sign in again.
+    let node = ask(&mut client, claude, "signed-out");
+    let (why, raw) = last_failure(&node);
+    assert!(why.contains("needs you to sign in again"), "{why}");
+    assert_eq!(raw.as_deref(), Some("Authentication required"));
+    // Codex's usage limit, in its words.
+    let pane = focused_pane(&mut client);
+    client.split_pane(pane, Side::Below, new_chat_with(Some("codex"))).unwrap();
+    let codex = newest_chat(&mut client);
+    wait_for_chat(&mut client, codex, |node| node.state == ChatState::Ready);
+    let node = ask(&mut client, codex, "usage-limit");
+    assert_eq!(
+        last_failure(&node).0,
+        "the account's usage limit is reached: You've hit your usage limit. Try again at 3:05 PM."
+    );
+}
+
+/// The pane focused in the first workspace's first tab.
+fn focused_pane(client: &mut Client) -> PaneId {
+    client.watch_workspaces().unwrap().list[0].tabs[0].focused
+}
+
+/// The chat with the highest number in the first workspace: the one made
+/// last.
+fn newest_chat(client: &mut Client) -> TerminalId {
+    let workspaces = client.watch_workspaces().unwrap();
+    *workspaces.list[0].terminals().iter().max_by_key(|chat| chat.0).unwrap()
+}
+
+#[test]
+fn a_chat_shows_its_agent_trying_again_until_it_goes_on_or_stops() {
+    let daemon = with_fake_codex(&[]);
+    let mut client = daemon.client();
+    let (claude, _) = start_chat_with(&mut client, "claude");
+    let node = ask(&mut client, claude, "retry");
+    assert_eq!(last_words(&node), "recovered\n");
+    assert_eq!(node.retrying, None);
+    client.chat(claude, ChatAction::Send("retry-wait".into())).unwrap();
+    wait_for_chat(&mut client, claude, |node| {
+        node.retrying.as_deref() == Some("Retrying Claude, attempt 1 of 10.")
+    });
+    client.chat(claude, ChatAction::Stop).unwrap();
+    let node = wait_for_chat(&mut client, claude, |node| last_outcome(node).is_some());
+    assert_eq!(node.retrying, None);
+    // Codex's, in its words.
+    let pane = focused_pane(&mut client);
+    client.split_pane(pane, Side::Below, new_chat_with(Some("codex"))).unwrap();
+    let codex = newest_chat(&mut client);
+    wait_for_chat(&mut client, codex, |node| node.state == ChatState::Ready);
+    client.chat(codex, ChatAction::Send("retry-wait".into())).unwrap();
+    wait_for_chat(&mut client, codex, |node| {
+        node.retrying.as_deref() == Some("Reconnecting... 1/5")
+    });
+}
+
+#[test]
+fn a_failed_message_is_sent_again_as_a_turn_of_its_own_and_only_a_failed_one() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    ask(&mut client, chat, "usage-limit");
+    client.chat(chat, ChatAction::Resend).unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.turns.len() == 2 && last_outcome(node).is_some()
+    });
+    assert_eq!(node.turns[1].prompt, "usage-limit");
+    assert!(matches!(last_outcome(&node), Some(Outcome::Failed(_))));
+    // One that went well isn't sent again.
+    ask(&mut client, chat, "hello");
+    client.chat(chat, ChatAction::Resend).unwrap();
+    let node = ask(&mut client, chat, "after");
+    assert_eq!(
+        (node.turns.iter()).map(|turn| turn.prompt.as_str()).collect::<Vec<_>>(),
+        ["usage-limit", "usage-limit", "hello", "after"]
+    );
+}
+
+#[test]
+fn compacting_the_context_shows_as_a_line_across_the_turn_for_claude_and_codex() {
+    let daemon = with_fake_codex(&[]);
+    let mut client = daemon.client();
+    let (claude, _) = start_chat_with(&mut client, "claude");
+    let node = ask(&mut client, claude, "compact");
+    let items = &node.turns.last().unwrap().items;
+    assert_eq!(items[0], Item::Compacted("automatic · 182k → 31k tokens".into()));
+    assert!(!items.iter().any(|item| matches!(item, Item::Tool(_))), "{items:?}");
+    let pane = focused_pane(&mut client);
+    client.split_pane(pane, Side::Below, new_chat_with(Some("codex"))).unwrap();
+    let codex = newest_chat(&mut client);
+    wait_for_chat(&mut client, codex, |node| node.state == ChatState::Ready);
+    let node = ask(&mut client, codex, "compact");
+    let items = &node.turns.last().unwrap().items;
+    assert_eq!(items[0], Item::Compacted(String::new()));
+    assert_eq!(last_words(&node), "compacted\n");
+}
+
+#[test]
+fn a_failed_commands_exit_code_and_what_a_turn_spent_are_kept() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let node = ask(&mut client, chat, "fail-command 2");
+    let tool = (node.turns.last().unwrap().items.iter())
+        .find_map(|item| match item {
+            Item::Tool(tool) => Some(tool.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!((tool.status, tool.exit), (clackatoo_protocol::ToolStatus::Failed, Some(2)));
+    let node = ask(&mut client, chat, "cost");
+    let cost = clackatoo_protocol::Cost {
+        micros: 42_100,
+        currency: *b"USD",
+    };
+    assert_eq!(node.usage.and_then(|usage| usage.cost), Some(cost));
+    let spent = node.turns.last().unwrap().end.as_ref().unwrap().spent;
+    assert_eq!(
+        spent,
+        Some(clackatoo_protocol::Spent {
+            input: 1000,
+            output: 200,
+            cached: 900,
+            cost: Some(cost),
+        })
+    );
+    // The session's cost stays through updates that don't say it.
+    let node = ask(&mut client, chat, "hello");
+    assert_eq!(node.usage.and_then(|usage| usage.cost), Some(cost));
+    assert_eq!(node.turns.last().unwrap().end.as_ref().unwrap().spent, None);
+}
+
+#[test]
+fn an_image_in_the_agents_words_shows_in_a_row_of_its_own() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    ask(&mut client, chat, "image");
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.turns.last().unwrap().items.iter().any(|item| {
+            matches!(item, Item::Tool(tool) if tool.id == "clackatoo-image-0"
+                && tool.content.iter().any(|content| matches!(content,
+                    clackatoo_protocol::ToolContent::Image(_))))
+        })
+    });
+    assert_eq!(last_words(&node), "shown\n");
+}
+
+#[test]
+fn an_answer_of_a_kind_not_known_is_offered_as_named_and_never_taken_for_yes() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    client.chat(chat, ChatAction::Send("ask-new".into())).unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let kinds: Vec<_> = (node.question.unwrap().choices.iter())
+        .map(|choice| (choice.id.clone(), choice.kind))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("allow".to_owned(), clackatoo_protocol::ChoiceKind::AllowOnce),
+            ("session".to_owned(), clackatoo_protocol::ChoiceKind::Other),
+            ("reject".to_owned(), clackatoo_protocol::ChoiceKind::RejectOnce),
+        ]
+    );
+    answer(&mut client, chat, Some("session".into()));
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert_eq!(last_words(&node), "picked session\n");
 }
 
 #[test]
@@ -3477,6 +3678,7 @@ fn an_accounts_limits_show_in_every_chat_of_its_agent_kept_to_sense() {
             size: 200_000,
             five_hour,
             weekly,
+            cost: None,
         })
     );
     // They're the account's: the other chat shows them at once, with its
@@ -3491,6 +3693,7 @@ fn an_accounts_limits_show_in_every_chat_of_its_agent_kept_to_sense() {
             size: 200_000,
             five_hour,
             weekly,
+            cost: None,
         })
     );
     // A chat started after shows them once it says its context.
@@ -3609,6 +3812,7 @@ fn a_codex_chat_shows_its_commands_output_and_its_own_settings() {
                 kind: ToolKind::Execute,
                 content: vec![ToolContent::Output("notes.txt\ntodo.txt\n".into())],
                 locations: Vec::new(),
+                exit: Some(0),
             }),
             Item::Words("done\n".into()),
         ]

@@ -616,6 +616,9 @@ pub fn next_second(node: &ChatNode, online: Online, now: u64) -> Option<u64> {
 /// One thing the agent did.
 fn item_view(item: &Item, open: &OpenChat, turn: usize, at: usize) -> Element {
     match item {
+        Item::Compacted(details) => el("div")
+            .class("compacted")
+            .text(&Item::compacted_label(details)),
         Item::Words(words) | Item::Other(words) => {
             el("div").class("words").children(markdown::render(words))
         }
@@ -787,11 +790,15 @@ pub fn footer(state: &State, node: Option<&ChatNode>) -> Element {
     {
         return footer.child(form_card(question.id, form));
     }
+    if let Some(retrying) = &node.retrying {
+        footer = footer.child(el("p").class("notice").text(retrying.clone()));
+    }
     if let Some(question) = &node.question {
         let choices = question.choices.iter().enumerate().map(|(index, choice)| {
             let kind = match choice.kind {
                 ChoiceKind::AllowOnce | ChoiceKind::AllowAlways => "allow",
                 ChoiceKind::RejectOnce | ChoiceKind::RejectAlways => "reject",
+                ChoiceKind::Other => "other",
             };
             el("button")
                 .class(kind)
@@ -1880,6 +1887,7 @@ mod tests {
                 path: "Cargo.toml".into(),
                 line: None,
             }],
+            exit: None,
         };
         let mut node = ChatNode::default();
         node.turns.push(Turn {
@@ -1895,6 +1903,8 @@ mod tests {
             end: Some(TurnEnd {
                 at: 43_000,
                 outcome: Outcome::Done,
+                raw: None,
+                spent: None,
             }),
             files: None,
             from: None,
@@ -2182,6 +2192,7 @@ mod tests {
                     resets: Some(1_760_543_400_000),
                 }),
                 weekly: None,
+                cost: None,
             }),
             ..ChatNode::default()
         }
@@ -2382,6 +2393,7 @@ mod tests {
             kind: clackatoo_protocol::ToolKind::Execute,
             content: Vec::new(),
             locations: Vec::new(),
+            exit: None,
         };
         let mut node = ChatNode {
             agent: "Claude Code".into(),
@@ -2474,6 +2486,8 @@ mod tests {
         node.turns[0].end = Some(TurnEnd {
             at: 20_000,
             outcome: Outcome::Done,
+            raw: None,
+            spent: None,
         });
         node.state = ChatState::Ready;
         assert_eq!(said(&node, 20_000), None);

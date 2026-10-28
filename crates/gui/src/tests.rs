@@ -790,6 +790,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
             kind: ToolKind::Read,
             content: Vec::new(),
             locations: Vec::new(),
+            exit: None,
         })
     };
     let build = Item::Tool(Tool {
@@ -805,6 +806,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
                 .repeat(10)
         ))],
         locations: Vec::new(),
+        exit: None,
     });
     let edit = Item::Tool(Tool {
         id: "edit".into(),
@@ -821,6 +823,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
             path: "/src/app/Cargo.toml".into(),
             line: Some(98),
         }],
+        exit: None,
     });
     ChatNode {
         turns: vec![
@@ -843,6 +846,8 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
                 end: Some(TurnEnd {
                     at: 1,
                     outcome: Outcome::Done,
+                    raw: None,
+                    spent: None,
                 }),
                 files: Some(TurnFiles {
                     count: 2,
@@ -894,6 +899,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
                 used: 12,
                 resets: Some(1_760_400_000_000),
             }),
+            cost: None,
         }),
         ..ChatNode::default()
     }
@@ -1218,6 +1224,8 @@ fn moved_chat_node() -> clackatoo_protocol::ChatNode {
             end: Some(TurnEnd {
                 at: 1,
                 outcome: Outcome::Done,
+                raw: None,
+                spent: None,
             }),
             files: None,
             from: None,
@@ -1354,6 +1362,8 @@ fn u_in_a_chat_undoes_the_last_turn_or_says_theres_none() {
                     end: Some(TurnEnd {
                         at: 0,
                         outcome: Outcome::Done,
+                        raw: None,
+                        spent: None,
                     }),
                     files,
                     switch: None,

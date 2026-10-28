@@ -39,6 +39,18 @@
 //! | `elicit-cancel` | As `elicit`, but 300 ms later no longer waits for the answer (`$/cancel_request`) |
 //! | `approve-plan` | Asks permission to leave plan mode, as Claude Code's adapter asks a client that asks as AIR does: its plan in the tool's input, the options that leave plan mode; then says which option was picked |
 //! | `commands SPEC` | Gives its slash commands, as `available_commands_update`: a word of SPEC each, `NAME` or `NAME:HINT`, each described `Does NAME`; then `commands given` |
+//! | `retry` | Says it's trying its request again, as Claude Code's adapter does to a client that asked for AIR's `sessionFailure` ("Retrying Claude, attempt 1 of 10."), or Codex's in `_meta.codex.error` ("Reconnecting... 1/5"); then says `recovered` |
+//! | `retry-wait` | As `retry`, but then waits until the message is cancelled |
+//! | `signed-out` | Refuses the message with ACP's `-32000`, as a sign-in that ran out mid-turn |
+//! | `usage-limit` | Fails as the account's usage limit is reached: as AIR's `sessionFailure` on the answer, to a client that asked for it; as Codex's `usageLimitExceeded` with `--codex`; else as Claude Code's SDK's `billing_error` |
+//! | `compact` | Compacts its context: a tool call "Compact conversation" as Claude Code's adapter says one, finished with its facts, or with `--codex`, Codex's words for it; then `compacted` |
+//! | `fail-command N` | Runs `false` in a terminal, which fails with exit code N; then `failed` |
+//! | `cost` | Says the session has cost $0.0421, then 1200 tokens more, `spent`, and answers with what the turn spent |
+//! | `image` | Shows a small image in its words, then `shown` |
+//! | `ask-new` | As `ask`, with an answer between allow and reject of a kind no build knows, `allow_for_session` |
+//!
+//! It lists the sessions it kept two at a time, as pages, saying where the
+//! next page starts in `nextCursor`.
 //! | anything else | `echo:` and the message, in two pieces |
 //!
 //! Asked to stop a task (`_session/async_task/stop`), it says it stopped
@@ -153,6 +165,7 @@ fn main() {
         log: value("--log"),
         codex: flag("--codex"),
         async_tasks: false,
+        session_failure: false,
         notices: false,
         forms: false,
         elicited: None,
@@ -221,6 +234,8 @@ fn main() {
 struct Fake {
     /// Whether the client asked for AIR's `asyncTasks`.
     async_tasks: bool,
+    /// Whether the client asked for AIR's `sessionFailure`.
+    session_failure: bool,
     /// Whether the client can show notices.
     notices: bool,
     /// Whether the client can show forms and links to open.
@@ -568,6 +583,21 @@ fn hang_up(session: &str, id: &Value, until: Option<&str>, waiting: &[(Value, St
     std::process::exit(0);
 }
 
+/// A small PNG, a red and blue gradient, in base64.
+fn small_png() -> String {
+    use base64::Engine;
+    let image = image::RgbImage::from_fn(96, 64, |x, y| {
+        image::Rgb([
+            u8::try_from(200 - x).unwrap(),
+            60,
+            u8::try_from(y * 3 + 40).unwrap(),
+        ])
+    });
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(bytes.get_ref())
+}
+
 fn done(id: &Value, reason: &str) {
     reply(id, &json!({ "stopReason": reason }));
 }
@@ -682,10 +712,12 @@ impl Fake {
         match message.get("method").and_then(Value::as_str) {
             Some("initialize") if self.mute_init => {}
             Some("initialize") => {
-                self.async_tasks = (params.pointer("/clientCapabilities/_meta/jetbrains/air"))
+                let air = (params.pointer("/clientCapabilities/_meta/jetbrains/air"))
                     .filter(|air| air["version"] == 1)
-                    .and_then(|air| air["capabilities"].as_array())
-                    .is_some_and(|asked| asked.iter().any(|asked| asked == "asyncTasks"));
+                    .and_then(|air| air["capabilities"].as_array());
+                let asked = |what: &str| air.is_some_and(|air| air.iter().any(|asked| asked == what));
+                self.async_tasks = asked("asyncTasks");
+                self.session_failure = asked("sessionFailure");
                 self.notices = params
                     .pointer("/clientCapabilities/session/notices")
                     .is_some_and(Value::is_object);
@@ -795,7 +827,16 @@ impl Fake {
                         sessions.push(json!({ "sessionId": session, "cwd": dir }));
                     }
                 }
-                reply(&id, &json!({ "sessions": sessions }));
+                // Two a page, as an agent with many lists them in pages.
+                let from: usize = (params["cursor"].as_str())
+                    .and_then(|cursor| cursor.parse().ok())
+                    .unwrap_or(0);
+                let page: Vec<Value> = sessions.iter().skip(from).take(2).cloned().collect();
+                let mut answer = json!({ "sessions": page });
+                if from + 2 < sessions.len() {
+                    answer["nextCursor"] = (from + 2).to_string().into();
+                }
+                reply(&id, &answer);
             }
             Some("session/load") if self.load => {
                 let cwd = params["cwd"].as_str().unwrap().to_owned();
@@ -1024,6 +1065,146 @@ impl Fake {
         }
     }
 
+    /// Answers the scripts of what agents say of a turn beyond their
+    /// words, `retry` to `ask-new`, the message `id` in `session`.
+    /// Returns whether `text` was one.
+    #[allow(clippy::too_many_lines, reason = "one arm for each script, most short")]
+    fn facts(&mut self, id: &Value, session: &str, text: &str) -> bool {
+        match text {
+            "retry" | "retry-wait" => {
+                let meta = if self.codex {
+                    json!({ "codex": { "error": { "message": "Reconnecting... 1/5",
+                        "codexErrorInfo": null, "turnId": "turn-1", "willRetry": true } } })
+                } else if self.session_failure {
+                    json!({ "jetbrains": { "air": { "version": 1, "sessionFailure": {
+                        "id": "u1:error", "revision": 1, "category": "service",
+                        "severity": "warning", "title": "Retrying Claude, attempt 1 of 10.",
+                        "actions": [] } } } })
+                } else {
+                    json!({})
+                };
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "session_info_update", "_meta": meta }),
+                );
+                if text == "retry-wait" {
+                    self.waits.push((id.clone(), session.to_owned()));
+                } else {
+                    say(session, "recovered\n");
+                    done(id, "end_turn");
+                }
+            }
+            "signed-out" => send(&json!({ "jsonrpc": "2.0", "id": id,
+                "error": { "code": -32000, "message": "Authentication required" } })),
+            "usage-limit" if self.codex => send(&json!({ "jsonrpc": "2.0", "id": id,
+                "error": { "code": -32603, "message": "Internal error", "data": {
+                    "message": "You've hit your usage limit. Try again at 3:05 PM.",
+                    "codexErrorInfo": "usageLimitExceeded" } } })),
+            "usage-limit" if self.session_failure => reply(
+                id,
+                &json!({ "stopReason": "end_turn",
+                    "usage": { "totalTokens": 0, "inputTokens": 0, "outputTokens": 0 },
+                    "_meta": { "jetbrains": { "air": { "version": 1, "sessionFailure": {
+                        "id": "u1:error", "revision": 1, "category": "limit",
+                        "severity": "error", "title": "You've hit your limit · resets 3pm",
+                        "actions": [] } } } } }),
+            ),
+            "usage-limit" => send(&json!({ "jsonrpc": "2.0", "id": id,
+                "error": { "code": -32603, "message": "Internal error: Credit balance is too low",
+                    "data": { "errorKind": "billing_error" } } })),
+            "compact" if self.codex => {
+                say(session, "*Context compacted to fit the model's context window.*\n\n");
+                say(session, "compacted\n");
+                done(id, "end_turn");
+            }
+            "compact" => {
+                let facts = json!({ "trigger": "automatic", "preTokens": 182_000,
+                                    "postTokens": 31_000, "durationMs": 9000 });
+                let (opening, closing) = if self.async_tasks {
+                    let air = |facts: Value| json!({ "jetbrains": { "air": {
+                        "version": 1, "contextCompaction": facts } } });
+                    (air(json!({ "version": 1 })), air(facts.clone()))
+                } else {
+                    let named = json!({ "claudeCode": { "toolName": "compact" } });
+                    (named.clone(), named)
+                };
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "tool_call", "toolCallId": "c1",
+                             "title": "Compact conversation", "kind": "think",
+                             "status": "in_progress", "_meta": opening }),
+                );
+                let mut finished = json!({ "sessionUpdate": "tool_call_update",
+                    "toolCallId": "c1", "status": "completed", "_meta": closing });
+                if !self.async_tasks {
+                    finished["rawOutput"] = facts;
+                }
+                update(session, &finished);
+                say(session, "compacted\n");
+                done(id, "end_turn");
+            }
+            failing if failing.starts_with("fail-command ") => {
+                let code: i64 = failing["fail-command ".len()..].parse().unwrap_or(1);
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "tool_call", "toolCallId": "x1", "kind": "execute",
+                             "title": "false", "status": "in_progress",
+                             "_meta": { "terminal_info": { "terminal_id": "x1" } } }),
+                );
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "x1",
+                             "status": "failed", "_meta": { "terminal_exit": {
+                                 "exit_code": code, "signal": null, "terminal_id": "x1" } } }),
+                );
+                say(session, "failed\n");
+                done(id, "end_turn");
+            }
+            "cost" => {
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "usage_update", "used": 2200, "size": 200_000,
+                             "cost": { "amount": 0.0421, "currency": "USD" } }),
+                );
+                say(session, "spent\n");
+                reply(
+                    id,
+                    &json!({ "stopReason": "end_turn",
+                        "usage": { "totalTokens": 1200, "inputTokens": 100,
+                                   "outputTokens": 200, "cachedReadTokens": 900,
+                                   "cachedWriteTokens": 0 },
+                        "_meta": { "quota": { "token_count": null, "model_usage": [] } } }),
+                );
+            }
+            "image" => {
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "agent_message_chunk",
+                             "content": { "type": "image", "mimeType": "image/png",
+                                          "data": small_png() } }),
+                );
+                say(session, "shown\n");
+                done(id, "end_turn");
+            }
+            "ask-new" => {
+                send(
+                    &json!({ "jsonrpc": "2.0", "id": "p1", "method": "session/request_permission",
+                    "params": { "sessionId": session,
+                        "toolCall": { "toolCallId": "t2", "title": "Write notes.txt" },
+                        "options": [
+                            { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                            { "optionId": "session", "name": "Allow for this session",
+                              "kind": "allow_for_session" },
+                            { "optionId": "reject", "name": "Reject", "kind": "reject_once" },
+                        ] } }),
+                );
+                self.waiting = Some((id.clone(), session.to_owned()));
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// Takes the answer to the permission to write a file itself, if
     /// `id` is its: writes it, if it's allowed to.
     fn edit_answered(&mut self, id: &Value, message: &Value) {
@@ -1059,6 +1240,9 @@ impl Fake {
             return true;
         }
         if self.file(&id, &session, text) {
+            return true;
+        }
+        if self.facts(&id, &session, text) {
             return true;
         }
         match text {

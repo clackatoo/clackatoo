@@ -96,6 +96,7 @@ impl Activity {
                 crate::ToolContent::Output(format!("$ {}\n{}", self.command, self.result)),
             ],
             locations: Vec::new(),
+            exit: None,
         }
     }
 }

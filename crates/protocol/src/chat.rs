@@ -100,6 +100,15 @@ pub struct ChatNode {
         deserialize_with = "wire::since::<{ wire::AGENT_COMMANDS }, _, _>"
     )]
     pub commands: Vec<AgentCommand>,
+    /// What the agent says as it tries its request to the model again,
+    /// as "Retrying Claude, attempt 2 of 10.", while the turn answering
+    /// waits on that: `None` once it's going again, or not answering.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CHAT_FACTS }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAT_FACTS }, _, _>"
+    )]
+    pub retrying: Option<String>,
 }
 
 /// A slash command an agent offers, typed as `/name` at the start of a
@@ -533,6 +542,82 @@ pub struct Usage {
         deserialize_with = "wire::since::<{ wire::LIMITS }, _, _>"
     )]
     pub weekly: Option<Limit>,
+    /// What the session has cost so far, where the agent says: Claude
+    /// Code's adapter does.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CHAT_FACTS }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAT_FACTS }, _, _>"
+    )]
+    pub cost: Option<Cost>,
+}
+
+/// An amount of money an agent says something cost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cost {
+    /// How much, in millionths of the currency: a dollar is 1 000 000.
+    pub micros: u64,
+    /// The currency, as its ISO 4217 code in capitals: `*b"USD"`.
+    pub currency: [u8; 3],
+}
+
+impl Cost {
+    /// The cost of `amount` in `currency`, as an agent says it: `None`
+    /// for an amount that's negative, not a number or past any bill, or
+    /// a currency that isn't three letters.
+    #[must_use]
+    pub fn of(amount: f64, currency: &str) -> Option<Self> {
+        let code: [u8; 3] = currency.as_bytes().try_into().ok()?;
+        if !code.iter().all(u8::is_ascii_alphabetic) || !amount.is_finite() || amount < 0.0 {
+            return None;
+        }
+        let micros = (amount * 1_000_000.0).round();
+        // A million a session is no agent's.
+        if micros > 1e12 {
+            return None;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "checked finite, not negative and small above"
+        )]
+        let micros = micros as u64;
+        Some(Self {
+            micros,
+            currency: code.map(|byte| byte.to_ascii_uppercase()),
+        })
+    }
+
+    /// The cost as it's shown: "$0.42", "$0.0031" below a cent, or
+    /// "1.20 EUR" in another currency.
+    #[must_use]
+    pub fn label(&self) -> String {
+        let amount = if self.micros > 0 && self.micros < 10_000 {
+            let shown = format!("0.{:06}", self.micros);
+            shown.trim_end_matches('0').to_owned()
+        } else {
+            let cents = (self.micros + 5_000) / 10_000;
+            format!("{}.{:02}", cents / 100, cents % 100)
+        };
+        match &self.currency {
+            b"USD" => format!("${amount}"),
+            code => format!("{amount} {}", String::from_utf8_lossy(code)),
+        }
+    }
+
+    /// What's been spent since `before`, in the same currency: all of it
+    /// if nothing was before; `None` if before was in another currency,
+    /// or more, as when the agent started again.
+    #[must_use]
+    pub fn since(&self, before: Option<Self>) -> Option<Self> {
+        let Some(before) = before else {
+            return Some(*self);
+        };
+        (before.currency == self.currency && before.micros <= self.micros).then(|| Self {
+            micros: self.micros - before.micros,
+            currency: self.currency,
+        })
+    }
 }
 
 impl Usage {
@@ -830,6 +915,48 @@ pub struct TurnEnd {
     pub at: u64,
     /// How.
     pub outcome: Outcome,
+    /// What the agent itself said of a failure, word for word, where
+    /// that isn't what [`Outcome::Failed`] says: that's put in plain
+    /// words, with what to do.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CHAT_FACTS }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAT_FACTS }, _, _>"
+    )]
+    pub raw: Option<String>,
+    /// What the turn spent, where the agent says.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CHAT_FACTS }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAT_FACTS }, _, _>"
+    )]
+    pub spent: Option<Spent>,
+}
+
+/// What a turn spent, as its agent says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spent {
+    /// Tokens the model read, those read from its cache included.
+    pub input: u64,
+    /// Tokens it wrote.
+    pub output: u64,
+    /// Of those it read, how many came from its cache.
+    pub cached: u64,
+    /// What it cost, if the agent says.
+    pub cost: Option<Cost>,
+}
+
+impl Spent {
+    /// What's shown under the turn: "12k tokens · $0.04".
+    #[must_use]
+    pub fn label(&self) -> String {
+        let tokens = self.input.saturating_add(self.output);
+        let mut label = format!("{} tokens", self::tokens(tokens));
+        if let Some(cost) = self.cost {
+            let _ = write!(label, " · {}", cost.label());
+        }
+        label
+    }
 }
 
 /// How a turn ended.
@@ -855,6 +982,24 @@ pub enum Item {
     /// Something newer than the client, which a newer daemon sent in place
     /// of it, as text to show: what it was.
     Other(String),
+    /// The agent compacted its context to make room, the conversation
+    /// before giving way to a summary of it: shown as a line across the
+    /// turn, with what the agent says of it, as "automatic · 182k → 31k
+    /// tokens", or nothing.
+    Compacted(String),
+}
+
+impl Item {
+    /// What the line an [`Item::Compacted`] with `details` is shown as
+    /// says.
+    #[must_use]
+    pub fn compacted_label(details: &str) -> String {
+        if details.is_empty() {
+            "Context compacted".to_owned()
+        } else {
+            format!("Context compacted · {details}")
+        }
+    }
 }
 
 /// A tool the agent used, such as reading a file or running a command.
@@ -874,6 +1019,13 @@ pub struct Tool {
     /// Where in files it works, as the agent says: a change to a file is
     /// at the line its location gives.
     pub locations: Vec<Location>,
+    /// The code the command it ran exited with, where the agent says.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CHAT_FACTS }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAT_FACTS }, _, _>"
+    )]
+    pub exit: Option<i32>,
 }
 
 /// A file a tool works in, and where in it.
@@ -1144,6 +1296,10 @@ pub enum ChoiceKind {
     RejectOnce,
     /// No, and don't ask again.
     RejectAlways,
+    /// An answer this build doesn't know the meaning of, shown as the
+    /// agent names it: never taken for yes or for no, nor chosen for the
+    /// user.
+    Other,
 }
 
 /// A chat as the list of chats shows it: enough to say which need the
@@ -1326,6 +1482,8 @@ pub enum ChatPatch {
     Plan(Vec<PlanStep>),
     /// The slash commands the agent offers are now these.
     Commands(Vec<AgentCommand>),
+    /// What the agent says as it tries again is now this.
+    Retrying(Option<String>),
 }
 
 /// A small, decoded image for chat history. Shared by snapshots and paint
@@ -1537,6 +1695,9 @@ pub enum ChatAction {
         /// The answer.
         reply: crate::FormReply,
     },
+    /// Send the last turn's message, which failed, again, with its
+    /// images, as a turn of its own. Requires `wire::CHAT_FACTS`.
+    Resend,
 }
 
 /// The number turn `index` of `turns` goes by, as people count them: from
@@ -1629,6 +1790,7 @@ impl ChatNode {
             tasks: self.tasks.clone(),
             plan: self.plan.clone(),
             commands: self.commands.clone(),
+            retrying: self.retrying.clone(),
             first_turn: self
                 .first_turn
                 .saturating_add(u32::try_from(start).unwrap_or(u32::MAX)),
@@ -1711,6 +1873,7 @@ impl ChatNode {
             ChatPatch::Tasks(tasks) => self.tasks = tasks,
             ChatPatch::Plan(plan) => self.plan = plan,
             ChatPatch::Commands(commands) => self.commands = commands,
+            ChatPatch::Retrying(retrying) => self.retrying = retrying,
             ChatPatch::History {
                 first,
                 before,
@@ -1750,6 +1913,9 @@ impl ChatNode {
                         text.push_str("\n\n");
                     }
                     Item::Thought(_) => {}
+                    Item::Compacted(details) => {
+                        let _ = write!(text, "— {} —\n\n", Item::compacted_label(details));
+                    }
                     Item::Tool(tool) => {
                         let mark = match tool.status {
                             ToolStatus::Running => "…",
@@ -2072,6 +2238,7 @@ mod tests {
             size,
             five_hour: None,
             weekly: None,
+            cost: None,
         };
         assert_eq!(usage(84_000, 200_000).percent(), Some(42));
         assert_eq!(usage(0, 200_000).percent(), Some(0));
@@ -2087,6 +2254,7 @@ mod tests {
             size,
             five_hour: None,
             weekly: None,
+            cost: None,
         }
     }
 
@@ -2206,6 +2374,7 @@ mod tests {
             kind,
             content: Vec::new(),
             locations: Vec::new(),
+            exit: None,
         })
     }
 
@@ -2267,6 +2436,8 @@ mod tests {
         chat.turns.last_mut().unwrap().end = Some(TurnEnd {
             at: 1,
             outcome: Outcome::Done,
+            raw: None,
+            spent: None,
         });
         chat.state = ChatState::Ready;
         assert!(!chat.working() && chat.doing().is_none());
@@ -2332,6 +2503,8 @@ mod tests {
         chat.turns[0].end = Some(TurnEnd {
             at: 600,
             outcome: Outcome::Failed("couldn't start".into()),
+            raw: None,
+            spent: None,
         });
         assert_eq!(chat.doing().as_deref(), Some("Starting Claude Code"));
         assert_eq!(chat.counted_from(), Some(1_000));
@@ -2339,6 +2512,8 @@ mod tests {
         chat.turns[0].end = Some(TurnEnd {
             at: 600,
             outcome: Outcome::Stopped,
+            raw: None,
+            spent: None,
         });
         assert_eq!(chat.doing().as_deref(), Some("Loading the session"));
         assert_eq!(chat.counted_from(), None, "no seconds while it loads");

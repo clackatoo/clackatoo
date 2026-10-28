@@ -643,7 +643,7 @@ mod tests {
         // A command it's asking to run isn't running yet.
         start_command(&mut daemon, chat);
         let tool = serde_json::from_value(json!({ "toolCallId": "c" })).unwrap();
-        daemon.chat(chat).unwrap().ask(json!(9), &tool, &[]);
+        daemon.chat(chat).unwrap().ask(json!(9), &tool, &[], &[]);
         write(&mut daemon, id, &path, "three\n");
         assert!(!daemon.disk.noted.contains_key(&id));
         assert!(daemon.buffers[&id].stale());

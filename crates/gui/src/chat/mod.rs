@@ -2631,6 +2631,7 @@ fn touches(patch: &clackatoo_protocol::ChatPatch) -> Option<usize> {
         | ChatPatch::Tasks(_)
         | ChatPatch::Plan(_)
         | ChatPatch::Commands(_)
+        | ChatPatch::Retrying(_)
         | ChatPatch::History { .. } => None,
     }
 }
@@ -4198,6 +4199,8 @@ mod tests {
                 end: Some(TurnEnd {
                     at: 0,
                     outcome: Outcome::Done,
+                    raw: None,
+                    spent: None,
                 }),
                 files: Some(TurnFiles { count: 2, state }),
                 switch: None,
@@ -4394,6 +4397,7 @@ mod tests {
             kind: ToolKind::Read,
             content: Vec::new(),
             locations: Vec::new(),
+            exit: None,
         }));
         // Still going.
         node.turns[0].end = None;
@@ -4520,6 +4524,7 @@ mod tests {
                 resets: None,
             }),
             weekly: None,
+            cost: None,
         });
         view
     }
@@ -4578,6 +4583,7 @@ mod tests {
             size: 200_000,
             five_hour: None,
             weekly: None,
+            cost: None,
         });
         fixtures::paint(&mut view, &mut fonts);
         let meter = drawn_at(&view, &Hit::Usage).expect("the meter");

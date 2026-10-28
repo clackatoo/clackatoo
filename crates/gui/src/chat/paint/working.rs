@@ -280,6 +280,7 @@ mod tests {
             kind,
             content: Vec::new(),
             locations: Vec::new(),
+            exit: None,
         })
     }
 
@@ -379,6 +380,8 @@ mod tests {
         earlier.end = Some(TurnEnd {
             at: SENT - 1,
             outcome: Outcome::Done,
+            raw: None,
+            spent: None,
         });
         node.turns.insert(0, earlier);
         let mut chat = ChatView::new(String::new(), node);
@@ -434,6 +437,8 @@ mod tests {
         done.end = Some(TurnEnd {
             at: SENT + 13_000,
             outcome: Outcome::Done,
+            raw: None,
+            spent: None,
         });
         chat.apply(&ViewUpdate::Patch(vec![
             Patch::Chat(ChatPatch::Turn {
@@ -577,6 +582,8 @@ mod tests {
         done.end = Some(TurnEnd {
             at: SENT + 1,
             outcome: Outcome::Done,
+            raw: None,
+            spent: None,
         });
         chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
             index: 0,

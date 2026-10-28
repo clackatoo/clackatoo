@@ -228,6 +228,7 @@ mod tests {
             kind: ToolKind::Read,
             content: Vec::new(),
             locations: Vec::new(),
+            exit: None,
         })
     }
 
@@ -251,6 +252,8 @@ mod tests {
                     end: Some(TurnEnd {
                         at: 10_000 + 4 * 60_000 + 58_000,
                         outcome: Outcome::Done,
+                        raw: None,
+                        spent: None,
                     }),
                     files: None,
                     switch: None,
@@ -388,6 +391,8 @@ mod tests {
         done.end = Some(TurnEnd {
             at: 401_500,
             outcome: Outcome::Done,
+            raw: None,
+            spent: None,
         });
         chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
             index: 1,

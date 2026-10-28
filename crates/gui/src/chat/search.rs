@@ -714,6 +714,7 @@ impl ChatView {
         let index = piece.checked_sub(ITEMS)?;
         let owned = match at.items.get(index) {
             Some(Item::Words(text) | Item::Thought(text) | Item::Other(text)) => blocks_text(text),
+            Some(Item::Compacted(details)) => Item::compacted_label(details),
             Some(Item::Tool(tool)) => card_text(tool),
             None => card_text(activities.get(index - at.items.len())?),
         };
@@ -768,6 +769,7 @@ impl ChatView {
             .filter(|&(index, item)| !folded_away(shape, index, item))
             .map(|(_, item)| match item {
                 Item::Words(text) | Item::Thought(text) | Item::Other(text) => text.len(),
+                Item::Compacted(details) => Item::compacted_label(details).len(),
                 Item::Tool(found) => tool(found),
             })
             .sum::<usize>();
@@ -1179,6 +1181,7 @@ mod tests {
             kind: ToolKind::Execute,
             content,
             locations: Vec::new(),
+            exit: None,
         })
     }
 

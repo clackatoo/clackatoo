@@ -67,7 +67,8 @@ use std::cell::Cell;
 use serde::{Deserialize, Deserializer};
 
 use crate::{
-    Answer, BufferUpdate, ChatPatch, ClientMessage, ConnectionState, Content, Done, Error, Event,
+    Answer, BufferUpdate, ChatPatch, ChoiceKind, ClientMessage, ConnectionState, Content, Done,
+    Error, Event,
     FilesUpdate, Found, Item, Node, PROTOCOL_VERSION, Patch, Response, ServerMessage, Setting,
     SettingKind, ToolContent, Turn, ViewUpdate, Workspaces,
 };
@@ -286,6 +287,15 @@ gates! {
     /// The slash commands the agent offers: `ChatNode`'s `commands`
     /// (`AgentCommand`) and `ChatPatch::Commands`.
     AGENT_COMMANDS = 114,
+    /// What an agent says of a turn beyond its words: that it's trying
+    /// again, `ChatNode`'s `retrying` and `ChatPatch::Retrying`; that it
+    /// compacted its context, `Item::Compacted`; a command's exit code,
+    /// `Tool`'s `exit`; a failure in the agent's own words, `TurnEnd`'s
+    /// `raw`, and what a turn spent, its `spent` (`Spent`, `Cost`); what
+    /// a session cost, `Usage`'s `cost`; an answer of a kind the daemon
+    /// doesn't know, `ChoiceKind::Other`; and sending a failed message
+    /// again, `ChatAction::Resend`.
+    CHAT_FACTS = 115,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -421,6 +431,7 @@ impl Since for Item {
         match self {
             Self::Words(_) | Self::Thought(_) | Self::Tool(_) => EARLIER,
             Self::Other(_) => FALLBACKS,
+            Self::Compacted(_) => CHAT_FACTS,
         }
     }
 }
@@ -458,6 +469,16 @@ impl Since for ChatPatch {
             Self::Tasks(_) => AGENT_TASKS,
             Self::Plan(_) => AGENT_PLAN,
             Self::Commands(_) => AGENT_COMMANDS,
+            Self::Retrying(_) => CHAT_FACTS,
+        }
+    }
+}
+
+impl Since for ChoiceKind {
+    fn since(&self) -> u32 {
+        match self {
+            Self::AllowOnce | Self::AllowAlways | Self::RejectOnce | Self::RejectAlways => EARLIER,
+            Self::Other => CHAT_FACTS,
         }
     }
 }
@@ -890,6 +911,7 @@ fn newest_in_node(node: &Node) -> u32 {
         Node::Chat(chat) => (chat.turns.iter())
             .map(newest_in_turn)
             .chain([newest_in_settings(&chat.settings)])
+            .chain([newest_in_question(chat.question.as_ref())])
             .max()
             .unwrap_or(EARLIER),
         Node::Grid(_) | Node::Other => node.since(),
@@ -899,6 +921,14 @@ fn newest_in_node(node: &Node) -> u32 {
 fn newest_in_settings(settings: &[Setting]) -> u32 {
     (settings.iter())
         .map(|setting| setting.kind.since())
+        .max()
+        .unwrap_or(EARLIER)
+}
+
+fn newest_in_question(question: Option<&crate::Question>) -> u32 {
+    (question.into_iter())
+        .flat_map(|question| &question.choices)
+        .map(|choice| choice.kind.since())
         .max()
         .unwrap_or(EARLIER)
 }
@@ -917,7 +947,7 @@ fn newest_in_item(item: &Item) -> u32 {
             .map(Since::since)
             .max()
             .unwrap_or(EARLIER),
-        Item::Words(_) | Item::Thought(_) | Item::Other(_) => item.since(),
+        Item::Words(_) | Item::Thought(_) | Item::Other(_) | Item::Compacted(_) => item.since(),
     }
 }
 
@@ -926,6 +956,7 @@ fn newest_in_patch(patch: &ChatPatch) -> u32 {
         ChatPatch::Turn { turn, .. } => newest_in_turn(turn),
         ChatPatch::Item { value, .. } => newest_in_item(value),
         ChatPatch::Settings(settings) => newest_in_settings(settings),
+        ChatPatch::Question(question) => newest_in_question(question.as_ref()),
         ChatPatch::History { turns, .. } => {
             turns.iter().map(newest_in_turn).max().unwrap_or(EARLIER)
         }
@@ -1037,6 +1068,7 @@ fn chat_action_since(action: &crate::ChatAction) -> u32 {
     use crate::ChatAction;
     match action {
         ChatAction::Fill { .. } => ELICITATION,
+        ChatAction::Resend => CHAT_FACTS,
         ChatAction::StopTask { .. } => AGENT_TASKS,
         ChatAction::RefreshUsage { .. } => PROVIDER_USAGE,
         ChatAction::Submit { .. }
@@ -1101,6 +1133,54 @@ fn without_tool_images(message: &ServerMessage) -> ServerMessage {
     message
 }
 
+/// `message` as a peer from before `CHAT_FACTS` reads it: a line across a
+/// turn where the agent compacted its context as words saying so, and
+/// answers of a kind the daemon doesn't know left out of a question, so
+/// that no older window takes one for yes or for no.
+fn without_chat_facts(message: &ServerMessage) -> ServerMessage {
+    fn item(item: &mut Item) {
+        if let Item::Compacted(details) = item {
+            *item = Item::Other(format!("*{}*", Item::compacted_label(details)));
+        }
+    }
+    fn turn(turn: &mut Turn) {
+        turn.items.iter_mut().for_each(item);
+    }
+    fn question(question: &mut Option<crate::Question>) {
+        if let Some(question) = question {
+            (question.choices).retain(|choice| choice.kind != ChoiceKind::Other);
+        }
+    }
+    fn node(node: &mut Node) {
+        if let Node::Chat(chat) = node {
+            chat.turns.iter_mut().for_each(turn);
+            question(&mut chat.question);
+        }
+    }
+    let mut message = message.clone();
+    match &mut message {
+        ServerMessage::Response(Response::View(view)) => node(&mut view.root),
+        ServerMessage::Event(Event::View { update, .. }) => match update {
+            ViewUpdate::Snapshot(view) => node(&mut view.root),
+            ViewUpdate::Patch(patches) => {
+                for patch in patches {
+                    match patch {
+                        Patch::Chat(ChatPatch::Turn { turn: value, .. }) => turn(value),
+                        Patch::Chat(ChatPatch::Item { value, .. }) => item(value),
+                        Patch::Chat(ChatPatch::History { turns, .. }) => {
+                            turns.iter_mut().for_each(turn);
+                        }
+                        Patch::Chat(ChatPatch::Question(value)) => question(value),
+                        _ => {}
+                    }
+                }
+            }
+        },
+        _ => {}
+    }
+    message
+}
+
 /// Informative chat updates can be omitted for clients without their controls.
 fn without_optional_chat_updates(message: &ServerMessage, wire: u32) -> Option<ServerMessage> {
     let ServerMessage::Event(Event::View {
@@ -1111,7 +1191,8 @@ fn without_optional_chat_updates(message: &ServerMessage, wire: u32) -> Option<S
         return None;
     };
     let unsupported = |patch: &Patch| {
-        matches!(patch, Patch::Chat(ChatPatch::Commands(_)) if wire < AGENT_COMMANDS)
+        matches!(patch, Patch::Chat(ChatPatch::Retrying(_)) if wire < CHAT_FACTS)
+            || matches!(patch, Patch::Chat(ChatPatch::Commands(_)) if wire < AGENT_COMMANDS)
             || matches!(patch, Patch::Chat(ChatPatch::Plan(_)) if wire < AGENT_PLAN)
             || matches!(patch, Patch::Chat(ChatPatch::Tasks(_)) if wire < AGENT_TASKS)
             || matches!(patch, Patch::Chat(ChatPatch::Activities(_)) if wire < HARNESS)
@@ -1176,9 +1257,16 @@ impl Downgrade for ServerMessage {
         if let Some(edited) = reversed_as_edited(self) {
             return Downgraded::To(edited);
         }
-        if wire < AGENT_COMMANDS
+        if wire < CHAT_FACTS
             && let Some(older) = without_optional_chat_updates(self, wire)
         {
+            return match older.downgrade(wire) {
+                Downgraded::AsIs => Downgraded::To(older),
+                other => other,
+            };
+        }
+        if wire < CHAT_FACTS && newest(self) == CHAT_FACTS {
+            let older = without_chat_facts(self);
             return match older.downgrade(wire) {
                 Downgraded::AsIs => Downgraded::To(older),
                 other => other,
@@ -1361,6 +1449,7 @@ mod tests {
                     rgba: vec![1, 2, 3, 255].into(),
                 }),
             ],
+            exit: None,
         };
         let message = ServerMessage::Event(Event::View {
             terminal: crate::TerminalId(1),

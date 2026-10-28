@@ -143,6 +143,22 @@ pub(crate) fn extract(update: &mut SessionUpdate) -> Option<(String, Vec<Source>
     (!sources.is_empty()).then(|| (id.0.to_string(), sources))
 }
 
+/// The image in `update`, if it's a piece of the agent's words that's an
+/// image given inline, which it leaves empty: within the same size caps as
+/// a tool's.
+pub(crate) fn extract_message(update: &mut SessionUpdate) -> Option<Source> {
+    let SessionUpdate::AgentMessageChunk(chunk) = update else {
+        return None;
+    };
+    let ContentBlock::Image(image) = &mut chunk.content else {
+        return None;
+    };
+    if !image.mime_type.starts_with("image/") {
+        return None;
+    }
+    inline(&mut image.data, &mut 0)
+}
+
 fn inline(data: &mut String, bytes: &mut usize) -> Option<Source> {
     if data.is_empty() || data.len() > BYTES.saturating_sub(*bytes) {
         return None;
