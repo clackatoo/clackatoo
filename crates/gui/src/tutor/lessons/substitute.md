@@ -176,7 +176,7 @@ cats and dogs
 
 ## Shown as you type
 
-While you type a search, the cursor goes to the match it would find from where you started, the view follows, and the matches light up, as Neovim's `incsearch` shows them. Backspace shows it afresh. Esc puts the cursor and the view back; Enter keeps them, and is the search. It works the same in a terminal's normal mode, a chat, an explorer, a board and a review, and a count before `/` goes to that match. `:set noincsearch` moves nothing until Enter.
+While you type a search, the cursor goes to the match it would find from where you started, the view follows, and the matches light up, as Neovim's `incsearch` shows them. Backspace shows it afresh. Esc puts the cursor and the view back; Enter keeps them, and is the search. It works the same in a terminal's normal mode, a chat, an explorer, a board and a review. A count before `/` goes to that match: an explorer, a board and a review show it as you type, the rest once you press Enter. `:set noincsearch` moves nothing until Enter.
 
 ```practice pets.txt
 one cat, two cat, red cat

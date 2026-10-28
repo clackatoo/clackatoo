@@ -993,7 +993,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "search-count",
         date: "2026-10-28",
         lesson: "substitute",
-        what: "A count before / or ? goes to that match in editors and terminals too, as 3/x goes to the third",
+        what: "Editors and terminals take a count before / or ?, as 3/x goes to the third, and terminals' n and N take one",
     },
 ];
 

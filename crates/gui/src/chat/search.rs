@@ -787,7 +787,6 @@ impl ChatView {
     }
 }
 
-/// How many bytes the first `lines` lines of `text` take, or the last if
 impl ChatView {
     /// Where a search being typed starts, to put back.
     fn search_start(&self) -> Start {
@@ -900,6 +899,7 @@ impl Searcher for Searching<'_> {
     }
 }
 
+/// How many bytes the first `lines` lines of `text` take, or the last if
 /// `last`, without reading further than they go.
 fn lines_bytes(text: &str, lines: usize, last: bool) -> usize {
     if lines == 0 {
