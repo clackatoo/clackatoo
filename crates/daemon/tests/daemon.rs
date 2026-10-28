@@ -16653,6 +16653,1125 @@ fn a_real_agents_background_shell_shows_until_it_ends() {
     assert_eq!(node.state, ChatState::Ready);
 }
 
+// --- Live scenarios (CLACKA-185) -----------------------------------------
+//
+// Long, unattended sessions with a real Claude Code on haiku, checking what
+// a user of Claude Code's own CLI would expect. Each test is one session.
+// Set `CLACKATOO_REAL_AGENT` as for
+// [`a_real_agent_answers_and_asks_before_running_commands`]. Set
+// `CLACKATOO_ACP_TRACER` to a program run as `TRACER DIR COMMAND...` that
+// relays the adapter's stdin and stdout, to keep the ACP traffic in DIR,
+// `$TMPDIR/acp-NAME`, which outlives the test; it writes the adapter's pid
+// to `DIR/pid`.
+
+/// The real adapter's command on haiku, traced into `trace` if asked.
+fn real_claude_command(trace: &Path) -> Vec<std::ffi::OsString> {
+    let command = std::env::var("CLACKATOO_REAL_AGENT")
+        .expect("set CLACKATOO_REAL_AGENT to the adapter's command");
+    let mut args: Vec<std::ffi::OsString> = Vec::new();
+    if let Some(tracer) = std::env::var_os("CLACKATOO_ACP_TRACER") {
+        args.extend([tracer, trace.into()]);
+    }
+    args.extend(["env", "ANTHROPIC_MODEL=haiku"].map(Into::into));
+    args.extend(command.split_whitespace().map(Into::into));
+    args
+}
+
+/// Where scenario `name` keeps its ACP traffic, emptied.
+fn live_trace(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("acp-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+/// A daemon talking to the real Claude Code, with one chat ready.
+struct Live {
+    daemon: TestDaemon,
+    client: Client,
+    chat: TerminalId,
+    trace: PathBuf,
+}
+
+fn live_claude(name: &str) -> Live {
+    let trace = live_trace(name);
+    let daemon = TestDaemon::start_with_agent(|_| real_claude_command(&trace));
+    let mut client = daemon.client();
+    client.new_workspace(None, new_chat()).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    wait_for_chat_for(&mut client, chat, Duration::from_mins(1), |node| {
+        node.state == ChatState::Ready
+    });
+    Live {
+        daemon,
+        client,
+        chat,
+        trace,
+    }
+}
+
+/// A daemon talking to the real Claude Code that keeps its workspaces in
+/// `file` and makes them again as it starts.
+fn live_keeping(file: &Path, trace: &Path) -> TestDaemon {
+    TestDaemon::start_with_restoring(
+        |_, config| {
+            config.agents.custom = vec![custom_agent("claude", real_claude_command(trace))];
+            config.workspaces = Some(file.to_owned());
+        },
+        true,
+    )
+}
+
+/// The adapter's pid: the tracer's note of it, or the daemon's one child.
+fn live_adapter(trace: &Path) -> String {
+    if let Ok(pid) = std::fs::read_to_string(trace.join("pid")) {
+        return pid.trim().to_owned();
+    }
+    let children = child_processes();
+    assert_eq!(children.len(), 1, "{children:?}");
+    children[0].clone()
+}
+
+/// Every process below this one, with its command line.
+fn descendants() -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let mut todo = child_processes();
+    while let Some(pid) = todo.pop() {
+        let command = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        let command = String::from_utf8_lossy(&command).replace('\0', " ");
+        for task in std::fs::read_dir(format!("/proc/{pid}/task"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let list = std::fs::read_to_string(task.path().join("children")).unwrap_or_default();
+            todo.extend(list.split_whitespace().map(str::to_owned));
+        }
+        found.push((pid, command));
+    }
+    found
+}
+
+/// Waits for `done`, saying yes, once, to anything the agent asks meanwhile.
+fn live_wait(
+    client: &mut Client,
+    chat: TerminalId,
+    limit: Duration,
+    done: impl Fn(&ChatNode) -> bool,
+) -> ChatNode {
+    let deadline = Instant::now() + limit;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let node = wait_for_chat_for(client, chat, left, |node| {
+            done(node) || node.question.is_some()
+        });
+        if done(&node) {
+            return node;
+        }
+        let question = node.question.expect("asked");
+        let yes = (question.choices.iter())
+            .find(|choice| choice.kind == clackatoo_protocol::ChoiceKind::AllowOnce)
+            .unwrap_or(&question.choices[0]);
+        answer(client, chat, Some(yes.id.clone()));
+    }
+}
+
+/// Whether the last turn has ended and the chat is waiting again.
+fn live_idle(node: &ChatNode) -> bool {
+    last_outcome(node).is_some() && node.state == ChatState::Ready
+}
+
+/// Sends `text` and waits for its turn to end, saying yes to whatever it
+/// asks, and for the chat to be waiting again.
+fn live_send(client: &mut Client, chat: TerminalId, text: &str, limit: Duration) -> ChatNode {
+    let turns = client.capture(chat).unwrap().chat().unwrap().turns.len();
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    // The last turn, not the next: a chat that loads its session as the
+    // message goes shows the conversation so far before it.
+    live_wait(client, chat, limit, |node| {
+        node.turns.len() > turns
+            && node.turns.last().is_some_and(|turn| turn.prompt == text)
+            && live_idle(node)
+    })
+}
+
+/// Submits `text` as the window does, queued if the agent is busy.
+fn live_submit(client: &mut Client, chat: TerminalId, text: &str, steer: bool) {
+    client
+        .chat(
+            chat,
+            ChatAction::Submit {
+                text: text.to_owned(),
+                images: Vec::new(),
+                target: None,
+                steer,
+            },
+        )
+        .unwrap();
+}
+
+/// The tools of the last turn.
+fn live_tools(node: &ChatNode) -> Vec<&Tool> {
+    (node.turns.last().iter())
+        .flat_map(|turn| turn.items.iter())
+        .filter_map(|item| match item {
+            Item::Tool(tool) => Some(tool),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What a tool's row shows as text.
+fn tool_text(tool: &Tool) -> String {
+    (tool.content.iter())
+        .filter_map(|content| match content {
+            ToolContent::Text(text) | ToolContent::Output(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Checks the last turn ended as done, with the chat waiting again and
+/// every tool it used finished.
+fn assert_ended_whole(node: &ChatNode) {
+    assert_eq!(last_outcome(node), Some(&Outcome::Done), "{node:#?}");
+    assert_eq!(node.state, ChatState::Ready, "{node:#?}");
+    for tool in live_tools(node) {
+        assert_eq!(tool.status, ToolStatus::Done, "{tool:#?}");
+    }
+}
+
+/// Whether `text` holds the numbers from 1 to `last` in order, then END.
+fn counts_to(text: &str, last: u32) -> bool {
+    let words: Vec<&str> = text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let numbers: Vec<String> = (1..=last).map(|n| n.to_string()).collect();
+    let mut expected = numbers.iter().map(String::as_str).chain(["END"]);
+    let mut next = expected.next();
+    for word in words {
+        if Some(word) == next {
+            next = expected.next();
+        }
+    }
+    next.is_none()
+}
+
+/// Claude Code's own record of what it last said in `cwd`'s newest
+/// session, from its JSONL transcript under `~/.claude/projects`, if found.
+fn claude_transcript_text_with(cwd: &Path, needle: &str) -> Option<String> {
+    let escaped: String = (cwd.to_string_lossy().chars())
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let projects = Path::new(&std::env::var("HOME").ok()?).join(".claude/projects");
+    let dir = std::fs::read_dir(projects)
+        .ok()?
+        .flatten()
+        .find(|entry| entry.file_name().to_string_lossy() == escaped)?
+        .path();
+    let newest = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .max_by_key(|entry| entry.metadata().and_then(|meta| meta.modified()).ok())?
+        .path();
+    let text = std::fs::read_to_string(newest).ok()?;
+    let mut found = None;
+    for line in text.lines() {
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if entry["type"] != "assistant" {
+            continue;
+        }
+        for block in entry["message"]["content"].as_array().into_iter().flatten() {
+            if let Some(said) = block["text"].as_str()
+                && said.contains(needle)
+            {
+                found = Some(said.to_owned());
+            }
+        }
+    }
+    found
+}
+
+/// Six turns with Read, a search, Edit and Bash, as a session runs: every
+/// turn ends, the chat waits again after each, every tool's row finishes
+/// with what it found, and the words are whole, as Claude Code's own
+/// transcript has them.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+#[allow(clippy::too_many_lines, reason = "one session, turn by turn")]
+fn a_real_session_of_six_turns_with_tools_ends_each_whole() {
+    let Live {
+        daemon,
+        mut client,
+        chat,
+        ..
+    } = live_claude("six-turns");
+    let dir = daemon.dir.path();
+    let notes = dir.join("notes.txt");
+    std::fs::write(&notes, "alpha\nbeta needle\ngamma\n").unwrap();
+    let limit = Duration::from_mins(2);
+    let client = &mut client;
+
+    let node = live_send(
+        client,
+        chat,
+        &format!(
+            "Use the Read tool on {}, then reply with its second line only.",
+            notes.display()
+        ),
+        limit,
+    );
+    assert_ended_whole(&node);
+    assert!(last_words(&node).contains("beta needle"), "{node:#?}");
+    let read = live_tools(&node)
+        .into_iter()
+        .find(|tool| tool.kind == ToolKind::Read);
+    assert!(
+        read.is_some_and(|tool| tool_text(tool).contains("needle")),
+        "{node:#?}"
+    );
+
+    let node = live_send(
+        client,
+        chat,
+        &format!(
+            "Search {} for the word needle, with the Grep tool if you have it, or else with grep \
+             in the Bash tool. Reply with the matching file's name only.",
+            dir.display()
+        ),
+        limit,
+    );
+    assert_ended_whole(&node);
+    assert!(last_words(&node).contains("notes.txt"), "{node:#?}");
+    let searched = live_tools(&node).into_iter().find(|tool| {
+        matches!(tool.kind, ToolKind::Search | ToolKind::Execute)
+            && (tool_text(tool).contains("needle") || tool_text(tool).contains("notes.txt"))
+    });
+    eprintln!("search row: {searched:#?}");
+    assert!(searched.is_some(), "{node:#?}");
+
+    let node = live_send(
+        client,
+        chat,
+        &format!(
+            "Use the Edit tool to change gamma to delta in {}. Then reply with the word edited.",
+            notes.display()
+        ),
+        limit,
+    );
+    assert_ended_whole(&node);
+    assert_eq!(
+        std::fs::read_to_string(&notes).unwrap(),
+        "alpha\nbeta needle\ndelta\n"
+    );
+    assert!(
+        live_tools(&node)
+            .iter()
+            .any(|tool| tool.kind == ToolKind::Edit),
+        "{node:#?}"
+    );
+
+    let node = live_send(
+        client,
+        chat,
+        &format!(
+            "Use the Bash tool to run: wc -l {}. Then reply with the number it printed only.",
+            notes.display()
+        ),
+        limit,
+    );
+    assert_ended_whole(&node);
+    assert!(last_words(&node).contains('3'), "{node:#?}");
+    let ran = live_tools(&node)
+        .into_iter()
+        .find(|tool| tool.kind == ToolKind::Execute);
+    assert!(
+        ran.is_some_and(|tool| tool_text(tool).contains('3')),
+        "{node:#?}"
+    );
+
+    let count = "Without using any tools, write the numbers from 1 to 150, separated by single \
+                 spaces, on one line, then the word END.";
+    let node = live_send(client, chat, count, limit);
+    assert_ended_whole(&node);
+    let said = last_words(&node);
+    assert!(counts_to(&said, 150), "{said}");
+    match claude_transcript_text_with(dir, "END") {
+        Some(kept) => assert_eq!(said.trim(), kept.trim(), "as Claude Code kept it"),
+        None => eprintln!("no Claude Code transcript found for {}", dir.display()),
+    }
+
+    let node = live_send(
+        client,
+        chat,
+        "Use the Bash tool to run: echo clackatoo-$((6*7)). Then reply with what it printed.",
+        limit,
+    );
+    assert_ended_whole(&node);
+    assert!(last_words(&node).contains("clackatoo-42"), "{node:#?}");
+    let ran = live_tools(&node)
+        .into_iter()
+        .find(|tool| tool.kind == ToolKind::Execute);
+    assert!(
+        ran.is_some_and(|tool| tool_text(tool).contains("clackatoo-42")),
+        "{node:#?}"
+    );
+
+    // The whole transcript, every turn ended as done.
+    assert_eq!(node.first_turn, 0);
+    assert_eq!(node.turns.len(), 6, "{node:#?}");
+    for turn in &node.turns {
+        assert_eq!(
+            turn.end.as_ref().map(|end| &end.outcome),
+            Some(&Outcome::Done),
+            "{turn:#?}"
+        );
+    }
+}
+
+/// Stopped while a long command runs, the turn ends at once, the command's
+/// row isn't left running, and the next message, sent as the window sends
+/// it, is answered.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agent_stopped_in_a_long_command_ends_at_once_and_goes_on() {
+    let Live {
+        daemon: _daemon,
+        mut client,
+        chat,
+        ..
+    } = live_claude("stop-mid-tool");
+    let client = &mut client;
+    let text = "Use the Bash tool to run exactly: sleep 30. Then reply with the word slept.";
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    let running = |node: &ChatNode| {
+        live_tools(node).iter().any(|tool| {
+            tool.kind == ToolKind::Execute
+                && tool.status == ToolStatus::Running
+                && tool.title.contains("sleep")
+        })
+    };
+    live_wait(client, chat, Duration::from_mins(1), running);
+    std::thread::sleep(Duration::from_secs(2));
+    let stopped = Instant::now();
+    client.chat(chat, ChatAction::Stop).unwrap();
+    let node = wait_for_chat_for(client, chat, Duration::from_secs(30), live_idle);
+    let took = stopped.elapsed();
+    eprintln!("stopped in {took:?}");
+    assert_eq!(last_outcome(&node), Some(&Outcome::Stopped), "{node:#?}");
+    for tool in live_tools(&node) {
+        assert_ne!(tool.status, ToolStatus::Running, "{tool:#?}");
+    }
+    assert!(took < Duration::from_secs(5), "took {took:?}");
+    std::thread::sleep(Duration::from_secs(2));
+    let sleeping: Vec<_> = (descendants().into_iter())
+        .filter(|(_, command)| command.starts_with("sleep 30"))
+        .collect();
+    eprintln!("sleeps left: {sleeping:?}");
+
+    // As the window sends it: a stop pauses the queue, which mustn't keep
+    // the next message from going.
+    let turns = node.turns.len();
+    live_submit(
+        client,
+        chat,
+        "Reply with exactly one word, pong, and use no tools.",
+        false,
+    );
+    let node = live_wait(client, chat, Duration::from_mins(1), |node| {
+        node.turns.len() > turns && live_idle(node)
+    });
+    assert_ended_whole(&node);
+    assert!(
+        last_words(&node).to_lowercase().contains("pong"),
+        "{node:#?}"
+    );
+    assert!(
+        sleeping.is_empty(),
+        "the stopped command still runs: {sleeping:?}"
+    );
+}
+
+/// Two messages sent while the agent answers are each answered, in order,
+/// once it's done. Then one sent to steer it reaches the agent in the turn
+/// it's in, or as the next, and is answered.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agent_answers_messages_queued_meanwhile_in_order_and_is_steered() {
+    let Live {
+        daemon: _daemon,
+        mut client,
+        chat,
+        ..
+    } = live_claude("queue");
+    let client = &mut client;
+    let first = "Use the Bash tool to run exactly: sleep 6. Then reply with the word one.";
+    client
+        .chat(chat, ChatAction::Send(first.to_owned()))
+        .unwrap();
+    live_wait(client, chat, Duration::from_mins(1), |node| {
+        node.state == ChatState::Answering
+    });
+    live_submit(
+        client,
+        chat,
+        "Reply with exactly the word two, and use no tools.",
+        false,
+    );
+    live_submit(
+        client,
+        chat,
+        "Reply with exactly the word three, and use no tools.",
+        false,
+    );
+    let node = client.capture(chat).unwrap().chat().unwrap().clone();
+    assert_eq!(node.delivery.queued.len(), 2, "{:#?}", node.delivery);
+    let node = live_wait(client, chat, Duration::from_mins(2), |node| {
+        node.turns.len() == 3 && live_idle(node)
+    });
+    let words: Vec<String> = (node.turns.iter())
+        .map(|turn| {
+            (turn.items.iter())
+                .filter_map(|item| match item {
+                    Item::Words(words) => Some(words.to_lowercase()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    assert!(words[0].contains("one"), "{node:#?}");
+    assert!(words[1].contains("two"), "{node:#?}");
+    assert!(words[2].contains("three"), "{node:#?}");
+    assert!(node.delivery.queued.is_empty(), "{:#?}", node.delivery);
+    for turn in &node.turns {
+        assert_eq!(
+            turn.end.as_ref().map(|end| &end.outcome),
+            Some(&Outcome::Done)
+        );
+    }
+
+    // Steering.
+    assert!(node.delivery.native_steering, "{:#?}", node.delivery);
+    let text = "Use the Bash tool to run exactly: sleep 8. Then reply with the word first.";
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    live_wait(client, chat, Duration::from_mins(1), |node| {
+        live_tools(node)
+            .iter()
+            .any(|tool| tool.status == ToolStatus::Running)
+    });
+    live_submit(
+        client,
+        chat,
+        "Also: end your final reply with the word STEERED.",
+        true,
+    );
+    let node = live_wait(client, chat, Duration::from_mins(2), |node| {
+        node.turns.len() >= 4
+            && live_idle(node)
+            && node.delivery.queued.is_empty()
+            && node.delivery.sending.is_none()
+    });
+    let labels: Vec<&str> = (node.turns[3..].iter())
+        .flat_map(|turn| turn.items.iter())
+        .filter_map(|item| match item {
+            Item::Other(text) if text.contains("Steer") => text.lines().next(),
+            _ => None,
+        })
+        .collect();
+    eprintln!("steering: {labels:?}, {} turns", node.turns.len());
+    let said: String = (node.turns[3..].iter())
+        .flat_map(|turn| turn.items.iter())
+        .filter_map(|item| match item {
+            Item::Words(words) => Some(words.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(said.contains("STEERED"), "{node:#?}");
+}
+
+/// The adapter killed in the middle of a turn: the turn ends, saying why,
+/// and the next message starts it again on the same conversation.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agent_killed_mid_turn_ends_it_and_goes_on_with_its_conversation() {
+    let Live {
+        mut client,
+        chat,
+        trace,
+        daemon: _daemon,
+    } = live_claude("kill-mid-turn");
+    let client = &mut client;
+    let limit = Duration::from_mins(1);
+    let node = live_send(
+        client,
+        chat,
+        "Remember the word PELICAN. Reply with the single word ok, and use no tools.",
+        limit,
+    );
+    assert_ended_whole(&node);
+    let text = "Use the Bash tool to run exactly: sleep 25. Then reply with the word done.";
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    live_wait(client, chat, limit, |node| {
+        live_tools(node)
+            .iter()
+            .any(|tool| tool.status == ToolStatus::Running)
+    });
+    let before = descendants();
+    let adapter = live_adapter(&trace);
+    let killed = std::process::Command::new("kill")
+        .args(["-KILL", &adapter])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let at = Instant::now();
+    let node = wait_for_chat_for(client, chat, Duration::from_secs(30), |node| {
+        node.turns.len() == 2 && last_outcome(node).is_some()
+    });
+    eprintln!(
+        "ended in {:?}: {:?}, notice {:?}, state {:?}",
+        at.elapsed(),
+        last_outcome(&node),
+        node.notice,
+        node.state
+    );
+    assert!(
+        matches!(last_outcome(&node), Some(Outcome::Failed(_))),
+        "{node:#?}"
+    );
+    assert_ne!(node.state, ChatState::Answering);
+    for tool in live_tools(&node) {
+        assert_ne!(tool.status, ToolStatus::Running, "{tool:#?}");
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    let alive: Vec<_> = (before.iter())
+        .filter(|(pid, _)| Path::new(&format!("/proc/{pid}")).exists())
+        .collect();
+    eprintln!("before the kill: {before:?}\nstill alive after: {alive:?}");
+
+    let node = live_send(
+        client,
+        chat,
+        "What word did I ask you to remember? Reply with it alone, and use no tools.",
+        limit,
+    );
+    assert_ended_whole(&node);
+    assert!(last_words(&node).contains("PELICAN"), "{node:#?}");
+    assert!(node.turns[0].prompt.contains("PELICAN"), "{node:#?}");
+}
+
+/// A chat in a folder of its own, asking before tools as the window does.
+fn live_chat_in(dir: &Path) -> PaneTerminal {
+    PaneTerminal::Agent(NewAgent {
+        size: Size::new(40, 10).unwrap(),
+        cwd: Some(dir.display().to_string()),
+        agent: None,
+        tools: AgentTools::Ask,
+        task: false,
+        browser: false,
+        model: None,
+        resume: None,
+    })
+}
+
+/// The daemon stopped and started again, the chat comes back with its
+/// conversation, and goes on with the same session, which remembers what
+/// it was told. Then as if the daemon died in the middle of a turn: it
+/// starts again from the workspaces as they were then, and a message,
+/// without the chat shown first, goes on with the session.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_chat_comes_back_after_restarts_and_remembers() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let project = kept.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let trace = live_trace("restart");
+    let limit = Duration::from_mins(1);
+    {
+        let daemon = live_keeping(&file, &trace);
+        let mut client = daemon.client();
+        client.new_workspace(None, live_chat_in(&project)).unwrap();
+        let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+        wait_for_chat_for(&mut client, chat, limit, |node| {
+            node.state == ChatState::Ready
+        });
+        let node = live_send(
+            &mut client,
+            chat,
+            "Remember the word PELICAN. Reply with the single word ok, and use no tools.",
+            limit,
+        );
+        assert_ended_whole(&node);
+        wait_for_kept(&file, |kept| kept.contains("\"session\""));
+    }
+
+    let snapshot = {
+        let daemon = live_keeping(&file, &trace);
+        let mut client = daemon.client();
+        let chat = client.list_terminals().unwrap()[0].id;
+        client.attach(chat).unwrap();
+        let node = wait_for_chat_for(&mut client, chat, limit, |node| {
+            node.state == ChatState::Ready && !node.turns.is_empty()
+        });
+        assert!(node.turns[0].prompt.contains("PELICAN"), "{node:#?}");
+        let node = live_send(
+            &mut client,
+            chat,
+            "What word did I ask you to remember? Reply with it alone, and use no tools.",
+            limit,
+        );
+        assert_ended_whole(&node);
+        assert!(last_words(&node).contains("PELICAN"), "{node:#?}");
+
+        // Dies mid-turn: what was kept as the turn ran.
+        let text = "Use the Bash tool to run exactly: sleep 20. Then reply with the word done.";
+        client
+            .chat(chat, ChatAction::Send(text.to_owned()))
+            .unwrap();
+        live_wait(&mut client, chat, limit, |node| {
+            live_tools(node)
+                .iter()
+                .any(|tool| tool.status == ToolStatus::Running)
+        });
+        std::fs::read_to_string(&file).unwrap()
+    };
+    std::fs::write(&file, &snapshot).unwrap();
+    let daemon = live_keeping(&file, &trace);
+    let mut client = daemon.client();
+    let chat = client.list_terminals().unwrap()[0].id;
+    let node = live_send(
+        &mut client,
+        chat,
+        "Which word did I ask you to remember first? Reply with it alone, and use no tools.",
+        limit,
+    );
+    eprintln!(
+        "after the cold start: {:?}",
+        (node.turns.iter())
+            .map(|turn| (&turn.prompt, turn.end.as_ref().map(|end| &end.outcome)))
+            .collect::<Vec<_>>()
+    );
+    assert_ended_whole(&node);
+    assert!(last_words(&node).contains("PELICAN"), "{node:#?}");
+    assert!(
+        node.turns
+            .iter()
+            .any(|turn| turn.prompt.contains("PELICAN")),
+        "{node:#?}"
+    );
+}
+
+/// A turn stopped mid-command, told again as the chat comes back after a
+/// restart, shows as stopped, as it did, and Claude Code's note of the
+/// stop isn't shown as a message the user sent.
+#[test]
+#[ignore = "CLACKA-185: a stop told again shows as a message and the turn as done (fails)"]
+fn a_real_chat_told_again_shows_a_stopped_turn_as_stopped() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let project = kept.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let trace = live_trace("stop-told-again");
+    let limit = Duration::from_mins(1);
+    {
+        let daemon = live_keeping(&file, &trace);
+        let mut client = daemon.client();
+        client.new_workspace(None, live_chat_in(&project)).unwrap();
+        let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+        wait_for_chat_for(&mut client, chat, limit, |node| {
+            node.state == ChatState::Ready
+        });
+        let text = "Use the Bash tool to run exactly: sleep 30. Then reply with the word slept.";
+        client
+            .chat(chat, ChatAction::Send(text.to_owned()))
+            .unwrap();
+        live_wait(&mut client, chat, limit, |node| {
+            live_tools(node)
+                .iter()
+                .any(|tool| tool.status == ToolStatus::Running)
+        });
+        client.chat(chat, ChatAction::Stop).unwrap();
+        let node = wait_for_chat_for(&mut client, chat, limit, live_idle);
+        assert_eq!(last_outcome(&node), Some(&Outcome::Stopped));
+        wait_for_kept(&file, |kept| kept.contains("\"session\""));
+    }
+    let daemon = live_keeping(&file, &trace);
+    let mut client = daemon.client();
+    let chat = client.list_terminals().unwrap()[0].id;
+    client.attach(chat).unwrap();
+    let node = wait_for_chat_for(&mut client, chat, limit, |node| {
+        node.state == ChatState::Ready && !node.turns.is_empty()
+    });
+    let prompts: Vec<&str> = node.turns.iter().map(|turn| turn.prompt.as_str()).collect();
+    assert!(
+        !prompts
+            .iter()
+            .any(|prompt| prompt.starts_with("[Request interrupted")),
+        "{prompts:?}"
+    );
+    assert_eq!(node.turns.len(), 1, "{node:#?}");
+    assert_eq!(last_outcome(&node), Some(&Outcome::Stopped), "{node:#?}");
+}
+
+/// `/compact`, as a Claude Code user types it: the conversation is
+/// compacted, the turn ends, and the session goes on, remembering.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_chat_compacts_and_goes_on() {
+    let Live {
+        daemon: _daemon,
+        mut client,
+        chat,
+        ..
+    } = live_claude("compact");
+    let client = &mut client;
+    let limit = Duration::from_mins(3);
+    let node = live_send(
+        client,
+        chat,
+        "Remember the word PELICAN. Reply with the single word ok, and use no tools.",
+        limit,
+    );
+    assert_ended_whole(&node);
+    let node = live_send(client, chat, "/compact", limit);
+    eprintln!("compact turn: {:#?}", node.turns.last());
+    assert_ended_whole(&node);
+    let node = live_send(
+        client,
+        chat,
+        "What word did I ask you to remember? Reply with it alone, and use no tools.",
+        limit,
+    );
+    assert_ended_whole(&node);
+    assert!(last_words(&node).contains("PELICAN"), "{node:#?}");
+}
+
+/// In Manual mode a command is asked about: refused, it isn't run and the
+/// turn ends; asked again and allowed, it runs. Then, moved to accepting
+/// edits mid-session, a file is written without asking.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agent_refused_then_allowed_then_moved_to_another_mode() {
+    let Live {
+        daemon,
+        mut client,
+        chat,
+        ..
+    } = live_claude("permissions");
+    let client = &mut client;
+    let dir = daemon.dir.path();
+    let limit = Duration::from_mins(1);
+    let set_mode = |client: &mut Client, value: &str| {
+        let node = client.capture(chat).unwrap().chat().unwrap().clone();
+        let mode = (node.settings.iter())
+            .find(|setting| setting.kind == clackatoo_protocol::SettingKind::Mode)
+            .cloned()
+            .expect("Claude Code has modes");
+        eprintln!(
+            "modes: {:?}",
+            mode.choices
+                .iter()
+                .map(|choice| &choice.value)
+                .collect::<Vec<_>>()
+        );
+        client
+            .chat(
+                chat,
+                ChatAction::Set {
+                    setting: mode.id.clone(),
+                    value: value.into(),
+                },
+            )
+            .unwrap();
+        wait_for_chat_for(client, chat, limit, |node| {
+            node.settings
+                .iter()
+                .any(|setting| setting.id == mode.id && setting.value == value)
+        });
+    };
+    set_mode(client, "default");
+    let made = dir.join("made-1");
+    let text = format!("Use your Bash tool to run: touch {}", made.display());
+    let ask = |client: &mut Client, kind: clackatoo_protocol::ChoiceKind| {
+        let turns = client.capture(chat).unwrap().chat().unwrap().turns.len();
+        client.chat(chat, ChatAction::Send(text.clone())).unwrap();
+        let node = wait_for_chat_for(client, chat, limit, |node| {
+            node.turns.len() > turns && (node.question.is_some() || last_outcome(node).is_some())
+        });
+        let question = node.question.expect("asked");
+        let choice = (question.choices.iter())
+            .find(|choice| choice.kind == kind)
+            .expect("the choice");
+        answer(client, chat, Some(choice.id.clone()));
+        live_wait(client, chat, limit, |node| {
+            node.turns.len() > turns && live_idle(node)
+        })
+    };
+    let node = ask(client, clackatoo_protocol::ChoiceKind::RejectOnce);
+    eprintln!("refused: {:#?}", node.turns.last());
+    assert!(!made.exists());
+    for tool in live_tools(&node) {
+        assert_ne!(tool.status, ToolStatus::Running, "{tool:#?}");
+    }
+    let node = ask(client, clackatoo_protocol::ChoiceKind::AllowOnce);
+    assert_ended_whole(&node);
+    assert!(made.exists(), "{node:#?}");
+
+    set_mode(client, "acceptEdits");
+    let written = dir.join("made-2.txt");
+    let text = format!(
+        "Use the Write tool to create {} containing the word hi. Then reply with the word written.",
+        written.display()
+    );
+    let turns = client.capture(chat).unwrap().chat().unwrap().turns.len();
+    client.chat(chat, ChatAction::Send(text)).unwrap();
+    let node = wait_for_chat_for(client, chat, limit, |node| {
+        node.question.is_some() || (node.turns.len() > turns && live_idle(node))
+    });
+    assert!(node.question.is_none(), "asked in acceptEdits: {node:#?}");
+    assert_ended_whole(&node);
+    assert!(std::fs::read_to_string(&written).unwrap().contains("hi"));
+}
+
+/// A command printing megabytes and a long answer: the turn ends, whole,
+/// and the daemon answers another client quickly all the while.
+#[test]
+#[ignore = "CLACKA-185: a multi-megabyte edit stalls the daemon's loop (fails); talks to a real model"]
+fn a_real_agents_long_output_leaves_the_daemon_answering() {
+    let Live {
+        daemon,
+        mut client,
+        chat,
+        ..
+    } = live_claude("long-output");
+    let client = &mut client;
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = {
+        let done = done.clone();
+        let mut other = daemon.client();
+        std::thread::spawn(move || {
+            let mut slowest = Duration::ZERO;
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let asked = Instant::now();
+                other.list_terminals().unwrap();
+                slowest = slowest.max(asked.elapsed());
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            slowest
+        })
+    };
+    let limit = Duration::from_mins(3);
+    let node = live_send(
+        client,
+        chat,
+        "Use the Bash tool to run exactly: seq 1 500000. Then reply with the word listed.",
+        limit,
+    );
+    assert_ended_whole(&node);
+    let shown: usize = live_tools(&node)
+        .iter()
+        .map(|tool| tool_text(tool).len())
+        .sum();
+    eprintln!("the command's row shows {shown} bytes");
+    // Claude Code cuts a command's output to about 30 KB, so megabytes
+    // come over ACP as an edit to a big file, whose diff carries it.
+    let big = daemon.dir.path().join("big.txt");
+    let mut text = String::from("header: old\n");
+    for n in 1..=300_000 {
+        writeln!(text, "line {n}").unwrap();
+    }
+    std::fs::write(&big, &text).unwrap();
+    let node = live_send(
+        client,
+        chat,
+        &format!(
+            "Read only the first 3 lines of {}, then use the Edit tool to change `header: old` \
+             to `header: new` in it. Then reply with the word edited.",
+            big.display()
+        ),
+        limit,
+    );
+    assert_ended_whole(&node);
+    let edited = std::fs::read_to_string(&big).unwrap();
+    assert_eq!(edited, text.replacen("header: old", "header: new", 1));
+    let count = "Without using any tools, write the numbers from 1 to 500, separated by single \
+                 spaces, then the word END.";
+    let node = live_send(client, chat, count, limit);
+    assert_ended_whole(&node);
+    assert!(counts_to(&last_words(&node), 500), "{}", last_words(&node));
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let slowest = watcher.join().unwrap();
+    eprintln!("slowest answer to another client: {slowest:?}");
+    assert!(slowest < Duration::from_millis(500), "{slowest:?}");
+}
+
+/// What [`a_real_agents_long_output_leaves_the_daemon_answering`] found,
+/// without a model: an agent's edit to a file of megabytes, whose diff
+/// carries the whole file, as Claude Code's adapter sends it, leaves the
+/// daemon answering another client quickly. Only `client` watches the
+/// chat, slowly, so the daemon isn't kept busy sending the diff.
+#[test]
+#[ignore = "CLACKA-185: a multi-megabyte diff stalls the daemon's loop (fails)"]
+fn an_agents_edit_to_a_big_file_leaves_the_daemon_answering() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let big = daemon.dir.path().join("big.txt");
+    let mut text = String::new();
+    for n in 1..=300_000 {
+        writeln!(text, "line {n}").unwrap();
+    }
+    std::fs::write(&big, &text).unwrap();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = {
+        let done = done.clone();
+        let mut other = daemon.client();
+        std::thread::spawn(move || {
+            let mut slowest = (Duration::ZERO, Duration::ZERO);
+            let start = Instant::now();
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let asked = Instant::now();
+                other.list_terminals().unwrap();
+                if asked.elapsed() > slowest.0 {
+                    slowest = (asked.elapsed(), asked - start);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            slowest
+        })
+    };
+    let sent = Instant::now();
+    client
+        .chat(
+            chat,
+            ChatAction::Send(format!("disk {}\nsmall\n", big.display())),
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_mins(1);
+    let ended = loop {
+        std::thread::sleep(Duration::from_millis(250));
+        let asked = Instant::now();
+        let view = client.capture(chat).unwrap();
+        let took = asked.elapsed();
+        if last_outcome(view.chat().unwrap()).is_some() {
+            break (sent.elapsed(), took);
+        }
+        assert!(Instant::now() < deadline);
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (slowest, at) = watcher.join().unwrap();
+    eprintln!(
+        "turn ended {:?} after sending; one capture of it took {:?}; slowest other answer \
+         {slowest:?}, {at:?} into the test",
+        ended.0, ended.1
+    );
+    assert_eq!(std::fs::read_to_string(&big).unwrap(), "small\n");
+    assert!(slowest < Duration::from_millis(100), "{slowest:?}");
+}
+
+/// The window goes away mid-turn: the turn goes on in the daemon, and a
+/// window coming back sees all of it, also what came while it was away.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_turn_goes_on_with_no_window_and_shows_whole_to_the_next() {
+    let live = live_claude("away");
+    let (daemon, mut client, chat) = (live.daemon, live.client, live.chat);
+    client.attach(chat).unwrap();
+    let text = "Use the Bash tool to run exactly: sleep 5; echo back-$((40+2)). Then write the \
+                numbers from 1 to 80, separated by single spaces, then the word END.";
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    live_wait(&mut client, chat, Duration::from_mins(1), |node| {
+        live_tools(node)
+            .iter()
+            .any(|tool| tool.status == ToolStatus::Running)
+    });
+    drop(client);
+    std::thread::sleep(Duration::from_secs(30));
+    let mut client = daemon.client();
+    client.attach(chat).unwrap();
+    let node = live_wait(&mut client, chat, Duration::from_mins(1), live_idle);
+    assert_ended_whole(&node);
+    assert_eq!((node.first_turn, node.turns.len()), (0, 1));
+    let ran = live_tools(&node)
+        .into_iter()
+        .find(|tool| tool.kind == ToolKind::Execute);
+    assert!(
+        ran.is_some_and(|tool| tool_text(tool).contains("back-42")),
+        "{node:#?}"
+    );
+    assert!(counts_to(&last_words(&node), 80), "{node:#?}");
+
+    // Back while it still answers.
+    let text = "Without using any tools, write the numbers from 1 to 300, separated by single \
+                spaces, then the word END.";
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    wait_for_chat_for(&mut client, chat, Duration::from_mins(1), |node| {
+        node.turns.len() == 2 && !last_words(node).is_empty()
+    });
+    drop(client);
+    std::thread::sleep(Duration::from_secs(1));
+    let mut client = daemon.client();
+    client.attach(chat).unwrap();
+    let node = live_wait(&mut client, chat, Duration::from_mins(1), live_idle);
+    assert_ended_whole(&node);
+    assert!(counts_to(&last_words(&node), 300), "{node:#?}");
+}
+
+/// A pasted image goes to the agent, which sees it.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agent_sees_an_image_in_a_message() {
+    let Live {
+        daemon: _daemon,
+        mut client,
+        chat,
+        ..
+    } = live_claude("image");
+    // A 16 by 16 PNG, all red.
+    let red = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAF0lEQVR4nGP4z8BAEiJN9aiGUQ1DSgMAkPn/\
+               Afnh+ngAAAAASUVORK5CYII=";
+    client
+        .chat(
+            chat,
+            ChatAction::Submit {
+                text: "What colour is this image? Reply with one word, and use no tools.".into(),
+                images: vec![clackatoo_protocol::ChatImage {
+                    data: red.into(),
+                    width: 16,
+                    height: 16,
+                    preview: None,
+                }],
+                target: None,
+                steer: false,
+            },
+        )
+        .unwrap();
+    let node = live_wait(&mut client, chat, Duration::from_mins(1), |node| {
+        node.turns.len() == 1 && live_idle(node)
+    });
+    assert_ended_whole(&node);
+    assert!(
+        last_words(&node).to_lowercase().contains("red"),
+        "{node:#?}"
+    );
+}
+
 /// A daemon whose agent is the fake one with `flags`, noting what it does
 /// in `agent.log`, and changed by `change`.
 fn with_fake(flags: &[&str], change: impl FnOnce(&mut DaemonConfig)) -> TestDaemon {
