@@ -502,10 +502,10 @@ pub(crate) type LitIn = Vec<(Range<usize>, bool)>;
 /// matches are lit, from `list`'s search, in the bytes of it `drawn`: each
 /// match's bytes, and whether it's the one the search went to, `found`
 /// saying whether this item is that one, whose first match it is. With
-/// `hlsearch`, every match in what's drawn, one after another from its
-/// start, no more than [`MOST_LIT`], with no more than [`AROUND`] bytes
-/// either side of it looked at, so a long text costs no more than a short
-/// one; without it, only the found item's first.
+/// `hlsearch`, every match reaching into what's drawn, one after another
+/// from a little before it, no more than [`MOST_LIT`], with no more than
+/// [`AROUND`] bytes either side of it looked at, so a long text costs no
+/// more than a short one; without it, only the found item's first.
 ///
 /// [`MOST_LIT`]: crate::hlsearch::MOST_LIT
 /// [`AROUND`]: crate::hlsearch::AROUND
@@ -528,24 +528,35 @@ pub(crate) fn lit_in<S: Debug>(
     }
     let hay = crate::hlsearch::around(text, drawn.clone());
     let range = drawn.start.saturating_sub(hay.start)..drawn.end.saturating_sub(hay.start);
-    // One after another from where what's drawn starts, as from a line's
-    // start, so however many come before it, it's lit.
-    let spans = [(range.start, range)];
+    // One after another from a little before what's drawn, as from a
+    // line's start, so one the top edge cuts is lit too, and however many
+    // come further before don't use up the looking.
+    let mut from = range.start.saturating_sub(BEFORE);
+    while !text.is_char_boundary(hay.start + from) {
+        from -= 1;
+    }
+    let spans = [(from, range)];
     let mut lit: LitIn = (pattern
         .matches_in(&text[hay.clone()], spans, crate::hlsearch::MOST_LIT)
         .into_iter())
     .map(|found| (hay.start + found.start..hay.start + found.end, false))
     .collect();
     // The item's first match, looked for from its start, is the one
-    // found: not among these if they're looked for from further on.
-    if found
-        && drawn.start == 0
-        && let Some(first) = lit.first_mut()
+    // found, if it's among these.
+    let first = (pattern.find_at(text, 0)).filter(|_| found);
+    if let Some(first) = first
+        && let Some(lit) = (lit.iter_mut()).find(|(bytes, _)| *bytes == (first.start..first.end))
     {
-        first.1 = true;
+        lit.1 = true;
     }
     lit
 }
+
+/// How many bytes before what's drawn of an item's text [`lit_in`] looks
+/// for its matches from: enough for one cut by the top edge, and few
+/// enough that matches there can't use up the searches
+/// [`Pattern::matches_in`] makes for those drawn.
+const BEFORE: usize = 256;
 
 /// How many bytes of `text` fit in `room` columns, each character as wide
 /// as `cells` says, going along it from the first.
@@ -1003,6 +1014,29 @@ mod tests {
         for ch in keys.chars() {
             assert!(search_stroke(list, Stroke::char(ch)));
         }
+    }
+
+    #[test]
+    fn a_match_the_top_edge_cuts_is_lit_and_the_first_found_wherever_its_drawn() {
+        let mut list = named(&["a", "xoxo"]);
+        search_command(
+            &mut list,
+            &command(None, Action::Search { backward: false }),
+        );
+        typed(&mut list, "xo");
+        search_stroke(&mut list, Stroke::Enter);
+        assert_eq!(list.cursor, 1);
+        // Drawn from inside the first match: it's lit, and brighter.
+        assert_eq!(
+            lit_in(&list.search, "xoxo", 1..4, true),
+            [(0..2, true), (2..4, false)]
+        );
+        // Drawn from past it: the next isn't the one found.
+        assert_eq!(lit_in(&list.search, "xoxo", 2..4, true), [(2..4, false)]);
+        assert_eq!(
+            lit_in(&list.search, "xoxo", 1..4, false),
+            [(0..2, false), (2..4, false)]
+        );
     }
 
     #[test]
