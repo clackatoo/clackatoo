@@ -5689,6 +5689,58 @@ fn a_chat_answering_on_another_machine_goes_on_after_it_upgrades() {
     );
 }
 
+/// What an idle chat's agent ran in the background goes with it in a real
+/// upgrade: the chat shows it lost, ended by the upgrade, and the agent
+/// gets a turn of its own saying what was stopped (CLACKA-187).
+#[test]
+fn an_idle_chats_background_task_is_lost_through_a_real_upgrade_and_it_is_told() {
+    use clackatoo_protocol::AgentTaskState;
+    let world = World::new();
+    let (child, socket) = process_daemon(&world, "laptop");
+    let mut client = Client::connect(&socket).unwrap();
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    client.new_workspace(Some("work".into()), chat()).unwrap();
+    let shown = client.watch_workspaces().unwrap();
+    let work = (shown.list.iter())
+        .find(|workspace| workspace.name == "work")
+        .unwrap();
+    let id = first_terminal(work);
+    attach_to(&mut client, id);
+    wait_for_chat(&mut client, id, |node| {
+        node.state == clackatoo_protocol::ChatState::Ready
+    });
+    client
+        .chat(id, ChatAction::Send("background".into()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, id, |node| {
+        node.turns.len() == 1 && node.turns[0].end.is_some()
+    });
+    assert_eq!(node.tasks[0].state, AgentTaskState::Running, "{node:#?}");
+
+    upgrade_process(&child, &socket);
+    let mut client = Client::connect(&socket).unwrap();
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    attach_to(&mut client, id);
+    let node = wait_for_chat(&mut client, id, |node| {
+        node.turns.len() == 2 && node.turns[1].end.is_some()
+    });
+    assert_eq!(node.tasks[0].state, AgentTaskState::Lost, "{node:#?}");
+    assert_eq!(
+        node.tasks[0].summary.as_deref(),
+        Some("ended by the daemon's upgrade")
+    );
+    let told = &node.turns[1];
+    assert!(told.prompt.starts_with("[daemon upgraded]"), "{told:#?}");
+    assert!(
+        told.prompt.contains("`Serve the docs (npm run dev)`"),
+        "{told:#?}"
+    );
+    assert!(
+        last_words(&node).contains("echo: [daemon upgraded]"),
+        "{node:#?}"
+    );
+}
+
 /// A message one chat's agent sent another, waiting for that chat's turn
 /// to end, goes on through a real upgrade, which hands it over in the
 /// chat's inbox: the turn it waited for is continued, and then it's sent
