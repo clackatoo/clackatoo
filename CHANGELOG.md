@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.88 (2026-10-28)
+
+### Fixes
+
+- **gui:** pickers' review fixes: Caps Lock, start page Esc, one key loop (CLACKA-172) (c819a27)
+
 ## 2026.10.87 (2026-10-27)
 
 ### Features
