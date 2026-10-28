@@ -65,12 +65,12 @@ impl ChatView {
         } else {
             (folded_heading(plan), Vec::new())
         };
-        let shelf = Shelf {
+        let card = Shelf {
             heading,
             heading_hit: Some(Hit::Plan),
             rows,
         };
-        self.draw_shelf(canvas, m, frame, above, shelf)
+        self.draw_shelf(canvas, m, frame, above, card)
     }
 }
 
@@ -125,7 +125,9 @@ fn shown_steps(plan: &[PlanStep], most: usize) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
-    use clackatoo_protocol::{ChatNode, ChatPatch, ChatState, Patch, PlanState, PlanStep, ViewUpdate};
+    use clackatoo_protocol::{
+        ChatNode, ChatPatch, ChatState, Patch, PlanState, PlanStep, ViewUpdate,
+    };
 
     use super::shown_steps;
     use crate::chat::fixtures::{fonts, paint};
@@ -205,9 +207,9 @@ mod tests {
             ["Plan · 1/3 done  ⌄", "◐ Step 2", "☐ Step 3", "☑ Step 1"]
         );
         // A new plan takes the old one's place, still open.
-        chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Plan(plan(
-            "xx>",
-        )))]));
+        chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Plan(
+            plan("xx>"),
+        ))]));
         paint(&mut chat, &mut fonts);
         assert_eq!(
             shelf(&chat),
@@ -237,7 +239,10 @@ mod tests {
         chat.toggle_plan().unwrap();
         paint(&mut chat, &mut fonts);
         let lines = shelf(&chat);
-        assert!(lines.contains(&"Plan · 5/12 done · steps 5–12  ⌄".to_owned()), "{lines:?}");
+        assert!(
+            lines.contains(&"Plan · 5/12 done · steps 5–12  ⌄".to_owned()),
+            "{lines:?}"
+        );
         assert!(lines.contains(&"☑ Step 5".to_owned()));
         assert!(!lines.contains(&"☑ Step 4".to_owned()));
     }

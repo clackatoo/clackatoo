@@ -49,12 +49,12 @@ impl ChatView {
         if rows.is_empty() {
             return 0.0;
         }
-        let shelf = Shelf {
+        let card = Shelf {
             heading: shelf_heading(&self.node.tasks),
             heading_hit: None,
             rows,
         };
-        self.draw_shelf(canvas, m, frame, above, shelf)
+        self.draw_shelf(canvas, m, frame, above, card)
     }
 
     /// When the shelf next counts on a second, if anything on it is

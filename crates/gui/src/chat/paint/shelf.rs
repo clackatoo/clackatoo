@@ -32,17 +32,15 @@ const PAD: f32 = 0.45;
 
 /// How many lines a shelf has room for within `height`, heading and all.
 pub(super) fn rows_within(m: Measures, height: f32) -> usize {
-    let room = (height - m.em(HEADER) - m.em(PAD) * 2.0) / m.em(ROW);
-    // Whole lines only; a negative or NaN room is none.
-    if room >= 1.0 {
-        room as usize
-    } else {
-        0
-    }
+    let room = height - m.em(HEADER) - m.em(PAD) * 2.0;
+    // Whole lines only, and never more than a shelf could list.
+    (0..u8::MAX)
+        .take_while(|&rows| m.em(ROW) * f32::from(rows + 1) <= room)
+        .count()
 }
 
 impl ChatView {
-    /// Draws `shelf` above the box and whatever's above it already,
+    /// Draws `card` above the box and whatever's above it already,
     /// `above` high. Returns how high it is, with the gap above it.
     pub(super) fn draw_shelf(
         &mut self,
@@ -50,26 +48,25 @@ impl ChatView {
         m: Measures,
         frame: &BoxFrame,
         above: f32,
-        shelf: Shelf,
+        card: Shelf,
     ) -> f32 {
         let row = m.em(ROW);
         let header = m.em(HEADER);
         let pad = m.em(PAD);
         let gap = m.em(0.45);
-        let rows = f32::from(u8::try_from(shelf.rows.len()).unwrap_or(u8::MAX));
+        let rows = f32::from(u8::try_from(card.rows.len()).unwrap_or(u8::MAX));
         let panel = header + row * rows + pad * 2.0;
         let mut top = frame.top - above - panel - gap;
         let left = frame.left + m.em(0.65);
         let width = frame.place.column - m.em(1.3);
-        let card = [left, top, width, panel];
-        canvas.fill(
-            Fill::rounded(card, Paint::Raised, m.em(0.9)).bordered(1.0, Paint::RaisedEdge),
-        );
+        let bounds = [left, top, width, panel];
+        canvas
+            .fill(Fill::rounded(bounds, Paint::Raised, m.em(0.9)).bordered(1.0, Paint::RaisedEdge));
         let inner_left = left + m.em(0.8);
         let inner_width = width - m.em(1.6);
         top += pad;
         let small = Measures::of(m.em(0.85));
-        if let Some(hit) = shelf.heading_hit {
+        if let Some(hit) = card.heading_hit {
             // The whole heading line takes the click, pad and all.
             let line = [left, top - pad, width, header + pad];
             self.hits.push((hit, frame.place.in_pane(line)));
@@ -77,12 +74,12 @@ impl ChatView {
         self.queue_text(
             canvas,
             small,
-            &shelf.heading,
+            &card.heading,
             [inner_left, top, inner_width, header],
             Tone::Muted,
         );
         top += header;
-        for (index, line) in shelf.rows.into_iter().enumerate() {
+        for (index, line) in card.rows.into_iter().enumerate() {
             if index > 0 {
                 canvas.fill(Fill::solid(
                     [inner_left, top, inner_width, 1.0],

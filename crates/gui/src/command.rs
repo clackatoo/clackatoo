@@ -416,12 +416,6 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "connect" => return connect_command(argument),
         "disconnect" => return Ok(Command::Disconnect(argument.map(str::to_owned))),
         "Capabilities" => return Ok(Command::Capabilities),
-        "plan" => {
-            return match argument {
-                Some(argument) => Err(format!("plan takes nothing after it, but has {argument:?}")),
-                None => Ok(Command::Plan),
-            };
-        }
         "agentaccess" => return match argument {
             Some("off") => Ok(Command::AgentAccess(clackatoo_protocol::NativeAccess::Off)),
             Some("inspect") => Ok(Command::AgentAccess(clackatoo_protocol::NativeAccess::Inspect)),
@@ -440,7 +434,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
     let (place, rest) = place(word);
     let command = (marked_pane(rest, place, argument))
         .or_else(|| file_command(word, argument))
-        .or_else(|| agent_undo(word, argument).or_else(|| stop_task(word, argument)))
+        .or_else(|| chat_command(word, argument))
         .or_else(|| review_command(word, argument));
     if let Some(command) = command {
         return command;
@@ -757,6 +751,22 @@ fn stop_task(word: &str, argument: Option<&str>) -> Option<Result<Command, Strin
         None => Ok(Command::StopTask(None)),
         Some(Ok(number)) if number > 0 => Ok(Command::StopTask(Some(number - 1))),
         Some(_) => Err("stoptask takes a line's number, from 1: :stoptask 2".to_owned()),
+    })
+}
+
+/// A command for the focused chat, if `word` is one: `:agentundo`,
+/// `:agentredo`, `:stoptask` or `:plan`.
+fn chat_command(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
+    (agent_undo(word, argument))
+        .or_else(|| stop_task(word, argument))
+        .or_else(|| plan_command(word, argument))
+}
+
+/// `:plan`, if `word` is it.
+fn plan_command(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
+    (word == "plan").then(|| match argument {
+        Some(argument) => Err(format!("plan takes nothing after it, but has {argument:?}")),
+        None => Ok(Command::Plan),
     })
 }
 

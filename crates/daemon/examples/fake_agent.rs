@@ -475,13 +475,13 @@ fn tell_again(session: &str, cwd: &str, gap: Option<std::time::Duration>) {
 fn give_plan(session: &str, states: &str) {
     let entries: Vec<Value> = (states.chars().enumerate())
         .map(|(index, state)| {
-            let status = match state {
+            let how = match state {
                 'x' => "completed",
                 '>' => "in_progress",
                 _ => "pending",
             };
             json!({ "content": format!("Step {}", index + 1), "priority": "medium",
-                    "status": status })
+                    "status": how })
         })
         .collect();
     update(
