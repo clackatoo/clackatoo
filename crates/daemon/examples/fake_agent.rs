@@ -34,6 +34,7 @@
 //! | `elicit` | Asks the user, as Claude Code's adapter asks its `AskUserQuestion` tool's questions (`elicitation/create`, `e1`), and some more: a choice of one, a box of words, a choice of several, a whole number from 1 to 9 and a yes-or-no; then says `answered:` and the answer as JSON, or the error. To a client that can't show forms, says `no forms` |
 //! | `elicit-url` | As `elicit`, but asks the user to open `https://example.com/oauth`, elicitation `u1` |
 //! | `elicit-done` | As `elicit-url`, but 300 ms later says the link is done with (`elicitation/complete`) |
+//! | `elicit-later` | Says `asking later` and ends its turn; 300 ms later asks the user to open a link, as an MCP server's sign-in asks between turns, and notes the answer as `answered later:` and the answer as JSON |
 //! | `elicit-cancel` | As `elicit`, but 300 ms later no longer waits for the answer (`$/cancel_request`) |
 //! | `approve-plan` | Asks permission to leave plan mode, as Claude Code's adapter asks a client that asks as AIR does: its plan in the tool's input, the options that leave plan mode; then says which option was picked |
 //! | anything else | `echo:` and the message, in two pieces |
@@ -901,6 +902,13 @@ impl Fake {
             }
             // The answer to what it asked the user.
             None if id == "e1" => {
+                let answer = match &message["error"] {
+                    Value::Object(error) => format!("error {}", error["code"]),
+                    _ => message["result"].to_string(),
+                };
+                if self.elicited.is_none() {
+                    self.note(&format!("answered later: {answer}"));
+                }
                 if let Some((id, session)) = self.elicited.take() {
                     let answer = match &message["error"] {
                         Value::Object(error) => format!("error {}", error["code"]),
@@ -1278,6 +1286,20 @@ impl Fake {
                         ] } }),
                 );
                 self.waiting = Some((id, session));
+            }
+            "elicit-later" => {
+                say(&session, "asking later\n");
+                done(&id, "end_turn");
+                let params = json!({ "mode": "url", "sessionId": session, "elicitationId": "u2",
+                                     "message": "Authenticate with MCP server linear",
+                                     "url": "https://example.com/oauth" });
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    send(
+                        &json!({ "jsonrpc": "2.0", "id": "e1", "method": "elicitation/create",
+                                  "params": params }),
+                    );
+                });
             }
             "elicit" | "elicit-url" | "elicit-done" | "elicit-cancel" => {
                 self.elicit(id, session, text);

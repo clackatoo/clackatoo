@@ -2693,6 +2693,32 @@ fn an_agents_form_goes_when_it_stops_waiting_or_the_turn_is_stopped() {
 }
 
 #[test]
+fn a_form_waiting_when_the_chat_moves_to_another_agent_is_cancelled_at_the_one_it_left() {
+    let daemon = with_fake_codex(&[]);
+    let mut client = daemon.client();
+    let (chat, _) = start_chat_with(&mut client, "claude");
+    // Asked between turns, as an MCP server's sign-in is.
+    ask(&mut client, chat, "elicit-later");
+    wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let node = switch_to(&mut client, chat, "codex", None);
+    assert_eq!(node.question, None);
+    let log = daemon.dir.path().join("agent.log");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let noted = std::fs::read_to_string(&log).unwrap_or_default();
+        if noted.contains("answered later: ") {
+            assert!(
+                noted.contains("answered later: {\"action\":\"cancel\"}"),
+                "{noted}"
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "never answered: {noted}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
 fn a_question_about_leaving_planning_shows_the_plan() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();

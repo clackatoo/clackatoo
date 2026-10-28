@@ -130,6 +130,30 @@ impl HostedChat {
         Some(request)
     }
 
+    /// The chat is moving to another agent: what the agent it leaves
+    /// asked the user goes, its requests kept to answer as cancelled (see
+    /// [`take_left_forms`](Self::take_left_forms)).
+    pub(super) fn forms_left(&mut self) {
+        let mut left = Vec::new();
+        self.asking.retain(|(asker, _)| match asker {
+            Asker::Elicit { request, .. } => {
+                left.push(request.clone());
+                false
+            }
+            _ => true,
+        });
+        if !left.is_empty() {
+            self.left_forms.extend(left);
+            self.show_question();
+        }
+    }
+
+    /// The requests of the forms the agent the chat moved from still
+    /// waits on, to answer as cancelled.
+    pub(crate) fn take_left_forms(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.left_forms)
+    }
+
     /// The agent's process or session has gone: what it asked the user
     /// goes with it, as nothing waits for the answer.
     pub(super) fn elicitations_lost(&mut self) {

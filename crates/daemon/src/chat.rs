@@ -380,6 +380,9 @@ pub(crate) struct HostedChat {
     asking: VecDeque<(Asker, Question)>,
     /// The number the next question gets.
     next_question: u64,
+    /// The requests of the forms the agent the chat moved from asked,
+    /// which it still waits on: the server answers them as cancelled.
+    left_forms: Vec<Value>,
     /// The values the user gave settings, by their IDs, which the chat
     /// asks for again whenever its session opens: the agent forgets them
     /// when it stops.
@@ -620,6 +623,7 @@ impl HostedChat {
             },
             asking: VecDeque::new(),
             next_question: 0,
+            left_forms: Vec::new(),
             chosen: vec![
                 (TOOLS_SETTING.to_owned(), tools_value(tools).to_owned()),
                 (
@@ -1522,9 +1526,11 @@ impl HostedChat {
         if to.name == self.agent {
             return None;
         }
-        // What it runs in the background goes with the agent it leaves.
+        // What it runs in the background goes with the agent it leaves,
+        // and what that agent asked is answered as cancelled, as stopping
+        // does: it's still running, and still waits.
         self.tasks_lost();
-        self.elicitations_lost();
+        self.forms_left();
         self.set_native_steering(false);
         // The chat's own settings go with it to every agent: what it may
         // do with clackatoo's tools, whether it keeps Claude Code's Task

@@ -1623,6 +1623,7 @@ impl Daemon {
             return;
         };
         log::info!("chat {id} moved from {old} to {name}");
+        let left_forms = chat.take_left_forms();
         // It no longer waits for the agent it left to go.
         self.agents.held.retain(|&(held, _)| held != id);
         // An install of the agent it left no longer has it waiting.
@@ -1631,6 +1632,12 @@ impl Daemon {
         }
         if let Some(agent) = self.agents.named(&old) {
             if let Some(slot) = self.agents.running.get_mut(&agent) {
+                // What it asked the user is answered as cancelled, as
+                // stopping answers it.
+                for request in &left_forms {
+                    slot.agent
+                        .answer(request, Ok(serde_json::json!({ "action": "cancel" })));
+                }
                 // A session it was still waiting for from the old agent
                 // is closed once it comes, and never heard of.
                 slot.agent.abandon_session(id);
@@ -1638,6 +1645,7 @@ impl Daemon {
                     slot.agent.close_session(&session);
                 }
             }
+            self.flush_agent(agent);
             self.stop_if_unneeded(agent);
         }
         self.offer_providers(Some(id));
