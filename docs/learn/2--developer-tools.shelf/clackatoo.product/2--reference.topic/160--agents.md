@@ -463,10 +463,10 @@ Starting and messaging chats never asks you first. Instead, what an agent can't 
 - A chat is started only inside the project of the chat starting it, a folder linked from inside it to outside included.
 - A chat an agent starts gets its parent's Tools setting and limits (see [Profiles](#profiles)). With the same agent, it gets its parent's mode; with another, that agent's safest. An agent that offers no modes as session settings can't be held to its safest, so a chat started with one fails to start, and says so, whenever its session opens. Modes an agent offers only through ACP's older `modes` field aren't read.
 - What one agent sends another shows its control characters, and those that reorder the text around them, as `^G` or `<U+202E>`, so nothing in it hides from you. So do tag characters, which can spell out words unseen, unless they make a flag such as Scotland's, and variation selectors that follow nothing they could change. Joiners and other characters emoji and scripts such as Persian need are left as they are.
-- Agents send each other as many messages as the work needs. A chat of yours can have at most 32 chats started under it open at once, and 64 started under it in all (counted again after an upgrade), 4 of them working at once, a message waking one counting too, 2 deep. Two chats messaging each other back and forth stop after 6 messages, each sent in the turn the one before started. An agent can't wait for a chat that's waiting for it.
+- Agents send each other as many messages as the work needs. A chat of yours can have at most 32 chats started under it open at once, and 64 started under it in all, 4 of them working at once, a message waking one counting too, 2 deep. Two chats messaging each other back and forth stop after 6 messages, each sent in the turn the one before started. An agent can't wait for a chat that's waiting for it.
 - A notice from clackatoo, such as that a subagent finished or an [activity](#managed-activities-and-recovery) ended, always reaches the chat it's for, and counts against none of these. A turn that a notice that subagents finished starts begins a new chain of messages, as yours does, so an agent going round with its builder isn't stopped after 6. Instead, notices that subagents finished start at most 100 turns under one of your chats between two of your messages there: past that, the next waits until you write again, there or in the chat it waits in, and that chat says so. Nothing is lost, and anything else waiting in that chat goes on meanwhile. An agent waiting for a chat holding such a notice isn't kept waiting: it's told why. An [activity](#managed-activities-and-recovery)'s notice, which nothing counts, leaves the chain of messages as it was.
 
-Which chat started which, and messages waiting their turn, last through an upgrade. Boards, shared between agents and you, have tools of their own: see [Boards](~clackatoo/reference/boards).
+Which chat started which, messages waiting their turn, which answers each chat has had from each other, and the counts above, last through an upgrade. A chat waiting for others with `wait_for_chat(s)` as the upgrade ends its agent hears when they finish, as a notice, as from chats it started. Boards, shared between agents and you, have tools of their own: see [Boards](~clackatoo/reference/boards).
 
 ## Which agent
 
@@ -521,7 +521,7 @@ When the daemon stops, a chat in a pane comes back with its workspace the next t
 
 The agent's [plan](#the-agent-s-plan) lasts through an upgrade. After the daemon stops, a chat going on with its session shows the plan again once the agent has told the conversation so far, if the agent tells its plans as it does: Claude Code does.
 
-An upgrade stops the browser; the next page starts it again. An upgrade, or the daemon stopping, ends what agents run in the background, as it ends the agents.
+An upgrade stops the browser; the next page starts it again. An upgrade, or the daemon stopping, ends what agents run in the background, as it ends the agents. After an upgrade the chat shows each lost, "ended by the daemon's upgrade", and the agent is told which: in the turn that goes on, if one was under way, or else in a turn of its own, a notice from clackatoo starting `[daemon upgraded]`, once, so it can start again what it still needs. A turn an agent took by itself that the upgrade cut off isn't carried on; the agent is told the same way where it was cut off.
 
 ## Not yet
 
@@ -533,7 +533,6 @@ An upgrade stops the browser; the next page starts it again. An upgrade, or the 
 - Agents can't yet see what you've selected in an editor. Commands run with the agent's own tool, rather than `run_in_terminal`, show their output once they're done.
 - The account-usage modal is native-only. Gemini CLI and custom adapters do not yet have read-only subscription probes; the phone keeps its existing per-chat usage detail.
 - `/` commands aren't listed or completed as you type them.
-- An upgrade forgets which turns an agent took by itself: they show as turns with no message.
 - In a past Claude Code session opened again, Read, Grep and Glob rows show what they read or looked for, but not what they found, while clackatoo asks Claude Code what it runs in the background.
 - Codex's commands in the background aren't listed: asking for them would change how Codex reports every command.
 - You can't click or type into a browser pane yourself.

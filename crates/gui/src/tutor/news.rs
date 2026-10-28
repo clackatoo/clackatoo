@@ -1037,6 +1037,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Stopped turns stay stopped when a chat comes back, and CLACKATOO_ACP_TRACE keeps agents' ACP traffic",
     },
+    News {
+        id: "upgrade-told",
+        date: "2026-10-28",
+        lesson: "agents",
+        what: "After an upgrade an agent is told which background tasks it stopped, and its chats' waits go on",
+    },
 ];
 
 impl News {
