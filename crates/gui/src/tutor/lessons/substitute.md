@@ -154,7 +154,7 @@ has "CATS AND DOGS"
 
 ## Every match lit
 
-A search lights up every match in view, the one it went to brighter than the rest, as Vim's `hlsearch` does: after `/`, `?`, `n` and `N`, in a terminal's normal mode and a chat too, and in an editor after `*`, `#`, `:s` and `:g`. Esc or `:noh` puts them out until the next search. `:set nohlsearch` lights only the one found.
+A search lights up every match in view, the one it went to brighter than the rest, as Vim's `hlsearch` does: after `/`, `?`, `n` and `N`, in a terminal's normal mode, a chat, an explorer, a board and a review too, and in an editor after `*`, `#`, `:s` and `:g`. Esc or `:noh` puts them out until the next search. `:set nohlsearch` lights only the one found.
 
 ```practice pets.txt
 one cat, two cat, red cat
@@ -176,7 +176,7 @@ cats and dogs
 
 ## Shown as you type
 
-While you type a search, the cursor goes to the match it would find from where you started, the view follows, and the matches light up, as Neovim's `incsearch` shows them. Backspace shows it afresh. Esc puts the cursor and the view back; Enter keeps them, and is the search. It works the same in a terminal's normal mode and a chat. `:set noincsearch` moves nothing until Enter.
+While you type a search, the cursor goes to the match it would find from where you started, the view follows, and the matches light up, as Neovim's `incsearch` shows them. Backspace shows it afresh. Esc puts the cursor and the view back; Enter keeps them, and is the search. It works the same in a terminal's normal mode, a chat, an explorer, a board and a review, and a count before `/` goes to that match. `:set noincsearch` moves nothing until Enter.
 
 ```practice pets.txt
 one cat, two cat, red cat

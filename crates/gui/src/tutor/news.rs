@@ -983,6 +983,18 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "finder",
         what: "Pickers take Home and End; Ctrl+W deletes a word as in prompts, and a paste's line breaks are spaces",
     },
+    News {
+        id: "list-search",
+        date: "2026-10-28",
+        lesson: "explorer",
+        what: "Explorers, boards and reviews search as editors do: shown as you type, lit, 2/x counts, Up for history",
+    },
+    News {
+        id: "search-count",
+        date: "2026-10-28",
+        lesson: "substitute",
+        what: "A count before / or ? goes to that match in editors and terminals too, as 3/x goes to the third",
+    },
 ];
 
 impl News {

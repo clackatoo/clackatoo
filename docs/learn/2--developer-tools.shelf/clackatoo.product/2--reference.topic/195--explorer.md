@@ -46,7 +46,7 @@ Which folders are open, where the cursor is and what's scrolled to belong to the
 | `g?` | Lists these keys at the explorer's foot, or hides them; the bar says `g? keys` until then |
 | `zo` `zc` `za` | Opens, closes or toggles the folder at the cursor |
 | `zR` `zM` | Opens every folder shown, one level a press; closes them all |
-| `/` `?` `n` `N` | Searches the names shown, with the editor's patterns |
+| `/` `?` `n` `N` | Searches the names shown, with the editor's patterns, shown as you type and lit as every [list](~clackatoo/reference/window#lists)'s search is |
 | `.`, `g.` | Shows hidden files, or hides them |
 | `R` | Lists everything shown again |
 | `q` | Closes the explorer, or stops recording a macro |

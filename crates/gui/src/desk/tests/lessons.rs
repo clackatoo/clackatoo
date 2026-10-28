@@ -1552,4 +1552,14 @@ fn the_explorer_lessons_search_step_is_done_by_searching_the_names() {
     enter(&mut desk);
     desk.settle_lesson();
     assert_eq!(step(&desk), search + 1);
+    // The next is done as the search typed shows where it goes, before
+    // Enter.
+    desk.settle_lesson();
+    assert_eq!(step(&desk), search + 1, "not done before it's started");
+    type_keys(&mut desk, "?not");
+    desk.settle_lesson();
+    assert_eq!(step(&desk), search + 1, "not shown yet");
+    desk.preview_searches();
+    desk.settle_lesson();
+    assert_eq!(step(&desk), search + 2);
 }

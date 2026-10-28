@@ -36,6 +36,16 @@ Type `/todo` and press Enter.
 at "todo.txt"
 ```
 
+## Searches show as you type
+
+A search here is typed as an editor's is: while you type it, the cursor goes to the name it would find and every name it matches lights up, the one it goes to brighter. Esc puts the cursor back; Enter keeps it. A count before it goes to that match, as `2/t` goes to the second name with a `t` in it, and `3n` three on. The bar edits as the command line does: Up and Down go back through the searches you've typed, Ctrl+R puts in a register. Esc, or `:noh`, puts out what's lit. A board and a review search the same way, lighting the text they match.
+
+Type `?not` and watch the cursor go to `notes.txt` before you press Enter.
+
+```check
+at "notes.txt"
+```
+
 ## Open a file
 
 `j` and `k` move, as do `gg`, `G`, Ctrl+D and Ctrl+U. `l` or Enter opens a file in the editor of the tab you were last in, in place of its file, as `:e` would; Ctrl+V and Ctrl+S open it in a split, and Ctrl+T in a new tab. On a folder, `l` opens it, `h` closes it, and `-` goes up a folder, though a lesson's explorer stays in the lesson's folder.
