@@ -253,6 +253,10 @@ impl ChatPane {
             return false;
         }
         let settled = self.view.settle(fonts);
+        // A click went into a box of the form, to type in.
+        if self.view.take_wants_insert() {
+            self.mode = Mode::Insert;
+        }
         let original = self.view.take_original_request();
         let first_turn = self.view.first_turn();
         let terminal = self.terminal();
@@ -301,6 +305,11 @@ impl ChatPane {
     }
 
     /// Takes what it copied, oldest first.
+    /// Takes the links a form asked to open, for the window to open.
+    pub(crate) fn take_opened(&mut self) -> Vec<String> {
+        self.view.take_opened()
+    }
+
     pub(crate) fn take_copies(&mut self) -> Vec<(String, Copy)> {
         std::mem::take(&mut self.copies)
     }
@@ -468,6 +477,11 @@ impl ChatPane {
     ) -> bool {
         // The wheel drops an answer armed, as a key does.
         let disarmed = self.view.disarm();
+        // Over the plan a question shows, it scrolls the plan.
+        #[allow(clippy::cast_precision_loss)]
+        if self.view.over_proposal(pixel) {
+            return self.view.scroll_proposal(-(lines as f32) * 3.0) || disarmed;
+        }
         #[allow(clippy::cast_precision_loss)]
         let lines = lines as f32 * 3.0;
         if modifiers.shift

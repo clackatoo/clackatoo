@@ -12,6 +12,7 @@ mod divider;
 mod edge;
 mod files;
 mod fold;
+mod form;
 mod handoff;
 mod image;
 mod models;
@@ -1111,6 +1112,10 @@ impl ChatView {
     /// Draws the box a message is typed in, or the agent's question in
     /// its place, at the bottom of the pane. Returns its height, with the
     /// space below it.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "sizes the box by what it holds: a message, a question, a plan or a form"
+    )]
     fn paint_box(
         &mut self,
         fonts: &mut Fonts,
@@ -1121,19 +1126,40 @@ impl ChatView {
     ) -> f32 {
         let pad = m.em(1.1);
         let inner = (place.column - 2.0 * pad).max(m.em(4.0));
-        let question = self.lay_out_question(fonts, m, inner);
-        let editor_height = if question.is_none() {
+        // A form, or a plan to approve, takes at most about half the pane.
+        let room = (place.size[1] * 0.5).max(m.em(8.0));
+        let form = (self.node.question.as_ref()).and_then(|question| question.form.clone());
+        let form = form.as_ref().and_then(|form| {
+            let caret = caret && self.menu.is_none();
+            self.lay_out_form(fonts, m, (form, inner, room), caret)
+        });
+        let question = if form.is_none() {
+            self.lay_out_question(fonts, m, inner)
+        } else {
+            None
+        };
+        let proposal = question
+            .as_ref()
+            .and_then(|_| self.lay_out_proposal(fonts, m, inner));
+        let proposal_height = proposal
+            .as_ref()
+            .map_or(0.0, |proposal| proposal.height.min(room) + m.em(1.7));
+        if proposal.is_none() {
+            self.proposal_rect = None;
+        }
+        let editor_height = if question.is_none() && form.is_none() {
             self.size_editor(inner);
             let layout = self.editor.layout(&mut fonts.font_cx, &mut self.layout_cx);
             layout.height().max(m.em(LINE))
         } else {
             0.0
         };
-        let content_height = question.as_ref().map_or(
-            editor_height.min(m.em(LINE * EDITOR_LINES)).max(m.em(3.6)),
-            |question| question.height,
-        );
-        let attachments = if question.is_none() {
+        let content_height = match (&question, &form) {
+            (Some(question), _) => question.height + proposal_height,
+            (None, Some(form)) => form.height,
+            (None, None) => editor_height.min(m.em(LINE * EDITOR_LINES)).max(m.em(3.6)),
+        };
+        let attachments = if question.is_none() && form.is_none() {
             self.images.len()
         } else {
             0
@@ -1190,9 +1216,16 @@ impl ChatView {
         canvas.fill(Fill::rounded(shadow, Paint::Shadow, m.em(1.5)));
         canvas
             .fill(Fill::rounded(bounds, Paint::Raised, m.em(1.5)).bordered(1.0, Paint::RaisedEdge));
-        match question {
-            Some(question) => self.draw_question(&mut canvas, m, &frame, question),
-            None => self.draw_editor(
+        match (question, form) {
+            (Some(question), _) => {
+                if let Some(proposal) = proposal {
+                    let top = frame.text_origin()[1];
+                    self.draw_proposal(&mut canvas, m, (&frame, top, room), proposal);
+                }
+                self.draw_question(&mut canvas, m, &frame, question, proposal_height);
+            }
+            (None, Some(form)) => self.draw_form(&mut canvas, m, &frame, form),
+            (None, None) => self.draw_editor(
                 &mut canvas,
                 m,
                 &frame,
@@ -1324,8 +1357,10 @@ impl ChatView {
         m: Measures,
         frame: &BoxFrame,
         question: QuestionLaid,
+        below: f32,
     ) {
-        let origin = frame.text_origin();
+        let [x, y] = frame.text_origin();
+        let origin = [x, y + below];
         draw_laid(canvas, m, &question.title, origin, frame.inner);
         let top = origin[1] + question.title.height + m.em(0.7);
         for button in question.buttons {
@@ -2436,6 +2471,11 @@ fn tool_text(status: ToolStatus, title: &str) -> String {
 /// agent do what it says. Only the code its title quotes is read as
 /// Markdown: the rest is shown as it's written.
 fn asked(question: &clackatoo_protocol::Question, quoted: bool) -> String {
+    // The plan above says what it's about, in the agent's words; the
+    // question is the window's.
+    if question.plan.is_some() && !question.own {
+        return "Go ahead with this plan?".to_owned();
+    }
     let mut shown = String::new();
     if !question.own {
         shown.push_str("Allow the agent to ");

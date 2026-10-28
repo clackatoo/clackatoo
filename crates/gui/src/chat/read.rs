@@ -348,6 +348,16 @@ impl ChatView {
         let unsaid = self.unsay();
         let detail = self.hide_detail();
         let disarmed = self.armed.is_some();
+        // A form's keys come first: `j` and `k` move through it.
+        if !self.keys.pending()
+            && let Some(typing) = self.form_key(press, false)
+        {
+            return (true, typing);
+        }
+        // So do a plan's: `j` and `k` scroll it.
+        if self.proposal_key(press) {
+            return (true, false);
+        }
         if self.question_key(press) {
             return (true, false);
         }
@@ -371,7 +381,7 @@ impl ChatView {
     /// armed, and reads as ever. Returns whether it took the key.
     fn question_key(&mut self, press: &KeyPress<'_>) -> bool {
         let armed = self.armed.take();
-        let Some(question) = &self.node.question else {
+        let Some(question) = (self.node.question.as_ref()).filter(|q| q.form.is_none()) else {
             return false;
         };
         let modifiers = press.modifiers;

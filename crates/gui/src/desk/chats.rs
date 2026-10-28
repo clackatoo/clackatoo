@@ -159,6 +159,7 @@ impl Desk {
             for chat in self.chats.values_mut() {
                 redraw |= chat.settle(fonts);
                 copied.extend(chat.take_copies());
+                self.opened.extend(chat.take_opened());
                 yanked.extend(chat.take_yanks());
             }
             for (text, to) in copied {

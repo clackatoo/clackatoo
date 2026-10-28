@@ -1,0 +1,42 @@
+# What an agent asks the user (ACP elicitation): a form of Claude Code's
+# AskUserQuestion shape, picked with numbers and j/k, typed into, and
+# submitted; a link to open; and a plan to approve. The fake agent's
+# messages choose what it does: see crates/daemon/examples/fake_agent.rs.
+size 1100x900
+keys <C-;>:Agent claude<CR>
+keys i
+type elicit
+keys <CR>
+wait-for Please answer the following questions.
+sleep 700
+shot elicit-form
+keys 2
+keys j
+keys hello
+keys <CR>
+keys x
+keys jj
+keys <Tab>
+keys <BS>
+type 7
+sleep 300
+shot elicit-filled
+keys <Down><Down>
+keys <CR>
+wait-for answered:
+sleep 300
+shot elicit-answered
+type elicit-url
+keys <CR>
+wait-for Authenticate with MCP server linear
+sleep 700
+shot elicit-url
+keys <Down><CR>
+wait-for answered:
+type approve-plan
+keys <CR>
+wait-for Write the failing test
+sleep 700
+shot elicit-plan
+size 480x700
+shot elicit-plan-narrow

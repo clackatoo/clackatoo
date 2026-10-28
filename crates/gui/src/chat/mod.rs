@@ -14,6 +14,7 @@
 
 mod card;
 mod favorites;
+mod filling;
 #[cfg(test)]
 pub(crate) mod fixtures;
 mod handoff;
@@ -143,6 +144,8 @@ enum Hit {
     Stop,
     /// One of the answers to the agent's question, by its ID.
     Choice(String),
+    /// A row of the form the agent asks to be filled in, by its index.
+    FormRow(usize),
     /// The message being typed.
     Editor,
     /// A button that opens the menu for these settings, by their IDs.
@@ -414,6 +417,21 @@ pub(crate) struct ChatView {
     /// or any other key, a click, the wheel or the window losing the focus
     /// drops it.
     armed: Option<(usize, u64)>,
+    /// The form the agent's question asks to be filled in, as filled in
+    /// so far, if it asks one (see [`crate::form`]).
+    filling: Option<crate::form::Filling>,
+    /// Links to open, as a form's Open asks, for the window to take.
+    opened: Vec<String>,
+    /// The plan the question shows, laid out, for the question, width and
+    /// size it was laid out for.
+    proposal_laid: Option<((u64, u32, u32), crate::markdown::layout::Laid)>,
+    /// How far the plan is scrolled down, in pixels.
+    proposal_scroll: f32,
+    /// Where the plan was drawn last, in the pane, for the wheel over it.
+    proposal_rect: Option<[f32; 4]>,
+    /// A click went into a box of the form, to type in: the pane goes to
+    /// insert mode.
+    wants_insert: bool,
 }
 
 /// How long, in milliseconds, after a number arms an answer in normal mode
@@ -549,11 +567,18 @@ impl ChatView {
             detail_anchor: None,
             asked_at: None,
             armed: None,
+            filling: None,
+            opened: Vec::new(),
+            proposal_laid: None,
+            proposal_scroll: 0.0,
+            proposal_rect: None,
+            wants_insert: false,
         };
         // A chat first seen asking may be arrived at already.
         if view.node.question.is_some() {
             view.asked_at = Some(view.now());
         }
+        view.start_filling();
         view
     }
 
@@ -768,7 +793,10 @@ impl ChatView {
             if asking.is_some() {
                 self.asked_at = Some(self.now());
             }
+            self.proposal_scroll = 0.0;
+            self.proposal_rect = None;
         }
+        self.start_filling();
         // A chat that moved to another agent has nothing to say in detail
         // until the new one says how much it uses.
         if self.node.usage.is_none() {
@@ -913,6 +941,10 @@ impl ChatView {
             && !press.modifiers.shift
         {
             self.say("Reading the clipboard… press Enter once it appears.".into());
+            return;
+        }
+        // A form's keys are its own, but those it leaves.
+        if self.form_key(press, true).is_some() {
             return;
         }
         // An answer to the question asked waits as one, so if the question
@@ -1234,7 +1266,13 @@ impl ChatView {
                 text.push('\n');
             }
         }
-        if let Some(question) = &self.node.question {
+        if let Some(form) = (self.node.question.as_ref()).and_then(|q| q.form.as_ref()) {
+            self.form_text(form, &mut text);
+        } else if let Some(question) = &self.node.question {
+            if let Some(plan) = &question.plan {
+                text.push_str(plan);
+                text.push('\n');
+            }
             text.push_str(&question.title);
             text.push('\n');
             for choice in &question.choices {
@@ -1389,7 +1427,7 @@ impl ChatView {
         } else if self.node.question.is_none() {
             let text = text.replace("\r\n", "\n");
             self.drive(fonts, |driver| driver.insert_or_replace_selection(&text));
-        } else {
+        } else if !self.paste_into_form(text) {
             self.typed_while_asking();
         }
     }
@@ -1636,6 +1674,16 @@ impl ChatView {
         let Some(question) = self.node.question.as_ref().map(|question| question.id) else {
             return;
         };
+        // A form's own keys went to it already: Ctrl+C still stops the
+        // agent, and the rest say what the form's keys are.
+        if self.filling.is_some() {
+            if modifiers.ctrl && matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("c")) {
+                settled.actions.push(ChatAction::Stop);
+            } else {
+                self.typed_while_asking();
+            }
+            return;
+        }
         let pick = match key {
             Key::Character(character) if modifiers.ctrl && character.eq_ignore_ascii_case("c") => {
                 settled.actions.push(ChatAction::Stop);
@@ -1663,11 +1711,8 @@ impl ChatView {
     /// and that question's number: an answer's number, or Esc for no.
     /// While the menu is open, it has the keys first.
     fn pick_of(&self, press: &KeyPress<'_>) -> Option<(u64, Pick)> {
-        let question = self
-            .node
-            .question
-            .as_ref()
-            .filter(|_| self.menu.is_none())?;
+        let question = (self.node.question.as_ref())
+            .filter(|question| self.menu.is_none() && question.form.is_none())?;
         if press.modifiers.ctrl || press.modifiers.alt {
             return None;
         }
@@ -1720,6 +1765,9 @@ impl ChatView {
     /// What the bar says to a key that doesn't answer the question asked:
     /// which keys do, as they do in either mode.
     fn answer_hint(&self) -> String {
+        if self.filling.is_some() {
+            return Self::form_hint();
+        }
         let choices = (self.node.question.as_ref()).map_or(0, |question| question.choices.len());
         match choices {
             0 => "a question waits".to_owned(),
@@ -2290,6 +2338,7 @@ impl ChatView {
                 steer: self.busy(),
             }),
             Some(Hit::Stop) => settled.actions.push(ChatAction::Stop),
+            Some(Hit::FormRow(row)) => self.wants_insert |= self.form_clicked(row),
             Some(Hit::Choice(id)) => {
                 // The question the button was drawn for, which may have
                 // been answered since.
@@ -2887,6 +2936,133 @@ mod tests {
         assert_eq!(
             view.label().as_deref(),
             Some("a question waits: 1–2 answer it")
+        );
+    }
+
+    /// A chat asking for a form, a choice of one of two and a box, on the
+    /// tests' clock, asked `ago` milliseconds ago.
+    fn filling(ago: u64) -> ChatView {
+        use clackatoo_protocol::{Field, FieldInput, FieldOption, Form, FormAsk};
+        let option = |value: &str| FieldOption {
+            value: value.into(),
+            title: value.into(),
+            description: None,
+        };
+        let form = Form {
+            message: "Which?".into(),
+            ask: FormAsk::Fields {
+                complete: true,
+                fields: vec![
+                    Field {
+                        key: "db".into(),
+                        title: None,
+                        description: None,
+                        required: true,
+                        input: FieldInput::One {
+                            options: vec![option("pg"), option("lite")],
+                            default: None,
+                        },
+                    },
+                    Field {
+                        key: "note".into(),
+                        title: None,
+                        description: None,
+                        required: false,
+                        input: FieldInput::Text {
+                            default: None,
+                            min: None,
+                            max: None,
+                            secret: false,
+                            format: None,
+                        },
+                    },
+                ],
+            },
+        };
+        let node = ChatNode {
+            question: Some(Question {
+                id: 6,
+                title: "ask you `Which?`, which needs a newer clackatoo to answer".into(),
+                choices: vec![Choice {
+                    id: "decline".into(),
+                    name: "Decline".into(),
+                    kind: ChoiceKind::RejectOnce,
+                }],
+                own: false,
+                form: Some(form),
+                plan: None,
+            }),
+            ..ChatNode::default()
+        };
+        let mut view = ChatView::new(String::new(), node);
+        view.set_clock(START);
+        view.asked_at = Some(START - ago);
+        view
+    }
+
+    #[test]
+    fn a_form_is_filled_in_with_its_own_keys_and_esc_never_declines_it() {
+        use clackatoo_protocol::{FieldValue, FormReply};
+        let mut fonts = fonts();
+        let mut view = filling(ANSWER_PAUSE);
+        // `1` picks the first option, not the one choice an older window
+        // has, which declines; Esc is the pane's, not a refusal.
+        typed(&mut view, "2");
+        press(
+            &mut view,
+            &Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        // Down to the box, where letters type, even j and k.
+        typed(&mut view, "j");
+        typed(&mut view, "jk ok");
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert_eq!(view.editor.raw_text(), "");
+        // Esc said what the form's keys are, and, as any key that does
+        // nothing, made the form wait a moment again.
+        assert!(view.label().unwrap().starts_with("a form waits"));
+        step(&mut view, ANSWER_PAUSE);
+        // Enter moves on to Submit, and Enter there sends it.
+        let enter = Key::Named(NamedKey::Enter);
+        press(&mut view, &enter, None, Modifiers::default());
+        press(&mut view, &enter, None, Modifiers::default());
+        assert_eq!(
+            view.settle(&mut fonts).actions,
+            [ChatAction::Fill {
+                question: 6,
+                reply: FormReply::Accept(vec![
+                    ("db".into(), FieldValue::Text("lite".into())),
+                    ("note".into(), FieldValue::Text("jk ok".into())),
+                ]),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_form_just_come_isnt_answered_and_normal_modes_j_moves_through_it() {
+        let mut fonts = fonts();
+        let mut view = filling(100);
+        // In normal mode, j and k move through the form; Enter on Decline,
+        // as the form has just come, says to press again.
+        read_keys(&mut view, "jjjj⏎");
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert!(view.label().unwrap().contains("press it again"));
+        step(&mut view, ANSWER_PAUSE);
+        read_keys(&mut view, "⏎");
+        assert_eq!(
+            view.settle(&mut fonts).actions,
+            [ChatAction::Fill {
+                question: 6,
+                reply: clackatoo_protocol::FormReply::Decline,
+            }]
+        );
+        // `i` on the box goes to insert mode, to type.
+        let mut view = filling(ANSWER_PAUSE);
+        read_keys(&mut view, "jj");
+        assert_eq!(
+            read(&mut view, &Key::Character("i".into()), Some("i")),
+            (true, true)
         );
     }
 

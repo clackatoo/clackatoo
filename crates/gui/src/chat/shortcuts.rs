@@ -9,7 +9,7 @@ impl ChatView {
     pub(crate) fn leaves_composer(&self, press: &crate::input::KeyPress<'_>) -> bool {
         crate::vim::enters_normal_mode(press)
             || (*press.key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
-                && self.node.question.is_none())
+                && (self.node.question.as_ref()).is_none_or(|question| question.form.is_some()))
     }
 
     pub(crate) fn exclusive_shortcuts(&self) -> Option<Context> {
