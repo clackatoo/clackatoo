@@ -16662,7 +16662,8 @@ fn a_real_agents_background_shell_shows_until_it_ends() {
 // `CLACKATOO_ACP_TRACER` to a program run as `TRACER DIR COMMAND...` that
 // relays the adapter's stdin and stdout, to keep the ACP traffic in DIR,
 // `$TMPDIR/acp-NAME`, which outlives the test; it writes the adapter's pid
-// to `DIR/pid`.
+// to `DIR/pid`. Run them one at a time (or with `--test-threads=1`) and with
+// the tracer: process checks look at every child of the test process.
 
 /// The real adapter's command on haiku, traced into `trace` if asked.
 fn real_claude_command(trace: &Path) -> Vec<std::ffi::OsString> {
@@ -17417,7 +17418,7 @@ fn a_real_chat_told_again_shows_a_stopped_turn_as_stopped() {
     assert!(
         !prompts
             .iter()
-            .any(|prompt| prompt.starts_with("[Request interrupted")),
+            .any(|prompt| prompt.contains("[Request interrupted")),
         "{prompts:?}"
     );
     assert_eq!(node.turns.len(), 1, "{node:#?}");
