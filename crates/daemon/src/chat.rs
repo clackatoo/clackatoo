@@ -6363,6 +6363,41 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_claude_code_kept_ends_its_turn_told_again_as_stopped() {
+        let mut chat = resuming();
+        // Stopped before it did anything: the note comes straight after.
+        replay_user(&mut chat, "sleep a while");
+        replay_user(&mut chat, "[Request interrupted by user]");
+        // Stopped at a running tool, which went with it.
+        replay_user(&mut chat, "run it");
+        replay(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"t1","title":"sleep 30","kind":"execute","status":"pending"}"#,
+        );
+        replay_user(&mut chat, "[Request interrupted by user for tool use]");
+        replay_user(&mut chat, "and now");
+        replay(
+            &mut chat,
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ok"}}"#,
+        );
+        chat.opened_again(true);
+        assert_eq!(prompts(&chat), ["sleep a while", "run it", "and now"]);
+        let outcomes: Vec<_> = chat.node.turns.iter().map(outcome).collect();
+        assert_eq!(
+            outcomes,
+            [
+                Some(&Outcome::Stopped),
+                Some(&Outcome::Stopped),
+                Some(&Outcome::Done)
+            ]
+        );
+        let Item::Tool(tool) = &chat.node.turns[1].items[0] else {
+            panic!("{:#?}", chat.node.turns[1]);
+        };
+        assert_eq!(tool.status, ToolStatus::Failed);
+    }
+
+    #[test]
     fn a_load_refused_holds_no_message_and_loads_again_with_the_next() {
         let mut chat = resuming();
         send(&mut chat, "first");

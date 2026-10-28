@@ -31,6 +31,15 @@ use clackatoo_protocol::{ChatState, Outcome, ResumeSession, Turn};
 
 use super::{Action, HostedChat, Link, TITLE, Wanted, clean, clean_text, now};
 
+/// What Claude Code keeps, as a message from the user, where a turn was
+/// stopped: at a tool's question, or otherwise. Codex's adapter tells no
+/// such thing: a turn of Codex's that was stopped is told again as one
+/// that ended.
+const INTERRUPTED: [&str; 2] = [
+    "[Request interrupted by user]",
+    "[Request interrupted by user for tool use]",
+];
+
 /// Where a chat is in loading a session its agent kept.
 #[derive(Debug, Default)]
 pub(super) struct Told {
@@ -146,6 +155,12 @@ impl HostedChat {
                     ContentBlock::Image(_) => "[Image]".to_owned(),
                     _ => return,
                 };
+                // Claude Code keeps a stop as a message of the user's own:
+                // the turn it ends was stopped, and no one wrote it.
+                if INTERRUPTED.contains(&text.trim()) {
+                    self.end_turn(Outcome::Stopped);
+                    return;
+                }
                 // A message of several blocks comes a block at a time,
                 // before the agent does anything with it.
                 if let Some(index) = self.answering_turn()

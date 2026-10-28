@@ -17377,7 +17377,7 @@ fn a_real_chat_comes_back_after_restarts_and_remembers() {
 /// restart, shows as stopped, as it did, and Claude Code's note of the
 /// stop isn't shown as a message the user sent.
 #[test]
-#[ignore = "CLACKA-185: a stop told again shows as a message and the turn as done (fails)"]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
 fn a_real_chat_told_again_shows_a_stopped_turn_as_stopped() {
     let kept = tempfile::tempdir().unwrap();
     let file = kept.path().join("workspaces");
