@@ -83,6 +83,7 @@ mod relay;
 mod rename;
 mod restore;
 mod review;
+mod settling;
 mod signs;
 mod stopping;
 mod symbols;

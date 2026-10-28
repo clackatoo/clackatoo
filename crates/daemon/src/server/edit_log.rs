@@ -24,9 +24,32 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use clackatoo_protocol::{BufferId, Op, TerminalId, TurnFiles, TurnFilesState};
-use clackatoo_text::{Edit, Rope};
+use clackatoo_text::{ChangedLines, Edit, Rope};
 
 use crate::handover;
+
+/// An agent's change to a file not open, worked out once for the edit log
+/// and the review both: the edit from the text before, the text after,
+/// and the lines the edit changed. Each is as long to work out as the
+/// file, so for a big one it's done off the daemon's loop (see
+/// `agent_files`).
+#[derive(Clone, Debug)]
+pub(crate) struct Diffed {
+    pub(crate) edit: Edit,
+    pub(crate) after: Rope,
+    pub(crate) lines: ChangedLines,
+}
+
+impl Diffed {
+    pub(crate) fn between(before: &str, after: &str) -> Self {
+        let edit = Edit::between(before, after);
+        Self {
+            lines: ChangedLines::of(&edit, before, after),
+            after: Rope::from_str(after),
+            edit,
+        }
+    }
+}
 
 /// How much text the log keeps for each chat, at most, in bytes: past it,
 /// the chat's oldest turns go.
@@ -252,13 +275,25 @@ impl EditLog {
         if before == after {
             return Vec::new();
         }
-        let file = self.file_mut(maker, path, before.is_some());
-        let (before, after) = (before.unwrap_or_default(), after);
-        file.exists = after.is_some();
-        let after = after.unwrap_or_default();
+        let diffed = Diffed::between(before.unwrap_or_default(), after.unwrap_or_default());
+        self.note_diffed(maker, path, (before.is_some(), after.is_some()), &diffed)
+    }
+
+    /// As [`note_text`](Self::note_text), with the change worked out
+    /// already, from a file that existed if `existed` to one that does if
+    /// `exists`. The texts must differ.
+    pub(super) fn note_diffed(
+        &mut self,
+        maker: &Maker,
+        path: &Path,
+        (existed, exists): (bool, bool),
+        diffed: &Diffed,
+    ) -> Vec<usize> {
+        let file = self.file_mut(maker, path, existed);
+        file.exists = exists;
         file.changes.push(Change::Text {
-            after: Rope::from_str(after),
-            edit: Edit::between(before, after),
+            after: diffed.after.clone(),
+            edit: diffed.edit.clone(),
         });
         self.chat_mut(maker.chat).trim()
     }

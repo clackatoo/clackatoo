@@ -1793,6 +1793,7 @@ impl Daemon {
         if self.agents.usage.take() {
             self.offer_usage();
         }
+        self.take_settled();
         for done in self.agents.images.take() {
             let id = done.target.terminal;
             if let Some(chat) = self.chat(id)

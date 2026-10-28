@@ -48,7 +48,7 @@ mod pieces;
 mod snippet;
 mod step;
 
-pub use agents::{Added, AgentHunk, AgentHunks, Maker};
+pub use agents::{Added, AgentHunk, AgentHunks, ChangedLines, Maker};
 pub use diagnostics::{Diagnostic, Diagnostics, Severity};
 pub use edit::{Bias, Edit, EditError, MOST_PIECES, Moved, Op, Untouched, compose, transform};
 pub use highlights::{Highlights, Kind, Span};

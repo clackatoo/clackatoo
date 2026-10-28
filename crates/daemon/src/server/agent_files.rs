@@ -52,9 +52,10 @@ use serde_json::{Value, json};
 use super::Daemon;
 use super::buffers::resolve;
 use super::chats::AgentId;
-use super::edit_log::{EditLog, Maker, edit_bytes};
+use super::edit_log::{Diffed, EditLog, Maker, edit_bytes};
+use super::settling::{Diffing, ON_LOOP, Settler};
 use crate::agent::{FAILED, NOT_FOUND};
-use crate::buffer::{self, Buffer, Made, Refused};
+use crate::buffer::{self, Buffer, DiskStamp, Made, Refused};
 use crate::chat::{RawDiff, Wrote};
 
 /// How many files' text, as agents last read them, are kept, to merge
@@ -84,6 +85,22 @@ pub(super) struct AgentFiles {
     /// them.
     pub(super) captures: Vec<Capture>,
     pub(super) log: EditLog,
+    /// Works out changes to big files off the loop.
+    settler: Settler,
+    /// The changes to files being worked out by `settler`, each holding
+    /// back what more its chat's tools do to its file.
+    diffing: Vec<Diffing>,
+    /// Chats whose turns have ended while a change was being worked out:
+    /// what's kept of their turns is let go once all are taken in.
+    ending: Vec<TerminalId>,
+}
+
+impl AgentFiles {
+    /// Whether a change the agent in `chat` made to a file is still being
+    /// worked out, so the edit log doesn't have it yet.
+    pub(super) fn diffing(&self, chat: TerminalId) -> bool {
+        self.diffing.iter().any(|diffing| diffing.chat == chat)
+    }
 }
 
 /// A file's text as the agent in one chat last read or wrote it.
@@ -194,6 +211,20 @@ impl AgentFiles {
             text,
         });
     }
+}
+
+/// A file not open that an agent's tools made as they said they would:
+/// what the edit log and the review are to hear of it.
+#[derive(Debug)]
+pub(super) struct Settled {
+    chat: TerminalId,
+    path: PathBuf,
+    maker: Maker,
+    /// Its text before the tools, or `None` if there was no file.
+    pub(super) before: Option<String>,
+    /// Its text on disk now, or `None` if there's no file.
+    pub(super) disk: Option<String>,
+    read_as: Option<DiskStamp>,
 }
 
 /// What a tool of an agent said it changed in a file, waiting for the file
@@ -413,9 +444,55 @@ impl Daemon {
                 None => self.settle_closed(chat, &path, true),
             }
         }
+        // A change still being worked out needs what's kept of the turn:
+        // it's let go once that's taken in.
+        if self.agent_files.diffing(chat) {
+            if !self.agent_files.ending.contains(&chat) {
+                self.agent_files.ending.push(chat);
+            }
+            return;
+        }
         let files = &mut self.agent_files;
         files.reports.retain(|report| report.chat != chat);
         files.captures.retain(|capture| capture.chat != chat);
+    }
+
+    /// Takes in the changes to big files worked out off the loop, in
+    /// order, then settles again what waited for each, and lets go of
+    /// what's kept of turns that ended meanwhile.
+    pub(super) fn take_settled(&mut self) {
+        for (settled, diffed) in self.agent_files.settler.take() {
+            let (chat, path) = (settled.chat, settled.path.clone());
+            let files = &mut self.agent_files;
+            let Some(at) = (files.diffing.iter())
+                .position(|diffing| diffing.chat == chat && diffing.path == path)
+            else {
+                continue;
+            };
+            let diffing = files.diffing.remove(at);
+            // A chat closed meanwhile has nothing to take it in.
+            if self.chat(chat).is_none() {
+                self.agent_files.ending.retain(|&ending| ending != chat);
+                continue;
+            }
+            self.settled_closed(settled, &diffed);
+            if diffing.again {
+                match self.buffer_of(&path) {
+                    Some(id) => self.settle(chat, &path, id, diffing.last),
+                    None => self.settle_closed(chat, &path, diffing.last),
+                }
+            }
+            let files = &mut self.agent_files;
+            if files.ending.contains(&chat) && !files.diffing(chat) {
+                files.ending.retain(|&ending| ending != chat);
+                // A turn begun since keeps what it's using.
+                if !self.chat(chat).is_some_and(|hosted| hosted.answering()) {
+                    let files = &mut self.agent_files;
+                    files.reports.retain(|report| report.chat != chat);
+                    files.captures.retain(|capture| capture.chat != chat);
+                }
+            }
+        }
     }
 
     /// The reports of the tools of the agent in `chat` about `path`, in
@@ -569,6 +646,15 @@ impl Daemon {
     /// with `last`, as the agent's turn ends, the change is noted as not
     /// known; without, more may yet be said.
     fn settle_closed(&mut self, chat: TerminalId, path: &Path, last: bool) {
+        // What the chat's tools did before is still being worked out: this
+        // waits for it, as it goes from what that leaves.
+        if let Some(diffing) = (self.agent_files.diffing.iter_mut())
+            .find(|diffing| diffing.chat == chat && diffing.path == path)
+        {
+            diffing.again = true;
+            diffing.last |= last;
+            return;
+        }
         let reports = self.reports_of(chat, path);
         let Some(first) = reports.first() else {
             return;
@@ -623,20 +709,37 @@ impl Daemon {
         match (before, made) {
             (Some(before), Some(made)) if made == disk => {
                 forget(&mut self.agent_files);
-                let dropped = (self.agent_files.log).note_text(
-                    &maker,
-                    path,
-                    before.as_deref(),
-                    disk.as_deref(),
+                let settled = Settled {
+                    chat,
+                    path: path.to_owned(),
+                    maker,
+                    before,
+                    disk,
+                    read_as,
+                };
+                let bytes = (settled.before.as_ref().map_or(0, String::len))
+                    + (settled.disk.as_ref().map_or(0, String::len));
+                let settled = if bytes > ON_LOOP {
+                    match self.agent_files.settler.submit(settled, &self.waker) {
+                        None => {
+                            self.agent_files.diffing.push(Diffing {
+                                chat,
+                                path: path.to_owned(),
+                                again: false,
+                                last: false,
+                            });
+                            return;
+                        }
+                        Some(settled) => settled,
+                    }
+                } else {
+                    settled
+                };
+                let diffed = Diffed::between(
+                    settled.before.as_deref().unwrap_or_default(),
+                    settled.disk.as_deref().unwrap_or_default(),
                 );
-                let texts = (before.as_deref(), disk.as_deref());
-                self.agent_changed_file(path, texts, maker.hunks(), read_as);
-                if let Some(capture) = (self.agent_files.captures.iter_mut())
-                    .find(|capture| capture.chat == chat && capture.path == path)
-                {
-                    capture.text = disk.map_or(Seen::Absent, Seen::Text);
-                }
-                self.refresh_files(chat, dropped.into_iter().chain([maker.turn]));
+                self.settled_closed(settled, &diffed);
             }
             _ if last => {
                 forget(&mut self.agent_files);
@@ -645,6 +748,42 @@ impl Daemon {
             }
             _ => {}
         }
+    }
+
+    /// Takes in what an agent's tools made of the file `settled.path`, not
+    /// open, as they said: the edit log and the review hear of it, with
+    /// the change `diffed` from the text before to the text on disk.
+    fn settled_closed(&mut self, settled: Settled, diffed: &Diffed) {
+        let Settled {
+            chat,
+            path,
+            maker,
+            before,
+            disk,
+            read_as,
+        } = settled;
+        let dropped = if before == disk {
+            Vec::new()
+        } else {
+            (self.agent_files.log).note_diffed(
+                &maker,
+                &path,
+                (before.is_some(), disk.is_some()),
+                diffed,
+            )
+        };
+        let texts = (
+            before.as_deref().unwrap_or_default(),
+            disk.as_deref().unwrap_or_default(),
+        );
+        let turn = maker.turn;
+        self.agent_changed_diffed(&path, texts, (maker.hunks(), read_as), diffed);
+        if let Some(capture) = (self.agent_files.captures.iter_mut())
+            .find(|capture| capture.chat == chat && capture.path == path)
+        {
+            capture.text = disk.map_or(Seen::Absent, Seen::Text);
+        }
+        self.refresh_files(chat, dropped.into_iter().chain([turn]));
     }
 
     /// Tells everyone following buffer `id`, and the chat, that the file

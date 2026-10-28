@@ -117,6 +117,20 @@ struct Changed {
     new: Range<usize>,
 }
 
+/// The runs of whole lines an edit changed, as [`AgentHunks::add`] works
+/// them out: worked out apart, as on a thread other than the daemon's
+/// loop, for a big file, and put in with [`AgentHunks::add_lines`].
+#[derive(Clone, Debug, Default)]
+pub struct ChangedLines(Vec<Changed>);
+
+impl ChangedLines {
+    /// The lines `edit`, which made `new` of `old`, changed.
+    #[must_use]
+    pub fn of(edit: &Edit, old: &str, new: &str) -> Self {
+        Self(changed_lines(edit, old, new))
+    }
+}
+
 impl AgentHunks {
     /// No hunks.
     #[must_use]
@@ -272,12 +286,24 @@ impl AgentHunks {
         (maker, fits): (Maker, &dyn Fn(&AgentHunk) -> bool),
         next_id: &mut u64,
     ) -> Added {
-        let changed = changed_lines(edit, old, new);
+        let changed = ChangedLines::of(edit, old, new);
+        self.add_lines(&changed, (old, new), (maker, fits), next_id)
+    }
+
+    /// As [`add`](Self::add), with the lines the edit changed worked out
+    /// already, by [`ChangedLines::of`] with the same texts.
+    pub fn add_lines(
+        &mut self,
+        ChangedLines(changed): &ChangedLines,
+        (old, new): (&str, &str),
+        (maker, fits): (Maker, &dyn Fn(&AgentHunk) -> bool),
+        next_id: &mut u64,
+    ) -> Added {
         let mut added = Added::default();
         if changed.is_empty() {
             return added;
         }
-        let shift = |place: usize, after: bool| shift(&changed, place, after);
+        let shift = |place: usize, after: bool| shift(changed, place, after);
         let old_list = std::mem::take(&mut self.list);
         let mut list = Vec::with_capacity(old_list.len() + changed.len());
         // Where the last run of lines ended, after the edit: lines put in

@@ -17548,7 +17548,7 @@ fn a_real_agent_refused_then_allowed_then_moved_to_another_mode() {
 /// A command printing megabytes and a long answer: the turn ends, whole,
 /// and the daemon answers another client quickly all the while.
 #[test]
-#[ignore = "CLACKA-185: a multi-megabyte edit stalls the daemon's loop (fails); talks to a real model"]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
 fn a_real_agents_long_output_leaves_the_daemon_answering() {
     let Live {
         daemon,
@@ -17618,13 +17618,12 @@ fn a_real_agents_long_output_leaves_the_daemon_answering() {
 }
 
 /// What [`a_real_agents_long_output_leaves_the_daemon_answering`] found,
-/// without a model: an agent's edit to a file of megabytes, whose diff
+/// without a model: an agent's rewrite of a file of megabytes, whose diff
 /// carries the whole file, as Claude Code's adapter sends it, leaves the
-/// daemon answering another client quickly. Only `client` watches the
-/// chat, slowly, so the daemon isn't kept busy sending the diff.
-#[test]
-#[ignore = "CLACKA-185: a multi-megabyte diff stalls the daemon's loop (fails)"]
-fn an_agents_edit_to_a_big_file_leaves_the_daemon_answering() {
+/// daemon answering another client quickly, with the file `open` in a
+/// buffer or not. Only `client` watches the chat, slowly, so the daemon
+/// isn't kept busy sending the diff. Returns the slowest answer.
+fn slowest_answer_while_a_big_file_is_rewritten(open: bool) -> Duration {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
     let chat = start_chat(&mut client);
@@ -17634,25 +17633,27 @@ fn an_agents_edit_to_a_big_file_leaves_the_daemon_answering() {
         writeln!(text, "line {n}").unwrap();
     }
     std::fs::write(&big, &text).unwrap();
+    if open {
+        let pane = client
+            .new_workspace(None, open_file(daemon.dir.path(), "big.txt"))
+            .unwrap();
+        buffer_in(&mut client, pane);
+    }
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watcher = {
         let done = done.clone();
         let mut other = daemon.client();
         std::thread::spawn(move || {
-            let mut slowest = (Duration::ZERO, Duration::ZERO);
-            let start = Instant::now();
+            let mut slowest = Duration::ZERO;
             while !done.load(std::sync::atomic::Ordering::Relaxed) {
                 let asked = Instant::now();
                 other.list_terminals().unwrap();
-                if asked.elapsed() > slowest.0 {
-                    slowest = (asked.elapsed(), asked - start);
-                }
+                slowest = slowest.max(asked.elapsed());
                 std::thread::sleep(Duration::from_millis(5));
             }
             slowest
         })
     };
-    let sent = Instant::now();
     client
         .chat(
             chat,
@@ -17660,26 +17661,84 @@ fn an_agents_edit_to_a_big_file_leaves_the_daemon_answering() {
         )
         .unwrap();
     let deadline = Instant::now() + Duration::from_mins(1);
-    let ended = loop {
+    loop {
         std::thread::sleep(Duration::from_millis(250));
-        let asked = Instant::now();
         let view = client.capture(chat).unwrap();
-        let took = asked.elapsed();
         if last_outcome(view.chat().unwrap()).is_some() {
-            break (sent.elapsed(), took);
+            break;
         }
         assert!(Instant::now() < deadline);
-    };
-    std::thread::sleep(Duration::from_millis(300));
+    }
+    // The change is taken in after the turn ends, off the loop.
+    std::thread::sleep(Duration::from_millis(500));
     done.store(true, std::sync::atomic::Ordering::Relaxed);
-    let (slowest, at) = watcher.join().unwrap();
-    eprintln!(
-        "turn ended {:?} after sending; one capture of it took {:?}; slowest other answer \
-         {slowest:?}, {at:?} into the test",
-        ended.0, ended.1
-    );
+    let slowest = watcher.join().unwrap();
+    eprintln!("slowest other answer: {slowest:?}");
     assert_eq!(std::fs::read_to_string(&big).unwrap(), "small\n");
-    assert!(slowest < Duration::from_millis(100), "{slowest:?}");
+    slowest
+}
+
+#[test]
+fn an_agents_rewrite_of_a_big_file_not_open_leaves_the_daemon_answering() {
+    // About 20 ms in a debug build; half a second before CLACKA-200.
+    let slowest = slowest_answer_while_a_big_file_is_rewritten(false);
+    assert!(slowest < Duration::from_millis(150), "{slowest:?}");
+}
+
+#[test]
+#[ignore = "CLACKA-200: a multi-megabyte rewrite of an open buffer still stalls the loop (fails)"]
+fn an_agents_rewrite_of_a_big_file_open_leaves_the_daemon_answering() {
+    let slowest = slowest_answer_while_a_big_file_is_rewritten(true);
+    assert!(slowest < Duration::from_millis(150), "{slowest:?}");
+}
+
+/// Changes to a big file not open are worked out off the daemon's loop,
+/// and still taken in in order: two turns rewriting it one after the
+/// other, the second likely before the first's is taken in, are undone
+/// each in turn, back to the file as it was.
+#[test]
+fn an_agents_changes_to_a_big_file_are_taken_in_in_order_off_the_loop() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let big = daemon.dir.path().join("big.txt");
+    let mut first = String::new();
+    for n in 1..=300_000 {
+        writeln!(first, "line {n}").unwrap();
+    }
+    std::fs::write(&big, &first).unwrap();
+    let second = first.replacen("line 1\n", "line one\n", 1);
+    // Asked first, so the file is read before the agent writes it.
+    for (turn, text) in [(0, second.as_str()), (1, "small\n")] {
+        client
+            .chat(
+                chat,
+                ChatAction::Send(format!("edit {}\n{text}", big.display())),
+            )
+            .unwrap();
+        wait_for_chat_for(&mut client, chat, Duration::from_mins(1), |node| {
+            node.turns.len() == turn + 1 && node.question.is_some()
+        });
+        answer(&mut client, chat, Some("allow".into()));
+        wait_for_chat_for(&mut client, chat, Duration::from_mins(1), |node| {
+            node.turns.len() == turn + 1 && last_outcome(node).is_some()
+        });
+    }
+    assert_eq!(std::fs::read_to_string(&big).unwrap(), "small\n");
+    // Each turn shows what it changed once that's taken in.
+    let made = Some(TurnFiles {
+        count: 1,
+        state: TurnFilesState::Made,
+    });
+    wait_for_chat_for(&mut client, chat, Duration::from_secs(30), |node| {
+        node.turns.iter().all(|turn| turn.files == made)
+    });
+    let notice = undo_turn(&mut client, chat, 1, false, false);
+    assert_eq!(notice, "Undid turn 2: big.txt.");
+    assert_eq!(std::fs::read_to_string(&big).unwrap(), second);
+    let notice = undo_turn(&mut client, chat, 0, false, false);
+    assert_eq!(notice, "Undid turn 1: big.txt.");
+    assert_eq!(std::fs::read_to_string(&big).unwrap(), first);
 }
 
 /// The window goes away mid-turn: the turn goes on in the daemon, and a

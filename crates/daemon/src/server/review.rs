@@ -47,6 +47,7 @@ use clackatoo_text::{AgentHunk, AgentHunks, Bias, Edit, Maker, Rope};
 use mio::Token;
 
 use super::Daemon;
+use super::edit_log::Diffed;
 use super::turn_undo::{Disk, Plan, Target, shown, take_out};
 use crate::buffer::{self, Buffer, DiskStamp};
 use crate::changes::{Compared, listed};
@@ -400,6 +401,19 @@ impl Daemon {
         stamp: Option<DiskStamp>,
     ) {
         let (before, after) = (before.unwrap_or_default(), after.unwrap_or_default());
+        let diffed = Diffed::between(before, after);
+        self.agent_changed_diffed(path, (before, after), (maker, stamp), &diffed);
+    }
+
+    /// As [`agent_changed_file`](Self::agent_changed_file), with the
+    /// change from `before` to `after` worked out already.
+    pub(super) fn agent_changed_diffed(
+        &mut self,
+        path: &Path,
+        (before, after): (&str, &str),
+        (maker, stamp): (Maker, Option<DiskStamp>),
+        diffed: &Diffed,
+    ) {
         let reviews = &mut self.reviews;
         let closed = (reviews.closed)
             .entry(path.to_owned())
@@ -417,11 +431,10 @@ impl Daemon {
         }
         let mut chats = chats_of(&closed.hunks);
         chats.push(TerminalId(maker.chat));
-        let edit = Edit::between(before, after);
         let known = &reviews.made;
         let fits = |hunk: &AgentHunk| fits(hunk, before, known);
-        let added = (closed.hunks).add(
-            &edit,
+        let added = (closed.hunks).add_lines(
+            &diffed.lines,
             (before, after),
             (maker, &fits),
             &mut reviews.next_hunk,
@@ -435,7 +448,7 @@ impl Daemon {
             }
         }
         closed.stamp = stamp;
-        closed.text = Some(Rope::from_str(after));
+        closed.text = Some(diffed.after.clone());
         if closed.hunks.is_empty() {
             reviews.closed.remove(path);
         }

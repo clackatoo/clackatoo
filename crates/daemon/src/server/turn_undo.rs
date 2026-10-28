@@ -74,6 +74,14 @@ impl Daemon {
     /// changed in files, and says how that went in the chat. If a file
     /// can't be, none is, unless `force`, which does the rest.
     pub(super) fn undo_turn(&mut self, chat: TerminalId, turn: usize, redo: bool, force: bool) {
+        // The log doesn't have a change to a big file still being worked
+        // out: undoing now would leave it.
+        if self.agent_files.diffing(chat) {
+            if let Some(hosted) = self.chat(chat) {
+                hosted.notify("Still taking in the agent's changes: try again in a moment.".into());
+            }
+            return;
+        }
         let notice = self.reverse_turn(chat, turn, redo, force);
         if let Some(hosted) = self.chat(chat) {
             hosted.notify(notice);

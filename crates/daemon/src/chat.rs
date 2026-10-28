@@ -3470,8 +3470,8 @@ fn tool_content(content: &[ToolCallContent]) -> Vec<ToolContent> {
             },
             ToolCallContent::Diff(diff) => Some(ToolContent::Diff(Diff {
                 path: diff.path.to_string_lossy().into_owned(),
-                old: (diff.old_text.as_deref()).map(|old| head(&clean_text(old), DIFF_TEXT)),
-                new: head(&clean_text(&diff.new_text), DIFF_TEXT),
+                old: (diff.old_text.as_deref()).map(|old| clean_head(old, DIFF_TEXT)),
+                new: clean_head(&diff.new_text, DIFF_TEXT),
             })),
             _ => None,
         })
@@ -3524,6 +3524,22 @@ fn head(text: &str, max: usize) -> String {
     }
     let cut = &text[..end];
     cut.rfind('\n').map_or(cut, |line| &cut[..=line]).to_owned()
+}
+
+/// [`head`] of [`clean_text`] of `text`, cleaning no more of it than
+/// that needs: an edit's diff can carry a whole file of megabytes, and
+/// cleaning it all would hold up the daemon's loop.
+fn clean_head(text: &str, max: usize) -> String {
+    let mut cleaned = String::new();
+    for ch in text.chars() {
+        if matches!(ch, '\n' | '\t') || !ch.is_control() {
+            cleaned.push(ch);
+            if cleaned.len() > max {
+                break;
+            }
+        }
+    }
+    head(&cleaned, max)
 }
 
 /// A title or name on one line, without control characters.
@@ -6360,6 +6376,21 @@ mod tests {
             chat.known, 2,
             "nothing carried: the session saw the turn told again"
         );
+    }
+
+    #[test]
+    fn a_diffs_head_is_cleaned_only_as_far_as_it_shows() {
+        let line = "a\u{7}b\tc\n";
+        for text in [
+            String::new(),
+            line.repeat(3),
+            line.repeat(100_000),
+            "é".repeat(200_000),
+        ] {
+            for max in [0, 5, 7, 64, DIFF_TEXT] {
+                assert_eq!(clean_head(&text, max), head(&clean_text(&text), max));
+            }
+        }
     }
 
     #[test]

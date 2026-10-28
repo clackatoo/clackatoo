@@ -596,25 +596,31 @@ impl Buffer {
         }
         let saved = self.saved.to_string();
         let mut now = self.text.to_string();
-        let whole = merge(&saved, disk, &now).map_err(|err| failed(err.to_string()))?;
-        if let Merged::Conflict(lines) = whole {
-            return Err(Refused::Conflict(lines));
-        }
+        let whole = match merge(&saved, disk, &now).map_err(|err| failed(err.to_string()))? {
+            Merged::Made(edit) => edit,
+            Merged::Conflict(lines) => return Err(Refused::Conflict(lines)),
+        };
         // Every step is merged before any is made, so one that can't be
         // leaves the buffer as it was. Each is merged from the text after
         // the one before, which only makes sense because the whole change
         // was found to touch no line changed and not saved, just above.
+        // A single step is the whole change, already merged: merging a big
+        // file again would hold up the loop as long again.
         let mut edits = Vec::with_capacity(steps.len());
-        let mut before = saved.as_str();
-        for (text, _) in steps {
-            match merge(before, text, &now).map_err(|err| failed(err.to_string()))? {
-                Merged::Made(edit) => {
-                    now = edit.apply_to(&now).map_err(|err| failed(err.to_string()))?;
-                    edits.push(edit);
+        if steps.len() == 1 {
+            edits.push(whole);
+        } else {
+            let mut before = saved.as_str();
+            for (text, _) in steps {
+                match merge(before, text, &now).map_err(|err| failed(err.to_string()))? {
+                    Merged::Made(edit) => {
+                        now = edit.apply_to(&now).map_err(|err| failed(err.to_string()))?;
+                        edits.push(edit);
+                    }
+                    Merged::Conflict(lines) => return Err(Refused::Conflict(lines)),
                 }
-                Merged::Conflict(lines) => return Err(Refused::Conflict(lines)),
+                before = text;
             }
-            before = text;
         }
         let mut made = Vec::with_capacity(steps.len());
         for (edit, &(_, step)) in edits.into_iter().zip(steps) {
