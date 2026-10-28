@@ -1499,8 +1499,8 @@ mod tests {
 
     /// Problem 2: a PM going round a review loop with its builder, a
     /// message and a wait at a time, is refused its ninth message in one
-    /// turn (MAX_PER_TURN), and its seventeenth turn of other agents' work
-    /// in one turn of the user's (MAX_CAUSED), though nothing runs away:
+    /// turn (`MAX_PER_TURN`), and its seventeenth turn of other agents' work
+    /// in one turn of the user's (`MAX_CAUSED`), though nothing runs away:
     /// each message is answered before the next.
     #[test]
     #[ignore = "CLACKA-185: 8 messages per turn, 16 per user turn"]
@@ -1533,7 +1533,7 @@ mod tests {
         let chat = daemon.chat(b).unwrap();
         chat.act(clackatoo_protocol::ChatAction::Send("and you?".to_owned()));
         answers(&mut daemon, b, "the user's answer");
-        let answer = (daemon.wait_for_chat(call(), a, b, Duration::from_secs(60)))
+        let answer = (daemon.wait_for_chat(call(), a, b, Duration::from_mins(1)))
             .expect("answered at once")
             .unwrap();
         assert!(
@@ -1561,7 +1561,7 @@ mod tests {
             let message = daemon.message_from(a, text).unwrap();
             drop(daemon.chat(b).unwrap().deliver(message).unwrap());
         }
-        let waits = daemon.wait_for_chat(call(), a, b, Duration::from_secs(60));
+        let waits = daemon.wait_for_chat(call(), a, b, Duration::from_mins(1));
         assert!(waits.is_none(), "it waits for both");
         answers(&mut daemon, b, "parser: two bugs");
         drop(daemon.chat(b).unwrap().deliver_next());
@@ -1587,7 +1587,7 @@ mod tests {
         drop(daemon.chat(b).unwrap().deliver(message).unwrap());
         runs_in_background(&mut daemon, b, "Run the gate");
         answers(&mut daemon, b, "The gate runs in the background.");
-        let answer = (daemon.wait_for_chat(call(), a, b, Duration::from_secs(60)))
+        let answer = (daemon.wait_for_chat(call(), a, b, Duration::from_mins(1)))
             .expect("answered at once, as the chat is idle")
             .unwrap();
         assert!(answer.contains("Run the gate"), "{answer}");
@@ -1644,7 +1644,7 @@ mod tests {
                 .any(|item| *item == Item::Other("Continuing after a daemon upgrade.".into())),
             "{turns:#?}"
         );
-        let answer = (resumed.wait_for_chat(call(), a, b, Duration::from_secs(60)))
+        let answer = (resumed.wait_for_chat(call(), a, b, Duration::from_mins(1)))
             .expect("the continuation couldn't start its agent here")
             .unwrap();
         assert!(
@@ -1667,7 +1667,7 @@ mod tests {
         daemon.chat(b).unwrap().started_by(a, a, 1, None);
         let message = daemon.message_from(a, "build it").unwrap();
         drop(daemon.chat(b).unwrap().deliver(message).unwrap());
-        let waits = daemon.wait_for_chat(call(), a, b, Duration::from_secs(600));
+        let waits = daemon.wait_for_chat(call(), a, b, Duration::from_mins(10));
         assert!(waits.is_none());
         let mut resumed = upgraded(daemon);
         assert!(
