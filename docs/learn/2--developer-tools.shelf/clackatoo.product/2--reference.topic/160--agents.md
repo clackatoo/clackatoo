@@ -247,6 +247,18 @@ When you send a message more than half an hour after the turn before it ended, a
 
 While the mouse is over a turn the agent has finished, `Copy` shows under its answer and copies the answer to the clipboard as the Markdown it came as, as `yim` on it yanks it in normal mode. It says `Copied` until the mouse leaves it. When the turn changed files, it shares the line with how many and the buttons that undo and redo them.
 
+### What it runs in the background
+
+Claude Code can leave a command running in the background, such as a dev server or a long build, and carry on with the turn. A shelf above the box lists what it runs: `In the background · 1 running`, then a line for each with its command and what it's for, how it's going, and for how long, as `● npm run dev · Start the dev server — running 2m 4s`. The seconds count while one runs. A watcher it started says `Watching:`, and a turn Claude Code takes by itself, with no message from you, such as to look at a shell that has finished, shows as `Claude is working` while it lasts.
+
+The square at the end of a running line stops it, through the agent. From the keyboard, `:stoptask` stops the newest running, and `:stoptask 2` the second line. A watcher can't be stopped from here; ask the agent. The shelf lists at most three, newest first, with how many more there are.
+
+A line that has ended says how: `✓ done`, `✗ failed`, or `■ stopped`, with how long it took and what Claude Code said of it. It stays until your next message. Nothing is left showing as running once it can't be: if the agent stops, what it ran stops with it, and its line says `ended with its agent`.
+
+A subagent's card says how many things its chats run in the background, and when open, has a line under each chat for what it runs. A chat with something running in the background is never let go while it's idle in the background, as that would end it.
+
+Only Claude Code says what it runs in the background. The phone lists the same lines, without the buttons that stop them.
+
 ### When the agent asks
 
 In Manual mode, before it does anything that changes something, such as writing a file or running a command that isn't only reading, the agent asks. Other modes ask about less, and Auto leaves it to Claude. Its question takes the box's place, with an answer on each button: the first way to say yes in the accent colour, and the ways to say no quieter.
@@ -478,7 +490,7 @@ When the daemon stops, a chat in a pane comes back with its workspace the next t
 
 `clackatoo capture` prints a chat as text: each message after a `>`, and what the agent said.
 
-An upgrade stops the browser; the next page starts it again.
+An upgrade stops the browser; the next page starts it again. An upgrade, or the daemon stopping, ends what agents run in the background, as it ends the agents.
 
 ## Not yet
 
@@ -490,6 +502,8 @@ An upgrade stops the browser; the next page starts it again.
 - Agents can't yet see what you've selected in an editor. Commands run with the agent's own tool, rather than `run_in_terminal`, show their output once they're done.
 - The account-usage modal is native-only. Gemini CLI and custom adapters do not yet have read-only subscription probes; the phone keeps its existing per-chat usage detail.
 - `/` commands aren't listed or completed as you type them.
+- What Claude Code says and does in a turn it takes by itself, with no message from you, such as when a shell it ran in the background ends, isn't shown yet: the shelf above the box says it's working, and its next answer to you carries on from it.
+- Codex's commands in the background aren't listed: asking for them would change how Codex reports every command.
 - You can't click or type into a browser pane yourself.
 - An upgrade forgets the cards of subagents that had already closed, so their changes drop out of the chat's and turn's reviews. They stay in `:Review base` and in the gutter, as `chat N`.
 
