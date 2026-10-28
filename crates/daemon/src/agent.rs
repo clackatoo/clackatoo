@@ -309,13 +309,17 @@ impl Agent {
     pub(crate) fn start(
         name: &str,
         command: &[OsString],
-        display: Option<&crate::display::Env>,
+        (display, trace): (Option<&crate::display::Env>, Option<&std::path::Path>),
         tasks: bool,
         parser: &Parser,
     ) -> io::Result<Self> {
         let logged = format!("agent {name}");
+        let mut peer = Peer::start(&logged, command, None, display, Framing::Lines, parser)?;
+        if let Some(dir) = trace {
+            peer.trace_agent_to(dir, name);
+        }
         let mut agent = Self {
-            peer: Peer::start(&logged, command, None, display, Framing::Lines, parser)?,
+            peer,
             next_id: 0,
             pending: BTreeMap::new(),
             held: None,

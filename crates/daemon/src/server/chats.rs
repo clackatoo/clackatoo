@@ -642,7 +642,7 @@ impl Daemon {
         let agent = Agent::start(
             &spec.name,
             &command,
-            display.as_deref(),
+            (display.as_deref(), self.config.agents.trace.as_deref()),
             spec.tasks,
             &self.parser,
         )?;

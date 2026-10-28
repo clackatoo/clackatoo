@@ -3636,6 +3636,44 @@ fn an_agent_added_in_agents_toml_is_found_when_a_chat_starts() {
     );
 }
 
+/// With a directory to trace agents to, as `$CLACKATOO_ACP_TRACE` gives,
+/// each agent started writes what it's told and says there, in a file of
+/// its own.
+#[test]
+fn each_agent_traces_what_it_says_to_a_file_of_its_own() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let agent = vec![
+            fake_agent().into(),
+            "--log".into(),
+            dir.join("agent.log").into(),
+        ];
+        config.agents.custom = vec![custom_agent("claude", agent)];
+        config.agents.trace = Some(dir.join("acp"));
+    });
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    assert_eq!(last_words(&ask(&mut client, chat, "hi")), "echo: hi\n");
+    let files: Vec<PathBuf> = std::fs::read_dir(daemon.dir.path().join("acp"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    let name = files[0].file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        name.starts_with("claude-") && files[0].extension() == Some("log".as_ref()),
+        "{name}"
+    );
+    let traced = std::fs::read_to_string(&files[0]).unwrap();
+    assert!(
+        traced.contains("] -> ") && traced.contains("\"session/prompt\""),
+        "{traced}"
+    );
+    assert!(
+        traced.contains("] <- ") && traced.contains("\"session/update\""),
+        "{traced}"
+    );
+}
+
 /// Whether process `pid` is gone, or only waits to be reaped.
 fn process_gone(pid: &str) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
@@ -16703,25 +16741,45 @@ fn a_real_agents_background_shell_shows_until_it_ends() {
 //
 // Long, unattended sessions with a real Claude Code on haiku, checking what
 // a user of Claude Code's own CLI would expect. Each test is one session.
-// Set `CLACKATOO_REAL_AGENT` as for
-// [`a_real_agent_answers_and_asks_before_running_commands`]. Set
-// `CLACKATOO_ACP_TRACER` to a program run as `TRACER DIR COMMAND...` that
-// relays the adapter's stdin and stdout, to keep the ACP traffic in DIR,
-// `$TMPDIR/acp-NAME`, which outlives the test; it writes the adapter's pid
-// to `DIR/pid`. Run them one at a time (or with `--test-threads=1`) and with
-// the tracer: process checks look at every child of the test process.
+// The adapter is `CLACKATOO_REAL_AGENT`'s command if it's set, as for
+// [`a_real_agent_answers_and_asks_before_running_commands`], or else the
+// one the daemon would run: its install in clackatoo's data directory, on
+// `PATH`, or through `npx`. With none, a test says so and passes, as
+// skipped. Each traces its ACP traffic, as `$CLACKATOO_ACP_TRACE` does,
+// to `$TMPDIR/acp-NAME`, which outlives the test. Run them one at a time
+// (or with `--test-threads=1`): process checks look at every child of the
+// test process.
 
-/// The real adapter's command on haiku, traced into `trace` if asked.
-fn real_claude_command(trace: &Path) -> Vec<std::ffi::OsString> {
-    let command = std::env::var("CLACKATOO_REAL_AGENT")
-        .expect("set CLACKATOO_REAL_AGENT to the adapter's command");
-    let mut args: Vec<std::ffi::OsString> = Vec::new();
-    if let Some(tracer) = std::env::var_os("CLACKATOO_ACP_TRACER") {
-        args.extend([tracer, trace.into()]);
+/// The command the daemon would run for the agent `name`, unless the
+/// environment variable `var` gives one; `None`, said, if there's none.
+fn real_adapter(name: &str, var: &str) -> Option<Vec<std::ffi::OsString>> {
+    if let Some(command) = std::env::var_os(var).filter(|command| !command.is_empty()) {
+        let command = command.to_string_lossy().into_owned();
+        return Some(command.split_whitespace().map(Into::into).collect());
     }
-    args.extend(["env", "ANTHROPIC_MODEL=haiku"].map(Into::into));
-    args.extend(command.split_whitespace().map(Into::into));
-    args
+    let config = AgentConfig {
+        dir: clackatoo_daemon::languages_dir().map(|dir| dir.with_file_name("agents")),
+        ..AgentConfig::default()
+    };
+    match config.command_for(name) {
+        Ok(command) => Some(command),
+        Err(why) => {
+            eprintln!("skipped: no adapter for {name} ({why}); set {var} to its command");
+            None
+        }
+    }
+}
+
+/// The real Claude Code's command, on haiku.
+fn real_claude() -> Option<Vec<std::ffi::OsString>> {
+    let command = real_adapter("claude", "CLACKATOO_REAL_AGENT")?;
+    Some(
+        ["env", "ANTHROPIC_MODEL=haiku"]
+            .map(Into::into)
+            .into_iter()
+            .chain(command)
+            .collect(),
+    )
 }
 
 /// Where scenario `name` keeps its ACP traffic, emptied.
@@ -16739,43 +16797,55 @@ struct Live {
     trace: PathBuf,
 }
 
-fn live_claude(name: &str) -> Live {
+/// A daemon talking to the real Claude Code, with one chat ready, tracing
+/// to scenario `name`'s directory; `None` if there's no adapter.
+fn live_claude(name: &str) -> Option<Live> {
+    let command = real_claude()?;
     let trace = live_trace(name);
-    let daemon = TestDaemon::start_with_agent(|_| real_claude_command(&trace));
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent("claude", command)];
+        config.agents.trace = Some(trace.clone());
+    });
     let mut client = daemon.client();
     client.new_workspace(None, new_chat()).unwrap();
     let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
     wait_for_chat_for(&mut client, chat, Duration::from_mins(1), |node| {
         node.state == ChatState::Ready
     });
-    Live {
+    Some(Live {
         daemon,
         client,
         chat,
         trace,
-    }
+    })
 }
 
-/// A daemon talking to the real Claude Code that keeps its workspaces in
-/// `file` and makes them again as it starts.
-fn live_keeping(file: &Path, trace: &Path) -> TestDaemon {
+/// A daemon running `command`, the real Claude Code's, that keeps its
+/// workspaces in `file` and makes them again as it starts.
+fn live_keeping(file: &Path, trace: &Path, command: &[std::ffi::OsString]) -> TestDaemon {
     TestDaemon::start_with_restoring(
         |_, config| {
-            config.agents.custom = vec![custom_agent("claude", real_claude_command(trace))];
+            config.agents.custom = vec![custom_agent("claude", command.to_vec())];
+            config.agents.trace = Some(trace.to_owned());
             config.workspaces = Some(file.to_owned());
         },
         true,
     )
 }
 
-/// The adapter's pid: the tracer's note of it, or the daemon's one child.
+/// The adapter's pid, as the name of the one trace in `trace` says.
 fn live_adapter(trace: &Path) -> String {
-    if let Ok(pid) = std::fs::read_to_string(trace.join("pid")) {
-        return pid.trim().to_owned();
-    }
-    let children = child_processes();
-    assert_eq!(children.len(), 1, "{children:?}");
-    children[0].clone()
+    let names: Vec<String> = std::fs::read_dir(trace)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let [name] = &names[..] else {
+        panic!("not one trace: {names:?}");
+    };
+    let pid = name
+        .strip_prefix("claude-")
+        .and_then(|name| name.strip_suffix(".log"));
+    pid.expect("named for its pid").to_owned()
 }
 
 /// Every process below this one, with its command line.
@@ -16952,12 +17022,15 @@ fn claude_transcript_text_with(cwd: &Path, needle: &str) -> Option<String> {
 #[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
 #[allow(clippy::too_many_lines, reason = "one session, turn by turn")]
 fn a_real_session_of_six_turns_with_tools_ends_each_whole() {
-    let Live {
+    let Some(Live {
         daemon,
         mut client,
         chat,
         ..
-    } = live_claude("six-turns");
+    }) = live_claude("six-turns")
+    else {
+        return;
+    };
     let dir = daemon.dir.path();
     let notes = dir.join("notes.txt");
     std::fs::write(&notes, "alpha\nbeta needle\ngamma\n").unwrap();
@@ -17087,12 +17160,15 @@ fn a_real_session_of_six_turns_with_tools_ends_each_whole() {
 #[test]
 #[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
 fn a_real_agent_stopped_in_a_long_command_ends_at_once_and_goes_on() {
-    let Live {
+    let Some(Live {
         daemon: _daemon,
         mut client,
         chat,
         ..
-    } = live_claude("stop-mid-tool");
+    }) = live_claude("stop-mid-tool")
+    else {
+        return;
+    };
     let client = &mut client;
     let text = "Use the Bash tool to run exactly: sleep 30. Then reply with the word slept.";
     client
@@ -17152,12 +17228,15 @@ fn a_real_agent_stopped_in_a_long_command_ends_at_once_and_goes_on() {
 #[test]
 #[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
 fn a_real_agent_answers_messages_queued_meanwhile_in_order_and_is_steered() {
-    let Live {
+    let Some(Live {
         daemon: _daemon,
         mut client,
         chat,
         ..
-    } = live_claude("queue");
+    }) = live_claude("queue")
+    else {
+        return;
+    };
     let client = &mut client;
     let first = "Use the Bash tool to run exactly: sleep 6. Then reply with the word one.";
     client
@@ -17250,12 +17329,15 @@ fn a_real_agent_answers_messages_queued_meanwhile_in_order_and_is_steered() {
 #[test]
 #[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
 fn a_real_agent_killed_mid_turn_ends_it_and_goes_on_with_its_conversation() {
-    let Live {
+    let Some(Live {
         mut client,
         chat,
         trace,
         daemon: _daemon,
-    } = live_claude("kill-mid-turn");
+    }) = live_claude("kill-mid-turn")
+    else {
+        return;
+    };
     let client = &mut client;
     let limit = Duration::from_mins(1);
     let node = live_send(
@@ -17343,10 +17425,13 @@ fn a_real_chat_comes_back_after_restarts_and_remembers() {
     let file = kept.path().join("workspaces");
     let project = kept.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
+    let Some(command) = real_claude() else {
+        return;
+    };
     let trace = live_trace("restart");
     let limit = Duration::from_mins(1);
     {
-        let daemon = live_keeping(&file, &trace);
+        let daemon = live_keeping(&file, &trace, &command);
         let mut client = daemon.client();
         client.new_workspace(None, live_chat_in(&project)).unwrap();
         let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
@@ -17364,7 +17449,7 @@ fn a_real_chat_comes_back_after_restarts_and_remembers() {
     }
 
     let snapshot = {
-        let daemon = live_keeping(&file, &trace);
+        let daemon = live_keeping(&file, &trace, &command);
         let mut client = daemon.client();
         let chat = client.list_terminals().unwrap()[0].id;
         client.attach(chat).unwrap();
@@ -17394,7 +17479,7 @@ fn a_real_chat_comes_back_after_restarts_and_remembers() {
         std::fs::read_to_string(&file).unwrap()
     };
     std::fs::write(&file, &snapshot).unwrap();
-    let daemon = live_keeping(&file, &trace);
+    let daemon = live_keeping(&file, &trace, &command);
     let mut client = daemon.client();
     let chat = client.list_terminals().unwrap()[0].id;
     let node = live_send(
@@ -17429,10 +17514,13 @@ fn a_real_chat_told_again_shows_a_stopped_turn_as_stopped() {
     let file = kept.path().join("workspaces");
     let project = kept.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
+    let Some(command) = real_claude() else {
+        return;
+    };
     let trace = live_trace("stop-told-again");
     let limit = Duration::from_mins(1);
     {
-        let daemon = live_keeping(&file, &trace);
+        let daemon = live_keeping(&file, &trace, &command);
         let mut client = daemon.client();
         client.new_workspace(None, live_chat_in(&project)).unwrap();
         let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
@@ -17453,7 +17541,7 @@ fn a_real_chat_told_again_shows_a_stopped_turn_as_stopped() {
         assert_eq!(last_outcome(&node), Some(&Outcome::Stopped));
         wait_for_kept(&file, |kept| kept.contains("\"session\""));
     }
-    let daemon = live_keeping(&file, &trace);
+    let daemon = live_keeping(&file, &trace, &command);
     let mut client = daemon.client();
     let chat = client.list_terminals().unwrap()[0].id;
     client.attach(chat).unwrap();
@@ -17476,12 +17564,15 @@ fn a_real_chat_told_again_shows_a_stopped_turn_as_stopped() {
 #[test]
 #[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
 fn a_real_chat_compacts_and_goes_on() {
-    let Live {
+    let Some(Live {
         daemon: _daemon,
         mut client,
         chat,
         ..
-    } = live_claude("compact");
+    }) = live_claude("compact")
+    else {
+        return;
+    };
     let client = &mut client;
     let limit = Duration::from_mins(3);
     let node = live_send(
@@ -17510,12 +17601,15 @@ fn a_real_chat_compacts_and_goes_on() {
 #[test]
 #[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
 fn a_real_agent_refused_then_allowed_then_moved_to_another_mode() {
-    let Live {
+    let Some(Live {
         daemon,
         mut client,
         chat,
         ..
-    } = live_claude("permissions");
+    }) = live_claude("permissions")
+    else {
+        return;
+    };
     let client = &mut client;
     let dir = daemon.dir.path();
     let limit = Duration::from_mins(1);
@@ -17596,12 +17690,15 @@ fn a_real_agent_refused_then_allowed_then_moved_to_another_mode() {
 #[test]
 #[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
 fn a_real_agents_long_output_leaves_the_daemon_answering() {
-    let Live {
+    let Some(Live {
         daemon,
         mut client,
         chat,
         ..
-    } = live_claude("long-output");
+    }) = live_claude("long-output")
+    else {
+        return;
+    };
     let client = &mut client;
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watcher = {
@@ -17792,7 +17889,9 @@ fn an_agents_changes_to_a_big_file_are_taken_in_in_order_off_the_loop() {
 #[test]
 #[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
 fn a_real_turn_goes_on_with_no_window_and_shows_whole_to_the_next() {
-    let live = live_claude("away");
+    let Some(live) = live_claude("away") else {
+        return;
+    };
     let (daemon, mut client, chat) = (live.daemon, live.client, live.chat);
     client.attach(chat).unwrap();
     let text = "Use the Bash tool to run exactly: sleep 5; echo back-$((40+2)). Then write the \
@@ -17843,12 +17942,15 @@ fn a_real_turn_goes_on_with_no_window_and_shows_whole_to_the_next() {
 #[test]
 #[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
 fn a_real_agent_sees_an_image_in_a_message() {
-    let Live {
+    let Some(Live {
         daemon: _daemon,
         mut client,
         chat,
         ..
-    } = live_claude("image");
+    }) = live_claude("image")
+    else {
+        return;
+    };
     // A 16 by 16 PNG, all red.
     let red = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAF0lEQVR4nGP4z8BAEiJN9aiGUQ1DSgMAkPn/\
                Afnh+ngAAAAASUVORK5CYII=";
@@ -17881,29 +17983,36 @@ fn a_real_agent_sees_an_image_in_a_message() {
 /// Codex, on its cheapest model, through scenarios 1 to 3 of the Claude
 /// Code ones above: turns with commands and an edit, each ending whole; a
 /// stop mid-command; and two messages queued meanwhile, each answered in
-/// order. Set `CLACKATOO_REAL_CODEX` to the adapter's command, such as the
-/// `dist/clackatoo.js` of an install the daemon made (with the steering
-/// backport); it uses the account `codex` is logged in to.
+/// order. The adapter is `CLACKATOO_REAL_CODEX`'s command, or else the one the
+/// daemon would run, as for the Claude Code ones; it uses the account
+/// `codex` is logged in to.
 #[test]
-#[ignore = "talks to a real model: set CLACKATOO_REAL_CODEX and run with --ignored"]
+#[ignore = "talks to a real model: run with --ignored"]
 #[allow(clippy::too_many_lines, reason = "one session, scenario by scenario")]
 fn a_real_codex_session_stops_and_takes_queued_messages() {
-    let command = std::env::var("CLACKATOO_REAL_CODEX")
-        .expect("set CLACKATOO_REAL_CODEX to the adapter's command");
+    let Some(command) = real_adapter("codex", "CLACKATOO_REAL_CODEX") else {
+        return;
+    };
     let trace = live_trace("codex");
     let daemon = TestDaemon::start_with(|_, config| {
-        let mut args: Vec<std::ffi::OsString> = Vec::new();
-        if let Some(tracer) = std::env::var_os("CLACKATOO_ACP_TRACER") {
-            args.extend([tracer, trace.clone().into()]);
-        }
-        args.extend(command.split_whitespace().map(Into::into));
-        config.agents.custom = vec![custom_agent("codex", args)];
+        config.agents.custom = vec![custom_agent("codex", command)];
+        config.agents.trace = Some(trace.clone());
     });
     let mut client = daemon.client();
     let client = &mut client;
-    client
-        .new_workspace(None, new_chat_with(Some("codex")))
-        .unwrap();
+    // In a folder of its own: Codex's sandbox leaves an empty `.git` in
+    // the folder above where it works, which mustn't be `$TMPDIR`.
+    let project = daemon.dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let chat = PaneTerminal::Agent(NewAgent {
+        cwd: Some(project.display().to_string()),
+        agent: Some("codex".into()),
+        ..match new_chat() {
+            PaneTerminal::Agent(agent) => agent,
+            _ => unreachable!(),
+        }
+    });
+    client.new_workspace(None, chat).unwrap();
     let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
     let minute = Duration::from_mins(1);
     wait_for_chat_for(client, chat, minute, |node| node.state == ChatState::Ready);

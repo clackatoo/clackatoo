@@ -67,6 +67,7 @@ impl TestDaemon {
             file: None,
             dir: None,
             path: Some(root.join("empty-path").into()),
+            trace: None,
         };
         let config = DaemonConfig {
             terminal: clackatoo_term::Config::default(),

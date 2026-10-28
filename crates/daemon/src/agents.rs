@@ -296,6 +296,10 @@ pub struct AgentConfig {
     /// Where adapters, `npx` and `npm` are looked for, as `PATH` lists
     /// directories. `None` is the daemon's own `PATH`.
     pub path: Option<OsString>,
+    /// A directory every message to and from each agent is written to, a
+    /// file for each agent started, with obvious secrets taken out (see
+    /// [`crate::rpc::Peer::trace_agent_to`]). `None` writes none.
+    pub trace: Option<PathBuf>,
 }
 
 impl Known {
@@ -373,6 +377,26 @@ impl AgentConfig {
                     names.join(", ")
                 ))
             }
+        }
+    }
+
+    /// The command a chat with the agent called `name` would run now, as
+    /// the daemon finds it: its install, its adapter on `PATH`, or `npx`.
+    /// For tools and tests that talk to the real agent.
+    ///
+    /// # Errors
+    ///
+    /// Why there's none: no agent is called `name`, or it's yet to be
+    /// installed, or nothing can run it.
+    pub fn command_for(&self, name: &str) -> Result<Vec<OsString>, String> {
+        let spec = self.find(name)?;
+        match self.start(&spec) {
+            Start::Ready { command, .. } => Ok(command),
+            Start::Install(known) => Err(format!(
+                "{} isn't installed: open a chat with it to install it",
+                known.package()
+            )),
+            Start::Unavailable(why) => Err(why),
         }
     }
 

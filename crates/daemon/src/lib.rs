@@ -45,6 +45,7 @@ mod provider_usage;
 mod pty;
 mod quic;
 mod recovery;
+mod redact;
 pub mod remote;
 mod rpc;
 mod runtime;
@@ -345,7 +346,8 @@ impl DaemonConfig {
     /// own folder), the web app as `daemon/web.toml` in [`config_dir`]
     /// says, keeping its devices in `clackatoo/web` in the data directory,
     /// `$CLACKATOO_LSP_TRACE`: a file to trace language servers'
-    /// messages to (or else none), and `$CLACKATOO_DISPLAY`: `off` to
+    /// messages to (or else none), `$CLACKATOO_ACP_TRACE`: a directory to
+    /// trace agents' messages to, a file each (or else none), and `$CLACKATOO_DISPLAY`: `off` to
     /// leave the programs the daemon starts its own display, rather than
     /// follow the desktop's login (see [`display`]).
     #[must_use]
@@ -381,6 +383,7 @@ impl DaemonConfig {
                 file: config_dir().map(|dir| dir.join("daemon/agents.toml")),
                 dir: languages_dir().map(|dir| dir.with_file_name("agents")),
                 path: None,
+                trace: non_empty("CLACKATOO_ACP_TRACE").map(PathBuf::from),
             },
             // Only the `clackatoo` program knows it can relay them, unless
             // the environment names a program that can (tests do).

@@ -23,9 +23,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::ops::{Deref, Range};
 use std::os::fd::{AsFd, AsRawFd, RawFd};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -138,8 +138,26 @@ pub(crate) struct Peer {
     last_errors: VecDeque<String>,
     login_required: bool,
     /// Where every message to and from it is written, if anywhere.
-    trace: Option<File>,
+    trace: Option<Trace>,
 }
+
+/// A program's trace file, and how it's kept.
+#[derive(Debug)]
+struct Trace {
+    file: File,
+    path: PathBuf,
+    /// How much has been written to the file.
+    written: u64,
+    /// Past how many bytes the file is set aside, as `PATH.1`, in place of
+    /// the one set aside before, and a new one begun. `None` lets it grow.
+    cap: Option<u64>,
+    /// Whether obvious secrets are taken out (see [`crate::redact`]).
+    redact: bool,
+}
+
+/// How big an agent's trace file grows before it's set aside: with the
+/// one set aside, at most about twice this is kept for each agent.
+pub(crate) const AGENT_TRACE_CAP: u64 = 16 * 1024 * 1024;
 
 /// How many of a program's last lines of stderr are kept.
 const LAST_ERRORS: usize = 4;
@@ -221,32 +239,66 @@ impl Peer {
     /// one through a link, nor a pipe, which could hold up the loop. If
     /// it can't be, the log says why.
     pub(crate) fn trace_to(&mut self, path: &Path) {
-        let opened = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .custom_flags(
-                i32::try_from((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits()).unwrap_or_default(),
-            )
-            .open(path)
-            .and_then(|file| {
-                if file.metadata()?.is_file() {
-                    Ok(file)
-                } else {
-                    Err(io::Error::other("it isn't a regular file"))
-                }
-            });
-        match opened {
-            Ok(file) => self.trace = Some(file),
-            Err(err) => log::warn!("{}: can't trace to {}: {err}", self.name, path.display()),
+        self.trace = open_trace(&self.name, path).map(|file| Trace {
+            file,
+            path: path.to_owned(),
+            written: 0,
+            cap: None,
+            redact: false,
+        });
+    }
+
+    /// Traces as [`trace_to`](Self::trace_to) does, for an agent: to a file
+    /// of this connection's own in the directory `dir`, made readable by
+    /// its owner only if it's new, named for the agent and its pid. Obvious
+    /// secrets are taken out (see [`crate::redact`]), and past
+    /// [`AGENT_TRACE_CAP`] the file is set aside as `….log.1`, so a trace
+    /// left on never fills the disk.
+    pub(crate) fn trace_agent_to(&mut self, dir: &Path, agent: &str) {
+        if let Err(err) = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+        {
+            log::warn!("{}: can't trace to {}: {err}", self.name, dir.display());
+            return;
         }
+        let agent: String = (agent.chars())
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let path = dir.join(format!(
+            "{agent}-{}.log",
+            self.process.pid().as_raw_nonzero()
+        ));
+        self.trace = open_trace(&self.name, &path).map(|file| Trace {
+            written: file.metadata().map_or(0, |metadata| metadata.len()),
+            file,
+            path,
+            cap: Some(AGENT_TRACE_CAP),
+            redact: true,
+        });
     }
 
     /// Writes `body`, which went the way `way` says, to the trace, if
     /// there's one: on one line, as JSON breaks lines only between its
     /// parts, where a space does as well.
     fn trace(&mut self, way: &str, body: &[u8]) {
-        let Some(file) = &mut self.trace else { return };
+        let Some(trace) = &mut self.trace else { return };
+        let body = if !trace.redact {
+            std::borrow::Cow::Borrowed(body)
+        } else if way == "!!" {
+            std::borrow::Cow::Owned(
+                crate::redact::line(&String::from_utf8_lossy(body)).into_bytes(),
+            )
+        } else {
+            crate::redact::message(body)
+        };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
@@ -265,12 +317,57 @@ impl Peer {
         line.push(b'\n');
         // In one write, so the lines of servers tracing to one file never
         // run into each other.
-        if let Err(err) = file.write_all(&line) {
+        if let Err(err) = trace.file.write_all(&line) {
             log::warn!("{}: tracing stopped: {err}", self.name);
             self.trace = None;
+            return;
+        }
+        trace.written += line.len() as u64;
+        if trace.cap.is_some_and(|cap| trace.written > cap) {
+            let aside = trace.path.with_extension("log.1");
+            let reopened = std::fs::rename(&trace.path, &aside)
+                .ok()
+                .and_then(|()| open_trace(&self.name, &trace.path));
+            match reopened {
+                Some(file) => {
+                    trace.file = file;
+                    trace.written = 0;
+                }
+                None => self.trace = None,
+            }
         }
     }
+}
 
+/// Opens the file at `path` to append a trace to, as
+/// [`Peer::trace_to`] says, for the program called `name`; `None`, having
+/// logged why, if it can't be.
+fn open_trace(name: &str, path: &Path) -> Option<File> {
+    let opened = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(
+            i32::try_from((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits()).unwrap_or_default(),
+        )
+        .open(path)
+        .and_then(|file| {
+            if file.metadata()?.is_file() {
+                Ok(file)
+            } else {
+                Err(io::Error::other("it isn't a regular file"))
+            }
+        });
+    match opened {
+        Ok(file) => Some(file),
+        Err(err) => {
+            log::warn!("{name}: can't trace to {}: {err}", path.display());
+            None
+        }
+    }
+}
+
+impl Peer {
     /// Queues `message`, framed, unless the program has gone: then nothing
     /// can be written to it.
     pub(crate) fn send(&mut self, message: &Value) {
@@ -1702,6 +1799,44 @@ mod tests {
         assert!(!inbox.full());
         assert!(!inbox.parsing());
         let _ = poll.poll(&mut mio::Events::with_capacity(1), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn an_agents_trace_is_its_own_file_kept_small_without_its_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let traces = dir.path().join("traces");
+        let parser = Parser::idle();
+        let command = ["cat".into()];
+        let mut peer =
+            Peer::start("agent x", &command, None, None, Framing::Lines, &parser).unwrap();
+        peer.trace_agent_to(&traces, "x");
+        let pid = peer.process.pid().as_raw_nonzero();
+        let path = traces.join(format!("x-{pid}.log"));
+        let permissions = |path: &Path| {
+            std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path).unwrap().permissions())
+                & 0o777
+        };
+        assert_eq!((permissions(&traces), permissions(&path)), (0o700, 0o600));
+        peer.send(&json!({"method": "initialize", "params": {"apiKey": "hidden-value"}}));
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("agent x[") && written.contains("] -> "),
+            "{written}"
+        );
+        assert!(
+            written.contains("[redacted]") && !written.contains("hidden-value"),
+            "{written}"
+        );
+        // Past its cap, it's set aside and begun again.
+        peer.trace.as_mut().unwrap().cap = Some(200);
+        for n in 0..4 {
+            peer.send(&json!({"method": "session/prompt", "params": {"n": n}}));
+        }
+        let aside = std::fs::read_to_string(path.with_extension("log.1")).unwrap();
+        let now = std::fs::read_to_string(&path).unwrap();
+        assert!(aside.contains("session/prompt"), "{aside}");
+        assert!(now.len() < aside.len() + 200, "{now}");
+        peer.kill();
     }
 
     #[test]
