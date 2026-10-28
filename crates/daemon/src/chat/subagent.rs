@@ -98,6 +98,37 @@ impl HostedChat {
             .any(|setting| setting.kind == SettingKind::Mode && !setting.choices.is_empty())
     }
 
+    /// The mode it asks for as its session opens, by its value, if its
+    /// session hasn't opened yet and it asks for one.
+    pub(crate) fn mode_to_come(&self) -> Option<&str> {
+        self.session
+            .is_none()
+            .then_some(self.starting_mode.as_deref())?
+    }
+
+    /// Where the mode `value` is among the modes its agent offers, from
+    /// 0, the safest, if it offers that one.
+    pub(crate) fn rank_of_mode(&self, value: &str) -> Option<usize> {
+        let setting = self.setting_of(SettingKind::Mode)?;
+        (setting.choices.iter()).position(|choice| choice.value == value)
+    }
+
+    /// Who sent the next message from another chat's agent, if it would be
+    /// begun now, as [`Self::deliver_next`] begins it.
+    pub(crate) fn next_message_from(&self) -> Option<TerminalId> {
+        if self.answering() || self.user_queue.native.is_some() || self.user_queue.restart.is_some()
+        {
+            return None;
+        }
+        Some(self.relations.inbox.front()?.from.chat)
+    }
+
+    /// Drops the next message from another chat's agent, which may no
+    /// longer be sent.
+    pub(crate) fn drop_next_message(&mut self) {
+        self.relations.inbox.pop_front();
+    }
+
     /// Where its agent's mode is among the modes it offers, from 0, the
     /// safest, which comes first, as Manual or Read-only: later ones may
     /// do more. None if it offers no modes, or hasn't said yet.

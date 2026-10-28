@@ -190,7 +190,7 @@ pub(crate) enum Tool {
     Explore { path: Option<String> },
     /// What language servers say is wrong, in one file or everywhere.
     GetDiagnostics { path: Option<String> },
-    /// List the chats with agents, in every workspace.
+    /// List the chats with agents in the chat's workspace or family.
     ListChats,
     /// Send another chat a message, as if the user typed it, marked as
     /// from this chat.

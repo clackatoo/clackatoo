@@ -12375,6 +12375,27 @@ fn start_tooled_chat_beside(
     tools: AgentTools,
     agent: Option<&str>,
 ) -> TerminalId {
+    start_chat_beside(client, beside, tooled(tools, agent, None))
+}
+
+/// A chat whose agent, `agent` or else the first, may use its tools as
+/// `tools` says, working in `cwd` or else the daemon's home.
+fn tooled(tools: AgentTools, agent: Option<&str>, cwd: Option<&Path>) -> NewAgent {
+    NewAgent {
+        size: Size::new(40, 10).unwrap(),
+        cwd: cwd.map(|cwd| cwd.display().to_string()),
+        agent: agent.map(str::to_owned),
+        tools,
+        task: true,
+        browser: false,
+        model: None,
+        resume: None,
+    }
+}
+
+/// Starts the chat `new` in a new tab of the workspace the chat `beside`
+/// is in, and waits for it to be ready.
+fn start_chat_beside(client: &mut Client, beside: TerminalId, new: NewAgent) -> TerminalId {
     let workspaces = client.watch_workspaces().unwrap();
     let workspace = (workspaces.list.iter())
         .find(|workspace| {
@@ -12384,16 +12405,6 @@ fn start_tooled_chat_beside(
         })
         .unwrap()
         .id;
-    let new = NewAgent {
-        size: Size::new(40, 10).unwrap(),
-        cwd: None,
-        agent: agent.map(str::to_owned),
-        tools,
-        task: true,
-        browser: false,
-        model: None,
-        resume: None,
-    };
     let pane = client.new_tab(workspace, PaneTerminal::Agent(new)).unwrap();
     let workspaces = client.watch_workspaces().unwrap();
     let (_, _, pane) = workspaces.find_pane(pane).unwrap();
@@ -12493,6 +12504,109 @@ fn chats_list_message_read_and_wait_for_each_other() {
         words.contains("read_chat: failed: there's no chat 99"),
         "{words}"
     );
+}
+
+#[test]
+fn a_message_waiting_its_turn_is_dropped_if_it_may_no_longer_go_and_its_sender_told() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let b = start_tooled_chat_beside(&mut client, a, AgentTools::Ask, None);
+    let busy = "mcp run_in_terminal {\"command\":\"true\"}";
+    client.chat(b, ChatAction::Send(busy.to_owned())).unwrap();
+    wait_for_chat(&mut client, b, |node| node.question.is_some());
+    let prompt = format!(
+        "mcp send_to_chat {{\"chat\":{b},\"message\":\"hi b\"}}\n\
+         mcp wait_for_chat {{\"chat\":{b},\"timeout\":20}}"
+    );
+    client.chat(a, ChatAction::Send(prompt)).unwrap();
+    wait_for_chat(&mut client, a, |node| {
+        last_words(node).contains("send_to_chat: Sent.")
+    });
+    // While it waits, the chat it's for comes to be able to do more.
+    set_chat(&mut client, a, "clackatoo.tools", "ask");
+    set_chat(&mut client, b, "clackatoo.tools", "allow");
+    answer(&mut client, b, Some("reject".to_owned()));
+    let node = wait_for_chat_for(&mut client, a, Duration::from_secs(10), |node| {
+        last_outcome(node).is_some()
+    });
+    let words = last_words(&node);
+    assert!(
+        words.contains(&format!(
+            "Your last message to chat {b} waited its turn, and wasn't sent: chat {b}'s agent \
+             may do more than this one"
+        )),
+        "{words}"
+    );
+    assert_eq!(chat_now(&mut client, b).turns.len(), 1, "never sent");
+}
+
+#[test]
+fn a_chat_is_messaged_only_in_this_project_and_another_agents_only_in_its_first_mode() {
+    let fake = |flags: &[&str]| -> Vec<std::ffi::OsString> {
+        std::iter::once(fake_agent().into_os_string())
+            .chain(flags.iter().map(Into::into))
+            .collect()
+    };
+    let daemon = TestDaemon::with_tools_and_agents(vec![
+        custom_agent("claude", fake(&[])),
+        custom_agent("codex", fake(&["--codex"])),
+    ]);
+    let mut client = daemon.client();
+    let (mine, other) = (
+        daemon.dir.path().join("mine"),
+        daemon.dir.path().join("other"),
+    );
+    std::fs::create_dir(&mine).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    let other = other.canonicalize().unwrap();
+    let a = start_new_chat(&mut client, tooled(AgentTools::Allow, None, Some(&mine)));
+
+    // A chat of the user's in this workspace, but another project.
+    let b = start_chat_beside(
+        &mut client,
+        a,
+        tooled(AgentTools::Allow, None, Some(&other)),
+    );
+    let send = |to: TerminalId| format!("mcp send_to_chat {{\"chat\":{to},\"message\":\"x\"}}");
+    let words = last_words(&ask_for(&mut client, a, &send(b), Duration::from_secs(10)));
+    assert!(
+        words.contains(&format!(
+            "send_to_chat: failed: chat {b} works outside this chat's project ("
+        )),
+        "{words}"
+    );
+    // Nor is one started there through a link from inside it.
+    std::os::unix::fs::symlink(&other, mine.join("away")).unwrap();
+    let away = "mcp start_chat {\"prompt\":\"x\",\"cwd\":\"away\"}";
+    let words = last_words(&ask_for(&mut client, a, away, Duration::from_secs(10)));
+    assert!(
+        words.contains(&format!(
+            "start_chat: failed: {} is outside this chat's project (",
+            other.display()
+        )),
+        "{words}"
+    );
+
+    // Another agent's chat at the same rank among its modes as this
+    // one's: ranks say nothing across agents, so only its first goes.
+    set_chat(&mut client, a, "mode", "auto");
+    let c = start_chat_beside(
+        &mut client,
+        a,
+        tooled(AgentTools::Allow, Some("codex"), Some(&mine)),
+    );
+    set_chat(&mut client, c, "mode", "workspace-write");
+    let words = last_words(&ask_for(&mut client, a, &send(c), Duration::from_secs(10)));
+    assert!(
+        words.contains(&format!(
+            "send_to_chat: failed: chat {c}'s agent may do more than this one"
+        )),
+        "{words}"
+    );
+    set_chat(&mut client, c, "mode", "read-only");
+    let words = last_words(&ask_for(&mut client, a, &send(c), Duration::from_secs(10)));
+    assert!(words.contains("send_to_chat: Sent"), "{words}");
 }
 
 #[test]

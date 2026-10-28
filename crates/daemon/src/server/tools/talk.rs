@@ -17,16 +17,20 @@
 //! - a chat lists, messages, reads and waits for only chats in its
 //!   workspace or family (the chat that started it, the chats it
 //!   started, and the chats its own started);
-//! - a message to a chat that may do more is refused: one whose Tools
-//!   setting is looser, whose limits, its mode's included, are fewer, or
-//!   whose mode comes later among those its agent offers (see
-//!   [`Daemon::unmessageable`]);
+//! - a message to a chat outside the sender's family and project, or to
+//!   one that may do more, is refused: one whose Tools setting is looser,
+//!   whose limits, its mode's included, are fewer, or whose mode comes
+//!   later among those its agent offers, or with another agent, any but
+//!   its first (see [`Daemon::unmessageable`]); a message that waited its
+//!   turn is checked again as it comes, and dropped, the sender told, if
+//!   it may no longer go;
 //! - `start_chat` starts chats only inside the sender's project, and with
 //!   another agent only if it offers modes; the chat started gets the
 //!   sender's Tools setting and mode, or that agent's safest, and its
 //!   limits, if its profile's are fewer (see `subagents.rs`);
-//! - what a message says reaches the other chat with its control and
-//!   bidi characters shown, so none hides anything from the user.
+//! - what a message says reaches the other chat with its control
+//!   characters, and those that reorder text, shown, so none hides
+//!   anything from the user.
 //!
 //! Limits keep agents from running away with each other:
 //!
@@ -95,6 +99,10 @@ pub(super) struct Talk {
     caused: BTreeMap<Cause, u32>,
     /// The chats with messages waiting for their turns.
     inboxes: BTreeSet<TerminalId>,
+    /// Why the last message each chat sent another, which waited its turn,
+    /// was dropped as its turn came, by sender and the chat it was for:
+    /// the sender is told as it waits for that chat.
+    undelivered: BTreeMap<(TerminalId, TerminalId), String>,
 }
 
 impl Talk {
@@ -102,6 +110,7 @@ impl Talk {
     pub(super) fn forget(&mut self, chat: TerminalId) {
         self.spent.remove(&chat);
         self.inboxes.remove(&chat);
+        (self.undelivered).retain(|&(from, to), _| from != chat && to != chat);
         self.caused.retain(|&(root, _), _| root != chat);
     }
 }
@@ -280,12 +289,16 @@ impl Daemon {
     }
 
     /// Why the chat `chat`, which is `own`, can't message the chat `to`,
-    /// if it can't: it isn't another chat, it's out of sight, or its agent
-    /// may do more, which this one's would gain through it. More is a
-    /// looser Tools setting, fewer limits, its mode's included, or a mode
-    /// later among those its agent offers, the first being the safest; an
-    /// agent offering no modes is no looser only if it's this one's, and
-    /// this one's offers none either.
+    /// if it can't: it isn't another chat, it's out of sight, it isn't of
+    /// this one's family and works outside its project, or its agent may
+    /// do more, which this one's would gain through it. More is a looser
+    /// Tools setting, fewer limits, its mode's included, or a mode later
+    /// among those its agent offers, the first being the safest. Ranks
+    /// compare only within one agent's modes: a chat with another agent is
+    /// no looser only in its first. An agent offering no modes is no
+    /// looser only if it's this one's, and this one's offers none either.
+    /// A chat whose session hasn't opened is ranked by the mode it will
+    /// ask for, if this one's agent offers it, or else waited for.
     pub(super) fn unmessageable(
         &self,
         own: &HostedChat,
@@ -302,11 +315,31 @@ impl Daemon {
                  to message it"
             ));
         }
+        if !self.family(chat, to)
+            && let (Some(ours), Some(theirs)) = (self.project_root(chat), self.project_root(to))
+            && !theirs.starts_with(&ours)
+        {
+            return Some(format!(
+                "chat {to} works outside this chat's project ({}): ask the user to message it",
+                ours.display()
+            ));
+        }
+        let same = target.agent() == own.agent();
+        let rank = (target.mode_rank()).or_else(|| {
+            let coming = target.mode_to_come()?;
+            same.then(|| own.rank_of_mode(coming)).flatten()
+        });
+        if rank.is_none() && target.session().is_none() {
+            return Some(format!(
+                "chat {to} isn't ready yet: wait for it, then try again"
+            ));
+        }
         let limits = |chat: &HostedChat| chat.limits().max(chat.mode_limits());
-        let mode_looser = match (own.mode_rank(), target.mode_rank()) {
-            (Some(own), Some(theirs)) => theirs > own,
-            (None, Some(theirs)) => theirs > 0,
-            (own_rank, None) => own_rank.is_some() || target.agent() != own.agent(),
+        let mode_looser = match (same, own.mode_rank(), rank) {
+            (false, _, theirs) => theirs != Some(0),
+            (true, Some(own), Some(theirs)) => theirs > own,
+            (true, None, Some(theirs)) => theirs > 0,
+            (true, own, None) => own.is_some(),
         };
         (reach(target.tools()) > reach(own.tools()) || limits(target) < limits(own) || mode_looser)
             .then(|| {
@@ -471,6 +504,7 @@ impl Daemon {
         if waiting > 0 {
             self.tools.talk.inboxes.insert(to);
         }
+        self.tools.talk.undelivered.remove(&(chat, to));
         self.spend(chat);
         self.act(to, actions);
         self.collect_damage(to);
@@ -625,11 +659,11 @@ impl Daemon {
         if !self.may_see(chat, to) {
             return format!("Chat {to} has moved out of this chat's workspace.");
         }
+        let mut text = self.undelivered(chat, to).unwrap_or_default();
         let turns = &target.node().turns;
         let asked = (turns.iter().enumerate().rev())
             .find(|(_, turn)| turn.from.as_ref().is_some_and(|from| from.chat == chat));
         let last = || (turns.iter().enumerate()).rfind(|(_, turn)| turn.switch.is_none());
-        let mut text = String::new();
         if late {
             let _ = writeln!(
                 text,
@@ -682,6 +716,7 @@ impl Daemon {
                     chat.fail_queue(error.to_string());
                     self.collect_damage(id);
                 }
+                self.drop_unsendable(id);
                 let Some(chat) = self.chat(id) else { continue };
                 let actions = chat.deliver_next();
                 if chat.has_user_queue() || !chat.relations().inbox.is_empty() {
@@ -718,6 +753,35 @@ impl Daemon {
             };
             self.answer_tool(waiting.token, &waiting.id, Ok(answer));
         }
+    }
+
+    /// Drops the messages waiting for the chat `id` that would begin now
+    /// but may no longer be sent, as things have changed since they were:
+    /// the chat or its sender has moved, or one may do more now. A sender
+    /// that has closed can't be checked, so its message goes too. Each
+    /// sender is told as it waits for the chat.
+    fn drop_unsendable(&mut self, id: TerminalId) {
+        while let Some(from) = self.chat_ref(id).and_then(HostedChat::next_message_from) {
+            let why = match self.chat_ref(from) {
+                Some(own) => self.unmessageable(own, from, id),
+                None => Some("the chat that sent it has closed".to_owned()),
+            };
+            let Some(why) = why else { return };
+            log::info!("chat {id}: a message from chat {from} is dropped: {why}");
+            if let Some(chat) = self.chat(id) {
+                chat.drop_next_message();
+            }
+            self.tools.talk.undelivered.insert((from, id), why);
+        }
+    }
+
+    /// What the chat `chat`'s agent is told of its last message to the
+    /// chat `to`, if it was dropped as its turn came.
+    pub(super) fn undelivered(&self, chat: TerminalId, to: TerminalId) -> Option<String> {
+        let why = self.tools.talk.undelivered.get(&(chat, to))?;
+        Some(format!(
+            "Your last message to chat {to} waited its turn, and wasn't sent: {why}\n"
+        ))
     }
 
     /// Answers a call that waited for the chat `to` until it timed out.
@@ -1020,6 +1084,57 @@ mod tests {
         assert!(refused.contains("are working already"), "{refused}");
         // One already working takes more without waking.
         assert_eq!(daemon.talk_refused(a, &send(TerminalId(2))), None);
+    }
+
+    #[test]
+    fn a_chat_not_yet_started_is_ranked_by_the_mode_it_will_ask_for_or_waited_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = daemon_with_chat(dir.path());
+        let agent = crate::AgentConfig::default().find("claude").unwrap();
+        let size = Size::new(40, 10).unwrap();
+        let new = |id| {
+            HostedChat::new(
+                TerminalId(id),
+                size,
+                "/".into(),
+                &agent,
+                AgentTools::Ask,
+                true,
+                false,
+            )
+        };
+        // The sender, in the mode a new chat with its agent asks for: Auto.
+        let mut sender = new(10);
+        let options = serde_json::from_value(serde_json::json!([
+            { "id": "mode", "name": "Mode", "category": "mode", "type": "select",
+              "currentValue": "default",
+              "options": [{ "value": "default", "name": "Manual" }, { "value": "auto", "name": "Auto" },
+                          { "value": "bypass", "name": "Bypass" }] },
+        ]))
+        .unwrap();
+        sender.connected(Opened {
+            session: "s10".to_owned(),
+            settings: Some(options),
+        });
+        daemon.add_chat(sender);
+        let a = TerminalId(10);
+        let mut kids = Vec::new();
+        for (id, mode) in [(11, Some("auto")), (12, Some("bypass")), (13, None)] {
+            let mut kid = new(id);
+            kid.started_by(a, a, 1, mode.map(str::to_owned));
+            daemon.add_chat(kid);
+            kids.push(TerminalId(id));
+        }
+        // Not started yet: the mode each asks for ranks it.
+        let own = daemon.chat_ref(a).unwrap();
+        assert_eq!(daemon.unmessageable(own, a, kids[0]), None);
+        let looser = daemon.unmessageable(own, a, kids[1]).unwrap();
+        assert!(looser.contains("may do more than this one"), "{looser}");
+        let waiting = daemon.unmessageable(own, a, kids[2]).unwrap();
+        assert!(
+            waiting.contains("isn't ready yet: wait for it"),
+            "{waiting}"
+        );
     }
 
     #[test]

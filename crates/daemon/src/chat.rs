@@ -1156,8 +1156,7 @@ impl HostedChat {
     /// Sends the first message waiting from another agent, if the agent
     /// has finished answering. Returns what the server must do to send it.
     pub(crate) fn deliver_next(&mut self) -> Vec<Action> {
-        if self.answering() || self.user_queue.native.is_some() || self.user_queue.restart.is_some()
-        {
+        if self.next_message_from().is_none() {
             return Vec::new();
         }
         match self.relations.inbox.pop_front() {

@@ -570,6 +570,9 @@ impl Daemon {
                 None => format!("Chat {to} has closed.\n"),
             };
         };
+        if !self.may_see(chat, to) {
+            return format!("Chat {to} has moved out of this chat's workspace.\n");
+        }
         let mut what = vec![other.agent_title().to_owned()];
         if let Some(profile) = other.profile() {
             what.insert(0, profile.to_owned());
@@ -588,6 +591,9 @@ impl Daemon {
             progress(&other.subagent_status()),
             duration(took.saturating_sub(started))
         );
+        if let Some(note) = self.undelivered(chat, to) {
+            text.insert_str(0, &note);
+        }
         if !super::talk::idle(other) {
             return text;
         }
@@ -624,9 +630,10 @@ impl Daemon {
     }
 
     /// Why the chat `chat`, which an agent started, can't go on with the
-    /// session `opened`, if it can't: it has an agent other than the chat
-    /// that started it, which offers no modes, so it can't be held to its
-    /// safest. A chat whose parent has closed is taken to have another.
+    /// session `opened`, made or opened again, if it can't: it has an
+    /// agent other than the chat that started it, which offers no modes,
+    /// so it can't be held to its safest. A chat whose parent has closed is
+    /// taken to have another.
     pub(in crate::server) fn unheld(
         &self,
         chat: TerminalId,
@@ -635,10 +642,16 @@ impl Daemon {
         let own = self.chat_ref(chat)?;
         let parent = own.relations().parent?;
         let same = (self.chat_ref(parent)).is_some_and(|parent| parent.agent() == own.agent());
-        if same || opened.session.is_empty() {
+        if same {
             return None;
         }
-        let offers_modes = (opened.settings.as_deref()).is_some_and(HostedChat::offers_modes);
+        // A session opened again may not say its settings again: those it
+        // said before stand. Only ACP's session settings are read, not its
+        // older `modes`, which the chat can't choose its safest from.
+        let offers_modes = match opened.settings.as_deref() {
+            Some(options) => HostedChat::offers_modes(options),
+            None => opened.session.is_empty() && own.mode_rank().is_some(),
+        };
         (!offers_modes).then(|| {
             format!(
                 "{} offers no modes, so a chat an agent started with it can't be kept to what the \

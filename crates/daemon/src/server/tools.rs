@@ -786,8 +786,8 @@ impl Daemon {
     /// The chat `chat`'s project: the git repository its working
     /// directory is in, or else that directory. Its agent's tools show
     /// what's in it without asking.
-    fn project_root(&mut self, chat: TerminalId) -> Option<PathBuf> {
-        let dir = PathBuf::from(self.chat_dir(chat).ok()?);
+    fn project_root(&self, chat: TerminalId) -> Option<PathBuf> {
+        let dir = PathBuf::from(self.chat_ref(chat)?.working_directory());
         let dir = dir.canonicalize().unwrap_or(dir);
         Some(clackatoo_syntax::git_root(&dir, &self.config.home).unwrap_or(dir))
     }
@@ -2026,20 +2026,31 @@ pub(super) fn visible(text: &str) -> String {
 }
 
 /// `text`, a message from one agent to another, with nothing in it that
-/// could hide from the user reading it, as [`visible`] shows it, but
-/// keeping its lines, tabs and spaces as they are: control characters as
-/// `^U` and characters that change how text around them shows as
-/// `<U+202E>`. A line break is `\n`, or `\r\n`, which becomes `\n`.
+/// could hide from the user reading it what it says, but otherwise as it
+/// is: C0 and C1 control characters but line breaks and tabs as `^U` or
+/// `<U+0085>`, and the controls that reorder text, as the right-to-left
+/// override, as `<U+202E>`. Joiners, variation selectors, tags and the
+/// like stay, as emoji and many scripts need them. `\r\n` becomes `\n`.
 pub(super) fn unhidden(text: &str) -> String {
     let text = text.replace("\r\n", "\n");
     let mut shown = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
             '\n' | '\t' => shown.push(ch),
-            ch => push_shown(&mut shown, ch),
+            ch if ch.is_control() || bidi_control(ch) => push_shown(&mut shown, ch),
+            ch => shown.push(ch),
         }
     }
     shown
+}
+
+/// Whether `ch` reorders the text around it: the bidi embeddings,
+/// overrides and isolates, and the directional marks.
+fn bidi_control(ch: char) -> bool {
+    matches!(
+        u32::from(ch),
+        0x061C | 0x200E | 0x200F | 0x202A..=0x202E | 0x2066..=0x2069
+    )
 }
 
 /// Puts `ch` on the end of `shown` so it can't go unseen: a control
@@ -2283,9 +2294,15 @@ mod tests {
     fn messages_between_agents_keep_their_lines_and_hide_nothing() {
         assert_eq!(unhidden("a\r\n\tb  c\n"), "a\n\tb  c\n");
         assert_eq!(
-            unhidden("ok\u{202e}gpj.exe\x1b[2J\r\u{200b}x"),
-            "ok<U+202E>gpj.exe^[[2J^M<U+200B>x"
+            unhidden("ok\u{202e}gpj.exe\x1b[2J\r\u{2066}x\u{85}\u{200f}"),
+            "ok<U+202E>gpj.exe^[[2J^M<U+2066>x<U+0085><U+200F>"
         );
+        // What emoji and scripts need stays: joiners, non-joiners,
+        // variation selectors, tags, a byte-order mark and a soft hyphen.
+        let family = "👩\u{200d}👩\u{200d}👧 ❤\u{fe0f} 🏴\u{e0067}\u{e0062}\u{e007f}";
+        assert_eq!(unhidden(family), family);
+        let persian = "می\u{200c}خواهم \u{feff}co\u{ad}op";
+        assert_eq!(unhidden(persian), persian);
     }
 
     #[test]
