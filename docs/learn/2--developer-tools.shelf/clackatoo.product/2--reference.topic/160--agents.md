@@ -369,6 +369,22 @@ Agents are told to use `start_chat` or `start_chats`, with a profile, for all su
 
 A chat an agent starts runs in the background. Your chat shows it as one line under the turn that started it, such as "3 subagents working… 12s ›". Click it, or press Enter on it in normal mode, to see a line for each: its profile, agent and model, what it was asked, and how it's going. Click a line, or press Enter on it, to open that chat as a pane beside yours. A subagent is a chat like any other: undo its turns, review its changes (your chat's review shows them too), message it, and answer its questions; the card says when one is waiting for you. Its tools reach what its parent's do.
 
+#### A subagent's pane
+
+A subagent in a pane, one its agent asked to show or one you opened from its card, has a teal band across the top that says what it is: `↳ subagent of chat 12 · explore`, the chat that started it and the profile it was started as. Click the band, or press Ctrl+B `u`, to go to that chat, whichever tab or workspace it's in.
+
+| Command | Does |
+|---|---|
+| `:q`, `:q!`, `:close`, Ctrl+B `x` | In a subagent's pane, closes only the pane: the subagent goes on in the background, a card in its chat again, as if it had never had a pane, and the card opens it once more. Closing its tab or workspace does the same. |
+| `:bd` (`:bdelete`) | Closes the focused chat for good, pane and all, a subagent's too. `clackatoo close N` does the same from a shell, and the card then says it's closed. |
+| Ctrl+B `u` | Goes from a subagent's pane to the chat that started it. |
+
+The daemon decides, so every window and client, and another machine's daemon relaying for its windows, all close a subagent's pane the same way. A subagent whose chat has closed has no card to go back to: its band says so, and closing its pane closes it, as for any chat. A daemon older than protocol 108 closes the chat with its pane, and its windows' bands don't name the profile.
+
+Once back in the background it is like any other there: it closes with the chat that started it, lets its agent's process go once finished, and lasts through an upgrade but not a restart, as [below](#what-lasts).
+
+#### Closing
+
 Subagents in the background close with the chat that started them, unless they're still working or have changes you haven't reviewed: then they pass to the chat above, if there is one. Past 8 under one of your chats, the oldest close to make room, but only those that have finished, whose answers the agent that started them has read, with nothing waiting for your review and no subagents of their own. A finished one in the background lets Claude Code's process go after 2 minutes, and its next message brings it back in about half a second.
 
 ### Profiles

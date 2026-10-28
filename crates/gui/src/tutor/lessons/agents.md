@@ -147,6 +147,12 @@ An agent hands work on with clackatoo's `start_chat`, or `start_chats` for sever
 
 A subagent is a chat like any other: you can steer it, review and undo what it changes, and answer its questions. The card says when one is waiting for you. Subagents in the background close with the chat that started them.
 
+## A subagent's own pane
+
+An agent can give a subagent a pane of its own, and a card opens one as a pane. A teal band across the top of a subagent's pane says what it is, as `↳ subagent of chat 12 · explore`: whose it is, and the profile it was started as. Click the band, or press Ctrl+B `u`, to go to the chat that started it, whichever tab that's in.
+
+`:q`, `:close` or Ctrl+B `x` in a subagent's pane closes only the pane: the subagent goes on in the background, a card in its chat again, as if it had never had a pane, and the card opens it once more. `:bd` closes the chat itself for good, pane and all, as `clackatoo close` does from a shell. A subagent whose chat has closed has no card to go back to: its band says so, and closing its pane closes it.
+
 ## Reviewing what they changed
 
 `:Review turn` lists what the chat's last turn changed in files, hunk by hunk, and `:Review chat` everything it changed that you haven't kept, to the right of the focused pane, or with a split's mark, as `:-Review`, on that side: `a` keeps a hunk, `x` rejects it, and `]h` goes to the next. Both take in the chat's subagents too, open or closed: under the heading is a line for each, with what it was asked, and each hunk says whose it is, as `· explore (chat 7)`. A turn's review lists the subagents that turn started, and theirs.

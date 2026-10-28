@@ -995,6 +995,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "substitute",
         what: "Editors and terminals take a count before / or ?, as 3/x goes to the third, and terminals' n and N take one",
     },
+    News {
+        id: "subagent-panes",
+        date: "2026-10-28",
+        lesson: "agents",
+        what: "A subagent's pane says whose it is (Ctrl+B u goes there); :q sends it back to its card, :bd closes it",
+    },
 ];
 
 impl News {
