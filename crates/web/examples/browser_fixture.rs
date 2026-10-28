@@ -266,6 +266,7 @@ fn chats() -> Vec<ChatSummary> {
             parent: None,
             workspace: Some(WorkspaceId(workspace)),
             active: now().saturating_sub(120_000),
+            profile: None,
         },
     )
     .collect()

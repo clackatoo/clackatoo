@@ -3390,6 +3390,7 @@ mod tests {
             parent: None,
             workspace: Some(WorkspaceId(workspace)),
             active: 0,
+            profile: None,
         };
         let choices = ChatChoices {
             agents: vec![Provider {
@@ -3902,6 +3903,7 @@ mod tests {
             parent: None,
             workspace: Some(WorkspaceId(workspace)),
             active: 0,
+            profile: None,
         }
     }
 

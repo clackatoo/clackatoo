@@ -1355,6 +1355,7 @@ mod tests {
             parent: None,
             workspace: workspace.map(WorkspaceId),
             active,
+            profile: None,
         }
     }
 

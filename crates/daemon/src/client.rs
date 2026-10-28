@@ -905,7 +905,8 @@ impl Client {
         })
     }
 
-    /// Closes `pane` and its terminal.
+    /// Closes `pane` and its terminal; but a chat an agent started, whose
+    /// chat is still open, goes on in the background, as a card in it.
     ///
     /// # Errors
     ///

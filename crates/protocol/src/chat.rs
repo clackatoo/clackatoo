@@ -900,6 +900,14 @@ pub struct ChatSummary {
     /// When something last happened in it, in milliseconds since the Unix
     /// epoch: its last message sent, or its last turn's end.
     pub active: u64,
+    /// The profile it was started as, such as `explore`, if an agent
+    /// started it as one. `None` from a daemon older than protocol 109.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::SUBAGENT_PROFILE }, _>",
+        deserialize_with = "wire::since::<{ wire::SUBAGENT_PROFILE }, _, _>"
+    )]
+    pub profile: Option<String>,
 }
 
 impl ChatSummary {

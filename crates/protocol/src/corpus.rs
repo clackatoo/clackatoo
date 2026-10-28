@@ -1337,6 +1337,15 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ]
         .map(|sample| (crate::wire::SEARCH_COUNT, sample)),
     );
+    // The profile a chat an agent started was started as (CLACKA-179).
+    let profiled = ChatSummary {
+        profile: Some("explore".into()),
+        ..summary()
+    };
+    samples.push((
+        crate::wire::SUBAGENT_PROFILE,
+        Server(ServerMessage::Event(Event::Chats(vec![profiled]))),
+    ));
     samples
 }
 
@@ -2804,6 +2813,7 @@ fn summary() -> ChatSummary {
         parent: Some(TerminalId(7)),
         workspace: Some(WorkspaceId(1)),
         active: 9,
+        profile: None,
     }
 }
 

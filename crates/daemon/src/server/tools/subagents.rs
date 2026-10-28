@@ -241,6 +241,40 @@ impl Daemon {
         }
     }
 
+    /// Takes `pane`, which shows the chat `chat`, out of its tab without
+    /// closing the chat, if an agent in a chat that's still open started
+    /// it: it goes on in the background, as a card in that chat again,
+    /// as one started without a pane is, and opens from the card again.
+    /// Returns whether it did; if not, closing the pane is closing the
+    /// chat, as for any other.
+    pub(in crate::server) fn send_subagent_back(&mut self, pane: PaneId, chat: TerminalId) -> bool {
+        let parent = (self.chat_ref(chat)).and_then(|kid| kid.relations().parent);
+        let Some(parent) = parent.filter(|&parent| self.chat_ref(parent).is_some()) else {
+            return false;
+        };
+        if !self.workspaces.remove_pane(pane) {
+            return false;
+        }
+        log::info!("chat {chat} goes to the background, as a card in chat {parent}");
+        // A window older than protocol 108 takes the pane's going for the
+        // chat's closing, and never stops following it: it stops here.
+        let older: Vec<Token> = (self.terminals.get(&chat).into_iter())
+            .flat_map(|slot| slot.viewers.iter().copied())
+            .filter(|token| match self.sources.get(token.0) {
+                Some(crate::server::Source::Client(client)) => {
+                    client.wire < clackatoo_protocol::wire::SUBAGENT_PROFILE
+                }
+                _ => false,
+            })
+            .collect();
+        for token in older {
+            self.detach(token, chat);
+        }
+        // Its card says so.
+        self.workspaces_changed();
+        true
+    }
+
     /// The chats under the user's chat `root` that can close to make room
     /// for new ones, oldest first: in the background, finished, asking
     /// nothing, with no chats of their own, their answers had by the chat

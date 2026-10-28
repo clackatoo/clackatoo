@@ -759,6 +759,7 @@ impl Daemon {
             parent: chat.relations().parent,
             workspace: self.workspace_of_chat(id),
             active,
+            profile: chat.profile().map(str::to_owned),
         })
     }
 

@@ -264,6 +264,9 @@ gates! {
     /// A terminal's search for the match a count says, in one answer:
     /// `Request::Search`'s `count`, answered with `Response::Searched`.
     SEARCH_COUNT = 108,
+    /// The profile a chat an agent started was started as, for windows to
+    /// mark its pane by: `ChatSummary`'s `profile`.
+    SUBAGENT_PROFILE = 109,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

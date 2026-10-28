@@ -470,6 +470,7 @@ impl Mirror {
                 .and_then(|workspace| self.workspace_numbers.local(workspace.0))
                 .map(WorkspaceId),
             active: summary.active,
+            profile: summary.profile.as_deref().map(shown_name),
         }
     }
 
@@ -1843,6 +1844,7 @@ mod tests {
             parent: parent.map(TerminalId),
             workspace: workspace.map(WorkspaceId),
             active: 3,
+            profile: None,
         };
         let changed = mirror.take_chats(
             &[summary(5, None, Some(7)), summary(9, Some(5), Some(8))],

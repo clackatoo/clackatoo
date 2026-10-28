@@ -79,6 +79,7 @@ fn chat(id: u32, title: &str) -> ChatSummary {
         parent: None,
         workspace: Some(WorkspaceId(1)),
         active: u64::from(id),
+        profile: None,
     }
 }
 

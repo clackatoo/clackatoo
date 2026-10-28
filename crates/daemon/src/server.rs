@@ -2500,10 +2500,21 @@ impl Daemon {
 
     /// Closes `panes`, as closing their tab or workspace does: their
     /// terminals, and their buffers that have no changes to save.
+    /// Closes `pane`, which shows the terminal `terminal`: ends its
+    /// program, or its chat. But a chat an agent started, whose chat is
+    /// still open, only loses its pane: it goes on in the background, as
+    /// a card in that chat again, as if it had never been shown.
+    fn close_terminal_pane(&mut self, pane: PaneId, terminal: TerminalId) -> Result<(), Error> {
+        if self.send_subagent_back(pane, terminal) {
+            return Ok(());
+        }
+        self.close_terminal(terminal)
+    }
+
     fn close_panes(&mut self, panes: &[Pane]) -> Result<Response, Error> {
         for pane in panes {
             match pane.content {
-                Content::Terminal(terminal) => self.close_terminal(terminal)?,
+                Content::Terminal(terminal) => self.close_terminal_pane(pane.id, terminal)?,
                 Content::Buffer(buffer) => self.close_buffer_pane(pane.id, buffer),
                 Content::Files(files) | Content::Folder(files) => {
                     self.close_files_pane(pane.id, files);
@@ -3362,7 +3373,7 @@ impl Daemon {
             } => self.split_tab(tab, side, terminal, share),
             Request::ClosePane { pane } => match self.workspaces.check_pane(pane)? {
                 Content::Terminal(terminal) => {
-                    self.close_terminal(terminal).map(|()| Response::Done)
+                    (self.close_terminal_pane(pane, terminal)).map(|()| Response::Done)
                 }
                 Content::Buffer(buffer) => {
                     self.close_buffer_pane(pane, buffer);

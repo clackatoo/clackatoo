@@ -12710,6 +12710,88 @@ fn a_chat_an_agent_starts_works_in_the_background_as_a_card_that_opens_as_a_pane
 }
 
 #[test]
+fn closing_a_subagents_pane_sends_it_back_to_its_card_until_its_chat_is_closed() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let kid = TerminalId(a.0 + 1);
+    let show = "mcp start_chat {\"prompt\":\"hi kid\",\"show\":true}";
+    ask_for(&mut client, a, show, Duration::from_secs(10));
+    wait_for_chat(&mut client, kid, |node| last_outcome(node).is_some());
+    assert_eq!(tab_contents(&mut client)[1], Content::Terminal(kid));
+    assert!(card_of(&mut client, a)[0].shown);
+    let alive = |client: &mut Client| -> Vec<TerminalId> {
+        (client.list_terminals().unwrap().iter())
+            .map(|terminal| terminal.id)
+            .collect()
+    };
+
+    // Closing its pane, as `:q` does, takes only the pane: the chat goes
+    // on in the background, a card again.
+    let panes = first_tab_panes(&client.watch_workspaces().unwrap());
+    client.close_pane(panes[1]).unwrap();
+    assert_eq!(tab_contents(&mut client), [Content::Terminal(a)]);
+    assert!(alive(&mut client).contains(&kid));
+    let card = card_of(&mut client, a);
+    assert_eq!((card[0].chat, card[0].shown), (kid, false));
+    assert_eq!(card[0].status, SubagentStatus::Done);
+    // Listed as started by that chat, as the profile it was started as,
+    // for windows to mark its pane by.
+    let Response::Chats(chats) = client.request(&Request::WatchChats).unwrap() else {
+        panic!("not the chats");
+    };
+    let listed = chats.iter().find(|chat| chat.chat == kid).unwrap();
+    assert_eq!(
+        (listed.parent, listed.profile.as_deref()),
+        (Some(a), Some("general"))
+    );
+    client
+        .chat(kid, ChatAction::Send("again".to_owned()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, kid, |node| {
+        node.turns.len() == 2 && last_outcome(node).is_some()
+    });
+    assert_eq!(last_words(&node), "echo: again\n");
+
+    // Closing a tab of its own does the same.
+    let workspace = client.watch_workspaces().unwrap().list[0].id;
+    let tab = Request::NewTab {
+        workspace,
+        terminal: PaneTerminal::Existing(kid),
+        on: None,
+    };
+    client.request(&tab).unwrap();
+    let tab = client.watch_workspaces().unwrap().list[0].tabs[1].id;
+    assert!(card_of(&mut client, a)[0].shown);
+    client.request(&Request::CloseTab { tab }).unwrap();
+    assert_eq!(client.watch_workspaces().unwrap().list[0].tabs.len(), 1);
+    assert!(alive(&mut client).contains(&kid));
+    assert!(!card_of(&mut client, a)[0].shown);
+
+    // The card opens it again.
+    client.chat(a, ChatAction::Open { chat: kid }).unwrap();
+    assert_eq!(tab_contents(&mut client)[1], Content::Terminal(kid));
+    assert!(card_of(&mut client, a)[0].shown);
+
+    // Closing the chat itself ends it, pane and all.
+    client.close_terminal(kid).unwrap();
+    assert!(!alive(&mut client).contains(&kid));
+    assert_eq!(card_of(&mut client, a)[0].status, SubagentStatus::Closed);
+    assert_eq!(tab_contents(&mut client), [Content::Terminal(a)]);
+
+    // One whose chat has closed has no card to go back to: closing its
+    // pane closes it, as for any chat.
+    let other = TerminalId(a.0 + 2);
+    ask_for(&mut client, a, show, Duration::from_secs(10));
+    wait_for_chat(&mut client, other, |node| last_outcome(node).is_some());
+    client.close_terminal(a).unwrap();
+    assert_eq!(tab_contents(&mut client), [Content::Terminal(other)]);
+    let panes = first_tab_panes(&client.watch_workspaces().unwrap());
+    client.close_pane(panes[0]).unwrap();
+    assert!(!alive(&mut client).contains(&other));
+}
+
+#[test]
 fn start_chats_starts_several_and_wait_for_chats_sums_them_up_for_all_or_the_first() {
     let daemon = TestDaemon::with_tools();
     let mut client = daemon.client();
