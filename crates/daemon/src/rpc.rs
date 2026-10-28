@@ -22,10 +22,10 @@ use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::ops::{Deref, Range};
-use std::os::fd::{AsFd, AsRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -145,14 +145,24 @@ pub(crate) struct Peer {
 #[derive(Debug)]
 struct Trace {
     file: File,
-    path: PathBuf,
-    /// How much has been written to the file.
-    written: u64,
-    /// Past how many bytes the file is set aside, as `PATH.1`, in place of
-    /// the one set aside before, and a new one begun. `None` lets it grow.
-    cap: Option<u64>,
+    /// How it's kept small, if it is: an agent's is.
+    capped: Option<Capped>,
     /// Whether obvious secrets are taken out (see [`crate::redact`]).
     redact: bool,
+}
+
+/// A trace file kept small: past `cap` bytes ([`AGENT_TRACE_CAP`]), it's
+/// set aside as `NAME.1`, in place of the one set aside before, and a new
+/// one begun.
+#[derive(Debug)]
+struct Capped {
+    /// The directory it's in, opened once, so the file is never looked for
+    /// through a link put in its place.
+    dir: OwnedFd,
+    name: String,
+    cap: u64,
+    /// How much has been written to the file.
+    written: u64,
 }
 
 /// How big an agent's trace file grows before it's set aside: with the
@@ -241,9 +251,7 @@ impl Peer {
     pub(crate) fn trace_to(&mut self, path: &Path) {
         self.trace = open_trace(&self.name, path).map(|file| Trace {
             file,
-            path: path.to_owned(),
-            written: 0,
-            cap: None,
+            capped: None,
             redact: false,
         });
     }
@@ -255,14 +263,6 @@ impl Peer {
     /// [`AGENT_TRACE_CAP`] the file is set aside as `….log.1`, so a trace
     /// left on never fills the disk.
     pub(crate) fn trace_agent_to(&mut self, dir: &Path, agent: &str) {
-        if let Err(err) = std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-        {
-            log::warn!("{}: can't trace to {}: {err}", self.name, dir.display());
-            return;
-        }
         let agent: String = (agent.chars())
             .map(|c| {
                 if c.is_ascii_alphanumeric() || c == '-' {
@@ -272,17 +272,24 @@ impl Peer {
                 }
             })
             .collect();
-        let path = dir.join(format!(
-            "{agent}-{}.log",
-            self.process.pid().as_raw_nonzero()
-        ));
-        self.trace = open_trace(&self.name, &path).map(|file| Trace {
-            written: file.metadata().map_or(0, |metadata| metadata.len()),
-            file,
-            path,
-            cap: Some(AGENT_TRACE_CAP),
-            redact: true,
+        let name = format!("{agent}-{}.log", self.process.pid().as_raw_nonzero());
+        let opened = trace_dir(dir).and_then(|dir| {
+            let (file, name) = create_trace(&dir, &name)?;
+            Ok(Trace {
+                file,
+                capped: Some(Capped {
+                    dir,
+                    name,
+                    cap: AGENT_TRACE_CAP,
+                    written: 0,
+                }),
+                redact: true,
+            })
         });
+        match opened {
+            Ok(trace) => self.trace = Some(trace),
+            Err(err) => log::warn!("{}: can't trace to {}: {err}", self.name, dir.display()),
+        }
     }
 
     /// Writes `body`, which went the way `way` says, to the trace, if
@@ -322,21 +329,83 @@ impl Peer {
             self.trace = None;
             return;
         }
-        trace.written += line.len() as u64;
-        if trace.cap.is_some_and(|cap| trace.written > cap) {
-            let aside = trace.path.with_extension("log.1");
-            let reopened = std::fs::rename(&trace.path, &aside)
-                .ok()
-                .and_then(|()| open_trace(&self.name, &trace.path));
+        let Some(capped) = &mut trace.capped else {
+            return;
+        };
+        capped.written += line.len() as u64;
+        if capped.written > capped.cap {
+            let aside = format!("{}.1", capped.name);
+            let reopened = rustix::fs::renameat(&capped.dir, &capped.name, &capped.dir, &aside)
+                .map_err(io::Error::from)
+                .and_then(|()| create_new(&capped.dir, &capped.name));
             match reopened {
-                Some(file) => {
+                Ok(file) => {
                     trace.file = file;
-                    trace.written = 0;
+                    capped.written = 0;
                 }
-                None => self.trace = None,
+                Err(err) => {
+                    log::warn!("{}: tracing stopped: {err}", self.name);
+                    self.trace = None;
+                }
             }
         }
     }
+}
+
+/// Opens `dir` to keep agents' traces in, making it, readable by its
+/// owner only, if it isn't there: never through a link, and only if it's
+/// this user's, and no one else may write in it.
+fn trace_dir(dir: &Path) -> io::Result<OwnedFd> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let fd = rustix::fs::open(
+        dir,
+        OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::RDONLY,
+        rustix::fs::Mode::empty(),
+    )?;
+    let stat = rustix::fs::fstat(&fd)?;
+    if stat.st_uid != rustix::process::geteuid().as_raw() {
+        return Err(io::Error::other("it isn't yours"));
+    }
+    if stat.st_mode & 0o022 != 0 {
+        return Err(io::Error::other("others may write in it"));
+    }
+    Ok(fd)
+}
+
+/// Makes a new trace file called `name` in `dir`, or if there's one, the
+/// first of `name.2`, `name.3`, … that there isn't, as a process ID used
+/// again would: never appending to an old one, nor writing through a link.
+/// Returns it, and the name it has.
+fn create_trace(dir: &OwnedFd, name: &str) -> io::Result<(File, String)> {
+    let mut tried = name.to_owned();
+    for n in 2..100 {
+        match create_new(dir, &tried) {
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => tried = format!("{name}.{n}"),
+            made => return made.map(|file| (file, tried)),
+        }
+    }
+    Err(io::Error::other("too many traces of that name"))
+}
+
+/// Makes the file `name` in `dir`, readable by its owner only, failing if
+/// there's one, and opens it to append to.
+fn create_new(dir: &OwnedFd, name: &str) -> io::Result<File> {
+    let fd = rustix::fs::openat(
+        dir,
+        name,
+        OFlags::CREATE
+            | OFlags::EXCL
+            | OFlags::WRONLY
+            | OFlags::APPEND
+            | OFlags::NOFOLLOW
+            | OFlags::NONBLOCK
+            | OFlags::CLOEXEC,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )?;
+    Ok(File::from(fd))
 }
 
 /// Opens the file at `path` to append a trace to, as
@@ -1828,7 +1897,7 @@ mod tests {
             "{written}"
         );
         // Past its cap, it's set aside and begun again.
-        peer.trace.as_mut().unwrap().cap = Some(200);
+        (peer.trace.as_mut().unwrap().capped.as_mut().unwrap()).cap = 200;
         for n in 0..4 {
             peer.send(&json!({"method": "session/prompt", "params": {"n": n}}));
         }
@@ -1837,6 +1906,33 @@ mod tests {
         assert!(aside.contains("session/prompt"), "{aside}");
         assert!(now.len() < aside.len() + 200, "{now}");
         peer.kill();
+
+        // A name taken, as by a process ID used again, isn't appended to.
+        let mut again =
+            Peer::start("agent x", &command, None, None, Framing::Lines, &parser).unwrap();
+        let reused = traces.join(format!("x-{}.log", again.process.pid().as_raw_nonzero()));
+        std::fs::write(&reused, "old\n").unwrap();
+        again.trace_agent_to(&traces, "x");
+        again.send(&json!({"method": "initialize"}));
+        assert_eq!(std::fs::read_to_string(&reused).unwrap(), "old\n");
+        let next = std::fs::read_to_string(reused.with_extension("log.2")).unwrap();
+        assert!(next.contains("initialize"), "{next}");
+        again.kill();
+
+        // Nor is a directory others may write in, or one through a link.
+        let open = dir.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::os::unix::fs::PermissionsExt::from_mode(0o777))
+            .unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&traces, &link).unwrap();
+        for refused in [&open, &link] {
+            let mut peer =
+                Peer::start("agent x", &command, None, None, Framing::Lines, &parser).unwrap();
+            peer.trace_agent_to(refused, "x");
+            assert!(peer.trace.is_none(), "{}", refused.display());
+            peer.kill();
+        }
     }
 
     #[test]
