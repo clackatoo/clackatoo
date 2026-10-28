@@ -402,3 +402,92 @@ fn a_search_lights_what_it_matches_where_its_drawn() {
             .all(|highlight| highlight.kind != HighlightKind::OtherMatch)
     );
 }
+
+#[test]
+fn what_a_search_keeps_follows_the_lines_as_the_list_changes() {
+    let mut review = review();
+    keys(&mut review, "/added<CR>");
+    let found = review.search.found().expect("found");
+    assert!(matches!(&review.lines[found], Line::Text { text, .. } if text.contains("added")));
+    // A file comes before them: the match found is still on its line.
+    let mut more = list();
+    more.files.insert(
+        0,
+        ReviewFile {
+            path: "/src/0.rs".to_owned(),
+            shown: "0.rs".to_owned(),
+            buffer: None,
+            hunks: vec![hunk(1, ("", "    first();\n"), 4, 0)],
+        },
+    );
+    review.update(more.clone());
+    let moved = review.search.found().expect("still found");
+    assert!(moved > found);
+    assert!(matches!(&review.lines[moved], Line::Text { text, .. } if text.contains("added")));
+    // A search typed from b.rs's line, shown elsewhere: given up after the
+    // list changes, the cursor's back on b.rs's line.
+    keys(&mut review, "<Esc>");
+    let b = (review.lines.iter())
+        .position(
+            |line| matches!(line, Line::File { file } if review.list.files[*file].shown == "b.rs"),
+        )
+        .expect("b.rs");
+    review.cursor = b;
+    keys(&mut review, "/first");
+    crate::vim::search::preview(&mut Searching(&mut review));
+    assert_ne!(review.cursor, b);
+    review.update(list());
+    keys(&mut review, "<Esc>");
+    assert_eq!(review.label(), "b.rs  1 hunk");
+    // A match whose hunk's gone is lit no more.
+    review.update(more);
+    keys(&mut review, "/first<CR>");
+    assert!(review.search.found().is_some());
+    review.update(list());
+    assert_eq!(review.search.found(), None);
+}
+
+#[test]
+fn what_is_lit_is_looked_for_once_and_only_as_far_as_is_drawn() {
+    let mut long = list();
+    // A changed line far wider than the pane, matching all along it.
+    long.files[1].hunks[0].text = format!("{}\n", "ab".repeat(100_000));
+    let mut review = Review::new(ReviewId(1), &Options::default());
+    review.resize(Size::new(60, 30).unwrap());
+    review.update(long);
+    keys(&mut review, "/b<CR>");
+    let scans = || crate::hlsearch::SCANS.with(std::cell::Cell::get);
+    let before = scans();
+    let shown = rows(&mut review);
+    assert_eq!(scans(), before + 1);
+    // Drawn again as it was, it's not looked for again.
+    rows(&mut review);
+    assert_eq!(scans(), before + 1);
+    // Only those drawn, in the columns they're drawn in.
+    let on_long: Vec<std::ops::Range<usize>> = (review.highlights().into_iter())
+        .filter(|highlight| {
+            matches!(
+                highlight.kind,
+                HighlightKind::Match | HighlightKind::OtherMatch
+            ) && shown[highlight.line].contains("abab")
+        })
+        .map(|highlight| highlight.cols)
+        .collect();
+    assert!(!on_long.is_empty());
+    assert!(on_long.len() <= 30, "{}", on_long.len());
+    assert!(on_long.iter().all(|cols| cols.end <= 60));
+    // A tab is as wide as drawn.
+    let mut tabbed = list();
+    tabbed.files[1].hunks[0].text = "\tadded();\n".to_owned();
+    review.update(tabbed);
+    keys(&mut review, "/added<CR>");
+    let shown = rows(&mut review);
+    let lit: Vec<String> = (review.highlights().into_iter())
+        .filter(|highlight| highlight.kind == HighlightKind::Match)
+        .map(|highlight| {
+            let row: Vec<char> = shown[highlight.line].chars().collect();
+            row[highlight.cols].iter().collect()
+        })
+        .collect();
+    assert_eq!(lit, ["added"]);
+}

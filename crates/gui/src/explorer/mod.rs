@@ -62,10 +62,10 @@ use clackatoo_term::{Row, RowBuilder};
 
 use crate::colors;
 use crate::motion::Motion;
-use crate::options::{Case, Options};
+use crate::options::Options;
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 use crate::vim::list::{self, ListRows, Searching};
-use crate::vim::search::{self, Search};
+use crate::vim::search;
 use crate::vim::{Action, Command, Dialect, Keys, Paging, Parsed, Read, Reader, Stroke};
 
 mod editing;
@@ -232,8 +232,7 @@ pub(crate) struct Explorer {
     paging: Paging,
     prompt: Option<Prompt>,
     /// The search being typed, the last, and what's lit.
-    search: Search<list::Items>,
-    case: Case,
+    search: list::ListSearch,
     cursorline: bool,
     /// A path to put the cursor on once it shows, expanding what it's in.
     reveal: Option<String>,
@@ -244,9 +243,6 @@ pub(crate) struct Explorer {
     /// What the bar says until the next key, such as why a key did
     /// nothing.
     message: Option<String>,
-    /// A search failed since the desk last asked, as Vim beeps: a macro or
-    /// a binding typing keys stops.
-    failed: bool,
     /// The directory it may not go above, nor change anything outside, as
     /// a lesson's explorer may not leave the lesson's scratch directory.
     fence: Option<String>,
@@ -309,14 +305,12 @@ impl Explorer {
             keys: Keys::default(),
             paging: Paging::default(),
             prompt: None,
-            search: Search::of(options),
-            case: Case::of(options),
+            search: list::ListSearch::of(options),
             cursorline: options.cursorline,
             reveal: None,
             outbox: Vec::new(),
             asks: Vec::new(),
             message: None,
-            failed: false,
             fence: None,
             fence_name: None,
             help: false,
@@ -369,7 +363,6 @@ impl Explorer {
 
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options) {
-        self.case = Case::of(options);
         self.search.set_options(options);
         self.cursorline = options.cursorline;
     }
@@ -770,10 +763,28 @@ impl Explorer {
         }
     }
 
+    /// Flattens the tree into the lines shown (see
+    /// [`flatten_lines`](Self::flatten_lines)), and finds what the search
+    /// keeps of them again by their paths, as the cursor is.
+    fn flatten(&mut self) {
+        let kept = list::KeptRows::of(&self.search, |row| {
+            (row < self.rows_len()).then(|| self.line_at(row).map(Line::path))
+        });
+        self.flatten_lines();
+        let found = kept.find(self.rows_len(), |path: &Option<String>| match path {
+            // `..`.
+            None => self.shows_up().then_some(0),
+            Some(path) => (self.lines.iter())
+                .position(|line| line.is(path))
+                .map(|at| at + self.lead()),
+        });
+        found.put(&mut self.search);
+    }
+
     /// Flattens the tree into the lines shown, keeping the cursor on the
     /// path it was on, and putting it on the path to reveal if that
     /// shows now.
-    fn flatten(&mut self) {
+    fn flatten_lines(&mut self) {
         let at = self.line().map(Line::path);
         // Gone up from `..`, as `-` goes, too.
         let from_up = self.up;
@@ -1657,7 +1668,8 @@ impl Explorer {
                 continue;
             };
             let name = &line.entry().name;
-            for (bytes, brighter) in list::lit_in(&self.search, name, found == Some(row)) {
+            let lit = list::lit_in(&self.search, name, 0..name.len(), found == Some(row));
+            for (bytes, brighter) in lit {
                 let start = col + crate::render::mono_width(&name[..bytes.start]);
                 let end = start + crate::render::mono_width(&name[bytes]);
                 highlights.push(Highlight {
@@ -1957,21 +1969,19 @@ impl Dialect for ExplorerKeys {
 
 /// An explorer's search goes through the names shown.
 impl list::Searched for Explorer {
-    fn search(&self) -> &Search<list::Items> {
+    type Start = list::Rows;
+
+    fn search(&self) -> &list::ListSearch {
         &self.search
     }
 
-    fn search_mut(&mut self) -> &mut Search<list::Items> {
+    fn search_mut(&mut self) -> &mut list::ListSearch {
         &mut self.search
     }
 
     fn matches(&self, row: usize, pattern: &crate::editor::Pattern) -> bool {
         // `..`, having no name, is passed over.
         (self.line_at(row)).is_some_and(|line| pattern.find_at(&line.entry().name, 0).is_some())
-    }
-
-    fn case(&self) -> Case {
-        self.case
     }
 
     fn missed(&self, query: &str) -> String {
@@ -1982,12 +1992,12 @@ impl list::Searched for Explorer {
         self.message = Some(said);
     }
 
-    fn fail(&mut self) {
-        self.failed = true;
+    fn keep(&self) -> list::Rows {
+        list::keep_rows(self)
     }
 
-    fn take_failed(&mut self) -> bool {
-        std::mem::take(&mut self.failed)
+    fn put_back(&mut self, start: &mut list::Rows, keep_view: bool) {
+        list::put_rows_back(self, *start, keep_view);
     }
 }
 

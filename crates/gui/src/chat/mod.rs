@@ -357,6 +357,9 @@ pub(crate) struct ChatView {
     /// The search being typed in the bar, the last one, for `n` and `N`,
     /// and what's lit.
     search: crate::vim::search::Search<search::InChat>,
+    /// What the last search's matches in view were last found in, and
+    /// them.
+    lit_kept: crate::hlsearch::Memo<search::LitKey, (usize, std::ops::Range<usize>)>,
     /// How searches treat case, as the options say.
     case: crate::options::Case,
     /// A yank or search failed, as Vim beeps, which stops a macro or a
@@ -518,6 +521,7 @@ impl ChatView {
             finds: crate::vim::Finds::default(),
             paging: crate::vim::Paging::default(),
             search: crate::vim::search::Search::default(),
+            lit_kept: crate::hlsearch::Memo::default(),
             case: crate::options::Case::default(),
             failed: false,
             hovered_code: None,

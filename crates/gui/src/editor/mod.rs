@@ -519,6 +519,9 @@ pub(crate) struct Editor {
     /// The search being typed, the last, and what's lit: from a search,
     /// `n` or `N`, `:s` or `:g`, until Esc or `:nohlsearch`.
     search: vim::search::Search<search::InFile>,
+    /// What the last search's matches in view were last found in, and
+    /// them.
+    lit_kept: crate::hlsearch::Memo<MatchesIn, (Point, Point)>,
     /// The matches of the last search in view, as of the last settle,
     /// each from its first character to its last, while they're lit.
     matches_lit: Vec<(Point, Point)>,
@@ -788,6 +791,7 @@ impl Editor {
             finds: vim::Finds::default(),
             prompt: None,
             search: vim::search::Search::of(options),
+            lit_kept: crate::hlsearch::Memo::default(),
             matches_lit: Vec::new(),
             status: None,
             asked: None,
@@ -6332,7 +6336,7 @@ impl Editor {
                 .map(|shown| (shown.line, shown.start, shown.next))
                 .collect(),
         };
-        self.search.lit_in_view(key, |lighting| {
+        self.search.lit_in_view(&self.lit_kept, key, |lighting| {
             let Some(pattern) = lighting.pattern(words) else {
                 return Vec::new();
             };

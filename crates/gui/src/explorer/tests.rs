@@ -1336,3 +1336,49 @@ fn a_key_that_does_nothing_still_clears_a_message_and_redraws() {
     assert!(explorer.stroke(Stroke::Escape), "drawn again");
     assert_ne!(explorer.label(), "no name shown matches zzz");
 }
+
+#[test]
+fn what_a_search_keeps_follows_the_names_as_the_rows_change() {
+    let mut explorer = explorer(10);
+    rooted(
+        &mut explorer,
+        vec![dir("src"), file("alpha.rs"), file("beta.rs")],
+    );
+    // Rows: `..`, src, alpha.rs, beta.rs.
+    keys(&mut explorer, "/beta<CR>");
+    assert_eq!(at(&mut explorer), "/p/beta.rs");
+    assert_eq!(explorer.search.found(), Some(3));
+    // `zo` above it: the match found is still beta.rs's, not the row's.
+    keys(&mut explorer, "ggjzo");
+    listed(&mut explorer, "/p/src", vec![file("x.rs"), file("y.rs")]);
+    assert_eq!(explorer.search.found(), Some(5));
+    let rows = shown(&mut explorer);
+    let found = (explorer.highlights().into_iter())
+        .find(|highlight| highlight.kind == HighlightKind::Match)
+        .map(|highlight| rows[highlight.line].clone());
+    assert_eq!(found.as_deref(), Some("    beta.rs"), "{rows:?}");
+    // A search typed from alpha.rs, shown on beta.rs: a listing that comes
+    // meanwhile puts a file above them both, and Esc is back on alpha.rs.
+    keys(&mut explorer, "zcj");
+    assert_eq!(at(&mut explorer), "/p/alpha.rs");
+    keys(&mut explorer, "/bet");
+    crate::vim::search::preview(&mut Searching(&mut explorer));
+    assert_eq!(at(&mut explorer), "/p/beta.rs");
+    listed(
+        &mut explorer,
+        "/p",
+        vec![
+            file("aaa.rs"),
+            dir("src"),
+            file("alpha.rs"),
+            file("beta.rs"),
+        ],
+    );
+    keys(&mut explorer, "<Esc>");
+    assert_eq!(at(&mut explorer), "/p/alpha.rs");
+    // Lit as it started: beta.rs's match, on its row now.
+    assert_eq!(explorer.search.found(), Some(4));
+    // A match whose file's gone is lit no more.
+    listed(&mut explorer, "/p", vec![file("alpha.rs")]);
+    assert_eq!(explorer.search.found(), None);
+}

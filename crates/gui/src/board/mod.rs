@@ -28,10 +28,10 @@ use clackatoo_term::{Row, RowBuilder};
 
 use crate::colors;
 use crate::motion::Motion;
-use crate::options::{Case, Options};
+use crate::options::Options;
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 use crate::vim::list::{self, ListRows, Searching};
-use crate::vim::search::{self, Search};
+use crate::vim::search;
 use crate::vim::{Action, Command, Dialect, Keys, Mode, Paging, Parsed, Read, Reader, Stroke};
 
 #[cfg(test)]
@@ -106,9 +106,7 @@ pub(crate) struct BoardPane {
     /// How far its scrolling keys go.
     paging: Paging,
     /// The search being typed, the last, and what's lit.
-    search: Search<list::Items>,
-    /// How a search matches case, as the editor's do.
-    case: Case,
+    search: list::ListSearch<Start>,
     prompt: Option<Prompt>,
     cursorline: bool,
     /// What to ask the daemon, oldest first.
@@ -117,9 +115,6 @@ pub(crate) struct BoardPane {
     /// What the bar says until the next key, such as why something
     /// couldn't be done.
     message: Option<String>,
-    /// A search failed since the desk last asked, as Vim beeps: a macro or
-    /// a binding typing keys stops.
-    failed: bool,
     /// The last search's matches in view, as of the last settle.
     lit: Vec<Highlight>,
 }
@@ -146,14 +141,12 @@ impl BoardPane {
             laid_at: 0,
             keys: Keys::default(),
             paging: Paging::default(),
-            search: Search::of(options),
-            case: Case::of(options),
+            search: list::ListSearch::of(options),
             prompt: None,
             cursorline: options.cursorline,
             outbox: Vec::new(),
             asks: Vec::new(),
             message: None,
-            failed: false,
             lit: Vec::new(),
         }
     }
@@ -165,7 +158,6 @@ impl BoardPane {
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.cursorline = options.cursorline;
-        self.case = Case::of(options);
         self.search.set_options(options);
     }
 
@@ -539,44 +531,52 @@ impl BoardPane {
     /// The last search's matches in the entries' text in view, the lines
     /// from the top to `end`, each on the row it's drawn in, while they're
     /// lit: every match, with `hlsearch`, and the entry the search went
-    /// to's first brighter.
+    /// to's first brighter. Each entry's text is looked through only
+    /// around what's drawn of it.
     fn matches_in_view(&self, end: usize) -> Vec<Highlight> {
         if self.search.lit().is_none() {
             return Vec::new();
         }
         let found = self.search.found();
         let mut highlights = Vec::new();
-        // The entry whose matches were last found, and them.
-        let mut matched: Option<(usize, list::LitIn)> = None;
-        for (index, line) in self.lines[self.top..end].iter().enumerate() {
-            let (Some(entry), Some(piece)) = (line.entry, &line.text) else {
+        let mut index = 0;
+        // Each entry's lines in view, together.
+        for lines in self.lines[self.top..end].chunk_by(|a, b| a.entry == b.entry) {
+            let first = index;
+            index += lines.len();
+            let Some(entry) = lines[0].entry else {
+                continue;
+            };
+            let pieces = || {
+                (lines.iter().enumerate()).filter_map(|(at, line)| Some((at, line.text.clone()?)))
+            };
+            let Some(drawn) = pieces()
+                .map(|(_, piece)| piece)
+                .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
+            else {
                 continue;
             };
             let text = &self.entries[entry].text;
-            let lit = match &matched {
-                Some((was, lit)) if *was == entry => lit,
-                _ => {
-                    let lit = list::lit_in(&self.search, text, found == Some(entry));
-                    &matched.insert((entry, lit)).1
+            let lit = list::lit_in(&self.search, text, drawn, found == Some(entry));
+            for (at, piece) in pieces() {
+                for (bytes, brighter) in &lit {
+                    let start = bytes.start.max(piece.start);
+                    let stop = bytes.end.min(piece.end);
+                    if start >= stop {
+                        continue;
+                    }
+                    let col = INDENT + crate::render::mono_width(&text[piece.start..start]);
+                    let cols = col..col + crate::render::mono_width(&text[start..stop]);
+                    highlights.push(Highlight {
+                        line: first + at + 1,
+                        cols: cols.start.min(self.width)..cols.end.min(self.width),
+                        kind: if *brighter {
+                            HighlightKind::Match
+                        } else {
+                            HighlightKind::OtherMatch
+                        },
+                    });
                 }
-            };
-            for (bytes, brighter) in lit {
-                let start = bytes.start.max(piece.start);
-                let stop = bytes.end.min(piece.end);
-                if start >= stop {
-                    continue;
-                }
-                let col = INDENT + crate::render::mono_width(&text[piece.start..start]);
-                let cols = col..col + crate::render::mono_width(&text[start..stop]);
-                highlights.push(Highlight {
-                    line: index + 1,
-                    cols: cols.start.min(self.width)..cols.end.min(self.width),
-                    kind: if *brighter {
-                        HighlightKind::Match
-                    } else {
-                        HighlightKind::OtherMatch
-                    },
-                });
             }
         }
         highlights
@@ -926,22 +926,33 @@ impl BoardPane {
     }
 }
 
+/// Where a board's cursor and view were as a search started, to put back.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Start {
+    cursor: usize,
+    /// Whether the cursor was on the last entry, following new ones.
+    at_end: bool,
+    /// The first line in view, and the entry it's of with how far into
+    /// it, if it's of one, to find again as the entries are laid out
+    /// afresh.
+    top: usize,
+    top_in: Option<(usize, usize)>,
+}
+
 /// A board's search goes through what its entries say.
 impl list::Searched for BoardPane {
-    fn search(&self) -> &Search<list::Items> {
+    type Start = Start;
+
+    fn search(&self) -> &list::ListSearch<Start> {
         &self.search
     }
 
-    fn search_mut(&mut self) -> &mut Search<list::Items> {
+    fn search_mut(&mut self) -> &mut list::ListSearch<Start> {
         &mut self.search
     }
 
     fn matches(&self, entry: usize, pattern: &crate::editor::Pattern) -> bool {
         pattern.find_at(&self.entries[entry].text, 0).is_some()
-    }
-
-    fn case(&self) -> Case {
-        self.case
     }
 
     fn missed(&self, query: &str) -> String {
@@ -952,12 +963,36 @@ impl list::Searched for BoardPane {
         self.message = Some(said);
     }
 
-    fn fail(&mut self) {
-        self.failed = true;
+    fn keep(&self) -> Start {
+        let top_in = (self.lines.get(self.top))
+            .and_then(|line| line.entry)
+            .and_then(|entry| Some((entry, self.top - self.lines_of(entry)?.start)));
+        Start {
+            cursor: self.cursor,
+            at_end: self.at_end,
+            top: self.top,
+            top_in,
+        }
     }
 
-    fn take_failed(&mut self) -> bool {
-        std::mem::take(&mut self.failed)
+    /// Back on the last entry, if it was on the last, whichever that is
+    /// now, following new ones again.
+    fn put_back(&mut self, start: &mut Start, keep_view: bool) {
+        if start.at_end {
+            self.go_to(self.entries.len());
+        } else {
+            self.go_to(start.cursor);
+        }
+        if keep_view {
+            return;
+        }
+        let in_entry = start.top_in.and_then(|(entry, into)| {
+            let lines = self.lines_of(entry)?;
+            Some(lines.start + into.min(lines.len() - 1))
+        });
+        self.top = in_entry
+            .unwrap_or(start.top)
+            .min(self.lines.len().saturating_sub(1));
     }
 }
 

@@ -195,7 +195,7 @@ impl Desk {
         } else if let Some(pane) = self.focused_pane() {
             pane.forget_match();
         } else if let Some(list) = self.focused_list_mut() {
-            list.search_mut().unlight();
+            list.unlight();
         }
     }
 

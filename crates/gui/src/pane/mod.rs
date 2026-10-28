@@ -116,6 +116,9 @@ pub(crate) struct Pane {
     last_visual: Option<(Point, Point, Selection)>,
     /// The search being typed, the last, and what's lit.
     search: vim::search::Search<search::Terminal>,
+    /// What the last search's matches in view were last found in, and
+    /// them.
+    lit_kept: crate::hlsearch::Memo<MatchesIn, Match>,
     /// How searches treat case, as the options say.
     case: Case,
     /// `gg`, `G`, `H`, `M` and `L` go to a line's first non-blank
@@ -182,6 +185,7 @@ impl Pane {
             anchor: None,
             last_visual: None,
             search: vim::search::Search::default(),
+            lit_kept: crate::hlsearch::Memo::default(),
             case: Case::default(),
             startofline: Options::default().startofline,
             paging: vim::Paging::default(),
@@ -476,7 +480,7 @@ impl Pane {
                 true
             }
             (Some(Pending::Search(asked)), Response::Searched { found, wrapped }) => {
-                self.counted(found, wrapped, asked);
+                self.counted(found, wrapped, &asked);
                 true
             }
             (Some(Pending::Preview(query)), Response::Found(found)) => {
@@ -511,32 +515,33 @@ impl Pane {
             top,
             height,
         };
-        self.search.lit_in_view(key, |(query, exact)| {
-            let document = Document(self);
-            let mut lit = Vec::new();
-            for line in top..top + height as u64 {
-                let Some(row) = document.line(line) else {
-                    continue;
-                };
-                let mut after = 0;
-                let apart = clackatoo_term::matches_in(row, query, *exact)
-                    .into_iter()
-                    .filter(|&(col, cells)| {
-                        let apart = col >= after;
-                        if apart {
-                            after = col + cells;
-                        }
-                        apart
-                    });
-                lit.extend(
-                    (apart.take(crate::hlsearch::MOST_LIT)).map(|(col, cells)| Match {
-                        start: clackatoo_term::Position { line, col },
-                        cells,
-                    }),
-                );
-            }
-            lit
-        })
+        self.search
+            .lit_in_view(&self.lit_kept, key, |(query, exact)| {
+                let document = Document(self);
+                let mut lit = Vec::new();
+                for line in top..top + height as u64 {
+                    let Some(row) = document.line(line) else {
+                        continue;
+                    };
+                    let mut after = 0;
+                    let apart = clackatoo_term::matches_in(row, query, *exact)
+                        .into_iter()
+                        .filter(|&(col, cells)| {
+                            let apart = col >= after;
+                            if apart {
+                                after = col + cells;
+                            }
+                            apart
+                        });
+                    lit.extend(
+                        (apart.take(crate::hlsearch::MOST_LIT)).map(|(col, cells)| Match {
+                            start: clackatoo_term::Position { line, col },
+                            cells,
+                        }),
+                    );
+                }
+                lit
+            })
     }
 
     /// Takes text copied, for the window to keep in the registers or put

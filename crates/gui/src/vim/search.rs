@@ -45,11 +45,6 @@ pub(crate) trait Kinds: Debug {
     type Found: Copy + Debug;
     /// A search as the pane matches it, compiled once.
     type Lit: Clone + Debug;
-    /// What the matches lit in view were last found in: which search, and
-    /// what's drawn where.
-    type LitKey: PartialEq + Debug;
-    /// A match lit in view.
-    type LitMatch: Clone + Debug;
 }
 
 /// A search done: what it looks for, and which way it goes.
@@ -84,8 +79,6 @@ pub(crate) struct Search<K: Kinds> {
     lit: Option<K::Lit>,
     /// The match the last search, `n` or `N` went to, while it's lit.
     found: Option<K::Found>,
-    /// What was last found lit in view, and in what.
-    lit_kept: Memo<K::LitKey, K::LitMatch>,
     /// Every match in view is lit, not only the one found (`hlsearch`).
     pub(crate) every: bool,
     /// A search being typed shows where it goes (`incsearch`).
@@ -100,7 +93,6 @@ impl<K: Kinds> Default for Search<K> {
             last: None,
             lit: None,
             found: None,
-            lit_kept: Memo::default(),
             every: options.hlsearch,
             incsearch: options.incsearch,
         }
@@ -142,6 +134,13 @@ pub(crate) struct Find<'a, K: Kinds> {
     /// search being typed started, to find from: a preview never fails or
     /// says anything, and finds what the search Enter makes would find, or
     /// nothing.
+    ///
+    /// A pane that finds at once has its cursor put back there before it's
+    /// asked, so may find from the cursor, as editors, chats and lists do;
+    /// a chat notes in what's kept the turn it opened for the match. A pane that [answers later](Searcher::ANSWERS_LATER)
+    /// still shows the last preview, so must find from what's kept, as
+    /// terminals do. Only lists preview a count before `/`; the rest find
+    /// nothing for one, as it may take far longer to find.
     pub(crate) preview: Option<&'a mut K::Start>,
 }
 
@@ -254,6 +253,19 @@ impl<K: Kinds> Search<K> {
     }
 
     /// What the pane kept as the search being typed started, if it's kept
+    /// one.
+    pub(crate) fn start(&self) -> Option<&K::Start> {
+        let started = self.typing.as_ref()?.start.as_ref()?;
+        Some(&started.start)
+    }
+
+    /// The match lit as the search being typed started, to be put back,
+    /// if one's kept and lit.
+    pub(crate) fn kept_found(&self) -> Option<K::Found> {
+        self.typing.as_ref()?.start.as_ref()?.found
+    }
+
+    /// What the pane kept as the search being typed started, if it's kept
     /// one, to follow what's changed since.
     pub(crate) fn start_mut(&mut self) -> Option<&mut K::Start> {
         let started = self.typing.as_mut()?.start.as_mut()?;
@@ -310,20 +322,21 @@ impl<K: Kinds> Search<K> {
     pub(crate) fn unlight(&mut self) {
         self.lit = None;
         self.found = None;
-        self.lit_kept.forget();
     }
 
     /// The matches lit in view, with `hlsearch` and while they're lit, as
-    /// `find` finds them for the search lit: kept, while `key` says they're
-    /// in what they were found in last. The one found isn't among them
-    /// unless `find` puts it there.
-    pub(crate) fn lit_in_view(
+    /// `find` finds them for the search lit: kept in `memo`, the pane's,
+    /// while `key` says they're in what they were found in last, which
+    /// names the search. The one found isn't among them unless `find` puts
+    /// it there.
+    pub(crate) fn lit_in_view<Key: PartialEq, M: Clone>(
         &self,
-        key: impl FnOnce(&K::Lit) -> K::LitKey,
-        find: impl FnOnce(&K::Lit) -> Vec<K::LitMatch>,
-    ) -> Vec<K::LitMatch> {
+        memo: &Memo<Key, M>,
+        key: impl FnOnce(&K::Lit) -> Key,
+        find: impl FnOnce(&K::Lit) -> Vec<M>,
+    ) -> Vec<M> {
         match self.lit.as_ref().filter(|_| self.every) {
-            Some(lit) => self.lit_kept.get(key(lit), || find(lit)),
+            Some(lit) => memo.get(key(lit), || find(lit)),
             None => Vec::new(),
         }
     }
@@ -673,8 +686,6 @@ mod tests {
         type Start = (usize, usize);
         type Found = usize;
         type Lit = String;
-        type LitKey = String;
-        type LitMatch = usize;
     }
 
     impl Restores for Places {
@@ -711,10 +722,7 @@ mod tests {
             match super::super::list::round(1000, from, find.count, find.backward, |at| {
                 find.lit != "none" && self.matches.contains(&at)
             }) {
-                Some(at) => Finding::Found {
-                    at,
-                    wrapped: if find.backward { at > from } else { at < from },
-                },
+                Some((at, wrapped)) => Finding::Found { at, wrapped },
                 None => Finding::Missed(format!("not found: {}", find.last.query)),
             }
         }
@@ -939,9 +947,9 @@ mod tests {
     #[test]
     fn what_is_lit_is_kept_till_the_search_or_what_is_drawn_changes() {
         let mut pane = places(&[7], 5);
+        let memo = Memo::default();
         let lit = |pane: &Places, view: &str| {
-            pane.search
-                .lit_in_view(|lit| format!("{lit} {view}"), |_| vec![1, 2])
+            (pane.search).lit_in_view(&memo, |lit| format!("{lit} {view}"), |_| vec![1, 2])
         };
         assert!(lit(&pane, "a").is_empty());
         search_for(&mut pane, Last::typed("x", false), 1);

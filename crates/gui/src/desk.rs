@@ -2192,24 +2192,25 @@ impl Desk {
         // Vim's beep does.
         let failed = self
             .focused_list_mut()
-            .is_some_and(crate::vim::list::Searched::take_failed);
+            .is_some_and(crate::vim::list::SearchBar::take_failed);
         if failed && self.frames_typing() {
             self.stop_macro(None);
         }
         Some(redraw)
     }
 
-    /// The focused explorer, board or review, as a list that's searched.
-    pub(super) fn focused_list_mut(&mut self) -> Option<&mut dyn crate::vim::list::Searched> {
+    /// The focused explorer's, board's or review's search.
+    pub(super) fn focused_list_mut(&mut self) -> Option<&mut dyn crate::vim::list::SearchBar> {
+        use crate::vim::list::Searched;
         let pane = self.shown?.pane;
         if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
-            return Some(explorer);
+            return Some(explorer.search_mut());
         }
         if let Some(board) = self.boards.panes.get_mut(&pane) {
-            return Some(board);
+            return Some(board.search_mut());
         }
         let review = self.reviews.panes.get_mut(&pane)?;
-        Some(review)
+        Some(review.search_mut())
     }
 
     /// Pastes `text` into the command line, if it's open, or else the focused pane.

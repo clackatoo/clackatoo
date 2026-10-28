@@ -41,11 +41,12 @@ use clackatoo_protocol::{
 use clackatoo_term::{Row, RowBuilder};
 
 use crate::colors;
+use crate::hlsearch::Memo;
 use crate::motion::Motion;
 use crate::options::{Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 use crate::vim::list::{self, ListRows, Searching};
-use crate::vim::search::{self, Search};
+use crate::vim::search;
 use crate::vim::{Action, Command, Dialect, Keys, Mode, Paging, Parsed, Read, Reader, Stroke};
 
 #[cfg(test)]
@@ -168,18 +169,51 @@ pub(crate) struct Review {
     /// How far its scrolling keys go.
     paging: Paging,
     /// The search being typed, the last, and what's lit.
-    search: Search<list::Items>,
+    search: list::ListSearch,
     /// The last search's matches in view, as of the last settle.
     matches_lit: Vec<Highlight>,
-    /// How a search matches case, as the editor's do.
-    case: Case,
+    /// What the last search's matches in view were last found in, and
+    /// them.
+    lit_kept: Memo<LitKey, LitAt>,
+    /// Which time the lines were made, which changes as what they show
+    /// does.
+    revision: u64,
     /// What to ask the desk, oldest first.
     asks: Vec<Ask>,
     /// What the bar says until the next key.
     message: Option<String>,
-    /// A search failed since the desk last asked, as Vim beeps: a macro or
-    /// a binding typing keys stops.
-    failed: bool,
+}
+
+/// What the matches lit in view were last found in: which search, which
+/// lines, as of which time they were made, and how wide they're drawn.
+#[derive(Debug, PartialEq, Eq)]
+struct LitKey {
+    search: (String, bool, Case),
+    top: usize,
+    lines: usize,
+    revision: u64,
+    width: usize,
+    tabstop: usize,
+}
+
+/// A match lit in view: on which of the lines, in which columns, and
+/// whether it's its line's first, the one a search going to the line goes
+/// to.
+type LitAt = (usize, std::ops::Range<usize>, bool);
+
+/// Something on a review's line, to find it again in a new list (see
+/// [`Review::place_of`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Place {
+    /// A file's line, or a hunk's: the file's path, the hunk's first
+    /// line in it, and how far past the file's or the hunk's first line.
+    In {
+        path: String,
+        hunk: Option<u32>,
+        past: usize,
+    },
+    Comment(String),
+    Note(String),
 }
 
 impl Review {
@@ -202,12 +236,12 @@ impl Review {
             cursor_cell: None,
             keys: Keys::default(),
             paging: Paging::default(),
-            search: Search::of(options),
+            search: list::ListSearch::of(options),
             matches_lit: Vec::new(),
-            case: Case::of(options),
+            lit_kept: Memo::default(),
+            revision: 0,
             asks: Vec::new(),
             message: None,
-            failed: false,
         };
         made.flatten();
         made
@@ -231,7 +265,6 @@ impl Review {
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.tabstop = options.tabstop as usize;
         self.cursorline = options.cursorline;
-        self.case = Case::of(options);
         self.search.set_options(options);
     }
 
@@ -344,11 +377,73 @@ impl Review {
     /// was on, or as near as it can.
     pub(crate) fn update(&mut self, list: ReviewList) {
         let at = self.place();
+        let kept = list::KeptRows::of(&self.search, |row| self.place_of(row));
         self.list = list;
         self.title = format!("Review {}", scope_words(self.list.scope));
         self.heard = true;
         self.flatten();
         self.go_back_to(at);
+        let found = kept.find(self.lines.len(), |place| self.find_place(place));
+        found.put(&mut self.search);
+    }
+
+    /// What's on line `row`, to find again in a new list: a file's or a
+    /// hunk's line by the file's path and the hunk's first line, a comment
+    /// or a note by what it says; nothing else.
+    fn place_of(&self, row: usize) -> Option<Place> {
+        let line = self.lines.get(row)?;
+        if let Line::Comment { comment } = line {
+            return Some(Place::Comment(
+                self.list.comments.get(*comment)?.text.clone(),
+            ));
+        }
+        if let Line::Note(note) = line {
+            return Some(Place::Note(note.clone()));
+        }
+        let file = line.file()?;
+        let hunk = line
+            .hunk()
+            .map(|(file, hunk)| self.list.files[file].hunks[hunk].line);
+        let first = self.lines[..=row]
+            .iter()
+            .rposition(|line| matches!(line, Line::File { .. } | Line::Hunk { .. }))?;
+        Some(Place::In {
+            path: self.list.files[file].path.clone(),
+            hunk,
+            past: row - first,
+        })
+    }
+
+    /// The line `place` is on, if it's there.
+    fn find_place(&self, place: &Place) -> Option<usize> {
+        let Place::In { path, hunk, past } = place else {
+            return (self.lines.iter().enumerate()).position(|(row, line)| {
+                matches!(line, Line::Comment { .. } | Line::Note(_))
+                    && self.place_of(row).as_ref() == Some(place)
+            });
+        };
+        let file = self.list.files.iter().position(|file| &file.path == path)?;
+        let hunk = match hunk {
+            Some(line) => Some(
+                self.list.files[file]
+                    .hunks
+                    .iter()
+                    .position(|hunk| hunk.line == *line)?,
+            ),
+            None => None,
+        };
+        let first = self.lines.iter().position(|line| match (line, hunk) {
+            (Line::Hunk { file: f, hunk: h }, Some(hunk)) => *f == file && *h == hunk,
+            (Line::File { file: f }, None) => *f == file,
+            _ => false,
+        })?;
+        let row = first + past;
+        let line = self.lines.get(row)?;
+        let same = match hunk {
+            Some(hunk) => line.hunk() == Some((file, hunk)),
+            None => *past == 0,
+        };
+        same.then_some(row)
     }
 
     /// Where the cursor is, to find again in a new list: its file's path,
@@ -395,6 +490,7 @@ impl Review {
 
     /// Lays the list out as lines.
     fn flatten(&mut self) {
+        self.revision += 1;
         let mut lines = vec![Line::Heading, Line::Keys, Line::Blank];
         if !self.heard {
             lines.push(Line::Note("Waiting for the daemon…".to_owned()));
@@ -522,7 +618,7 @@ impl Review {
             wanted(&self.lines[at])
         });
         match found {
-            Some(at) => self.cursor = at,
+            Some((at, _)) => self.cursor = at,
             None => self.message = Some("there are no hunks".to_owned()),
         }
     }
@@ -664,9 +760,9 @@ impl Review {
         let end = (self.top + height + self.scroll_extra).min(self.lines.len());
         let mut rows = Vec::with_capacity(height);
         let mut lit = Vec::with_capacity(height);
-        let mut matches_lit = Vec::new();
+        // The column each line's text starts in.
+        let mut starts = Vec::with_capacity(height);
         self.cursor_cell = None;
-        let found = self.search.found();
         for (index, line) in self.lines[self.top..end].iter().enumerate() {
             let (row, kind, col) = self.draw(line);
             if self.top + index == self.cursor {
@@ -674,39 +770,99 @@ impl Review {
             }
             rows.push(row);
             lit.push(kind);
-            // The last search's matches in what it looks in, where that's
-            // drawn, from `col`, a changed line's tabs as wide as drawn.
-            let Some(text) = self.searched(line) else {
-                continue;
-            };
-            let cells = |upto: &str| match line {
-                Line::Text { .. } => crate::render::mono_width(&expand_tabs(upto, self.tabstop)),
-                _ => crate::render::mono_width(upto),
-            };
-            let brighter = found == Some(self.top + index);
-            for (bytes, found) in list::lit_in(&self.search, text, brighter) {
-                let (start, end) = (
-                    col + cells(&text[..bytes.start]),
-                    col + cells(&text[..bytes.end]),
-                );
-                matches_lit.push(Highlight {
-                    line: index,
-                    cols: start.min(self.width)..end.min(self.width),
-                    kind: if found {
-                        HighlightKind::Match
-                    } else {
-                        HighlightKind::OtherMatch
-                    },
-                });
-            }
+            starts.push(col);
         }
-        self.matches_lit = matches_lit;
+        self.matches_lit = self.matches_in_view(&starts);
         while rows.len() < self.height + self.scroll_extra {
             rows.push(RowBuilder::new(self.width).finish(false));
             lit.push(None);
         }
         self.rows = rows;
         self.lit = lit;
+    }
+
+    /// The last search's matches drawn in the lines in view, from the
+    /// top, each line's text from the column `starts` gives: with
+    /// `hlsearch`, every match, looked for only as far along a line as is
+    /// drawn and [`AROUND`] bytes past, and kept while the lines, the view
+    /// and the search are as they were; and the line the search went to's
+    /// first brighter.
+    ///
+    /// [`AROUND`]: crate::hlsearch::AROUND
+    fn matches_in_view(&self, starts: &[usize]) -> Vec<Highlight> {
+        let found = self.search.found();
+        let lit = if self.search.every {
+            let key = |lit: &list::ListLit| LitKey {
+                search: lit.source.clone(),
+                top: self.top,
+                lines: starts.len(),
+                revision: self.revision,
+                width: self.width,
+                tabstop: self.tabstop,
+            };
+            (self.search).lit_in_view(&self.lit_kept, key, |_| self.find_lit(starts, None))
+        } else {
+            // Only the one found is lit.
+            let found = found.and_then(|found| found.checked_sub(self.top));
+            found.map_or_else(Vec::new, |found| self.find_lit(starts, Some(found)))
+        };
+        (lit.into_iter())
+            .map(|(index, cols, first)| Highlight {
+                line: index,
+                cols: cols.start.min(self.width)..cols.end.min(self.width),
+                kind: if first && found == Some(self.top + index) {
+                    HighlightKind::Match
+                } else {
+                    HighlightKind::OtherMatch
+                },
+            })
+            .collect()
+    }
+
+    /// The matches drawn in the lines in view, or only in the `only`th of
+    /// them (see [`matches_in_view`](Self::matches_in_view)).
+    fn find_lit(&self, starts: &[usize], only: Option<usize>) -> Vec<LitAt> {
+        let mut found = Vec::new();
+        let lines = self.lines[self.top..].iter().zip(starts).enumerate();
+        for (index, (line, &col)) in lines {
+            if only.is_some_and(|only| only != index) {
+                continue;
+            }
+            let Some(text) = self.searched(line) else {
+                continue;
+            };
+            // A changed line's tabs as wide as they're drawn.
+            let tabs = matches!(line, Line::Text { .. });
+            let drawn = list::fitting(text, self.width.saturating_sub(col), self.cells(tabs));
+            // Looked for from the line's start, the first is the one a
+            // search goes to.
+            let lit = list::lit_in(&self.search, text, 0..drawn, true);
+            let cols = list::columns(text, &lit, self.cells(tabs));
+            found.extend(
+                (cols.into_iter())
+                    .map(|(cols, first)| (index, col + cols.start..col + cols.end, first)),
+            );
+        }
+        found
+    }
+
+    /// How many columns each character of a line takes, one after another
+    /// from its start, as it's drawn: with `tabs`, a tab as far as the next
+    /// tab stop, as [`expand_tabs`] has it.
+    fn cells(&self, tabs: bool) -> impl FnMut(char) -> usize {
+        let tabstop = self.tabstop.max(1);
+        let mut chars = 0;
+        move |ch| {
+            if tabs && ch == '\t' {
+                let to = (chars / tabstop + 1) * tabstop;
+                let wide = to - chars;
+                chars = to;
+                wide
+            } else {
+                chars += 1;
+                crate::render::mono_width(ch.encode_utf8(&mut [0; 4]))
+            }
+        }
     }
 
     /// Draws `line`. Returns its row, how it's lit, and the column the
@@ -1118,20 +1274,18 @@ impl Dialect for ReviewKeys {
 /// A review's search goes through its changed lines, its files' names and
 /// its comments.
 impl list::Searched for Review {
-    fn search(&self) -> &Search<list::Items> {
+    type Start = list::Rows;
+
+    fn search(&self) -> &list::ListSearch {
         &self.search
     }
 
-    fn search_mut(&mut self) -> &mut Search<list::Items> {
+    fn search_mut(&mut self) -> &mut list::ListSearch {
         &mut self.search
     }
 
     fn matches(&self, line: usize, pattern: &crate::editor::Pattern) -> bool {
         (self.searched(&self.lines[line])).is_some_and(|text| pattern.find_at(text, 0).is_some())
-    }
-
-    fn case(&self) -> Case {
-        self.case
     }
 
     fn missed(&self, query: &str) -> String {
@@ -1142,12 +1296,12 @@ impl list::Searched for Review {
         self.message = Some(said);
     }
 
-    fn fail(&mut self) {
-        self.failed = true;
+    fn keep(&self) -> list::Rows {
+        list::keep_rows(self)
     }
 
-    fn take_failed(&mut self) -> bool {
-        std::mem::take(&mut self.failed)
+    fn put_back(&mut self, start: &mut list::Rows, keep_view: bool) {
+        list::put_rows_back(self, *start, keep_view);
     }
 }
 

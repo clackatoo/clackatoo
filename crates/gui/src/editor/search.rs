@@ -13,8 +13,8 @@
 use super::pattern::{Found, Pattern};
 use super::wrap::Top;
 use super::{
-    BufferCopy, Cursor, Editor, Lighting, MatchesIn, Matching, Point, Shared, Text, back_matches,
-    find, on_matches,
+    BufferCopy, Cursor, Editor, Lighting, Matching, Point, Shared, Text, back_matches, find,
+    on_matches,
 };
 use crate::vim::search::{self, Find, Finding, Kinds, Last, Restores, Search, Searcher};
 
@@ -38,8 +38,6 @@ impl Kinds for InFile {
     type Start = Start;
     type Found = (Point, Point);
     type Lit = Lighting;
-    type LitKey = MatchesIn;
-    type LitMatch = (Point, Point);
 }
 
 /// Where a search being typed started, to put back.

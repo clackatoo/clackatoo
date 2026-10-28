@@ -500,7 +500,7 @@ impl Desk {
             return self.editor_prompt_line(shown.pane);
         }
         if self.focused_list_mut().is_some() {
-            let line = self.focused_list_mut()?.search_mut().line()?;
+            let line = self.focused_list_mut()?.line()?;
             return Some((line, Some(Kind::Search)));
         }
         let terminal = self.focused_terminal()?;

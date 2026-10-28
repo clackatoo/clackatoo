@@ -22,7 +22,7 @@
 
 use clackatoo_protocol::{Match, Request};
 
-use super::{Document, MatchesIn, Pane, Pending, normal};
+use super::{Document, Pane, Pending, normal};
 use crate::motion::{Cursor, Lines, Point};
 use crate::vim::search::{self, Find, Finding, Kinds, Last, Restores, Search, Searcher};
 
@@ -35,8 +35,6 @@ impl Kinds for Terminal {
     type Start = Start;
     type Found = Match;
     type Lit = (Vec<char>, bool);
-    type LitKey = MatchesIn;
-    type LitMatch = Match;
 }
 
 /// Where a search being typed started, to put back.
@@ -211,7 +209,7 @@ impl Pane {
 
     /// Takes in where the daemon found the match `asked`'s count goes to,
     /// if anywhere, and whether it went round to it.
-    pub(super) fn counted(&mut self, found: Option<Match>, wrapped: bool, asked: Asked) {
+    pub(super) fn counted(&mut self, found: Option<Match>, wrapped: bool, asked: &Asked) {
         let finding = match found {
             Some(at) => Finding::Found {
                 at,

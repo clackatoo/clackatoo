@@ -403,3 +403,70 @@ fn a_search_shows_where_it_goes_and_lights_the_text_it_matches() {
     assert_eq!(pane.cursor, 0, "round to the first");
     assert_eq!(pane.label(), "search wrapped to top");
 }
+
+#[test]
+fn a_search_given_up_puts_the_board_back_following_new_posts_and_on_the_same_row() {
+    let mut pane = pane(vec![
+        entry(1, PostKind::Note, "the first plan"),
+        entry(2, PostKind::Note, "two"),
+        entry(3, PostKind::Note, "three"),
+    ]);
+    assert_eq!(pane.cursor, 2, "on the last, following");
+    typed(&mut pane, "/first");
+    assert!(crate::vim::search::preview(&mut Searching(&mut pane)));
+    assert_eq!(pane.cursor, 0);
+    // A post while it's typed, then Esc: on the last, whichever it is now.
+    pane.update(BoardUpdate::Changed {
+        summary: summary(4, false),
+        entries: vec![entry(4, PostKind::Note, "four")],
+    });
+    pane.stroke(Stroke::Escape);
+    assert_eq!(pane.cursor, 3);
+    pane.update(BoardUpdate::Changed {
+        summary: summary(5, false),
+        entries: vec![entry(5, PostKind::Note, "five")],
+    });
+    assert_eq!(pane.cursor, 4, "still following");
+    // The view put back on the row it was on, inside an entry above the
+    // cursor's.
+    let long = "word ".repeat(30);
+    let mut pane = self::pane(vec![
+        entry(1, PostKind::Note, "the first plan"),
+        entry(2, PostKind::Note, &long),
+        entry(3, PostKind::Note, "end"),
+    ]);
+    let into = pane.lines_of(1).expect("laid out").start + 2;
+    pane.top = into;
+    pane.settle();
+    assert_eq!((pane.cursor, pane.top), (2, into), "the cursor's in view");
+    typed(&mut pane, "/first");
+    crate::vim::search::preview(&mut Searching(&mut pane));
+    pane.settle();
+    assert_ne!(pane.top, into);
+    pane.stroke(Stroke::Escape);
+    pane.settle();
+    assert_eq!((pane.cursor, pane.top), (2, into));
+}
+
+#[test]
+fn every_match_drawn_is_lit_however_many_come_before_it() {
+    // More matches before what's drawn of it than are lit in one go.
+    let long = "x ".repeat(2000);
+    let mut pane = pane(vec![
+        entry(1, PostKind::Note, &long),
+        entry(2, PostKind::Note, "end"),
+    ]);
+    typed(&mut pane, "/x");
+    pane.stroke(Stroke::Enter);
+    assert_eq!(pane.search.found(), Some(0));
+    // Back to the last, its end in view.
+    pane.go_to(1);
+    pane.settle();
+    let last_of_long = pane.lines_of(0).expect("laid out").end - 1;
+    assert!(last_of_long >= pane.top, "in view");
+    let lit: Vec<usize> = (pane.highlights().into_iter())
+        .filter(|highlight| highlight.kind == HighlightKind::OtherMatch)
+        .map(|highlight| highlight.line)
+        .collect();
+    assert!(lit.contains(&(last_of_long - pane.top + 1)), "{lit:?}");
+}

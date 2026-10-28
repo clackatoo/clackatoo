@@ -80,9 +80,4 @@ impl<K: PartialEq, M: Clone> Memo<K, M> {
         *self.kept.borrow_mut() = Some((key, lit.clone()));
         lit
     }
-
-    /// Forgets what was found, as nothing's lit any more.
-    pub(crate) fn forget(&self) {
-        self.kept.borrow_mut().take();
-    }
 }

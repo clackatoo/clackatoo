@@ -80,8 +80,6 @@ impl Kinds for InChat {
     /// and how case was matched, for what was found of it to be kept
     /// against.
     type Lit = (Pattern, (String, Case));
-    type LitKey = LitKey;
-    type LitMatch = (usize, std::ops::Range<usize>);
 }
 
 /// Where a search being typed started, to put back on Esc.
@@ -249,28 +247,29 @@ impl ChatView {
                 })
                 .collect(),
         };
-        self.search.lit_in_view(key, |(pattern, _)| {
-            let mut lit = Vec::new();
-            for (index, shown) in self.shown.iter().enumerate() {
-                if control(shown.key.piece) {
-                    continue;
+        self.search
+            .lit_in_view(&self.lit_kept, key, |(pattern, _)| {
+                let mut lit = Vec::new();
+                for (index, shown) in self.shown.iter().enumerate() {
+                    if control(shown.key.piece) {
+                        continue;
+                    }
+                    let Some(text) = self.text(shown.key) else {
+                        continue;
+                    };
+                    let Some(bytes) = self.bytes_in_view(shown, text.layout) else {
+                        continue;
+                    };
+                    let hay = hlsearch::around(text.text, bytes.clone());
+                    let range = bytes.start - hay.start..bytes.end - hay.start;
+                    let found = pattern.matches_in(&text.text[hay.clone()], [(0, range)], MOST_LIT);
+                    lit.extend(
+                        (found.into_iter())
+                            .map(|found| (index, hay.start + found.start..hay.start + found.end)),
+                    );
                 }
-                let Some(text) = self.text(shown.key) else {
-                    continue;
-                };
-                let Some(bytes) = self.bytes_in_view(shown, text.layout) else {
-                    continue;
-                };
-                let hay = hlsearch::around(text.text, bytes.clone());
-                let range = bytes.start - hay.start..bytes.end - hay.start;
-                let found = pattern.matches_in(&text.text[hay.clone()], [(0, range)], MOST_LIT);
-                lit.extend(
-                    (found.into_iter())
-                        .map(|found| (index, hay.start + found.start..hay.start + found.end)),
-                );
-            }
-            lit
-        })
+                lit
+            })
     }
 
     /// Whether `lit`, a match lit up, is the one the last search, `n` or
