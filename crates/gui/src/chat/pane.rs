@@ -113,8 +113,7 @@ impl ChatPane {
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.carryover = options.carryover;
         self.view.set_case(crate::options::Case::of(options));
-        self.view.set_hlsearch(options.hlsearch);
-        self.view.set_incsearch(options.incsearch);
+        self.view.set_search_options(options);
     }
 
     /// The number of the first turn it holds, the rest being older and

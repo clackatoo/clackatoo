@@ -1,7 +1,7 @@
 //! `/` and `?` in a chat's normal mode: search the conversation's text
-//! forward or back, typed in the bar as an editor's search is, with its
-//! history and Ctrl+R for a register (the desk has those), and `n` and
-//! `N` search again, the same way or back, round the chat's ends.
+//! forward or back, and `n` and `N` search again, the same way or back,
+//! round the chat's ends, on the search every pane shares (see
+//! [`crate::vim::search`]).
 //!
 //! What's searched is the text the chat shows, block by block, as visual
 //! mode selects it: messages, the agent's words and thinking without their
@@ -40,25 +40,23 @@
 //!
 //! With `incsearch`, while a search is typed, the cursor goes to the match
 //! it would go to from where it started, opening what that needs, and the
-//! view follows, as an editor's does: worked out as the chat settles
-//! before it's drawn, not at each key, a step within the same bounds, and
-//! never failing or saying anything. Esc puts the cursor, the view, what
-//! was opened and what was lit back; Enter searches from where it started,
-//! keeping the view.
+//! view follows: worked out as the chat settles before it's drawn, a step
+//! within the same bounds. Esc puts back what was opened too. A count
+//! before `/` isn't shown till it's searched for.
 
 use clackatoo_protocol::{Item, Tool};
 
 use super::card::Card;
 use super::paint::{ITEMS, Position, after, blocks_text, control, folded_away};
 use super::{ChatView, Input};
-use crate::cmdline::{Keyed, Line};
+use crate::cmdline::Line;
 use crate::editor::{Matching, Pattern};
 use crate::fonts::Fonts;
 use crate::hlsearch::{self, MOST_LIT};
 use crate::input::KeyPress;
 use crate::motion::Words;
 use crate::options::Case;
-use crate::vim::{WRAPPED_TO_BOTTOM, WRAPPED_TO_TOP};
+use crate::vim::search::{self, Find, Finding, Kinds, Last, Restores, Search, Searcher};
 
 /// The most bytes of what the chat holds one step of a search reads.
 pub(super) const MOST_READ: usize = 64 << 20;
@@ -70,66 +68,34 @@ pub(super) const MOST_LAID: usize = 32;
 /// laying out costs far more than reading.
 pub(super) const MOST_LAID_BYTES: usize = 4 << 20;
 
-/// A chat's search: the one being typed in the bar, and the last one, for
-/// `n` and `N`, and whether each goes back.
+/// The kinds a chat's search works in: places in the text it shows,
+/// Vim's patterns, and matches by the block they're drawn in.
 #[derive(Debug)]
-pub(super) struct Searching {
-    prompt: Option<Prompt>,
-    last: Option<(String, bool)>,
-    /// How searches treat case, as the options say.
-    case: Case,
-    /// Whether every match in view is lit, or only the one found
-    /// (`hlsearch`).
-    every: bool,
-    /// The last search's pattern, while what it matches is lit up: from
-    /// a search until Esc or `:nohlsearch`, as Vim's `hlsearch` lights it.
-    /// And what it was compiled from, what was searched for and how case
-    /// was matched, for what was found of it to be kept against.
-    lit: Option<(Pattern, (String, Case))>,
-    /// Where the match the last search, `n` or `N` went to starts, lit
-    /// brighter than the rest, while they're lit.
-    found: Option<Position>,
-    /// What was last found lit up, and of what text drawn where.
-    lit_kept: hlsearch::Memo<LitKey, (usize, std::ops::Range<usize>)>,
-    /// A search being typed shows where it goes (`incsearch`).
-    incsearch: bool,
-    /// Where the search being typed started, with `incsearch`.
-    start: Option<Start>,
+pub(super) struct InChat;
+
+impl Kinds for InChat {
+    type Start = Start;
+    type Found = Position;
+    /// The pattern, and what it was compiled from, what was searched for
+    /// and how case was matched, for what was found of it to be kept
+    /// against.
+    type Lit = (Pattern, (String, Case));
+    type LitKey = LitKey;
+    type LitMatch = (usize, std::ops::Range<usize>);
 }
 
-/// Where a search being typed started, to put back on Esc, and what was
-/// last shown of it.
+/// Where a search being typed started, to put back on Esc.
 #[derive(Debug)]
-struct Start {
+pub(super) struct Start {
     cursor: Option<Position>,
     goal: Option<f32>,
     scroll: f32,
     follow: bool,
-    lit: Option<(Pattern, (String, Case))>,
-    found: Option<Position>,
     folds: std::collections::HashMap<usize, bool>,
     open_cards: std::collections::HashSet<String>,
     /// The turn the match last shown is in, whose work or card may have
     /// been opened for it.
     opened_in: Option<usize>,
-    /// What was typed when it was last shown, if it has been.
-    previewed: Option<String>,
-}
-
-impl Default for Searching {
-    fn default() -> Self {
-        Self {
-            prompt: None,
-            last: None,
-            case: Case::default(),
-            every: crate::options::Options::default().hlsearch,
-            lit: None,
-            found: None,
-            lit_kept: hlsearch::Memo::default(),
-            incsearch: crate::options::Options::default().incsearch,
-            start: None,
-        }
-    }
 }
 
 /// The matches lit up: each one's block, by its place among those shown,
@@ -141,7 +107,7 @@ type Lit = Vec<(usize, std::ops::Range<usize>)>;
 /// tall the view is; and each block drawn, where, how big, and of which
 /// layout of its turn.
 #[derive(Debug, PartialEq, Eq)]
-struct LitKey {
+pub(super) struct LitKey {
     search: (String, Case),
     view: u32,
     blocks: Vec<LitBlock>,
@@ -149,7 +115,7 @@ struct LitKey {
 
 /// A block of text drawn, as [`LitKey`] knows it.
 #[derive(Debug, PartialEq, Eq)]
-struct LitBlock {
+pub(super) struct LitBlock {
     key: super::paint::TextKey,
     at: [u32; 2],
     /// How big it's laid out, which changes as it wraps differently.
@@ -157,15 +123,6 @@ struct LitBlock {
     /// Which time laying out a turn laid out its turn, which changes as
     /// its text does, whether or not its length does.
     laid: u64,
-}
-
-/// A search being typed.
-#[derive(Debug)]
-struct Prompt {
-    line: Line,
-    backward: bool,
-    /// The count typed before `/` or `?`, as `3/x` finds the third.
-    count: Option<usize>,
 }
 
 /// How far one step of a search has gone: what it spends, against
@@ -226,9 +183,7 @@ impl ChatView {
     /// Stops lighting up what the last search matches, as Esc and
     /// `:nohlsearch` do, until the next search.
     pub(crate) fn stop_highlighting(&mut self) {
-        self.search.lit = None;
-        self.search.found = None;
-        self.search.lit_kept.forget();
+        self.search.unlight();
     }
 
     /// What the last search matches in the text drawn, while it's lit up:
@@ -237,14 +192,10 @@ impl ChatView {
     /// none of the rest over it; without `hlsearch`, it's the only one, and
     /// nothing else is looked for. Nothing at all once it isn't lit.
     pub(crate) fn lit_matches(&self) -> Lit {
-        let Some((pattern, search)) = &self.search.lit else {
+        let Some((pattern, _)) = self.search.lit() else {
             return Vec::new();
         };
-        let mut lit = if self.search.every {
-            self.every_match_lit(pattern, search)
-        } else {
-            Vec::new()
-        };
+        let mut lit = self.every_match_lit();
         if let Some(found) = self.found_match(pattern) {
             let (index, ref range) = found;
             lit.retain(|(other, lit)| {
@@ -262,7 +213,7 @@ impl ChatView {
     /// none if the block's text has changed so that no match starts there,
     /// or the place isn't in it at all, as when it's grown shorter.
     fn found_match(&self, pattern: &Pattern) -> Option<(usize, std::ops::Range<usize>)> {
-        let found = self.search.found?;
+        let found = self.search.found()?;
         let index = self
             .shown
             .iter()
@@ -278,29 +229,27 @@ impl ChatView {
         Some((index, hay.start + matched.start..hay.start + matched.end))
     }
 
-    /// Every match of the last search, `pattern`, compiled from `search`,
-    /// in the text drawn. In each block, only its lines in view are looked
+    /// Every match of the last search in the text drawn, with `hlsearch`. In each block, only its lines in view are looked
     /// through, and [`AROUND`] bytes either side, matches found one after
     /// another from there, as `n` goes, no more than [`MOST_LIT`] of them.
     /// What was found is kept, so a frame that draws the same text in the
     /// same places doesn't look again, nor does `n`.
     ///
     /// [`AROUND`]: hlsearch::AROUND
-    fn every_match_lit(&self, pattern: &Pattern, search: &(String, Case)) -> Lit {
-        let blocks: Vec<LitBlock> = (self.shown.iter())
-            .map(|shown| LitBlock {
-                key: shown.key,
-                at: shown.at.map(f32::to_bits),
-                size: shown.size.map(f32::to_bits),
-                laid: self.laid_at(shown.key.turn),
-            })
-            .collect();
-        let key = LitKey {
+    fn every_match_lit(&self) -> Lit {
+        let key = |(_, search): &(Pattern, (String, Case))| LitKey {
             search: search.clone(),
             view: self.view_height.to_bits(),
-            blocks,
+            blocks: (self.shown.iter())
+                .map(|shown| LitBlock {
+                    key: shown.key,
+                    at: shown.at.map(f32::to_bits),
+                    size: shown.size.map(f32::to_bits),
+                    laid: self.laid_at(shown.key.turn),
+                })
+                .collect(),
         };
-        self.search.lit_kept.get(key, || {
+        self.search.lit_in_view(key, |(pattern, _)| {
             let mut lit = Vec::new();
             for (index, shown) in self.shown.iter().enumerate() {
                 if control(shown.key.piece) {
@@ -327,7 +276,7 @@ impl ChatView {
     /// Whether `lit`, a match lit up, is the one the last search, `n` or
     /// `N` went to.
     pub(super) fn found_at(&self, (index, range): &(usize, std::ops::Range<usize>)) -> bool {
-        self.search.found.is_some_and(|found| {
+        self.search.found().is_some_and(|found| {
             (self.shown.get(*index)).is_some_and(|shown| shown.key == found.text)
                 && range.start == found.byte
         })
@@ -362,12 +311,15 @@ impl ChatView {
     /// Older turns, `count` of them, have come before those held: the
     /// match the last search went to is in a turn numbered that many on.
     pub(super) fn search_prepended(&mut self, count: usize) {
-        if let Some(found) = &mut self.search.found {
+        if let Some(found) = self.search.found_mut() {
             found.text.turn += count;
         }
-        if let Some(start) = &mut self.search.start {
-            for position in [&mut start.cursor, &mut start.found].into_iter().flatten() {
-                position.text.turn += count;
+        if let Some(Some(found)) = self.search.kept_found_mut() {
+            found.text.turn += count;
+        }
+        if let Some(start) = self.search.start_mut() {
+            if let Some(cursor) = &mut start.cursor {
+                cursor.text.turn += count;
             }
             if let Some(turn) = &mut start.opened_in {
                 *turn += count;
@@ -378,190 +330,76 @@ impl ChatView {
 
     /// Takes how searches treat case, as the options say.
     pub(crate) fn set_case(&mut self, case: Case) {
-        self.search.case = case;
+        self.case = case;
     }
 
-    /// Takes whether every match in view is lit, or only the one found
-    /// (`hlsearch`).
-    pub(crate) fn set_hlsearch(&mut self, every: bool) {
-        self.search.every = every;
-    }
-
-    /// Takes whether a search being typed shows where it goes
-    /// (`incsearch`).
-    pub(crate) fn set_incsearch(&mut self, on: bool) {
-        self.search.incsearch = on;
+    /// Takes in how searches are lit and shown, as the options say.
+    pub(crate) fn set_search_options(&mut self, options: &crate::options::Options) {
+        self.search.set_options(options);
     }
 
     /// Whether a search is being typed, which takes every key.
     pub(crate) fn prompting(&self) -> bool {
-        self.search.prompt.is_some()
+        self.search.typing()
     }
 
     /// The search being typed, for the desk to put a register in, or a
     /// search typed before.
     pub(crate) fn search_line(&mut self) -> Option<&mut Line> {
-        self.search.prompt.as_mut().map(|prompt| &mut prompt.line)
+        self.search.line()
     }
 
     /// What the bar shows of the search being typed, if one is: `/` or
     /// `?`, and what's typed.
     pub(crate) fn prompt_label(&self) -> Option<String> {
-        let prompt = self.search.prompt.as_ref()?;
-        let slash = if prompt.backward { '?' } else { '/' };
-        Some(format!("{slash}{}", prompt.line.shown()))
+        self.search.label()
     }
 
     /// The keys shown by Ctrl+? while a search is typed.
     pub(super) fn prompt_shortcuts(&self) -> Option<crate::shortcuts::Context> {
-        let prompt = self.search.prompt.as_ref()?;
-        Some(crate::shortcuts::prompt("Chat search", &prompt.line, true))
+        self.search.shortcuts("Chat search")
     }
 
     /// Forgets the search being typed, as leaving the chat does.
     pub(super) fn give_up_search(&mut self) {
-        self.end_search_preview(false);
-        self.search.prompt = None;
+        search::give_up(&mut Searching {
+            chat: self,
+            fonts: None,
+        });
     }
 
     /// `/`, or `?` if `backward`: starts typing a search in the bar, for
-    /// the `count`th match. Where it starts is kept, with `incsearch`, to
-    /// show it from and put back.
+    /// the `count`th match.
     pub(super) fn start_search(&mut self, backward: bool, count: Option<usize>) {
-        self.search.prompt = Some(Prompt {
-            line: Line::default(),
-            backward,
-            count,
-        });
-        self.search.start = self.search.incsearch.then(|| Start {
-            cursor: self.cursor,
-            goal: self.goal,
-            scroll: self.scroll,
-            follow: self.follow,
-            lit: self.search.lit.clone(),
-            found: self.search.found,
-            folds: self.folds.clone(),
-            open_cards: self.open_cards.clone(),
-            opened_in: None,
-            previewed: None,
-        });
+        let mut searching = Searching {
+            chat: self,
+            fonts: None,
+        };
+        search::start(&mut searching, backward, count);
     }
 
-    /// Shows where the search being typed would go, if what's typed has
-    /// changed since it was last shown: from where it started, one step,
-    /// within a step's bounds, the cursor going to the match, what it needs
-    /// opened, and the matches lit. A pattern that isn't one yet, or no
-    /// match within bounds, shows nothing. A search no longer being typed,
-    /// by a way that didn't put things back, is put back now. Returns
-    /// whether the chat must be redrawn.
+    /// Shows where the search being typed would go, with `incsearch` (see
+    /// [`search::preview`]). Returns whether the chat must be redrawn.
     pub(super) fn preview_search(&mut self, fonts: &mut Fonts) -> bool {
-        let Some(start) = &self.search.start else {
-            return false;
-        };
-        let Some(prompt) = &self.search.prompt else {
-            self.end_search_preview(false);
-            return true;
-        };
-        if start.previewed.as_deref() == Some(prompt.line.text()) {
-            return false;
-        }
-        let (typed, backward) = (prompt.line.text().to_owned(), prompt.backward);
-        self.put_back_search_start(false);
-        if let Some(start) = &mut self.search.start {
-            start.previewed = Some(typed.clone());
-        }
-        if typed.is_empty() {
-            return true;
-        }
-        self.search.found = None;
-        let case = self.search.case;
-        let Ok(pattern) = Pattern::new(&typed, Matching::Typed(case), "", Words::NONE) else {
-            self.search.lit = None;
-            return true;
-        };
-        self.search.lit = Some((pattern.clone(), (typed, case)));
-        let Some(from) = self.cursor_or_default() else {
-            return true;
-        };
-        let mut spent = Spent::new(&pattern);
-        if let Some((position, _)) = self.next_match(fonts, &mut spent, from, backward) {
-            self.search.found = Some(position);
-            if let Some(start) = &mut self.search.start {
-                start.opened_in = Some(position.text.turn);
-            }
-            self.go(position);
-            self.goal = None;
-        }
-        true
+        search::preview(&mut Searching {
+            chat: self,
+            fonts: Some(fonts),
+        })
     }
 
-    /// Stops showing the search being typed: the cursor goes back to where
-    /// it started, and what was lit; and the view and what was opened,
-    /// unless `keep_view`, as Enter keeps them.
-    fn end_search_preview(&mut self, keep_view: bool) {
-        self.put_back_search_start(keep_view);
-        self.search.start = None;
-    }
-
-    /// Puts the cursor back where the search being typed started, and
-    /// what was lit, and the view and what was opened unless `keep_view`.
-    fn put_back_search_start(&mut self, keep_view: bool) {
-        let Some(start) = &mut self.search.start else {
-            return;
-        };
-        self.cursor = start.cursor;
-        self.goal = start.goal;
-        self.search.lit = start.lit.clone();
-        self.search.found = start.found;
-        if keep_view {
-            return;
-        }
-        (self.scroll, self.follow, self.reveal) = (start.scroll, start.follow, false);
-        self.folds.clone_from(&start.folds);
-        self.open_cards.clone_from(&start.open_cards);
-        if let Some(turn) = start.opened_in.take() {
-            self.restyled(turn);
-        }
-    }
-
-    /// A key typed into the search, edited as the command line is (see
-    /// [`crate::cmdline`]); the desk has Up, Down and a register's name
-    /// after Ctrl+R first. Enter searches, and with nothing typed, for the
-    /// last search again, this way, as Vim's does. Returns whether a
-    /// search was being typed, which takes every key.
+    /// A key typed into the search, if one's being typed, which takes
+    /// every key. Returns whether one was.
     pub(super) fn prompt_key(&mut self, press: &KeyPress<'_>) -> bool {
-        use crate::cmdline::controls::Control;
-
-        let Some(prompt) = &mut self.search.prompt else {
+        if !self.search.typing() {
             return false;
-        };
-        let control =
-            (crate::vim::prompt_strokes(press).first()).map(|stroke| Control::read(*stroke).0);
-        match control {
-            Some(Control::Accept) => {
-                let Some(mut prompt) = self.search.prompt.take() else {
-                    return true;
-                };
-                // From where it started, as without `incsearch`, so it
-                // finds what was shown, the view kept.
-                self.end_search_preview(true);
-                let query = prompt.line.take();
-                match &mut self.search.last {
-                    _ if !query.is_empty() => self.search.last = Some((query, prompt.backward)),
-                    Some((_, backward)) => *backward = prompt.backward,
-                    None => return true,
-                }
-                self.search_again(false, prompt.count);
-            }
-            Some(Control::Cancel) => {
-                self.end_search_preview(false);
-                self.search.prompt = None;
-            }
-            _ => {
-                if prompt.line.key(press) == Keyed::Emptied {
-                    self.end_search_preview(false);
-                    self.search.prompt = None;
-                }
+        }
+        for stroke in crate::vim::prompt_strokes(press) {
+            let mut searching = Searching {
+                chat: self,
+                fonts: None,
+            };
+            if search::key(&mut searching, stroke) == search::Typed::Not {
+                break;
             }
         }
         true
@@ -571,19 +409,11 @@ impl ChatView {
     /// way it went, or back, from the cursor, once the fonts are at hand
     /// to lay out what it finds.
     pub(super) fn search_again(&mut self, reverse: bool, count: Option<usize>) {
-        let Some((_, backward)) = self.search.last else {
-            self.say("no search yet".to_owned());
-            self.failed = true;
-            return;
+        let mut searching = Searching {
+            chat: self,
+            fonts: None,
         };
-        let Some(from) = self.cursor_or_default() else {
-            return;
-        };
-        self.queued.push(Input::Search {
-            from,
-            backward: backward != reverse,
-            count: count.unwrap_or(1),
-        });
+        search::again(&mut searching, reverse, count.unwrap_or(1));
     }
 
     /// Searches for the last search from `from`, `count` times, backward
@@ -597,26 +427,50 @@ impl ChatView {
         backward: bool,
         count: usize,
     ) {
-        let Some((query, _)) = self.search.last.clone() else {
+        let Some((pattern, (query, _))) = self.search.lit().cloned() else {
             return;
         };
-        let pattern = match Pattern::new(&query, Matching::Typed(self.search.case), "", Words::NONE)
-        {
-            Ok(pattern) => pattern,
-            Err(why) => {
-                self.say(why);
-                self.failed = true;
-                return;
+        let finding = match self.nth_match(fonts, &pattern, from, backward, count) {
+            Ok((at, wrapped)) => Finding::Found { at, wrapped },
+            Err(spent) => {
+                let older = self.node.first_turn > 0;
+                Finding::Missed(if spent.ran_out {
+                    "the chat is too long to search all of: search stopped".to_owned()
+                } else if pattern.gave_up() {
+                    pattern.not_found(String::new())
+                } else if spent.hidden {
+                    format!("{query} is only in output its card doesn't show")
+                } else if older {
+                    format!("not found in the turns loaded: {query}")
+                } else {
+                    format!("not found: {query}")
+                })
             }
         };
-        self.search.lit = Some((pattern.clone(), (query.clone(), self.search.case)));
-        self.search.found = None;
+        let mut searching = Searching {
+            chat: self,
+            fonts: Some(fonts),
+        };
+        search::answered(&mut searching, finding, backward);
+    }
+
+    /// The `count`th match of `pattern` from `from`, backward if
+    /// `backward`, round the chat's ends, and whether it went round; or
+    /// what the last step spent, finding none. Each step has its own
+    /// bounds.
+    fn nth_match<'p>(
+        &mut self,
+        fonts: &mut Fonts,
+        pattern: &'p Pattern,
+        from: Position,
+        backward: bool,
+        count: usize,
+    ) -> Result<(Position, bool), Spent<'p>> {
         let (mut at, mut left, mut taken) = (from, count.max(1), 0);
         let (mut first, mut found, mut wrapped) = (None, None, false);
-        let mut spent = Spent::new(&pattern);
+        let mut spent = Spent::new(pattern);
         while left > 0 {
-            // Each step has its own bounds.
-            spent = Spent::new(&pattern);
+            spent = Spent::new(pattern);
             let Some((position, round)) = self.next_match(fonts, &mut spent, at, backward) else {
                 break;
             };
@@ -633,34 +487,7 @@ impl ChatView {
             at = position;
             found = Some(position);
         }
-        let Some(position) = found else {
-            self.failed = true;
-            let older = self.node.first_turn > 0;
-            self.say(if spent.ran_out {
-                "the chat is too long to search all of: search stopped".to_owned()
-            } else if pattern.gave_up() {
-                pattern.not_found(String::new())
-            } else if spent.hidden {
-                format!("{query} is only in output its card doesn't show")
-            } else if older {
-                format!("not found in the turns loaded: {query}")
-            } else {
-                format!("not found: {query}")
-            });
-            return;
-        };
-        self.search.found = Some(position);
-        self.go(position);
-        self.goal = None;
-        self.follow_selection();
-        if wrapped {
-            let said = if backward {
-                WRAPPED_TO_BOTTOM
-            } else {
-                WRAPPED_TO_TOP
-            };
-            self.say(said.to_owned());
-        }
+        found.map(|found| (found, wrapped)).ok_or(spent)
     }
 
     /// The next match of `spent`'s pattern after `from`, or before it if
@@ -970,6 +797,118 @@ impl ChatView {
 }
 
 /// How many bytes the first `lines` lines of `text` take, or the last if
+impl ChatView {
+    /// Where a search being typed starts, to put back.
+    fn search_start(&self) -> Start {
+        Start {
+            cursor: self.cursor,
+            goal: self.goal,
+            scroll: self.scroll,
+            follow: self.follow,
+            folds: self.folds.clone(),
+            open_cards: self.open_cards.clone(),
+            opened_in: None,
+        }
+    }
+
+    /// Puts the cursor back where a search being typed started, and unless
+    /// `keep_view`, the view and what was opened for a match shown.
+    fn put_back_search_start(&mut self, start: &mut Start, keep_view: bool) {
+        self.cursor = start.cursor;
+        self.goal = start.goal;
+        if keep_view {
+            return;
+        }
+        (self.scroll, self.follow, self.reveal) = (start.scroll, start.follow, false);
+        self.folds.clone_from(&start.folds);
+        self.open_cards.clone_from(&start.open_cards);
+        if let Some(turn) = start.opened_in.take() {
+            self.restyled(turn);
+        }
+    }
+}
+
+/// A chat as the shared search drives it, with the fonts, while they're
+/// at hand, to lay out what it looks through: a search asked for without
+/// them is queued till the chat settles.
+struct Searching<'a> {
+    chat: &'a mut ChatView,
+    fonts: Option<&'a mut Fonts>,
+}
+
+impl Restores for Searching<'_> {
+    type Kinds = InChat;
+
+    fn search(&mut self) -> &mut Search<InChat> {
+        &mut self.chat.search
+    }
+
+    fn keep(&self) -> Start {
+        self.chat.search_start()
+    }
+
+    fn put_back(&mut self, start: &mut Start, keep_view: bool) {
+        self.chat.put_back_search_start(start, keep_view);
+    }
+}
+
+impl Searcher for Searching<'_> {
+    fn compile(&self, last: &Last) -> Result<(Pattern, (String, Case)), String> {
+        let case = self.chat.case;
+        let matching = if last.word {
+            Matching::Always(case)
+        } else {
+            Matching::Typed(case)
+        };
+        let pattern = Pattern::new(&last.query, matching, "", Words::NONE)?;
+        Ok((pattern, (last.query.clone(), case)))
+    }
+
+    fn find(&mut self, find: Find<'_, InChat>) -> Finding<Position> {
+        let chat = &mut *self.chat;
+        let Some(from) = chat.cursor_or_default() else {
+            return Finding::Missed(format!("not found: {}", find.last.query));
+        };
+        let Some(start) = find.preview else {
+            chat.queued.push(Input::Search {
+                from,
+                backward: find.backward,
+                count: find.count,
+            });
+            return Finding::Asked;
+        };
+        let Some(fonts) = self.fonts.as_deref_mut().filter(|_| find.count == 1) else {
+            return Finding::Missed(String::new());
+        };
+        let mut spent = Spent::new(&find.lit.0);
+        match chat.next_match(fonts, &mut spent, from, find.backward) {
+            Some((at, _)) => {
+                start.opened_in = Some(at.text.turn);
+                Finding::Found { at, wrapped: false }
+            }
+            None => Finding::Missed(String::new()),
+        }
+    }
+
+    /// For a search done, the view follows the selection.
+    fn go(&mut self, found: Position) {
+        let chat = &mut *self.chat;
+        chat.go(found);
+        chat.goal = None;
+        if !chat.search.typing() {
+            chat.follow_selection();
+        }
+    }
+
+    fn say(&mut self, said: String) {
+        self.chat.say(said);
+    }
+
+    fn fail(&mut self) {
+        self.chat.failed = true;
+    }
+}
+
 /// `last`, without reading further than they go.
 fn lines_bytes(text: &str, lines: usize, last: bool) -> usize {
     if lines == 0 {
@@ -1211,7 +1150,7 @@ mod tests {
         assert_eq!((at(&chat), chat.scroll), ((2, PROMPT, 0), shown));
         assert!(!chat.take_failed());
         // Off, nothing moves till Enter.
-        chat.set_incsearch(false);
+        chat.search.incsearch = false;
         read(&mut chat, "gg/Turn 1");
         chat.settle(&mut fonts);
         assert_eq!(chat.cursor, before.0);
@@ -1435,13 +1374,13 @@ mod tests {
         assert_eq!(scans(), before, "kept through n");
         // Without `hlsearch`, only the one found is, until Esc, though
         // the cursor moves off it.
-        chat.set_hlsearch(false);
+        chat.search.every = false;
         assert_eq!(lit(&mut chat, &mut fonts), (1, 0));
         read(&mut chat, "w");
         assert_eq!(lit(&mut chat, &mut fonts), (1, 0));
         read_named(&mut chat, NamedKey::Escape);
         assert_eq!(lit(&mut chat, &mut fonts), (0, 0));
-        chat.set_hlsearch(true);
+        chat.search.every = true;
         read(&mut chat, "n");
         chat.settle(&mut fonts);
         chat.stop_highlighting();
@@ -1459,7 +1398,7 @@ mod tests {
         paint(&mut chat, &mut fonts);
         let found = |chat: &ChatView| chat.lit_matches().iter().any(|lit| chat.found_at(lit));
         assert!(found(&chat));
-        let turn = chat.search.found.unwrap().text.turn;
+        let turn = chat.search.found().unwrap().text.turn;
         chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::History {
             first: 24,
             before: 32,
@@ -1467,7 +1406,7 @@ mod tests {
             turns: full.turns[24..32].to_vec(),
         })]));
         paint(&mut chat, &mut fonts);
-        assert_eq!(chat.search.found.unwrap().text.turn, turn + 8);
+        assert_eq!(chat.search.found().unwrap().text.turn, turn + 8);
         assert!(found(&chat));
         // The text it's in grows shorter than where it was: nothing's lit
         // there, and drawing doesn't fall over.

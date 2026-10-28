@@ -354,9 +354,11 @@ pub(crate) struct ChatView {
     finds: crate::vim::Finds,
     /// How far its scrolling keys go.
     paging: crate::vim::Paging,
-    /// The search being typed in the bar, and the last one, for `n` and
-    /// `N`.
-    search: search::Searching,
+    /// The search being typed in the bar, the last one, for `n` and `N`,
+    /// and what's lit.
+    search: crate::vim::search::Search<search::InChat>,
+    /// How searches treat case, as the options say.
+    case: crate::options::Case,
     /// A yank or search failed, as Vim beeps, which stops a macro or a
     /// binding typing keys, until the window takes it.
     failed: bool,
@@ -515,7 +517,8 @@ impl ChatView {
             keys: crate::vim::Keys::default(),
             finds: crate::vim::Finds::default(),
             paging: crate::vim::Paging::default(),
-            search: search::Searching::default(),
+            search: crate::vim::search::Search::default(),
+            case: crate::options::Case::default(),
             failed: false,
             hovered_code: None,
             copied_code: None,
