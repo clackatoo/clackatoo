@@ -21,17 +21,24 @@ pub(crate) const WHOLE: usize = 1024 * 1024;
 /// How much of a longer message's start is traced.
 const START: usize = 64 * 1024;
 
-/// What in a field's name says its string value is a secret.
-const SECRET_NAMES: [&str; 9] = [
+/// What in a message says it may hold a secret, to look at it closer:
+/// a quick check, which may say so of one that doesn't.
+const SUSPECT: [&str; 15] = [
     "token",
-    "apikey",
-    "api_key",
-    "authorization",
+    "key",
+    "auth",
     "password",
+    "passwd",
     "secret",
     "cookie",
     "credential",
-    "private_key",
+    "sig=",
+    "signature",
+    "bearer ",
+    "basic ",
+    "akia",
+    "aiza",
+    "glpat-",
 ];
 
 /// Fields whose every value is a secret: environment variables and HTTP
@@ -60,16 +67,9 @@ pub(crate) fn message(body: &[u8]) -> Cow<'_, [u8]> {
             .windows(needle.len())
             .any(|window| window == needle.as_bytes())
     };
-    let named = (SECRET_NAMES.iter()).any(|name| suspect(name))
+    let named = (SUSPECT.iter()).any(|name| suspect(name))
         || (SECRET_LISTS.iter()).any(|name| suspect(&format!("\"{name}\"")))
-        || suspect("bearer ")
-        || (KEY_PREFIXES.iter()).any(|prefix| suspect(prefix))
-        || suspect("key=")
-        || suspect("auth=")
-        || suspect("sig=")
-        || suspect("signature=")
-        || suspect("secret=")
-        || suspect("passwd=");
+        || (KEY_PREFIXES.iter()).any(|prefix| suspect(&prefix.to_ascii_lowercase()));
     if !named {
         return Cow::Borrowed(body);
     }
@@ -87,9 +87,9 @@ pub(crate) fn message(body: &[u8]) -> Cow<'_, [u8]> {
 }
 
 /// `text`, a line of an agent's stderr or a string in a message, with
-/// bearer tokens, keys with well-known prefixes and the values of
-/// assignments and URL query parameters named for secrets taken out:
-/// `Bearer …`, `sk-…`, `OPENAI_API_KEY=…`, `?token=…`.
+/// bearer tokens, keys with well-known prefixes and the values of names
+/// for secrets taken out: `Bearer …`, `sk-…`, `OPENAI_API_KEY=…`,
+/// `?token=…`, `Authorization: Basic …`, `api_key: …`, `"password": "…"`.
 pub(crate) fn line(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
@@ -117,13 +117,12 @@ pub(crate) fn line(text: &str) -> String {
                 at += value;
                 continue;
             }
-            if let Some(name) = secret_name(rest) {
-                out.push_str(&rest[..=name]);
-                let value = value_end(&rest[name + 1..]);
-                if value > 0 {
+            if let Some((start, end)) = named_value(rest) {
+                out.push_str(&rest[..start]);
+                if end > start {
                     out.push_str(REDACTED);
                 }
-                at += name + 1 + value;
+                at += end;
                 continue;
             }
         }
@@ -134,29 +133,133 @@ pub(crate) fn line(text: &str) -> String {
 }
 
 /// API keys' well-known prefixes: Anthropic's and `OpenAI`'s, GitHub's,
-/// Slack's.
-const KEY_PREFIXES: [&str; 6] = ["sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-"];
-
-/// How a name assigned a secret ends, as in `GITHUB_TOKEN=` or
-/// `api_key=`, or what it is whole.
-const SECRET_SUFFIXES: [&str; 7] = [
-    "token", "_key", "-key", "apikey", "secret", "password", "passwd",
+/// GitLab's, Slack's, AWS's access keys and Google's API keys.
+const KEY_PREFIXES: [&str; 11] = [
+    "sk-",
+    "ghp_",
+    "gho_",
+    "ghs_",
+    "ghu_",
+    "github_pat_",
+    "glpat-",
+    "xoxb-",
+    "xoxp-",
+    "AKIA",
+    "AIza",
 ];
-const SECRET_WHOLE: [&str; 4] = ["key", "auth", "sig", "signature"];
 
-/// Where the `=` is, if `text` starts with a name assigned a secret: an
-/// environment variable's, or a URL query parameter's.
-fn secret_name(text: &str) -> Option<usize> {
+/// What an `Authorization` header's value may start with, before its
+/// secret.
+const SCHEMES: [&str; 5] = ["basic", "bearer", "digest", "token", "negotiate"];
+
+/// Where the value is, as a range of `text`, if `text` starts with a name
+/// for a secret given one: `NAME=value`, `name: value`, or `"name": "value"`
+/// as text. An `Authorization` value's scheme, as `Basic`, stays.
+fn named_value(text: &str) -> Option<(usize, usize)> {
     let name = text
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
         .unwrap_or(text.len());
-    if name == 0 || !text[name..].starts_with('=') {
+    if name == 0 || !secret_field(&text[..name]) {
         return None;
     }
-    let lower = text[..name].to_ascii_lowercase();
-    ((SECRET_SUFFIXES.iter()).any(|suffix| lower.ends_with(suffix))
-        || SECRET_WHOLE.contains(&lower.as_str()))
-    .then_some(name)
+    let mut at = name;
+    if text[at..].starts_with(['"', '\'']) {
+        at += 1;
+    }
+    let colon = text[at..].starts_with(':');
+    if !colon && !text[at..].starts_with('=') {
+        return None;
+    }
+    at += 1;
+    if colon {
+        at += text[at..].len() - text[at..].trim_start_matches([' ', '\t']).len();
+    }
+    if text[at..].starts_with(['"', '\'']) {
+        at += 1;
+    }
+    if text[..name].eq_ignore_ascii_case("authorization") {
+        let word = text[at..].find(' ').unwrap_or(0);
+        if SCHEMES
+            .iter()
+            .any(|scheme| text[at..at + word].eq_ignore_ascii_case(scheme))
+        {
+            at += word + 1;
+        }
+    }
+    Some((at, at + value_end(&text[at..])))
+}
+
+/// Names that are a secret whole, though they'd say nothing within one.
+const SECRET_WHOLE: [&str; 4] = ["key", "auth", "sig", "signature"];
+
+/// Words in a name that say it's for a secret, wherever they are.
+const SECRET_WORDS: [&str; 10] = [
+    "password",
+    "passwd",
+    "secret",
+    "credential",
+    "credentials",
+    "cookie",
+    "cookies",
+    "authorization",
+    "apikey",
+    "privatekey",
+];
+
+/// What, before `key`, says it's a secret one: `api_key`, `privateKey`.
+const KEYS: [&str; 6] = [
+    "api",
+    "private",
+    "secret",
+    "access",
+    "signing",
+    "encryption",
+];
+
+/// What, before `token`, says it's not a secret, but where to go on from:
+/// `nextPageToken`, `continuation_token`.
+const BENIGN_TOKENS: [&str; 7] = [
+    "page",
+    "next",
+    "continuation",
+    "cursor",
+    "sync",
+    "resume",
+    "cancellation",
+];
+
+/// Whether `name`, a field's or a variable's, is for a secret: by its
+/// words, as `snake_case`, `kebab-case` or `camelCase` split them. A token
+/// is, unless it's one to go on from (`nextPageToken`); `tokenizer` and
+/// `inputTokens` aren't tokens at all.
+pub(crate) fn secret_field(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if SECRET_WHOLE.contains(&lower.as_str()) {
+        return true;
+    }
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut last_lower = false;
+    for c in name.chars() {
+        if c == '_' || c == '-' {
+            words.push(std::mem::take(&mut word));
+            last_lower = false;
+            continue;
+        }
+        if c.is_ascii_uppercase() && last_lower {
+            words.push(std::mem::take(&mut word));
+        }
+        last_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+        word.push(c.to_ascii_lowercase());
+    }
+    words.push(word);
+    words.retain(|word| !word.is_empty());
+    words.iter().enumerate().any(|(at, word)| {
+        let before = at.checked_sub(1).map(|at| words[at].as_str());
+        SECRET_WORDS.contains(&word.as_str())
+            || (word == "key" && before.is_some_and(|before| KEYS.contains(&before)))
+            || (word == "token" && !before.is_some_and(|before| BENIGN_TOKENS.contains(&before)))
+    })
 }
 
 /// How far a secret's value at the start of `text` goes: up to space, a
@@ -179,9 +282,7 @@ fn scrub(value: &mut Value) -> bool {
                 if SECRET_LISTS.contains(&lower.as_str()) && !field.is_null() {
                     hide_all(field);
                     found = true;
-                } else if (SECRET_NAMES.iter()).any(|secret| lower.contains(secret))
-                    && field.is_string()
-                {
+                } else if secret_field(name) && field.is_string() {
                     *field = Value::String(REDACTED.into());
                     found = true;
                 } else {
@@ -314,6 +415,82 @@ mod tests {
         assert_eq!(
             redacted(&json),
             r#"{"url":"https://x/y?api_key=[redacted]","cmd":"FOO=[redacted] run"}"#
+        );
+    }
+
+    #[test]
+    fn headers_and_names_given_secrets_go_from_text() {
+        assert_eq!(
+            line("Authorization: Basic dXNlcjpwYXNz and more"),
+            "Authorization: Basic [redacted] and more"
+        );
+        assert_eq!(line("authorization: abc123"), "authorization: [redacted]");
+        assert_eq!(
+            line("api_key: abc123, client_secret: s3"),
+            "api_key: [redacted], client_secret: [redacted]"
+        );
+        assert_eq!(
+            line(r#"body {"password": "hunter2", "user": "j"}"#),
+            r#"body {"password": "[redacted]", "user": "j"}"#
+        );
+        // Keys by their prefixes.
+        for key in [
+            format!("ghs_{}", "a".repeat(36)),
+            format!("ghu_{}", "a".repeat(36)),
+            format!("glpat-{}", "a".repeat(20)),
+            format!("AKIA{}", "A".repeat(16)),
+            format!("AIza{}", "a".repeat(35)),
+        ] {
+            assert_eq!(
+                line(&format!("use {key} now")),
+                "use [redacted] now",
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn names_for_secrets_are_told_by_their_words() {
+        for secret in [
+            "token",
+            "access_token",
+            "refreshToken",
+            "sessionToken",
+            "GITHUB_TOKEN",
+            "id-token",
+            "apiKey",
+            "x-api-key",
+            "OPENAI_API_KEY",
+            "privateKey",
+            "client_secret",
+            "password",
+            "Set-Cookie",
+            "Authorization",
+            "key",
+            "sig",
+        ] {
+            assert!(secret_field(secret), "{secret}");
+        }
+        for benign in [
+            "tokenizer",
+            "nextPageToken",
+            "page_token",
+            "continuationToken",
+            "inputTokens",
+            "max_tokens",
+            "monkey",
+            "keyboard",
+            "sortKey",
+            "authStatus",
+            "author",
+        ] {
+            assert!(!secret_field(benign), "{benign}");
+        }
+        let json =
+            r#"{"nextPageToken":"p2","tokenizer":"bpe","sortKey":"name","refresh_token":"r"}"#;
+        assert_eq!(
+            redacted(json),
+            r#"{"nextPageToken":"p2","tokenizer":"bpe","sortKey":"name","refresh_token":"[redacted]"}"#
         );
     }
 
