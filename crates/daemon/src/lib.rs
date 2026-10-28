@@ -12,6 +12,8 @@
 // explicitly.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
+// The list of the tools agents get is one long `json!`.
+#![recursion_limit = "256"]
 
 mod agent;
 mod agents;
@@ -330,7 +332,10 @@ impl DaemonConfig {
     /// gives it, `$CLACKATOO_SSH`: the program run as ssh to connect to
     /// other daemons (or else `ssh`), `$CLACKATOO_AGENT`: the command of the agent a
     /// chat gets when it asks for none, split at spaces (or else Claude
-    /// Code's adapter), `$CLACKATOO_UDP_PORTS`: a port, a range such as
+    /// Code's adapter), `$CLACKATOO_MCP`: the command, split at spaces,
+    /// agents run to reach clackatoo's tools, given `--chat ID --socket
+    /// PATH` after it (or else none: the `clackatoo` program sets its own),
+    /// `$CLACKATOO_UDP_PORTS`: a port, a range such as
     /// `60000-61000` (the default), or `off`, the language packs in
     /// [`languages_dir`], agents added in `daemon/agents.toml` in
     /// [`config_dir`], and `$CLACKATOO_BROWSER`: the browser agents drive,
@@ -377,8 +382,13 @@ impl DaemonConfig {
                 dir: languages_dir().map(|dir| dir.with_file_name("agents")),
                 path: None,
             },
-            // Only the `clackatoo` program knows it can relay them.
-            mcp: None,
+            // Only the `clackatoo` program knows it can relay them, unless
+            // the environment names a program that can (tests do).
+            mcp: non_empty("CLACKATOO_MCP").map(|command| {
+                (command.to_string_lossy().split_whitespace())
+                    .map(OsString::from)
+                    .collect()
+            }),
             udp_ports: match non_empty("CLACKATOO_UDP_PORTS") {
                 None => Some(DEFAULT_UDP_PORTS),
                 Some(ports) if ports == "off" => None,

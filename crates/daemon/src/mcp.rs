@@ -201,6 +201,8 @@ pub(crate) enum Tool {
     StartChat(Box<NewChat>),
     /// Start several chats at once.
     StartChats(Vec<NewChat>),
+    /// Close a chat this one started, for good.
+    CloseChat { chat: TerminalId },
     /// Wait until a chat has finished answering, or `timeout` passes.
     WaitForChat { chat: TerminalId, timeout: Duration },
     /// Wait until all of `chats` have finished answering, or with
@@ -609,6 +611,10 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
         show: Option<bool>,
     }
     #[derive(Deserialize)]
+    struct CloseChat {
+        chat: u32,
+    }
+    #[derive(Deserialize)]
     struct WaitChat {
         chat: u32,
         timeout: Option<f64>,
@@ -987,6 +993,12 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
                 })
                 .collect::<Result<Vec<_>, Refused>>()?;
             Tool::StartChats(chats)
+        }
+        "close_chat" => {
+            let CloseChat { chat } = args(arguments)?;
+            Tool::CloseChat {
+                chat: TerminalId(chat),
+            }
         }
         "wait_for_chat" => {
             let WaitChat { chat, timeout } = args(arguments)?;
@@ -1408,8 +1420,9 @@ fn clackatoo_tools() -> Value {
             "title": "Message another chat",
             "description": "Sends another chat's agent a message, as if the user typed it, marked in both \
                 chats as from this one. If that agent is busy answering, the message waits its turn. \
-                Its answer is what wait_for_chat returns. A chat whose agent may do more than this \
-                one can't be messaged.",
+                Its answer is what wait_for_chat returns. There's no limit on how many you send: go \
+                round with a chat you started (build, review, fix) for as long as the work needs. A \
+                chat whose agent may do more than this one can't be messaged.",
             "inputSchema": { "type": "object", "properties": {
                 "chat": chat,
                 "message": { "type": "string", "description": "The message." },
@@ -1434,8 +1447,10 @@ fn clackatoo_tools() -> Value {
             "description": "Starts a subagent: a new chat with an agent, as a profile, and sends it a \
                 first message, marked as from this chat. It runs in the background, shown as a card \
                 in this chat that the user can open, unless show is true. Returns at once with its \
-                number: then wait_for_chat waits for its answer. Give it everything it needs to \
-                know: it sees nothing of this conversation.",
+                number: then wait_for_chat waits for its answer. If you don't wait, this chat gets \
+                a notice from clackatoo, \"[chat N finished]\", when it finishes. It stays open, to \
+                be messaged again, until you close it with close_chat or the user does. Give it \
+                everything it needs to know: it sees nothing of this conversation.",
             "inputSchema": { "type": "object", "properties": new_chat.clone(), "required": ["prompt"] },
             "annotations": { "destructiveHint": false, "openWorldHint": true },
         },
@@ -1453,13 +1468,29 @@ fn clackatoo_tools() -> Value {
             "annotations": { "destructiveHint": false, "openWorldHint": true },
         },
         {
+            "name": "close_chat",
+            "title": "Close a chat",
+            "description": "Closes a chat this chat started, for good, stopping it if it's working, \
+                as the user's :bd does: the chats it started close with it, or pass to this chat if \
+                they're still working. Close the ones whose work is done and that you won't message \
+                again: a limited number may be open under one of the user's chats, and none is ever \
+                closed for you. A chat the user opened and sent back to the background is theirs, \
+                and can't be closed here.",
+            "inputSchema": { "type": "object", "properties": {
+                "chat": chat,
+            }, "required": ["chat"] },
+            "annotations": { "destructiveHint": true, "openWorldHint": false },
+        },
+        {
             "name": "wait_for_chat",
             "title": "Wait for a chat's answer",
             "description": "Waits until another chat's agent has finished answering, every message \
-                waiting its turn included, or the timeout passes, then returns its last answer: to \
-                this chat's last message, if it sent one. Timed out, it says how far the chat has \
-                got: call it again to wait on. If your client gives up on tools sooner, give a \
-                shorter timeout.",
+                waiting its turn included, or the timeout passes, then returns every answer to this \
+                chat's messages it hasn't had yet, oldest first, or else its last answer. If the \
+                chat still runs something in the background, it says so: the chat may go on by \
+                itself when that ends, so call this again later to hear what it does. Timed out, it \
+                says how far the chat has got: call it again to wait on. If your client gives up \
+                on tools sooner, give a shorter timeout.",
             "inputSchema": { "type": "object", "properties": {
                 "chat": chat,
                 "timeout": { "type": "number", "minimum": 0, "maximum": MAX_CHAT_WAIT.as_secs(),

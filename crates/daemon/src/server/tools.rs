@@ -915,6 +915,7 @@ impl Daemon {
             Tool::ReadChat { chat: to, turns } => self.read_chat(chat, to, turns),
             Tool::StartChat(new) => self.start_chats(chat, vec![*new]),
             Tool::StartChats(news) => self.start_chats(chat, news),
+            Tool::CloseChat { chat: to } => self.close_child(chat, to),
             Tool::WaitForChat { chat: to, timeout } => {
                 match self.wait_for_chat((token, id.clone()), chat, to, timeout) {
                     Some(result) => result,

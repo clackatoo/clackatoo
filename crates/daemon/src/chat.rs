@@ -411,12 +411,13 @@ pub(crate) struct HostedChat {
     /// The settings it was started wanting, to choose as its first
     /// session opens.
     wanted: Option<Wanted>,
-    /// How many of its turns the chat that started it has had the answer
-    /// to, through `wait_for_chat(s)` or `read_chat`: a chat whose last
-    /// answer nobody has had is never closed to make room. Kept through
+    /// How many of its turns each other chat has had the answers to, by
+    /// that chat: through `wait_for_chat(s)`, `read_chat`, or a notice
+    /// that it finished. A wait gives every answer since, and the chat
+    /// that started it is told of the answers it hasn't had. Kept through
     /// `&self`, as answers are read; not handed over, so after an upgrade
-    /// it's none, which errs on keeping chats.
-    told_parent: std::cell::Cell<usize>,
+    /// it's none.
+    answers_heard: std::cell::RefCell<std::collections::BTreeMap<TerminalId, usize>>,
     /// The task the agent says stands for the turn it took by itself, if
     /// it says (see `chat/woken.rs`).
     woke_by_task: Option<String>,
@@ -629,7 +630,7 @@ impl HostedChat {
             heard: None,
             role: None,
             wanted: None,
-            told_parent: std::cell::Cell::new(0),
+            answers_heard: std::cell::RefCell::default(),
             woke_by_task: None,
             woken_stopping: false,
             wake_held: None,
@@ -1235,8 +1236,12 @@ impl HostedChat {
     /// Starts a turn with `message`, from another agent.
     fn begin_message(&mut self, message: Message) -> Vec<Action> {
         let mut actions = Vec::new();
-        self.relations.hops = message.hops;
-        self.relations.cause = message.cause;
+        // A notice from clackatoo itself is no message between agents: the
+        // chain of messages the chat is in goes on as it was.
+        if !message.is_notice() {
+            self.relations.hops = message.hops;
+        }
+        self.relations.cause = message.cause.or(self.relations.cause);
         let prompt = relations::prompt_for(&message);
         self.begin(
             message.text,
@@ -1247,16 +1252,16 @@ impl HostedChat {
         actions
     }
 
-    /// The chat that started it has had the answers to its first `turns`
-    /// turns.
-    pub(crate) fn told_parent(&self, turns: usize) {
-        self.told_parent.set(self.told_parent.get().max(turns));
+    /// The chat `by` has had the answers to its first `turns` turns.
+    pub(crate) fn heard_by(&self, by: TerminalId, turns: usize) {
+        let mut heard = self.answers_heard.borrow_mut();
+        let had = heard.entry(by).or_default();
+        *had = (*had).max(turns);
     }
 
-    /// Whether the chat that started it has had the answer to every turn
-    /// it has finished.
-    pub(crate) fn parent_has_heard(&self) -> bool {
-        self.told_parent.get() >= self.node.turns.len()
+    /// How many of its first turns the chat `by` has had the answers to.
+    pub(crate) fn turns_heard_by(&self, by: TerminalId) -> usize {
+        self.answers_heard.borrow().get(&by).copied().unwrap_or(0)
     }
 
     /// Whether a message has been sent and not yet answered.

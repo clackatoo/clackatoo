@@ -15,10 +15,11 @@
 //! limits, agent and model from it, and never has fewer limits than the
 //! chat that started it.
 //!
-//! Chats in the background close with the chat that started them. To
-//! keep the number of chats under one of the user's within bounds, the
-//! oldest that have finished, in the background, close to make room for
-//! new ones: the agent that started them has had their answers.
+//! Chats in the background close with the chat that started them, and
+//! otherwise only when the agent that started them closes them
+//! (`close_chat`) or the user does: never to make room, as the agent may
+//! still be sending one fixes. Too many open is refused instead (see
+//! `talk.rs`), as Codex refuses more agent threads than it allows.
 //!
 //! A chat is started only inside its parent's project, and with an agent
 //! other than its parent's only if that agent offers modes, so it starts
@@ -35,7 +36,7 @@ use clackatoo_protocol::{PaneId, PaneTerminal, SettingKind, Subagent, SubagentSt
 use mio::Token;
 use serde_json::Value;
 
-use super::talk::{MAX_CHILDREN, final_words, head};
+use super::talk::{final_words, going_note, head};
 use super::{MAX_WAITS, Wait, Waiting};
 use crate::chat::{HostedChat, Wanted, role_for};
 use crate::mcp::NewChat;
@@ -79,6 +80,7 @@ impl Daemon {
         let Some(of) = self.chat_ref(parent) else {
             return;
         };
+        let was_going = of.subagent(chat).is_some_and(|entry| entry.status.going());
         let entry = match of.subagent(chat) {
             Some(entry) if !child.outdates(entry, shown) => return,
             Some(entry) => child.as_subagent(entry.turn, shown),
@@ -89,6 +91,10 @@ impl Daemon {
         };
         // Finished in the background, it lets its session go in a while.
         let idle = !shown && !entry.status.going() && child.is_connected();
+        // It has just finished: the chat that started it may need telling.
+        if was_going && !entry.status.going() {
+            self.tools.talk.finished.insert(chat);
+        }
         self.park_later(chat, idle);
         if let Some(of) = self.chat(parent) {
             of.set_subagent(entry);
@@ -268,41 +274,41 @@ impl Daemon {
         true
     }
 
-    /// The chats under the user's chat `root` that can close to make room
-    /// for new ones, oldest first: in the background, finished, asking
-    /// nothing, with no chats of their own, their answers had by the chat
-    /// that started them, none of their changes waiting for review, and
-    /// never one the user had in a pane and sent back, which is theirs.
-    /// Closing one loses nothing anyone is waiting on.
-    pub(super) fn closable(&self, root: TerminalId) -> Vec<TerminalId> {
-        let workspaces = self.workspaces.get();
-        let parents: std::collections::HashSet<TerminalId> = (self.terminals.values())
-            .filter_map(|slot| slot.terminal.chat_ref()?.relations().parent)
-            .collect();
-        let mut found: Vec<(u64, TerminalId)> = (self.terminals.iter())
-            .filter_map(|(&id, slot)| {
-                let chat = slot.terminal.chat_ref()?;
-                let ours = chat.relations().root == Some(root) && chat.relations().parent.is_some();
-                let done = !chat.node().turns.is_empty()
-                    && super::talk::idle(chat)
-                    && matches!(
-                        chat.subagent_status(),
-                        SubagentStatus::Done | SubagentStatus::Failed(_)
-                    );
-                // One the user had in a pane and sent back is theirs, and
-                // closing one would end what it runs in the background.
-                let spent = done
-                    && !chat.kept_by_user()
-                    && !chat.has_tasks_going()
-                    && chat.parent_has_heard()
-                    && !parents.contains(&id)
-                    && !self.awaits_review(id);
-                let started = chat.node().turns.first().map_or(0, |turn| turn.sent);
-                (ours && spent && workspaces.pane_showing(id).is_none()).then_some((started, id))
-            })
-            .collect();
-        found.sort_unstable();
-        found.into_iter().map(|(_, id)| id).collect()
+    /// `close_chat`: closes the chat `to`, which the chat `chat`'s agent
+    /// started, for good, as the user's `:bd` does: the chats it started
+    /// in turn close with it, or pass up, as they would then. Only a chat
+    /// the caller started, and never one the user had in a pane and sent
+    /// back, which is theirs.
+    pub(super) fn close_child(
+        &mut self,
+        chat: TerminalId,
+        to: TerminalId,
+    ) -> Result<String, String> {
+        if to == chat {
+            return Err(format!("chat {to} is this chat"));
+        }
+        let Some(target) = self.chat_ref(to) else {
+            return Err(format!("there's no chat {to}: list_chats lists them"));
+        };
+        if target.relations().parent != Some(chat) {
+            return Err(format!(
+                "this chat didn't start chat {to}: it closes only the chats it started"
+            ));
+        }
+        if target.kept_by_user() {
+            return Err(format!(
+                "the user opened chat {to} and sent it back to the background, so it's theirs: \
+                 ask them to close it"
+            ));
+        }
+        let working = !super::talk::idle(target);
+        log::info!("chat {chat} closes chat {to}, which it started");
+        self.close_terminal(to).map_err(|err| err.to_string())?;
+        Ok(if working {
+            format!("Closed chat {to}, stopping what it was doing.")
+        } else {
+            format!("Closed chat {to}.")
+        })
     }
 
     /// `start_chat` and `start_chats`: starts each of `chats` for the chat
@@ -345,27 +351,7 @@ impl Daemon {
                 .profile(new.profile.as_deref().unwrap_or(profiles::DEFAULT))?;
             planned.push((new, profile, dir));
         }
-        let root = self
-            .chat_ref(chat)
-            .ok_or("the chat has closed")?
-            .relations()
-            .root;
-        let root = root.unwrap_or(chat);
-        let live = (self.terminals.values())
-            .filter_map(|slot| slot.terminal.chat_ref())
-            .filter(|other| other.relations().root == Some(root))
-            .count();
         let mut text = String::new();
-        let over = (live + planned.len()).saturating_sub(MAX_CHILDREN);
-        for old in self.closable(root).into_iter().take(over) {
-            let _ = writeln!(
-                text,
-                "Closed chat {old}, which had finished, in the background, to make room."
-            );
-            if let Err(err) = self.close_terminal(old) {
-                log::warn!("chat {old} couldn't be closed: {err}");
-            }
-        }
         let mut started = 0;
         for (number, (new, profile, dir)) in planned.into_iter().enumerate() {
             // Checked first, one fails only as the chat it starts closes
@@ -451,7 +437,7 @@ impl Daemon {
         let actions = (self.chat(id).ok_or("the chat closed at once")?)
             .deliver(message)
             .map_err(|_| "the new chat refused its first message".to_owned())?;
-        self.spend(chat);
+        self.count_start(chat);
         self.act(id, actions);
         self.collect_damage(id);
         self.note_subagent(id);
@@ -600,15 +586,33 @@ impl Daemon {
             return text;
         }
         let answer = (turns.iter()).rfind(|turn| turn.switch.is_none() && turn.end.is_some());
-        if other.relations().parent == Some(chat) {
-            other.told_parent(turns.len());
-        }
+        // The answers to this chat's messages it hasn't had, but the last,
+        // which this gives.
+        let heard = other.turns_heard_by(chat);
+        let earlier = (turns.iter().enumerate())
+            .filter(|&(index, turn)| {
+                index >= heard && turn.from.as_ref().is_some_and(|from| from.chat == chat)
+            })
+            .count()
+            .saturating_sub(1);
+        other.heard_by(chat, turns.len());
         match answer.map(final_words) {
             Some(words) if !words.is_empty() => {
                 text.push_str(&head(&words, share));
                 text.push('\n');
             }
             _ => text.push_str("It said nothing.\n"),
+        }
+        if earlier > 0 {
+            let _ = writeln!(
+                text,
+                "[It answered {earlier} earlier messages of yours since you last heard from it: \
+                 read_chat reads them]"
+            );
+        }
+        if let Some(going) = going_note(other) {
+            text.push_str(&going);
+            text.push('\n');
         }
         let changed = self.agent_files.log.changed_in(to, 0..turns.len());
         if changed.is_empty() {

@@ -40,7 +40,7 @@
 //!
 //! A message from another chat's agent comes framed as clackatoo frames
 //! it, saying which chat sent it: the script is chosen by the message
-//! inside.
+//! inside. So is a notice from clackatoo itself, by what it says.
 //!
 //! Run as `fake_agent mcp --chat ID --socket PATH`, it relays MCP for a
 //! chat's tools, as `clackatoo mcp` does.
@@ -1491,6 +1491,13 @@ impl Fake {
 /// Which chat sent `text`, if another chat's agent did, and the message,
 /// after the line clackatoo puts before it saying so.
 fn from_chat(text: &str) -> (Option<u32>, &str) {
+    // A notice from clackatoo itself: what it says is the message.
+    if text.starts_with("[Notice from clackatoo") {
+        let body = (text.split_once(" ---\n"))
+            .and_then(|(_, body)| body.rsplit_once("\n--- end of notice "))
+            .map_or("", |(body, _)| body);
+        return (None, body);
+    }
     let Some(rest) = text.strip_prefix("[Message from chat ") else {
         return (None, text);
     };

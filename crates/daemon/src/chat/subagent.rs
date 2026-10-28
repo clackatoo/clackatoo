@@ -24,6 +24,11 @@ use crate::profiles::{self, Limits};
 /// characters.
 const TASK: usize = 80;
 
+/// The longest notices from clackatoo waiting a chat's turn grow to as
+/// more are added to them, in bytes: a little more than four subagents'
+/// answers, as `wait_for_chat` gives them.
+const MOST_NOTICE: usize = 64 * 1024;
+
 /// The settings a chat started as a profile asks for as its first
 /// session opens, where its agent offers them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -47,7 +52,7 @@ impl HostedChat {
     }
 
     /// Whether the user had it in a pane and sent it back to the
-    /// background: it's theirs to close, never closed to make room.
+    /// background: it's theirs to close, never the agent's (`close_chat`).
     pub(crate) fn kept_by_user(&self) -> bool {
         (self.chosen.iter()).any(|(id, _)| id == KEPT_SETTING)
     }
@@ -127,6 +132,20 @@ impl HostedChat {
     /// longer be sent.
     pub(crate) fn drop_next_message(&mut self) {
         self.relations.inbox.pop_front();
+    }
+
+    /// Adds `text` to a notice from clackatoo already waiting its turn, so
+    /// several go as one, unless that would make it longer than
+    /// [`MOST_NOTICE`]. Returns whether it did.
+    pub(crate) fn add_to_notice(&mut self, text: &str) -> bool {
+        let waiting = (self.relations.inbox.iter_mut())
+            .find(|message| message.is_notice() && message.text.len() + text.len() < MOST_NOTICE);
+        let Some(notice) = waiting else {
+            return false;
+        };
+        notice.text.push_str("\n\n");
+        notice.text.push_str(text);
+        true
     }
 
     /// Where its agent's mode is among the modes it offers, from 0, the

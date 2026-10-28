@@ -11702,12 +11702,23 @@ fn start_new_chat(client: &mut Client, chat: NewAgent) -> TerminalId {
 
 /// Sends `text` to `chat`, and waits up to `limit` for the answer to end.
 fn ask_for(client: &mut Client, chat: TerminalId, text: &str, limit: Duration) -> ChatNode {
+    let before = chat_now(client, chat).turns.len();
     client
         .chat(chat, ChatAction::Send(text.to_owned()))
         .unwrap();
-    wait_for_chat_for(client, chat, limit, |node| {
-        node.turns.last().is_some_and(|turn| turn.prompt == text) && last_outcome(node).is_some()
-    })
+    let asked = |node: &ChatNode| {
+        (node.turns.iter().enumerate().skip(before))
+            .find(|(_, turn)| turn.prompt == text && turn.from.is_none())
+            .map(|(at, turn)| (at, turn.end.is_some()))
+    };
+    let mut node = wait_for_chat_for(client, chat, limit, |node| {
+        asked(node).is_some_and(|(_, ended)| ended)
+    });
+    // What came after, as a notice that a chat it started finished, is
+    // left out: the asked turn is the last.
+    let (at, _) = asked(&node).expect("asked");
+    node.turns.truncate(at + 1);
+    node
 }
 
 /// The panes of the first workspace's first tab, with what they show.
@@ -11861,6 +11872,7 @@ fn the_tools_speak_mcp_over_the_relays_stdio() {
             "read_chat",
             "start_chat",
             "start_chats",
+            "close_chat",
             "wait_for_chat",
             "wait_for_chats",
             "board_list",
@@ -13287,6 +13299,52 @@ fn start_chats_starts_several_and_wait_for_chats_sums_them_up_for_all_or_the_fir
         "{words}"
     );
     assert_eq!(card_of(&mut client, a).len(), 2, "none started");
+}
+
+/// A chat that started another and didn't wait for it is told when it
+/// finishes, as a turn of its own a notice from clackatoo starts, and
+/// closes it once it's done with it (CLACKA-186).
+#[test]
+fn a_chat_is_told_when_one_it_started_finishes_and_closes_it_when_done() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let kid = TerminalId(a.0 + 1);
+    let words = last_words(&ask_for(
+        &mut client,
+        a,
+        "mcp start_chat {\"prompt\":\"hi kid\"}",
+        Duration::from_secs(10),
+    ));
+    assert!(
+        words.contains(&format!("Started chat {kid} (claude, as general)")),
+        "{words}"
+    );
+    let node = wait_for_chat_for(&mut client, a, Duration::from_secs(10), |node| {
+        node.turns.len() == 2 && last_outcome(node).is_some()
+    });
+    let told = &node.turns[1];
+    assert!(
+        told.prompt.starts_with(&format!(
+            "[chat {kid} finished] Chat {kid}, which this chat started"
+        )),
+        "{told:#?}"
+    );
+    assert_eq!(told.from.as_ref().map(|from| from.chat), Some(kid));
+    assert!(last_words(&node).contains("echo: hi kid"), "{node:#?}");
+    // Done with it, it closes it, and only its own.
+    let close = format!("mcp close_chat {{\"chat\":{kid}}}\nmcp close_chat {{\"chat\":{a}}}");
+    let words = last_words(&ask_for(&mut client, a, &close, Duration::from_secs(10)));
+    assert!(
+        words.contains(&format!("close_chat: Closed chat {kid}.")),
+        "{words}"
+    );
+    assert!(
+        words.contains(&format!("close_chat: failed: chat {a} is this chat")),
+        "{words}"
+    );
+    let card = card_of(&mut client, a);
+    assert_eq!(card[0].status, SubagentStatus::Closed, "{card:#?}");
 }
 
 #[test]
