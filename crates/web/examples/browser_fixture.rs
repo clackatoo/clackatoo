@@ -552,7 +552,9 @@ fn main() {
                             ChatAction::RemoveQueued { id } | ChatAction::SendQueued { id, .. } => {
                                 node.delivery.queued.retain(|q| q.id != id);
                             }
-                            ChatAction::Answer { .. } => node.question = None,
+                            ChatAction::Answer { .. } | ChatAction::Fill { .. } => {
+                                node.question = None
+                            }
                             ChatAction::Set { setting, value } => {
                                 if let Some(s) = node.settings.iter_mut().find(|s| s.id == setting)
                                 {

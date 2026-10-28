@@ -19,7 +19,7 @@ mod terminal;
 mod viewport;
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
-use clackatoo_protocol::{ChatAction, PROTOCOL_VERSION, TerminalId};
+use clackatoo_protocol::{ChatAction, FormReply, PROTOCOL_VERSION, TerminalId};
 use js_sys::{Reflect, Uint8Array};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
@@ -499,6 +499,38 @@ fn listen_for_chat_input(root: &DomElement) {
             });
         }
     });
+}
+
+/// What's filled in in `within`'s inputs, by their ids: each one's value
+/// and whether it's ticked.
+fn kept_inputs(within: &DomElement) -> Vec<(String, String, bool)> {
+    let mut kept = Vec::new();
+    let Ok(inputs) = within.query_selector_all("input[id]") else {
+        return kept;
+    };
+    for index in 0..inputs.length() {
+        if let Some(input) =
+            (inputs.item(index)).and_then(|i| i.dyn_into::<HtmlInputElement>().ok())
+        {
+            kept.push((input.id(), input.value(), input.checked()));
+        }
+    }
+    kept
+}
+
+/// Puts `kept` back in `within`'s inputs of the same ids.
+fn put_back_inputs(within: &DomElement, kept: &[(String, String, bool)]) {
+    for (id, value, checked) in kept {
+        let found = within
+            .query_selector(&format!("input[id=\"{id}\"]"))
+            .ok()
+            .flatten()
+            .and_then(|input| input.dyn_into::<HtmlInputElement>().ok());
+        if let Some(input) = found {
+            input.set_value(value);
+            input.set_checked(*checked);
+        }
+    }
 }
 
 /// Listens for what happens on the page: taps, picks from menus, parts
@@ -1718,11 +1750,15 @@ impl App {
         }
         let footer = view::footer(&self.state, node);
         if fresh || footer != page.shown_footer {
+            // A form being filled in keeps what's filled in, as the rest
+            // of what's under the turns is drawn again.
+            let kept = kept_inputs(&page.footer);
             dom::replace_children(
                 &self.document,
                 &page.footer,
                 &el("div").child(footer.clone()),
             );
+            put_back_inputs(&page.footer, &kept);
             page.shown_footer = footer;
         }
         let menus = node.map_or_else(
@@ -1962,6 +1998,10 @@ impl App {
                     self.state.chat(answer, "answering");
                 }
             }
+            Action::Fill(question) => self.fill(question),
+            Action::Decline(question) => self.answer_form(question, FormReply::Decline),
+            // The link opens by itself, as links do.
+            Action::OpenLink(question) => self.answer_form(question, FormReply::Accept(Vec::new())),
             Action::CancelActivity(index) => self.state.cancel_activity(index),
             Action::Usage | Action::Settings => self.toggle_sheet(action),
             Action::Filter(filter) => self.state.filter(filter),
@@ -2225,6 +2265,45 @@ impl App {
             }
         }
         false
+    }
+
+    /// The form question `question` asks, if it's still the one asked.
+    fn form_asked(&self, question: u64) -> Option<clackatoo_protocol::Form> {
+        let asked = (self.state.open.as_ref())
+            .and_then(|open| open.view.as_ref()?.chat()?.question.clone())?;
+        (asked.id == question).then_some(asked.form).flatten()
+    }
+
+    /// Submits the form question `question` asks, as its inputs are filled
+    /// in, if that fits it; or says why not, under it.
+    fn fill(&mut self, question: u64) {
+        let Some(form) = self.form_asked(question) else {
+            return;
+        };
+        let answers = view::form_answers(&form, |id| self.input(id), |id| self.checked(id));
+        if let Some(why) = form.problem(&answers) {
+            if let Some(line) = self.document.get_element_by_id(view::FORM_PROBLEM) {
+                line.set_text_content(Some(&format!("Can't submit yet: {why}")));
+            }
+            return;
+        }
+        self.answer_form(question, FormReply::Accept(answers));
+    }
+
+    /// Answers the form question `question` asks with `reply`, if it's
+    /// still the one asked.
+    fn answer_form(&mut self, question: u64, reply: FormReply) {
+        if self.form_asked(question).is_some() {
+            self.state
+                .chat(ChatAction::Fill { question, reply }, "answering");
+        }
+    }
+
+    /// Whether the box or button with `id` is ticked.
+    fn checked(&self, id: &str) -> bool {
+        (self.document.get_element_by_id(id))
+            .and_then(|input| input.dyn_into::<HtmlInputElement>().ok())
+            .is_some_and(|input| input.checked())
     }
 
     /// The value of the input with `id`, if there's one.

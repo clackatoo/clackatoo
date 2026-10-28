@@ -68,6 +68,12 @@ pub enum Action {
     Bring(TabId),
     /// Dismisses a background tab: a second tap for one still running.
     Dismiss(TabId),
+    /// Submits the form question `0` asks, as filled in.
+    Fill(u64),
+    /// Declines the form question `0` asks.
+    Decline(u64),
+    /// Answers question `0`'s link as opened, as the link itself opens.
+    OpenLink(u64),
 }
 
 /// The keys on the row above the phone's keyboard: those a phone's
@@ -218,6 +224,9 @@ impl Action {
             Self::SendQueued(id) => format!("send-queued:{id}"),
             Self::Bring(tab) => format!("bring:{tab}"),
             Self::Dismiss(tab) => format!("dismiss:{tab}"),
+            Self::Fill(question) => format!("fill:{question}"),
+            Self::Decline(question) => format!("decline:{question}"),
+            Self::OpenLink(question) => format!("open-link:{question}"),
         }
     }
 
@@ -270,6 +279,9 @@ impl Action {
             ("send-queued", id) => Self::SendQueued(id.parse().ok()?),
             ("bring", tab) => Self::Bring(TabId(tab.parse().ok()?)),
             ("dismiss", tab) => Self::Dismiss(TabId(tab.parse().ok()?)),
+            ("fill", question) => Self::Fill(question.parse().ok()?),
+            ("decline", question) => Self::Decline(question.parse().ok()?),
+            ("open-link", question) => Self::OpenLink(question.parse().ok()?),
             _ => return None,
         })
     }

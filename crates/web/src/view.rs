@@ -7,9 +7,9 @@
 //! [`grid`](crate::grid)'s).
 
 use clackatoo_protocol::{
-    ChatNode, ChatState, ChatSummary, ChoiceKind, Diff, Fullness, Item, Outcome, Said, SettingKind,
-    Subagent, SubagentStatus, TerminalInfo, TerminalStatus, Tool, ToolContent, ToolStatus, Turn,
-    TurnFilesState,
+    ChatNode, ChatState, ChatSummary, ChoiceKind, Diff, Field, FieldInput, FieldValue, Form,
+    FormAsk, Fullness, Item, Outcome, Said, SettingKind, Subagent, SubagentStatus, TerminalInfo,
+    TerminalStatus, Tool, ToolContent, ToolStatus, Turn, TurnFilesState,
 };
 
 use crate::action::{Action, RowKey};
@@ -782,6 +782,11 @@ pub fn footer(state: &State, node: Option<&ChatNode>) -> Element {
     if let Some(notice) = &node.notice {
         footer = footer.child(el("p").class("notice").text(notice.clone()));
     }
+    if let Some((question, form)) = (node.question.as_ref())
+        .and_then(|question| question.form.as_ref().map(|form| (question, form)))
+    {
+        return footer.child(form_card(question.id, form));
+    }
     if let Some(question) = &node.question {
         let choices = question.choices.iter().enumerate().map(|(index, choice)| {
             let kind = match choice.kind {
@@ -799,26 +804,257 @@ pub fn footer(state: &State, node: Option<&ChatNode>) -> Element {
         // The daemon's own question as it is; any other is about what the
         // agent would do, however it's worded. The code it quotes is code.
         let mut asked = el("p");
-        if !question.own {
+        // A plan says what it's about, in the agent's words; the question
+        // is the page's.
+        let plan = question.plan.as_ref().filter(|_| !question.own);
+        if plan.is_some() {
+            asked = asked.child(Node::Text("Go ahead with this plan?".to_owned()));
+        } else if !question.own {
             asked = asked.child(Node::Text("Allow the agent to ".to_owned()));
         }
-        for piece in question.said() {
+        for piece in question.said().into_iter().filter(|_| plan.is_none()) {
             asked = asked.child(match piece {
                 Said::Words(words) => Node::Text(words),
                 Said::Code(code) => el("code").text(code).into(),
             });
         }
-        if !question.own {
+        if !question.own && plan.is_none() {
             asked = asked.child(Node::Text("?".to_owned()));
         }
+        let mut card = el("div").class("question");
+        if let Some(plan) = plan {
+            card = card.child(
+                el("div")
+                    .class("plan words")
+                    .children(markdown::render(plan)),
+            );
+        }
         footer = footer.child(
-            el("div")
-                .class("question")
-                .child(asked)
+            card.child(asked)
                 .child(el("div").class("choices").children(choices)),
         );
     }
     footer
+}
+
+/// The id of the input for field `field` of a form, option `option` of
+/// it if it's a field of choices.
+#[must_use]
+pub fn form_input(field: usize, option: Option<usize>) -> String {
+    match option {
+        Some(option) => format!("form-{field}-{option}"),
+        None => format!("form-{field}"),
+    }
+}
+
+/// The id of the line that says why a form can't be submitted yet.
+pub const FORM_PROBLEM: &str = "form-problem";
+
+/// The form question `question` asks, `form`, as the page's own inputs:
+/// a radio button for each option of a choice of one, a box to tick for
+/// each of several and for a yes-or-no, a box to type in, then Submit and
+/// Decline; for a link, the link whole, to open, and Decline. What's
+/// filled in stays in the inputs until Submit reads it.
+fn form_card(question: u64, form: &Form) -> Element {
+    let mut card = el("div").class("question form").child(
+        el("div")
+            .class("words")
+            .children(markdown::render(&form.message)),
+    );
+    if let FormAsk::Url(url) = &form.ask {
+        let open = el("a")
+            .class("button allow")
+            .attr("href", url.clone())
+            .attr("target", "_blank")
+            .attr("rel", "noopener noreferrer")
+            .action(&Action::OpenLink(question))
+            .text("Open the link");
+        let decline = el("button")
+            .class("reject")
+            .action(&Action::Decline(question))
+            .text("Decline");
+        return card
+            .child(el("p").child(el("code").text(url.clone())))
+            .child(el("div").class("choices").child(open).child(decline));
+    }
+    for (index, field) in form.fields().iter().enumerate() {
+        card = card.child(form_field(index, field));
+    }
+    let mut buttons = el("div").class("choices");
+    if form.answerable() {
+        buttons = buttons.child(
+            el("button")
+                .class("allow")
+                .action(&Action::Fill(question))
+                .text("Submit"),
+        );
+    }
+    buttons = buttons.child(
+        el("button")
+            .class("reject")
+            .action(&Action::Decline(question))
+            .text("Decline"),
+    );
+    card.child(el("p").class("failed").attr("id", FORM_PROBLEM))
+        .child(buttons)
+}
+
+/// The answers to `form`, as its inputs are filled in: `value` gives what
+/// an input of an id holds, and `checked` whether it's ticked. A box left
+/// empty, and a field of several with none ticked, aren't answered.
+pub fn form_answers(
+    form: &Form,
+    value: impl Fn(&str) -> Option<String>,
+    checked: impl Fn(&str) -> bool,
+) -> Vec<(String, FieldValue)> {
+    let mut answers = Vec::new();
+    for (index, field) in form.fields().iter().enumerate() {
+        let picked = |options: &[clackatoo_protocol::FieldOption]| -> Vec<String> {
+            (options.iter().enumerate())
+                .filter(|(option, _)| checked(&form_input(index, Some(*option))))
+                .map(|(_, offered)| offered.value.clone())
+                .collect()
+        };
+        let answer = match &field.input {
+            FieldInput::One { options, .. } => {
+                picked(options).into_iter().next().map(FieldValue::Text)
+            }
+            FieldInput::Many { options, .. } => Some(picked(options))
+                .filter(|picked| !picked.is_empty())
+                .map(FieldValue::Many),
+            FieldInput::Toggle { .. } => {
+                Some(FieldValue::Toggle(checked(&form_input(index, None))))
+            }
+            FieldInput::Text { .. } => (value(&form_input(index, None)))
+                .filter(|text| !text.trim().is_empty())
+                .map(FieldValue::Text),
+            FieldInput::Number { .. } => (value(&form_input(index, None)))
+                .map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty())
+                .map(FieldValue::Number),
+        };
+        if let Some(answer) = answer {
+            answers.push((field.key.clone(), answer));
+        }
+    }
+    answers
+}
+
+/// Field `index` of a form, `field`, as the page's inputs.
+fn form_field(index: usize, field: &Field) -> Element {
+    let mut fieldset = el("fieldset").class("field");
+    let mut legend = String::new();
+    if let Some(title) = &field.title {
+        legend.push_str(title);
+    }
+    if let Some(description) = &field.description {
+        if !legend.is_empty() {
+            legend.push_str(" · ");
+        }
+        legend.push_str(description);
+    }
+    if field.required {
+        legend.push_str(" *");
+    }
+    if !legend.trim().is_empty() && !matches!(field.input, FieldInput::Toggle { .. }) {
+        fieldset = fieldset.child(el("legend").text(legend));
+    }
+    let name = form_input(index, None);
+    let choice =
+        |kind: &'static str, option: usize, title: &str, note: Option<&String>, on: bool| {
+            let id = form_input(index, Some(option));
+            let mut input = el("input")
+                .attr("type", kind)
+                .attr("name", name.clone())
+                .attr("id", id.clone());
+            if on {
+                input = input.attr("checked", "");
+            }
+            let mut label = el("label")
+                .attr("for", id)
+                .child(input)
+                .child(Node::Text(title.to_owned()));
+            if let Some(note) = note {
+                label = label.child(el("span").class("muted").text(note.clone()));
+            }
+            label
+        };
+    match &field.input {
+        FieldInput::One { options, default } => {
+            for (option, offered) in options.iter().enumerate() {
+                let on = default.as_ref() == Some(&offered.value);
+                let row = choice(
+                    "radio",
+                    option,
+                    &offered.title,
+                    offered.description.as_ref(),
+                    on,
+                );
+                fieldset = fieldset.child(row);
+            }
+        }
+        FieldInput::Many {
+            options, default, ..
+        } => {
+            for (option, offered) in options.iter().enumerate() {
+                let on = default.contains(&offered.value);
+                let row = choice(
+                    "checkbox",
+                    option,
+                    &offered.title,
+                    offered.description.as_ref(),
+                    on,
+                );
+                fieldset = fieldset.child(row);
+            }
+        }
+        FieldInput::Toggle { default } => {
+            let mut input = el("input")
+                .attr("type", "checkbox")
+                .attr("id", name.clone());
+            if default.unwrap_or(false) {
+                input = input.attr("checked", "");
+            }
+            fieldset = fieldset.child(
+                el("label")
+                    .attr("for", name)
+                    .child(input)
+                    .child(Node::Text(field.name().to_owned())),
+            );
+        }
+        FieldInput::Text {
+            default, secret, ..
+        } => {
+            let kind = if *secret { "password" } else { "text" };
+            fieldset = fieldset.child(typed_input(&name, kind, "text", default.as_ref()));
+        }
+        FieldInput::Number {
+            integer, default, ..
+        } => {
+            let mode = if *integer { "numeric" } else { "decimal" };
+            fieldset = fieldset.child(typed_input(&name, "text", mode, default.as_ref()));
+        }
+    }
+    fieldset
+}
+
+/// An input to type in, `id`, of type `kind`, bringing up the phone's
+/// keyboard for `mode`, starting as `default`.
+fn typed_input(
+    id: &str,
+    kind: &'static str,
+    mode: &'static str,
+    default: Option<&String>,
+) -> Element {
+    let input = el("input")
+        .attr("type", kind)
+        .attr("inputmode", mode)
+        .attr("id", id.to_owned())
+        .attr("autocomplete", "off");
+    match default {
+        Some(default) => input.attr("value", default.clone()),
+        None => input,
+    }
 }
 
 /// How many minutes ahead of UTC the phone's clock is, or was, or will
@@ -1599,6 +1835,114 @@ mod tests {
         assert!(!shown(true).contains("Allow the agent"));
         // Worded as the daemon's, an agent's is still the agent's.
         assert!(shown(false).contains(&format!("Allow the agent to {own}?")));
+    }
+
+    #[test]
+    fn a_form_is_drawn_as_inputs_and_read_back_from_them() {
+        use clackatoo_protocol::{Field, FieldOption, FieldValue, Form, FormAsk};
+        let option = |value: &str| FieldOption {
+            value: value.into(),
+            title: value.to_uppercase(),
+            description: None,
+        };
+        let field = |key: &str, required, input| Field {
+            key: key.into(),
+            title: Some(key.into()),
+            description: None,
+            required,
+            input,
+        };
+        let form = Form {
+            message: "Which?".into(),
+            ask: FormAsk::Fields {
+                complete: true,
+                fields: vec![
+                    field(
+                        "db",
+                        true,
+                        FieldInput::One {
+                            options: vec![option("pg"), option("lite")],
+                            default: Some("pg".into()),
+                        },
+                    ),
+                    field(
+                        "token",
+                        false,
+                        FieldInput::Text {
+                            default: None,
+                            min: None,
+                            max: None,
+                            secret: true,
+                            format: None,
+                        },
+                    ),
+                    field("go", false, FieldInput::Toggle { default: None }),
+                ],
+            },
+        };
+        let node = ChatNode {
+            question: Some(Question {
+                id: 3,
+                title: "ask you `Which?`, which needs a newer clackatoo to answer".into(),
+                choices: Vec::new(),
+                own: false,
+                form: Some(form.clone()),
+                plan: None,
+            }),
+            ..ChatNode::default()
+        };
+        let drawn = footer(&State::default(), Some(&node));
+        let ids: Vec<&str> = (drawn.find_all("id").into_iter())
+            .filter_map(|element| element.get("id"))
+            .collect();
+        assert_eq!(
+            ids,
+            ["form-0-0", "form-0-1", "form-1", "form-2", FORM_PROBLEM]
+        );
+        let typed = (drawn.find_all("type").into_iter())
+            .find(|element| element.get("id") == Some("form-1"))
+            .and_then(|element| element.get("type"));
+        assert_eq!(typed, Some("password"), "a secret is hidden as it's typed");
+        let actions: Vec<&str> = (drawn.find_all("data-action").into_iter())
+            .filter_map(|element| element.get("data-action"))
+            .collect();
+        assert_eq!(
+            actions,
+            [Action::Fill(3).encode(), Action::Decline(3).encode()]
+        );
+        let answers = form_answers(
+            &form,
+            |id| (id == "form-1").then(|| "s3cret".to_owned()),
+            |id| id == "form-0-1",
+        );
+        assert_eq!(
+            answers,
+            [
+                ("db".to_owned(), FieldValue::Text("lite".into())),
+                ("token".to_owned(), FieldValue::Text("s3cret".into())),
+                ("go".to_owned(), FieldValue::Toggle(false)),
+            ]
+        );
+        assert_eq!(form.problem(&answers), None);
+    }
+
+    #[test]
+    fn a_plan_is_shown_with_the_pages_own_question() {
+        let node = ChatNode {
+            question: Some(Question {
+                id: 1,
+                title: "Approve Plan".into(),
+                choices: Vec::new(),
+                own: false,
+                form: None,
+                plan: Some("1. Test it".into()),
+            }),
+            ..ChatNode::default()
+        };
+        let text = footer(&State::default(), Some(&node)).all_text();
+        assert!(text.contains("Test it"));
+        assert!(text.contains("Go ahead with this plan?"));
+        assert!(!text.contains("Allow the agent"));
     }
 
     #[test]
