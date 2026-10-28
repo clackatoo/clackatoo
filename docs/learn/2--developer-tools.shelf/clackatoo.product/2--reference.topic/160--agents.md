@@ -355,7 +355,7 @@ An agent can work with your other chats through more of clackatoo's tools.
 
 | Tool | Does |
 |---|---|
-| `list_chats` | Lists the chats: each one's number, agent, title, folder and workspace, and whether it's idle, working or waiting for you. Chats in other workspaces show only their number and title. |
+| `list_chats` | Lists the chats in its workspace and family: each one's number, agent, title, folder and workspace, and whether it's idle, working or waiting for you. |
 | `send_to_chat` | Sends a chat a message. |
 | `read_chat` | Reads a chat's last turns: 3, unless it asks for up to 20. |
 | `start_chat` | Starts a subagent: a chat with the agent, profile and folder it picks, sent a first message. It runs in the background, as a card in this chat, unless it asks for a pane. |
@@ -415,11 +415,13 @@ prompt = "You review changes for bugs. Say what's wrong, briefly."
 
 A message from another chat shows with "From chat 3 · Claude Code · …" over it, and reaches the agent framed as another agent's request, not yours: it's told to ask you before anything destructive or outside its task. If the chat is busy, the message waits until its answer ends; up to 8 can wait, and stopping the chat drops them, and says so.
 
-Starting and messaging chats never asks you first, as in other agent harnesses, but an agent can never gain, through another chat, what its own chat isn't allowed:
+Starting and messaging chats never asks you first. Instead, what an agent can't do through another chat is refused, and the agent is told to ask you, so it can never gain, through another chat, what its own chat isn't allowed:
 
-- A message to a chat whose Tools setting is looser than the sender's, or whose [limits](#profiles) are fewer, is refused.
-- A chat an agent starts gets its parent's Tools setting and mode, and its limits (see [Profiles](#profiles)), so its own tools ask whatever its parent's would.
-- Reading or waiting on a chat needs the same workspace or the same family: the chat that started it, the chats it started and their siblings. Of any other chat, an agent waits only for the answers to its own messages.
+- An agent lists, messages, reads and waits for only chats in its own workspace or family: the chat that started it, the chats it started and their siblings. Chats in other workspaces are out of its sight, a workspace lent to another machine included.
+- A message to a chat that may do more is refused: one whose Tools setting is looser than the sender's, whose [limits](#profiles) are fewer, counting what each one's mode rules out, or whose mode comes later among those its agent offers, the first, such as Manual or Read-only, being the safest. A chat with another agent that offers no modes can't be messaged, unless both chats use that agent.
+- A chat is started only inside the project of the chat starting it: the git repository its folder is in, or else that folder.
+- A chat an agent starts gets its parent's Tools setting and limits (see [Profiles](#profiles)). With the same agent, it gets its parent's mode; with another, that agent's safest. An agent that offers no modes can't be held to its safest, so a chat started with one fails to start, and says so.
+- What one agent sends another shows its control characters and any that change the direction or look of text around them, as `^G` or `<U+202E>`, so nothing in it hides from you.
 - One message of yours can lead to at most 16 turns of agents' work across all chats, and a chat of yours can have at most 8 chats started under it (finished ones in the background close to make room), 4 of them working at once, a message waking one counting too, 2 deep. An agent can't wait for a chat that's waiting for it.
 
 Which chat started which, and messages waiting their turn, last through an upgrade. Boards, shared between agents and you, have tools of their own: see [Boards](~clackatoo/reference/boards).
