@@ -5689,6 +5689,71 @@ fn a_chat_answering_on_another_machine_goes_on_after_it_upgrades() {
     );
 }
 
+/// A message one chat's agent sent another, waiting for that chat's turn
+/// to end, goes on through a real upgrade, which hands it over in the
+/// chat's inbox: the turn it waited for is continued, and then it's sent
+/// (CLACKA-186). The daemon runs in a process of its own here, serving
+/// its agents' tools through the fake agent's relay.
+#[test]
+fn a_message_waiting_a_chats_turn_goes_on_through_a_real_upgrade() {
+    use clackatoo_protocol::AgentTools;
+    let world = World::new();
+    let (child, socket) = process_daemon(&world, "laptop");
+    let mut client = Client::connect(&socket).unwrap();
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    let tooled = |tools| match chat() {
+        PaneTerminal::Agent(new) => PaneTerminal::Agent(NewAgent { tools, ..new }),
+        other => other,
+    };
+    client
+        .new_workspace(Some("work".into()), tooled(AgentTools::Allow))
+        .unwrap();
+    let shown = client.watch_workspaces().unwrap();
+    let work = (shown.list.iter())
+        .find(|workspace| workspace.name == "work")
+        .unwrap();
+    let a = first_terminal(work);
+    let pane = client.new_tab(work.id, tooled(AgentTools::Ask)).unwrap();
+    let shown = client.watch_workspaces().unwrap();
+    let (_, _, pane) = shown.find_pane(pane).unwrap();
+    let b = pane.content.terminal().unwrap();
+    for chat in [a, b] {
+        attach_to(&mut client, chat);
+        wait_for_chat(&mut client, chat, |node| {
+            node.state == clackatoo_protocol::ChatState::Ready
+        });
+    }
+    // b's agent is busy, so a's message to it waits its turn.
+    client.chat(b, ChatAction::Send("wait".into())).unwrap();
+    wait_for_chat(&mut client, b, |node| {
+        node.state == clackatoo_protocol::ChatState::Answering
+    });
+    let message = format!("mcp send_to_chat {{\"chat\":{b},\"message\":\"hi b\"}}");
+    client.chat(a, ChatAction::Send(message)).unwrap();
+    let node = wait_for_chat(&mut client, a, |node| {
+        last_words(node).contains("send_to_chat: ")
+    });
+    assert!(
+        last_words(&node).contains(&format!(
+            "send_to_chat: Sent. Chat {b} is busy answering, so it waits its turn (1 waiting)."
+        )),
+        "{node:#?}"
+    );
+
+    upgrade_process(&child, &socket);
+    let mut client = Client::connect(&socket).unwrap();
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    attach_to(&mut client, b);
+    // Its turn goes on, as the upgrade asks, and ends; then the message.
+    let node = wait_for_chat(&mut client, b, |node| {
+        node.turns.len() == 2 && node.turns[1].end.is_some()
+    });
+    assert!(last_words(&node).contains("echo: hi b"), "{node:#?}");
+    let turn = &node.turns[1];
+    assert_eq!(turn.prompt, "hi b");
+    assert_eq!(turn.from.as_ref().map(|from| from.chat), Some(a));
+}
+
 #[test]
 fn a_chat_of_this_machine_in_another_machines_layout_goes_on_after_this_one_restarts() {
     let mut mixed = Mixed::new();
@@ -6171,6 +6236,12 @@ fn process_daemon(world: &World, host: &str) -> (Killed, PathBuf) {
         .env("XDG_CONFIG_HOME", state.join("config"))
         .env("HOME", &dir)
         .env("CLACKATOO_AGENT", example("fake_agent"))
+        // Agents reach clackatoo's tools through the fake's relay, as
+        // through `clackatoo mcp`, in chats whose tools are on.
+        .env(
+            "CLACKATOO_MCP",
+            format!("{} mcp", example("fake_agent").display()),
+        )
         .env("SHELL", "/bin/sh")
         .env("CLACKATOO_DISPLAY", "off")
         .env("CLACKATOO_WORKSPACES", "off")
