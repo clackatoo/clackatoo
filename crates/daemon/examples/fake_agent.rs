@@ -27,14 +27,14 @@
 //! | `background` | Runs `npm run dev` in the background, as Claude Code's adapter says one to a client that asked for AIR's `asyncTasks`: a command that finishes at once, then a task, `t1`, "Serve the docs", that goes on; and says `started`, or `no tasks` to a client that didn't ask |
 //! | `finish` | Says task `t1` completed, then `finished` |
 //! | `wake` | Says `started` and ends its turn; 300 ms later takes a turn by itself, as Claude Code does when something it ran in the background ends: runs `git commit` and says `committed`. To a client that asked for AIR's `asyncTasks`, it says the turn starts and ends, as a task of kind `turn` |
-//!
 //! | `wake-wait` | As `wake`, but its turn goes on, saying `working`, until it's cancelled: then it says `late` as words in flight would, and that the turn stopped |
+//! | `wake-missed` | As `wake`, to a client that asked for AIR's `asyncTasks`, but as if what said the turn started went missing: it runs `git commit`, says `committed`, and says task `autonomous-turn-9` completed |
+//! | anything else | `echo:` and the message, in two pieces |
 //!
 //! Asked to stop a task (`_session/async_task/stop`), it says it stopped
 //! `t1`, and that it did, and gives the notice "Task stopped by user", as
 //! Claude Code's adapter does: as a notice to a client that can show them,
 //! else as words; any other task it says it didn't stop.
-//! | anything else | `echo:` and the message, in two pieces |
 //!
 //! A message from another chat's agent comes framed as clackatoo frames
 //! it, saying which chat sent it: the script is chosen by the message
@@ -1063,6 +1063,24 @@ impl Fake {
                         );
                     }
                     say(&session, "working\n");
+                });
+            }
+            "wake-missed" => {
+                say(&session, "started\n");
+                done(&id, "end_turn");
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    update(
+                        &session,
+                        &json!({ "sessionUpdate": "tool_call", "toolCallId": "w1", "title": "git commit",
+                                 "kind": "execute", "status": "completed" }),
+                    );
+                    say(&session, "committed\n");
+                    update(
+                        &session,
+                        &json!({ "sessionUpdate": "async_task_state_update",
+                                 "asyncTaskId": "autonomous-turn-9", "state": "completed" }),
+                    );
                 });
             }
             "wake" => {

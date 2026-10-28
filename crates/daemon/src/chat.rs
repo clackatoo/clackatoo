@@ -429,9 +429,6 @@ pub(crate) struct HostedChat {
     /// opens no turn, as what was in flight when one was stopped comes
     /// after it.
     wake_held: Option<std::time::Instant>,
-    /// What the agent said while the chat answered nothing and it took no
-    /// turn: shown as the notice.
-    idle_said: String,
     /// The session the chat's tasks were started in: a stop goes to that
     /// session only.
     tasks_session: Option<String>,
@@ -615,7 +612,6 @@ impl HostedChat {
             woke_by_task: None,
             woken_stopping: false,
             wake_held: None,
-            idle_said: String::new(),
             tasks_session: None,
             own_tools: VecDeque::new(),
             limits: Limits::default(),
@@ -2971,7 +2967,6 @@ impl HostedChat {
 
     fn push_turn(&mut self, turn: Turn) {
         self.diffs.clear();
-        self.idle_said.clear();
         self.woken_stopping = false;
         self.node.turns.push(turn);
         self.patch_turn(self.node.turns.len() - 1);
@@ -5473,13 +5468,97 @@ mod tests {
         )
         .unwrap();
         assert!(!chat.wakes(&words, true), "only its turn task opens one");
-        assert!(chat.wakes(&words, false));
-        assert!(chat.said_while_idle(&words));
+        assert!(chat.said_while_idle(&words, true));
         assert!(chat.node.turns.is_empty());
         assert_eq!(
             chat.node.notice.as_deref(),
             Some("Fast mode turned off: the model has none.")
         );
+        // Only the latest shows.
+        let chunk = |kind: &str, text: &str| -> SessionUpdate {
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate": kind, "content": { "type": "text", "text": text },
+            }))
+            .unwrap()
+        };
+        assert!(chat.said_while_idle(
+            &chunk("agent_message_chunk", "**Task stopped by user**"),
+            true
+        ));
+        assert_eq!(chat.node.notice.as_deref(), Some("Task stopped by user"));
+        // Its thinking with no turn open is it at work.
+        assert!(!chat.said_while_idle(&chunk("agent_thought_chunk", "Let me look."), true));
+        assert!(chat.wakes(&chunk("agent_thought_chunk", "Let me look."), true));
+    }
+
+    #[test]
+    fn words_shaped_as_a_notice_from_an_agent_that_doesnt_say_when_it_wakes_are_one() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        let chunk = |kind: &str, text: &str| -> SessionUpdate {
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate": kind, "content": { "type": "text", "text": text },
+            }))
+            .unwrap()
+        };
+        for (kind, text, shown) in [
+            (
+                "agent_message_chunk",
+                "**Fast mode turned off:** none.",
+                "Fast mode turned off: none.",
+            ),
+            (
+                "agent_message_chunk",
+                "Warning: deprecated flag\n\n",
+                "Warning: deprecated flag",
+            ),
+            (
+                "agent_message_chunk",
+                "Config warning: bad key",
+                "Config warning: bad key",
+            ),
+            (
+                "agent_message_chunk",
+                "*Context compacted to fit the model's context window.*\n\n",
+                "Context compacted to fit the model's context window.",
+            ),
+            (
+                "agent_thought_chunk",
+                "Model rerouted from a to b (busy).",
+                "Model rerouted from a to b (busy).",
+            ),
+        ] {
+            assert!(chat.said_while_idle(&chunk(kind, text), false), "{text}");
+            assert_eq!(chat.node.notice.as_deref(), Some(shown));
+        }
+        assert!(chat.node.turns.is_empty());
+        // Anything else is it at work.
+        let words = chunk("agent_message_chunk", "All done: committed.");
+        assert!(!chat.said_while_idle(&words, false));
+        assert!(chat.wakes(&words, false));
+    }
+
+    #[test]
+    fn a_turn_task_whose_start_went_missing_opens_the_turn_as_it_goes_on() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        let ended = chat.task_said(crate::agent::Task::Progress {
+            id: "autonomous-turn-1".into(),
+            description: Some("A scheduled wakeup fired.".into()),
+        });
+        assert_eq!(ended, None);
+        assert!(chat.woken_says_when_it_ends());
+        assert_eq!(
+            chat.node.turns[0].woke.as_deref(),
+            Some("A scheduled wakeup fired.")
+        );
+        assert!(chat.node.tasks.is_empty());
+        let ended = chat.task_said(crate::agent::Task::State {
+            id: "autonomous-turn-1".into(),
+            state: "completed".into(),
+            summary: None,
+        });
+        assert_eq!(ended, Some(StopReason::EndTurn));
     }
 
     #[test]

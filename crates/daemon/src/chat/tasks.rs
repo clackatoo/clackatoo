@@ -103,6 +103,28 @@ impl HostedChat {
     /// by itself, if `said` is of one: one starting opens that turn, if
     /// none is being answered, and one ending ends it.
     fn turn_task_said(&mut self, said: &Task) -> TurnTask {
+        // One whose start went missing is known by its name.
+        let unseen = |id: &str, chat: &Self| {
+            id.starts_with(TURN_TASK) && chat.woke_by_task.as_deref() != Some(id)
+        };
+        match said {
+            Task::Progress { id, description } if unseen(id, self) => {
+                if !self.woken() {
+                    self.wake(description.clone());
+                }
+                if self.woken() && self.woke_by_task.is_none() {
+                    self.woke_by_task = Some(id.clone());
+                }
+                return TurnTask::Taken;
+            }
+            Task::State { id, .. } if unseen(id, self) => {
+                if !self.woken() || self.woke_by_task.is_some() {
+                    return TurnTask::Taken;
+                }
+                self.woke_by_task = Some(id.clone());
+            }
+            _ => {}
+        }
         match said {
             Task::Spawned {
                 id,
@@ -232,6 +254,10 @@ impl HostedChat {
         }
     }
 }
+
+/// How Claude Code's adapter names the task that stands for a turn it
+/// takes by itself, which tells one apart whose start went missing.
+const TURN_TASK: &str = "autonomous-turn-";
 
 /// What a task the agent said something of was to a turn it takes by
 /// itself.

@@ -30,24 +30,26 @@ use super::{HostedChat, Link, now};
 /// opens no new turn, nor shows as a notice: it was in flight.
 const WAKE_HELD: Duration = Duration::from_secs(2);
 
-/// The most bytes of what an agent says with no turn open kept, as a
-/// notice.
-const IDLE_SAID: usize = 600;
-
 impl HostedChat {
     /// Whether `update`, come while the chat answers nothing, is the agent
-    /// at work by itself: words, thinking, or a tool it starts, from an
+    /// at work by itself: thinking or a tool it starts, or words from an
     /// agent that doesn't say when it takes a turn by itself (`!tells`).
     /// What's said of a tool of a turn that has ended, or of settings and
-    /// usage, isn't.
+    /// usage, isn't, nor a notice (see [`said_while_idle`]).
+    ///
+    /// [`said_while_idle`]: Self::said_while_idle
     pub(crate) fn wakes(&self, update: &SessionUpdate, tells: bool) -> bool {
-        if tells || self.answering() || self.link != Link::Open || self.told_again() {
+        if self.answering() || self.link != Link::Open || self.told_again() {
             return false;
         }
         if self.wake_held.is_some_and(|until| Instant::now() < until) {
             return false;
         }
         match update {
+            // Its words with no turn open are a notice, from an agent that
+            // says when it takes a turn; its thinking or a tool it starts
+            // is it at work, as one whose turn's start went missing.
+            SessionUpdate::AgentMessageChunk(_) if tells => false,
             SessionUpdate::AgentMessageChunk(chunk) | SessionUpdate::AgentThoughtChunk(chunk) => {
                 matches!(&chunk.content, ContentBlock::Text(text) if !text.text.trim().is_empty())
             }
@@ -78,31 +80,39 @@ impl HostedChat {
         true
     }
 
-    /// Takes `update` if it's words the agent says with no turn open and
-    /// no turn taken for them: they show as the notice. Words that were in
-    /// flight as a turn of its own was stopped go nowhere. Returns whether
-    /// it took it.
-    pub(crate) fn said_while_idle(&mut self, update: &SessionUpdate) -> bool {
+    /// Takes `update` if it's something the agent says with no turn open
+    /// that's a notice, not the agent at work: the chat shows it as its
+    /// notice, the latest only. From an agent that `tells` when it takes a
+    /// turn by itself, that's any words (as "Task stopped by user", from an
+    /// adapter that can't send it as a notice); from another, only words
+    /// shaped as the adapters shape their notices (see [`notice_shaped`]).
+    /// What was in flight as a turn of its own was stopped goes nowhere.
+    /// Returns whether it took it.
+    pub(crate) fn said_while_idle(&mut self, update: &SessionUpdate, tells: bool) -> bool {
         if self.answering() || self.told_again() {
             return false;
         }
-        let SessionUpdate::AgentMessageChunk(chunk) = update else {
+        let (SessionUpdate::AgentMessageChunk(chunk) | SessionUpdate::AgentThoughtChunk(chunk)) =
+            update
+        else {
             return false;
         };
+        let thought = matches!(update, SessionUpdate::AgentThoughtChunk(_));
         let ContentBlock::Text(text) = &chunk.content else {
-            return true;
+            return !thought;
         };
         if self.wake_held.is_some_and(|until| Instant::now() < until) {
             return true;
         }
-        if self.idle_said.len() < IDLE_SAID {
-            self.idle_said.push_str(&text.text);
-        }
-        // What Claude Code's adapter makes bold, as its notices, plain.
-        let said = super::clean(&self.idle_said.replace("**", ""));
+        let said = match notice_shaped(&text.text) {
+            Some(said) => said,
+            None if tells && !thought => text.text.clone(),
+            None => return false,
+        };
+        let said = super::clean(&said);
         let said = said.split_whitespace().collect::<Vec<_>>().join(" ");
         if !said.is_empty() {
-            self.set_notice(Some(said));
+            self.set_notice(Some(super::one_line_notice(&said)));
         }
         true
     }
@@ -146,4 +156,25 @@ impl HostedChat {
         (turn.items.iter())
             .any(|item| matches!(item, Item::Tool(tool) if tool.status == ToolStatus::Running))
     }
+}
+
+/// What `text` says, if it's shaped as the adapters shape a notice to a
+/// client that can't take one: Claude Code's `**Title:** what` or
+/// `**Title**`, and Codex's `Config warning: …`, `Warning: …`,
+/// `*Context compacted …*` and `Model rerouted from …`. Its bold and
+/// slant markers are left out.
+fn notice_shaped(text: &str) -> Option<String> {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix("**")
+        && let Some((title, after)) = rest.split_once("**")
+        && !title.is_empty()
+    {
+        return Some(format!("{title}{after}"));
+    }
+    let codex = ["Config warning: ", "Warning: ", "Model rerouted from "];
+    if codex.iter().any(|start| text.starts_with(start)) {
+        return Some(text.to_owned());
+    }
+    (text.starts_with("*Context compacted") && text.ends_with('*'))
+        .then(|| text.trim_matches('*').to_owned())
 }

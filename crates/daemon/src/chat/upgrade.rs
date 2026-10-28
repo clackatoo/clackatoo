@@ -27,8 +27,10 @@ impl HostedChat {
                 return None;
             }
             // A turn the agent took by itself is nothing the user asked
-            // for: it goes on only if a tool of it was cut off.
-            if self.woken() && !self.tool_running() {
+            // for, so there's no request of theirs to go on with: it's
+            // handed over ended, and the agent's own next turn, if it
+            // takes one, comes as before.
+            if self.woken() {
                 return None;
             }
             Some(ChatContinuation {

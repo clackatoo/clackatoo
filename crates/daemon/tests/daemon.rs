@@ -2714,6 +2714,20 @@ fn stopping_a_turn_an_agent_took_by_itself_ends_it() {
 }
 
 #[test]
+fn a_turn_claude_takes_by_itself_whose_start_went_missing_still_shows_and_ends() {
+    // No quiet ends it here: what Claude Code says of its turn does.
+    let daemon = TestDaemon::start_with_agent(|_| vec![fake_agent().into()]);
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    ask(&mut client, chat, "wake-missed");
+    let node = wait_for_turns(&mut client, chat, 2);
+    assert_eq!(node.turns[1].woke.as_deref(), Some(""));
+    assert_eq!(last_words(&node), "committed\n");
+    assert_eq!(last_outcome(&node), Some(&Outcome::Done));
+    assert!(node.tasks.is_empty(), "{:#?}", node.tasks);
+}
+
+#[test]
 fn stopping_a_turn_claude_took_by_itself_waits_for_it_to_say_it_ended() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();

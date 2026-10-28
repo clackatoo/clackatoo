@@ -799,18 +799,32 @@ impl Daemon {
                 // The agent has gone, which the chat has heard or will.
                 _ => {}
             }
-            if woken && let Some(chat) = self.chat(id) {
-                if chat.stop_woken() {
-                    // Ends as the agent says, or else soon.
-                    self.agents.woken.insert(id, Instant::now() + WOKEN_STOP);
-                } else {
-                    self.agents.woken.remove(&id);
-                    self.prompt_answered(id, Ok(StopReason::Cancelled), false);
-                }
+            if woken {
+                self.stop_woken(id);
             }
         }
         if let Some(agent) = agent {
             self.flush_agent(agent);
+        }
+    }
+
+    /// The user stopped the turn the chat in `id`'s agent took by itself,
+    /// and the agent was asked to stop: it ends as the agent says it has,
+    /// if it says when it does, or at most [`WOKEN_STOP`] later; or else
+    /// now, as no answer comes to end it.
+    fn stop_woken(&mut self, id: TerminalId) {
+        let Some(chat) = self.chat(id) else {
+            return;
+        };
+        let again = chat.woken_stopping();
+        if chat.stop_woken() {
+            // Asking again doesn't put that off.
+            if !again {
+                self.agents.woken.insert(id, Instant::now() + WOKEN_STOP);
+            }
+        } else {
+            self.agents.woken.remove(&id);
+            self.prompt_answered(id, Ok(StopReason::Cancelled), false);
         }
     }
 
@@ -1046,7 +1060,7 @@ impl Daemon {
         }
         let images = self.chat(id)?.image_sources(&mut update);
         let chat = self.chat(id)?;
-        if tells && chat.said_while_idle(&update) {
+        if chat.said_while_idle(&update, tells) {
             return Some(id);
         }
         // The agent at work with no turn open took one by itself.
