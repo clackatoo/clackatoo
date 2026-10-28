@@ -99,7 +99,7 @@ impl Editor {
             at: self.cursor.at,
             revision: copy.revision(),
             mode: self.mode,
-            may_ask: may_ask && self.highlight_uses && self.prompt.is_none(),
+            may_ask: may_ask && self.highlight_uses && !self.prompting(),
             offers: copy.features().uses,
         };
         if self.uses.seen == Some(seen) {
@@ -162,7 +162,7 @@ impl Editor {
             return true;
         };
         let may_ask = (self.uses.seen).is_some_and(|seen| seen.may_ask);
-        if !focused || !may_ask || self.prompt.is_some() || self.mode != Mode::Normal {
+        if !focused || !may_ask || self.prompting() || self.mode != Mode::Normal {
             return true;
         }
         let text = self.text(copy);

@@ -1,21 +1,22 @@
-//! `incsearch`: while `/` or `?` is typed, the cursor goes to the match the
-//! search would go to from where it started, the view follows it, and its
-//! matches are lit, as Neovim's `incsearch` shows them. Esc puts the
-//! cursor, the view and what was lit back; Enter searches from where it
-//! started, as without it, so it finds what was shown, and keeps the view.
+//! `/` `?` `n` `N` `*` `#` in an editor, on the search every pane shares
+//! (see [`crate::vim::search`]): Vim's patterns, found in the copy's text,
+//! with `incsearch`'s preview and `hlsearch`'s lit matches.
 //!
-//! It's worked out as the window settles before it draws, not at each key,
-//! so keys typed faster than frames cost one search between them, and a
-//! macro's `/foo<CR>`, typed within one, none. Each looks no further than
-//! [`REACH`] bytes from the cursor, each way round the file's ends: one
-//! that would have to look further, or can't be sure it finds what Enter
-//! would (see [`near`]), shows nothing, rather than a match Enter wouldn't
-//! go to. Edits from elsewhere while it's typed move where it started, but
+//! A preview, worked out as the window settles before it draws, looks no
+//! further than [`REACH`] bytes from the cursor, each way round the file's
+//! ends: one that would have to look further, or can't be sure it finds
+//! what Enter would (see [`near`]), shows nothing, rather than a match
+//! Enter wouldn't go to. A count before `/` isn't shown till it's searched
+//! for. Edits from elsewhere while it's typed move where it started, but
 //! aren't shown afresh till the next key.
 
 use super::pattern::{Found, Pattern};
 use super::wrap::Top;
-use super::{BufferCopy, Cursor, Editor, Lighting, Matching, Point, Prompt, Shared, Text};
+use super::{
+    BufferCopy, Cursor, Editor, Lighting, MatchesIn, Matching, Point, Shared, Text, back_matches,
+    find, on_matches,
+};
+use crate::vim::search::{self, Find, Finding, Kinds, Last, Restores, Search, Searcher};
 
 /// How far from the cursor a preview looks for a match, in bytes, before
 /// and after going round the file's ends.
@@ -28,105 +29,61 @@ const CHUNK: usize = 4 << 10;
 /// go through every character.
 const MOST_TRIES: usize = 1 << 14;
 
-/// Where a search being typed started, to put back on Esc, and what was
-/// last shown of it.
+/// The kinds an editor's search works in: a match from its first
+/// character to its last, and Vim's patterns.
 #[derive(Debug)]
-pub(super) struct Start {
+pub(crate) struct InFile;
+
+impl Kinds for InFile {
+    type Start = Start;
+    type Found = (Point, Point);
+    type Lit = Lighting;
+    type LitKey = MatchesIn;
+    type LitMatch = (Point, Point);
+}
+
+/// Where a search being typed started, to put back.
+#[derive(Debug)]
+pub(crate) struct Start {
     cursor: Cursor,
     /// The view's top and left, unless the text has been replaced since.
     view: Option<(Top, usize)>,
-    matching: Option<Lighting>,
-    found: Option<(Point, Point)>,
-    /// What was typed when it was last shown, if it has been.
-    previewed: Option<String>,
     /// Where the cursor was in the text, as a byte, before an edit from
     /// elsewhere changes it (see [`Editor::hold`]).
     held: Option<usize>,
 }
 
-impl Editor {
-    /// A search starts being typed: where it starts is kept, with
-    /// `incsearch`, to show it from and put back.
-    pub(super) fn start_search_preview(&mut self) {
-        self.search_start = self.incsearch.then(|| Start {
+impl Start {
+    /// Where the cursor was.
+    pub(super) fn at(&self) -> Point {
+        self.cursor.at
+    }
+}
+
+/// An editor as the shared search drives it, with the copy of the file it
+/// shows and what's shared between editors.
+pub(super) struct Searching<'a> {
+    pub(super) editor: &'a mut Editor,
+    pub(super) copy: &'a BufferCopy,
+    pub(super) shared: &'a Shared,
+}
+
+impl Restores for Editor {
+    type Kinds = InFile;
+
+    fn search(&mut self) -> &mut Search<InFile> {
+        &mut self.search
+    }
+
+    fn keep(&self) -> Start {
+        Start {
             cursor: self.cursor,
             view: Some((self.top, self.left)),
-            matching: self.matching.clone(),
-            found: self.found,
-            previewed: None,
             held: None,
-        });
+        }
     }
 
-    /// Shows where the search being typed would go, if what's typed has
-    /// changed since it was last shown: from where it started, the cursor
-    /// going to the match, the view following, and the matches lit. A
-    /// pattern that isn't one yet, or no match near enough, shows nothing.
-    /// A search no longer being typed, by a way that didn't put things
-    /// back, is put back now.
-    pub(crate) fn preview_search(&mut self, copy: &BufferCopy, shared: &Shared) {
-        let Some(start) = &self.search_start else {
-            return;
-        };
-        let Some(Prompt::Search { line, backward }) = &self.prompt else {
-            self.end_search_preview(false);
-            return;
-        };
-        if start.previewed.as_deref() == Some(line.text()) {
-            return;
-        }
-        let (typed, backward) = (line.text().to_owned(), *backward);
-        self.put_back_search_start(false);
-        if let Some(start) = &mut self.search_start {
-            start.previewed = Some(typed.clone());
-        }
-        if typed.is_empty() || !copy.loaded() {
-            return;
-        }
-        self.found = None;
-        let matching = Matching::Typed(self.case);
-        let tilde = (shared.substituted.as_ref()).map_or("", |last| last.replacement.as_str());
-        let Ok(pattern) = Pattern::new(&typed, matching, tilde, copy.words()) else {
-            self.matching = None;
-            return;
-        };
-        self.light_matches(&typed, matching, shared);
-        let (whole, len) = self.haystack(copy);
-        pattern.searching(&whole);
-        // What's lit is matched with this, compiled once, its words read
-        // once.
-        if let Some(lighting) = &self.matching {
-            *lighting.compiled.borrow_mut() = Some((copy.words(), Some(pattern.clone())));
-        }
-        let text = self.text(copy);
-        let from = text.byte_at(self.cursor.at);
-        let Some(found) = near(&whole[..len], (&pattern, literal(&typed)), from, backward) else {
-            return;
-        };
-        // The last character's first byte.
-        let last = (whole[..found.end].char_indices().next_back())
-            .map_or(found.start, |(at, _)| at)
-            .max(found.start);
-        self.found = Some((text.point_of(found.start), text.point_of(last)));
-        self.cursor = Cursor::new(text.point_of(found.start));
-        drop(text);
-        self.follow(copy);
-    }
-
-    /// Stops showing the search being typed: the cursor goes back to where
-    /// it started, and what was lit; and the view, unless `keep_view`, as
-    /// Enter keeps it.
-    pub(super) fn end_search_preview(&mut self, keep_view: bool) {
-        self.put_back_search_start(keep_view);
-        self.search_start = None;
-    }
-
-    /// Puts the cursor back where the search being typed started, and
-    /// what was lit, and the view unless `keep_view`.
-    fn put_back_search_start(&mut self, keep_view: bool) {
-        let Some(start) = &self.search_start else {
-            return;
-        };
+    fn put_back(&mut self, start: &mut Start, keep_view: bool) {
         self.cursor = start.cursor;
         match start.view {
             _ if keep_view => {}
@@ -134,14 +91,137 @@ impl Editor {
             // The view then is gone: it goes to the cursor.
             None => self.follow_due = true,
         }
-        self.matching = start.matching.clone();
-        self.found = start.found;
+    }
+}
+
+impl Restores for Searching<'_> {
+    type Kinds = InFile;
+
+    fn search(&mut self) -> &mut Search<InFile> {
+        &mut self.editor.search
+    }
+
+    fn keep(&self) -> Start {
+        Restores::keep(&*self.editor)
+    }
+
+    fn put_back(&mut self, start: &mut Start, keep_view: bool) {
+        Restores::put_back(&mut *self.editor, start, keep_view);
+    }
+}
+
+impl Searcher for Searching<'_> {
+    /// As a search typed matches case, as `ignorecase` and `smartcase`
+    /// say, or a word's as `ignorecase` alone does; with `~` the last
+    /// replacement. Compiled once, with the words of the copy's language.
+    fn compile(&self, last: &Last) -> Result<Lighting, String> {
+        let matching = if last.word {
+            Matching::Always(self.editor.case)
+        } else {
+            Matching::Typed(self.editor.case)
+        };
+        let pattern = (self.editor).pattern(&last.query, matching, self.copy, self.shared)?;
+        let lighting = Lighting::new(&last.query, matching, self.shared);
+        *lighting.compiled.borrow_mut() = Some((self.copy.words(), Some(pattern)));
+        Ok(lighting)
+    }
+
+    fn find(&mut self, find: Find<'_, InFile>) -> Finding<(Point, Point)> {
+        let (editor, copy) = (&mut *self.editor, self.copy);
+        let Some(pattern) = find.lit.pattern(copy.words()) else {
+            return Finding::Missed(String::new());
+        };
+        let (whole, len) = editor.haystack(copy);
+        let hay = &whole[..len];
+        let text = editor.text(copy);
+        let from = text.byte_at(editor.cursor.at);
+        let found = if find.preview.is_some() {
+            if find.count > 1 || !copy.loaded() {
+                return Finding::Missed(String::new());
+            }
+            let literal = literal(&find.last.query);
+            near(hay, (&pattern, literal), from, find.backward).map(|found| (found, false))
+        } else {
+            nth(hay, &pattern, from, find.backward, find.count)
+        };
+        let Some((found, wrapped)) = found else {
+            let query = &find.last.query;
+            return Finding::Missed(pattern.not_found(format!("{query} isn't in the file")));
+        };
+        // The last character's first byte.
+        let last = (whole[..found.end].char_indices().next_back())
+            .map_or(found.start, |(at, _)| at)
+            .max(found.start);
+        let at = (text.point_of(found.start), text.point_of(last));
+        Finding::Found { at, wrapped }
+    }
+
+    /// While a search is typed, the view follows at once, as it's put back
+    /// from there.
+    fn go(&mut self, (start, _): (Point, Point)) {
+        self.editor.cursor = Cursor::new(start);
+        if self.editor.search.typing() {
+            self.editor.follow(self.copy);
+        }
+    }
+
+    fn say(&mut self, said: String) {
+        self.editor.status = Some(said);
+    }
+
+    fn fail(&mut self) {
+        self.editor.fail();
+    }
+}
+
+/// The `count`th match of `pattern` in `hay` after byte `from`, or before it
+/// if `backward`, going round the ends, as `n` finds it, and whether it went
+/// round; `None` if there's none, or the pattern gave up. A count goes a
+/// match at a time, as `n` goes, till it's back at the first, and then only
+/// as many as are left of a time round: so no count goes round more than
+/// once, however big.
+fn nth(
+    hay: &str,
+    pattern: &Pattern,
+    from: usize,
+    backward: bool,
+    count: usize,
+) -> Option<(Found, bool)> {
+    let found = find(hay, pattern, from, backward)?;
+    // A match back where it started went all the way round.
+    let wrapped = if backward {
+        found.start >= from
+    } else {
+        found.start <= from
+    };
+    if count <= 1 {
+        return Some((found, wrapped));
+    }
+    let went = if backward {
+        back_matches(hay, pattern, found.start, count - 1)
+    } else {
+        on_matches(hay, pattern, found, count - 1)
+    };
+    let (there, round) = went.filter(|_| !pattern.gave_up())?;
+    Some((there, wrapped || round))
+}
+
+impl Editor {
+    /// Shows where the search being typed would go, with `incsearch` (see
+    /// [`search::preview`]).
+    pub(crate) fn preview_search(&mut self, copy: &BufferCopy, shared: &Shared) {
+        let editor = self;
+        search::preview(&mut Searching {
+            editor,
+            copy,
+            shared,
+        });
     }
 
     /// Notes where the search being typed started in `text`, before an
     /// edit from elsewhere changes it, as the cursor is.
     pub(super) fn hold_search_start(&mut self, text: &Text<'_>) {
-        if let Some(start) = &mut self.search_start {
+        if let Some(start) = self.search.start_mut() {
             start.held = Some(text.byte_at(start.cursor.at));
         }
     }
@@ -150,9 +230,11 @@ impl Editor {
     /// since it was held, with the text around it. The match lit then
     /// isn't followed: it's lit no more.
     pub(super) fn search_start_follows(&mut self, edit: &clackatoo_text::Edit) {
-        if let Some(start) = &mut self.search_start {
+        if let Some(start) = self.search.start_mut() {
             start.held = (start.held).map(|at| edit.map(at, clackatoo_text::Bias::Before));
-            start.found = None;
+        }
+        if let Some(found) = self.search.kept_found_mut() {
+            *found = None;
         }
     }
 
@@ -162,18 +244,23 @@ impl Editor {
     /// it's shown afresh.
     pub(super) fn search_start_replaced(&mut self, copy: &BufferCopy) {
         let text = self.text(copy);
-        if let Some(start) = &mut self.search_start {
+        if let Some(start) = self.search.start_mut() {
             let line = start.cursor.at.line.min(text.last_line());
             let col = start.cursor.at.col.min(text.line_cells(line));
             start.cursor = Cursor::new(text.point_of(text.byte_at(Point { line, col })));
-            (start.view, start.found, start.previewed, start.held) = (None, None, None, None);
+            (start.view, start.held) = (None, None);
         }
+        drop(text);
+        if let Some(found) = self.search.kept_found_mut() {
+            *found = None;
+        }
+        self.search.show_again();
     }
 
     /// Puts where the search being typed started in `text`, edited since
     /// it was held.
     pub(super) fn place_search_start(&mut self, text: &Text<'_>) {
-        if let Some(start) = &mut self.search_start
+        if let Some(start) = self.search.start_mut()
             && let Some(at) = start.held.take()
         {
             start.cursor = start.cursor.moved(text.point_of(at));

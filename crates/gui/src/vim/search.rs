@@ -157,15 +157,11 @@ pub(crate) enum Finding<F> {
     Asked,
 }
 
-/// A pane that's searched.
-pub(crate) trait Searcher {
+/// A pane a search is typed in: what it keeps of its cursor and view as
+/// one starts, and puts back, which is all that starting one and giving it
+/// up need.
+pub(crate) trait Restores {
     type Kinds: Kinds;
-
-    /// Whether the pane's finds are answered later, as the daemon answers
-    /// a terminal's: then the last preview stays shown, the cursor and the
-    /// view where it put them, till the next is answered, so they don't
-    /// flicker back at each key.
-    const ANSWERS_LATER: bool = false;
 
     /// Its search.
     fn search(&mut self) -> &mut Search<Self::Kinds>;
@@ -176,6 +172,15 @@ pub(crate) trait Searcher {
     /// Puts the cursor back as `start` keeps it, and the view, unless
     /// `keep_view`, as Enter keeps it.
     fn put_back(&mut self, start: &mut <Self::Kinds as Kinds>::Start, keep_view: bool);
+}
+
+/// A pane that's searched.
+pub(crate) trait Searcher: Restores {
+    /// Whether the pane's finds are answered later, as the daemon answers
+    /// a terminal's: then the last preview stays shown, the cursor and the
+    /// view where it put them, till the next is answered, so they don't
+    /// flicker back at each key.
+    const ANSWERS_LATER: bool = false;
 
     /// `last` compiled, or why it can't be.
     fn compile(&self, last: &Last) -> Result<<Self::Kinds as Kinds>::Lit, String>;
@@ -327,7 +332,7 @@ impl<K: Kinds> Search<K> {
 /// `/`, or `?` if `backward`, `count` typed before it: starts typing a
 /// search in the bar. With `incsearch`, where it starts is kept, to show
 /// it from and put back.
-pub(crate) fn start<P: Searcher>(pane: &mut P, backward: bool, count: Option<usize>) {
+pub(crate) fn start<P: Restores>(pane: &mut P, backward: bool, count: Option<usize>) {
     give_up(pane);
     let start = pane.search().incsearch.then(|| pane.keep());
     let search = pane.search();
@@ -401,7 +406,7 @@ fn accept<P: Searcher>(pane: &mut P) {
 
 /// Gives up the search being typed, if one is, as Esc and leaving the pane
 /// do: the cursor, the view and what was lit are put back.
-pub(crate) fn give_up<P: Searcher>(pane: &mut P) {
+pub(crate) fn give_up<P: Restores>(pane: &mut P) {
     if let Some(typing) = pane.search().typing.take() {
         put_back(pane, typing.start, false);
     }
@@ -409,7 +414,7 @@ pub(crate) fn give_up<P: Searcher>(pane: &mut P) {
 
 /// Puts back what `started` kept: the cursor, what was lit, and the view
 /// unless `keep_view`.
-fn put_back<P: Searcher>(pane: &mut P, started: Option<Started<P::Kinds>>, keep_view: bool) {
+fn put_back<P: Restores>(pane: &mut P, started: Option<Started<P::Kinds>>, keep_view: bool) {
     let Some(mut started) = started else {
         return;
     };
@@ -420,7 +425,7 @@ fn put_back<P: Searcher>(pane: &mut P, started: Option<Started<P::Kinds>>, keep_
 }
 
 /// Puts back what the search being typed kept, keeping it to show from.
-fn put_back_kept<P: Searcher>(pane: &mut P) {
+fn put_back_kept<P: Restores>(pane: &mut P) {
     let Some(typing) = &mut pane.search().typing else {
         return;
     };
@@ -624,7 +629,7 @@ mod tests {
         type LitMatch = usize;
     }
 
-    impl Searcher for Places {
+    impl Restores for Places {
         type Kinds = Self;
 
         fn search(&mut self) -> &mut Search<Self> {
@@ -639,6 +644,9 @@ mod tests {
                 self.top = start.1;
             }
         }
+    }
+
+    impl Searcher for Places {
         fn compile(&self, last: &Last) -> Result<String, String> {
             if last.query.contains('\\') {
                 return Err("not a pattern".into());
@@ -797,9 +805,8 @@ mod tests {
     #[derive(Debug, Default)]
     struct Later(Places);
 
-    impl Searcher for Later {
+    impl Restores for Later {
         type Kinds = Places;
-        const ANSWERS_LATER: bool = true;
 
         fn search(&mut self) -> &mut Search<Places> {
             &mut self.0.search
@@ -810,6 +817,11 @@ mod tests {
         fn put_back(&mut self, start: &mut (usize, usize), keep_view: bool) {
             self.0.put_back(start, keep_view);
         }
+    }
+
+    impl Searcher for Later {
+        const ANSWERS_LATER: bool = true;
+
         fn compile(&self, last: &Last) -> Result<String, String> {
             self.0.compile(last)
         }

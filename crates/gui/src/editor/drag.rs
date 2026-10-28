@@ -320,7 +320,7 @@ impl Editor {
         }
         self.insert_after = false;
         let menu = self.actions.is_some() || matches!(self.asked, Some((_, Asking::Actions(_))));
-        if self.mode == Mode::Normal && self.prompt.is_none() && !self.keys.pending() && !menu {
+        if self.mode == Mode::Normal && !self.prompting() && !self.keys.pending() && !menu {
             self.new_step = true;
             self.enter_insert(1);
         }

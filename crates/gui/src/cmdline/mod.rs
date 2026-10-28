@@ -121,10 +121,6 @@ impl Line {
         std::mem::take(&mut self.text)
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.text.is_empty()
-    }
-
     /// The text before the caret.
     pub(crate) fn before_caret(&self) -> &str {
         &self.text[..self.caret]

@@ -27,7 +27,7 @@ use clackatoo_text::Edit;
 use super::marked::Marked;
 use super::pattern::{Found, Locations, Matching, Pattern, TOO_COMPLEX};
 use super::substitute::{self, Bytes, Flags, Replacement};
-use super::{BufferCopy, Done, Editor, Prompt, Register, Searched, Shared, Text, Wrote};
+use super::{BufferCopy, Done, Editor, Prompt, Register, Shared, Text, Wrote};
 use crate::keymap::read_macro;
 use crate::motion::{Cursor, Motion, Point};
 use crate::vim::Mode;
@@ -193,7 +193,7 @@ impl Editor {
         // and on from there.
         self.end_preview();
         self.leave_visual();
-        self.end_search_preview(false);
+        crate::vim::search::give_up(self);
         self.prompt = None;
         self.status = None;
         self.replaying = replaying;
@@ -484,14 +484,8 @@ impl Editor {
             }
             Some('\\') => {
                 let (backward, pattern) = match chars.next() {
-                    Some('/') => (
-                        false,
-                        self.search.as_ref().map(|search| search.pattern.clone()),
-                    ),
-                    Some('?') => (
-                        true,
-                        self.search.as_ref().map(|search| search.pattern.clone()),
-                    ),
+                    Some('/') => (false, self.search.last().map(|last| last.query.clone())),
+                    Some('?') => (true, self.search.last().map(|last| last.query.clone())),
                     Some('&') => (
                         false,
                         shared.substituted.as_ref().map(|last| last.pattern.clone()),
@@ -539,8 +533,8 @@ impl Editor {
         if !source.is_empty() {
             return Ok(source.to_owned());
         }
-        (self.search.as_ref())
-            .map(|search| search.pattern.clone())
+        (self.search.last())
+            .map(|last| last.query.clone())
             .ok_or_else(|| "there's no search to use yet".into())
     }
 
@@ -707,12 +701,9 @@ impl Editor {
     /// the last went; and lights its matches, as Vim's `hlsearch` lights
     /// the last search's, matching case as a search typed does.
     fn remember_search(&mut self, source: &str, shared: &Shared) {
-        let backward = self.search.as_ref().is_some_and(|search| search.backward);
-        self.search = Some(Searched {
-            pattern: source.to_owned(),
-            backward,
-            star: false,
-        });
+        let backward = self.search.last().is_some_and(|last| last.backward);
+        let last = crate::vim::search::Last::typed(source, backward);
+        self.search.set_last(Some(last));
         self.light_matches(source, Matching::Typed(self.case), shared);
     }
 
@@ -928,7 +919,7 @@ impl Editor {
         match next {
             Some((start, last)) => {
                 self.cursor = Cursor::new(start);
-                self.found = Some((start, last));
+                *self.search.found_mut() = Some((start, last));
                 self.follow(copy);
             }
             None => self.finish_confirming(copy),
@@ -1069,7 +1060,7 @@ impl Editor {
         let Some(Prompt::Confirm(confirming)) = self.prompt.take() else {
             return;
         };
-        self.found = None;
+        *self.search.found_mut() = None;
         if let Some(end) = confirming.last_end {
             self.cursor_to_line_of(end, copy);
         }
@@ -1237,10 +1228,7 @@ impl Editor {
         }
         self.failed = false;
         // What's left half done is finished, or given up, as Esc does.
-        if matches!(self.prompt, Some(Prompt::Search { .. })) {
-            self.end_search_preview(false);
-            self.prompt = None;
-        }
+        crate::vim::search::give_up(self);
         self.keys.clear();
         if self.mode != Mode::Normal {
             self.stroke(crate::vim::Stroke::Escape, copy, shared);

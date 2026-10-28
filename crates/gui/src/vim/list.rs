@@ -9,7 +9,7 @@
 
 use std::ops::Range;
 
-use super::search::{Find, Finding, Kinds, Last, Search, Searcher};
+use super::search::{Find, Finding, Kinds, Last, Restores, Search, Searcher};
 use super::{Action, Command, Keys, Paging, Scroll, Stroke, ViewAt};
 use crate::editor::{Matching, Pattern};
 use crate::motion::{Motion, Words};
@@ -232,7 +232,7 @@ pub(crate) trait Searched: ListRows + super::ListKeys {
 /// looking at each item once however big the count, and goes there.
 pub(crate) struct Searching<'a, L: ?Sized>(pub(crate) &'a mut L);
 
-impl<L: Searched + ?Sized> Searcher for Searching<'_, L> {
+impl<L: Searched + ?Sized> Restores for Searching<'_, L> {
     type Kinds = Items;
 
     fn search(&mut self) -> &mut Search<Items> {
@@ -250,7 +250,9 @@ impl<L: Searched + ?Sized> Searcher for Searching<'_, L> {
             self.0.set_top(top.min(final_item));
         }
     }
+}
 
+impl<L: Searched + ?Sized> Searcher for Searching<'_, L> {
     fn compile(&self, last: &Last) -> Result<Pattern, String> {
         let case = self.0.case();
         let matching = if last.word {

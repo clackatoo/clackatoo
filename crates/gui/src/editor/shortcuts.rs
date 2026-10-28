@@ -11,14 +11,14 @@ impl Editor {
         if self.rendered() {
             return super::rendered::shortcuts(&self.keys);
         }
+        if let Some(context) = self.search.shortcuts("Editor search") {
+            return context;
+        }
         if let Some(prompt) = &self.prompt {
             return match prompt {
                 Prompt::Confirm(_) => bindings::list("Confirm substitution", None, |stroke, _| {
                     self.describe_confirm_stroke(stroke)
                 }),
-                Prompt::Search { line, .. } => {
-                    crate::shortcuts::prompt("Editor search", line, true)
-                }
                 Prompt::Rename { name, .. } => {
                     crate::shortcuts::prompt("Rename symbol", name, false)
                 }

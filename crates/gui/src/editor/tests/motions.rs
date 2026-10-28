@@ -967,6 +967,16 @@ fn a_search_found_or_not_aims_for_where_the_cursor_is() {
 }
 
 #[test]
+fn a_count_before_a_search_goes_to_that_match_round_the_ends() {
+    let text = "ax\nax\nax\nax\n";
+    assert_eq!(in_cells(text, (1, 0), "2/x<CR>").1, (2, 1));
+    assert_eq!(in_cells(text, (4, 1), "6/x<CR>").1, (2, 1));
+    assert_eq!(in_cells(text, (4, 1), "2?x<CR>").1, (2, 1));
+    // As `n` takes one, never going round more than once.
+    assert_eq!(in_cells(text, (1, 0), "/x<CR>99999999n").1, (4, 1));
+}
+
+#[test]
 fn up_and_down_in_insert_mode_go_just_past_a_short_lines_end() {
     // Aiming further on than the line goes, just past its last character,
     // as Vim's `coladvance()` goes in insert mode.

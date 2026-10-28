@@ -722,7 +722,7 @@ impl Editor {
         // Nothing half typed, which showing it rendered would throw away,
         // leaving the rest of its keys to edit the text: else it stays as
         // its text.
-        let idle = self.mode == Mode::Normal && !self.keys.pending() && self.prompt.is_none();
+        let idle = self.mode == Mode::Normal && !self.keys.pending() && !self.prompting();
         if self.renders(copy) && idle {
             self.show_rendered(copy);
         }

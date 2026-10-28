@@ -21,7 +21,7 @@ use clackatoo_protocol::{Match, Request};
 
 use super::{Document, MatchesIn, Pane, Pending, normal};
 use crate::motion::{Cursor, Lines, Point};
-use crate::vim::search::{self, Find, Finding, Kinds, Last, Search, Searcher};
+use crate::vim::search::{self, Find, Finding, Kinds, Last, Restores, Search, Searcher};
 
 /// The kinds a terminal's search works in: matches as the daemon finds
 /// them, and what's looked for as typed, with whether it matches case.
@@ -69,9 +69,8 @@ fn start_of(found: Match) -> Point {
     }
 }
 
-impl Searcher for Pane {
+impl Restores for Pane {
     type Kinds = Terminal;
-    const ANSWERS_LATER: bool = true;
 
     fn search(&mut self) -> &mut Search<Terminal> {
         &mut self.search
@@ -97,6 +96,10 @@ impl Searcher for Pane {
             None => self.follow_cursor(),
         }
     }
+}
+
+impl Searcher for Pane {
+    const ANSWERS_LATER: bool = true;
 
     fn compile(&self, last: &Last) -> Result<(Vec<char>, bool), String> {
         Ok((last.query.chars().collect(), self.case.exact(&last.query)))
