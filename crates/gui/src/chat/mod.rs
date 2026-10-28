@@ -3040,6 +3040,34 @@ mod tests {
     }
 
     #[test]
+    fn a_link_from_the_daemon_is_opened_only_if_its_a_plain_web_link() {
+        use clackatoo_protocol::{Form, FormAsk};
+        let mut fonts = fonts();
+        for (url, opens) in [
+            ("https://example.com/oauth", true),
+            ("file:///etc/passwd", false),
+            ("https://me@evil.example/", false),
+        ] {
+            let mut view = filling(ANSWER_PAUSE);
+            if let Some(question) = &mut view.node.question {
+                question.form = Some(Form {
+                    message: "Sign in".into(),
+                    ask: FormAsk::Url(url.into()),
+                });
+            }
+            view.filling = None;
+            view.start_filling();
+            read_keys(&mut view, "⏎");
+            let answered = !view.settle(&mut fonts).actions.is_empty();
+            assert_eq!(
+                (answered, view.take_opened().len()),
+                (opens, usize::from(opens)),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
     fn a_form_just_come_isnt_answered_and_normal_modes_j_moves_through_it() {
         let mut fonts = fonts();
         let mut view = filling(100);

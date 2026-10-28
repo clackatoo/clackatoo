@@ -94,6 +94,16 @@ impl ChatView {
                 self.queue_control(Input::Act(ChatAction::Fill { question, reply }));
             }
             Filled::Open(url) => {
+                // Checked here too: the daemon that sent it may not be
+                // this machine's, and only a plain web link is opened.
+                let opens = matches!(
+                    crate::links::target_of_uri(&url),
+                    Some(crate::links::Target::Url(_))
+                ) && clackatoo_protocol::url_host(&url).is_some();
+                if !opens {
+                    self.say("That link isn't one clackatoo opens".to_owned());
+                    return Some(false);
+                }
                 self.opened.push(url);
                 let reply = FormReply::Accept(Vec::new());
                 self.queue_control(Input::Act(ChatAction::Fill { question, reply }));
