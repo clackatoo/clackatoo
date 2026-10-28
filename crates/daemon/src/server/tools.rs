@@ -2029,19 +2029,74 @@ pub(super) fn visible(text: &str) -> String {
 /// could hide from the user reading it what it says, but otherwise as it
 /// is: C0 and C1 control characters but line breaks and tabs as `^U` or
 /// `<U+0085>`, and the controls that reorder text, as the right-to-left
-/// override, as `<U+202E>`. Joiners, variation selectors, tags and the
-/// like stay, as emoji and many scripts need them. `\r\n` becomes `\n`.
+/// override, as `<U+202E>`. Tag characters, which mirror ASCII unseen,
+/// stay only in an emoji tag sequence, as a subdivision's flag; others
+/// show as `<U+E0069>`. A supplementary variation selector stays only as
+/// the one after an ideograph. Joiners, the other variation selectors and
+/// the like stay, as emoji and many scripts need them. `\r\n` becomes
+/// `\n`.
 pub(super) fn unhidden(text: &str) -> String {
     let text = text.replace("\r\n", "\n");
     let mut shown = String::with_capacity(text.len());
-    for ch in text.chars() {
+    // Whether the last character may take a supplementary variation
+    // selector: it's an ideograph, and none has followed it yet.
+    let mut selectable = false;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        let was_selectable = std::mem::replace(&mut selectable, false);
         match ch {
             '\n' | '\t' => shown.push(ch),
-            ch if ch.is_control() || bidi_control(ch) => push_shown(&mut shown, ch),
-            ch => shown.push(ch),
+            '\u{1F3F4}' => {
+                shown.push(ch);
+                let rest = chars.as_str();
+                let tags = rest.chars().take_while(|&ch| tag_letter(ch)).count();
+                let end = rest
+                    .char_indices()
+                    .nth(tags)
+                    .filter(|&(_, ch)| ch == '\u{E007F}' && tags > 0)
+                    .map(|(at, ch)| at + ch.len_utf8());
+                if let Some(end) = end {
+                    shown.push_str(&rest[..end]);
+                    chars = rest[end..].chars();
+                }
+            }
+            '\u{E0100}'..='\u{E01EF}' if was_selectable => shown.push(ch),
+            ch if ch.is_control() || bidi_control(ch) || hidden_letter(ch) => {
+                push_shown(&mut shown, ch);
+            }
+            ch => {
+                selectable = ideograph(ch);
+                shown.push(ch);
+            }
         }
     }
     shown
+}
+
+/// Whether `ch` is a tag letter or digit, which spell a subdivision in
+/// an emoji tag sequence.
+fn tag_letter(ch: char) -> bool {
+    matches!(ch, '\u{E0030}'..='\u{E0039}' | '\u{E0061}'..='\u{E007A}')
+}
+
+/// Whether `ch` is a tag character or a supplementary variation selector,
+/// which show nothing themselves: [`unhidden`] keeps them only where
+/// they belong.
+fn hidden_letter(ch: char) -> bool {
+    matches!(ch, '\u{E0000}'..='\u{E007F}' | '\u{E0100}'..='\u{E01EF}')
+}
+
+/// Whether `ch` is a CJK ideograph, the characters supplementary variation
+/// selectors choose among the forms of (the Ideographic Variation
+/// Database).
+fn ideograph(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{20000}'..='\u{3134F}'
+    )
 }
 
 /// Whether `ch` reorders the text around it: the bidi embeddings,
@@ -2303,6 +2358,37 @@ mod tests {
         assert_eq!(unhidden(family), family);
         let persian = "می\u{200c}خواهم \u{feff}co\u{ad}op";
         assert_eq!(unhidden(persian), persian);
+    }
+
+    #[test]
+    fn tag_characters_show_but_in_a_flag() {
+        // ASCII smuggled in tag characters, which show nothing.
+        assert_eq!(
+            unhidden("hi\u{e0072}\u{e006d}\u{e0020}\u{e002d}\u{e0072}\u{e007f}!"),
+            "hi<U+E0072><U+E006D><U+E0020><U+E002D><U+E0072><U+E007F>!"
+        );
+        let scotland = "🏴\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}";
+        assert_eq!(unhidden(scotland), scotland);
+        assert_eq!(
+            unhidden(&format!("{scotland}\u{e0069}")),
+            format!("{scotland}<U+E0069>")
+        );
+        // A flag that never ends, or that has nothing in it, isn't one.
+        assert_eq!(unhidden("🏴\u{e0067}\u{e0062}x"), "🏴<U+E0067><U+E0062>x");
+        assert_eq!(unhidden("🏴\u{e007f}"), "🏴<U+E007F>");
+        assert_eq!(
+            unhidden("🏴\u{e0067}\u{e0020}\u{e007f}"),
+            "🏴<U+E0067><U+E0020><U+E007F>"
+        );
+        assert_eq!(unhidden("\u{e0001}en"), "<U+E0001>en");
+    }
+
+    #[test]
+    fn supplementary_variation_selectors_stay_only_one_after_an_ideograph() {
+        assert_eq!(unhidden("葛\u{e0100}"), "葛\u{e0100}");
+        assert_eq!(unhidden("葛\u{e0100}\u{e0101}"), "葛\u{e0100}<U+E0101>");
+        assert_eq!(unhidden("a\u{e0100}"), "a<U+E0100>");
+        assert_eq!(unhidden("\u{e01ef}"), "<U+E01EF>");
     }
 
     #[test]
