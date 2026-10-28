@@ -692,7 +692,7 @@ impl Agent {
         self.peer.needs_login()
     }
 
-    fn receive(&mut self, message: Message, incoming: &mut Vec<Incoming>) {
+    fn receive(&mut self, mut message: Message, incoming: &mut Vec<Incoming>) {
         match (message.method, message.id) {
             (Some(method), None) => {
                 if method == "_clackatoo/login_required" && self.name() == "agent antigravity" {
@@ -700,6 +700,11 @@ impl Agent {
                 } else if method == "_claude/sdkMessage" {
                     if let Some((session, results)) = tool_results(&message.params) {
                         incoming.push(Incoming::ToolResults { session, results });
+                    }
+                    // A raw message holds a whole file read, or more: a big
+                    // one is freed off the loop, as it was parsed.
+                    if let Some(trash) = message.trash.take() {
+                        trash.throw(message.params.take());
                     }
                 } else if method == "session/update" {
                     // Not ACP's own, so its schema doesn't know them.
@@ -1101,9 +1106,9 @@ fn listed(result: &Value) -> Vec<Listed> {
     listed
 }
 
-/// The most bytes of what a tool found kept, as clackatoo's chats keep
-/// more of no tool's output.
-const MOST_RESULT: usize = 64 * 1024;
+/// The most bytes of what a tool found shown, as many as a chat keeps of
+/// any tool's text (`chat::TOOL_TEXT`): what's past it is cut, at a line.
+const MOST_RESULT: usize = 32 * 1024;
 
 /// The session and what its tools found, by the tool call, if `params`,
 /// a `_claude/sdkMessage`'s, hold a raw message of the user's side with
@@ -1136,7 +1141,7 @@ fn tool_results(params: &Value) -> Option<(String, Vec<(String, String)>)> {
             let text = structured
                 .and_then(numbered_read)
                 .or_else(|| result_text(result.get("content")?))?;
-            Some((id.to_owned(), fenced(&text)))
+            Some((id.to_owned(), fenced(&cut(text))))
         })
         .collect();
     (!found.is_empty()).then(|| (session.to_owned(), found))
@@ -1190,6 +1195,19 @@ fn result_text(content: &Value) -> Option<String> {
     }
     let text = text.trim_end();
     (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// `text`, cut at the last line that ends within [`MOST_RESULT`] bytes, if
+/// it's longer, saying so.
+fn cut(mut text: String) -> String {
+    if text.len() <= MOST_RESULT {
+        return text;
+    }
+    let at = floor(&text, MOST_RESULT);
+    let at = text[..at].rfind('\n').unwrap_or(at);
+    text.truncate(at);
+    text.push_str("\n[cut short]");
+    text
 }
 
 /// `text` as a fenced code block, with a fence longer than any it holds.

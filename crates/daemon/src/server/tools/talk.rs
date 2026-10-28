@@ -1002,7 +1002,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
         let b = idle_chat(&mut daemon, 2);
-        let message = daemon.message_from(a, "run the gate".to_owned()).unwrap();
+        // A subagent a's agent started, waiting on its report.
+        daemon.chat(b).unwrap().started_by(a, a, 1, None);
+        let message = daemon.message_from(a, "run the gate").unwrap();
         daemon.chat(b).unwrap().deliver(message).unwrap();
         let chat = daemon.chat(b).unwrap();
         chat.update(words("The gate runs in the background."));

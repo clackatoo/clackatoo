@@ -261,7 +261,7 @@ Only Claude Code says what it runs in the background. The phone lists the same l
 
 Claude Code's adapter says so only to a client that asks as JetBrains' AIR does, and to such a client it reports some things differently:
 
-- It sends a read or a search of files without what it found. clackatoo asks it for the messages it hands the model too, and shows what Claude Code's Read, Grep and Glob found from those, as before. (Claude Code 2.1.310 has no Grep or Glob of its own here: it searches with commands, whose output shows anyway.)
+- It sends a read or a search of files without what it found. clackatoo asks it for the messages it hands the model too, and shows what Claude Code's Read, Grep and Glob found from those, as before, while they run: in a past session opened again, those rows don't show it. (Claude Code 2.1.310 has no Grep or Glob of its own here: it searches with commands, whose output shows anyway.)
 - It keeps the words and thinking of Claude Code's own subagents (its Task tool) to itself unless asked for them: clackatoo asks, so they show as before, and a past session opened again tells them too, which it didn't.
 - It doesn't send the same task list twice in a row, which changes nothing shown.
 - Its notices, such as a fast mode turned off, come as notices above the box rather than as words in the turn.
@@ -520,6 +520,7 @@ An upgrade stops the browser; the next page starts it again. An upgrade, or the 
 - The account-usage modal is native-only. Gemini CLI and custom adapters do not yet have read-only subscription probes; the phone keeps its existing per-chat usage detail.
 - `/` commands aren't listed or completed as you type them.
 - An upgrade forgets which turns an agent took by itself: they show as turns with no message.
+- In a past Claude Code session opened again, Read, Grep and Glob rows show what they read or looked for, but not what they found, while clackatoo asks Claude Code what it runs in the background.
 - Codex's commands in the background aren't listed: asking for them would change how Codex reports every command.
 - You can't click or type into a browser pane yourself.
 - An upgrade forgets the cards of subagents that had already closed, so their changes drop out of the chat's and turn's reviews. They stay in `:Review base` and in the gutter, as `chat N`.

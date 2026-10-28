@@ -429,6 +429,10 @@ pub(crate) struct HostedChat {
     /// opens no turn, as what was in flight when one was stopped comes
     /// after it.
     wake_held: Option<std::time::Instant>,
+    /// What the agent said with no turn open that was taken for a notice,
+    /// and when: given back to a turn it opens soon after, which shows it
+    /// was the turn's start (see `chat/woken.rs`).
+    idle_taken: Option<(std::time::Instant, String)>,
     /// The session the chat's tasks were started in: a stop goes to that
     /// session only.
     tasks_session: Option<String>,
@@ -612,6 +616,7 @@ impl HostedChat {
             woke_by_task: None,
             woken_stopping: false,
             wake_held: None,
+            idle_taken: None,
             tasks_session: None,
             own_tools: VecDeque::new(),
             limits: Limits::default(),
@@ -2012,6 +2017,11 @@ impl HostedChat {
         }
         if !matches!(outcome, Outcome::Done) {
             self.pause_queue(true);
+        }
+        // What was in flight as it was stopped comes after: it's no turn
+        // of the agent's own.
+        if outcome == Outcome::Stopped {
+            self.hold_wake();
         }
         if self.answering() {
             self.end_turn(outcome);
@@ -5510,51 +5520,122 @@ mod tests {
         assert!(chat.wakes(&chunk("agent_thought_chunk", "Let me look."), true));
     }
 
+    /// A piece of words, or of thinking, with `text`.
+    fn chunk(kind: &str, text: &str) -> SessionUpdate {
+        serde_json::from_value(serde_json::json!({
+            "sessionUpdate": kind, "content": { "type": "text", "text": text },
+        }))
+        .unwrap()
+    }
+
     #[test]
-    fn words_shaped_as_a_notice_from_an_agent_that_doesnt_say_when_it_wakes_are_one() {
-        let mut chat = chat();
-        connect(&mut chat, "s");
-        let chunk = |kind: &str, text: &str| -> SessionUpdate {
-            serde_json::from_value(serde_json::json!({
-                "sessionUpdate": kind, "content": { "type": "text", "text": text },
-            }))
-            .unwrap()
-        };
-        for (kind, text, shown) in [
+    fn words_shaped_exactly_as_its_own_adapters_notices_from_an_agent_that_doesnt_say_when_it_wakes_are_one()
+     {
+        let mut claude = chat();
+        connect(&mut claude, "s");
+        let mut codex = chat_with("codex");
+        connect(&mut codex, "s");
+        for (agent, kind, text, shown) in [
             (
+                "claude",
                 "agent_message_chunk",
                 "**Fast mode turned off:** none.",
                 "Fast mode turned off: none.",
             ),
             (
+                "claude",
+                "agent_message_chunk",
+                "**Task stopped by user**",
+                "Task stopped by user",
+            ),
+            (
+                "codex",
                 "agent_message_chunk",
                 "Warning: deprecated flag\n\n",
                 "Warning: deprecated flag",
             ),
             (
+                "codex",
                 "agent_message_chunk",
-                "Config warning: bad key",
-                "Config warning: bad key",
+                "Config warning: bad key\n\nIn config.toml.\n\n",
+                "Config warning: bad key In config.toml.",
             ),
             (
+                "codex",
                 "agent_message_chunk",
                 "*Context compacted to fit the model's context window.*\n\n",
                 "Context compacted to fit the model's context window.",
             ),
             (
+                "codex",
                 "agent_thought_chunk",
-                "Model rerouted from a to b (busy).",
+                "Model rerouted from a to b (busy).\n\n",
                 "Model rerouted from a to b (busy).",
             ),
         ] {
+            let chat = if agent == "claude" {
+                &mut claude
+            } else {
+                &mut codex
+            };
             assert!(chat.said_while_idle(&chunk(kind, text), false), "{text}");
             assert_eq!(chat.node.notice.as_deref(), Some(shown));
+            assert!(chat.node.turns.is_empty());
         }
-        assert!(chat.node.turns.is_empty());
-        // Anything else is it at work.
-        let words = chunk("agent_message_chunk", "All done: committed.");
-        assert!(!chat.said_while_idle(&words, false));
-        assert!(chat.wakes(&words, false));
+        // A reply that starts as one might isn't: it's the agent at work.
+        for text in [
+            "**Summary:**",
+            "**Done.** Committed the fix.",
+            "**Fixed:** the parser.\nAnd the tests.",
+            "All done: committed.",
+        ] {
+            let words = chunk("agent_message_chunk", text);
+            assert!(!claude.said_while_idle(&words, false), "{text}");
+            assert!(claude.wakes(&words, false), "{text}");
+        }
+        // Another adapter's shape, or an agent of no known adapter: words.
+        let warning = chunk("agent_message_chunk", "Warning: deprecated flag\n\n");
+        assert!(!claude.said_while_idle(&warning, false));
+        let mut other = chat();
+        other.agent = "mine".into();
+        connect(&mut other, "s");
+        let bold = chunk("agent_message_chunk", "**Task stopped by user**");
+        assert!(!other.said_while_idle(&bold, false));
+    }
+
+    #[test]
+    fn words_taken_for_a_notice_just_before_the_agent_goes_on_start_its_turn() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        assert!(chat.said_while_idle(
+            &chunk("agent_message_chunk", "**Plan:** look first."),
+            false
+        ));
+        assert!(chat.node.notice.is_some());
+        let next = chunk("agent_message_chunk", " Then fix it.");
+        assert!(!chat.said_while_idle(&next, false));
+        assert!(chat.wakes(&next, false));
+        chat.wake(None);
+        chat.update(next);
+        assert_eq!(chat.node.notice, None);
+        let words: String = (chat.node.turns[0].items.iter())
+            .filter_map(|item| match item {
+                Item::Words(words) => Some(words.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(words, "**Plan:** look first. Then fix it.");
+    }
+
+    #[test]
+    fn what_comes_just_after_a_stopped_turn_opens_no_turn_of_the_agents_own() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "work");
+        chat.answered(Ok(StopReason::Cancelled));
+        let late = chunk("agent_thought_chunk", "I was about to…");
+        assert!(!chat.wakes(&late, true));
+        assert!(!chat.wakes(&chunk("agent_message_chunk", "late words"), false));
     }
 
     #[test]

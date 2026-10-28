@@ -21,14 +21,21 @@
 
 use std::time::{Duration, Instant};
 
-use agent_client_protocol_schema::v1::{ContentBlock, SessionUpdate};
+use agent_client_protocol_schema::v1::{ContentBlock, SessionUpdate, TextContent};
 use clackatoo_protocol::{ChatState, Item, ToolStatus, Turn};
 
 use super::{HostedChat, Link, now};
 
-/// How long after a turn the agent took by itself is stopped what it says
-/// opens no new turn, nor shows as a notice: it was in flight.
+/// How long after a turn is stopped what the agent says opens no new turn,
+/// nor shows as a notice: it was in flight.
 const WAKE_HELD: Duration = Duration::from_secs(2);
+
+/// How soon after words taken for a notice a turn the agent opens takes
+/// them back, as its start.
+const PUT_BACK: Duration = Duration::from_millis(500);
+
+/// The longest title of a notice Claude Code's adapter writes as words.
+const NOTICE_TITLE: usize = 60;
 
 impl HostedChat {
     /// Whether `update`, come while the chat answers nothing, is the agent
@@ -65,6 +72,7 @@ impl HostedChat {
             return false;
         }
         self.woke_by_task = None;
+        let taken = (self.idle_taken.take()).filter(|(at, _)| at.elapsed() < PUT_BACK);
         self.push_turn(Turn {
             previews: Vec::new(),
             prompt: String::new(),
@@ -77,7 +85,18 @@ impl HostedChat {
             woke: Some(why.unwrap_or_default()),
         });
         self.set_state(ChatState::Answering);
+        // What was taken for a notice just now was this turn's start.
+        if let Some((_, text)) = taken {
+            self.set_notice(None);
+            self.write(&ContentBlock::Text(TextContent::new(text)), false);
+        }
         true
+    }
+
+    /// What the agent says next, for a moment, opens no turn of its own:
+    /// a turn was just stopped, and that was in flight.
+    pub(super) fn hold_wake(&mut self) {
+        self.wake_held = Some(Instant::now() + WAKE_HELD);
     }
 
     /// Takes `update` if it's something the agent says with no turn open
@@ -104,11 +123,20 @@ impl HostedChat {
         if self.wake_held.is_some_and(|until| Instant::now() < until) {
             return true;
         }
-        let said = match notice_shaped(&text.text) {
+        let said = match notice_shaped(&self.agent, &text.text, thought) {
             Some(said) => said,
             None if tells && !thought => text.text.clone(),
             None => return false,
         };
+        if !thought {
+            match &mut self.idle_taken {
+                Some((at, taken)) if at.elapsed() < PUT_BACK => {
+                    *at = Instant::now();
+                    taken.push_str(&text.text);
+                }
+                kept => *kept = Some((Instant::now(), text.text.clone())),
+            }
+        }
         let said = super::clean(&said);
         let said = said.split_whitespace().collect::<Vec<_>>().join(" ");
         if !said.is_empty() {
@@ -126,7 +154,7 @@ impl HostedChat {
             self.woken_stopping = true;
             return true;
         }
-        self.wake_held = Some(Instant::now() + WAKE_HELD);
+        self.hold_wake();
         false
     }
 
@@ -158,23 +186,51 @@ impl HostedChat {
     }
 }
 
-/// What `text` says, if it's shaped as the adapters shape a notice to a
-/// client that can't take one: Claude Code's `**Title:** what` or
-/// `**Title**`, and Codex's `Config warning: …`, `Warning: …`,
-/// `*Context compacted …*` and `Model rerouted from …`. Its bold and
-/// slant markers are left out.
-fn notice_shaped(text: &str) -> Option<String> {
-    let text = text.trim();
-    if let Some(rest) = text.strip_prefix("**")
-        && let Some((title, after)) = rest.split_once("**")
-        && !title.is_empty()
-    {
-        return Some(format!("{title}{after}"));
+/// What `text` says, if `agent`'s own adapter would have written it so for
+/// a notice to a client that can't take one, exactly: Claude Code's a line
+/// `**Title**` or `**Title:** what`, with a short title; Codex's
+/// `Config warning: …`, `Warning: …` or `*Context compacted to fit the
+/// model's context window.*`, each ending in a blank line, or a thought
+/// `Model rerouted from … to … (…).` likewise. Its bold and slant markers
+/// are left out. Any other agent's words are never taken for one.
+fn notice_shaped(agent: &str, text: &str, thought: bool) -> Option<String> {
+    match (agent, thought) {
+        ("claude", false) => {
+            let line = text.strip_suffix('\n').unwrap_or(text);
+            let rest = line
+                .strip_prefix("**")
+                .filter(|rest| !rest.contains('\n'))?;
+            let (title, after) = rest.split_once("**")?;
+            let short = !title.is_empty() && title.chars().count() <= NOTICE_TITLE;
+            if !short || title.contains('*') {
+                return None;
+            }
+            if after.is_empty() && !title.ends_with(':') {
+                return Some(title.to_owned());
+            }
+            let title = title.strip_suffix(':')?;
+            let what = after
+                .strip_prefix(' ')
+                .filter(|what| !what.trim().is_empty())?;
+            Some(format!("{title}: {what}"))
+        }
+        ("codex", false) => {
+            let said = text.strip_suffix("\n\n")?;
+            let compacted = "*Context compacted to fit the model's context window.*";
+            if said == compacted {
+                return Some(compacted.trim_matches('*').to_owned());
+            }
+            let config = said.starts_with("Config warning: ");
+            let warning = said.starts_with("Warning: ") && !said.contains('\n');
+            (config || warning).then(|| said.to_owned())
+        }
+        ("codex", true) => {
+            let said = text.strip_suffix("\n\n")?;
+            (said.starts_with("Model rerouted from ")
+                && said.ends_with(").")
+                && !said.contains('\n'))
+            .then(|| said.to_owned())
+        }
+        _ => None,
     }
-    let codex = ["Config warning: ", "Warning: ", "Model rerouted from "];
-    if codex.iter().any(|start| text.starts_with(start)) {
-        return Some(text.to_owned());
-    }
-    (text.starts_with("*Context compacted") && text.ends_with('*'))
-        .then(|| text.trim_matches('*').to_owned())
 }
