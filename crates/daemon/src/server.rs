@@ -3515,6 +3515,7 @@ impl Daemon {
     }
 
     /// Does what a client asked of the chat `id`.
+    #[allow(clippy::too_many_lines, reason = "one arm for each action")]
     fn chat_action(&mut self, id: TerminalId, action: ChatAction) -> Result<(), Error> {
         let slot = self
             .terminals
