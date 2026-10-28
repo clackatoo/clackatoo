@@ -2955,6 +2955,7 @@ mod tests {
                 fields: vec![
                     Field {
                         key: "db".into(),
+                        label: "db".into(),
                         title: None,
                         description: None,
                         required: true,
@@ -2965,6 +2966,7 @@ mod tests {
                     },
                     Field {
                         key: "note".into(),
+                        label: "note".into(),
                         title: None,
                         description: None,
                         required: false,
@@ -3047,6 +3049,8 @@ mod tests {
             ("https://example.com/oauth", true),
             ("file:///etc/passwd", false),
             ("https://me@evil.example/", false),
+            ("https://paypal.com\n\n.evil.com/", false),
+            ("https://lіnear.app/", false),
         ] {
             let mut view = filling(ANSWER_PAUSE);
             if let Some(question) = &mut view.node.question {

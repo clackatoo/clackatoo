@@ -128,6 +128,17 @@ impl HostedChat {
         Some(request)
     }
 
+    /// Says the agent asked something too big to show, which was
+    /// declined: once, until the user next writes, however many come.
+    pub(crate) fn too_big(&mut self) {
+        if !std::mem::replace(&mut self.told_too_big, true) {
+            let agent = self.agent_title().to_owned();
+            self.notify(format!(
+                "{agent} asked you something too big to show, so it was declined."
+            ));
+        }
+    }
+
     /// Answers every form the agent asked as cancelled, as stopping does.
     pub(super) fn cancel_forms(&mut self, actions: &mut Vec<Action>) {
         let before = self.asking.len();

@@ -461,6 +461,7 @@ mod tests {
     fn field(key: &str, required: bool, input: FieldInput) -> Field {
         Field {
             key: key.into(),
+            label: key.into(),
             title: None,
             description: None,
             required,

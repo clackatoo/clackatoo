@@ -871,7 +871,9 @@ fn form_card(question: u64, form: &Form) -> Element {
         // Checked here too, with the filter links in Markdown have: the
         // daemon that sent it may not be this one. Where it goes is said
         // on a line of its own, so a long link can't hide it.
-        let Some(host) = clackatoo_protocol::url_host(url) else {
+        let host =
+            clackatoo_protocol::url_host(url).filter(|_| clackatoo_protocol::plain_web_link(url));
+        let Some(host) = host else {
             return card
                 .child(
                     el("p")
@@ -880,11 +882,10 @@ fn form_card(question: u64, form: &Form) -> Element {
                 )
                 .child(el("div").class("choices").child(decline));
         };
-        let open = el("a")
-            .class("button allow")
-            .attr("href", url.clone())
-            .attr("target", "_blank")
-            .attr("rel", "noopener noreferrer")
+        // A button, not a link: it opens the link only once the pause
+        // after the question coming is over (see `App::open_link`).
+        let open = el("button")
+            .class("allow")
             .action(&Action::OpenLink(question))
             .text("Open the link");
         return card
@@ -1868,6 +1869,7 @@ mod tests {
         };
         let field = |key: &str, required, input| Field {
             key: key.into(),
+            label: key.into(),
             title: Some(key.into()),
             description: None,
             required,
@@ -1976,10 +1978,19 @@ mod tests {
         };
         let good = card("https://example.com/oauth?state=1");
         assert!(good.all_text().contains("Goes to example.com"));
-        assert_eq!(good.find_all("href").len(), 1);
-        for bad in ["javascript:alert(1)", "https://me@evil.example/"] {
+        let opens = |drawn: &Element| {
+            (drawn.find_all("data-action").into_iter())
+                .any(|element| element.get("data-action") == Some(&Action::OpenLink(2).encode()))
+        };
+        assert!(opens(&good));
+        for bad in [
+            "javascript:alert(1)",
+            "https://me@evil.example/",
+            "https://paypal.com\n\n.evil.com/",
+            "https://lіnear.app/",
+        ] {
             let drawn = card(bad);
-            assert!(drawn.find_all("href").is_empty(), "{bad}");
+            assert!(!opens(&drawn), "{bad}");
             assert!(drawn.all_text().contains("isn't one this page opens"));
         }
     }

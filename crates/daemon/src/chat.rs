@@ -336,6 +336,10 @@ enum Link {
 
 /// A chat with an agent.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts of a chat, each set and cleared on its own"
+)]
 pub(crate) struct HostedChat {
     /// Only outstanding workers hold strong receipts. Replaced results revoke them.
     image_receipts: Vec<(String, std::sync::Weak<()>)>,
@@ -383,6 +387,9 @@ pub(crate) struct HostedChat {
     /// The requests of the forms the agent the chat moved from asked,
     /// which it still waits on: the server answers them as cancelled.
     left_forms: Vec<Value>,
+    /// Whether the chat has said a form was too big to show since the
+    /// user last wrote: it says so once.
+    told_too_big: bool,
     /// The values the user gave settings, by their IDs, which the chat
     /// asks for again whenever its session opens: the agent forgets them
     /// when it stops.
@@ -623,6 +630,7 @@ impl HostedChat {
             asking: VecDeque::new(),
             next_question: 0,
             left_forms: Vec::new(),
+            told_too_big: false,
             chosen: vec![
                 (TOOLS_SETTING.to_owned(), tools_value(tools).to_owned()),
                 (
@@ -1152,6 +1160,7 @@ impl HostedChat {
         if from.is_none() {
             self.forget_ended_tasks();
             self.forget_finished_plan();
+            self.told_too_big = false;
         }
         self.push_turn(Turn {
             woke: None,
@@ -4700,6 +4709,20 @@ mod tests {
             result: serde_json::json!({ "action": "cancel" }),
         }));
         assert_eq!(chat.node.question, None);
+    }
+
+    #[test]
+    fn a_form_too_big_is_said_once_until_the_user_writes() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        chat.too_big();
+        assert!(chat.node.notice.as_deref().unwrap().contains("too big"));
+        chat.set_notice(None);
+        chat.too_big();
+        assert_eq!(chat.node.notice, None, "once");
+        send(&mut chat, "go");
+        chat.too_big();
+        assert!(chat.node.notice.is_some(), "again, after the user wrote");
     }
 
     #[test]

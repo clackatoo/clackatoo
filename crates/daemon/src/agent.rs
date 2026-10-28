@@ -775,6 +775,16 @@ impl Agent {
                         "error": { "code": error.code, "message": error.message },
                     }));
                 }
+                // A form can be big: read, then freed off the loop, as
+                // it was parsed.
+                if method == "elicitation/create" {
+                    let asked = self.elicited(&id, &message.params);
+                    if let Some(trash) = message.trash.take() {
+                        trash.throw(message.params.take());
+                    }
+                    incoming.extend(asked);
+                    return;
+                }
                 let params = message.params;
                 let asked = match method.as_str() {
                     "session/request_permission" => {
@@ -787,10 +797,6 @@ impl Agent {
                                 options: request.options,
                             })
                     }
-                    "elicitation/create" => match self.elicited(&id, &params) {
-                        Some(asked) => Some(asked),
-                        None => return,
-                    },
                     "fs/read_text_file" => serde_json::from_value::<ReadTextFileRequest>(params)
                         .ok()
                         .map(|request| Incoming::ReadFile {

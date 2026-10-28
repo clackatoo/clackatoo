@@ -114,7 +114,7 @@ pub use files::{
 pub use find::{Done, Found, FoundBuffer, FoundLine, FoundSymbol, Search};
 pub use form::{
     Field, FieldInput, FieldOption, FieldValue, Form, FormAsk, FormReply, MOST_ANSWER, MOST_FIELDS,
-    MOST_LABEL, MOST_MESSAGE, MOST_OPTIONS, MOST_URL, parse_number, url_host,
+    MOST_LABEL, MOST_MESSAGE, MOST_OPTIONS, MOST_URL, parse_number, plain_web_link, url_host,
 };
 pub use forward::{Forward, ForwardFailure, Forwarding};
 pub use machines::{BadMachineId, Connection, ConnectionState, Machine, MachineId, Passed, Secret};

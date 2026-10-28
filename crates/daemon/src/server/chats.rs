@@ -1319,10 +1319,7 @@ impl Daemon {
                 let Some((id, chat)) = self.chat_in(name, &session) else {
                     return;
                 };
-                chat.notify(format!(
-                    "{} asked you something too big to show, so it was declined.",
-                    chat.agent_title()
-                ));
+                chat.too_big();
                 id
             }
             Incoming::Cancelled { request } => {

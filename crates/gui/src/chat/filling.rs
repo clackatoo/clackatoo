@@ -99,7 +99,7 @@ impl ChatView {
                 let opens = matches!(
                     crate::links::target_of_uri(&url),
                     Some(crate::links::Target::Url(_))
-                ) && clackatoo_protocol::url_host(&url).is_some();
+                ) && clackatoo_protocol::plain_web_link(&url);
                 if !opens {
                     self.say("That link isn't one clackatoo opens".to_owned());
                     return Some(false);

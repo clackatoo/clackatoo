@@ -137,7 +137,6 @@ details > summary { cursor: pointer; list-style: none; } details > summary::-web
 .question.form label .muted { flex-basis: 100%; padding-left: 28px; font-size: 13px; }
 .question.form .field > input { width: 100%; }
 .question.form p.failed:empty { display: none; }
-.question a.button { display: inline-flex; align-items: center; justify-content: center; flex: 1 1 40%; min-height: 44px; border-radius: 12px; padding: 10px 16px; background: var(--accent); color: var(--on-accent); text-decoration: none; font-size: 14px; }
 .question .plan { max-height: 50vh; overflow: auto; background: var(--raised); border-radius: 12px; padding: 4px 14px; margin-bottom: 14px; }
 .dock { flex: none; width: 100%; max-width: 840px; align-self: center; padding: 6px 14px clamp(6px, env(safe-area-inset-bottom), 12px); background: var(--bg); }
 .composer { background: var(--panel); border: 1px solid #35353b; border-radius: 18px; padding: 8px 8px 5px 12px; }

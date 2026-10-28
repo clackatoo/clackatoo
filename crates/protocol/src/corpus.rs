@@ -1431,6 +1431,7 @@ fn elicitation() -> Vec<Sample> {
     };
     let field = |key: &str, required, input| Field {
         key: key.into(),
+        label: key.into(),
         title: Some(key.to_uppercase()),
         description: None,
         required,

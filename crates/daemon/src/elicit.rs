@@ -19,7 +19,7 @@
 
 use clackatoo_protocol::{
     Field, FieldInput, FieldOption, FieldValue, Form, FormAsk, FormReply, MOST_FIELDS, MOST_LABEL,
-    MOST_MESSAGE, MOST_OPTIONS, MOST_URL,
+    MOST_MESSAGE, MOST_OPTIONS,
 };
 use serde_json::{Map, Value, json};
 
@@ -98,11 +98,7 @@ pub(crate) fn read(params: &Value) -> Result<Asked, Unshown> {
 /// another host), with nothing hidden in it (see
 /// [`unhidden`](crate::server::unhidden)), and not too long.
 fn plain_web_link(url: &str) -> bool {
-    let web = url.starts_with("https://") || url.starts_with("http://");
-    web && url.len() <= MOST_URL
-        && url.is_ascii()
-        && clackatoo_protocol::url_host(url).is_some()
-        && crate::server::unhidden(url) == url
+    clackatoo_protocol::plain_web_link(url) && crate::server::unhidden(url) == url
 }
 
 /// Reads a form under [`MOST_BYTES`] of text all told.
@@ -146,12 +142,15 @@ impl Reader {
 
     /// `value` as given back to the agent, a key or an option's value, if
     /// it's a string no longer than `most` bytes and there's room.
+    /// A value too long costs as much as it may be, and one refused for
+    /// any other reason, as a duplicate, costs it too: nothing given
+    /// is read for free.
     fn exact(&mut self, value: &str, most: usize) -> Option<String> {
-        if value.len() > most || self.over() {
+        if self.over() {
             return None;
         }
-        self.charge(value.len());
-        (!self.over()).then(|| value.to_owned())
+        self.charge(value.len().min(most + 1));
+        (value.len() <= most && !self.over()).then(|| value.to_owned())
     }
 
     /// The fields a form's `requestedSchema` asks for, as many as are
@@ -168,7 +167,8 @@ impl Reader {
             .unwrap_or_default();
         let mut fields = Vec::new();
         let mut complete = true;
-        for (key, property) in properties {
+        // One past the most kept says there were more.
+        for (key, property) in properties.iter().take(MOST_FIELDS + 1) {
             let required = required.contains(&key.as_str());
             if fields.len() == MOST_FIELDS || self.over() {
                 complete = false;
@@ -189,6 +189,7 @@ impl Reader {
         if key.is_empty() {
             return None;
         }
+        let label = self.shown(Some(&Value::from(clean(key))), MOST_LABEL)?;
         let key = self.exact(key, MOST_LABEL)?;
         let input = match property.get("type").and_then(Value::as_str)? {
             "string" => match self.options(property.get("oneOf"), property.get("enum"), property) {
@@ -246,6 +247,7 @@ impl Reader {
         let description = self.shown(property.get("description"), MOST_LABEL);
         Some(Field {
             key,
+            label,
             title: title.filter(|title| !title.is_empty()),
             description: description.filter(|description| !description.is_empty()),
             required,
@@ -263,31 +265,36 @@ impl Reader {
         property: &Value,
     ) -> Option<Vec<FieldOption>> {
         let mut options: Vec<FieldOption> = Vec::new();
-        let mut offered: Vec<(&str, Option<&Value>, Option<&Value>)> = Vec::new();
-        if let Some(titled) = titled.and_then(Value::as_array) {
-            for option in titled {
-                if let Some(value) = option.get("const").and_then(Value::as_str) {
-                    offered.push((value, option.get("title"), option.get("description")));
-                }
-            }
-        } else if let Some(plain) = plain.and_then(Value::as_array) {
-            let names = property.get("enumNames").and_then(Value::as_array);
-            for (index, value) in plain.iter().enumerate() {
-                if let Some(value) = value.as_str() {
-                    offered.push((value, names.and_then(|names| names.get(index)), None));
-                }
-            }
-        }
-        for (value, title, description) in offered {
+        let names = property.get("enumNames").and_then(Value::as_array);
+        // The options as given, one past the most kept at most: a list
+        // of millions is never walked.
+        let offered: Box<dyn Iterator<Item = (&Value, Option<&Value>, Option<&Value>)>> =
+            if let Some(titled) = titled.and_then(Value::as_array) {
+                Box::new((titled.iter()).map(|option| {
+                    let value = option.get("const").unwrap_or(&Value::Null);
+                    (value, option.get("title"), option.get("description"))
+                }))
+            } else if let Some(plain) = plain.and_then(Value::as_array) {
+                Box::new((plain.iter().enumerate()).map(move |(index, value)| {
+                    (value, names.and_then(|names| names.get(index)), None)
+                }))
+            } else {
+                Box::new(std::iter::empty())
+            };
+        for (value, title, description) in offered.take(MOST_OPTIONS + 1) {
             if options.len() == MOST_OPTIONS || self.over() {
                 break;
             }
-            if options.iter().any(|option| option.value == value) {
+            let Some(value) = value.as_str() else {
                 continue;
-            }
+            };
+            // A duplicate costs what it's given as.
             let Some(kept) = self.exact(value, MOST_LABEL) else {
                 continue;
             };
+            if options.iter().any(|option| option.value == value) {
+                continue;
+            }
             let title = match self.shown(title, MOST_LABEL) {
                 Some(title) => title,
                 None => self.shown(Some(&Value::from(clean(value))), MOST_LABEL)?,
@@ -555,6 +562,41 @@ mod tests {
             "{} bytes",
             frame.len()
         );
+    }
+
+    #[test]
+    fn a_huge_list_of_options_is_read_no_further_than_kept() {
+        let options: Vec<Value> = (0..1_000_000)
+            .map(|n| json!({ "const": n.to_string() }))
+            .collect();
+        let params = json!({ "mode": "form", "sessionId": "s1", "message": "?",
+            "requestedSchema": { "properties": { "a": { "type": "string", "oneOf": options } } } });
+        let started = std::time::Instant::now();
+        let asked = read(&params).unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "{:?}",
+            started.elapsed()
+        );
+        let FieldInput::One { options, .. } = &asked.form.fields()[0].input else {
+            panic!("one of");
+        };
+        assert_eq!(options.len(), MOST_OPTIONS);
+    }
+
+    #[test]
+    fn a_keys_hidden_text_is_shown_where_the_key_names_its_field() {
+        let asked = read(&json!({ "mode": "form", "sessionId": "s1", "message": "?",
+            "requestedSchema": { "required": ["ok\u{202E}gnp.exe"], "properties": {
+                "ok\u{202E}gnp.exe": { "type": "boolean" } } } }))
+        .unwrap();
+        let field = &asked.form.fields()[0];
+        assert_eq!(
+            field.key, "ok\u{202E}gnp.exe",
+            "the agent gets its key back"
+        );
+        assert!(!field.name().contains('\u{202E}'), "{}", field.name());
+        assert!(!asked.form.problem(&[]).unwrap().contains('\u{202E}'));
     }
 
     #[test]

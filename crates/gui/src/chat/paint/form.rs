@@ -36,6 +36,8 @@ pub(super) struct FormLaid {
     buttons: Vec<(usize, Laid, bool)>,
     /// How many rows are out of sight, said beside the buttons.
     more: Option<Laid>,
+    /// For a link: where it goes, and the link whole, above the buttons.
+    link: Vec<Laid>,
     /// From below the message to the buttons.
     rows_height: f32,
     pub(super) height: f32,
@@ -75,21 +77,35 @@ impl ChatView {
         caret: bool,
     ) -> Option<FormLaid> {
         let filling = self.filling.as_ref()?;
-        // A link is shown whole before it's opened.
-        let message = match &form.ask {
+        // A link is shown whole, where it goes on a line of its own, as
+        // plain text, outside the agent's message, which can't push them
+        // out of sight or pass for them.
+        let link: Vec<Laid> = match &form.ask {
             FormAsk::Url(url) => {
-                // Where it goes, on a line of its own, so a long link
-                // can't hide it.
                 let host = clackatoo_protocol::url_host(url).unwrap_or("nowhere it may go");
-                format!(
-                    "{}\n\nGoes to {}\n\n{}",
-                    form.message,
-                    clackatoo_protocol::code_span(host),
-                    clackatoo_protocol::code_span(url)
-                )
+                vec![
+                    lay_out(
+                        &mut self.layout_cx,
+                        fonts,
+                        m,
+                        &format!("Goes to {host}"),
+                        Look::Plain(Tone::Plain),
+                        inner,
+                    ),
+                    lay_out(
+                        &mut self.layout_cx,
+                        fonts,
+                        m,
+                        url,
+                        Look::Mono(Tone::Muted),
+                        inner,
+                    ),
+                ]
             }
-            FormAsk::Fields { .. } => form.message.clone(),
+            FormAsk::Fields { .. } => Vec::new(),
         };
+        let link_height: f32 = link.iter().map(|line| line.height + m.em(0.4)).sum();
+        let message = form.message.clone();
         let message = lay_out(&mut self.layout_cx, fonts, m, &message, Look::Words, inner);
         // A long message scrolls in a share of the room, leaving the rest
         // to the rows.
@@ -183,7 +199,7 @@ impl ChatView {
                 (index, laid, primary)
             })
             .collect();
-        let height = message_shown + m.em(0.7) + rows_height + m.em(2.0);
+        let height = message_shown + m.em(0.7) + rows_height + link_height + m.em(2.0);
         let hidden = rows.len() - shown.len();
         let more = (hidden > 0).then(|| {
             let text = format!("j k: {hidden} more");
@@ -203,6 +219,8 @@ impl ChatView {
             shown,
             buttons,
             more,
+            link,
+
             rows_height,
             height,
         })
@@ -277,8 +295,13 @@ impl ChatView {
             self.hits
                 .push((Hit::FormRow(index), frame.place.in_pane(hit)));
         }
+        let mut y = origin[1] + laid.message_shown + m.em(0.7) + laid.rows_height;
+        for line in &laid.link {
+            draw_laid(canvas, m, line, [origin[0], y], frame.inner);
+            y += line.height + m.em(0.4);
+        }
         let mut x = origin[0];
-        let top = origin[1] + laid.message_shown + m.em(0.7) + laid.rows_height + m.em(0.2);
+        let top = y + m.em(0.2);
         for (index, label, primary) in laid.buttons {
             let width = label.width + m.em(1.6);
             let rect = [x, top, width, m.em(1.7)];

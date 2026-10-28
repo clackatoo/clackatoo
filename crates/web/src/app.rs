@@ -2016,7 +2016,7 @@ impl App {
             Action::Fill(question) => self.fill(question),
             Action::Decline(question) => self.answer_form(question, FormReply::Decline),
             // The link opens by itself, as links do.
-            Action::OpenLink(question) => self.answer_form(question, FormReply::Accept(Vec::new())),
+            Action::OpenLink(question) => self.open_link(question),
             Action::CancelActivity(index) => self.state.cancel_activity(index),
             Action::Usage | Action::Settings => self.toggle_sheet(action),
             Action::Filter(filter) => self.state.filter(filter),
@@ -2320,19 +2320,52 @@ impl App {
     /// Answers the form question `question` asks with `reply`, if it's
     /// still the one asked, and came long enough ago.
     fn answer_form(&mut self, question: u64, reply: FormReply) {
-        let just = self.form_since.is_some_and(|(_, asked, since)| {
-            asked == question && js_sys::Date::now() - since < FORM_PAUSE
-        });
-        if just {
-            if let Some(line) = self.document.get_element_by_id(view::FORM_PROBLEM) {
-                line.set_text_content(Some("A question just came: tap again to answer it."));
-            }
+        if self.just_asked(question) {
             return;
         }
         if self.form_asked(question).is_some() {
             self.state
                 .chat(ChatAction::Fill { question, reply }, "answering");
         }
+    }
+
+    /// Whether the form question `question` came too short a time ago to
+    /// be answered: if so, says to tap again.
+    fn just_asked(&self, question: u64) -> bool {
+        let just = self.form_since.is_some_and(|(_, asked, since)| {
+            asked == question && js_sys::Date::now() - since < FORM_PAUSE
+        });
+        if just && let Some(line) = self.document.get_element_by_id(view::FORM_PROBLEM) {
+            line.set_text_content(Some("A question just came: tap again to answer it."));
+        }
+        just
+    }
+
+    /// Opens the link question `question` asks to be opened, in a tab of
+    /// its own, and answers it, unless it came too short a time ago, or
+    /// isn't a plain web link (checked here too: the daemon may not be
+    /// this one).
+    fn open_link(&mut self, question: u64) {
+        if self.just_asked(question) {
+            return;
+        }
+        let Some(clackatoo_protocol::Form {
+            ask: clackatoo_protocol::FormAsk::Url(url),
+            ..
+        }) = self.form_asked(question)
+        else {
+            return;
+        };
+        if !clackatoo_protocol::plain_web_link(&url) {
+            return;
+        }
+        // In the tap's own handler, so a phone's browser lets it open.
+        let _ = self.window.open_with_url_and_target_and_features(
+            &url,
+            "_blank",
+            "noopener,noreferrer",
+        );
+        self.answer_form(question, FormReply::Accept(Vec::new()));
     }
 
     /// Whether the box or button with `id` is ticked.

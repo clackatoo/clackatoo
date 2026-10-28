@@ -64,6 +64,9 @@ pub enum FormAsk {
 pub struct Field {
     /// The name the answer goes by.
     pub key: String,
+    /// The key as it's shown, with nothing hidden in it: what the field
+    /// is called if it has no title.
+    pub label: String,
     /// What it's called, if the agent says: a short heading.
     pub title: Option<String>,
     /// What it asks, if the agent says more.
@@ -224,7 +227,7 @@ impl Field {
     /// What to call it: its title, else its key.
     #[must_use]
     pub fn name(&self) -> &str {
-        self.title.as_deref().unwrap_or(&self.key)
+        self.title.as_deref().unwrap_or(&self.label)
     }
 
     /// What's wrong with `value` as its answer, if anything is.
@@ -312,15 +315,30 @@ fn number_problem(
 /// The host a web link `url` goes to, with its port if it says one: what
 /// a link's card shows on a line of its own, so a long link can't hide
 /// where it goes. `None` if it isn't an `http` or `https` link with a
-/// host, or names a user (`user@host`), which can pass for another host.
+/// host, names a user (`user@host`), which can pass for another host, or
+/// holds a space, a control character or DEL anywhere, which browsers
+/// and openers drop, so the host shown wouldn't be the one gone to.
 #[must_use]
 pub fn url_host(url: &str) -> Option<&str> {
+    if url.bytes().any(|byte| byte <= 0x20 || byte == 0x7f) {
+        return None;
+    }
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let host = &rest[..end];
     (!host.is_empty() && !host.contains('@') && !host.contains('\\')).then_some(host)
+}
+
+/// Whether `url` is a link that may be handed to a browser or the
+/// desktop's opener: `http` or `https`, plain printable ASCII with no
+/// spaces, naming no user, with a host (see [`url_host`]), and not too
+/// long. The daemon checks every link an agent gives so, and so does
+/// every window before it opens one, as the daemon may be another's.
+#[must_use]
+pub fn plain_web_link(url: &str) -> bool {
+    url.len() <= MOST_URL && url.is_ascii() && url_host(url).is_some()
 }
 
 /// `text` as a finite number, whole if `integer`, if it's one.
@@ -359,6 +377,7 @@ mod tests {
                 fields: vec![
                     Field {
                         key: "db".into(),
+                        label: "db".into(),
                         title: Some("Database".into()),
                         description: None,
                         required: true,
@@ -369,6 +388,7 @@ mod tests {
                     },
                     Field {
                         key: "also".into(),
+                        label: "also".into(),
                         title: None,
                         description: None,
                         required: false,
@@ -381,6 +401,7 @@ mod tests {
                     },
                     Field {
                         key: "n".into(),
+                        label: "n".into(),
                         title: None,
                         description: None,
                         required: false,
@@ -393,6 +414,7 @@ mod tests {
                     },
                     Field {
                         key: "note".into(),
+                        label: "note".into(),
                         title: None,
                         description: None,
                         required: false,
@@ -441,6 +463,13 @@ mod tests {
         assert_eq!(url_host("https://good.com@evil.com/"), None);
         assert_eq!(url_host("https:///path"), None);
         assert_eq!(url_host("javascript:alert(1)"), None);
+        for hidden in ["\n\n\n\n", "\t", " ", "\r", "\u{7f}"] {
+            let url = format!("https://paypal.com{hidden}.evil.com/");
+            assert_eq!(url_host(&url), None, "{url:?}");
+            assert!(!plain_web_link(&url), "{url:?}");
+        }
+        assert!(plain_web_link("https://linear.app/oauth"));
+        assert!(!plain_web_link("https://lіnear.app/"));
     }
 
     #[test]
