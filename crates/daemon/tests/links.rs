@@ -151,6 +151,7 @@ impl World {
                     title: None,
                     command: vec![example("fake_agent").into()],
                     starting_mode: None,
+                    tasks: None,
                 }],
                 ..AgentConfig::default()
             },

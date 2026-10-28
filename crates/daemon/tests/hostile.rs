@@ -60,6 +60,7 @@ impl TestDaemon {
                         title: None,
                         command: vec![agent.into()],
                         starting_mode: None,
+                        tasks: None,
                     }]
                 })
                 .unwrap_or_default(),

@@ -157,6 +157,7 @@ fn custom_agent(name: &str, command: Vec<std::ffi::OsString>) -> CustomAgent {
         title: None,
         command,
         starting_mode: None,
+        tasks: None,
     }
 }
 
@@ -2654,6 +2655,23 @@ fn only_claude_code_is_asked_for_its_background_tasks() {
     let node = ask(&mut client, chat, "background");
     assert_eq!(last_words(&node), "no tasks\n");
     assert!(node.tasks.is_empty());
+}
+
+#[test]
+fn claude_code_isnt_asked_for_its_background_tasks_with_tasks_off_in_agents_toml() {
+    // As asking costs the text of its Read, Grep and Glob results.
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.agents.file = Some(dir.join("agents.toml"));
+    });
+    let toml = format!(
+        "[agents.claude]\ncommand = [\"{}\"]\ntasks = false\n",
+        fake_agent().display()
+    );
+    std::fs::write(daemon.dir.path().join("agents.toml"), toml).unwrap();
+    let mut client = daemon.client();
+    let (chat, _) = start_chat_with(&mut client, "claude");
+    let node = ask(&mut client, chat, "background");
+    assert_eq!(last_words(&node), "no tasks\n");
 }
 
 #[test]
@@ -19654,6 +19672,7 @@ fn antigravity_sign_in_stops_the_browser_flow_and_keeps_secrets_out_of_chat() {
                 name: "antigravity".into(),
                 title: None,
                 starting_mode: None,
+                tasks: None,
                 command: vec![fake_agent().into(), flag.into()],
             });
         });
@@ -19685,6 +19704,7 @@ fn a_real_antigravity_shows_native_output_images_and_file_edits() {
             name: "antigravity".into(),
             title: Some("Antigravity".into()),
             starting_mode: Some("default".into()),
+            tasks: None,
             command: command.split_whitespace().map(Into::into).collect(),
         });
         config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);

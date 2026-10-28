@@ -359,6 +359,7 @@ impl DaemonConfig {
                             .map(OsString::from)
                             .collect(),
                         starting_mode: None,
+                        tasks: None,
                     })
                     .collect(),
                 file: config_dir().map(|dir| dir.join("daemon/agents.toml")),

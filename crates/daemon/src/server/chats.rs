@@ -433,6 +433,7 @@ impl Daemon {
             title: name.to_owned(),
             launch: Launch::Command(Vec::new()),
             starting_mode: None,
+            tasks: false,
             login: None,
         })
     }
@@ -630,7 +631,13 @@ impl Daemon {
             command
         };
         let display = self.display_env();
-        let agent = Agent::start(&spec.name, &command, display.as_deref(), &self.parser)?;
+        let agent = Agent::start(
+            &spec.name,
+            &command,
+            display.as_deref(),
+            spec.tasks,
+            &self.parser,
+        )?;
         let id = AgentId(self.agents.next);
         self.agents.next += 1;
         let mut tokens: Vec<Token> = Vec::new();
@@ -2257,6 +2264,7 @@ mod tests {
             name: "claude".into(),
             title: None,
             starting_mode: None,
+            tasks: None,
             command: vec![
                 example("fake_agent").into_os_string(),
                 "--log".into(),

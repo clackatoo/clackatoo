@@ -233,10 +233,11 @@ const MOST_TASK_ID: usize = 256;
 const MOST_TASK_TEXT: usize = 300;
 
 /// The capabilities of the AIR extensions to ACP (`JetBrains`') clackatoo asks
-/// for, of Claude Code's adapter only: asking for any makes the adapter
-/// treat clackatoo as AIR, which changes how it reports tools a little
-/// for Claude Code (checked with its live tests), and a lot for Codex's,
-/// which then leaves out a command's output.
+/// for, of an agent asked what it runs in the background: by default only
+/// Claude Code's adapter. Asking for any makes an adapter treat clackatoo
+/// as AIR for the whole connection: Claude Code's then sends Read, Grep
+/// and Glob results with no text, and Codex's leaves out commands'
+/// output.
 const AIR_CAPABILITIES: &[&str] = &["asyncTasks"];
 
 /// A session the agent kept, as it listed it.
@@ -291,12 +292,14 @@ pub(crate) struct Agent {
 
 impl Agent {
     /// Starts `command`, the agent called `name`, on the desktop's
-    /// `display` if it's followed, and introduces the daemon to it. Its
-    /// big messages are parsed by `parser`.
+    /// `display` if it's followed, and introduces the daemon to it, asking
+    /// what it runs in the background if `tasks`. Its big messages are
+    /// parsed by `parser`.
     pub(crate) fn start(
         name: &str,
         command: &[OsString],
         display: Option<&crate::display::Env>,
+        tasks: bool,
         parser: &Parser,
     ) -> io::Result<Self> {
         let logged = format!("agent {name}");
@@ -318,7 +321,7 @@ impl Agent {
         // Codex's adapter streams commands' output in this, which the
         // daemon adds to the tool's.
         let mut meta = json!({ "terminal_output_delta": true });
-        if name == "claude" {
+        if tasks {
             meta["jetbrains"] =
                 json!({ "air": { "version": 1, "capabilities": AIR_CAPABILITIES } });
         }

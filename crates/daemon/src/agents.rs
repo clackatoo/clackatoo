@@ -30,7 +30,11 @@
 //!
 //! [agents.claude]
 //! command = ["claude-agent-acp"]
+//! tasks = false
 //! ```
+//!
+//! `tasks` says whether to ask the agent what it runs in the background
+//! (see [`crate::agent::Task`]): Claude Code is asked unless it's `false`.
 //!
 //! It's the daemon's, not the window's, as the daemon runs the agent:
 //! it starts it again after an upgrade or a crash with no window there,
@@ -83,6 +87,8 @@ pub(crate) struct Known {
     pub(crate) size: &'static str,
     /// The mode a new chat asks for, if the agent offers it.
     pub(crate) starting_mode: Option<&'static str>,
+    /// Whether it's asked what it runs in the background.
+    pub(crate) tasks: bool,
     /// What logs in to it, to say when it isn't logged in.
     pub(crate) login: &'static str,
     /// Where it's told which MCP servers to start, to say when a session
@@ -131,6 +137,7 @@ pub(crate) const KNOWN: &[Known] = &[
         size: "620 MB",
         // Auto decides itself what needs asking about (jack, 2026-10-08).
         starting_mode: Some("auto"),
+        tasks: true,
         login: "claude",
         servers: Servers {
             set_in: "its settings (`~/.claude.json`, or the project's `.mcp.json`)",
@@ -151,6 +158,8 @@ pub(crate) const KNOWN: &[Known] = &[
         // Codex starts in the mode its own config gives, as it does in a
         // terminal: Auto review for most.
         starting_mode: None,
+        // Asking makes Codex's adapter leave out its commands' output.
+        tasks: false,
         login: "codex login",
         servers: Servers {
             set_in: "`~/.codex/config.toml`",
@@ -189,6 +198,7 @@ pub(crate) const KNOWN: &[Known] = &[
         args: &["--uid="],
         size: "1.1 GB, plus about 1 GB of runtime scratch",
         starting_mode: Some("default"),
+        tasks: false,
         login: "clackatoo agent login antigravity",
         servers: Servers {
             set_in: "its Clackatoo Antigravity profile",
@@ -207,6 +217,7 @@ pub(crate) const KNOWN: &[Known] = &[
         args: &["--acp"],
         size: "100 MB",
         starting_mode: None,
+        tasks: false,
         login: "gemini",
         servers: Servers {
             set_in: "`~/.gemini/settings.json`",
@@ -229,6 +240,9 @@ pub struct CustomAgent {
     pub command: Vec<OsString>,
     /// The mode a new chat asks for, if the agent offers it.
     pub starting_mode: Option<String>,
+    /// Whether to ask it what it runs in the background, if not as the
+    /// known agent of its name is asked.
+    pub tasks: Option<bool>,
 }
 
 /// An agent, ready to start.
@@ -238,6 +252,8 @@ pub(crate) struct AgentSpec {
     pub(crate) title: String,
     pub(crate) launch: Launch,
     pub(crate) starting_mode: Option<String>,
+    /// Whether it's asked what it runs in the background.
+    pub(crate) tasks: bool,
     /// What logs in to it, if it's known.
     pub(crate) login: Option<String>,
 }
@@ -332,6 +348,7 @@ impl AgentConfig {
                 launch: Launch::Command(custom.command.clone()),
                 starting_mode: (custom.starting_mode.clone())
                     .or_else(|| known.and_then(|known| known.starting_mode.map(str::to_owned))),
+                tasks: (custom.tasks).unwrap_or_else(|| known.is_some_and(|known| known.tasks)),
                 login: known.map(|known| known.login.to_owned()),
             }),
             (None, Some(known)) => Ok(AgentSpec {
@@ -339,6 +356,7 @@ impl AgentConfig {
                 title: known.title.to_owned(),
                 launch: Launch::Known(known),
                 starting_mode: known.starting_mode.map(str::to_owned),
+                tasks: known.tasks,
                 login: Some(known.login.to_owned()),
             }),
             (None, None) => {
@@ -785,11 +803,16 @@ fn parse(document: &toml_edit::DocumentMut) -> Result<Vec<CustomAgent>, String> 
             .collect::<Option<Vec<_>>>()
             .filter(|command| !command.is_empty())
             .ok_or_else(|| format!("agents.{name}.command is a list of strings"))?;
+        let tasks = agent.get("tasks").map_or(Ok(None), |item| {
+            (item.as_bool().map(Some))
+                .ok_or_else(|| format!("agents.{name}.tasks is true or false"))
+        })?;
         parsed.push(CustomAgent {
             name: name.to_owned(),
             title: text("name")?,
             command,
             starting_mode: text("mode")?,
+            tasks,
         });
     }
     Ok(parsed)
@@ -813,6 +836,7 @@ mod tests {
             title: None,
             command: command.iter().map(OsString::from).collect(),
             starting_mode: None,
+            tasks: None,
         }
     }
 
@@ -902,6 +926,7 @@ mod tests {
                 name = "OpenCode"
                 command = ["opencode", "acp"]
                 mode = "build"
+                tasks = false
 
                 [agents.claude]
                 command = ["claude-agent-acp"]
@@ -916,6 +941,7 @@ mod tests {
                     title: Some("OpenCode".into()),
                     command: vec!["opencode".into(), "acp".into()],
                     starting_mode: Some("build".into()),
+                    tasks: Some(false),
                 },
                 custom("claude", &["claude-agent-acp"]),
             ]

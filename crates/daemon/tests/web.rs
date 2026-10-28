@@ -146,6 +146,7 @@ impl TestDaemon {
                     title: None,
                     command: agent,
                     starting_mode: None,
+                    tasks: None,
                 }],
                 ..AgentConfig::default()
             },
