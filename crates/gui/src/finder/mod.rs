@@ -19,6 +19,7 @@
 //! | Ctrl+U, Ctrl+W | Deletes what's typed, or its last word |
 //! | Down, Ctrl+N; Up, Ctrl+P | The next or previous thing |
 //! | Page Down, Page Up | A page further or back |
+//! | Home, End | The first thing or the last |
 //! | Enter | Opens it in place of the focused pane's file, as `:e` does |
 //! | Ctrl+V, Ctrl+X | Opens it beside the focused pane, or below |
 //! | Ctrl+T | Opens it in a new tab |
@@ -26,7 +27,8 @@
 //!
 //! Listing the background tabs, Enter, Ctrl+V, Ctrl+X and Ctrl+T bring the
 //! one picked back, Ctrl+D dismisses it, and Ctrl+F forwards the ports it
-//! listens on here (see `desk::background`).
+//! listens on here (see `desk::background`). The keys every picker has,
+//! the wheel, clicks and pastes are [`crate::picker`]'s.
 
 pub(crate) mod rank;
 pub(crate) mod view;
@@ -41,12 +43,13 @@ use clackatoo_protocol::{
     Answer, Code, Done, FileLocation, Found, FoundBuffer, FoundLine, FoundSymbol, Side, Span,
     Symbol,
 };
-use winit::keyboard::{Key, NamedKey};
 
 use crate::command::Place;
 use crate::input::KeyPress;
 use crate::options::Case;
+use crate::picker::{self, Keyed, Picker};
 use crate::render::Ink;
+use crate::vim::Stroke;
 use rank::{Items, Ranking};
 use view::{FinderView, PreviewView, Row};
 
@@ -231,7 +234,8 @@ struct Shown {
 #[derive(Debug)]
 pub(crate) struct Finder {
     kind: Kind,
-    query: String,
+    /// What's typed, the thing picked and the first shown, by their ranks.
+    picker: Picker,
     /// The daemon's search filling the list, while it goes on.
     search: Option<u64>,
     /// The query to a file's language server whose answer fills the list,
@@ -245,12 +249,6 @@ pub(crate) struct Finder {
     items: Items,
     entries: Vec<Entry>,
     ranking: Ranking,
-    /// The thing picked, by its rank.
-    selected: usize,
-    /// The first thing shown, by its rank.
-    top: usize,
-    /// How many things the list showed last, for paging.
-    rows: usize,
     preview: Preview,
     /// The preview of each thing, by its index, for a list the window
     /// makes itself.
@@ -292,7 +290,7 @@ impl Finder {
         }
         Self {
             kind,
-            query,
+            picker: Picker::new(query),
             search: None,
             asking: None,
             done: None,
@@ -300,9 +298,6 @@ impl Finder {
             items,
             entries: Vec::new(),
             ranking,
-            selected: 0,
-            top: 0,
-            rows: 1,
             preview: Preview::default(),
             local_previews: Vec::new(),
             note: None,
@@ -363,13 +358,13 @@ impl Finder {
         self.entries.clear();
         self.ranking.clear();
         self.push_local(items);
-        self.ranking.set_query(&self.query, &self.items);
+        self.ranking.set_query(self.picker.query(), &self.items);
         let rank = picked.and_then(|picked| {
             (0..self.ranking.len()).find(|&rank| {
                 (self.ranking.get(rank)).is_some_and(|index| self.entries[index].path == picked)
             })
         });
-        self.selected = rank.unwrap_or(0);
+        self.picker.set_selected(rank.unwrap_or(0));
     }
 
     /// What [`Opening::path`] would say of the thing picked, if anything
@@ -415,7 +410,7 @@ impl Finder {
     }
 
     pub(crate) fn query(&self) -> &str {
-        &self.query
+        self.picker.query()
     }
 
     /// What it lists.
@@ -435,11 +430,10 @@ impl Finder {
         self.items.clear();
         self.entries.clear();
         self.ranking.clear();
-        self.selected = 0;
-        self.top = 0;
+        self.picker.restart();
         // What it searches for picks out the letters in what it finds.
         if self.kind == Kind::ProjectSymbols {
-            self.ranking.set_query(&self.query, &self.items);
+            self.ranking.set_query(self.picker.query(), &self.items);
         }
     }
 
@@ -642,105 +636,66 @@ impl Finder {
 
     /// The thing picked, if anything matches.
     fn picked(&mut self) -> Option<&Entry> {
-        let index = self.ranking.get(self.selected)?;
+        let index = self.ranking.get(self.picker.selected())?;
         self.entries.get(index)
     }
 
     /// Handles a key.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> Outcome {
-        let modifiers = press.modifiers;
-        // Not with Shift: Ctrl+Shift+C and the like are the terminal's.
-        let ctrl = |press: &KeyPress<'_>| match press.key {
-            Key::Character(text) if modifiers.ctrl && !modifiers.alt && !modifiers.shift => {
-                text.chars().next().map(|ch| ch.to_ascii_lowercase())
+        let mut outcome = Outcome::Nothing;
+        for stroke in picker::strokes(press) {
+            match self.stroke(stroke) {
+                Outcome::Nothing => {}
+                // What a grep looks for changed: it's searched for, once.
+                Outcome::Changed if outcome == Outcome::Search => {}
+                changed @ (Outcome::Changed | Outcome::Search) => outcome = changed,
+                done => return done,
             }
-            _ => None,
-        };
-        self.bound_key(press, ctrl(press))
+        }
+        outcome
     }
 
     crate::shortcuts::bindings::described_keys! {
-        fn bound_key / describe_bound_key(&mut self, press: &KeyPress<'_>, ctrl: Option<char>) -> Outcome;
+        fn stroke / describe_stroke(&mut self, stroke: Stroke) -> Outcome;
         prepare {
-            let modifiers = press.modifiers;
             let background = self.kind == Kind::Background;
         }
-        match (press.key, ctrl) => {
-            (Key::Named(NamedKey::Escape), _) | (_, Some('c')) =>
+        match stroke => {
+            Stroke::Escape | Stroke::Char { ch: 'c', ctrl: true } =>
                 Hint::Action("Close picker"),
                 Outcome::Close;
-            (Key::Named(NamedKey::Enter), _) =>
+            Stroke::Enter =>
                 Hint::Action("Open selected item"),
                 self.open(Place::Here);
             // A background tab comes back as a tab, however it's opened.
-            (_, Some('v' | 'x' | 't')) if background =>
+            Stroke::Char { ch: 'v' | 'x' | 't', ctrl: true } if background =>
                 Hint::Action("Bring back background tab"),
                 self.open(Place::Here);
-            (_, Some('d')) if background =>
+            Stroke::Char { ch: 'd', ctrl: true } if background =>
                 Hint::Action("Dismiss background tab"),
                 match self.picked() {
                     Some(entry) => Outcome::Dismiss(entry.path.clone()),
                     None => Outcome::NothingPicked,
                 };
-            (_, Some('f')) if background =>
+            Stroke::Char { ch: 'f', ctrl: true } if background =>
                 Hint::Action("Forward background tab ports"),
                 match self.picked() {
                     Some(entry) => Outcome::Forward(entry.path.clone()),
                     None => Outcome::NothingPicked,
                 };
-            (_, Some('v')) =>
+            Stroke::Char { ch: 'v', ctrl: true } =>
                 Hint::Action("Open in right split"),
                 self.open(Place::Beside(Side::Right));
-            (_, Some('x')) =>
+            Stroke::Char { ch: 'x', ctrl: true } =>
                 Hint::Action("Open in split below"),
                 self.open(Place::Beside(Side::Below));
-            (_, Some('t')) =>
+            Stroke::Char { ch: 't', ctrl: true } =>
                 Hint::Action("Open in new tab"),
                 self.open(Place::Tab);
-            (Key::Named(NamedKey::ArrowDown), _) | (_, Some('n')) =>
-                Hint::Action("Next result"),
-                self.go(1);
-            (Key::Named(NamedKey::ArrowUp), _) | (_, Some('p')) =>
-                Hint::Action("Previous result"),
-                self.go(-1);
-            (Key::Named(NamedKey::PageDown), _) =>
-                Hint::Action("Next page"),
-                self.go(self.page());
-            (Key::Named(NamedKey::PageUp), _) =>
-                Hint::Action("Previous page"),
-                self.go(-self.page());
-            (Key::Named(NamedKey::Backspace), _) =>
-                Hint::Action("Delete last query character"),
-                {
-                    if self.query.pop().is_none() {
-                        return Outcome::Nothing;
-                    }
-                    self.typed()
-                };
-            (_, Some('u')) =>
-                Hint::Action("Clear query"),
-                {
-                    self.query.clear();
-                    self.typed()
-                };
-            (_, Some('w')) =>
-                Hint::Action("Delete last query word"),
-                {
-                    let kept = self
-                        .query
-                        .trim_end()
-                        .rfind(' ')
-                        .map_or(0, |space| space + 1);
-                    self.query.truncate(kept);
-                    self.typed()
-                };
-            _ if modifiers.ctrl || modifiers.alt =>
-                Hint::None,
-                Outcome::Nothing;
             _ =>
-                Hint::Text("Search items"),
-                match press.text {
-                    Some(text) => self.paste(text),
+                Picker::hint(stroke, "Search items"),
+                match self.picker.key(stroke, self.ranking.len()) {
+                    Some(keyed) => self.did(keyed),
                     None => Outcome::Nothing,
                 };
         }
@@ -748,71 +703,45 @@ impl Finder {
     }
 
     pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
-        crate::shortcuts::bindings::list("Picker", None, |stroke, _| {
-            let key = stroke.chord().kept();
-            let ctrl = match stroke {
-                crate::vim::Stroke::Char { ch, ctrl: true } => Some(ch),
-                _ => None,
-            };
-            self.describe_bound_key(&key.press(), ctrl)
-        })
+        crate::shortcuts::bindings::list("Picker", None, |stroke, _| self.describe_stroke(stroke))
     }
 
     /// Types `text`.
     pub(crate) fn paste(&mut self, text: &str) -> Outcome {
-        let before = self.query.len();
-        (self.query).extend(text.chars().filter(|ch| !ch.is_control()));
-        if self.query.len() == before {
-            return Outcome::Nothing;
-        }
-        self.typed()
+        let keyed = self.picker.paste(text);
+        self.did(keyed)
     }
 
-    /// What's typed changed: the list is matched against it again, or for
-    /// a grep, it's searched for.
-    fn typed(&mut self) -> Outcome {
-        self.selected = 0;
-        self.top = 0;
-        if self.kind.searched() {
-            return Outcome::Search;
+    /// What the picker did with a key: what's typed changed, so the list
+    /// is matched against it again, or for a grep, it's searched for.
+    fn did(&mut self, keyed: Keyed) -> Outcome {
+        match keyed {
+            Keyed::Nothing => Outcome::Nothing,
+            Keyed::Moved => Outcome::Changed,
+            Keyed::Typed if self.kind.searched() => Outcome::Search,
+            Keyed::Typed => {
+                self.ranking.set_query(self.picker.query(), &self.items);
+                Outcome::Changed
+            }
         }
-        self.ranking.set_query(&self.query, &self.items);
-        Outcome::Changed
-    }
-
-    /// Moves what's picked by `by` things.
-    fn go(&mut self, by: isize) -> Outcome {
-        let last = self.ranking.len().saturating_sub(1);
-        let selected = self.selected.saturating_add_signed(by).min(last);
-        if selected == self.selected {
-            return Outcome::Nothing;
-        }
-        self.selected = selected;
-        Outcome::Changed
     }
 
     /// Moves what's picked by `by` things, as the mouse's wheel does.
     pub(crate) fn scroll(&mut self, by: isize) -> Outcome {
-        self.go(by)
+        let keyed = self.picker.go(by, self.ranking.len());
+        self.did(keyed)
     }
 
     /// Picks the thing shown in row `row` of the list, as a click does,
     /// and opens it in place if `open`, as a double click does.
     pub(crate) fn click(&mut self, row: usize, open: bool) -> Outcome {
-        let rank = self.top + row;
-        if rank >= self.ranking.len() {
+        if !self.picker.click(row, self.ranking.len()) {
             return Outcome::Nothing;
         }
-        self.selected = rank;
         if open {
             return self.open(Place::Here);
         }
         Outcome::Changed
-    }
-
-    /// How many things a page is.
-    fn page(&self) -> isize {
-        isize::try_from(self.rows.max(1)).unwrap_or(1)
     }
 
     /// Opens the thing picked, at `place`.
@@ -980,24 +909,17 @@ impl Finder {
         (rows, cols): (usize, usize),
         preview: Option<(usize, usize)>,
     ) -> FinderView {
-        self.rows = rows;
         let count = self.ranking.len();
-        self.selected = self.selected.min(count.saturating_sub(1));
-        if self.selected < self.top {
-            self.top = self.selected;
-        } else if self.selected >= self.top + rows {
-            self.top = self.selected + 1 - rows;
-        }
-        let shown: Vec<Row> = (self.top..count.min(self.top + rows))
+        let shown: Vec<Row> = (self.picker.shown(rows, count))
             .filter_map(|rank| self.row(rank, cols))
             .collect();
         let preview = preview.and_then(|size| self.preview_view(size));
         FinderView {
             title: self.kind.title(),
             place: self.root.as_ref().map(|(_, name)| name.clone()),
-            query: format!("{}▏", self.query),
+            query: picker::drawn(self.picker.query()),
             count: self.note.clone().unwrap_or_else(|| self.count()),
-            selected: (count > 0).then(|| self.selected - self.top),
+            selected: self.picker.shown_selected(count),
             rows: shown,
             preview,
             empty: self.nothing_matches(cols),
@@ -1011,7 +933,7 @@ impl Finder {
     fn nothing_matches(&self, cols: usize) -> Option<String> {
         let looking = self.search.or(self.asking).is_some();
         let unsure = matches!(self.done, Some(Done::Failed(_) | Done::CutShort));
-        if self.query.is_empty() || self.ranking.len() > 0 || looking || unsure {
+        if self.picker.query().is_empty() || self.ranking.len() > 0 || looking || unsure {
             return None;
         }
         // What's typed, cut short to the room the words leave.
@@ -1019,7 +941,7 @@ impl Finder {
         let room = cols.saturating_sub(words).min(QUOTED);
         Some(format!(
             "Nothing matches ‘{}’",
-            view::cut(&self.query, room, false)
+            view::cut(self.picker.query(), room, false)
         ))
     }
 
@@ -1094,7 +1016,7 @@ impl Finder {
     /// if it's come.
     fn preview_view(&mut self, (rows, cols): (usize, usize)) -> Option<PreviewView> {
         if self.kind.local() {
-            let index = self.ranking.get(self.selected)?;
+            let index = self.ranking.get(self.picker.selected())?;
             let lines = self.local_previews.get(index)?;
             // A background tab's screen, as it is: no line numbers.
             if self.kind == Kind::Background {

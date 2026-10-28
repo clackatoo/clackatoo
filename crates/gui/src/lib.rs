@@ -50,6 +50,7 @@ mod objects;
 mod options;
 mod other;
 mod pane;
+mod picker;
 mod render;
 mod review;
 mod screen;

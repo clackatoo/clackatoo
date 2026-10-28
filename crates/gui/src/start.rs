@@ -24,6 +24,8 @@
 //! | Enter | Starts the new chat, or shows or goes on with the one picked |
 //! | `n` | Starts the new chat, whatever is picked |
 //! | `j`, `k`; Down, Up; Ctrl+N, Ctrl+P | The next or previous row |
+//! | Page Down, Page Up | A page further or back |
+//! | Home, End | The new chat, or the last row |
 //! | Tab, Shift+Tab | The new chat's next or previous picker: agent, model, folder |
 //! | `l`, `h`; Right, Left | The picker's next or previous choice |
 //! | `/` | Starts typing, to filter |
@@ -32,18 +34,22 @@
 //!
 //! `j`, `k`, `n`, `h` and `l` are keys only while nothing's typed; any
 //! other letter starts typing, and once typing, every letter types.
+//! The keys every picker has, the wheel, clicks and pastes are
+//! [`crate::picker`]'s, and its rows are the new chat's, then the list's.
 
 use clackatoo_protocol::{
     AgentSession, ChatChoices, ChatState, ChatSummary, Provider, ProviderModels, TerminalId,
 };
-use winit::keyboard::{Key, NamedKey};
 
 use crate::command::Place;
 use crate::finder::rank::{Items, Ranking};
 use crate::finder::view::{FinderView, PreviewView, Row, fit};
 use crate::input::KeyPress;
 use crate::options::Case;
+use crate::picker::{self, Keyed, Picker};
 use crate::render::Ink;
+use crate::shortcuts::bindings::Hint;
+use crate::vim::Stroke;
 
 /// What the last new chat started from the page had, for the next page to
 /// start with.
@@ -91,7 +97,7 @@ pub(crate) enum Outcome {
 
 /// One of the new chat's pickers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Picker {
+enum Field {
     Agent,
     Model,
     Folder,
@@ -122,7 +128,7 @@ pub(crate) struct StartPage {
     /// once the daemon has said where the focused pane is.
     folders: Vec<(String, String)>,
     folder: usize,
-    picker: Picker,
+    field: Field,
     last: LastChat,
     /// This workspace's chats in no pane.
     chats: Vec<ChatSummary>,
@@ -138,7 +144,9 @@ pub(crate) struct StartPage {
     listing: Option<u64>,
     /// Why the agent's sessions aren't listed, if they couldn't be.
     unlisted: Option<String>,
-    query: String,
+    /// What's typed, the row picked and the first shown: row 0 is the new
+    /// chat, and the rest the ranked list (see [`len`](Self::len)).
+    picker: Picker,
     /// Letters type, as after `/`, rather than act.
     typing: bool,
     /// Each chat's and session's text, which what's typed is matched
@@ -146,12 +154,6 @@ pub(crate) struct StartPage {
     items: Items,
     entries: Vec<Entry>,
     ranking: Ranking,
-    /// The row picked: 0 is the new chat, and the rest the ranked list.
-    selected: usize,
-    /// The first row shown.
-    top: usize,
-    /// How many rows the list showed last, for paging.
-    rows: usize,
 }
 
 impl StartPage {
@@ -168,7 +170,7 @@ impl StartPage {
             model: last.model.clone(),
             folders: Vec::new(),
             folder: 0,
-            picker: Picker::Agent,
+            field: Field::Agent,
             last,
             chats: Vec::new(),
             others: Vec::new(),
@@ -176,14 +178,11 @@ impl StartPage {
             sessions: Vec::new(),
             listing: None,
             unlisted: None,
-            query: String::new(),
+            picker: Picker::default(),
             typing: false,
             items: Items::default(),
             entries: Vec::new(),
             ranking: Ranking::new(case, false),
-            selected: 0,
-            top: 0,
-            rows: 1,
         }
     }
 
@@ -315,110 +314,129 @@ impl StartPage {
             self.entries.push(Entry::Session(session.clone()));
         }
         self.ranking.add(&self.items);
-        self.selected = self.selected.min(self.ranking.len());
+        self.picker.clamp(self.len());
+    }
+
+    /// How many rows there are to pick from: the new chat's, first, and
+    /// the chats and sessions matching what's typed.
+    fn len(&self) -> usize {
+        self.ranking.len() + 1
     }
 
     /// Handles a key.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> Outcome {
         self.said = None;
-        let modifiers = press.modifiers;
-        // Not with Shift: Ctrl+Shift+C and the like are the terminal's.
-        let ctrl = match press.key {
-            Key::Character(text) if modifiers.ctrl && !modifiers.alt && !modifiers.shift => {
-                text.chars().next().map(|ch| ch.to_ascii_lowercase())
+        let mut outcome = Outcome::Nothing;
+        for stroke in picker::strokes(press) {
+            match self.stroke(stroke) {
+                Outcome::Nothing => {}
+                Outcome::Changed => outcome = Outcome::Changed,
+                done => return done,
             }
-            _ => None,
-        };
-        // A letter that acts, while nothing's typed.
-        let letter = match press.text {
-            Some(text) if !self.typing && !modifiers.ctrl && !modifiers.alt => {
-                let mut chars = text.chars();
-                chars.next().filter(|_| chars.next().is_none())
-            }
-            _ => None,
-        };
-        match (press.key, ctrl, letter) {
-            (Key::Named(NamedKey::Escape), ..) | (_, Some('c'), _) => self.escape(),
-            (Key::Named(NamedKey::Enter), ..) => self.act(),
-            (_, _, Some('n')) => self.start(),
-            (Key::Named(NamedKey::ArrowDown), ..) | (_, Some('n'), _) | (_, _, Some('j')) => {
-                self.go(1)
-            }
-            (Key::Named(NamedKey::ArrowUp), ..) | (_, Some('p'), _) | (_, _, Some('k')) => {
-                self.go(-1)
-            }
-            (Key::Named(NamedKey::PageDown), ..) => self.go(self.page()),
-            (Key::Named(NamedKey::PageUp), ..) => self.go(-self.page()),
-            (Key::Named(NamedKey::Tab), ..) if modifiers.shift => self.next_picker(-1),
-            (Key::Named(NamedKey::Tab), ..) => self.next_picker(1),
-            (Key::Named(NamedKey::ArrowRight), ..) | (_, _, Some('l')) => self.change(1),
-            (Key::Named(NamedKey::ArrowLeft), ..) | (_, _, Some('h')) => self.change(-1),
-            (_, _, Some('/')) => {
-                self.typing = true;
-                Outcome::Changed
-            }
-            (Key::Named(NamedKey::Backspace), ..) => {
-                if self.query.pop().is_none() {
-                    return Outcome::Nothing;
-                }
-                self.typed()
-            }
-            (_, Some('u'), _) => {
-                self.query.clear();
-                self.typed()
-            }
-            (_, Some('w'), _) => {
-                let kept = (self.query.trim_end().rfind(' ')).map_or(0, |space| space + 1);
-                self.query.truncate(kept);
-                self.typed()
-            }
-            _ if modifiers.ctrl || modifiers.alt => Outcome::Nothing,
-            _ => match press.text {
-                Some(text) => self.paste(text),
-                None => Outcome::Nothing,
-            },
         }
+        outcome
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        fn stroke / describe_stroke(&mut self, stroke: Stroke) -> Outcome;
+        prepare {
+            // A letter that acts, while nothing's typed.
+            let letter = stroke.plain().filter(|_| !self.typing);
+        }
+        match (stroke, letter) => {
+            (Stroke::Escape | Stroke::Char { ch: 'c', ctrl: true }, _) =>
+                Hint::Action("Clear query, or close the page"),
+                self.escape();
+            (Stroke::Enter, _) =>
+                Hint::Action("Start the new chat, or show or resume the one picked"),
+                self.act();
+            (_, Some('n')) =>
+                Hint::Action("Start the new chat"),
+                self.start();
+            (_, Some('j')) =>
+                Hint::Action("Next result"),
+                self.go(1);
+            (_, Some('k')) =>
+                Hint::Action("Previous result"),
+                self.go(-1);
+            (Stroke::Tab, _) =>
+                Hint::Action("Next field of the new chat"),
+                self.next_field(1);
+            (Stroke::BackTab, _) =>
+                Hint::Action("Previous field of the new chat"),
+                self.next_field(-1);
+            (Stroke::Right, _) | (_, Some('l')) =>
+                Hint::Action("Next choice for the field"),
+                self.change(1);
+            (Stroke::Left, _) | (_, Some('h')) =>
+                Hint::Action("Previous choice for the field"),
+                self.change(-1);
+            (_, Some('/')) =>
+                Hint::Action("Filter chats and sessions"),
+                {
+                    self.typing = true;
+                    Outcome::Changed
+                };
+            _ =>
+                Picker::hint(stroke, "Filter chats and sessions"),
+                match self.picker.key(stroke, self.len()) {
+                    Some(keyed) => {
+                        // A letter typed starts typing; deleting doesn't.
+                        self.typing |= stroke.plain().is_some();
+                        self.did(keyed)
+                    }
+                    None => Outcome::Nothing,
+                };
+        }
+        result
+    }
+
+    pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
+        crate::shortcuts::bindings::list("Agent start page", None, |stroke, _| {
+            self.describe_stroke(stroke)
+        })
     }
 
     /// Types `text`, which starts typing.
     pub(crate) fn paste(&mut self, text: &str) -> Outcome {
-        let before = self.query.len();
-        (self.query).extend(text.chars().filter(|ch| !ch.is_control()));
-        if self.query.len() == before {
-            return Outcome::Nothing;
+        let keyed = self.picker.paste(text);
+        if keyed == Keyed::Typed {
+            self.typing = true;
         }
-        self.typing = true;
-        self.typed()
+        self.did(keyed)
     }
 
-    /// What's typed changed: the list is matched against it again, and
-    /// the best match picked, if anything's typed.
-    fn typed(&mut self) -> Outcome {
-        self.ranking.set_query(&self.query, &self.items);
-        self.top = 0;
-        self.selected = usize::from(!self.query.is_empty() && self.ranking.len() > 0);
-        Outcome::Changed
+    /// What the picker did with a key: what's typed changed, so the list
+    /// is matched against it again, and the best match picked, if
+    /// anything's typed.
+    fn did(&mut self, keyed: Keyed) -> Outcome {
+        match keyed {
+            Keyed::Nothing => Outcome::Nothing,
+            Keyed::Moved => Outcome::Changed,
+            Keyed::Typed => {
+                self.ranking.set_query(self.picker.query(), &self.items);
+                let typed = !self.picker.query().is_empty() && self.ranking.len() > 0;
+                self.picker.set_selected(usize::from(typed));
+                Outcome::Changed
+            }
+        }
     }
 
     /// Esc: what's typed goes, or else the page.
     fn escape(&mut self) -> Outcome {
-        if !self.typing && self.query.is_empty() {
+        if !self.typing && self.picker.query().is_empty() {
             return Outcome::Close;
         }
         self.typing = false;
-        self.query.clear();
-        self.typed()
+        let keyed = self.picker.clear();
+        self.did(keyed);
+        Outcome::Changed
     }
 
-    /// Moves what's picked by `by` rows.
+    /// Moves what's picked by `by` rows, as `j` and `k` do.
     fn go(&mut self, by: isize) -> Outcome {
-        let last = self.ranking.len();
-        let selected = self.selected.saturating_add_signed(by).min(last);
-        if selected == self.selected {
-            return Outcome::Nothing;
-        }
-        self.selected = selected;
-        Outcome::Changed
+        let keyed = self.picker.go(by, self.len());
+        self.did(keyed)
     }
 
     /// Moves what's picked by `by` rows, as the mouse's wheel does.
@@ -429,40 +447,32 @@ impl StartPage {
     /// Picks the row shown at `row`, as a click does, and acts on it if
     /// `open`, as a double click does.
     pub(crate) fn click(&mut self, row: usize, open: bool) -> Outcome {
-        let picked = self.top + row;
-        if picked > self.ranking.len() {
+        if !self.picker.click(row, self.len()) {
             return Outcome::Nothing;
         }
-        self.selected = picked;
         if open {
             return self.act();
         }
         Outcome::Changed
     }
 
-    /// How many rows a page is.
-    fn page(&self) -> isize {
-        isize::try_from(self.rows.max(1)).unwrap_or(1)
-    }
-
     /// Moves to the new chat's picker `by` along, and picks the new chat.
-    fn next_picker(&mut self, by: isize) -> Outcome {
-        let pickers = [Picker::Agent, Picker::Model, Picker::Folder];
-        let at = pickers
-            .iter()
-            .position(|&picker| picker == self.picker)
+    fn next_field(&mut self, by: isize) -> Outcome {
+        let fields = [Field::Agent, Field::Model, Field::Folder];
+        let at = (fields.iter())
+            .position(|&field| field == self.field)
             .unwrap_or(0);
-        self.picker = pickers[step(at, pickers.len(), by)];
-        self.selected = 0;
+        self.field = fields[step(at, fields.len(), by)];
+        self.picker.set_selected(0);
         Outcome::Changed
     }
 
     /// Changes the picker's choice `by` along, wrapping round: a new agent
     /// or folder lists its sessions anew.
     fn change(&mut self, by: isize) -> Outcome {
-        self.selected = 0;
-        match self.picker {
-            Picker::Agent if self.agents.len() > 1 => {
+        self.picker.set_selected(0);
+        match self.field {
+            Field::Agent if self.agents.len() > 1 => {
                 self.agent = step(self.agent, self.agents.len(), by);
                 // The model last started on goes with its agent.
                 let name = &self.agents[self.agent].agent;
@@ -471,7 +481,7 @@ impl StartPage {
                     .flatten();
                 self.list_again()
             }
-            Picker::Model => {
+            Field::Model => {
                 let models = self.models();
                 let at = (models.iter())
                     .position(|(value, _)| *value == self.model)
@@ -479,11 +489,11 @@ impl StartPage {
                 self.model.clone_from(&models[step(at, models.len(), by)].0);
                 Outcome::Changed
             }
-            Picker::Folder if self.folders.len() > 1 => {
+            Field::Folder if self.folders.len() > 1 => {
                 self.folder = step(self.folder, self.folders.len(), by);
                 self.list_again()
             }
-            Picker::Agent | Picker::Folder => Outcome::Changed,
+            Field::Agent | Field::Folder => Outcome::Changed,
         }
     }
 
@@ -530,7 +540,7 @@ impl StartPage {
     /// Enter: starts the new chat, or shows or goes on with the chat or
     /// session picked.
     fn act(&mut self) -> Outcome {
-        let Some(rank) = self.selected.checked_sub(1) else {
+        let Some(rank) = self.picker.selected().checked_sub(1) else {
             return self.start();
         };
         let Some(index) = self.ranking.get(rank) else {
@@ -561,25 +571,17 @@ impl StartPage {
         (rows, cols): (usize, usize),
         preview: Option<(usize, usize)>,
     ) -> FinderView {
-        let rows = rows.max(1);
-        self.rows = rows;
-        let count = self.ranking.len() + 1;
-        self.selected = self.selected.min(count - 1);
-        if self.selected < self.top {
-            self.top = self.selected;
-        } else if self.selected >= self.top + rows {
-            self.top = self.selected + 1 - rows;
-        }
+        let len = self.len();
         let now = jiff::Timestamp::now();
-        let shown: Vec<Row> = (self.top..count.min(self.top + rows))
+        let shown: Vec<Row> = (self.picker.shown(rows, len))
             .filter_map(|row| match row {
                 0 => Some(self.new_row(cols)),
                 row => self.row(row - 1, cols),
             })
             .collect();
         let preview = preview.map(|size| self.preview(size, now));
-        let query = if self.typing || !self.query.is_empty() {
-            format!("{}▏", self.query)
+        let query = if self.typing || !self.picker.query().is_empty() {
+            picker::drawn(self.picker.query())
         } else {
             String::new()
         };
@@ -597,7 +599,7 @@ impl StartPage {
                 .map(|(_, shown)| shown.clone()),
             query,
             count,
-            selected: Some(self.selected - self.top),
+            selected: self.picker.shown_selected(len),
             rows: shown,
             preview,
             empty: None,
@@ -614,9 +616,9 @@ impl StartPage {
             inks.extend(std::iter::repeat_n(ink, piece.chars().count()));
         };
         add("New chat", Ink::Bold);
-        for (picker, value) in self.pickers() {
+        for (field, value) in self.fields() {
             add(" · ", Ink::Muted);
-            let ink = if picker == self.picker {
+            let ink = if field == self.field {
                 Ink::Accent
             } else {
                 Ink::Plain
@@ -627,7 +629,7 @@ impl StartPage {
     }
 
     /// Each picker, and its choice as it's shown.
-    fn pickers(&self) -> [(Picker, String); 3] {
+    fn fields(&self) -> [(Field, String); 3] {
         let agent = match self.agents.get(self.agent) {
             Some(agent) => agent.title.clone(),
             None => (self.first_agent.clone()).unwrap_or_else(|| "the default agent".to_owned()),
@@ -640,9 +642,9 @@ impl StartPage {
             None => "the pane's folder".to_owned(),
         };
         [
-            (Picker::Agent, agent),
-            (Picker::Model, model),
-            (Picker::Folder, folder),
+            (Field::Agent, agent),
+            (Field::Model, model),
+            (Field::Folder, folder),
         ]
     }
 
@@ -672,16 +674,16 @@ impl StartPage {
 
     /// The preview of the row picked, `rows` lines tall and `cols` wide.
     fn preview(&mut self, (rows, cols): (usize, usize), now: jiff::Timestamp) -> PreviewView {
-        let entry = (self.selected.checked_sub(1))
+        let entry = (self.picker.selected().checked_sub(1))
             .and_then(|rank| self.ranking.get(rank))
             .and_then(|index| self.entries.get(index));
         let mut lines: Vec<(String, Ink)> = Vec::new();
         match entry {
             None => {
-                for ((picker, value), label) in
-                    self.pickers().into_iter().zip(["Agent", "Model", "Folder"])
+                for ((field, value), label) in
+                    self.fields().into_iter().zip(["Agent", "Model", "Folder"])
                 {
-                    let ink = if picker == self.picker {
+                    let ink = if field == self.field {
                         Ink::Accent
                     } else {
                         Ink::Plain

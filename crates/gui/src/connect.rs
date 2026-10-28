@@ -23,21 +23,24 @@
 //! | Ctrl+U, Ctrl+W | Deletes what's typed, or its last word |
 //! | Down, Ctrl+N; Up, Ctrl+P | The next or previous machine |
 //! | Page Down, Page Up | A page further or back |
+//! | Home, End | The first machine or the last |
 //! | Enter | Connects to it |
 //! | Esc, Ctrl+C | Closes the picker |
+//!
+//! All but Enter and Esc are every picker's (see [`crate::picker`]).
 
 use crate::shortcuts::bindings::Hint;
 
 use std::time::Duration;
-
-use winit::keyboard::{Key, NamedKey};
 
 use crate::finder::rank::{Items, Ranking};
 use crate::finder::view::{FinderView, Row, fit};
 use crate::hosts;
 use crate::input::KeyPress;
 use crate::options::Case;
+use crate::picker::{self, Keyed, Picker};
 use crate::render::Ink;
+use crate::vim::Stroke;
 
 /// How long Tailscale may take to say who its peers are.
 const TAILSCALE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -135,18 +138,13 @@ pub(crate) struct HostPicker {
     /// Its number, which the machines found for it carry.
     id: u64,
     purpose: Purpose,
-    query: String,
+    /// What's typed, the row picked and the first shown, among the
+    /// candidates matching and the machine typed, if it's offered.
+    picker: Picker,
     candidates: Vec<Candidate>,
     /// Each candidate's text, which what's typed is matched against.
     items: Items,
     ranking: Ranking,
-    /// The row picked, among the candidates matching and the machine
-    /// typed, if it's offered.
-    selected: usize,
-    /// The first row shown, likewise.
-    top: usize,
-    /// How many rows the list showed last, for paging.
-    rows: usize,
     /// How many lines the error took last, above the list.
     error_rows: usize,
     /// Whether more machines are still to come.
@@ -163,13 +161,10 @@ impl HostPicker {
         Self {
             id,
             purpose,
-            query: String::new(),
+            picker: Picker::default(),
             candidates: Vec::new(),
             items: Items::default(),
             ranking: Ranking::new(case, false),
-            selected: 0,
-            top: 0,
-            rows: 1,
             error_rows: 0,
             gathering: true,
             error,
@@ -205,6 +200,7 @@ impl HostPicker {
         }
         self.ranking.clear();
         self.ranking.add(&self.items);
+        self.picker.clamp(self.len());
         true
     }
 
@@ -213,7 +209,7 @@ impl HostPicker {
     /// a user or a port, which only a whole address has, or nothing else
     /// matches, and otherwise last.
     fn typed(&self) -> Option<(&str, usize)> {
-        let typed = self.query.trim();
+        let typed = self.picker.query().trim();
         if !hosts::is_host(typed) || self.candidates.iter().any(|known| known.host == typed) {
             return None;
         }
@@ -246,66 +242,32 @@ impl HostPicker {
         }
     }
 
-    // Handles a key.
-    crate::shortcuts::bindings::described_keys! {
-        pub(crate) fn key / describe_key(&mut self, press: &KeyPress<'_>) -> Outcome;
-        prepare {
-            let modifiers = press.modifiers;
-            // Not with Shift: Ctrl+Shift+C and the like are the terminal's.
-            let ctrl = match press.key {
-                Key::Character(text) if modifiers.ctrl && !modifiers.alt && !modifiers.shift => {
-                    text.chars().next().map(|ch| ch.to_ascii_lowercase())
-                }
-                _ => None,
-            };
+    /// Handles a key.
+    pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> Outcome {
+        let mut outcome = Outcome::Nothing;
+        for stroke in picker::strokes(press) {
+            match self.stroke(stroke) {
+                Outcome::Nothing => {}
+                Outcome::Changed => outcome = Outcome::Changed,
+                done => return done,
+            }
         }
-        match (press.key, ctrl) => {
-            (Key::Named(NamedKey::Escape), _) | (_, Some('c')) =>
+        outcome
+    }
+
+    crate::shortcuts::bindings::described_keys! {
+        fn stroke / describe_stroke(&mut self, stroke: Stroke) -> Outcome;
+        match stroke => {
+            Stroke::Escape | Stroke::Char { ch: 'c', ctrl: true } =>
                 Hint::Action("Close picker"),
                 Outcome::Close;
-            (Key::Named(NamedKey::Enter), _) =>
+            Stroke::Enter =>
                 Hint::Action("Connect to selected machine"),
                 self.connect();
-            (Key::Named(NamedKey::ArrowDown), _) | (_, Some('n')) =>
-                Hint::Action("Next result"),
-                self.go(1);
-            (Key::Named(NamedKey::ArrowUp), _) | (_, Some('p')) =>
-                Hint::Action("Previous result"),
-                self.go(-1);
-            (Key::Named(NamedKey::PageDown), _) =>
-                Hint::Action("Next page"),
-                self.go(self.page());
-            (Key::Named(NamedKey::PageUp), _) =>
-                Hint::Action("Previous page"),
-                self.go(-self.page());
-            (Key::Named(NamedKey::Backspace), _) =>
-                Hint::Action("Delete last query character"),
-                {
-                    if self.query.pop().is_none() {
-                        return Outcome::Nothing;
-                    }
-                    self.typed_changed()
-                };
-            (_, Some('u')) =>
-                Hint::Action("Clear query"),
-                {
-                    self.query.clear();
-                    self.typed_changed()
-                };
-            (_, Some('w')) =>
-                Hint::Action("Delete last query word"),
-                {
-                    let kept = (self.query.trim_end().rfind(' ')).map_or(0, |space| space + 1);
-                    self.query.truncate(kept);
-                    self.typed_changed()
-                };
-            _ if modifiers.ctrl || modifiers.alt =>
-                Hint::None,
-                Outcome::Nothing;
             _ =>
-                Hint::Text("Search machines"),
-                match press.text {
-                    Some(text) => self.paste(text),
+                Picker::hint(stroke, "Search machines"),
+                match self.picker.key(stroke, self.len()) {
+                    Some(keyed) => self.did(keyed),
                     None => Outcome::Nothing,
                 };
         }
@@ -313,43 +275,34 @@ impl HostPicker {
     }
 
     pub(crate) fn shortcut_context(&self) -> crate::shortcuts::Context {
-        crate::shortcuts::bindings::from_presses("Connect to a machine", |press| {
-            self.describe_key(press)
+        crate::shortcuts::bindings::list("Connect to a machine", None, |stroke, _| {
+            self.describe_stroke(stroke)
         })
     }
 
     /// Types `text`.
     pub(crate) fn paste(&mut self, text: &str) -> Outcome {
-        let before = self.query.len();
-        (self.query).extend(text.chars().filter(|ch| !ch.is_control()));
-        if self.query.len() == before {
-            return Outcome::Nothing;
-        }
-        self.typed_changed()
+        let keyed = self.picker.paste(text);
+        self.did(keyed)
     }
 
-    /// What's typed changed: the list is matched against it again.
-    fn typed_changed(&mut self) -> Outcome {
-        self.selected = 0;
-        self.top = 0;
-        self.ranking.set_query(&self.query, &self.items);
-        Outcome::Changed
-    }
-
-    /// Moves what's picked by `by` rows.
-    fn go(&mut self, by: isize) -> Outcome {
-        let last = self.len().saturating_sub(1);
-        let selected = self.selected.saturating_add_signed(by).min(last);
-        if selected == self.selected {
-            return Outcome::Nothing;
+    /// What the picker did with a key: what's typed changed, so the list
+    /// is matched against it again.
+    fn did(&mut self, keyed: Keyed) -> Outcome {
+        match keyed {
+            Keyed::Nothing => Outcome::Nothing,
+            Keyed::Moved => Outcome::Changed,
+            Keyed::Typed => {
+                self.ranking.set_query(self.picker.query(), &self.items);
+                Outcome::Changed
+            }
         }
-        self.selected = selected;
-        Outcome::Changed
     }
 
     /// Moves what's picked by `by` rows, as the mouse's wheel does.
     pub(crate) fn scroll(&mut self, by: isize) -> Outcome {
-        self.go(by)
+        let keyed = self.picker.go(by, self.len());
+        self.did(keyed)
     }
 
     /// Picks the machine shown in row `row` of the list, as a click does,
@@ -358,34 +311,27 @@ impl HostPicker {
         let Some(row) = row.checked_sub(self.error_rows) else {
             return Outcome::Nothing;
         };
-        let picked = self.top + row;
-        if picked >= self.len() {
+        if !self.picker.click(row, self.len()) {
             return Outcome::Nothing;
         }
-        self.selected = picked;
         if open {
             return self.connect();
         }
         Outcome::Changed
     }
 
-    /// How many rows a page is.
-    fn page(&self) -> isize {
-        isize::try_from(self.rows.max(1)).unwrap_or(1)
-    }
-
     /// Connects to the machine picked, if any. What's typed that names no
     /// machine, and nothing else matches, is said to be no machine.
     fn connect(&mut self) -> Outcome {
-        if let Some(host) = self.host(self.selected) {
+        if let Some(host) = self.host(self.picker.selected()) {
             return Outcome::Connect(host);
         }
-        if self.query.trim().is_empty() {
+        let typed = self.picker.query().trim();
+        if typed.is_empty() {
             return Outcome::Nothing;
         }
         self.error = Some(format!(
-            "{} isn't a machine to connect to: type a name, user@host or user@host:port",
-            self.query.trim()
+            "{typed} isn't a machine to connect to: type a name, user@host or user@host:port"
         ));
         Outcome::Changed
     }
@@ -399,16 +345,11 @@ impl HostPicker {
         // Room for one machine at least.
         shown.truncate(rows.saturating_sub(1).max(1));
         self.error_rows = shown.len();
-        let rows = rows.saturating_sub(self.error_rows).max(1);
-        self.rows = rows;
         let count = self.len();
-        self.selected = self.selected.min(count.saturating_sub(1));
-        if self.selected < self.top {
-            self.top = self.selected;
-        } else if self.selected >= self.top + rows {
-            self.top = self.selected + 1 - rows;
-        }
-        for row in self.top..count.min(self.top + rows) {
+        for row in self
+            .picker
+            .shown(rows.saturating_sub(self.error_rows), count)
+        {
             match self.row(row) {
                 Picked::Typed(typed) => {
                     let text = format!("{typed}  as typed");
@@ -451,9 +392,9 @@ impl HostPicker {
         FinderView {
             title: "Connect to",
             place: None,
-            query: format!("{}▏", self.query),
+            query: picker::drawn(self.picker.query()),
             count: format!("{} / {}{more}", self.ranking.len(), self.candidates.len()),
-            selected: (count > 0).then(|| self.error_rows + self.selected - self.top),
+            selected: (self.picker.shown_selected(count)).map(|row| self.error_rows + row),
             rows: shown,
             preview: None,
             empty: None,
@@ -502,7 +443,7 @@ fn wrap(text: &str, cols: usize) -> Vec<Row> {
 
 #[cfg(test)]
 mod tests {
-    use winit::keyboard::KeyLocation;
+    use winit::keyboard::{Key, KeyLocation, NamedKey};
 
     use super::*;
     use crate::input::Modifiers;
@@ -699,8 +640,31 @@ mod tests {
         );
         // Ctrl+W deletes the last word, Backspace a character.
         press(&mut picker, &Key::Character("w".into()), true);
-        assert_eq!(picker.query, "");
+        assert_eq!(picker.picker.query(), "");
         assert_eq!(named(&mut picker, NamedKey::Backspace), Outcome::Nothing);
+    }
+
+    #[test]
+    fn home_and_end_go_to_the_first_machine_and_the_machine_typed_last() {
+        let mut picker = picker(None);
+        type_text(&mut picker, "desk");
+        assert_eq!(named(&mut picker, NamedKey::End), Outcome::Changed);
+        assert_eq!(
+            named(&mut picker, NamedKey::Enter),
+            Outcome::Connect("desk".into())
+        );
+        assert_eq!(named(&mut picker, NamedKey::Home), Outcome::Changed);
+        assert_eq!(
+            named(&mut picker, NamedKey::Enter),
+            Outcome::Connect("jack-ubuntu-desktop".into())
+        );
+        // Ctrl+W takes the last word, as every prompt does, not all up to
+        // a space; a paste's line breaks are spaces.
+        press(&mut picker, &Key::Character("u".into()), true);
+        assert_eq!(picker.paste("jack@box:22\n"), Outcome::Changed);
+        assert_eq!(picker.picker.query(), "jack@box:22 ");
+        press(&mut picker, &Key::Character("w".into()), true);
+        assert_eq!(picker.picker.query(), "jack@box:");
     }
 
     #[test]

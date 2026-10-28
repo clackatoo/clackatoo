@@ -325,3 +325,54 @@ fn a_session_another_workspaces_chat_has_open_isnt_taken_from_there() {
     let count = page.view((10, 80), None).count;
     assert!(count.contains("in another workspace"), "{count}");
 }
+
+#[test]
+fn the_new_chat_is_the_first_row_home_goes_to_and_end_goes_to_the_last() {
+    let sessions = vec![
+        session("a", "Fix the parser", None),
+        session("b", "Write the docs", None),
+    ];
+    let mut page = page(LastChat::default(), Vec::new(), sessions);
+    assert_eq!(named(&mut page, NamedKey::End), Outcome::Changed);
+    assert_eq!(page.view((10, 80), None).selected, Some(2));
+    assert!(matches!(
+        named(&mut page, NamedKey::Enter),
+        Outcome::Resume { session, .. } if session.session == "b"
+    ));
+    assert_eq!(named(&mut page, NamedKey::End), Outcome::Nothing);
+    assert_eq!(named(&mut page, NamedKey::Home), Outcome::Changed);
+    assert!(matches!(
+        named(&mut page, NamedKey::Enter),
+        Outcome::Start(_)
+    ));
+    // A paste is typed on one line, and starts typing; Ctrl+W takes a
+    // word as every prompt does.
+    assert_eq!(page.paste("the\nparser"), Outcome::Changed);
+    assert_eq!(page.view((10, 80), None).query, "the parser▏");
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::default()
+    };
+    press(&mut page, &Key::Character("w".into()), ctrl);
+    assert_eq!(page.view((10, 80), None).query, "the ▏");
+    type_text(&mut page, "j");
+    assert_eq!(page.view((10, 80), None).query, "the j▏", "typing");
+}
+
+#[test]
+fn the_pages_help_says_its_own_keys_and_every_pickers() {
+    let page = page(LastChat::default(), Vec::new(), Vec::new());
+    let rows = page.shortcut_context().rows;
+    let keys = |description: &str| {
+        (rows.iter())
+            .find(|(_, said)| said == description)
+            .map(|(keys, _)| keys.clone())
+    };
+    assert!(keys("Start the new chat").is_some(), "{rows:#?}");
+    assert!(keys("First result").is_some(), "{rows:#?}");
+    assert!(keys("Delete last word").is_some(), "{rows:#?}");
+    assert!(
+        keys("Next result").is_some_and(|keys| keys.contains('j')),
+        "{rows:#?}"
+    );
+}

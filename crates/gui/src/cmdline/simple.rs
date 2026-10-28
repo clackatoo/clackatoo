@@ -1,4 +1,5 @@
-//! The small append-only prompts used by list panes.
+//! The small append-only prompts used by list panes, and what's typed into
+//! a picker (see [`crate::picker`]).
 use crate::shortcuts::{
     Context,
     bindings::{self, Hint},
@@ -62,6 +63,12 @@ pub(crate) fn key(text: &mut String, stroke: Stroke) -> Outcome {
         Action::Type(ch) => text.push(ch),
     }
     Outcome::Edited
+}
+
+/// What [`key`] does with `stroke`, as a prompt's help says it, the
+/// prompt holding nothing if `empty`.
+pub(crate) fn hint(stroke: Stroke, empty: bool) -> Hint {
+    Action::read(stroke, empty).1
 }
 
 pub(crate) fn help(title: &str, text: &str) -> Context {

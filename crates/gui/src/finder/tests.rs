@@ -870,3 +870,24 @@ fn an_empty_file_says_so_in_the_preview() {
     named(&mut finder, NamedKey::ArrowDown);
     assert_eq!(preview(&mut finder, &[""]).text, "1 ");
 }
+
+#[test]
+fn home_and_end_go_to_the_ends_and_a_paste_is_one_line() {
+    let mut finder = Finder::new(Kind::Files, String::new(), Case::default());
+    finder.searching(1);
+    files(&mut finder, &["a", "b", "c"]);
+    finder.view((2, 60), None);
+    assert_eq!(named(&mut finder, NamedKey::End), Outcome::Changed);
+    assert_eq!(finder.picked_path().as_deref(), Some("c"));
+    assert_eq!(finder.view((2, 60), None).selected, Some(1));
+    assert_eq!(named(&mut finder, NamedKey::End), Outcome::Nothing);
+    assert_eq!(named(&mut finder, NamedKey::Home), Outcome::Changed);
+    assert_eq!(finder.picked_path().as_deref(), Some("a"));
+    // A grep searches for what's pasted once, its line breaks as spaces.
+    let mut grep = Finder::new(Kind::Grep, String::new(), Case::default());
+    assert_eq!(grep.paste("fn main\r\n{"), Outcome::Search);
+    assert_eq!(grep.query(), "fn main {");
+    assert_eq!(type_text(&mut grep, "x"), Outcome::Search);
+    assert_eq!(ctrl(&mut grep, "w"), Outcome::Search);
+    assert_eq!(grep.query(), "fn main {");
+}
