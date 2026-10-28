@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026.10.96 (2026-10-28)
+
+### Fixes
+
+- **daemon:** an upgrade keeps where chats stand, and tells agents what it stopped (CLACKA-187) (329e1164)
+- **daemon:** cut-off waits hear their chat settle, and upgrade notices are bounded (CLACKA-187) (325bb4fe)
+
 ## 2026.10.95 (2026-10-28)
 
 ### Features
