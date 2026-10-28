@@ -63,7 +63,13 @@ pub(crate) fn message(body: &[u8]) -> Cow<'_, [u8]> {
     let named = (SECRET_NAMES.iter()).any(|name| suspect(name))
         || (SECRET_LISTS.iter()).any(|name| suspect(&format!("\"{name}\"")))
         || suspect("bearer ")
-        || suspect("sk-");
+        || (KEY_PREFIXES.iter()).any(|prefix| suspect(prefix))
+        || suspect("key=")
+        || suspect("auth=")
+        || suspect("sig=")
+        || suspect("signature=")
+        || suspect("secret=")
+        || suspect("passwd=");
     if !named {
         return Cow::Borrowed(body);
     }
@@ -81,41 +87,85 @@ pub(crate) fn message(body: &[u8]) -> Cow<'_, [u8]> {
 }
 
 /// `text`, a line of an agent's stderr or a string in a message, with
-/// bearer tokens and keys with well-known prefixes taken out.
+/// bearer tokens, keys with well-known prefixes and the values of
+/// assignments and URL query parameters named for secrets taken out:
+/// `Bearer …`, `sk-…`, `OPENAI_API_KEY=…`, `?token=…`.
 pub(crate) fn line(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut words = text.split_inclusive(char::is_whitespace).peekable();
-    while let Some(word) = words.next() {
-        let bare = word.trim_end();
-        if bare.eq_ignore_ascii_case("bearer") {
-            out.push_str(word);
-            if let Some(token) = words.next() {
-                out.push_str(REDACTED);
-                out.push_str(&token[token.trim_end().len()..]);
+    let mut at = 0;
+    while let Some(ch) = text[at..].chars().next() {
+        let rest = &text[at..];
+        let starts = at == 0 || !text[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_');
+        if starts {
+            if rest.len() > 7
+                && rest.is_char_boundary(7)
+                && rest[..7].eq_ignore_ascii_case("bearer ")
+            {
+                out.push_str(&rest[..7]);
+                let value = value_end(&rest[7..]);
+                if value > 0 {
+                    out.push_str(REDACTED);
+                }
+                at += 7 + value;
+                continue;
             }
-        } else if let Some(key) = key_in(bare) {
-            out.push_str(&bare[..key.start]);
-            out.push_str(REDACTED);
-            out.push_str(&word[key.end..]);
-        } else {
-            out.push_str(word);
+            let value = value_end(rest);
+            if (KEY_PREFIXES.iter())
+                .any(|prefix| rest.starts_with(prefix) && value >= prefix.len() + 16)
+            {
+                out.push_str(REDACTED);
+                at += value;
+                continue;
+            }
+            if let Some(name) = secret_name(rest) {
+                out.push_str(&rest[..=name]);
+                let value = value_end(&rest[name + 1..]);
+                if value > 0 {
+                    out.push_str(REDACTED);
+                }
+                at += name + 1 + value;
+                continue;
+            }
         }
+        out.push(ch);
+        at += ch.len_utf8();
     }
     out
 }
 
-/// Where in `word` an API key is, known by its prefix: Anthropic's and
-/// `OpenAI`'s `sk-…`, GitHub's tokens, Slack's. Quotes and punctuation
-/// around it aren't part of it.
-fn key_in(word: &str) -> Option<std::ops::Range<usize>> {
-    let around = |c: char| matches!(c, '"' | '\'' | ',' | ';' | '.' | '(' | ')');
-    let key = word.trim_start_matches(around);
-    let start = word.len() - key.len();
-    let key = key.trim_end_matches(around);
-    ["sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-"]
-        .iter()
-        .any(|prefix| key.starts_with(prefix) && key.len() >= prefix.len() + 16)
-        .then(|| start..start + key.len())
+/// API keys' well-known prefixes: Anthropic's and `OpenAI`'s, GitHub's,
+/// Slack's.
+const KEY_PREFIXES: [&str; 6] = ["sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-"];
+
+/// How a name assigned a secret ends, as in `GITHUB_TOKEN=` or
+/// `api_key=`, or what it is whole.
+const SECRET_SUFFIXES: [&str; 7] = [
+    "token", "_key", "-key", "apikey", "secret", "password", "passwd",
+];
+const SECRET_WHOLE: [&str; 4] = ["key", "auth", "sig", "signature"];
+
+/// Where the `=` is, if `text` starts with a name assigned a secret: an
+/// environment variable's, or a URL query parameter's.
+fn secret_name(text: &str) -> Option<usize> {
+    let name = text
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .unwrap_or(text.len());
+    if name == 0 || !text[name..].starts_with('=') {
+        return None;
+    }
+    let lower = text[..name].to_ascii_lowercase();
+    ((SECRET_SUFFIXES.iter()).any(|suffix| lower.ends_with(suffix))
+        || SECRET_WHOLE.contains(&lower.as_str()))
+    .then_some(name)
+}
+
+/// How far a secret's value at the start of `text` goes: up to space, a
+/// quote, or what separates a URL's query parameters or a list's items.
+fn value_end(text: &str) -> usize {
+    text.find(|c: char| {
+        c.is_whitespace() || matches!(c, '&' | '"' | '\'' | '<' | '>' | ')' | ',' | ';' | '`')
+    })
+    .unwrap_or(text.len())
 }
 
 /// Takes the secrets out of `value`, all through. Returns whether there
@@ -236,6 +286,35 @@ mod tests {
         assert_eq!(line("a sk-short word"), "a sk-short word");
         let json = format!(r#"{{"text":"use {key} here"}}"#);
         assert_eq!(redacted(&json), r#"{"text":"use [redacted] here"}"#);
+    }
+
+    #[test]
+    fn assignments_and_query_values_named_for_secrets_go() {
+        let key = format!("sk-ant-{}", "b".repeat(30));
+        assert_eq!(
+            line(&format!(
+                "export ANTHROPIC_API_KEY={key} GITHUB_TOKEN=ghs_x PATH=/bin"
+            )),
+            "export ANTHROPIC_API_KEY=[redacted] GITHUB_TOKEN=[redacted] PATH=/bin"
+        );
+        assert_eq!(
+            line(&format!("KEY={key}; key:{key}")),
+            "KEY=[redacted]; key:[redacted]"
+        );
+        assert_eq!(
+            line("GET https://h.example/p?token=abc123&page=2&access_token=x&sig=y"),
+            "GET https://h.example/p?token=[redacted]&page=2&access_token=[redacted]&sig=[redacted]"
+        );
+        // Not secrets.
+        assert_eq!(
+            line("monkey=banana inputTokens=5 tokens: 3"),
+            "monkey=banana inputTokens=5 tokens: 3"
+        );
+        let json = format!(r#"{{"url":"https://x/y?api_key=zzz","cmd":"FOO={key} run"}}"#);
+        assert_eq!(
+            redacted(&json),
+            r#"{"url":"https://x/y?api_key=[redacted]","cmd":"FOO=[redacted] run"}"#
+        );
     }
 
     #[test]
