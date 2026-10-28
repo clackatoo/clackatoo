@@ -101,6 +101,7 @@ impl TestDaemon {
             prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
             probe_wait: clackatoo_daemon::DEFAULT_PROBE_WAIT,
             session_wait: clackatoo_daemon::DEFAULT_SESSION_WAIT,
+            quiet_turn: clackatoo_daemon::DEFAULT_QUIET_TURN,
             gone_wait: clackatoo_daemon::DEFAULT_GONE_WAIT,
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             fit_lasts: clackatoo_daemon::DEFAULT_FIT_LASTS,
@@ -2624,6 +2625,78 @@ fn a_shell_claude_runs_in_the_background_shows_until_it_ends_and_can_be_stopped(
     });
     assert_eq!(node.tasks[0].state, AgentTaskState::Stopped);
     assert_eq!(node.notice, None);
+}
+
+/// Waits for `chat` to have `turns` turns, the last ended.
+fn wait_for_turns(client: &mut Client, chat: TerminalId, turns: usize) -> ChatNode {
+    wait_for_chat(client, chat, |node| {
+        node.turns.len() == turns && last_outcome(node).is_some()
+    })
+}
+
+#[test]
+fn a_turn_claude_takes_by_itself_shows_as_its_own_and_ends_as_it_says() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let node = ask(&mut client, chat, "wake");
+    assert_eq!(last_words(&node), "started\n");
+    // As something it ran in the background ends, it goes on by itself.
+    let node = wait_for_turns(&mut client, chat, 2);
+    let turn = &node.turns[1];
+    assert_eq!(turn.prompt, "");
+    assert_eq!(
+        turn.woke.as_deref(),
+        Some("Background command \"Serve the docs\" completed")
+    );
+    assert_eq!(last_words(&node), "committed\n");
+    assert!(
+        (turn.items.iter())
+            .any(|item| matches!(item, Item::Tool(tool) if tool.title == "git commit")),
+        "{turn:#?}"
+    );
+    assert_eq!(last_outcome(&node), Some(&Outcome::Done));
+    assert_eq!(node.state, ChatState::Ready);
+    // The turn shows; the task that stood for it isn't listed.
+    assert!(node.tasks.is_empty(), "{:#?}", node.tasks);
+    // The next message is a turn of the user's again.
+    let node = ask(&mut client, chat, "hello");
+    assert_eq!(node.turns[2].woke, None);
+}
+
+#[test]
+fn a_turn_an_agent_takes_by_itself_without_saying_when_it_ends_ends_once_it_is_quiet() {
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent("other", vec![fake_agent().into()])];
+        config.quiet_turn = Duration::from_millis(300);
+    });
+    let mut client = daemon.client();
+    let (chat, _) = start_chat_with(&mut client, "other");
+    ask(&mut client, chat, "wake");
+    let node = wait_for_chat(&mut client, chat, |node| node.turns.len() == 2);
+    assert_eq!(node.turns[1].woke.as_deref(), Some(""));
+    let node = wait_for_turns(&mut client, chat, 2);
+    assert_eq!(last_words(&node), "committed\n");
+    assert_eq!(last_outcome(&node), Some(&Outcome::Done));
+    assert_eq!(node.state, ChatState::Ready);
+}
+
+#[test]
+fn stopping_a_turn_an_agent_took_by_itself_ends_it() {
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent("other", vec![fake_agent().into()])];
+        config.quiet_turn = Duration::from_mins(1);
+    });
+    let mut client = daemon.client();
+    let (chat, _) = start_chat_with(&mut client, "other");
+    ask(&mut client, chat, "wake");
+    wait_for_chat(&mut client, chat, |node| {
+        node.turns.len() == 2 && last_words(node) == "committed\n"
+    });
+    client.chat(chat, ChatAction::Stop).unwrap();
+    let node = wait_for_turns(&mut client, chat, 2);
+    assert_eq!(last_outcome(&node), Some(&Outcome::Stopped));
+    assert_eq!(node.state, ChatState::Ready);
 }
 
 #[test]
@@ -16266,7 +16339,8 @@ fn a_real_agent_lists_the_sessions_it_kept() {
 
 /// A shell Claude Code runs in the background shows in the chat while it
 /// runs, as the command it is, and as done once it ends: Claude Code's
-/// adapter says so to a client that asks for AIR's `asyncTasks`. As
+/// adapter says so to a client that asks for AIR's `asyncTasks`. Then
+/// Claude Code goes on by itself, in a turn of its own that ends. As
 /// [`a_real_agent_answers_and_asks_before_running_commands`].
 #[test]
 #[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
@@ -16289,7 +16363,8 @@ fn a_real_agents_background_shell_shows_until_it_ends() {
         node.state == ChatState::Ready
     });
     let text = "Use the Bash tool once, with run_in_background set to true, to run exactly: \
-                sleep 5; echo finished. Then reply with the single word started.";
+                sleep 5; echo finished. Then reply with the single word started. When it \
+                finishes, reply with the single word over.";
     client
         .chat(chat, ChatAction::Send(text.to_owned()))
         .unwrap();
@@ -16305,6 +16380,14 @@ fn a_real_agents_background_shell_shows_until_it_ends() {
     });
     let shell = (node.tasks.iter()).find(|task| task.kind == AgentTaskKind::Shell);
     assert_eq!(shell.map(|task| task.state), Some(AgentTaskState::Done));
+    let node = wait_for_chat_for(&mut client, chat, minute, |node| {
+        node.turns.last().is_some_and(|turn| turn.woke.is_some()) && last_outcome(node).is_some()
+    });
+    assert!(
+        last_words(&node).to_lowercase().contains("over"),
+        "{node:#?}"
+    );
+    assert_eq!(node.state, ChatState::Ready);
 }
 
 /// A daemon whose agent is the fake one with `flags`, noting what it does

@@ -26,6 +26,7 @@
 //! | `bounce`, from another chat | Sends that chat `bounce` back with `send_to_chat`, and says what it answered |
 //! | `background` | Runs `npm run dev` in the background, as Claude Code's adapter says one to a client that asked for AIR's `asyncTasks`: a command that finishes at once, then a task, `t1`, "Serve the docs", that goes on; and says `started`, or `no tasks` to a client that didn't ask |
 //! | `finish` | Says task `t1` completed, then `finished` |
+//! | `wake` | Says `started` and ends its turn; 300 ms later takes a turn by itself, as Claude Code does when something it ran in the background ends: runs `git commit` and says `committed`. To a client that asked for AIR's `asyncTasks`, it says the turn starts and ends, as a task of kind `turn` |
 //!
 //! Asked to stop a task (`_session/async_task/stop`), it says it stopped
 //! `t1`, and that it did; any other it says it didn't.
@@ -1022,6 +1023,36 @@ impl Fake {
                 );
                 say(&session, "started\n");
                 done(&id, "end_turn");
+            }
+            "wake" => {
+                say(&session, "started\n");
+                done(&id, "end_turn");
+                let tasks = self.async_tasks;
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    if tasks {
+                        update(
+                            &session,
+                            &json!({ "sessionUpdate": "async_task_spawned", "asyncTaskId": "turn-1",
+                                     "name": "Claude is working", "taskType": "turn",
+                                     "description": "Background command \"Serve the docs\" completed",
+                                     "showInTranscript": false, "canStop": true }),
+                        );
+                    }
+                    update(
+                        &session,
+                        &json!({ "sessionUpdate": "tool_call", "toolCallId": "w1", "title": "git commit",
+                                 "kind": "execute", "status": "completed" }),
+                    );
+                    say(&session, "committed\n");
+                    if tasks {
+                        update(
+                            &session,
+                            &json!({ "sessionUpdate": "async_task_state_update",
+                                     "asyncTaskId": "turn-1", "state": "completed" }),
+                        );
+                    }
+                });
             }
             "finish" => {
                 update(

@@ -3891,6 +3891,7 @@ mod tests {
             snapshot(&mut desk, terminal);
         }
         let turn = Turn {
+            woke: None,
             previews: Vec::new(),
             from: None,
             prompt: "Why does CI fail?".into(),
@@ -9452,6 +9453,7 @@ mod tests {
         let node = ChatNode {
             state: ChatState::Ready,
             turns: vec![Turn {
+                woke: None,
                 previews: Vec::new(),
                 from: None,
                 prompt: "how?".into(),

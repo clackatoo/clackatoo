@@ -732,8 +732,18 @@ impl ChatView {
             laid.spans.push(Span::of(Piece::Divider, y, height));
             y += height + divider::below(m);
         }
-        if let Some(from) = &turns[index].from {
-            let text = format!("From chat {} · {} · {}", from.chat, from.agent, from.title);
+        let turn = &turns[index];
+        let head = match (&turn.from, &turn.woke) {
+            // A turn the agent took by itself has no message: this line
+            // says so in its place.
+            (_, Some(why)) => Some(woke_line(&self.node.agent, why)),
+            (Some(from), None) => Some(format!(
+                "From chat {} · {} · {}",
+                from.chat, from.agent, from.title
+            )),
+            (None, None) => None,
+        };
+        if let Some(text) = head {
             // Quiet: it says where the message came from, which is
             // neither focus nor something to act on.
             let look = Look::Plain(Tone::Muted);
@@ -1063,7 +1073,15 @@ impl ChatView {
                 // On the right, over the message it's about.
                 Piece::Badge => {
                     if let Some(badge) = &laid.badge {
-                        let left = origin[0] + column - badge.width;
+                        // A message's on its side; a turn the agent took by
+                        // itself on the agent's.
+                        let woke =
+                            (self.node.turns.get(index)).is_some_and(|turn| turn.woke.is_some());
+                        let left = if woke {
+                            origin[0]
+                        } else {
+                            origin[0] + column - badge.width
+                        };
                         draw_laid(canvas, m, badge, [left, top], badge.width);
                     }
                 }
@@ -2336,7 +2354,7 @@ fn guess(m: Measures, column: f32, turn: &Turn, open: bool, divided: bool) -> f3
     if divided {
         height += divider::height(m) + divider::below(m);
     }
-    if turn.from.is_some() {
+    if turn.from.is_some() || turn.woke.is_some() {
         height += line + m.em(0.3);
     }
     if !turn.prompt.is_empty() {
@@ -2459,6 +2477,16 @@ fn escape(text: &str) -> String {
     escaped
 }
 
+/// The line a turn `agent` took by itself shows in place of a message:
+/// that it did, and why, if it said.
+pub(super) fn woke_line(agent: &str, why: &str) -> String {
+    if why.is_empty() {
+        format!("{agent} went on by itself")
+    } else {
+        format!("{agent} went on by itself · {why}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2488,6 +2516,24 @@ mod tests {
             assert!(bubble_left(m, laid, chat.cache.width) >= 0.0);
             assert!(laid.blocks[0].layout.lines().count() > 3);
         }
+    }
+
+    #[test]
+    fn a_turn_the_agent_took_by_itself_says_so_in_place_of_a_message() {
+        let mut fonts = Fonts::load(&FontOptions::default(), 1.0).expect("a font");
+        let mut node =
+            crate::chat::fixtures::talk(&[("Run the gate", "Running it."), ("", "Committed.")]);
+        node.agent = "Claude Code".into();
+        node.turns[1].woke = Some("the gate passed".into());
+        let mut chat = ChatView::new("chat".into(), node);
+        chat.paint(&mut fonts, [0.0; 2], [900.0, 1000.0], true);
+        let laid = chat.cache.turns[1].laid.as_ref().unwrap();
+        assert!(!laid.pieces.contains_key(&PROMPT), "no message");
+        assert_eq!(
+            laid.badge.as_ref().map(|badge| badge.source.as_str()),
+            Some("Claude Code went on by itself · the gate passed")
+        );
+        assert_eq!(woke_line("Codex", ""), "Codex went on by itself");
     }
 
     #[test]
@@ -2911,6 +2957,7 @@ mod tests {
     #[test]
     fn a_turn_where_the_chat_moved_is_a_line_across_it_with_what_didnt_carry_over() {
         let turn = Turn {
+            woke: None,
             previews: Vec::new(),
             prompt: String::new(),
             sent: 1,

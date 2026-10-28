@@ -988,6 +988,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
                 index: 0,
                 turn: Turn {
+                    woke: None,
                     prompt: "[Image]".into(),
                     sent: 1,
                     items: Vec::new(),
@@ -1351,6 +1352,21 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             .into_iter()
             .map(|sample| (crate::wire::AGENT_TASKS, sample)),
     );
+    // A turn an agent took by itself (CLACKA-180).
+    samples.push((
+        crate::wire::AGENT_TURNS,
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal: TerminalId(3),
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
+                index: 1,
+                turn: Turn {
+                    prompt: String::new(),
+                    woke: Some("Background command \"npm test\" completed".into()),
+                    ..turn()
+                },
+            })]),
+        })),
+    ));
     samples
 }
 
@@ -3078,6 +3094,7 @@ fn chat() -> ChatNode {
 
 fn turn() -> Turn {
     Turn {
+        woke: None,
         previews: Vec::new(),
         prompt: "fix it".into(),
         sent: 1_760_000_000,

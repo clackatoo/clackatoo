@@ -128,6 +128,10 @@ pub struct DaemonConfig {
     /// the chat says it hasn't, and what it may be waiting on, and offers
     /// to start it again. The chat goes on waiting.
     pub session_wait: std::time::Duration,
+    /// How long an agent that took a turn by itself, without saying when
+    /// it ends, is quiet, with no tool running, before the turn is taken
+    /// to have ended (see `chat/woken.rs`).
+    pub quiet_turn: std::time::Duration,
     /// A setting for tests: how long an agent or language server that has
     /// gone is kept for what it sent last, from when it went or the
     /// parser's thread last got on with its messages (see
@@ -281,6 +285,11 @@ pub const DEFAULT_PROBE_WAIT: std::time::Duration = std::time::Duration::from_se
 /// one in about a second when nothing holds it up.
 pub const DEFAULT_SESSION_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long an agent that took a turn by itself is quiet before the turn
+/// is taken to have ended, if it doesn't say: Claude Code's adapter says,
+/// to a client that asks for its background tasks.
+pub const DEFAULT_QUIET_TURN: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// How long a program that has gone is kept for what it sent last, unless
 /// the daemon is told otherwise (see [`DaemonConfig::gone_wait`]).
 pub const DEFAULT_GONE_WAIT: std::time::Duration = crate::rpc::PARSE_WAIT;
@@ -388,6 +397,7 @@ impl DaemonConfig {
             keep_wait: DEFAULT_KEEP_WAIT,
             probe_wait: DEFAULT_PROBE_WAIT,
             session_wait: DEFAULT_SESSION_WAIT,
+            quiet_turn: DEFAULT_QUIET_TURN,
             gone_wait: DEFAULT_GONE_WAIT,
             park_after: DEFAULT_PARK_AFTER,
             fit_lasts: DEFAULT_FIT_LASTS,

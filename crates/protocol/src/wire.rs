@@ -272,6 +272,8 @@ gates! {
     /// `AgentTaskState`), `ChatPatch::Tasks`, and stopping one,
     /// `ChatAction::StopTask`.
     AGENT_TASKS = 110,
+    /// Turns an agent takes by itself, with no message: `Turn`'s `woke`.
+    AGENT_TURNS = 111,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -1523,6 +1525,7 @@ mod tests {
         image.preview = None;
         assert_eq!(read::<crate::ChatImage>(CHAT_IMAGES, &bytes), image);
         let mut turn = crate::Turn {
+            woke: None,
             prompt: "[Image]".into(),
             sent: 0,
             items: Vec::new(),

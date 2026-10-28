@@ -238,6 +238,7 @@ mod tests {
             state: ChatState::Answering,
             turns: vec![
                 Turn {
+                    woke: None,
                     previews: Vec::new(),
                     from: None,
                     prompt: "What's in it?".into(),
@@ -255,6 +256,7 @@ mod tests {
                     switch: None,
                 },
                 Turn {
+                    woke: None,
                     previews: Vec::new(),
                     from: None,
                     prompt: "And the other?".into(),

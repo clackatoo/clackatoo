@@ -483,6 +483,14 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
         }
         section = section.child(prompt);
     }
+    // A turn the agent took by itself has no message: a line says so.
+    if let Some(why) = &turn.woke {
+        let mut said = format!("{} went on by itself", node.agent);
+        if !why.is_empty() {
+            said = format!("{said} · {why}");
+        }
+        section = section.child(el("div").class("from").text(said));
+    }
     let answer = answer_start(turn);
     let running = turn.end.is_none();
     if answer > 0 || running {
@@ -1470,6 +1478,7 @@ mod tests {
         };
         let mut node = ChatNode::default();
         node.turns.push(Turn {
+            woke: None,
             previews: Vec::new(),
             prompt: "look".into(),
             sent: 1_000,
@@ -1814,6 +1823,7 @@ mod tests {
             ..ChatNode::default()
         };
         node.turns.push(Turn {
+            woke: None,
             previews: Vec::new(),
             prompt: "test it".into(),
             sent: 1_000,

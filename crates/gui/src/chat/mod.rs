@@ -2701,6 +2701,7 @@ mod tests {
         assert_eq!(view.editor.raw_text(), "look pasted after");
         view.paste_image(pasted_image());
         view.node.turns.push(Turn {
+            woke: None,
             previews: Vec::new(),
             prompt: "previous".into(),
             sent: 0,
@@ -2759,6 +2760,7 @@ mod tests {
         let mut fonts = fonts();
         let mut node = ChatNode::default();
         node.turns.push(Turn {
+            woke: None,
             previews: Vec::new(),
             prompt: "hi".into(),
             sent: 0,
@@ -3754,6 +3756,7 @@ mod tests {
         let mut node = ChatNode::default();
         for &state in states {
             node.turns.push(Turn {
+                woke: None,
                 previews: Vec::new(),
                 from: None,
                 prompt: "change it".into(),

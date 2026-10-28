@@ -582,6 +582,15 @@ pub struct Turn {
         deserialize_with = "wire::since::<{ wire::CHAT_PREVIEWS }, _, _>"
     )]
     pub previews: Vec<ChatPreview>,
+    /// The agent took the turn by itself, with no message, as Claude Code
+    /// does when something it ran in the background ends: why, as the
+    /// agent said, or empty if it didn't. Its `prompt` is empty.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::AGENT_TURNS }, _>",
+        deserialize_with = "wire::since::<{ wire::AGENT_TURNS }, _, _>"
+    )]
+    pub woke: Option<String>,
 }
 
 /// The chat whose agent sent a message to another chat, as it was when it
@@ -1938,6 +1947,7 @@ mod tests {
 
     fn turn(prompt: &str, items: Vec<Item>) -> Turn {
         Turn {
+            woke: None,
             previews: Vec::new(),
             prompt: prompt.into(),
             sent: 0,

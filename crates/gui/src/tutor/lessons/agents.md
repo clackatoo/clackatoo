@@ -195,6 +195,8 @@ has "tutor: hello"
 
 Claude Code can leave a command running in the background, such as a dev server, and carry on. A shelf above the box lists what it runs, with its command, how it's going and for how long, counting while it runs. The square at the end of a running line stops it; `:stoptask` does the same from the keyboard, for the newest running, and `:stoptask 2` for the second line. Once one ends, its line says done, failed or stopped until your next message. Asking Claude Code for these costs the text of its Read and search rows; `tasks = false` for it in the daemon's `agents.toml` turns the shelf off.
 
+When one ends, Claude Code may go on by itself to look at it: that shows as a turn of its own, under a line saying it went on by itself, with no message of yours.
+
 If you have a chat open, ask it to run `sleep 30` in the background, watch the shelf count, then stop it with `:stoptask`.
 
 ## Continuing after upgrades

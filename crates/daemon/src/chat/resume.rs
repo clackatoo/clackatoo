@@ -183,6 +183,7 @@ impl HostedChat {
     /// what the agent did with it.
     fn push_replayed(&mut self, prompt: String) {
         self.push_turn(Turn {
+            woke: None,
             previews: Vec::new(),
             prompt,
             sent: now(),
@@ -344,6 +345,7 @@ impl HostedChat {
             Held::End(outcome) => {
                 self.set_notice(None);
                 self.push_turn(Turn {
+                    woke: None,
                     previews: Vec::new(),
                     prompt: text.shown(),
                     sent: now(),

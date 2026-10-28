@@ -1,0 +1,9 @@
+# A turn the agent takes by itself after something in the background ends.
+size 1100x700
+keys <C-;>:Agent claude<CR>
+keys i
+type wake
+keys <CR>
+wait-for committed
+sleep 300
+shot woken

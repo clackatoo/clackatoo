@@ -31,6 +31,7 @@ pub(crate) fn talk(pairs: &[(&str, &str)]) -> ChatNode {
         state: ChatState::Ready,
         turns: (pairs.iter().enumerate())
             .map(|(index, (prompt, answer))| Turn {
+                woke: None,
                 previews: Vec::new(),
                 from: None,
                 prompt: (*prompt).to_owned(),
@@ -108,6 +109,7 @@ pub(crate) fn long_chat(turns: usize) -> ChatNode {
         let sent = 1_000_000 + 600_000 * index as u64;
         let last = index + 1 == turns;
         node.turns.push(Turn {
+            woke: None,
             previews: Vec::new(),
             from: None,
             prompt: format!(

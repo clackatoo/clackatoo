@@ -40,6 +40,7 @@ mod relations;
 mod resume;
 mod tasks;
 mod upgrade;
+mod woken;
 
 use resume::Held;
 mod subagent;
@@ -418,6 +419,9 @@ pub(crate) struct HostedChat {
     /// `&self`, as answers are read; not handed over, so after an upgrade
     /// it's none, which errs on keeping chats.
     told_parent: std::cell::Cell<usize>,
+    /// The task the agent says stands for the turn it took by itself, if
+    /// it says (see `chat/woken.rs`).
+    woke_by_task: Option<String>,
     /// The tool calls whose input named clackatoo's MCP server as they
     /// began, the latest few: a question about one is about our own tool,
     /// whatever it's titled, and the agent can't make a command's input
@@ -595,6 +599,7 @@ impl HostedChat {
             role: None,
             wanted: None,
             told_parent: std::cell::Cell::new(0),
+            woke_by_task: None,
             own_tools: VecDeque::new(),
             limits: Limits::default(),
             user_queue: queue::Queue::default(),
@@ -1087,7 +1092,10 @@ impl HostedChat {
             })
             .collect();
         self.make_preview_room(&previews);
+        // What ended in the background was seen as the user wrote this.
+        self.forget_ended_tasks();
         self.push_turn(Turn {
+            woke: None,
             previews,
             prompt: shown,
             sent: now(),
@@ -1505,6 +1513,7 @@ impl HostedChat {
         self.set_notice(None);
         self.withdraw_install();
         self.push_turn(Turn {
+            woke: None,
             previews: Vec::new(),
             prompt: String::new(),
             sent: now(),
@@ -2934,7 +2943,6 @@ impl HostedChat {
 
     fn push_turn(&mut self, turn: Turn) {
         self.diffs.clear();
-        self.forget_ended_tasks();
         self.node.turns.push(turn);
         self.patch_turn(self.node.turns.len() - 1);
     }
@@ -3546,6 +3554,7 @@ fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
 
 fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
     Turn {
+        woke: None,
         previews: Vec::new(),
         prompt: resume::without_inline_images(turn.prompt),
         sent: turn.sent,

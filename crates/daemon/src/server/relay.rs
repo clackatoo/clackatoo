@@ -3402,6 +3402,7 @@ mod tests {
         let full = ChatNode {
             turns: (0..24)
                 .map(|i| Turn {
+                    woke: None,
                     prompt: i.to_string(),
                     sent: 0,
                     items: vec![Item::Words("answer".into())],

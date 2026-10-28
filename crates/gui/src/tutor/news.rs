@@ -1013,6 +1013,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "What Claude Code runs in the background shows above a chat's box, counting, and stops with a click or :stoptask",
     },
+    News {
+        id: "woken-turns",
+        date: "2026-10-28",
+        lesson: "agents",
+        what: "A turn an agent takes by itself, as when a background shell ends, shows in the chat instead of being lost",
+    },
 ];
 
 impl News {

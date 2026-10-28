@@ -1078,6 +1078,7 @@ mod tests {
 
     fn turn(prompt: &str) -> Turn {
         Turn {
+            woke: None,
             previews: Vec::new(),
             prompt: prompt.into(),
             sent: 0,

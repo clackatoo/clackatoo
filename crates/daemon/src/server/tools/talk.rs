@@ -685,6 +685,13 @@ impl Daemon {
         let turns = &target.node().turns;
         let asked = (turns.iter().enumerate().rev())
             .find(|(_, turn)| turn.from.as_ref().is_some_and(|from| from.chat == chat));
+        // What it went on to do by itself after answering, as when
+        // something it ran in the background ended, answers it too.
+        let asked = asked.map(|(index, turn)| {
+            (turns.iter().enumerate().skip(index + 1))
+                .rfind(|(_, later)| later.woke.is_some())
+                .unwrap_or((index, turn))
+        });
         let last = || (turns.iter().enumerate()).rfind(|(_, turn)| turn.switch.is_none());
         if late {
             let _ = writeln!(
@@ -706,7 +713,14 @@ impl Daemon {
             target.told_parent(index + 1);
         }
         let number = clackatoo_protocol::turn_number(turns, index).unwrap_or(index + 1);
-        let _ = writeln!(text, "Chat {to}'s answer to {whose}, turn {number}:");
+        if turn.woke.is_some() {
+            let _ = writeln!(
+                text,
+                "Chat {to} went on by itself after {whose}, in turn {number}:"
+            );
+        } else {
+            let _ = writeln!(text, "Chat {to}'s answer to {whose}, turn {number}:");
+        }
         text.push_str(&head(&final_words(turn), MAX_READ));
         text.push('\n');
         text.push_str(&ending(turn));
@@ -845,12 +859,14 @@ fn turn_text(number: Option<usize>, turn: &Turn) -> String {
             .map_or("another agent", |switch| switch.to.as_str());
         return format!("(switched to {to})\n");
     };
-    let mut text = match &turn.from {
-        Some(from) => format!(
+    let mut text = match (&turn.from, &turn.woke) {
+        (_, Some(why)) if why.is_empty() => format!("Turn {number}, taken by the agent itself:\n"),
+        (_, Some(why)) => format!("Turn {number}, taken by the agent itself ({why}):\n"),
+        (Some(from), None) => format!(
             "Turn {number}, from chat {} ({}, {:?}):\n",
             from.chat, from.agent, from.title
         ),
-        None => format!("Turn {number}, from the user:\n"),
+        (None, None) => format!("Turn {number}, from the user:\n"),
     };
     for line in head(&turn.prompt, MAX_PROMPT).lines() {
         let _ = writeln!(text, "> {line}");
@@ -970,6 +986,48 @@ mod tests {
             chat: to,
             message: "x".to_owned(),
         }
+    }
+
+    #[test]
+    fn a_wait_for_a_chat_hears_what_it_went_on_to_do_by_itself() {
+        use agent_client_protocol_schema::v1::{SessionUpdate, StopReason};
+        let words = |text: &str| -> SessionUpdate {
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": text },
+            }))
+            .unwrap()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = idle_chat(&mut daemon, 2);
+        let message = daemon.message_from(a, "run the gate".to_owned()).unwrap();
+        daemon.chat(b).unwrap().deliver(message).unwrap();
+        let chat = daemon.chat(b).unwrap();
+        chat.update(words("The gate runs in the background."));
+        chat.answered(Ok(StopReason::EndTurn));
+        assert!(
+            daemon
+                .answer_of(a, b, false)
+                .contains("runs in the background")
+        );
+        // The gate ends, and the agent goes on by itself.
+        let chat = daemon.chat(b).unwrap();
+        assert!(chat.wake(Some("the gate ended".to_owned())));
+        chat.update(words("Committed: the gate passed."));
+        chat.answered(Ok(StopReason::EndTurn));
+        let answer = daemon.answer_of(a, b, false);
+        assert!(
+            answer.contains("went on by itself after your message, in turn 2")
+                && answer.contains("Committed: the gate passed."),
+            "{answer}"
+        );
+        let turn = &daemon.chat_ref(b).unwrap().node().turns[1];
+        let read = turn_text(Some(2), turn);
+        assert!(
+            read.starts_with("Turn 2, taken by the agent itself (the gate ended):\n"),
+            "{read}"
+        );
     }
 
     #[test]
@@ -1284,6 +1342,7 @@ mod tests {
 
     fn turn(items: Vec<Item>) -> Turn {
         Turn {
+            woke: None,
             previews: Vec::new(),
             files: None,
             switch: None,

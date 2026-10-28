@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use agent_client_protocol_schema::v1::{Meta, SessionUpdate};
+use agent_client_protocol_schema::v1::{Meta, SessionUpdate, StopReason};
 use clackatoo_protocol::{
     AgentSession, ChatChoices, Error, Event, NewAgent, PaneId, Provider, ProviderModels, Setting,
     SettingKind, TerminalId,
@@ -92,6 +92,10 @@ pub(super) struct Agents {
     /// lets its session go if it's still idle (see
     /// [`Daemon::park_idle`]).
     parking: BTreeMap<TerminalId, Instant>,
+    /// When each chat whose agent took a turn by itself, without saying
+    /// when it ends, is taken to have ended it, the agent being quiet
+    /// till then (see `chat/woken.rs`).
+    woken: BTreeMap<TerminalId, Instant>,
     /// The chats whose agent has been asked for their session, and when,
     /// until it answers, or they've been told it's slow to (see
     /// [`Daemon::time_out_sessions`]).
@@ -726,6 +730,9 @@ impl Daemon {
             let session = self
                 .chat(id)
                 .and_then(|chat| chat.session().map(str::to_owned));
+            // No answer comes to end a turn the agent took by itself.
+            let woken =
+                matches!(action, Action::Cancel) && self.chat(id).is_some_and(|chat| chat.woken());
             let slot = agent.and_then(|agent| self.agents.running.get_mut(&agent));
             match (action, slot, session) {
                 (Action::Connect, _, _) => {
@@ -787,6 +794,10 @@ impl Daemon {
                 }
                 // The agent has gone, which the chat has heard or will.
                 _ => {}
+            }
+            if woken {
+                self.agents.woken.remove(&id);
+                self.prompt_answered(id, Ok(StopReason::Cancelled), false);
             }
         }
         if let Some(agent) = agent {
@@ -1024,9 +1035,19 @@ impl Daemon {
         }
         let images = self.chat(id)?.image_sources(&mut update);
         let chat = self.chat(id)?;
+        // The agent at work with no turn open took one by itself.
+        if chat.wakes(&update) {
+            chat.wake(None);
+            log::info!("chat {id}: its agent took a turn by itself");
+        }
         let settings = matches!(update, SessionUpdate::ConfigOptionUpdate(_));
         if let Some(wrote) = chat.update(update) {
             self.take_written(id, &wrote);
+        }
+        let chat = self.chat(id)?;
+        if chat.woken() && !chat.woken_says_when_it_ends() {
+            let quiet = Instant::now() + self.config.quiet_turn;
+            self.agents.woken.insert(id, quiet);
         }
         if settings {
             self.note_settings(id);
@@ -1177,7 +1198,10 @@ impl Daemon {
                 if chat.loading() || chat.skipping() || (gone && !chat.is_connected()) {
                     return;
                 }
-                chat.task_said(task);
+                if let Some(ended) = chat.task_said(task) {
+                    self.agents.woken.remove(&id);
+                    self.prompt_answered(id, Ok(ended), false);
+                }
                 id
             }
             Incoming::TaskStopped {
@@ -1737,6 +1761,42 @@ impl Daemon {
         self.time_out_sessions();
         self.time_out_listings();
         self.park_idle();
+        self.end_quiet_turns();
+    }
+
+    /// Ends the turns agents took by themselves, without saying when they
+    /// end, once they've been quiet a while with no tool running. Cheap
+    /// when none is due.
+    fn end_quiet_turns(&mut self) {
+        let now = Instant::now();
+        if self
+            .agents
+            .woken
+            .values()
+            .min()
+            .is_none_or(|due| *due > now)
+        {
+            return;
+        }
+        let due: Vec<TerminalId> = (self.agents.woken.iter())
+            .filter(|(_, due)| **due <= now)
+            .map(|(&chat, _)| chat)
+            .collect();
+        for id in due {
+            self.agents.woken.remove(&id);
+            let Some(chat) = self.chat(id).filter(|chat| chat.woken()) else {
+                continue;
+            };
+            if chat.tool_running() {
+                let quiet = now + self.config.quiet_turn;
+                self.agents.woken.insert(id, quiet);
+                continue;
+            }
+            log::info!("chat {id}: the turn its agent took by itself has gone quiet");
+            if self.prompt_answered(id, Ok(StopReason::EndTurn), false) {
+                self.collect_damage(id);
+            }
+        }
     }
 
     /// When the next chat waiting for its session is to be told its agent
@@ -1936,6 +1996,7 @@ impl Daemon {
     pub(super) fn next_agent_due(&self) -> Option<Instant> {
         (self.next_probe_due().into_iter())
             .chain(self.next_park_due())
+            .chain(self.agents.woken.values().min().copied())
             .chain(self.next_session_due())
             .chain(self.next_listing_due())
             .min()

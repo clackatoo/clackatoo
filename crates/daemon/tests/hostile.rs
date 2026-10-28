@@ -84,6 +84,7 @@ impl TestDaemon {
             prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
             probe_wait: clackatoo_daemon::DEFAULT_PROBE_WAIT,
             session_wait: clackatoo_daemon::DEFAULT_SESSION_WAIT,
+            quiet_turn: clackatoo_daemon::DEFAULT_QUIET_TURN,
             gone_wait: clackatoo_daemon::DEFAULT_GONE_WAIT,
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             fit_lasts: clackatoo_daemon::DEFAULT_FIT_LASTS,

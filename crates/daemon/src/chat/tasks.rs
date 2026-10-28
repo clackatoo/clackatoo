@@ -9,6 +9,7 @@
 //! task still going then is marked lost, never left running for ever: its
 //! process went with the agent's.
 
+use agent_client_protocol_schema::v1::StopReason;
 use clackatoo_protocol::{AgentTask, AgentTaskKind, AgentTaskState, ChatPatch};
 
 use super::{Action, HostedChat, now};
@@ -20,7 +21,14 @@ const MOST_TASKS: usize = 16;
 
 impl HostedChat {
     /// Takes what the agent said of a task it runs in the background.
-    pub(crate) fn task_said(&mut self, said: Task) {
+    /// Returns how the turn the agent took by itself ended, if the task
+    /// that stands for it did: such a task isn't listed, as the turn shows.
+    pub(crate) fn task_said(&mut self, said: Task) -> Option<StopReason> {
+        match self.turn_task_said(&said) {
+            TurnTask::Ended(how) => return Some(how),
+            TurnTask::Taken => return None,
+            TurnTask::NotOne => {}
+        }
         let mut tasks = self.node.tasks.clone();
         match said {
             Task::Spawned {
@@ -55,9 +63,7 @@ impl HostedChat {
                 }
             }
             Task::Progress { id, description } => {
-                let Some(task) = tasks.iter_mut().find(|task| task.id == id) else {
-                    return;
-                };
+                let task = tasks.iter_mut().find(|task| task.id == id)?;
                 if let Some(description) = description
                     && task.kind != AgentTaskKind::Turn
                 {
@@ -65,20 +71,18 @@ impl HostedChat {
                 }
             }
             Task::State { id, state, summary } => {
-                let Some(task) = tasks.iter_mut().find(|task| task.id == id) else {
-                    return;
-                };
+                let task = tasks.iter_mut().find(|task| task.id == id)?;
                 let state = match state.as_str() {
                     "running" => AgentTaskState::Running,
                     "paused" => AgentTaskState::Paused,
                     "completed" => AgentTaskState::Done,
                     "failed" => AgentTaskState::Failed,
                     "stopped" => AgentTaskState::Stopped,
-                    _ => return,
+                    _ => return None,
                 };
                 // Once it has ended, it stays as it ended.
                 if !task.going() {
-                    return;
+                    return None;
                 }
                 // A stop asked for stays in hand until the agent says it ended.
                 if !(task.state == AgentTaskState::Stopping && state == AgentTaskState::Running) {
@@ -91,6 +95,50 @@ impl HostedChat {
             }
         }
         self.set_tasks(tasks);
+        None
+    }
+
+    /// Takes what the agent said of a task that stands for a turn it takes
+    /// by itself, if `said` is of one: one starting opens that turn, if
+    /// none is being answered, and one ending ends it.
+    fn turn_task_said(&mut self, said: &Task) -> TurnTask {
+        match said {
+            Task::Spawned {
+                id,
+                kind,
+                description,
+                ..
+            } if kind == "turn" => {
+                if self.wake(description.clone()) {
+                    self.woke_by_task = Some(id.clone());
+                } else if self.woken() && self.woke_by_task.is_none() {
+                    // Its words came first.
+                    self.woke_by_task = Some(id.clone());
+                    let last = self.node.turns.len() - 1;
+                    let turn = &mut self.node.turns[last];
+                    if turn.woke.as_deref() == Some("") && description.is_some() {
+                        turn.woke.clone_from(description);
+                        self.patch_turn(last);
+                    }
+                }
+                TurnTask::Taken
+            }
+            Task::Progress { id, .. } if self.woke_by_task.as_ref() == Some(id) => TurnTask::Taken,
+            Task::State { id, state, .. } if self.woke_by_task.as_ref() == Some(id) => {
+                let reason = match state.as_str() {
+                    "completed" | "failed" => StopReason::EndTurn,
+                    "stopped" => StopReason::Cancelled,
+                    _ => return TurnTask::Taken,
+                };
+                self.woke_by_task = None;
+                if self.woken() {
+                    TurnTask::Ended(reason)
+                } else {
+                    TurnTask::Taken
+                }
+            }
+            _ => TurnTask::NotOne,
+        }
     }
 
     /// Asks the agent to stop task `id`, if it's going and can be stopped.
@@ -176,6 +224,17 @@ impl HostedChat {
             self.journal.push(ChatPatch::Tasks(tasks));
         }
     }
+}
+
+/// What a task the agent said something of was to a turn it takes by
+/// itself.
+enum TurnTask {
+    /// It's no such task.
+    NotOne,
+    /// It's one, and what was said of it is taken.
+    Taken,
+    /// It's one, and the turn it stands for ended, as this says.
+    Ended(StopReason),
 }
 
 /// The kind of task the agent calls `kind`.
