@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026.10.97 (2026-10-28)
+
+### Features
+
+- let agents ask the user questions and open links (ACP elicitation) (CLACKA-191) (12e120ef)
+- **gui:** fill in an agent's form, open its link and approve its plan in the chat (CLACKA-191) (75b12971)
+- **web:** answer an agent's form, open its link and see its plan on the phone (CLACKA-191) (6a5e1e60)
+
+### Fixes
+
+- **web:** what's filled in one form never lands in the next or another chat's (CLACKA-191) (e2cd808c)
+- **daemon:** a form waiting when a chat moves to another agent is cancelled at the one it left (CLACKA-191) (6e0ec931)
+- **daemon:** bound what an agent's form may hold, and show nothing hidden in it (CLACKA-191) (663743cf)
+- **gui:** open only a plain web link a form gives, show where it goes, and scroll a long message (CLACKA-191) (0b7ae45c)
+- **web:** open only a plain web link a form gives, show where it goes, and wait a moment before a form's buttons answer (CLACKA-191) (81f6e02f)
+- a link's host can't be faked or hidden, and a form is read no further than it keeps (CLACKA-191) (fb557d95)
+- **protocol:** a link's host may hold no `%` nor an address browsers read otherwise (CLACKA-191) (265dcfcd)
+
 ## 2026.10.96 (2026-10-28)
 
 ### Fixes
