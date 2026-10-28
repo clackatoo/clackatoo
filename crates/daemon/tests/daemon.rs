@@ -4879,7 +4879,7 @@ fn an_agents_write_to_lines_changed_and_not_saved_or_outside_its_project_is_refu
     );
 }
 
-/// Claude Code's AskUserQuestion tool, on the cheapest model: its adapter
+/// Claude Code's `AskUserQuestion` tool, on the cheapest model: its adapter
 /// keeps it only for a client that can show forms, and asks it as one.
 /// Run by hand, as [`a_real_agent_answers_and_asks_before_running_commands`]
 /// is.

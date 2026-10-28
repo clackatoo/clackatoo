@@ -553,7 +553,7 @@ fn main() {
                                 node.delivery.queued.retain(|q| q.id != id);
                             }
                             ChatAction::Answer { .. } | ChatAction::Fill { .. } => {
-                                node.question = None
+                                node.question = None;
                             }
                             ChatAction::Set { setting, value } => {
                                 if let Some(s) = node.settings.iter_mut().find(|s| s.id == setting)

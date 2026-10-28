@@ -1354,6 +1354,59 @@ fn a_chat_on_another_machine_is_talked_to_through_this_daemon() {
     assert_eq!(summary.workspace, Some(pair.work.id));
 }
 
+#[test]
+fn a_form_an_agent_on_another_machine_asks_is_filled_in_through_this_daemon() {
+    use clackatoo_protocol::{FieldValue, FormReply};
+    let mut pair = Pair::new();
+    let pane = pair.window.new_tab(pair.work.id, chat()).unwrap();
+    let shown = pair.window.watch_workspaces().unwrap();
+    let (_, _, pane) = shown.find_pane(pane).expect("its pane is shown");
+    let Content::Terminal(chat) = pane.content else {
+        panic!("{pane:?}");
+    };
+    attach_to(&mut pair.window, chat);
+    pair.window
+        .chat(chat, ChatAction::Send("elicit".into()))
+        .unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    let question = loop {
+        let node = pair.window.capture(chat).unwrap().chat().cloned().unwrap();
+        if let Some(question) = node
+            .question
+            .clone()
+            .filter(|question| question.form.is_some())
+        {
+            break question;
+        }
+        assert!(Instant::now() < deadline, "no form came: {node:#?}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let reply = FormReply::Accept(vec![
+        ("question_0".into(), FieldValue::Text("Postgres".into())),
+        ("count".into(), FieldValue::Number("3".into())),
+    ]);
+    pair.window
+        .chat(
+            chat,
+            ChatAction::Fill {
+                question: question.id,
+                reply,
+            },
+        )
+        .unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let node = pair.window.capture(chat).unwrap().chat().cloned().unwrap();
+        if last_words(&node).starts_with("answered: ") {
+            assert!(last_words(&node).contains("\"question_0\":\"Postgres\""));
+            assert_eq!(node.question, None);
+            break;
+        }
+        assert!(Instant::now() < deadline, "no answer: {node:#?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// What the agent said in `chat`'s last turn.
 fn last_words(chat: &ChatNode) -> String {
     let Some(turn) = chat.turns.last() else {
