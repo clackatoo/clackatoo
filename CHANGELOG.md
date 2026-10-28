@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026.10.92 (2026-10-28)
+
+### Features
+
+- show what Claude Code runs in the background, and stop it (CLACKA-177) (31a630fc)
+- **daemon:** `tasks` in agents.toml says whether to ask an agent what it runs in the background (CLACKA-177) (9ed23863)
+
+### Fixes
+
+- **daemon:** pin Claude Code's adapter at 0.98.0, which finishes advisor calls (CLACKA-176) (d1d95a2b)
+- show turns an agent takes by itself, rather than dropping them (CLACKA-180) (4d8add2a)
+- review of agent-started turns and background tasks (CLACKA-177, CLACKA-180) (445c3416)
+- second review of agent-started turns and background tasks (CLACKA-177, CLACKA-180) (94bbd3a7)
+- **daemon:** Claude Code's Read, Grep and Glob rows show what they found again (CLACKA-183) (5d0f84df)
+- final review of agent-started turns and tool results (CLACKA-180, CLACKA-183) (39169515)
+
 ## 2026.10.91 (2026-10-28)
 
 ### Features
