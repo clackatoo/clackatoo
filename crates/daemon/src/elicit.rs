@@ -43,34 +43,48 @@ pub(crate) enum Unshown {
     /// It's about no session but a request, as Codex's sign-in asks:
     /// there's no chat to show it in.
     NoSession,
-    /// A mode this build doesn't know, or one missing what it needs.
+    /// A mode this build doesn't know, or one missing what it needs, or a
+    /// link that isn't plainly to the web.
     Unknown,
+    /// Its words, all told, are more than [`MOST_BYTES`]: the chat in
+    /// session `0` says it was turned down.
+    TooBig(String),
 }
+
+/// The most bytes of text, all told, a form keeps: its message, titles,
+/// descriptions, options, keys and what fields start as. One asking more
+/// is declined whole, so no window is sent a form too big to draw, nor
+/// one that fills a frame.
+pub(crate) const MOST_BYTES: usize = 256 * 1024;
 
 /// Reads an `elicitation/create` request's `params`.
 pub(crate) fn read(params: &Value) -> Result<Asked, Unshown> {
     let Some(session) = params.get("sessionId").and_then(Value::as_str) else {
         return Err(Unshown::NoSession);
     };
+    let mut reader = Reader { left: MOST_BYTES };
     let tool = (params.get("toolCallId").and_then(Value::as_str)).map(|tool| capped(tool, 256));
-    let message = text(params.get("message"), MOST_MESSAGE).unwrap_or_default();
+    let message = reader.shown(params.get("message"), MOST_MESSAGE);
     let (ask, url_id) = match params.get("mode").and_then(Value::as_str) {
-        Some("form") => (fields(params.get("requestedSchema")), None),
+        Some("form") => (reader.fields(params.get("requestedSchema")), None),
         Some("url") => {
             let url = params.get("url").and_then(Value::as_str);
             let id = params.get("elicitationId").and_then(Value::as_str);
             let (Some(url), Some(id)) = (url, id) else {
                 return Err(Unshown::Unknown);
             };
-            // Only a link the desktop's opener may open: one to the web.
-            let web = url.starts_with("https://") || url.starts_with("http://");
-            if !web || url.len() > MOST_URL || url.chars().any(char::is_control) {
+            if !plain_web_link(url) {
                 return Err(Unshown::Unknown);
             }
+            reader.charge(url.len());
             (FormAsk::Url(url.to_owned()), Some(capped(id, 256)))
         }
         _ => return Err(Unshown::Unknown),
     };
+    let message = message.unwrap_or_default();
+    if reader.over() {
+        return Err(Unshown::TooBig(session.to_owned()));
+    }
     Ok(Asked {
         session: session.to_owned(),
         tool,
@@ -79,172 +93,214 @@ pub(crate) fn read(params: &Value) -> Result<Asked, Unshown> {
     })
 }
 
-/// The fields a form's `requestedSchema` asks for, as many as are kept.
-/// One of a kind this build can't show leaves the form incomplete if it's
-/// required, and is left out if not.
-fn fields(schema: Option<&Value>) -> FormAsk {
-    let empty = Map::new();
-    let properties = (schema.and_then(|schema| schema.get("properties")))
-        .and_then(Value::as_object)
-        .unwrap_or(&empty);
-    let required: Vec<&str> = (schema.and_then(|schema| schema.get("required")))
-        .and_then(Value::as_array)
-        .map(|keys| keys.iter().filter_map(Value::as_str).take(256).collect())
-        .unwrap_or_default();
-    let mut fields = Vec::new();
-    let mut complete = true;
-    for (key, property) in properties {
-        let required = required.contains(&key.as_str());
-        if fields.len() == MOST_FIELDS {
-            complete = false;
-            break;
-        }
-        match field(key, property, required) {
-            Some(field) => fields.push(field),
-            None if required => complete = false,
-            None => {}
-        }
-    }
-    FormAsk::Fields { fields, complete }
+/// Whether `url` is a link the desktop's opener may be handed: to the web,
+/// in plain ASCII, naming no user (`user@host`, which can pass for
+/// another host), with nothing hidden in it (see
+/// [`unhidden`](crate::server::unhidden)), and not too long.
+fn plain_web_link(url: &str) -> bool {
+    let web = url.starts_with("https://") || url.starts_with("http://");
+    web && url.len() <= MOST_URL
+        && url.is_ascii()
+        && clackatoo_protocol::url_host(url).is_some()
+        && crate::server::unhidden(url) == url
 }
 
-/// The field `key` of a form, as `property` describes it, if it's one
-/// this build can show.
-fn field(key: &str, property: &Value, required: bool) -> Option<Field> {
-    if key.is_empty() || key.len() > MOST_LABEL {
-        return None;
-    }
-    let input = match property.get("type").and_then(Value::as_str)? {
-        "string" => match options(property.get("oneOf"), property.get("enum"), property) {
-            Some(options) => FieldInput::One {
-                default: (property.get("default").and_then(Value::as_str))
-                    .filter(|value| options.iter().any(|option| option.value == *value))
-                    .map(str::to_owned),
-                options,
-            },
-            None => FieldInput::Text {
-                default: text(property.get("default"), clackatoo_protocol::MOST_ANSWER),
-                min: count(property.get("minLength")),
-                max: count(property.get("maxLength")),
-                // Codex marks a password so.
-                secret: property.pointer("/_meta/codex/isSecret") == Some(&Value::Bool(true)),
-                format: text(property.get("format"), 32),
-            },
-        },
-        kind @ ("number" | "integer") => FieldInput::Number {
-            integer: kind == "integer",
-            min: number(property.get("minimum")),
-            max: number(property.get("maximum")),
-            default: number(property.get("default")),
-        },
-        "boolean" => FieldInput::Toggle {
-            default: property.get("default").and_then(Value::as_bool),
-        },
-        "array" => {
-            let items = property.get("items")?;
-            let options = options(items.get("anyOf"), items.get("enum"), items)?;
-            let default = (property.get("default").and_then(Value::as_array))
-                .map(|values| {
-                    let picked = values.iter().filter_map(Value::as_str);
-                    let offered = picked.filter(|value| options.iter().any(|o| o.value == *value));
-                    let mut default: Vec<String> = Vec::new();
-                    for value in offered {
-                        if !default.iter().any(|seen| seen == value) {
-                            default.push(value.to_owned());
-                        }
-                    }
-                    default
-                })
-                .unwrap_or_default();
-            FieldInput::Many {
-                options,
-                min: count(property.get("minItems")),
-                max: count(property.get("maxItems")),
-                default,
-            }
-        }
-        _ => return None,
-    };
-    Some(Field {
-        key: key.to_owned(),
-        title: text(property.get("title"), MOST_LABEL).filter(|title| !title.is_empty()),
-        description: text(property.get("description"), MOST_LABEL)
-            .filter(|description| !description.is_empty()),
-        required,
-        input,
-    })
+/// Reads a form under [`MOST_BYTES`] of text all told.
+struct Reader {
+    /// The bytes still to be kept; once short, it reads nothing more.
+    left: usize,
 }
 
-/// The options of a field of choices: titled (`oneOf` or `anyOf`, each
-/// `{const, title, description}`), or plain (`enum`, with `enumNames` as
-/// MCP's older schemas name them); `None` if it offers none.
-fn options(
-    titled: Option<&Value>,
-    plain: Option<&Value>,
-    property: &Value,
-) -> Option<Vec<FieldOption>> {
-    let mut options: Vec<FieldOption> = Vec::new();
-    if let Some(titled) = titled.and_then(Value::as_array) {
-        for option in titled {
-            let Some(value) = option.get("const").and_then(Value::as_str) else {
-                continue;
-            };
-            let title = text(option.get("title"), MOST_LABEL).unwrap_or_else(|| clean(value));
-            push_option(
-                &mut options,
-                value,
-                title,
-                text(option.get("description"), MOST_LABEL),
-            );
-        }
-    } else if let Some(plain) = plain.and_then(Value::as_array) {
-        let names = property.get("enumNames").and_then(Value::as_array);
-        for (index, value) in plain.iter().enumerate() {
-            let Some(value) = value.as_str() else {
-                continue;
-            };
-            let name = names.and_then(|names| text(names.get(index), MOST_LABEL));
-            push_option(
-                &mut options,
-                value,
-                name.unwrap_or_else(|| clean(value)),
-                None,
-            );
+impl Reader {
+    /// Counts `bytes` against what's left.
+    fn charge(&mut self, bytes: usize) {
+        if !self.over() {
+            self.left = self.left.checked_sub(bytes).unwrap_or(usize::MAX);
         }
     }
-    (!options.is_empty()).then_some(options)
-}
 
-/// Adds the option `value` to `options`, if it's not too long, not
-/// there already, and there's room.
-fn push_option(
-    options: &mut Vec<FieldOption>,
-    value: &str,
-    title: String,
-    description: Option<String>,
-) {
-    if options.len() < MOST_OPTIONS
-        && value.len() <= MOST_LABEL
-        && !options.iter().any(|option| option.value == value)
-    {
-        options.push(FieldOption {
-            value: value.to_owned(),
-            title,
-            description: description.filter(|description| !description.is_empty()),
-        });
+    /// Whether it went past what it keeps.
+    fn over(&self) -> bool {
+        self.left == usize::MAX
     }
-}
 
-/// `value` as text, without control characters but line breaks and tabs,
-/// cut to `most` characters, if it's a string.
-fn text(value: Option<&Value>, most: usize) -> Option<String> {
-    let text = value?.as_str()?;
-    Some(
-        text.chars()
+    /// `value` as text to show: without control characters but line
+    /// breaks and tabs, cut to `most` characters, with what would be
+    /// hidden shown (see [`unhidden`](crate::server::unhidden)), if it's
+    /// a string and there's room.
+    fn shown(&mut self, value: Option<&Value>, most: usize) -> Option<String> {
+        if self.over() {
+            return None;
+        }
+        let text = value?.as_str()?;
+        // Never more than is left is looked at.
+        let text = capped(text, self.left.saturating_add(1));
+        let kept: String = (text.chars())
             .filter(|&ch| matches!(ch, '\n' | '\t') || !ch.is_control())
             .take(most)
-            .collect(),
-    )
+            .collect();
+        let shown = crate::server::unhidden(&kept);
+        self.charge(shown.len());
+        (!self.over()).then_some(shown)
+    }
+
+    /// `value` as given back to the agent, a key or an option's value, if
+    /// it's a string no longer than `most` bytes and there's room.
+    fn exact(&mut self, value: &str, most: usize) -> Option<String> {
+        if value.len() > most || self.over() {
+            return None;
+        }
+        self.charge(value.len());
+        (!self.over()).then(|| value.to_owned())
+    }
+
+    /// The fields a form's `requestedSchema` asks for, as many as are
+    /// kept. One of a kind this build can't show leaves the form
+    /// incomplete if it's required, and is left out if not.
+    fn fields(&mut self, schema: Option<&Value>) -> FormAsk {
+        let empty = Map::new();
+        let properties = (schema.and_then(|schema| schema.get("properties")))
+            .and_then(Value::as_object)
+            .unwrap_or(&empty);
+        let required: Vec<&str> = (schema.and_then(|schema| schema.get("required")))
+            .and_then(Value::as_array)
+            .map(|keys| keys.iter().filter_map(Value::as_str).take(256).collect())
+            .unwrap_or_default();
+        let mut fields = Vec::new();
+        let mut complete = true;
+        for (key, property) in properties {
+            let required = required.contains(&key.as_str());
+            if fields.len() == MOST_FIELDS || self.over() {
+                complete = false;
+                break;
+            }
+            match self.field(key, property, required) {
+                Some(field) => fields.push(field),
+                None if required => complete = false,
+                None => {}
+            }
+        }
+        FormAsk::Fields { fields, complete }
+    }
+
+    /// The field `key` of a form, as `property` describes it, if it's one
+    /// this build can show.
+    fn field(&mut self, key: &str, property: &Value, required: bool) -> Option<Field> {
+        if key.is_empty() {
+            return None;
+        }
+        let key = self.exact(key, MOST_LABEL)?;
+        let input = match property.get("type").and_then(Value::as_str)? {
+            "string" => match self.options(property.get("oneOf"), property.get("enum"), property) {
+                Some(options) => FieldInput::One {
+                    default: (property.get("default").and_then(Value::as_str))
+                        .filter(|value| options.iter().any(|option| option.value == *value))
+                        .map(str::to_owned),
+                    options,
+                },
+                None => FieldInput::Text {
+                    default: self.shown(property.get("default"), clackatoo_protocol::MOST_ANSWER),
+                    min: count(property.get("minLength")),
+                    max: count(property.get("maxLength")),
+                    // Codex marks a password so.
+                    secret: property.pointer("/_meta/codex/isSecret") == Some(&Value::Bool(true)),
+                    format: self.shown(property.get("format"), 32),
+                },
+            },
+            kind @ ("number" | "integer") => FieldInput::Number {
+                integer: kind == "integer",
+                min: number(property.get("minimum")),
+                max: number(property.get("maximum")),
+                default: number(property.get("default")),
+            },
+            "boolean" => FieldInput::Toggle {
+                default: property.get("default").and_then(Value::as_bool),
+            },
+            "array" => {
+                let items = property.get("items")?;
+                let options = self.options(items.get("anyOf"), items.get("enum"), items)?;
+                let default = (property.get("default").and_then(Value::as_array))
+                    .map(|values| {
+                        let picked = values.iter().filter_map(Value::as_str);
+                        let offered =
+                            picked.filter(|value| options.iter().any(|o| o.value == *value));
+                        let mut default: Vec<String> = Vec::new();
+                        for value in offered {
+                            if !default.iter().any(|seen| seen == value) {
+                                default.push(value.to_owned());
+                            }
+                        }
+                        default
+                    })
+                    .unwrap_or_default();
+                FieldInput::Many {
+                    options,
+                    min: count(property.get("minItems")),
+                    max: count(property.get("maxItems")),
+                    default,
+                }
+            }
+            _ => return None,
+        };
+        let title = self.shown(property.get("title"), MOST_LABEL);
+        let description = self.shown(property.get("description"), MOST_LABEL);
+        Some(Field {
+            key,
+            title: title.filter(|title| !title.is_empty()),
+            description: description.filter(|description| !description.is_empty()),
+            required,
+            input,
+        })
+    }
+
+    /// The options of a field of choices: titled (`oneOf` or `anyOf`, each
+    /// `{const, title, description}`), or plain (`enum`, with `enumNames`
+    /// as MCP's older schemas name them); `None` if it offers none.
+    fn options(
+        &mut self,
+        titled: Option<&Value>,
+        plain: Option<&Value>,
+        property: &Value,
+    ) -> Option<Vec<FieldOption>> {
+        let mut options: Vec<FieldOption> = Vec::new();
+        let mut offered: Vec<(&str, Option<&Value>, Option<&Value>)> = Vec::new();
+        if let Some(titled) = titled.and_then(Value::as_array) {
+            for option in titled {
+                if let Some(value) = option.get("const").and_then(Value::as_str) {
+                    offered.push((value, option.get("title"), option.get("description")));
+                }
+            }
+        } else if let Some(plain) = plain.and_then(Value::as_array) {
+            let names = property.get("enumNames").and_then(Value::as_array);
+            for (index, value) in plain.iter().enumerate() {
+                if let Some(value) = value.as_str() {
+                    offered.push((value, names.and_then(|names| names.get(index)), None));
+                }
+            }
+        }
+        for (value, title, description) in offered {
+            if options.len() == MOST_OPTIONS || self.over() {
+                break;
+            }
+            if options.iter().any(|option| option.value == value) {
+                continue;
+            }
+            let Some(kept) = self.exact(value, MOST_LABEL) else {
+                continue;
+            };
+            let title = match self.shown(title, MOST_LABEL) {
+                Some(title) => title,
+                None => self.shown(Some(&Value::from(clean(value))), MOST_LABEL)?,
+            };
+            let description = self.shown(description, MOST_LABEL);
+            options.push(FieldOption {
+                value: kept,
+                title,
+                description: description.filter(|description| !description.is_empty()),
+            });
+        }
+        (!options.is_empty()).then_some(options)
+    }
 }
 
 /// `text` on one line, without control characters.
@@ -446,6 +502,105 @@ mod tests {
         assert!(odd(false).answerable());
         assert_eq!(odd(false).fields().len(), 1);
         assert!(!odd(true).answerable());
+    }
+
+    /// A form of `fields` fields of `options` options each, every option's
+    /// value and title `size` bytes.
+    fn sized(fields: usize, options: usize, size: usize) -> Value {
+        let mut properties = Map::new();
+        for field in 0..fields {
+            let options: Vec<Value> = (0..options)
+                .map(|option| {
+                    let value = format!("{field:03}{option:03}{}", "v".repeat(size - 6));
+                    json!({ "const": value, "title": "t".repeat(size) })
+                })
+                .collect();
+            properties.insert(
+                format!("f{field}"),
+                json!({ "type": "string", "oneOf": options }),
+            );
+        }
+        json!({ "mode": "form", "sessionId": "s1", "message": "Pick",
+                "requestedSchema": { "type": "object", "properties": properties } })
+    }
+
+    #[test]
+    fn a_form_too_big_is_declined_and_the_biggest_kept_fits_a_frame_with_room() {
+        // 4 MB of options, each under the caps on one: too much all told.
+        let huge = sized(32, 64, 1000);
+        assert_eq!(read(&huge), Err(Unshown::TooBig("s1".into())));
+        // Just under the budget: kept whole, and far under a frame.
+        let biggest = read(&sized(32, 64, 62)).unwrap();
+        assert!(biggest.form.answerable());
+        assert_eq!(biggest.form.fields().len(), 32);
+        let question = clackatoo_protocol::Question {
+            id: 1,
+            title: "ask you `Pick`, which needs a newer clackatoo to answer".into(),
+            choices: Vec::new(),
+            own: false,
+            form: Some(biggest.form),
+            plan: None,
+        };
+        let message = clackatoo_protocol::ServerMessage::Event(clackatoo_protocol::Event::View {
+            terminal: clackatoo_protocol::TerminalId(1),
+            update: clackatoo_protocol::ViewUpdate::Patch(vec![clackatoo_protocol::Patch::Chat(
+                clackatoo_protocol::ChatPatch::Question(Some(question)),
+            )]),
+        });
+        let frame =
+            clackatoo_protocol::frame::encode(clackatoo_protocol::PROTOCOL_VERSION, &message)
+                .unwrap();
+        assert!(
+            frame.len() < clackatoo_protocol::frame::MAX_FRAME_LEN / 32,
+            "{} bytes",
+            frame.len()
+        );
+    }
+
+    #[test]
+    fn fields_keep_the_agents_order() {
+        let asked = read(&json!({ "mode": "form", "sessionId": "s1", "message": "?",
+            "requestedSchema": { "properties": {
+                "zeta": { "type": "boolean" }, "alpha": { "type": "boolean" },
+                "mid": { "type": "boolean" } } } }))
+        .unwrap();
+        let keys: Vec<&str> = (asked.form.fields().iter())
+            .map(|field| field.key.as_str())
+            .collect();
+        assert_eq!(keys, ["zeta", "alpha", "mid"]);
+    }
+
+    #[test]
+    fn hidden_text_is_shown_and_a_link_that_could_mislead_is_refused() {
+        let asked = read(&json!({ "mode": "form", "sessionId": "s1",
+            "message": "Pick\u{202E}txt.exe",
+            "requestedSchema": { "properties": { "a": { "type": "string",
+                "oneOf": [{ "const": "x", "title": "Yes\u{E0041}" }] } } } }))
+        .unwrap();
+        assert!(
+            !asked.form.message.contains('\u{202E}'),
+            "{}",
+            asked.form.message
+        );
+        let FieldInput::One { options, .. } = &asked.form.fields()[0].input else {
+            panic!("one of");
+        };
+        assert!(!options[0].title.contains('\u{E0041}'));
+        let link = |url: &str| {
+            read(
+                &json!({ "mode": "url", "sessionId": "s1", "message": "Sign in",
+                          "url": url, "elicitationId": "e1" }),
+            )
+        };
+        assert!(link("https://linear.app/oauth").is_ok());
+        for url in [
+            "https://linear.app@evil.example/",
+            "https://lіnear.app/",
+            "https://linear.app/\u{200B}x",
+            "ftp://linear.app/",
+        ] {
+            assert_eq!(link(url), Err(Unshown::Unknown), "{url}");
+        }
     }
 
     #[test]

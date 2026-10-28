@@ -502,12 +502,11 @@ enum Asker {
     Suggest,
     /// The daemon: what to do about a session the agent is slow to open.
     Slow,
-    /// The agent, asking the user to fill in `form` or open the link it
-    /// holds, in the request with this JSON-RPC ID; `url_id` is the
-    /// agent's ID for a link, which says when it's done with.
+    /// The agent, asking the user to fill in the form its question holds,
+    /// or open its link, in the request with this JSON-RPC ID; `url_id` is
+    /// the agent's ID for a link, which says when it's done with.
     Elicit {
         request: Value,
-        form: Box<clackatoo_protocol::Form>,
         url_id: Option<String>,
     },
 }
@@ -1333,6 +1332,9 @@ impl HostedChat {
         self.user_queue.restart = None;
         self.pause_queue(true);
         if !self.answering() && self.link != Link::Opening {
+            // A form the agent asked between turns, as a sign-in, is
+            // answered as cancelled: stopping stops what it waits on.
+            self.cancel_forms(actions);
             return;
         }
         // Questions waiting are answered with none, as the protocol asks.
@@ -2274,15 +2276,15 @@ impl HostedChat {
             Asker::Agent(request) => Some(Action::Answer { request, option }),
             // The only choice a window older than forms is offered says no;
             // none is not now.
-            Asker::Elicit { request, form, .. } => {
-                let reply = if option.as_deref() == Some(elicit::DECLINE) {
-                    clackatoo_protocol::FormReply::Decline
+            Asker::Elicit { request, .. } => {
+                let action = if option.as_deref() == Some(elicit::DECLINE) {
+                    "decline"
                 } else {
-                    clackatoo_protocol::FormReply::Cancel
+                    "cancel"
                 };
                 Some(Action::Elicited {
                     request,
-                    result: crate::elicit::result(&form, &reply),
+                    result: serde_json::json!({ "action": action }),
                 })
             }
             Asker::Tool(call) => {
@@ -4683,6 +4685,20 @@ mod tests {
         chat.answered(Ok(StopReason::EndTurn));
         assert!(chat.node.question.is_some());
         chat.disconnected(None);
+        assert_eq!(chat.node.question, None);
+    }
+
+    #[test]
+    fn stopping_an_idle_chat_cancels_a_form_asked_between_turns() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        chat.elicit(Value::from(6), question_form("s"));
+        assert!(!chat.answering());
+        let stopped = chat.act(ChatAction::Stop);
+        assert!(stopped.contains(&Action::Elicited {
+            request: Value::from(6),
+            result: serde_json::json!({ "action": "cancel" }),
+        }));
         assert_eq!(chat.node.question, None);
     }
 

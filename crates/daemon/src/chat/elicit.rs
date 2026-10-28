@@ -56,13 +56,13 @@ impl HostedChat {
                 kind: ChoiceKind::RejectOnce,
             }],
             own: false,
-            form: Some(asked.form.clone()),
+            // The question holds the form; nothing else does.
+            form: Some(asked.form),
             plan: None,
         };
         self.next_question += 1;
         let held = Asker::Elicit {
             request,
-            form: Box::new(asked.form),
             url_id: asked.url_id,
         };
         self.asking.push_back((held, question));
@@ -75,12 +75,12 @@ impl HostedChat {
     /// the agent hears it. Any other is ignored, as an answer sent twice
     /// or to a question gone is, so a stale or forged one changes nothing.
     pub(super) fn fill(&mut self, question: u64, reply: &FormReply, actions: &mut Vec<Action>) {
-        let Some((Asker::Elicit { form, .. }, shown)) = self.asking.front() else {
+        let Some((Asker::Elicit { .. }, shown)) = self.asking.front() else {
             return;
         };
-        if shown.id != question {
+        let Some(form) = shown.form.as_ref().filter(|_| shown.id == question) else {
             return;
-        }
+        };
         if let FormReply::Accept(answers) = reply
             && let Some(problem) = form.problem(answers)
         {
@@ -90,14 +90,12 @@ impl HostedChat {
             );
             return;
         }
-        let Some((Asker::Elicit { request, form, .. }, _)) = self.asking.pop_front() else {
+        let result = crate::elicit::result(form, reply);
+        let Some((Asker::Elicit { request, .. }, _)) = self.asking.pop_front() else {
             return;
         };
         self.show_question();
-        actions.push(Action::Elicited {
-            request,
-            result: crate::elicit::result(&form, reply),
-        });
+        actions.push(Action::Elicited { request, result });
     }
 
     /// The agent no longer waits for its request `request`: the question
@@ -118,7 +116,7 @@ impl HostedChat {
 
     /// The agent says the link it asked the user to open, which it calls
     /// `id`, is done with: the question goes. Returns the request it was
-    /// asked in, if one still waited, to answer as opened.
+    /// asked in, if one still waited, to answer: as cancelled, as the user never opened it.
     pub(crate) fn link_done(&mut self, id: &str) -> Option<Value> {
         let at = (self.asking.iter()).position(|(asker, _)| {
             matches!(asker, Asker::Elicit { url_id: Some(url_id), .. } if url_id == id)
@@ -128,6 +126,24 @@ impl HostedChat {
         };
         self.show_question();
         Some(request)
+    }
+
+    /// Answers every form the agent asked as cancelled, as stopping does.
+    pub(super) fn cancel_forms(&mut self, actions: &mut Vec<Action>) {
+        let before = self.asking.len();
+        self.asking.retain(|(asker, _)| {
+            let Asker::Elicit { request, .. } = asker else {
+                return true;
+            };
+            actions.push(Action::Elicited {
+                request: request.clone(),
+                result: serde_json::json!({ "action": "cancel" }),
+            });
+            false
+        });
+        if self.asking.len() != before {
+            self.show_question();
+        }
     }
 
     /// The chat is moving to another agent: what the agent it leaves
@@ -184,5 +200,7 @@ pub(super) fn plan(tool: &ToolCallUpdate, options: &[PermissionOption]) -> Optio
         .filter(|&ch| matches!(ch, '\n' | '\t') || !ch.is_control())
         .take(MOST_PLAN)
         .collect();
+    // Shown as agents' words to other agents are: nothing in it hidden.
+    let plan = crate::server::unhidden(&plan);
     (!plan.is_empty()).then_some(plan)
 }

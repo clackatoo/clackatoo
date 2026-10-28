@@ -179,6 +179,9 @@ pub(crate) enum Incoming {
     /// The agent says the link it asked the user to open, its
     /// elicitation `id`, has done what it was for (`elicitation/complete`).
     Completed { id: String },
+    /// The agent asked the user something too big to show, in session
+    /// `session`, which was declined: the chat says so.
+    TooBig { session: String },
     /// The agent asks for the text of a file, from line `line` (counting
     /// from 1) and at most `limit` lines, and waits for it.
     ReadFile {
@@ -837,9 +840,9 @@ impl Agent {
     }
 
     /// What the agent asks the user in an `elicitation/create` request
-    /// `id`, with `params`, to show; or `None` if it's been declined at
-    /// once, as it can't be shown: about no session, or not something
-    /// this build can show, which the protocol has a client decline.
+    /// `id`, with `params`, to show; or, if it's been declined at once, as
+    /// it can't be shown, `None`, or that the chat is to say it was too
+    /// big. The protocol has a client decline what it can't show.
     fn elicited(&mut self, id: &Value, params: &Value) -> Option<Incoming> {
         match crate::elicit::read(params) {
             Ok(asked) => Some(Incoming::Elicit {
@@ -853,7 +856,10 @@ impl Agent {
                     "id": id,
                     "result": { "action": "decline" },
                 }));
-                None
+                match why {
+                    crate::elicit::Unshown::TooBig(session) => Some(Incoming::TooBig { session }),
+                    _ => None,
+                }
             }
         }
     }

@@ -309,6 +309,20 @@ fn number_problem(
     None
 }
 
+/// The host a web link `url` goes to, with its port if it says one: what
+/// a link's card shows on a line of its own, so a long link can't hide
+/// where it goes. `None` if it isn't an `http` or `https` link with a
+/// host, or names a user (`user@host`), which can pass for another host.
+#[must_use]
+pub fn url_host(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let host = &rest[..end];
+    (!host.is_empty() && !host.contains('@') && !host.contains('\\')).then_some(host)
+}
+
 /// `text` as a finite number, whole if `integer`, if it's one.
 #[must_use]
 pub fn parse_number(text: &str, integer: bool) -> Option<f64> {
@@ -418,6 +432,15 @@ mod tests {
         assert!(with("n", FieldValue::Text("3".into())).is_some());
         assert_eq!(with("note", FieldValue::Text("abcd".into())), None);
         assert!(with("note", FieldValue::Text("abcde".into())).is_some());
+    }
+
+    #[test]
+    fn a_links_host_is_read_and_a_user_in_it_refused() {
+        assert_eq!(url_host("https://linear.app/oauth?x=1"), Some("linear.app"));
+        assert_eq!(url_host("http://localhost:8080"), Some("localhost:8080"));
+        assert_eq!(url_host("https://good.com@evil.com/"), None);
+        assert_eq!(url_host("https:///path"), None);
+        assert_eq!(url_host("javascript:alert(1)"), None);
     }
 
     #[test]

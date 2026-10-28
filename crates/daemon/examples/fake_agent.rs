@@ -34,6 +34,7 @@
 //! | `elicit` | Asks the user, as Claude Code's adapter asks its `AskUserQuestion` tool's questions (`elicitation/create`, `e1`), and some more: a choice of one, a box of words, a choice of several, a whole number from 1 to 9 and a yes-or-no; then says `answered:` and the answer as JSON, or the error. To a client that can't show forms, says `no forms` |
 //! | `elicit-url` | As `elicit`, but asks the user to open `https://example.com/oauth`, elicitation `u1` |
 //! | `elicit-done` | As `elicit-url`, but 300 ms later says the link is done with (`elicitation/complete`) |
+//! | `elicit-huge` | As `elicit`, but asks a form of 32 fields of 64 options, each option's value and title 1000 bytes: about 4 MB |
 //! | `elicit-later` | Says `asking later` and ends its turn; 300 ms later asks the user to open a link, as an MCP server's sign-in asks between turns, and notes the answer as `answered later:` and the answer as JSON |
 //! | `elicit-cancel` | As `elicit`, but 300 ms later no longer waits for the answer (`$/cancel_request`) |
 //! | `approve-plan` | Asks permission to leave plan mode, as Claude Code's adapter asks a client that asks as AIR does: its plan in the tool's input, the options that leave plan mode; then says which option was picked |
@@ -1301,7 +1302,7 @@ impl Fake {
                     );
                 });
             }
-            "elicit" | "elicit-url" | "elicit-done" | "elicit-cancel" => {
+            "elicit" | "elicit-url" | "elicit-done" | "elicit-cancel" | "elicit-huge" => {
                 self.elicit(id, session, text);
             }
             "approve-plan" => {
@@ -1371,7 +1372,23 @@ impl Fake {
             done(&id, "end_turn");
             return;
         }
-        let params = if script == "elicit" || script == "elicit-cancel" {
+        let params = if script == "elicit-huge" {
+            let mut properties = serde_json::Map::new();
+            for field in 0..32 {
+                let options: Vec<Value> = (0..64)
+                    .map(|option| {
+                        let value = format!("{field:03}{option:03}{}", "v".repeat(994));
+                        json!({ "const": value, "title": "t".repeat(1000) })
+                    })
+                    .collect();
+                properties.insert(
+                    format!("f{field}"),
+                    json!({ "type": "string", "oneOf": options }),
+                );
+            }
+            json!({ "mode": "form", "sessionId": session, "message": "Pick",
+                    "requestedSchema": { "type": "object", "properties": properties } })
+        } else if script == "elicit" || script == "elicit-cancel" {
             update(
                 &session,
                 &json!({ "sessionUpdate": "tool_call", "toolCallId": "te",

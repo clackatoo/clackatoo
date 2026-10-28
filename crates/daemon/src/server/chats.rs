@@ -1315,6 +1315,16 @@ impl Daemon {
                 };
                 id
             }
+            Incoming::TooBig { session } => {
+                let Some((id, chat)) = self.chat_in(name, &session) else {
+                    return;
+                };
+                chat.notify(format!(
+                    "{} asked you something too big to show, so it was declined.",
+                    chat.agent_title()
+                ));
+                id
+            }
             Incoming::Cancelled { request } => {
                 let withdrawn = (self.terminals.iter_mut()).find_map(|(&id, slot)| {
                     let chat = slot.terminal.chat()?;
@@ -1339,9 +1349,10 @@ impl Daemon {
                 let Some((id, request)) = done else {
                     return;
                 };
+                // The user never opened it: it's done with all the same.
                 if let Some(slot) = self.agents.running.get_mut(&agent) {
                     slot.agent
-                        .answer(&request, Ok(serde_json::json!({ "action": "accept" })));
+                        .answer(&request, Ok(serde_json::json!({ "action": "cancel" })));
                 }
                 id
             }

@@ -2670,7 +2670,7 @@ fn an_agents_form_goes_when_it_stops_waiting_or_the_turn_is_stopped() {
         node.turns.len() == 2 && last_outcome(node).is_some()
     });
     assert_eq!(last_words(&node), "answered: {\"action\":\"accept\"}\n");
-    // A link the agent says is done with goes by itself.
+    // A link the agent says is done with goes by itself, unopened.
     client
         .chat(chat, ChatAction::Send("elicit-done".to_owned()))
         .unwrap();
@@ -2679,7 +2679,7 @@ fn an_agents_form_goes_when_it_stops_waiting_or_the_turn_is_stopped() {
         node.turns.len() == 3 && last_outcome(node).is_some()
     });
     assert_eq!(node.question, None);
-    assert_eq!(last_words(&node), "answered: {\"action\":\"accept\"}\n");
+    assert_eq!(last_words(&node), "answered: {\"action\":\"cancel\"}\n");
     // Stopping the turn answers it as cancelled.
     client
         .chat(chat, ChatAction::Send("elicit".to_owned()))
@@ -2716,6 +2716,23 @@ fn a_form_waiting_when_the_chat_moves_to_another_agent_is_cancelled_at_the_one_i
         assert!(Instant::now() < deadline, "never answered: {noted}");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn a_form_too_big_to_show_is_declined_and_the_chat_says_so() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let node = ask(&mut client, chat, "elicit-huge");
+    assert_eq!(last_words(&node), "answered: {\"action\":\"decline\"}\n");
+    assert_eq!(node.question, None);
+    assert!(
+        node.notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("too big to show")),
+        "{:?}",
+        node.notice
+    );
 }
 
 #[test]
