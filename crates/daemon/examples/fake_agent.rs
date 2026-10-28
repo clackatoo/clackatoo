@@ -28,8 +28,12 @@
 //! | `finish` | Says task `t1` completed, then `finished` |
 //! | `wake` | Says `started` and ends its turn; 300 ms later takes a turn by itself, as Claude Code does when something it ran in the background ends: runs `git commit` and says `committed`. To a client that asked for AIR's `asyncTasks`, it says the turn starts and ends, as a task of kind `turn` |
 //!
+//! | `wake-wait` | As `wake`, but its turn goes on, saying `working`, until it's cancelled: then it says `late` as words in flight would, and that the turn stopped |
+//!
 //! Asked to stop a task (`_session/async_task/stop`), it says it stopped
-//! `t1`, and that it did; any other it says it didn't.
+//! `t1`, and that it did, and gives the notice "Task stopped by user", as
+//! Claude Code's adapter does: as a notice to a client that can show them,
+//! else as words; any other task it says it didn't stop.
 //! | anything else | `echo:` and the message, in two pieces |
 //!
 //! A message from another chat's agent comes framed as clackatoo frames
@@ -139,6 +143,8 @@ fn main() {
         log: value("--log"),
         codex: flag("--codex"),
         async_tasks: false,
+        notices: false,
+        woken: None,
         logged_out: flag("--logged-out"),
         mute_init: first && flag("--mute-init"),
         answers: (flag("--mute").then_some(0))
@@ -203,6 +209,10 @@ fn main() {
 struct Fake {
     /// Whether the client asked for AIR's `asyncTasks`.
     async_tasks: bool,
+    /// Whether the client can show notices.
+    notices: bool,
+    /// The session whose turn it took by itself waits to be cancelled.
+    woken: Option<String>,
     images: Vec<tempfile::TempPath>,
     log: Option<String>,
     /// Sends what Codex's adapter sends.
@@ -613,6 +623,9 @@ impl Fake {
                     .filter(|air| air["version"] == 1)
                     .and_then(|air| air["capabilities"].as_array())
                     .is_some_and(|asked| asked.iter().any(|asked| asked == "asyncTasks"));
+                self.notices = params
+                    .pointer("/clientCapabilities/session/notices")
+                    .is_some_and(Value::is_object);
                 self.initialize(&id);
             }
             Some("_session/async_task/stop") => {
@@ -623,6 +636,15 @@ impl Fake {
                         &json!({ "sessionUpdate": "async_task_state_update",
                                  "asyncTaskId": "t1", "state": "stopped" }),
                     );
+                    if self.notices {
+                        update(
+                            &session,
+                            &json!({ "sessionUpdate": "notice", "severity": "info",
+                                     "title": "Task stopped by user", "description": "Serve the docs." }),
+                        );
+                    } else {
+                        say(&session, "**Task stopped by user:** Serve the docs.");
+                    }
                 }
                 reply(&id, &json!({ "stopped": stopped }));
             }
@@ -1024,6 +1046,25 @@ impl Fake {
                 say(&session, "started\n");
                 done(&id, "end_turn");
             }
+            "wake-wait" => {
+                say(&session, "started\n");
+                done(&id, "end_turn");
+                self.woken = Some(session.clone());
+                let tasks = self.async_tasks;
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    if tasks {
+                        update(
+                            &session,
+                            &json!({ "sessionUpdate": "async_task_spawned", "asyncTaskId": "turn-1",
+                                     "name": "Claude is working", "taskType": "turn",
+                                     "description": "A scheduled wakeup fired.",
+                                     "showInTranscript": false, "canStop": true }),
+                        );
+                    }
+                    say(&session, "working\n");
+                });
+            }
             "wake" => {
                 say(&session, "started\n");
                 done(&id, "end_turn");
@@ -1330,6 +1371,18 @@ impl Fake {
 
     /// Ends the message waiting in `session`, as cancelled.
     fn cancel(&mut self, session: &str) {
+        if self.woken.as_deref() == Some(session) {
+            self.woken = None;
+            say(session, "late\n");
+            if self.async_tasks {
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "async_task_state_update",
+                             "asyncTaskId": "turn-1", "state": "stopped" }),
+                );
+            }
+            return;
+        }
         let wait = (self.waits.iter()).position(|(_, waiting)| waiting == session);
         if let Some(wait) = wait {
             let (id, _) = self.waits.remove(wait);

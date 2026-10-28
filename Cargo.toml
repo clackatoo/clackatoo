@@ -24,7 +24,7 @@ clackatoo-netem = { path = "crates/netem" }
 # The types of ACP, the Agent Client Protocol, which chats with agents
 # speak. Only the types: the daemon frames the messages itself,
 # in its own event loop. Without schemars, which only describes them.
-agent-client-protocol-schema = { version = "1.10", default-features = false }
+agent-client-protocol-schema = { version = "1.10", default-features = false, features = ["unstable_session_notices"] }
 anyhow = "1.0"
 # Checks the web app's password against its hash, kept as Argon2id (the
 # RustCrypto implementation, pure Rust). Without its own random numbers:

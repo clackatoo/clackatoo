@@ -59,6 +59,10 @@ pub(super) struct AgentSlot {
 }
 
 /// The agents chats talk to, and the ones being installed.
+/// How long a turn an agent took by itself, which the user stopped, waits
+/// for the agent to say it ended (see `chat/woken.rs`).
+const WOKEN_STOP: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Default)]
 pub(super) struct Agents {
     usage: crate::provider_usage::Cache,
@@ -795,9 +799,14 @@ impl Daemon {
                 // The agent has gone, which the chat has heard or will.
                 _ => {}
             }
-            if woken {
-                self.agents.woken.remove(&id);
-                self.prompt_answered(id, Ok(StopReason::Cancelled), false);
+            if woken && let Some(chat) = self.chat(id) {
+                if chat.stop_woken() {
+                    // Ends as the agent says, or else soon.
+                    self.agents.woken.insert(id, Instant::now() + WOKEN_STOP);
+                } else {
+                    self.agents.woken.remove(&id);
+                    self.prompt_answered(id, Ok(StopReason::Cancelled), false);
+                }
             }
         }
         if let Some(agent) = agent {
@@ -997,9 +1006,11 @@ impl Daemon {
 
     /// Hands `update`, from agent `name` about `session`, to its chat.
     /// Returns the chat, if there is one.
+    /// An agent that `tells` when it takes a turn by itself opens one only
+    /// as it says so (see `chat/woken.rs`).
     fn session_updated(
         &mut self,
-        name: &str,
+        (name, tells): (&str, bool),
         session: &str,
         mut update: SessionUpdate,
     ) -> Option<TerminalId> {
@@ -1035,8 +1046,11 @@ impl Daemon {
         }
         let images = self.chat(id)?.image_sources(&mut update);
         let chat = self.chat(id)?;
+        if tells && chat.said_while_idle(&update) {
+            return Some(id);
+        }
         // The agent at work with no turn open took one by itself.
-        if chat.wakes(&update) {
+        if chat.wakes(&update, tells) {
             chat.wake(None);
             log::info!("chat {id}: its agent took a turn by itself");
         }
@@ -1145,7 +1159,9 @@ impl Daemon {
                 {
                     return;
                 }
-                let Some(id) = self.session_updated(name, &session, *update) else {
+                let tells =
+                    (self.agents.running.get(&agent)).is_some_and(|slot| slot.agent.tells_turns());
+                let Some(id) = self.session_updated((name, tells), &session, *update) else {
                     return;
                 };
                 id
@@ -1198,7 +1214,12 @@ impl Daemon {
                 if chat.loading() || chat.skipping() || (gone && !chat.is_connected()) {
                     return;
                 }
-                if let Some(ended) = chat.task_said(task) {
+                let ended = chat.task_said(task);
+                // The agent says when the turn it took ends: no quiet ends it.
+                if chat.woken_says_when_it_ends() && !chat.woken_stopping() {
+                    self.agents.woken.remove(&id);
+                }
+                if let Some(ended) = ended {
                     self.agents.woken.remove(&id);
                     self.prompt_answered(id, Ok(ended), false);
                 }
@@ -1787,6 +1808,16 @@ impl Daemon {
             let Some(chat) = self.chat(id).filter(|chat| chat.woken()) else {
                 continue;
             };
+            if chat.woken_stopping() {
+                log::info!("chat {id}: its agent didn't say the turn it was asked to stop ended");
+                if self.prompt_answered(id, Ok(StopReason::Cancelled), false) {
+                    self.collect_damage(id);
+                }
+                continue;
+            }
+            if chat.woken_says_when_it_ends() {
+                continue;
+            }
             if chat.tool_running() {
                 let quiet = now + self.config.quiet_turn;
                 self.agents.woken.insert(id, quiet);

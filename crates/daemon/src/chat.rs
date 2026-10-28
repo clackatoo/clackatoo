@@ -422,6 +422,19 @@ pub(crate) struct HostedChat {
     /// The task the agent says stands for the turn it took by itself, if
     /// it says (see `chat/woken.rs`).
     woke_by_task: Option<String>,
+    /// Whether the user stopped the turn the agent took by itself, which
+    /// waits for the agent to say it has ended.
+    woken_stopping: bool,
+    /// Until when what the agent says while the chat answers nothing
+    /// opens no turn, as what was in flight when one was stopped comes
+    /// after it.
+    wake_held: Option<std::time::Instant>,
+    /// What the agent said while the chat answered nothing and it took no
+    /// turn: shown as the notice.
+    idle_said: String,
+    /// The session the chat's tasks were started in: a stop goes to that
+    /// session only.
+    tasks_session: Option<String>,
     /// The tool calls whose input named clackatoo's MCP server as they
     /// began, the latest few: a question about one is about our own tool,
     /// whatever it's titled, and the agent can't make a command's input
@@ -600,6 +613,10 @@ impl HostedChat {
             wanted: None,
             told_parent: std::cell::Cell::new(0),
             woke_by_task: None,
+            woken_stopping: false,
+            wake_held: None,
+            idle_said: String::new(),
+            tasks_session: None,
             own_tools: VecDeque::new(),
             limits: Limits::default(),
             user_queue: queue::Queue::default(),
@@ -1442,6 +1459,8 @@ impl HostedChat {
         if to.name == self.agent {
             return None;
         }
+        // What it runs in the background goes with the agent it leaves.
+        self.tasks_lost();
         self.set_native_steering(false);
         // The chat's own settings go with it to every agent: what it may
         // do with clackatoo's tools, whether it keeps Claude Code's Task
@@ -2318,6 +2337,15 @@ impl HostedChat {
                     self.set_value(&id, &mode);
                 }
             }
+            // Something to tell the user that belongs to no turn, such as
+            // that a task was stopped as asked.
+            SessionUpdate::Notice(notice) => {
+                let mut said = clean(&notice.title);
+                if let Some(description) = &notice.description {
+                    said = format!("{said}: {}", clean(description));
+                }
+                self.set_notice(Some(one_line_notice(&said)));
+            }
             // What it says of its account's limits the daemon has taken
             // in already, for every chat of the agent: see
             // `Daemon::limits_heard`.
@@ -2943,6 +2971,8 @@ impl HostedChat {
 
     fn push_turn(&mut self, turn: Turn) {
         self.diffs.clear();
+        self.idle_said.clear();
+        self.woken_stopping = false;
         self.node.turns.push(turn);
         self.patch_turn(self.node.turns.len() - 1);
     }
@@ -3244,6 +3274,20 @@ pub(crate) fn now() -> u64 {
             u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
         })
 }
+
+/// A notice the agent gives, at most [`NOTICE`] characters, cut short with
+/// `…`.
+fn one_line_notice(text: &str) -> String {
+    let mut text = text.trim().to_owned();
+    if let Some((cut, _)) = text.char_indices().nth(NOTICE) {
+        text.truncate(cut);
+        text.push('…');
+    }
+    text
+}
+
+/// The most characters of what an agent gives as a notice kept.
+const NOTICE: usize = 600;
 
 /// The settings the agent offers, as the chat shows them. Only those that
 /// pick from a list: on/off ones aren't shown yet.
@@ -5393,6 +5437,49 @@ mod tests {
         assert!(chat.outdates(&card, false), "the card says it's going");
         assert!(chat.as_subagent(0, false).tasks.is_empty());
         assert_eq!(chat.park().as_deref(), Some("s"));
+    }
+
+    #[test]
+    fn what_runs_in_the_background_goes_with_the_agent_a_chat_leaves() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        chat.task_said(crate::agent::Task::Spawned {
+            id: "t1".into(),
+            kind: "shell".into(),
+            name: "Serve the docs".into(),
+            description: None,
+            can_stop: true,
+            tool: None,
+        });
+        let codex = crate::agents::AgentConfig::default().find("codex").unwrap();
+        chat.switch(&codex, None, None, handoff::BUDGET);
+        assert_eq!(
+            chat.node.tasks[0].state,
+            clackatoo_protocol::AgentTaskState::Lost
+        );
+        // Nothing asks the agent it moved to to stop it.
+        assert!(
+            chat.act(ChatAction::StopTask { id: "t1".into() })
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn words_an_agent_that_says_when_it_wakes_says_with_no_turn_open_are_a_notice() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        let words: SessionUpdate = serde_json::from_str(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"**Fast mode turned off:** the model has none."}}"#,
+        )
+        .unwrap();
+        assert!(!chat.wakes(&words, true), "only its turn task opens one");
+        assert!(chat.wakes(&words, false));
+        assert!(chat.said_while_idle(&words));
+        assert!(chat.node.turns.is_empty());
+        assert_eq!(
+            chat.node.notice.as_deref(),
+            Some("Fast mode turned off: the model has none.")
+        );
     }
 
     #[test]

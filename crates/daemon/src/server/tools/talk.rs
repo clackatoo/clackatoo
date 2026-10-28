@@ -685,11 +685,12 @@ impl Daemon {
         let turns = &target.node().turns;
         let asked = (turns.iter().enumerate().rev())
             .find(|(_, turn)| turn.from.as_ref().is_some_and(|from| from.chat == chat));
-        // What it went on to do by itself after answering, as when
-        // something it ran in the background ended, answers it too.
+        // What it went on to do by itself straight after answering, as
+        // when something it ran in the background ended, answers it too.
         let asked = asked.map(|(index, turn)| {
             (turns.iter().enumerate().skip(index + 1))
-                .rfind(|(_, later)| later.woke.is_some())
+                .take_while(|(_, later)| later.woke.is_some())
+                .last()
                 .unwrap_or((index, turn))
         });
         let last = || (turns.iter().enumerate()).rfind(|(_, turn)| turn.switch.is_none());
@@ -1022,6 +1023,16 @@ mod tests {
                 && answer.contains("Committed: the gate passed."),
             "{answer}"
         );
+        // Only what follows its answer straight away: not a turn it takes
+        // after another message.
+        let chat = daemon.chat(b).unwrap();
+        chat.act(clackatoo_protocol::ChatAction::Send("later".to_owned()));
+        chat.answered(Ok(StopReason::EndTurn));
+        assert!(chat.wake(None));
+        chat.update(words("Something else."));
+        chat.answered(Ok(StopReason::EndTurn));
+        let answer = daemon.answer_of(a, b, false);
+        assert!(answer.contains("in turn 2:"), "{answer}");
         let turn = &daemon.chat_ref(b).unwrap().node().turns[1];
         let read = turn_text(Some(2), turn);
         assert!(

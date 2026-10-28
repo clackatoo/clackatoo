@@ -289,9 +289,11 @@ impl Daemon {
                         chat.subagent_status(),
                         SubagentStatus::Done | SubagentStatus::Failed(_)
                     );
-                // One the user had in a pane and sent back is theirs.
+                // One the user had in a pane and sent back is theirs, and
+                // closing one would end what it runs in the background.
                 let spent = done
                     && !chat.kept_by_user()
+                    && !chat.has_tasks_going()
                     && chat.parent_has_heard()
                     && !parents.contains(&id)
                     && !self.awaits_review(id);

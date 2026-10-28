@@ -26,6 +26,11 @@ impl HostedChat {
             if self.stop_requested || self.skipping() {
                 return None;
             }
+            // A turn the agent took by itself is nothing the user asked
+            // for: it goes on only if a tool of it was cut off.
+            if self.woken() && !self.tool_running() {
+                return None;
+            }
             Some(ChatContinuation {
                 chat: self.id.0,
                 turn: turn as u64,

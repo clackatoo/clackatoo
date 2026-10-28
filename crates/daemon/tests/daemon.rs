@@ -2621,10 +2621,18 @@ fn a_shell_claude_runs_in_the_background_shows_until_it_ends_and_can_be_stopped(
         .chat(chat, ChatAction::StopTask { id: "t1".into() })
         .unwrap();
     let node = wait_for_chat(&mut client, chat, |node| {
-        node.tasks.first().is_some_and(|task| !task.going())
+        node.tasks.first().is_some_and(|task| !task.going()) && node.notice.is_some()
     });
     assert_eq!(node.tasks[0].state, AgentTaskState::Stopped);
-    assert_eq!(node.notice, None);
+    // Its notice is one, not a turn the agent took by itself.
+    assert_eq!(
+        node.notice.as_deref(),
+        Some("Task stopped by user: Serve the docs.")
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    let node = client.capture(chat).unwrap().chat().unwrap().clone();
+    assert_eq!(node.turns.len(), 4, "{:#?}", node.turns.last());
+    assert_eq!(node.state, ChatState::Ready);
 }
 
 /// Waits for `chat` to have `turns` turns, the last ended.
@@ -2689,12 +2697,39 @@ fn stopping_a_turn_an_agent_took_by_itself_ends_it() {
     });
     let mut client = daemon.client();
     let (chat, _) = start_chat_with(&mut client, "other");
-    ask(&mut client, chat, "wake");
+    ask(&mut client, chat, "wake-wait");
     wait_for_chat(&mut client, chat, |node| {
-        node.turns.len() == 2 && last_words(node) == "committed\n"
+        node.turns.len() == 2 && last_words(node) == "working\n"
     });
+    // It ends at once, as nothing would say it had; what was in flight
+    // opens no turn of its own.
     client.chat(chat, ChatAction::Stop).unwrap();
     let node = wait_for_turns(&mut client, chat, 2);
+    assert_eq!(last_outcome(&node), Some(&Outcome::Stopped));
+    assert_eq!(node.state, ChatState::Ready);
+    std::thread::sleep(Duration::from_millis(300));
+    let node = client.capture(chat).unwrap().chat().unwrap().clone();
+    assert_eq!(node.turns.len(), 2, "{:#?}", node.turns.last());
+    assert_eq!(node.state, ChatState::Ready);
+}
+
+#[test]
+fn stopping_a_turn_claude_took_by_itself_waits_for_it_to_say_it_ended() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    ask(&mut client, chat, "wake-wait");
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.turns.len() == 2 && last_words(node) == "working\n"
+    });
+    assert_eq!(
+        node.turns[1].woke.as_deref(),
+        Some("A scheduled wakeup fired.")
+    );
+    client.chat(chat, ChatAction::Stop).unwrap();
+    // What was in flight lands in it, before it ends.
+    let node = wait_for_turns(&mut client, chat, 2);
+    assert_eq!(last_words(&node), "working\nlate\n");
     assert_eq!(last_outcome(&node), Some(&Outcome::Stopped));
     assert_eq!(node.state, ChatState::Ready);
 }
@@ -11645,12 +11680,17 @@ fn claude_code_keeps_its_task_tool_unless_the_chat_starts_without_it() {
     };
     let allowed = serde_json::json!(["mcp__clackatoo"]);
     let disallowed = serde_json::json!(["Agent", "Task"]);
+    // Asked for its background tasks, it's asked for its subagents' words
+    // too, as AIR's adapter keeps them otherwise.
+    let forward = true;
 
     let with = start_new_chat(&mut client, new(AgentTools::Ask, true));
     let meta = session_meta(&mut client, with);
     assert_eq!(
         meta,
-        serde_json::json!({ "claudeCode": { "options": { "allowedTools": allowed } } })
+        serde_json::json!({ "claudeCode": { "options": {
+            "allowedTools": allowed, "forwardSubagentText": forward,
+        } } })
     );
 
     let without = start_new_chat(&mut client, new(AgentTools::Ask, false));
@@ -11662,10 +11702,15 @@ fn claude_code_keeps_its_task_tool_unless_the_chat_starts_without_it() {
     let bare = start_new_chat(&mut client, new(AgentTools::Off, false));
     assert_eq!(
         session_meta(&mut client, bare),
-        serde_json::json!({ "claudeCode": { "options": { "disallowedTools": disallowed } } })
+        serde_json::json!({ "claudeCode": { "options": {
+            "disallowedTools": disallowed, "forwardSubagentText": forward,
+        } } })
     );
     let plain = start_new_chat(&mut client, new(AgentTools::Off, true));
-    assert_eq!(session_meta(&mut client, plain), serde_json::Value::Null);
+    assert_eq!(
+        session_meta(&mut client, plain),
+        serde_json::json!({ "claudeCode": { "options": { "forwardSubagentText": forward } } })
+    );
 
     // The session opened again, as after the agent stops, is opened the
     // same way.

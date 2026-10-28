@@ -55,6 +55,7 @@ impl HostedChat {
                     ended: None,
                     can_stop,
                 };
+                self.tasks_session.clone_from(&self.session);
                 if let Some(known) = tasks.iter_mut().find(|task| task.id == id) {
                     *known = task;
                 } else {
@@ -126,6 +127,7 @@ impl HostedChat {
             Task::Progress { id, .. } if self.woke_by_task.as_ref() == Some(id) => TurnTask::Taken,
             Task::State { id, state, .. } if self.woke_by_task.as_ref() == Some(id) => {
                 let reason = match state.as_str() {
+                    _ if self.woken_stopping() => StopReason::Cancelled,
                     "completed" | "failed" => StopReason::EndTurn,
                     "stopped" => StopReason::Cancelled,
                     _ => return TurnTask::Taken,
@@ -143,6 +145,11 @@ impl HostedChat {
 
     /// Asks the agent to stop task `id`, if it's going and can be stopped.
     pub(super) fn stop_task(&mut self, id: &str, actions: &mut Vec<Action>) {
+        // One of a session the chat has left is no longer the agent's to
+        // stop.
+        if self.tasks_session != self.session {
+            return;
+        }
         let mut tasks = self.node.tasks.clone();
         let Some(task) = (tasks.iter_mut())
             .find(|task| task.id == id && task.can_stop && task.state == AgentTaskState::Running)

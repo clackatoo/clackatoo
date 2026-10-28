@@ -288,6 +288,9 @@ pub(crate) struct Agent {
     /// Whether the agent can list the sessions it kept, once it has said
     /// what it can.
     can_list: Option<bool>,
+    /// Whether it was asked what it runs in the background, and so says
+    /// when it takes a turn by itself (see `chat/woken.rs`).
+    tasks: bool,
 }
 
 impl Agent {
@@ -313,6 +316,7 @@ impl Agent {
             can_image: false,
             can_steer: false,
             can_list: None,
+            tasks,
         };
         // Antigravity replaces its image-capable view_file with a text-only
         // client tool when fs is advertised. Keep its native file tools; their
@@ -321,20 +325,25 @@ impl Agent {
         // Codex's adapter streams commands' output in this, which the
         // daemon adds to the tool's.
         let mut meta = json!({ "terminal_output_delta": true });
+        let mut capabilities = json!({
+            "fs": { "readTextFile": client_files, "writeTextFile": client_files },
+            "terminal": false,
+        });
         if tasks {
             meta["jetbrains"] =
                 json!({ "air": { "version": 1, "capabilities": AIR_CAPABILITIES } });
+            // Else Claude Code's adapter says its notices, such as that a
+            // task was stopped, as words, which would seem a turn of its
+            // own. Codex's says its warnings so too: it isn't asked.
+            capabilities["session"] = json!({ "notices": {} });
         }
+        capabilities["_meta"] = meta;
         agent.request(
             Pending::Initialize,
             "initialize",
             &json!({
                 "protocolVersion": PROTOCOL_VERSION,
-                "clientCapabilities": {
-                    "fs": { "readTextFile": client_files, "writeTextFile": client_files },
-                    "terminal": false,
-                    "_meta": meta,
-                },
+                "clientCapabilities": capabilities,
                 "clientInfo": { "name": "clackatoo", "version": env!("CARGO_PKG_VERSION") },
             }),
         );
@@ -356,6 +365,11 @@ impl Agent {
         opening: Opening,
     ) {
         let mut params = session_params(cwd, opening);
+        // As AIR, Claude Code's adapter keeps the words and thinking of its
+        // own subagents to itself unless asked for them.
+        if self.tasks {
+            params["_meta"]["claudeCode"]["options"]["forwardSubagentText"] = true.into();
+        }
         // Before the agent has said what it can, it's asked to load, and
         // that's changed as it says, if it can't (see `cannot_load`).
         let load = session.is_some() && load && (self.can_load || self.held.is_some());
@@ -436,6 +450,12 @@ impl Agent {
     /// Whether initialization advertised image prompts.
     pub(crate) fn can_image(&self) -> bool {
         self.can_image
+    }
+
+    /// Whether it says when it takes a turn by itself, and gives its
+    /// notices as such (see `chat/woken.rs`).
+    pub(crate) fn tells_turns(&self) -> bool {
+        self.tasks
     }
 
     pub(crate) fn can_steer(&self) -> bool {

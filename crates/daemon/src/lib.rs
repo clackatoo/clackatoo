@@ -287,8 +287,10 @@ pub const DEFAULT_SESSION_WAIT: std::time::Duration = std::time::Duration::from_
 
 /// How long an agent that took a turn by itself is quiet before the turn
 /// is taken to have ended, if it doesn't say: Claude Code's adapter says,
-/// to a client that asks for its background tasks.
-pub const DEFAULT_QUIET_TURN: std::time::Duration = std::time::Duration::from_secs(20);
+/// to a client that asks for its background tasks, so this is for others
+/// only. Long, as a turn ended too soon splits in two when its agent goes
+/// on.
+pub const DEFAULT_QUIET_TURN: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// How long a program that has gone is kept for what it sent last, unless
 /// the daemon is told otherwise (see [`DaemonConfig::gone_wait`]).
