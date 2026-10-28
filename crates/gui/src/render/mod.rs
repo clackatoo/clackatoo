@@ -260,6 +260,11 @@ pub(crate) enum Paint {
     Caution,
     /// ...and in the warning colour once it's all but full.
     Full,
+    /// Behind the band across the top of a subagent's pane, faintly in
+    /// the subagents' colour...
+    Subagent,
+    /// ...and the line under it.
+    SubagentEdge,
 }
 
 /// A line of text of the window's own.
@@ -298,6 +303,9 @@ pub(crate) enum Ink {
     Added,
     /// ...and red, for what's removed.
     Removed,
+    /// In the subagents' colour, as the band over a subagent's pane
+    /// says what it is.
+    Subagent,
     /// Bold, in the text colour, as a heading is.
     Bold,
     /// In a terminal's colour, as the theme draws it, as an editor's text
@@ -1183,6 +1191,7 @@ impl Renderer {
             Ink::Matched => self.theme.matched,
             Ink::Added => self.theme.added,
             Ink::Removed => self.theme.removed,
+            Ink::Subagent => self.theme.subagent,
             Ink::Color(color) => self.theme.resolve(color).unwrap_or(self.theme.foreground),
         }
     }

@@ -2312,6 +2312,22 @@ impl App {
             })
             .collect();
         pills.extend(away);
+        // The band across the top of each subagent's pane.
+        let bands: Vec<(Tile, f32, chrome::BandParts)> = (placement.panes.iter())
+            .filter_map(|&(pane, tile)| {
+                let terminal = layout_panes
+                    .iter()
+                    .find(|p| p.id == pane)?
+                    .content
+                    .terminal()?;
+                let band = desk.band_height(terminal);
+                let said = desk.subagent_band(terminal).filter(|_| band > 0.0)?;
+                Some((tile, band, said.parts()))
+            })
+            .collect();
+        for (tile, band, parts) in &bands {
+            fills.extend(chrome::paint_band(geometry, tile, *band, parts).0);
+        }
         let offers: Vec<(Tile, crate::desk::Offer)> = (drawings.iter())
             .filter_map(|drawing| {
                 let offer =
@@ -2341,6 +2357,10 @@ impl App {
         // but for while something is raised over the panes, which its
         // text would show through, as texts are drawn over every fill.
         if !chrome.raises_over_panes(self.hover) && !desk.numbering_panes() {
+            // What each subagent's band says.
+            for (tile, band, parts) in &bands {
+                texts.extend(chrome::paint_band(geometry, tile, *band, parts).1);
+            }
             for (tile, pill) in &pills {
                 let (fill, pill_texts) = chrome::paint_pill(geometry, tile, pill);
                 over.push(fill);
@@ -2428,8 +2448,15 @@ impl App {
             // In insert mode, the cursor is in the box; in normal mode, in
             // the conversation; and while a prompt has the keys, nowhere.
             let caret = focused && self.focused && !prompting;
-            let size = tile.cells_size(cell);
-            let paint = chat.paint(&mut frame.fonts, tile.origin, size, caret);
+            // A subagent's chat goes below the band that says what it is.
+            let band = self.desk.band_height(terminal);
+            let Some(chat) = self.desk.chat_mut(terminal) else {
+                continue;
+            };
+            let [width, height] = tile.cells_size(cell);
+            let origin = [tile.origin[0], tile.origin[1] + band];
+            let size = [width, (height - band).max(0.0)];
+            let paint = chat.paint(&mut frame.fonts, origin, size, caret);
             all.images.extend(paint.images);
             all.fills.extend(paint.fills);
             all.glyphs.extend(paint.glyphs);

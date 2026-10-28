@@ -19,6 +19,13 @@ const LINK: u32 = 0x7c_b7_f5;
 /// How opaque the focused pane's edge is, in the accent.
 const FOCUS_EDGE: f32 = 0.6;
 
+/// How opaque the band across the top of a subagent's pane is, in the
+/// subagents' colour: a tint, under text that stays readable...
+const SUBAGENT_BAND: f32 = 0.12;
+
+/// ...and the line under it.
+const SUBAGENT_EDGE: f32 = 0.5;
+
 /// How opaque the other matches of a search in view are, in the accent:
 /// fainter than the one found (0.6) and than a selection (0.35), so the
 /// cursor's stands out among them.
@@ -75,6 +82,11 @@ pub(crate) struct Theme {
     pub(crate) added: Rgba,
     /// ...and removed.
     pub(crate) removed: Rgba,
+    /// Chats an agent started, the band across the top of each one's
+    /// pane says: apart from the accent, which is for focus, and the
+    /// links' blue, though the band's link to the chat that started it
+    /// is in that.
+    pub(crate) subagent: Rgba,
     /// The workspaces' colours, the dots by their names, in turn.
     pub(crate) workspaces: [Rgba; 6],
     /// The mode's colour, behind its name in the bottom bar: insert,
@@ -140,6 +152,9 @@ impl Default for Theme {
             // The bright green and red.
             added: hex_rgba(NAMED[10]),
             removed: hex_rgba(NAMED[9]),
+            // The teal of the sixth workspace's dot: neither the accent's
+            // gold, nor the links' blue, nor insert mode's violet.
+            subagent: hex_rgba(0x6f_d3_c9),
             workspaces: [
                 hex_rgba(0xf8_cd_5a),
                 hex_rgba(0x7c_b7_f5),
@@ -501,6 +516,8 @@ impl Theme {
             Paint::Removed => faint(self.removed, 0.13),
             Paint::Caution => self.caution,
             Paint::Full => self.warning,
+            Paint::Subagent => faint(self.subagent, SUBAGENT_BAND),
+            Paint::SubagentEdge => faint(self.subagent, SUBAGENT_EDGE),
         }
     }
 

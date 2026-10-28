@@ -2068,6 +2068,7 @@ impl Desk {
                 self.request(Request::Discard { buffer }, Asked::Command);
             }
         }
+        self.closing_pane(shown.pane);
         self.request(Request::ClosePane { pane: shown.pane }, Asked::Command);
     }
 

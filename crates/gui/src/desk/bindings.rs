@@ -129,6 +129,8 @@ pub(crate) enum Action {
     ToggleMarkdown,
     /// Background tabs, as `:bg`, `:bgpane` and `:Background` do.
     Background(crate::command::BackgroundCommand),
+    /// From a subagent's pane to the chat that started it.
+    ParentChat,
 }
 
 /// What a key does in reviewing what agents changed.
@@ -210,6 +212,8 @@ fn defaults() -> Keymap<Binding> {
     bind("niv", "<C-b>i", jump(false), Some("jump forward"));
     let agent = Action::Split(Side::Right, Kind::Agent);
     bind("niv", "<C-b>a", agent, Some("agent chat"));
+    // Up, from a subagent to the chat that started it.
+    bind("niv", "<C-b>u", Action::ParentChat, Some("parent chat"));
     bind("niv", "<C-b>w", Action::PickWorkspace, Some("workspaces"));
     bind("niv", "<C-b>r", Action::Connect, Some("connect"));
     for (keys, command, label) in BACKGROUND_KEYS {
@@ -481,6 +485,7 @@ impl Desk {
                 agent: None,
             }),
             Action::Close => self.run(Command::Close),
+            Action::ParentChat => self.go_to_parent_chat(),
             // `3<C-o>` goes back three places, as in Vim.
             Action::Jump { back, within_tab } => {
                 self.jump(back, within_tab, self.bound_count.unwrap_or(1));

@@ -122,6 +122,11 @@ impl Desk {
         self.marks() != before
     }
 
+    /// Chat `id`, as the daemon last summed it up, if it's open.
+    pub(super) fn watched_chat(&self, id: TerminalId) -> Option<&ChatSummary> {
+        self.watched.chats.get(&id)
+    }
+
     /// The chats shown now are seen: those in the tab shown, while the
     /// window has the focus.
     pub(super) fn see_shown(&mut self) {

@@ -2241,6 +2241,79 @@ pub(crate) fn paint_pill<'a>(
     (fill, texts)
 }
 
+/// What the band across the top of a subagent's pane says, in parts,
+/// each in its ink.
+pub(crate) type BandParts = Vec<(String, Ink)>;
+
+/// The band across the top of a subagent's pane, `tile`, `band` pixels
+/// below where its cells start, where the chat is drawn from: tinted in
+/// the subagents' colour with a line under it, and `parts` along it, in
+/// their inks, in the terminal's font from the cells' left, as many as
+/// fit whole, but the first two, cut short if they must be.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn paint_band<'a>(
+    geometry: &Geometry,
+    tile: &Tile,
+    band: f32,
+    parts: &'a [(String, Ink)],
+) -> (Vec<Fill>, Vec<Text<'a>>) {
+    let [cell_width, cell_height] = geometry.metrics.cell;
+    let rect = tile.rect;
+    let height = (tile.origin[1] + band - rect.y).min(rect.height);
+    let fills = vec![
+        Fill::solid([rect.x, rect.y, rect.width, height], Paint::Subagent),
+        Fill::solid(
+            [
+                rect.x,
+                rect.y + height - geometry.edge,
+                rect.width,
+                geometry.edge,
+            ],
+            Paint::SubagentEdge,
+        ),
+    ];
+    let left = tile.origin[0];
+    let top = (rect.y + (height - cell_height) / 2.0).round();
+    // As far in from the right as the cells start from the left.
+    let mut room = cells_in(rect.width - 2.0 * (left - rect.x), cell_width);
+    let mut at = 0;
+    let mut texts = Vec::new();
+    for (index, (part, ink)) in parts.iter().enumerate() {
+        let width = crate::render::mono_width(part);
+        let content = if width <= room {
+            part.as_str()
+        } else if index < 2 && room > 0 {
+            // What it is says as much as it can.
+            let mut end = 0;
+            let mut cells = 0;
+            for (byte, ch) in part.char_indices() {
+                let ch_cells = crate::render::mono_width(&part[byte..byte + ch.len_utf8()]);
+                if cells + ch_cells > room {
+                    break;
+                }
+                cells += ch_cells;
+                end = byte + ch.len_utf8();
+            }
+            &part[..end]
+        } else {
+            break;
+        };
+        let cells = crate::render::mono_width(content);
+        texts.push(Text {
+            origin: [left + at as f32 * cell_width, top],
+            content,
+            ink: *ink,
+            font: TextFont::Mono,
+        });
+        at += cells;
+        room -= cells;
+        if content.len() < part.len() {
+            break;
+        }
+    }
+    (fills, texts)
+}
+
 /// The offer to run again what a terminal ran before a restart, over
 /// `tile`'s last row, where [`Offer`](crate::desk::Offer) lays it out by
 /// its cells, so a click lands on what it's drawn over: raised as the

@@ -145,6 +145,9 @@ pub(crate) enum Command {
     Rename(String),
     /// Close the focused pane.
     Close,
+    /// `:bd`: close the focused pane's chat for good, a subagent's too,
+    /// whose pane `:q` only sends back to the background.
+    CloseChat,
     /// `:q`: close the focused pane, unless it's the last showing a file
     /// with changes that aren't saved, or if `force`, throwing them away.
     Quit { force: bool },
@@ -671,7 +674,7 @@ fn agent_named(word: &str, rest: &str, argument: Option<&str>) -> Result<Option<
 }
 
 /// Vim's commands for files, if `word` is one: `w`, `q`, `wq`, `e` and
-/// their kin.
+/// their kin, and `bd`, which closes a chat for good.
 fn file_command(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
     let write = |force, quit| {
         let name = argument.map(unescape);
@@ -680,6 +683,12 @@ fn file_command(word: &str, argument: Option<&str>) -> Option<Result<Command, St
     match word {
         "q" | "quit" => Some(Ok(Command::Quit { force: false })),
         "q!" | "quit!" => Some(Ok(Command::Quit { force: true })),
+        "bd" | "bdelete" | "bd!" | "bdelete!" => Some(match argument {
+            Some(argument) => Err(format!(
+                "bdelete takes nothing after it, but has {argument:?}"
+            )),
+            None => Ok(Command::CloseChat),
+        }),
         "w" | "write" => write(false, false),
         "w!" | "write!" => write(true, false),
         "wq" | "x" => write(false, true),
@@ -828,6 +837,7 @@ command_names! {
     "workspace" => "Switch to or create a workspace",
     "rename" => "Rename the current workspace",
     "close" => "Close the focused pane",
+    "bdelete" => "Close this chat for good, a subagent's too",
     "bg" => "Move the tab to the background, or run a command there",
     "bgpane" => "Move the focused terminal to the background",
     "Background" => "Browse background tabs",
@@ -888,7 +898,7 @@ command_names! {
 /// Arguments (paths, hosts, patterns and keys) must never pass through this.
 pub(crate) fn canonical(name: &str) -> &str {
     const ALIASES: &[&str] = &[
-        "ws", "se", "reg", "display", "di", "mes", "rec", "q", "w", "x", "e", "Ex", "noh",
+        "ws", "se", "reg", "display", "di", "mes", "rec", "q", "w", "x", "e", "Ex", "noh", "bd",
     ];
     NAMES
         .iter()
@@ -1017,6 +1027,8 @@ mod tests {
         ("ws", "workspace"),
         ("rename", ""),
         ("close", ""),
+        ("bdelete", ""),
+        ("bd", "bdelete"),
         ("reload", ""),
         ("set", ""),
         ("se", "set"),
@@ -1394,6 +1406,8 @@ mod tests {
         );
         assert!(parse("rename").is_err());
         assert_eq!(parse("q"), Ok(Command::Quit { force: false }));
+        assert_eq!(parse("bd"), Ok(Command::CloseChat));
+        assert_eq!(parse("bdelete!"), Ok(Command::CloseChat));
         assert_eq!(parse("close"), Ok(Command::Close));
     }
 

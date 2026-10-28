@@ -192,6 +192,7 @@ mod script;
 mod settings;
 mod shortcuts;
 mod starting;
+mod subagents;
 mod typing;
 mod updating;
 
@@ -534,8 +535,14 @@ impl Desk {
             if let Content::Terminal(terminal) = pane.content
                 && let Some(chat) = self.chats.get(&terminal)
             {
+                let band = self.band_height(terminal);
+                if let Some(said) = self.subagent_band(terminal).filter(|_| band > 0.0) {
+                    let label = format!("subagent of chat {}", said.parent);
+                    let height = tile.origin[1] + band - tile.rect.y;
+                    controls.push(serde_json::json!({"role":"control","label":label,"bounds":[tile.rect.x,tile.rect.y,tile.rect.width,height]}));
+                }
                 for (label, [x, y, w, h]) in chat.view().native_controls() {
-                    controls.push(serde_json::json!({"role":"control","label":label,"bounds":[tile.origin[0]+x,tile.origin[1]+y,w,h]}));
+                    controls.push(serde_json::json!({"role":"control","label":label,"bounds":[tile.origin[0]+x,tile.origin[1]+band+y,w,h]}));
                 }
             }
         }
@@ -1290,8 +1297,9 @@ impl Desk {
         let gone: Vec<TerminalId> = self.attached.difference(&shown).copied().collect();
         for terminal in gone {
             self.attached.remove(&terminal);
-            // A closed terminal's view went with it.
-            if anywhere.contains(&terminal) {
+            // A closed terminal's view went with it; but a subagent's
+            // pane closed goes on in the background, still open.
+            if anywhere.contains(&terminal) || self.watched_chat(terminal).is_some() {
                 self.request(Request::Detach { terminal }, Asked::Quiet);
             }
         }
@@ -2379,6 +2387,16 @@ impl Desk {
             outcome.redraw = true;
             return outcome;
         }
+        // A click on the band over a subagent's chat goes to the chat that
+        // started it.
+        if dragging.is_none()
+            && action == MouseAction::Press(MouseButton::Left)
+            && pixel[1] < 0.0
+            && self.band_height(terminal) > 0.0
+        {
+            outcome.redraw = self.focus_at(point) | self.band_click(terminal);
+            return outcome;
+        }
         let action = match action {
             MouseAction::Press(button) => {
                 outcome.redraw = self.focus_at(point);
@@ -2662,7 +2680,10 @@ impl Desk {
         };
         #[allow(clippy::cast_possible_truncation)]
         let cell = |offset: f32, size: f32| (offset / size).floor() as i64;
-        let pixel = [point[0] - tile.origin[0], point[1] - tile.origin[1]];
+        // A subagent's chat is drawn below the band that says what it is,
+        // over which the point is above the chat.
+        let band = self.band_height(terminal);
+        let pixel = [point[0] - tile.origin[0], point[1] - tile.origin[1] - band];
         Some((
             terminal,
             [
@@ -2836,8 +2857,10 @@ impl Desk {
             // with its pane: a file's waits, unseen, to be opened again.
             Command::Close if self.loses_blank(&[shown.pane]) => self.say(BLANK_KEPT.into()),
             Command::Close => {
+                self.closing_pane(shown.pane);
                 self.request(Request::ClosePane { pane: shown.pane }, Asked::Command);
             }
+            Command::CloseChat => self.close_chat(),
             Command::Edit { place, path } => self.open_file(place, path),
             Command::EditBlank => self.edit_blank(),
             Command::Quit { force } => self.quit(force),
@@ -3028,6 +3051,7 @@ mod tests {
     mod scrolling;
     mod shared;
     mod shortcuts;
+    mod subagents;
     mod typing;
 
     use clackatoo_protocol::{ChatState, ChatSummary, Layout, Pane as LayoutPane, View, Workspace};
@@ -4505,6 +4529,7 @@ mod tests {
                 ("o", "jump back"),
                 ("i", "jump forward"),
                 ("a", "agent chat"),
+                ("u", "parent chat"),
                 ("w", "workspaces"),
                 ("r", "connect"),
                 ("b", "+background"),

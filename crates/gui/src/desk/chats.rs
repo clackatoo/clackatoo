@@ -116,7 +116,18 @@ impl Desk {
     /// says by what it drew there.
     pub(crate) fn chat_pointer(&self, point: [f32; 2]) -> Option<crate::chat::Pointer> {
         let (terminal, _, pixel) = self.cell_at(point, None)?;
-        Some(self.chats.get(&terminal)?.pointer(pixel))
+        let chat = self.chats.get(&terminal)?;
+        // The band over a subagent's chat goes to the chat that started
+        // it, while that's open.
+        if pixel[1] < 0.0 && self.band_height(terminal) > 0.0 {
+            let open = self.subagent_band(terminal).is_some_and(|band| band.open);
+            return Some(if open {
+                crate::chat::Pointer::Hand
+            } else {
+                crate::chat::Pointer::Arrow
+            });
+        }
+        Some(chat.pointer(pixel))
     }
 
     /// Passes what an input method is composing to the focused pane, if
