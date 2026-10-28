@@ -559,6 +559,7 @@ An upgrade stops the browser; the next page starts it again. An upgrade, or the 
 - Agents can't yet see what you've selected in an editor. Commands run with the agent's own tool, rather than `run_in_terminal`, show their output once they're done.
 - The account-usage modal is native-only. Gemini CLI and custom adapters do not yet have read-only subscription probes; the phone keeps its existing per-chat usage detail.
 - `/` commands aren't listed or completed as you type them.
+- Ctrl+? doesn't list a form's keys yet. What an input method is composing doesn't show in a form's box until it's committed.
 - In a past Claude Code session opened again, Read, Grep and Glob rows show what they read or looked for, but not what they found, while clackatoo asks Claude Code what it runs in the background.
 - Codex's commands in the background aren't listed: asking for them would change how Codex reports every command.
 - You can't click or type into a browser pane yourself.
