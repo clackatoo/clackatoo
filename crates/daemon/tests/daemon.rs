@@ -17772,6 +17772,175 @@ fn a_real_agent_sees_an_image_in_a_message() {
     );
 }
 
+/// Codex, on its cheapest model, through scenarios 1 to 3 of the Claude
+/// Code ones above: turns with commands and an edit, each ending whole; a
+/// stop mid-command; and two messages queued meanwhile, each answered in
+/// order. Set `CLACKATOO_REAL_CODEX` to the adapter's command, such as the
+/// `dist/clackatoo.js` of an install the daemon made (with the steering
+/// backport); it uses the account `codex` is logged in to.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_CODEX and run with --ignored"]
+#[allow(clippy::too_many_lines, reason = "one session, scenario by scenario")]
+fn a_real_codex_session_stops_and_takes_queued_messages() {
+    let command = std::env::var("CLACKATOO_REAL_CODEX")
+        .expect("set CLACKATOO_REAL_CODEX to the adapter's command");
+    let trace = live_trace("codex");
+    let daemon = TestDaemon::start_with(|_, config| {
+        let mut args: Vec<std::ffi::OsString> = Vec::new();
+        if let Some(tracer) = std::env::var_os("CLACKATOO_ACP_TRACER") {
+            args.extend([tracer, trace.clone().into()]);
+        }
+        args.extend(command.split_whitespace().map(Into::into));
+        config.agents.custom = vec![custom_agent("codex", args)];
+    });
+    let mut client = daemon.client();
+    let client = &mut client;
+    client
+        .new_workspace(None, new_chat_with(Some("codex")))
+        .unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minute = Duration::from_mins(1);
+    wait_for_chat_for(client, chat, minute, |node| node.state == ChatState::Ready);
+    for (setting, value) in [("model", "gpt-6-luna"), ("reasoning_effort", "low")] {
+        client
+            .chat(
+                chat,
+                ChatAction::Set {
+                    setting: setting.into(),
+                    value: value.into(),
+                },
+            )
+            .unwrap();
+        wait_for_chat_for(client, chat, minute, |node| {
+            node.settings
+                .iter()
+                .any(|known| known.id == setting && known.value == value)
+        });
+    }
+    let dir = daemon.dir.path();
+    let notes = dir.join("notes.txt");
+    std::fs::write(&notes, "alpha\nbeta needle\ngamma\n").unwrap();
+    let limit = 2 * minute;
+
+    // 1: turns with tools.
+    let node = live_send(
+        client,
+        chat,
+        &format!(
+            "Run `cat {}` in your shell, then reply with its second line only.",
+            notes.display()
+        ),
+        limit,
+    );
+    assert_ended_whole(&node);
+    assert!(last_words(&node).contains("beta needle"), "{node:#?}");
+    assert!(
+        live_tools(&node)
+            .iter()
+            .any(|tool| tool_text(tool).contains("needle")),
+        "{node:#?}"
+    );
+    let node = live_send(
+        client,
+        chat,
+        &format!(
+            "Change gamma to delta in {}, editing the file. Then reply with the word edited.",
+            notes.display()
+        ),
+        limit,
+    );
+    assert_ended_whole(&node);
+    assert_eq!(
+        std::fs::read_to_string(&notes).unwrap(),
+        "alpha\nbeta needle\ndelta\n"
+    );
+    let node = live_send(
+        client,
+        chat,
+        "Run `echo clackatoo-$((6*7))` in your shell, then reply with what it printed.",
+        limit,
+    );
+    assert_ended_whole(&node);
+    assert!(last_words(&node).contains("clackatoo-42"), "{node:#?}");
+
+    // 2: stopped mid-command.
+    let text = "Run exactly `sleep 30` in your shell, then reply with the word slept.";
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    live_wait(client, chat, limit, |node| {
+        node.turns.last().is_some_and(|turn| turn.prompt == text)
+            && live_tools(node)
+                .iter()
+                .any(|tool| tool.status == ToolStatus::Running)
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    let stopped = Instant::now();
+    client.chat(chat, ChatAction::Stop).unwrap();
+    let node = wait_for_chat_for(client, chat, Duration::from_secs(30), live_idle);
+    let took = stopped.elapsed();
+    eprintln!("stopped in {took:?}");
+    assert_eq!(last_outcome(&node), Some(&Outcome::Stopped), "{node:#?}");
+    for tool in live_tools(&node) {
+        assert_ne!(tool.status, ToolStatus::Running, "{tool:#?}");
+    }
+    assert!(took < Duration::from_secs(5), "took {took:?}");
+    let turns = node.turns.len();
+    live_submit(
+        client,
+        chat,
+        "Reply with exactly one word, pong, and use no tools.",
+        false,
+    );
+    let node = live_wait(client, chat, limit, |node| {
+        node.turns.len() > turns && live_idle(node)
+    });
+    assert_ended_whole(&node);
+    assert!(
+        last_words(&node).to_lowercase().contains("pong"),
+        "{node:#?}"
+    );
+
+    // 3: queued meanwhile.
+    let turns = node.turns.len();
+    let first = "Run exactly `sleep 6` in your shell, then reply with the word one.";
+    client
+        .chat(chat, ChatAction::Send(first.to_owned()))
+        .unwrap();
+    live_wait(client, chat, minute, |node| {
+        node.state == ChatState::Answering
+    });
+    live_submit(
+        client,
+        chat,
+        "Reply with exactly the word two, and use no tools.",
+        false,
+    );
+    live_submit(
+        client,
+        chat,
+        "Reply with exactly the word three, and use no tools.",
+        false,
+    );
+    let node = live_wait(client, chat, limit, |node| {
+        node.turns.len() == turns + 3 && live_idle(node)
+    });
+    let words: Vec<String> = (node.turns[turns..].iter())
+        .map(|turn| {
+            (turn.items.iter())
+                .filter_map(|item| match item {
+                    Item::Words(words) => Some(words.to_lowercase()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    assert!(words[0].contains("one"), "{node:#?}");
+    assert!(words[1].contains("two"), "{node:#?}");
+    assert!(words[2].contains("three"), "{node:#?}");
+    eprintln!("native steering: {}", node.delivery.native_steering);
+}
+
 /// A daemon whose agent is the fake one with `flags`, noting what it does
 /// in `agent.log`, and changed by `change`.
 fn with_fake(flags: &[&str], change: impl FnOnce(&mut DaemonConfig)) -> TestDaemon {
