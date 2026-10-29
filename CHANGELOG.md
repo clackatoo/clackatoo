@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026.10.104 (2026-10-29)
+
+### Fixes
+
+- **daemon:** don't look again at a file whose merged change was refused (CLACKA-201) (9eb58795)
+- **daemon:** a command's change during a pending merge is the agent's, after it (CLACKA-201) (3e3b9c94)
+- **daemon:** another writer during a pending merge isn't the agent's (CLACKA-201) (2d17bcc7)
+- **daemon:** the same write heard again during a pending merge isn't another (CLACKA-201) (fa5293cb)
+
+### Speed
+
+- **daemon:** merge agents' big changes to open files off the loop (CLACKA-201) (02b26112)
+
 ## 2026.10.103 (2026-10-29)
 
 ### Features
