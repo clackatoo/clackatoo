@@ -231,6 +231,16 @@ What you type and don't send is kept by the daemon, so closing the window, upgra
 
 If you have a chat open, press `i`, then Up to bring back your last message, and Ctrl+R to search them all.
 
+## Mentioning files
+
+Type `@` at the start of a word in a chat's box and a menu of the project's files opens over it, those the finder lists, leaving out what's ignored. Keep typing to narrow it, as `@pars` for `src/parser.rs`; Down and Up pick, and Tab or Enter puts `@src/parser.rs` in, from the chat's folder, with quotes round a path with a space in it, as `@"docs/read me.md"`. Esc closes the menu.
+
+When the message goes, the agent gets each file it mentions in the chat's project with it: Claude Code a link it reads itself, Codex the file's text if it's small. A file open in an editor with changes not saved goes as it is in the editor, so the agent sees what you see. A mention of something outside the project stays words, and the chat says so. In the conversation, mentions are chips: click one, or put the cursor on it and type `gf`, to open the file.
+
+In an editor, select some lines with `V` and press `<Space>a`, or type `:'<,'>Ask`: they go to the chat beside it, or the one you used last in the tab, as `@notes.txt#L2-L4` at the end of what you're typing, and the chat takes you to its box to say what to do with them. The agent gets those lines' text as they are when you send it. Without a selection, `<Space>a` mentions the whole file. To bind another key, map it to `:Ask<CR>` in your config with `client.keys.map`.
+
+If you have a chat open, type `@` in its box and pick a file, then send it with a question about that file.
+
 ## The agent's plan
 
 On a long task, Claude Code keeps a to-do list, and Codex a plan. It shows on a shelf above the box, folded to one line: how many steps are done, and the one being worked on, as `Plan · 2/5 done · ◐ Write the tests`. Click it, or type `:plan`, to open it: a line a step, ☐ to do, ◐ being worked on, ☑ done and dimmed. Click or `:plan` again folds it. Each time the agent changes its list, the shelf follows. Once every step is done, the list stays until your next message. It survives an upgrade, and a chat going on with an old session shows the list as its agent last gave it. The phone shows it too.

@@ -151,6 +151,37 @@ A command the agent says it has (or, before it has said, one its adapter is know
 
 The phone lists the agent's commands too, as you type `/` and a name, and a tap puts one in your message. It doesn't send the commands clackatoo does itself, typed alone: use those in the window.
 
+### Mentioning files
+
+Type `@` at the start of a word and a menu of the chat's project's files opens over the box: every file the finder's `<Space>pf` lists, without what the project's ignore files leave out, walked by the daemon in the background. It narrows fuzzily as you type the path.
+
+| Key | Does |
+|---|---|
+| Down, Up; Ctrl+N, Ctrl+P | The next or previous file, round the ends. |
+| Tab, Enter | Puts `@path` in the box in place of what you typed, from the chat's folder, with a space after it. |
+| Esc | Closes the menu, staying in insert mode, until what you've typed changes. |
+
+A path with a space in it is quoted, as Claude Code quotes one: `@"docs/read me.md"`. A mention can name lines, `@src/parser.rs#L12-L40` (or `#L12` for one), and you can type mentions by hand: a word starting with `@` names a file relative to the chat's folder, or from the project's root, or an absolute path or one starting `~/`. Punctuation ending a sentence after it isn't part of it.
+
+When the message is sent, the daemon finds each file it mentions and sends it to the agent with the message, as ACP context:
+
+| What's mentioned | Claude Code | Codex, Gemini and others |
+|---|---|---|
+| A saved file | A link to it, which it reads with its Read tool | Its text, if it's at most 64 KiB; a link if bigger |
+| A file open in an editor with changes not saved | Its text as it is in the editor, at most 64 KiB | The same |
+| Lines of a file (`#L12-L40`) | Those lines' text, as they are in the editor if it's open | The same |
+| A folder, or a file that isn't text | A link | A link |
+
+The text sent with one message is at most 256 KiB in all; files past that go as links. An agent that doesn't say it takes files' text gets links alone. Claude Code gets links to saved files because it edits only files its own Read tool has read, so text in the message would be read again before any edit; Read also gives it line numbers. Both agents show what they were given as `[@name](file:///…)` and a `<context>` block, and neither reads lines from anywhere but the link, so the lines go in it: `file:///…/parser.rs#L12-L40`.
+
+A mention of a file outside the chat's project (its repository, or else its folder, with links followed) goes to the agent as words, not the file, and the chat says so above the box; one that names nothing at all is just words. A message that's a slash command is sent as typed, its mentions as words, as the agents look for the command in its only or last part. Native steering sends words alone, so a queued message that mentions files is sent with **Stop & continue** instead, whole.
+
+In the conversation, mentions are chips in the link colour. Click one, or put the cursor on it in normal mode and type `gf` (or `gx`), to open the file, at its first line if it names lines; `gf` on a link or path in the agent's words opens it too. Going on with a past session shows its mentions as chips again, not the text that was sent with them.
+
+From an editor, `<Space>a` in visual mode, or `:'<,'>Ask`, puts the lines selected at the end of the message in the chat beside the editor, or the one used last in the tab, as `@src/parser.rs#L12-L40`, and moves you to its box in insert mode, to say what to do with them. In normal mode, `<Space>a` (or `:Ask`) mentions the whole file. The lines' text is read when you send the message, so it's what the editor shows then. The key is a binding like any other: unmap `<Space>a`, or map another key to `:Ask<CR>`, with `client.keys.map` (see [Config](~clackatoo/reference/config)).
+
+The phone shows mentions in sent messages as chips; typing `@path` by hand there works the same, as the daemon finds the files, but it has no menu.
+
 One message is answered at a time. While the agent answers, the button in the box's corner is a stop button, and Enter keeps what you typed until it's done. Clicking the button with nothing being answered sends the message, as Enter does.
 
 ### Messages sent and drafts
@@ -224,6 +255,7 @@ In normal mode, a solid cursor moves through the conversation's text, and the vi
 | `0` `^` `$` | The start of the line, its first word, its end. |
 | `{` `}` | The block before or after. |
 | `gg` `G` | The start or end of the chat; with a count, the start of that turn, as `3G`. |
+| `gf` `gx` | Opens the file a mention under the cursor names, or the link or path there (see [Mentioning files](#mentioning-files)). |
 | Ctrl+D Ctrl+U, Ctrl+E Ctrl+Y, Ctrl+F, Page Down Page Up | Scroll half a view, a line, or a page of the view less two lines, as far as in any pane, with a count. The cursor stays in view. |
 | `v` `V` | Select characters, or lines. `o` goes to the other end, Esc stops. |
 | `y` and a motion or object, `yy` `Y` | Yanks what the motion moves over, the object, or whole lines, into the registers (see [Yanking](#yanking)). In visual mode, `y` yanks what's selected and `Y` its lines. |

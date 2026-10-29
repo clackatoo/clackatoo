@@ -1091,6 +1091,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "An agent's big edit to a file you have open no longer freezes the window while it lands",
     },
+    News {
+        id: "mentions",
+        date: "2026-10-29",
+        lesson: "agents",
+        what: "Type @ in a chat to mention a project file; <Space>a or :Ask sends an editor's selection to the chat beside",
+    },
 ];
 
 impl News {

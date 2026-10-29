@@ -301,6 +301,7 @@ The finder picks a file from the project the focused pane is in: the files git d
 | `<Space>bs` | The symbols in the focused editor's file: its functions, types and their fields, in the order of the file's outline, each indented inside what it's in, with what it is; past 5000, the count ends `+` |
 | `<Space>ps` | The symbols in the whole project whose names match what you type, as the file's language server finds them, asked again each time typing pauses, with the letters you typed picked out in their names |
 | `<Space>e` | Opens the tab's [file explorer](~clackatoo/reference/explorer), goes to it, or closes it |
+| `<Space>a` | Mentions the focused editor's selection, or its file, in the chat beside it, as `:Ask` does (see [Mentioning files](~clackatoo/reference/agents#mentioning-files)) |
 | `<Space>pgf` | A grep of them, as you type |
 | `<Space>?` | The files open, `[+]` after those with changes |
 | `<Space>ds` | What's wrong in the project's files, as their language servers say, the worst first: the files open, and those not open that a server has checked, as rust-analyzer checks a whole crate, each `error`, `warning`, `info` or `hint` in the editor's colour for it |
