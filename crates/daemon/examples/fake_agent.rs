@@ -715,7 +715,8 @@ impl Fake {
                 let air = (params.pointer("/clientCapabilities/_meta/jetbrains/air"))
                     .filter(|air| air["version"] == 1)
                     .and_then(|air| air["capabilities"].as_array());
-                let asked = |what: &str| air.is_some_and(|air| air.iter().any(|asked| asked == what));
+                let asked =
+                    |what: &str| air.is_some_and(|air| air.iter().any(|asked| asked == what));
                 self.async_tasks = asked("asyncTasks");
                 self.session_failure = asked("sessionFailure");
                 self.notices = params
@@ -1113,7 +1114,10 @@ impl Fake {
                 "error": { "code": -32603, "message": "Internal error: Credit balance is too low",
                     "data": { "errorKind": "billing_error" } } })),
             "compact" if self.codex => {
-                say(session, "*Context compacted to fit the model's context window.*\n\n");
+                say(
+                    session,
+                    "*Context compacted to fit the model's context window.*\n\n",
+                );
                 say(session, "compacted\n");
                 done(id, "end_turn");
             }
@@ -1121,8 +1125,10 @@ impl Fake {
                 let facts = json!({ "trigger": "automatic", "preTokens": 182_000,
                                     "postTokens": 31_000, "durationMs": 9000 });
                 let (opening, closing) = if self.async_tasks {
-                    let air = |facts: Value| json!({ "jetbrains": { "air": {
-                        "version": 1, "contextCompaction": facts } } });
+                    let air = |facts: Value| {
+                        json!({ "jetbrains": { "air": {
+                        "version": 1, "contextCompaction": facts } } })
+                    };
                     (air(json!({ "version": 1 })), air(facts.clone()))
                 } else {
                     let named = json!({ "claudeCode": { "toolName": "compact" } });

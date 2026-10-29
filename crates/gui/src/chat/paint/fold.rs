@@ -396,7 +396,7 @@ mod tests {
         });
         chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
             index: 1,
-            turn: done,
+            turn: Box::new(done),
         })]));
         paint(&mut chat, &mut fonts);
         assert_eq!(label(&chat, 1).as_deref(), Some("Worked for 1s  ›"));

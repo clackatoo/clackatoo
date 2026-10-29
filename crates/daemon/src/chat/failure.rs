@@ -45,7 +45,10 @@ pub(crate) fn refused(failure: &Failure, agent: &str, login: Option<&str>) -> Sa
     let words = field("additionalDetails")
         .or_else(|| field("message"))
         .unwrap_or(&failure.message);
-    let words = words.strip_prefix("Internal error: ").unwrap_or(words).trim();
+    let words = words
+        .strip_prefix("Internal error: ")
+        .unwrap_or(words)
+        .trim();
     let kind = if failure.code == AUTH_REQUIRED {
         Some(Kind::SignIn)
     } else if field("reason") == Some("thread_active_writer") {
@@ -157,9 +160,9 @@ impl Kind {
                 ),
             },
             Self::Access => with(&format!("{agent} can't use the account")),
-            Self::RateLimited => format!(
-                "{agent} is rate limited. Wait a moment, then send the message again"
-            ),
+            Self::RateLimited => {
+                format!("{agent} is rate limited. Wait a moment, then send the message again")
+            }
             Self::Quota => with("the account's usage limit is reached"),
             Self::Overloaded => {
                 format!("{agent}'s model is overloaded. Send the message again in a moment")
@@ -290,9 +293,18 @@ mod tests {
     #[test]
     fn claudes_kinds_of_error_and_codexs_say_what_to_do() {
         for (data, start) in [
-            (json!({"errorKind": "rate_limit"}), "Claude Code is rate limited"),
-            (json!({"errorKind": "overloaded"}), "Claude Code's model is overloaded"),
-            (json!({"errorKind": "no_result"}), "the connection to Claude Code's"),
+            (
+                json!({"errorKind": "rate_limit"}),
+                "Claude Code is rate limited",
+            ),
+            (
+                json!({"errorKind": "overloaded"}),
+                "Claude Code's model is overloaded",
+            ),
+            (
+                json!({"errorKind": "no_result"}),
+                "the connection to Claude Code's",
+            ),
             (
                 json!({"codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": null}}}),
                 "the connection to Claude Code's",
@@ -318,7 +330,11 @@ mod tests {
 
     #[test]
     fn a_failure_of_a_kind_not_known_is_said_as_before() {
-        let said = refused(&failure(-32603, "boom", json!({"errorKind": "new"})), "Codex", None);
+        let said = refused(
+            &failure(-32603, "boom", json!({"errorKind": "new"})),
+            "Codex",
+            None,
+        );
         assert_eq!(said.text, "the agent failed: boom");
         assert_eq!(said.raw, None);
     }
@@ -334,11 +350,17 @@ mod tests {
             said.text,
             "the account's usage limit is reached: You've hit your limit · resets 3pm"
         );
-        assert_eq!(said.raw.as_deref(), Some("You've hit your limit · resets 3pm"));
+        assert_eq!(
+            said.raw.as_deref(),
+            Some("You've hit your limit · resets 3pm")
+        );
         let record = json!({"category": "service", "title": "Claude is temporarily overloaded.",
             "actions": ["retry"]});
         let said = typed(&record, "Claude Code", None).unwrap();
         assert!(said.text.starts_with("Claude Code's model is overloaded"));
-        assert_eq!(typed(&json!({"category": "unknown"}), "Claude Code", None), None);
+        assert_eq!(
+            typed(&json!({"category": "unknown"}), "Claude Code", None),
+            None
+        );
     }
 }

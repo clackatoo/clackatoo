@@ -618,7 +618,7 @@ fn item_view(item: &Item, open: &OpenChat, turn: usize, at: usize) -> Element {
     match item {
         Item::Compacted(details) => el("div")
             .class("compacted")
-            .text(&Item::compacted_label(details)),
+            .text(Item::compacted_label(details)),
         Item::Words(words) | Item::Other(words) => {
             el("div").class("words").children(markdown::render(words))
         }

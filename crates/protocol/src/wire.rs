@@ -68,9 +68,8 @@ use serde::{Deserialize, Deserializer};
 
 use crate::{
     Answer, BufferUpdate, ChatPatch, ChoiceKind, ClientMessage, ConnectionState, Content, Done,
-    Error, Event,
-    FilesUpdate, Found, Item, Node, PROTOCOL_VERSION, Patch, Response, ServerMessage, Setting,
-    SettingKind, ToolContent, Turn, ViewUpdate, Workspaces,
+    Error, Event, FilesUpdate, Found, Item, Node, PROTOCOL_VERSION, Patch, Response, ServerMessage,
+    Setting, SettingKind, ToolContent, Turn, ViewUpdate, Workspaces,
 };
 
 /// The oldest client a daemon of this build talks to.
@@ -1181,6 +1180,17 @@ fn without_chat_facts(message: &ServerMessage) -> ServerMessage {
     message
 }
 
+/// `message` as a peer of `wire`, older than `CHAT_FACTS`, reads a chat:
+/// without the chat updates it has no controls for, or else without what
+/// `CHAT_FACTS` brought. `None` if it reads it as it is.
+fn older_chat(message: &ServerMessage, wire: u32) -> Option<ServerMessage> {
+    if wire >= CHAT_FACTS {
+        return None;
+    }
+    without_optional_chat_updates(message, wire)
+        .or_else(|| (newest(message) == CHAT_FACTS).then(|| without_chat_facts(message)))
+}
+
 /// Informative chat updates can be omitted for clients without their controls.
 fn without_optional_chat_updates(message: &ServerMessage, wire: u32) -> Option<ServerMessage> {
     let ServerMessage::Event(Event::View {
@@ -1257,16 +1267,7 @@ impl Downgrade for ServerMessage {
         if let Some(edited) = reversed_as_edited(self) {
             return Downgraded::To(edited);
         }
-        if wire < CHAT_FACTS
-            && let Some(older) = without_optional_chat_updates(self, wire)
-        {
-            return match older.downgrade(wire) {
-                Downgraded::AsIs => Downgraded::To(older),
-                other => other,
-            };
-        }
-        if wire < CHAT_FACTS && newest(self) == CHAT_FACTS {
-            let older = without_chat_facts(self);
+        if let Some(older) = older_chat(self, wire) {
             return match older.downgrade(wire) {
                 Downgraded::AsIs => Downgraded::To(older),
                 other => other,

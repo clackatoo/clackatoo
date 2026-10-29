@@ -1402,8 +1402,9 @@ pub enum ChatPatch {
     Turn {
         /// Which turn.
         index: u32,
-        /// What it is now.
-        turn: Turn,
+        /// What it is now: boxed, as a turn is far bigger than any other
+        /// change.
+        turn: Box<Turn>,
     },
     /// Item `item` of turn `turn` is now `value`, as a tool is as it
     /// goes. An index one past the last adds an item.
@@ -1815,8 +1816,8 @@ impl ChatNode {
                     return;
                 };
                 match index.cmp(&self.turns.len()) {
-                    std::cmp::Ordering::Less => self.turns[index] = turn,
-                    std::cmp::Ordering::Equal => self.turns.push(turn),
+                    std::cmp::Ordering::Less => self.turns[index] = *turn,
+                    std::cmp::Ordering::Equal => self.turns.push(*turn),
                     std::cmp::Ordering::Greater => {}
                 }
             }
@@ -2209,7 +2210,7 @@ mod tests {
         );
         recent.apply(ChatPatch::Turn {
             index: 24,
-            turn: turn("next", vec![]),
+            turn: Box::new(turn("next", vec![])),
         });
         assert_eq!(recent.turns.last().unwrap().prompt, "next");
     }
@@ -2650,7 +2651,7 @@ mod tests {
         let mut chat = ChatNode::default();
         chat.apply(ChatPatch::Turn {
             index: 0,
-            turn: turn("hi", vec![Item::Words("Hel".into())]),
+            turn: Box::new(turn("hi", vec![Item::Words("Hel".into())])),
         });
         chat.apply(ChatPatch::Append {
             turn: 0,
@@ -2665,7 +2666,7 @@ mod tests {
         });
         chat.apply(ChatPatch::Turn {
             index: 5,
-            turn: turn("lost", vec![]),
+            turn: Box::new(turn("lost", vec![])),
         });
         assert_eq!(chat.turns, [turn("hi", vec![Item::Words("Hello".into())])]);
         assert_eq!(chat.text(), "> hi\n\nHello");

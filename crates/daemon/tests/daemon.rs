@@ -2922,7 +2922,9 @@ fn a_failed_turn_says_why_in_plain_words_and_what_to_do_keeping_the_agents_own()
     assert_eq!(raw.as_deref(), Some("Authentication required"));
     // Codex's usage limit, in its words.
     let pane = focused_pane(&mut client);
-    client.split_pane(pane, Side::Below, new_chat_with(Some("codex"))).unwrap();
+    client
+        .split_pane(pane, Side::Below, new_chat_with(Some("codex")))
+        .unwrap();
     let codex = newest_chat(&mut client);
     wait_for_chat(&mut client, codex, |node| node.state == ChatState::Ready);
     let node = ask(&mut client, codex, "usage-limit");
@@ -2941,7 +2943,11 @@ fn focused_pane(client: &mut Client) -> PaneId {
 /// last.
 fn newest_chat(client: &mut Client) -> TerminalId {
     let workspaces = client.watch_workspaces().unwrap();
-    *workspaces.list[0].terminals().iter().max_by_key(|chat| chat.0).unwrap()
+    *workspaces.list[0]
+        .terminals()
+        .iter()
+        .max_by_key(|chat| chat.0)
+        .unwrap()
 }
 
 #[test]
@@ -2952,7 +2958,9 @@ fn a_chat_shows_its_agent_trying_again_until_it_goes_on_or_stops() {
     let node = ask(&mut client, claude, "retry");
     assert_eq!(last_words(&node), "recovered\n");
     assert_eq!(node.retrying, None);
-    client.chat(claude, ChatAction::Send("retry-wait".into())).unwrap();
+    client
+        .chat(claude, ChatAction::Send("retry-wait".into()))
+        .unwrap();
     wait_for_chat(&mut client, claude, |node| {
         node.retrying.as_deref() == Some("Retrying Claude, attempt 1 of 10.")
     });
@@ -2961,10 +2969,14 @@ fn a_chat_shows_its_agent_trying_again_until_it_goes_on_or_stops() {
     assert_eq!(node.retrying, None);
     // Codex's, in its words.
     let pane = focused_pane(&mut client);
-    client.split_pane(pane, Side::Below, new_chat_with(Some("codex"))).unwrap();
+    client
+        .split_pane(pane, Side::Below, new_chat_with(Some("codex")))
+        .unwrap();
     let codex = newest_chat(&mut client);
     wait_for_chat(&mut client, codex, |node| node.state == ChatState::Ready);
-    client.chat(codex, ChatAction::Send("retry-wait".into())).unwrap();
+    client
+        .chat(codex, ChatAction::Send("retry-wait".into()))
+        .unwrap();
     wait_for_chat(&mut client, codex, |node| {
         node.retrying.as_deref() == Some("Reconnecting... 1/5")
     });
@@ -2987,7 +2999,9 @@ fn a_failed_message_is_sent_again_as_a_turn_of_its_own_and_only_a_failed_one() {
     client.chat(chat, ChatAction::Resend).unwrap();
     let node = ask(&mut client, chat, "after");
     assert_eq!(
-        (node.turns.iter()).map(|turn| turn.prompt.as_str()).collect::<Vec<_>>(),
+        (node.turns.iter())
+            .map(|turn| turn.prompt.as_str())
+            .collect::<Vec<_>>(),
         ["usage-limit", "usage-limit", "hello", "after"]
     );
 }
@@ -2999,10 +3013,18 @@ fn compacting_the_context_shows_as_a_line_across_the_turn_for_claude_and_codex()
     let (claude, _) = start_chat_with(&mut client, "claude");
     let node = ask(&mut client, claude, "compact");
     let items = &node.turns.last().unwrap().items;
-    assert_eq!(items[0], Item::Compacted("automatic · 182k → 31k tokens".into()));
-    assert!(!items.iter().any(|item| matches!(item, Item::Tool(_))), "{items:?}");
+    assert_eq!(
+        items[0],
+        Item::Compacted("automatic · 182k → 31k tokens".into())
+    );
+    assert!(
+        !items.iter().any(|item| matches!(item, Item::Tool(_))),
+        "{items:?}"
+    );
     let pane = focused_pane(&mut client);
-    client.split_pane(pane, Side::Below, new_chat_with(Some("codex"))).unwrap();
+    client
+        .split_pane(pane, Side::Below, new_chat_with(Some("codex")))
+        .unwrap();
     let codex = newest_chat(&mut client);
     wait_for_chat(&mut client, codex, |node| node.state == ChatState::Ready);
     let node = ask(&mut client, codex, "compact");
@@ -3023,7 +3045,10 @@ fn a_failed_commands_exit_code_and_what_a_turn_spent_are_kept() {
             _ => None,
         })
         .unwrap();
-    assert_eq!((tool.status, tool.exit), (clackatoo_protocol::ToolStatus::Failed, Some(2)));
+    assert_eq!(
+        (tool.status, tool.exit),
+        (clackatoo_protocol::ToolStatus::Failed, Some(2))
+    );
     let node = ask(&mut client, chat, "cost");
     let cost = clackatoo_protocol::Cost {
         micros: 42_100,
@@ -3067,7 +3092,9 @@ fn an_answer_of_a_kind_not_known_is_offered_as_named_and_never_taken_for_yes() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
     let chat = start_chat(&mut client);
-    client.chat(chat, ChatAction::Send("ask-new".into())).unwrap();
+    client
+        .chat(chat, ChatAction::Send("ask-new".into()))
+        .unwrap();
     let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
     let kinds: Vec<_> = (node.question.unwrap().choices.iter())
         .map(|choice| (choice.id.clone(), choice.kind))
@@ -3075,9 +3102,15 @@ fn an_answer_of_a_kind_not_known_is_offered_as_named_and_never_taken_for_yes() {
     assert_eq!(
         kinds,
         [
-            ("allow".to_owned(), clackatoo_protocol::ChoiceKind::AllowOnce),
+            (
+                "allow".to_owned(),
+                clackatoo_protocol::ChoiceKind::AllowOnce
+            ),
             ("session".to_owned(), clackatoo_protocol::ChoiceKind::Other),
-            ("reject".to_owned(), clackatoo_protocol::ChoiceKind::RejectOnce),
+            (
+                "reject".to_owned(),
+                clackatoo_protocol::ChoiceKind::RejectOnce
+            ),
         ]
     );
     answer(&mut client, chat, Some("session".into()));
@@ -4224,6 +4257,54 @@ fn a_real_agents_slash_commands_reach_the_chat() {
             .all(|command| !command.name.starts_with('/') && !command.description.contains('\n')),
         "{:#?}",
         node.commands
+    );
+}
+
+/// Claude Code, asked for AIR's `sessionFailure` as clackatoo asks, on
+/// the cheapest model: a turn that goes well still ends well, saying what
+/// it spent, and `/compact` shows as a line across its turn. Run by hand,
+/// as [`a_real_agent_answers_and_asks_before_running_commands`] is.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_claude_says_what_a_turn_spent_and_where_it_compacted() {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
+    };
+    let daemon = TestDaemon::start_with_agent(|_| {
+        ["env", "ANTHROPIC_MODEL=haiku"]
+            .into_iter()
+            .chain(command.split_whitespace())
+            .map(Into::into)
+            .collect()
+    });
+    let mut client = daemon.client();
+    client.new_workspace(None, new_chat()).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minutes = Duration::from_mins(3);
+    wait_for_chat_for(&mut client, chat, minutes, |node| {
+        node.state == ChatState::Ready
+    });
+    let send = |client: &mut Client, text: &str| {
+        client
+            .chat(chat, ChatAction::Send(text.to_owned()))
+            .unwrap();
+        wait_for_chat_for(client, chat, minutes, |node| {
+            node.turns.last().is_some_and(|turn| turn.prompt == text)
+                && last_outcome(node).is_some()
+        })
+    };
+    let node = send(
+        &mut client,
+        "Reply with exactly one word, pong, and use no tools.",
+    );
+    assert_eq!(last_outcome(&node), Some(&Outcome::Done), "{node:#?}");
+    let end = node.turns.last().unwrap().end.as_ref().unwrap();
+    assert!(end.spent.is_some_and(|spent| spent.output > 0), "{end:?}");
+    let node = send(&mut client, "/compact");
+    let items = &node.turns.last().unwrap().items;
+    assert!(
+        items.iter().any(|item| matches!(item, Item::Compacted(_))),
+        "{node:#?}"
     );
 }
 

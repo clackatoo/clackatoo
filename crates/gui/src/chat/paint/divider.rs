@@ -20,9 +20,9 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
 use super::{Canvas, LINE, Look, Measures, draw_laid, lay_out};
-use crate::markdown::layout::Laid;
 use crate::chat::{ChatView, Tone};
 use crate::fonts::Fonts;
+use crate::markdown::layout::Laid;
 use crate::render::{Fill, Paint};
 
 /// How long after the turn before it a turn is sent for the time to show
@@ -154,7 +154,13 @@ pub(super) fn draw_rule(canvas: &mut Canvas<'_>, m: Measures, label: &Laid, row:
     let [x, y, column, tall] = row;
     let middle = (y + tall / 2.0).round();
     let left = x + ((column - label.width) / 2.0).round();
-    draw_laid(canvas, m, label, [left, y + (tall - label.height) / 2.0], label.width);
+    draw_laid(
+        canvas,
+        m,
+        label,
+        [left, y + (tall - label.height) / 2.0],
+        label.width,
+    );
     let gap = m.em(0.8);
     let rules = [[x, left - gap], [left + label.width + gap, x + column]];
     for [from, to] in rules {
@@ -306,7 +312,7 @@ mod tests {
             });
             chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
                 index: 0,
-                turn,
+                turn: Box::new(turn),
             })]));
         };
         ended(&mut chat, TUESDAY + 5 * MINUTE);

@@ -688,7 +688,14 @@ impl ChatView {
             if let Item::Compacted(details) = item {
                 let label = Item::compacted_label(details);
                 let look = Look::Plain(Tone::Muted);
-                let piece = self.reuse(fonts, m, old_pieces.remove(&key), &label, look, column * 0.8);
+                let piece = self.reuse(
+                    fonts,
+                    m,
+                    old_pieces.remove(&key),
+                    &label,
+                    look,
+                    column * 0.8,
+                );
                 if follows {
                     y += m.em(0.75);
                 }
@@ -1408,10 +1415,9 @@ impl ChatView {
             let primary = index == 0 && choice.kind == ChoiceKind::AllowOnce;
             let tone = match choice.kind {
                 _ if primary => Tone::OnAccent,
-                ChoiceKind::AllowOnce | ChoiceKind::AllowAlways => Tone::Plain,
-                // An answer whose meaning isn't known: plain, never the
-                // one to press.
-                ChoiceKind::Other => Tone::Plain,
+                // An answer whose meaning isn't known is plain too, and
+                // never the one to press.
+                ChoiceKind::AllowOnce | ChoiceKind::AllowAlways | ChoiceKind::Other => Tone::Plain,
                 ChoiceKind::RejectOnce | ChoiceKind::RejectAlways => Tone::Muted,
             };
             let text = format!("{}  {}", index + 1, choice.name);

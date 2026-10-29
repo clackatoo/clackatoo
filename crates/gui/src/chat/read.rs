@@ -647,7 +647,9 @@ impl ChatView {
             ChatKey::Undo { redo } => self.undo_key(redo),
             ChatKey::Resend => {
                 if !self.resend() {
-                    self.say("the last message didn't fail, so there's nothing to send again".into());
+                    self.say(
+                        "the last message didn't fail, so there's nothing to send again".into(),
+                    );
                     return (false, false);
                 }
             }

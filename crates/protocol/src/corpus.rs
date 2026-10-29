@@ -472,7 +472,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     [
                         ChatPatch::Turn {
                             index: 1,
-                            turn: turn(),
+                            turn: Box::new(turn()),
                         },
                         ChatPatch::Item {
                             turn: 1,
@@ -988,7 +988,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             terminal,
             update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
                 index: 0,
-                turn: Turn {
+                turn: Box::new(Turn {
                     woke: None,
                     prompt: "[Image]".into(),
                     sent: 1,
@@ -1003,7 +1003,7 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                         height: 1,
                         rgba: vec![25, 50, 75, 255].into(),
                     }],
-                },
+                }),
             })]),
         })),
     ));
@@ -1360,11 +1360,11 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             terminal: TerminalId(3),
             update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
                 index: 1,
-                turn: Turn {
+                turn: Box::new(Turn {
                     prompt: String::new(),
                     woke: Some("Background command \"npm test\" completed".into()),
                     ..turn()
-                },
+                }),
             })]),
         })),
     ));
@@ -1508,7 +1508,10 @@ fn chat_facts() -> Vec<Sample> {
                     item: 0,
                     value: Item::Compacted(String::new()),
                 }),
-                Patch::Chat(ChatPatch::Turn { index: 0, turn }),
+                Patch::Chat(ChatPatch::Turn {
+                    index: 0,
+                    turn: Box::new(turn),
+                }),
                 Patch::Chat(ChatPatch::Question(Some(question))),
                 Patch::Chat(ChatPatch::Retrying(None)),
             ]),

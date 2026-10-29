@@ -23,8 +23,8 @@ use agent_client_protocol_schema::v1::{
 use clackatoo_protocol::{
     AgentTools, ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item,
     Location, Node, Outcome, Patch, Provider, ProviderModels, Question, Sender, Setting,
-    SettingChoice, SettingKind, Size, Switch, TerminalId, TerminalInfo, TerminalStatus, Tool,
-    Spent, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, Usage, View, ViewUpdate,
+    SettingChoice, SettingKind, Size, Spent, Switch, TerminalId, TerminalInfo, TerminalStatus,
+    Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, Usage, View, ViewUpdate,
 };
 use serde_json::Value;
 
@@ -2119,7 +2119,7 @@ impl HostedChat {
 
     /// The agent finished answering, or failed to.
     pub(crate) fn answered(&mut self, result: Result<StopReason, String>) {
-        self.answered_as(facts::outcome_of(&result), None, None);
+        self.answered_as(facts::outcome_of(result), None, None);
     }
 
     /// The agent finished answering as `outcome` says, or failed to, in
@@ -2221,9 +2221,7 @@ impl HostedChat {
                 kind: match option.kind {
                     // A kind newer than this build knows: what it means
                     // isn't known, so it's never taken for yes or no.
-                    _ if unknown.iter().any(|id| *option.option_id.0 == **id) => {
-                        ChoiceKind::Other
-                    }
+                    _ if unknown.iter().any(|id| *option.option_id.0 == **id) => ChoiceKind::Other,
                     PermissionOptionKind::AllowOnce => ChoiceKind::AllowOnce,
                     PermissionOptionKind::AllowAlways => ChoiceKind::AllowAlways,
                     PermissionOptionKind::RejectOnce => ChoiceKind::RejectOnce,
@@ -3208,7 +3206,7 @@ impl HostedChat {
     fn patch_turn(&mut self, index: usize) {
         self.journal.push(ChatPatch::Turn {
             index: index_u32(index),
-            turn: self.node.turns[index].clone(),
+            turn: Box::new(self.node.turns[index].clone()),
         });
     }
 

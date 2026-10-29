@@ -500,7 +500,10 @@ mod tests {
             spent: None,
         });
         chat.apply(&ViewUpdate::Patch(vec![
-            Patch::Chat(ChatPatch::Turn { index: 0, turn }),
+            Patch::Chat(ChatPatch::Turn {
+                index: 0,
+                turn: Box::new(turn),
+            }),
             Patch::Chat(ChatPatch::Subagents(done)),
         ]));
         paint(&mut chat, &mut fonts);

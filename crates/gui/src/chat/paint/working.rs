@@ -105,7 +105,10 @@ impl ChatView {
         }
         // Waiting on the agent trying again says so in place of what it
         // was doing.
-        let doing = self.node.doing().map(|doing| self.node.retrying.clone().unwrap_or(doing))?;
+        let doing = self
+            .node
+            .doing()
+            .map(|doing| self.node.retrying.clone().unwrap_or(doing))?;
         let seconds = (self.node.counted_from()).map(|sent| duration(now.saturating_sub(sent)));
         Some((doing, seconds))
     }
@@ -457,7 +460,7 @@ mod tests {
         chat.apply(&ViewUpdate::Patch(vec![
             Patch::Chat(ChatPatch::Turn {
                 index: 0,
-                turn: done,
+                turn: Box::new(done),
             }),
             Patch::Chat(ChatPatch::State(ChatState::Ready)),
         ]));
@@ -601,7 +604,7 @@ mod tests {
         });
         chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
             index: 0,
-            turn: done,
+            turn: Box::new(done),
         })]));
         drawn(&mut chat, &mut fonts, SENT + 2, true);
         assert!((chat.view_height - working - m.em(1.8)).abs() < 0.5);

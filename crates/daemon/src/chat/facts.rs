@@ -257,7 +257,7 @@ impl HostedChat {
                     .and_then(|record| failure::typed(record, &agent, login));
                 match said {
                     Some(said) => self.answered_as(Outcome::Failed(said.text), said.raw, spent),
-                    None => self.answered_as(outcome_of(&Ok(answer.stop)), None, spent),
+                    None => self.answered_as(outcome_of(Ok(answer.stop)), None, spent),
                 }
             }
             Err(refusal) => {
@@ -275,7 +275,10 @@ impl HostedChat {
             return;
         };
         let turn = &self.node.turns[index];
-        let failed = matches!(turn.end.as_ref().map(|end| &end.outcome), Some(Outcome::Failed(_)));
+        let failed = matches!(
+            turn.end.as_ref().map(|end| &end.outcome),
+            Some(Outcome::Failed(_))
+        );
         if !failed || turn.from.is_some() || turn.switch.is_some() || turn.woke.is_some() {
             return;
         }
@@ -298,7 +301,7 @@ impl HostedChat {
 }
 
 /// How a turn that ended as `result` says ended.
-pub(super) fn outcome_of(result: &Result<StopReason, String>) -> Outcome {
+pub(super) fn outcome_of(result: Result<StopReason, String>) -> Outcome {
     match result {
         Ok(StopReason::Cancelled) => Outcome::Stopped,
         Ok(StopReason::MaxTokens) => Outcome::Failed("the answer hit its length limit".to_owned()),
@@ -315,7 +318,12 @@ pub(super) fn outcome_of(result: &Result<StopReason, String>) -> Outcome {
 /// The code the command a tool call ran exited with, as its `meta` or,
 /// for one that runs a command, of `kind`, its `raw` output says.
 pub(super) fn exit_code(meta: Option<&Meta>, raw: Option<&Value>, kind: ToolKind) -> Option<i32> {
-    let code = |value: &Value| value.get("exit_code")?.as_i64().and_then(|code| i32::try_from(code).ok());
+    let code = |value: &Value| {
+        value
+            .get("exit_code")?
+            .as_i64()
+            .and_then(|code| i32::try_from(code).ok())
+    };
     (meta.and_then(|meta| meta.get("terminal_exit")))
         .and_then(code)
         .or_else(|| raw.filter(|_| kind == ToolKind::Execute).and_then(code))
@@ -341,7 +349,10 @@ fn compaction_details(facts: Option<&Value>) -> String {
             clackatoo_protocol::tokens(after)
         )),
         (Some(before), None) => {
-            details.push(format!("from {} tokens", clackatoo_protocol::tokens(before)));
+            details.push(format!(
+                "from {} tokens",
+                clackatoo_protocol::tokens(before)
+            ));
         }
         _ => {}
     }
@@ -376,8 +387,14 @@ mod tests {
     fn a_compaction_says_how_it_was_started_and_the_tokens_before_and_after() {
         let facts = json!({"version": 1, "trigger": "automatic", "preTokens": 182_000,
             "postTokens": 31_000, "durationMs": 9000});
-        assert_eq!(compaction_details(Some(&facts)), "automatic · 182k → 31k tokens");
-        assert_eq!(compaction_details(Some(&json!({"trigger": "manual"}))), "asked for");
+        assert_eq!(
+            compaction_details(Some(&facts)),
+            "automatic · 182k → 31k tokens"
+        );
+        assert_eq!(
+            compaction_details(Some(&json!({"trigger": "manual"}))),
+            "asked for"
+        );
         assert_eq!(compaction_details(None), "");
     }
 

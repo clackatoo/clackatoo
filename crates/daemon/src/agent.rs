@@ -516,6 +516,38 @@ impl Agent {
         self.list_page(listing, cwd.to_owned(), Vec::new(), 1, None);
     }
 
+    /// Takes `result`, page `pages` of the sessions the agent kept in
+    /// `cwd`, for the listing numbered `listing`, having `got` those
+    /// before: asks for the next, if there's one to read, or else gives
+    /// the listing.
+    fn page_listed(
+        &mut self,
+        (listing, cwd, mut got, pages): (u64, String, Vec<Listed>, usize),
+        result: Result<Value, String>,
+        incoming: &mut Vec<Incoming>,
+    ) {
+        let result = match result {
+            Ok(result) => {
+                got.extend(listed_page(&result));
+                let next = (result.get("nextCursor").and_then(Value::as_str))
+                    .filter(|next| !next.is_empty() && next.len() <= MOST_CURSOR);
+                // More, up to as many pages as are read.
+                if let Some(next) = next.filter(|_| pages < MOST_PAGES && got.len() < MOST_READ) {
+                    self.list_page(listing, cwd, got, pages + 1, Some(next));
+                    return;
+                }
+                Ok(newest(got))
+            }
+            // A page after the first that fails leaves those read.
+            Err(err) if pages > 1 => {
+                log::info!("agent: a page of sessions after the first failed: {err}");
+                Ok(newest(got))
+            }
+            Err(err) => Err(err),
+        };
+        incoming.push(Incoming::Listed { listing, result });
+    }
+
     /// Asks for page `pages` of the sessions the agent kept in `cwd`, at
     /// `cursor`, as the page before said, having `got` those before.
     fn list_page(
@@ -1043,24 +1075,7 @@ impl Agent {
             return;
         }
         if let Pending::Prompt(terminal) = pending {
-            let result = result
-                .map_err(|error| Failure {
-                    code: error.code,
-                    message: error.message,
-                    data: error.data,
-                })
-                .and_then(|mut result| {
-                    let usage = result.get_mut("usage").map(Value::take);
-                    let failure = (result.pointer_mut("/_meta/jetbrains/air/sessionFailure"))
-                        .map(Value::take);
-                    serde_json::from_value::<PromptResponse>(result)
-                        .map(|response| Answer {
-                            stop: response.stop_reason,
-                            usage: usage.filter(Value::is_object),
-                            failure: failure.filter(Value::is_object),
-                        })
-                        .map_err(|err| format!("the agent's answer made no sense: {err}").into())
-                });
+            let result = prompt_answer(result);
             incoming.push(Incoming::Answered { terminal, result });
             return;
         }
@@ -1070,37 +1085,9 @@ impl Agent {
             Pending::Listing {
                 listing,
                 cwd,
-                mut got,
+                got,
                 pages,
-            } => match result {
-                Ok(result) => {
-                    got.extend(listed_page(&result));
-                    let next = (result.get("nextCursor").and_then(Value::as_str))
-                        .filter(|next| !next.is_empty() && next.len() <= MOST_CURSOR);
-                    // More, up to as many pages as are read.
-                    match next {
-                        Some(next) if pages < MOST_PAGES && got.len() < MOST_READ => {
-                            self.list_page(listing, cwd, got, pages + 1, Some(next));
-                        }
-                        _ => incoming.push(Incoming::Listed {
-                            listing,
-                            result: Ok(newest(got)),
-                        }),
-                    }
-                }
-                // A page after the first that fails leaves those read.
-                Err(err) if pages > 1 => {
-                    log::info!("agent: a page of sessions after the first failed: {err}");
-                    incoming.push(Incoming::Listed {
-                        listing,
-                        result: Ok(newest(got)),
-                    });
-                }
-                Err(err) => incoming.push(Incoming::Listed {
-                    listing,
-                    result: Err(err),
-                }),
-            },
+            } => self.page_listed((listing, cwd, got, pages), result, incoming),
             Pending::Setting(terminal) => incoming.push(Incoming::Settings {
                 terminal,
                 result: result.map(|result| settings(&result).unwrap_or_default()),
@@ -1294,6 +1281,26 @@ fn session_params(cwd: &str, opening: Opening) -> Value {
 /// The sessions an answer to `session/list` lists, newest first, at most
 /// [`MOST_LISTED`]: those it lists without an ID or a directory are left
 /// out.
+/// How the agent answered a message, as `result`, its answer, says: why
+/// it stopped, what the turn spent, and the failure it ended with, if it
+/// said one as AIR's `sessionFailure`; or how it refused it.
+fn prompt_answer(result: Result<Value, RpcError>) -> Result<Answer, Failure> {
+    let mut result = result.map_err(|error| Failure {
+        code: error.code,
+        message: error.message,
+        data: error.data,
+    })?;
+    let usage = result.get_mut("usage").map(Value::take);
+    let failure = (result.pointer_mut("/_meta/jetbrains/air/sessionFailure")).map(Value::take);
+    serde_json::from_value::<PromptResponse>(result)
+        .map(|response| Answer {
+            stop: response.stop_reason,
+            usage: usage.filter(Value::is_object),
+            failure: failure.filter(Value::is_object),
+        })
+        .map_err(|err| format!("the agent's answer made no sense: {err}").into())
+}
+
 /// The most pages of sessions read of an agent that lists them in pages,
 /// as ACP's `nextCursor` says: Claude Code's adapter gives up to 1000 a
 /// page, so this is plenty.

@@ -3647,7 +3647,7 @@ mod tests {
             &ViewUpdate::Patch(vec![
                 Patch::Chat(ChatPatch::Turn {
                     index: 0,
-                    turn: done,
+                    turn: Box::new(done),
                 }),
                 Patch::Chat(ChatPatch::State(ChatState::Ready)),
             ]),
@@ -3665,7 +3665,10 @@ mod tests {
         turn.items = vec![Item::Words("Here:\n\n```rust\nfn main() {}\n```".into())];
         desk.view_changed(
             TerminalId(2),
-            &ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn { index: 0, turn })]),
+            &ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
+                index: 0,
+                turn: Box::new(turn),
+            })]),
         );
         let mut fonts = crate::chat::fixtures::fonts();
         paint_chat_two(&mut desk, &mut fonts);
@@ -3699,7 +3702,10 @@ mod tests {
         turn.items = vec![Item::Words("```rust\nlet x = 1;\n```".into())];
         desk.view_changed(
             TerminalId(2),
-            &ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn { index: 0, turn })]),
+            &ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
+                index: 0,
+                turn: Box::new(turn),
+            })]),
         );
         paint_chat_two(&mut desk, &mut fonts);
         assert!(!desk.ask_colours());
@@ -3771,7 +3777,10 @@ mod tests {
         turn.items = vec![Item::Words("```rust\nfn main() {}\n```".into())];
         desk.view_changed(
             TerminalId(2),
-            &ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn { index: 0, turn })]),
+            &ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
+                index: 0,
+                turn: Box::new(turn),
+            })]),
         );
         let mut fonts = crate::chat::fixtures::fonts();
         paint_chat_two(&mut desk, &mut fonts);

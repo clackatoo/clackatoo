@@ -2638,7 +2638,11 @@ impl ChatView {
     pub(crate) fn can_resend(&self) -> bool {
         self.resend_supported
             && self.node.state != ChatState::Answering
-            && self.node.turns.last().is_some_and(|last| resendable(last, true))
+            && self
+                .node
+                .turns
+                .last()
+                .is_some_and(|last| resendable(last, true))
     }
 
     /// Sends the last turn's message again, if it can be: returns whether

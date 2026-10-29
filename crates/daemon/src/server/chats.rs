@@ -1117,7 +1117,8 @@ impl Daemon {
         }
         // Looked for on PATH, so only for a failure, which may be that no
         // one's signed in.
-        let failed = result.is_err() || result.as_ref().is_ok_and(|answer| answer.failure.is_some());
+        let failed =
+            result.is_err() || result.as_ref().is_ok_and(|answer| answer.failure.is_some());
         let login = (self.chat(terminal).filter(|_| failed))
             .map(|chat| chat.agent().to_owned())
             .and_then(|name| self.login_of(&name));
@@ -1300,7 +1301,8 @@ impl Daemon {
                 let answered = if interaction {
                     None
                 } else {
-                    (chat.turned_down(&tool, &known)).or_else(|| chat.about_own_tools(&tool, &known))
+                    (chat.turned_down(&tool, &known))
+                        .or_else(|| chat.about_own_tools(&tool, &known))
                 };
                 if let Some(option) = answered {
                     if let Some(slot) = self.agents.running.get_mut(&agent) {
