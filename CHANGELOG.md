@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026.10.109 (2026-10-29)
+
+### Features
+
+- **daemon:** note where a chat's session can be forked, and ask agents to fork (CLACKA-198) (3856877d)
+- **daemon:** rewind a chat's conversation and switch between its branches, protocol 121 (CLACKA-198) (8cc828a1)
+- **daemon:** hold a subagent's finish notice while the branch that started it isn't shown (CLACKA-198) (89a3e166)
+- **daemon:** a rewind or a switch undoes and redoes the files of the turns it takes out (CLACKA-198) (8061ee1a)
+- **daemon:** keep branches past the bounds as stubs, and in the saved workspaces (CLACKA-198) (078f0a46)
+
+### Fixes
+
+- **daemon:** fork a branch only at a point, keep the branch just left, and hold what's sent while one is pending (CLACKA-198) (f8d5fc40)
+- **protocol:** leave turns on another branch out for peers before protocol 121 (CLACKA-198) (4e446382)
+- **protocol:** show older peers a turn on another branch as an index no conversation reaches (CLACKA-198) (e88f8663)
+- **daemon:** redo only what leaving undid, and match a stub's turns only on exact evidence (CLACKA-198) (ac3a5f44)
+- **daemon:** a branch shown again leaves its files to the user, and stubs match every turn (CLACKA-198) (890d82bf)
+
 ## 2026.10.108 (2026-10-29)
 
 ### Features
