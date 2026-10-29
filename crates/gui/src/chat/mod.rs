@@ -529,8 +529,6 @@ enum Pick {
     Refuse,
 }
 
-/// The answer the number `text` names, from 1 to 9, by its index, if it's
-/// one.
 /// How many of the turns `old` held, as indexes among those `new` holds,
 /// `older` turns having come before them, are still what they were: up
 /// to the first that's another turn, or gone, as a rewind or a switch to
@@ -547,6 +545,8 @@ fn kept_turns(old: &ChatNode, new: &ChatNode, older: usize) -> Option<usize> {
     Some(older + same)
 }
 
+/// The answer the number `text` names, from 1 to 9, by its index, if it's
+/// one.
 fn numbered(text: Option<&str>) -> Option<usize> {
     let number = text?.parse::<usize>().ok()?;
     (1..=9).contains(&number).then(|| number - 1)

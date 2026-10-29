@@ -19,13 +19,13 @@ use clackatoo_protocol::{
     AgentTaskKind, AgentTaskState, AgentTools, Answer, Author, Axis, BlockMarks, BufferId,
     BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode, ChatState, ClientMessage,
     CompletionItem, Construct, Content, Diff, Done, Edit, Error, Event, FileLocation, FileOp,
-    FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate, Found, FoundBuffer, FoundLine,
-    FoundSymbol, GitMark, InlayHint, InlayHintKind, Item, Kind, Layout, Limit, Location, NewAgent,
-    NewTerminal, OpenBlank, OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal,
-    Patch, Piece, Place, ProviderModels, Query, Request, Response, Restored, Resume, Search,
-    Selection, ServerFeatures, ServerMessage, Side, Size, Span, SubagentStatus, Symbol, TerminalId,
-    TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, TurnFiles,
-    TurnFilesState, Usage, Use, UseKind, View, ViewUpdate, Workspaces,
+    FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate, ForkFiles, Found, FoundBuffer,
+    FoundLine, FoundSymbol, GitMark, InlayHint, InlayHintKind, Item, Kind, Layout, Limit, Location,
+    NewAgent, NewTerminal, OpenBlank, OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION, PaneId,
+    PaneTerminal, Patch, Piece, Place, ProviderModels, Query, Request, Response, Restored, Resume,
+    Search, Selection, ServerFeatures, ServerMessage, Side, Size, Span, SubagentStatus, Symbol,
+    TerminalId, TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger,
+    TurnFiles, TurnFilesState, Usage, Use, UseKind, View, ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -18266,6 +18266,142 @@ fn a_real_background_shells_output_is_followed_from_the_file_its_adapter_names()
     // Claude Code 2.1.310 ends the file with how the command exited.
     let written = std::fs::read_to_string(&output).unwrap();
     assert!(written.starts_with("alpha\nomega\n"), "{written:?}");
+}
+
+/// A chat with a real agent, `agent` (`claude` on haiku, or `codex` on
+/// Luna at low effort, from the install the daemon would run), rewinds:
+/// the agent forgets the turns cut, as its session is forked at the end of
+/// the turn before (`session/fork` at a message, its `_meta.jetbrains.air`
+/// fork point), and switching back resumes the branch left, which still
+/// remembers them. Traced to `$TMPDIR/acp-rewind-AGENT` (CLACKA-198).
+///
+/// Recorded live (2026-10-29; claude-agent-acp 0.98.0 on haiku, codex-acp
+/// 2.2.2+clackatoo.1 on Luna): both fork at the message named, and the
+/// branch left resumes with `session/resume`. Neither lists a fork with
+/// `forkedFrom`, flat or in `_meta`, to clackatoo (Claude, told AIR, lists
+/// it as "TITLE (fork)"; Codex, not told AIR, as its first message), so
+/// only the branch tree hides them. The fork point's `_meta.jetbrains`
+/// doesn't make Codex treat the connection as AIR: its rows stay plain.
+fn live_rewind(agent: &str) {
+    let command = match agent {
+        "claude" => real_claude(),
+        _ => real_adapter(agent, "CLACKATOO_REAL_CODEX"),
+    };
+    let Some(command) = command else {
+        return;
+    };
+    let trace = live_trace(&format!("rewind-{agent}"));
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent(agent, command)];
+        config.agents.trace = Some(trace.clone());
+    });
+    let mut client = daemon.client();
+    client
+        .new_workspace(None, new_chat_with(Some(agent)))
+        .unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minute = Duration::from_mins(1);
+    wait_for_chat_for(&mut client, chat, minute, |node| {
+        node.state == ChatState::Ready
+    });
+    if agent == "codex" {
+        for (setting, value) in [("model", "gpt-6-luna"), ("reasoning_effort", "low")] {
+            let set = ChatAction::Set {
+                setting: setting.into(),
+                value: value.into(),
+            };
+            client.chat(chat, set).unwrap();
+            wait_for_chat_for(&mut client, chat, minute, |node| {
+                (node.settings.iter()).any(|known| known.id == setting && known.value == value)
+            });
+        }
+    }
+    let limit = 2 * minute;
+    for word in ["APPLE", "BANANA"] {
+        let text = format!("Remember the word {word}. Reply with exactly: ok. Use no tools.");
+        live_send(&mut client, chat, &text, limit);
+    }
+    let ask = "Which words did I ask you to remember? Reply with just those words, \
+               comma-separated, and use no tools.";
+    let rewind = ChatAction::Rewind {
+        at: 1,
+        files: ForkFiles::Keep,
+        edit: false,
+        stop_tasks: false,
+    };
+    client.chat(chat, rewind).unwrap();
+    let node = live_send(&mut client, chat, ask, limit);
+    let words = last_words(&node).to_uppercase();
+    eprintln!("after the rewind: {words}");
+    let place = node.branches[0].clone();
+    eprintln!("divergence: {place:#?}");
+    assert!(
+        words.contains("APPLE") && !words.contains("BANANA"),
+        "{words}"
+    );
+    assert_eq!((place.at, place.current, place.count), (1, 2, 2));
+
+    let back = ChatAction::SwitchBranch {
+        at: 1,
+        to: 1,
+        files: ForkFiles::Keep,
+        stop_tasks: false,
+    };
+    client.chat(chat, back).unwrap();
+    wait_for_chat_for(&mut client, chat, minute, |node| {
+        (node.branches.first()).is_some_and(|place| place.current == 1) && live_idle(node)
+    });
+    let node = live_send(&mut client, chat, ask, limit);
+    let words = last_words(&node).to_uppercase();
+    eprintln!("switched back: {words}");
+    assert!(
+        words.contains("APPLE") && words.contains("BANANA"),
+        "{words}"
+    );
+
+    // What the agent lists, as the start page asks: the branch sessions
+    // are hidden, and each row says what it was forked from, if it does.
+    let cwd = (client.capture(chat).unwrap().chat().unwrap().paths.clone())
+        .map(|paths| paths.cwd)
+        .unwrap_or_default();
+    let listed = sessions(&mut client, 99, agent, Path::new(&cwd));
+    eprintln!("listed: {listed:#?}");
+    let log: String = (std::fs::read_dir(&trace).unwrap().flatten())
+        .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
+        .collect();
+    let forks: Vec<&str> = log
+        .lines()
+        .filter(|line| line.contains("session/fork"))
+        .collect();
+    eprintln!("forks: {forks:#?}");
+    assert!(
+        forks.iter().any(|line| line.contains("messageId")),
+        "forked at a message"
+    );
+    for line in log
+        .lines()
+        .filter(|line| line.contains("forkedFrom"))
+        .take(4)
+    {
+        eprintln!("forkedFrom: {line}");
+    }
+}
+
+/// [`live_rewind`] with Claude Code on haiku.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_claude_chat_rewinds_forgetting_the_turns_cut_and_switches_back() {
+    live_rewind("claude");
+}
+
+/// [`live_rewind`] with Codex on Luna, from the install the daemon would
+/// run (or `CLACKATOO_REAL_CODEX`'s command).
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_CODEX or install Codex, and run with --ignored"]
+fn a_real_codex_chat_rewinds_forgetting_the_turns_cut_and_switches_back() {
+    live_rewind("codex");
+    // Codex's sandbox leaves an empty .git in each writable root.
+    let _ = std::fs::remove_dir(std::env::temp_dir().join(".git"));
 }
 
 /// Submits `text` as the window does, queued if the agent is busy.
