@@ -1109,6 +1109,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Codex's Plan mode is in the permissions menu beside its mode, and its warnings show as notices, not words",
     },
+    News {
+        id: "subagents-restored",
+        date: "2026-10-29",
+        lesson: "agents",
+        what: "A subagent in a pane comes back a subagent after a restart: its band, its card, its profile and its limits",
+    },
 ];
 
 impl News {
