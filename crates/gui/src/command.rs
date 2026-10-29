@@ -30,7 +30,10 @@
 //! after it, or else the last, and `agentredo` makes it again; with `!`,
 //! in the files that can be, though others can't. `stoptask` asks the
 //! agent to stop what it runs in the background, the line's number on the
-//! shelf above the box after it, or else the newest running. `plan`
+//! shelf above the box after it, or else the newest running.
+//! `taskoutput` opens what one printed in a terminal below the chat,
+//! following it as it grows, the line's number after it, or else the
+//! newest with output. `plan`
 //! opens the agent's plan above the box, or folds it.
 //! `devices` lists the devices paired with the daemon's web app; `devices
 //! allow CODE` allows the one asking to pair that shows `CODE`, `devices
@@ -235,6 +238,10 @@ pub(crate) enum Command {
     /// the background on line `line` of the shelf above the box, counting
     /// from 0, or the newest running.
     StopTask(Option<usize>),
+    /// `:taskoutput`: follow what the focused chat's agent's background
+    /// task on line `line` of the shelf above the box printed, counting
+    /// from 0, or the newest that says where its output goes.
+    TaskOutput(Option<usize>),
     /// `:plan`: open the focused chat's plan's shelf above the box, or
     /// fold it.
     Plan,
@@ -746,21 +753,23 @@ fn agent_undo(word: &str, argument: Option<&str>) -> Option<Result<Command, Stri
     }))
 }
 
-/// `:stoptask`, if `word` is it, and the line's number after it, from 1,
-/// if there is one.
+/// `:stoptask` or `:taskoutput`, if `word` is one, and the line's number
+/// after it, from 1, if there is one.
 fn stop_task(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
-    if word != "stoptask" {
-        return None;
-    }
+    let command: fn(Option<usize>) -> Command = match word {
+        "stoptask" => Command::StopTask,
+        "taskoutput" => Command::TaskOutput,
+        _ => return None,
+    };
     Some(match argument.map(str::parse::<usize>) {
-        None => Ok(Command::StopTask(None)),
-        Some(Ok(number)) if number > 0 => Ok(Command::StopTask(Some(number - 1))),
-        Some(_) => Err("stoptask takes a line's number, from 1: :stoptask 2".to_owned()),
+        None => Ok(command(None)),
+        Some(Ok(number)) if number > 0 => Ok(command(Some(number - 1))),
+        Some(_) => Err(format!("{word} takes a line's number, from 1: :{word} 2")),
     })
 }
 
 /// A command for the focused chat, if `word` is one: `:agentundo`,
-/// `:agentredo`, `:stoptask` or `:plan`.
+/// `:agentredo`, `:stoptask`, `:taskoutput` or `:plan`.
 fn chat_command(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
     (agent_undo(word, argument))
         .or_else(|| stop_task(word, argument))
@@ -933,6 +942,7 @@ command_names! {
     "agentundo" => "Undo file changes from an agent turn",
     "agentredo" => "Redo file changes from an agent turn",
     "stoptask" => "Stop what the agent runs in the background",
+    "taskoutput" => "Follow what a background task printed",
     "plan" => "Open or fold the agent's plan",
     "Review" => "Review changes made by agents",
     "reviewkeep" => "Keep the selected agent changes",
@@ -1132,6 +1142,7 @@ mod tests {
         ("agentundo", ""),
         ("agentredo", ""),
         ("stoptask", ""),
+        ("taskoutput", ""),
         ("plan", ""),
         ("Review", ""),
         ("reviewsend", ""),
@@ -1637,6 +1648,12 @@ mod tests {
         assert_eq!(parse("stoptask").unwrap(), Command::StopTask(None));
         assert_eq!(parse("stoptask 2").unwrap(), Command::StopTask(Some(1)));
         assert!(parse("stoptask 0").is_err());
+        assert_eq!(parse("taskoutput").unwrap(), Command::TaskOutput(None));
+        assert_eq!(parse("taskoutput 3").unwrap(), Command::TaskOutput(Some(2)));
+        assert_eq!(
+            parse("taskoutput x").unwrap_err(),
+            "taskoutput takes a line's number, from 1: :taskoutput 2"
+        );
         assert_eq!(parse("plan").unwrap(), Command::Plan);
         assert_eq!(parse("agentundo").unwrap(), undo(None, false, false));
         assert_eq!(parse("agentundo 3").unwrap(), undo(Some(2), false, false));

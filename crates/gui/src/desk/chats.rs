@@ -13,9 +13,11 @@
 //!
 //! [`Content::Terminal`]: clackatoo_protocol::Content::Terminal
 
-use clackatoo_protocol::{PaneId, TerminalId, ViewUpdate, wire};
+use clackatoo_protocol::{
+    NewTerminal, PaneId, PaneTerminal, Request, Side, TerminalId, ViewUpdate, wire,
+};
 
-use super::Desk;
+use super::{Asked, Desk};
 use crate::chat::ChatPane;
 use crate::finder::{self, Finder, LocalItem};
 use crate::input::KeyPress;
@@ -477,6 +479,37 @@ impl Desk {
         if let Err(why) = asked {
             self.refuse(why);
         }
+    }
+
+    /// Opens what the focused chat's agent's background task on line
+    /// `line` of the shelf printed, or the newest with output, in a new
+    /// terminal below `pane`, the chat's, following it as it grows: the
+    /// daemon makes it on the chat's machine, where the agent writes it.
+    pub(super) fn task_output(&mut self, pane: PaneId, line: Option<usize>) {
+        if !self.needs_daemon("a background task's output", wire::TASK_OUTPUT) {
+            return;
+        }
+        let follow = (self.focused_chat()).map_or_else(
+            || Err("that's for a chat with an agent".to_owned()),
+            |chat| chat.task_output(line),
+        );
+        let command = match follow {
+            Ok(command) => command,
+            Err(why) => return self.refuse(why),
+        };
+        let terminal = PaneTerminal::New(NewTerminal {
+            size: self.new_pane_size(Some(Side::Below)),
+            command: Some(command),
+            cwd: None,
+            record_to: None,
+        });
+        let split = Request::Split {
+            pane,
+            side: Side::Below,
+            terminal,
+            on: None,
+        };
+        self.request(split, Asked::Pane);
     }
 
     /// Opens the focused chat's plan's shelf, or folds it.

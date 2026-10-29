@@ -54,6 +54,7 @@ impl ChatView {
                         PlanState::Doing | PlanState::ToDo => Tone::Plain,
                     },
                     stop: None,
+                    open: None,
                 })
                 .collect();
             let mut heading = done_of(plan);

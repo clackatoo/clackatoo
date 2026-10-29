@@ -193,6 +193,33 @@ impl ChatPane {
         Ok(())
     }
 
+    /// The program that follows what the task on line `line` of the shelf
+    /// above the box printed, counting from 0, or the newest that says
+    /// where its output goes; or why there's none. ACP carries no output,
+    /// only where Claude Code writes it, so a task that doesn't say has
+    /// none to follow: the agent's own `TaskOutput` tool reads it.
+    pub(crate) fn task_output(&self, line: Option<usize>) -> Result<Vec<String>, String> {
+        let listed = self.view.shelf();
+        let task = match line {
+            Some(line) => *listed
+                .get(line)
+                .ok_or(format!("there's no line {} above the box", line + 1))?,
+            None => *(listed.iter())
+                .find(|task| task.output.is_some())
+                .ok_or(if listed.is_empty() {
+                    "the agent runs nothing in the background"
+                } else {
+                    "the agent didn't say where any of it prints: ask it to show the output"
+                })?,
+        };
+        task.follow_output().ok_or_else(|| {
+            format!(
+                "the agent didn't say where {} prints: ask it to show the output",
+                task.title
+            )
+        })
+    }
+
     /// Opens the agent's plan's shelf above the box, or folds it, or says
     /// why not.
     pub(crate) fn toggle_plan(&mut self) -> Result<(), String> {

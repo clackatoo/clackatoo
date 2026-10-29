@@ -155,6 +155,10 @@ enum Hit {
     /// The button that stops a task the agent runs in the background, by
     /// the agent's name for it.
     StopTask(String),
+    /// The line of a task the agent runs in the background that says
+    /// where its output goes, which follows it, by the agent's name for
+    /// it.
+    TaskOutput(String),
     QueuePage(i8),
     /// The heading of the agent's plan's shelf, which opens and folds it.
     Plan,
@@ -2465,6 +2469,11 @@ impl ChatView {
             Some(Hit::RemoveQueued(id)) => settled.actions.push(ChatAction::RemoveQueued { id }),
             Some(Hit::EditQueued(id)) => self.take_back(id, settled),
             Some(Hit::StopTask(id)) => settled.actions.push(ChatAction::StopTask { id }),
+            Some(Hit::TaskOutput(id)) => {
+                if let Some(line) = self.shelf().iter().position(|task| task.id == id) {
+                    (settled.commands).push(crate::command::Command::TaskOutput(Some(line)));
+                }
+            }
             Some(Hit::Plan) => self.plan_open = !self.plan_open,
             Some(Hit::SendQueued(id)) => settled.actions.push(ChatAction::SendQueued {
                 id,

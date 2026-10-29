@@ -2927,6 +2927,7 @@ impl Desk {
             } => self.open_explorer_beside(dir, edit, side),
             Command::AgentUndo { turn, redo, force } => self.agent_undo(turn, redo, force),
             Command::StopTask(line) => self.stop_task(line),
+            Command::TaskOutput(line) => self.task_output(shown.pane, line),
             Command::Plan => self.toggle_plan(),
             Command::Board { place, name } => self.open_board(name, place),
             Command::Browser(place) => self.open_browser(place),
@@ -3069,6 +3070,7 @@ mod tests {
     mod shared;
     mod shortcuts;
     mod subagents;
+    mod tasks;
     mod typing;
 
     use clackatoo_protocol::{ChatState, ChatSummary, Layout, Pane as LayoutPane, View, Workspace};

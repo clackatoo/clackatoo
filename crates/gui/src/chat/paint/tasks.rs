@@ -2,7 +2,9 @@
 //! message is typed in: "In the background · 1 running", then a line for
 //! each, saying what it runs, how it's going and for how long, with a
 //! button to stop one that's running. Claude Code's shells started with
-//! `run_in_background` show here, and the turns it takes by itself.
+//! `run_in_background` show here, and the turns it takes by itself. A
+//! click on the line of one that says where its output goes follows that
+//! output in a terminal below the chat, as `:taskoutput` does.
 //!
 //! While any is going, the shelf counts the seconds.
 
@@ -44,6 +46,7 @@ impl ChatView {
                 tone: task_tone(task),
                 stop: (task.can_stop && task.state == AgentTaskState::Running)
                     .then(|| Hit::StopTask(task.id.clone())),
+                open: (task.output.is_some()).then(|| Hit::TaskOutput(task.id.clone())),
             })
             .collect();
         if rows.is_empty() {
@@ -219,6 +222,39 @@ mod tests {
         chat.release();
         let settled = chat.settle(&mut fonts);
         assert_eq!(settled.actions, [ChatAction::StopTask { id: "t1".into() }]);
+    }
+
+    /// A click on the line of a task that says where its output goes
+    /// follows it, as `:taskoutput` with the line's number does; one that
+    /// doesn't say has nothing to click (CLACKA-199).
+    #[test]
+    fn a_click_on_a_tasks_line_follows_its_output_if_it_says_where_that_goes() {
+        let mut fonts = fonts();
+        let mut quiet = task("t1", AgentTaskState::Running);
+        quiet.started = 90_000;
+        let mut printing = task("t2", AgentTaskState::Running);
+        printing.output = Some("/tmp/c/tasks/t2.output".into());
+        let mut chat = ChatView::new(String::new(), chat(vec![quiet, printing]));
+        chat.set_clock(112_400);
+        paint(&mut chat, &mut fonts);
+        let opens: Vec<&Hit> = (chat.hits.iter())
+            .map(|(hit, _)| hit)
+            .filter(|hit| matches!(hit, Hit::TaskOutput(_)))
+            .collect();
+        assert_eq!(opens, [&Hit::TaskOutput("t2".into())]);
+        let rect = (chat.hits.iter())
+            .find(|(hit, _)| *hit == Hit::TaskOutput("t2".into()))
+            .map(|(_, rect)| *rect)
+            .unwrap();
+        chat.press([rect[0] + 4.0, rect[1] + 4.0], 1, false);
+        chat.release();
+        let settled = chat.settle(&mut fonts);
+        assert!(settled.actions.is_empty(), "{:?}", settled.actions);
+        // The newest is the first line.
+        assert_eq!(
+            settled.commands,
+            [crate::command::Command::TaskOutput(Some(0))]
+        );
     }
 
     #[test]

@@ -22,6 +22,9 @@ pub(super) struct ShelfRow {
     /// The square button at the line's end, which stops what it's for,
     /// and what a click on it does.
     pub(super) stop: Option<Hit>,
+    /// What a click on the rest of the line does, if anything: it's lit
+    /// while the mouse is over it.
+    pub(super) open: Option<Hit>,
 }
 
 /// The height of a shelf's line, its heading's, and the pad above and
@@ -92,6 +95,14 @@ impl ChatView {
             } else {
                 inner_width
             };
+            if let Some(hit) = line.open {
+                let rect = [inner_left - m.em(0.3), top, text_width + m.em(0.3), row];
+                if (self.mouse).is_some_and(|p| super::super::contains(frame.place.in_pane(rect), p))
+                {
+                    canvas.fill(Fill::rounded(rect, Paint::ChatHover, m.em(0.4)));
+                }
+                self.hits.push((hit, frame.place.in_pane(rect)));
+            }
             self.queue_text(
                 canvas,
                 small,
