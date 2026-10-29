@@ -1,0 +1,17 @@
+# A Task subagent's work, folded under the tool call that started it
+# (CLACKA-195): the card says what the subagent did last and how many
+# tools it used, and opens to show its words and tools, indented.
+size 1100x900
+keys <C-;>:Agent claude<CR>
+keys i
+type task
+keys <CR>
+wait-for The parser is in src/parse.rs.
+sleep 300
+shot nested-turn-folded
+keys <C-;>zR
+sleep 300
+shot nested-task-folded
+click 500 177
+sleep 300
+shot nested-task-open

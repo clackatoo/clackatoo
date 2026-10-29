@@ -42,6 +42,7 @@
 //! | `elicit-later` | Says `asking later` and ends its turn; 300 ms later asks the user to open a link, as an MCP server's sign-in asks between turns, and notes the answer as `answered later:` and the answer as JSON |
 //! | `elicit-cancel` | As `elicit`, but 300 ms later no longer waits for the answer (`$/cancel_request`) |
 //! | `approve-plan` | Asks permission to leave plan mode, as Claude Code's adapter asks a client that asks as AIR does: its plan in the tool's input, the options that leave plan mode; then says which option was picked |
+//! | `task` | Hands a search to a subagent, as Claude Code's Task tool does: the Task call `toolu_task`, "Find the parser", then the subagent's words and tools, each marked as its in `_meta.claudeCode.parentToolUseId`, then the Task's result, then `The parser is in src/parse.rs.` |
 //! | `commands SPEC` | Gives its slash commands, as `available_commands_update`: a word of SPEC each, `NAME` or `NAME:HINT`, each described `Does NAME`; then `commands given` |
 //! | `retry` | Says it's trying its request again, as Claude Code's adapter does to a client that asked for AIR's `sessionFailure` ("Retrying Claude, attempt 1 of 10."), or Codex's in `_meta.codex.error` ("Reconnecting... 1/5"); then says `recovered` |
 //! | `retry-wait` | As `retry`, but then waits until the message is cancelled |
@@ -124,6 +125,9 @@
 //! untitled, and two a daemon must leave out: one in another directory,
 //! and one with an ID far too long. It notes the answers to what
 //! `past-1` asked as `replay read: ANSWER` and `replay asked: OUTCOME`.
+//! `session/load` of `past-task`, a session it doesn't list, tells "find
+//! the parser" and what `task` does again, with the subagent's prompt as
+//! the user's words, marked as the subagent's.
 //! `session/load` tells a session's conversation again before it
 //! answers, as Claude Code's and Codex's adapters do, noting `told
 //! SESSION` once it has, and refuses a session it doesn't know.
@@ -618,6 +622,77 @@ fn tell_again(session: &str, cwd: &str, gap: Option<std::time::Duration>) {
     say(session, "You're welcome.");
 }
 
+/// Hands a search to a subagent, as Claude Code's adapter says its Task
+/// tool's work to a client that asked for `forwardSubagentText`: the Task
+/// call, `toolu_task`, then what the subagent says and the tools it uses,
+/// each marked with that call in `_meta.claudeCode.parentToolUseId` (a
+/// call asked about first, `toolu_grep`, only once an update names it,
+/// and a finished call's update without it), then the Task's result. Told
+/// again as a session loads, the subagent's prompt comes as the user's
+/// words, marked so too.
+fn delegate(session: &str, told_again: bool) {
+    let from = json!({ "claudeCode": { "parentToolUseId": "toolu_task" } });
+    let prompt = "Find where lines are parsed.";
+    update(
+        session,
+        &json!({ "sessionUpdate": "tool_call", "toolCallId": "toolu_task",
+                 "title": "Find the parser", "kind": "think", "status": "pending",
+                 "rawInput": { "description": "Find the parser", "prompt": prompt,
+                               "subagent_type": "Explore" },
+                 "content": [{ "type": "content", "content": { "type": "text", "text": prompt } }],
+                 "_meta": { "claudeCode": { "toolName": "Agent" },
+                            "jetbrains": { "air": { "subagent": true } } } }),
+    );
+    if told_again {
+        update(
+            session,
+            &json!({ "sessionUpdate": "user_message_chunk",
+                     "content": { "type": "text", "text": prompt }, "_meta": from }),
+        );
+    }
+    for text in ["I'll look", " in src."] {
+        update(
+            session,
+            &json!({ "sessionUpdate": "agent_message_chunk",
+                     "content": { "type": "text", "text": text }, "_meta": from }),
+        );
+    }
+    update(
+        session,
+        &json!({ "sessionUpdate": "tool_call", "toolCallId": "toolu_read",
+                 "title": "Read /src/parse.rs", "kind": "read", "status": "in_progress",
+                 "locations": [{ "path": "/src/parse.rs" }], "_meta": from }),
+    );
+    update(
+        session,
+        &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "toolu_read",
+                 "status": "completed" }),
+    );
+    update(
+        session,
+        &json!({ "sessionUpdate": "tool_call", "toolCallId": "toolu_grep",
+                 "title": "grep -n parse_line", "kind": "search", "status": "pending" }),
+    );
+    update(
+        session,
+        &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "toolu_grep",
+                 "status": "completed", "_meta": from }),
+    );
+    update(
+        session,
+        &json!({ "sessionUpdate": "agent_message_chunk",
+                 "content": { "type": "text", "text": "It's parse_line." }, "_meta": from }),
+    );
+    update(
+        session,
+        &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "toolu_task",
+                 "status": "completed",
+                 "content": [{ "type": "content", "content": { "type": "text",
+                               "text": "Lines are parsed in src/parse.rs, parse_line." } }] }),
+    );
+    say(session, "The parser is in src/parse.rs.");
+}
+
 /// Gives the slash commands `spec` says in `session`, as `commands`
 /// does: a word each, `NAME` or `NAME:HINT`.
 fn give_commands(session: &str, spec: &str) {
@@ -981,6 +1056,14 @@ impl Fake {
                     }
                     if session == "past-1" {
                         tell_again(&session, &cwd, gap);
+                    }
+                    if session == "past-task" {
+                        update(
+                            &session,
+                            &json!({ "sessionUpdate": "user_message_chunk",
+                                     "content": { "type": "text", "text": "find the parser" } }),
+                        );
+                        delegate(&session, true);
                     }
                     // Noted before the answer, which may be all a test
                     // waits for.
@@ -1670,6 +1753,10 @@ impl Fake {
                              "state": "completed", "summary": "exit code 0" }),
                 );
                 say(&session, "finished\n");
+                done(&id, "end_turn");
+            }
+            "task" => {
+                delegate(&session, false);
                 done(&id, "end_turn");
             }
             "limits" => {

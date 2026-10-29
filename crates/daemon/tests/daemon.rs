@@ -2861,6 +2861,75 @@ fn a_slash_command_after_a_move_goes_alone_and_the_digest_with_the_next_message(
 }
 
 #[test]
+fn a_task_subagents_words_and_tools_go_under_its_tool_call_and_older_windows_see_them_flat() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let node = ask(&mut client, chat, "task");
+    let items = &node.turns.last().unwrap().items;
+    let shape: Vec<(Option<&str>, String)> = (items.iter())
+        .map(|item| {
+            let what = match item.inner() {
+                Item::Words(words) => format!("words {words}"),
+                Item::Tool(tool) => format!("tool {} {:?}", tool.id, tool.status),
+                other => format!("{other:?}"),
+            };
+            (item.parent(), what)
+        })
+        .collect();
+    let task = Some("toolu_task");
+    assert_eq!(
+        shape,
+        [
+            (None, "tool toolu_task Done".to_owned()),
+            (task, "words I'll look in src.".to_owned()),
+            (task, "tool toolu_read Done".to_owned()),
+            (task, "tool toolu_grep Done".to_owned()),
+            (task, "words It's parse_line.".to_owned()),
+            (None, "words The parser is in src/parse.rs.".to_owned()),
+        ]
+    );
+    // The subagent's words aren't the agent's answer.
+    assert_eq!(last_words(&node), "The parser is in src/parse.rs.");
+    // A window from before nesting sees the same items in the same
+    // places, each as the agent's own, as before.
+    let old = wire::AGENT_COMMANDS;
+    let mut raw = Raw::open(&daemon, old);
+    raw.hello(old);
+    assert_eq!(raw.next(), Some(hello(old)));
+    raw.request(Request::Attach { terminal: chat });
+    let seen = loop {
+        if let ServerMessage::Event(Event::View {
+            update: ViewUpdate::Snapshot(view),
+            ..
+        }) = raw.next().expect("the view")
+        {
+            break view;
+        }
+    };
+    let seen = &seen.chat().unwrap().turns.last().unwrap().items;
+    let flat: Vec<Item> = items.iter().cloned().map(Item::flattened).collect();
+    assert_eq!(seen, &flat);
+}
+
+#[test]
+fn a_loaded_session_puts_what_its_subagents_did_under_their_tasks_again() {
+    let daemon = TestDaemon::start();
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    let resumed = open_resumed(&mut client, resumed_chat(&home, "past-task", None));
+    wait_for_log(&daemon, "agent.log", "told past-task");
+    let node = wait_for_chat(&mut client, resumed, |node| node.state == ChatState::Ready);
+    // One turn: the subagent's prompt, told again as the user's words,
+    // starts none.
+    let prompts: Vec<&str> = node.turns.iter().map(|turn| turn.prompt.as_str()).collect();
+    assert_eq!(prompts, ["find the parser"]);
+    let parents: Vec<Option<&str>> = node.turns[0].items.iter().map(Item::parent).collect();
+    let task = Some("toolu_task");
+    assert_eq!(parents, [None, task, task, task, task, None]);
+}
+
+#[test]
 fn the_agents_plan_shows_as_it_last_gave_it_until_the_next_message_after_its_all_done() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
