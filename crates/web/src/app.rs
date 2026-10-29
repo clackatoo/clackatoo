@@ -853,7 +853,7 @@ fn touch_listeners(
             return;
         };
         with_app(|app| {
-            let moved = (app.pressed)
+            let moved = (app.pressed.as_ref())
                 .is_some_and(|(_, (from_x, from_y))| (x - from_x).hypot(y - from_y) > PRESS_SLOP);
             if moved {
                 app.pressed = None;
@@ -1993,7 +1993,7 @@ impl App {
             | Action::TerminalControls
             | Action::SmallerText
             | Action::LargerText
-            | Action::ResetText => self.terminal_control(action),
+            | Action::ResetText => self.terminal_control(&action),
             Action::Key(RowKey::Ctrl) => self.state.tap_ctrl(),
             Action::Key(RowKey::Paste) => self.paste_clipboard(),
             Action::Key(key) => {
@@ -2019,7 +2019,7 @@ impl App {
             // The link opens by itself, as links do.
             Action::OpenLink(question) => self.open_link(question),
             Action::CancelActivity(index) => self.state.cancel_activity(index),
-            Action::Usage | Action::Settings => self.toggle_sheet(action),
+            Action::Usage | Action::Settings => self.toggle_sheet(&action),
             Action::Filter(filter) => self.state.filter(filter),
             Action::Bring(tab) => {
                 if let Some(terminal) = self.state.bring_back(tab) {
@@ -2048,7 +2048,7 @@ impl App {
                 "delivering queued message",
             ),
             Action::Stop => self.state.chat(ChatAction::Stop, "stopping the agent"),
-            Action::Command(at) => self.put_command(at),
+            Action::Command(name) => self.put_command(&name),
             Action::AttachPhotos => self.attach_photos(),
             Action::RemovePhoto(id) => self.remove_photo(id),
             Action::Send | Action::Steer => {
@@ -2085,8 +2085,8 @@ impl App {
         self.draw_soon();
     }
 
-    fn toggle_sheet(&mut self, action: Action) {
-        if action != Action::Usage {
+    fn toggle_sheet(&mut self, action: &Action) {
+        if *action != Action::Usage {
             let saved = self
                 .window
                 .local_storage()
@@ -2118,7 +2118,7 @@ impl App {
                 };
             }
         }
-        let fold = if action == Action::Usage {
+        let fold = if *action == Action::Usage {
             view::USAGE_FOLD
         } else {
             view::SETTINGS_FOLD
@@ -2137,7 +2137,7 @@ impl App {
             .open
             .as_ref()
             .is_some_and(|o| o.folds.get(fold).copied().unwrap_or(false));
-        if opening && action == Action::Usage {
+        if opening && *action == Action::Usage {
             self.state
                 .chat(ChatAction::RefreshUsage { force: true }, "refreshing usage");
         } else if opening {
@@ -2210,18 +2210,17 @@ impl App {
         });
     }
 
-    /// Puts the agent's slash command at `at` in the open chat's list in
-    /// the message being typed, with a space after it, as a tap on it in
-    /// the list `/` shows does.
-    fn put_command(&mut self, at: usize) {
+    /// Puts the agent's slash command `name` in the message being typed,
+    /// with a space after it, as a tap on it in the list `/` shows does,
+    /// if the open chat's agent still offers it.
+    fn put_command(&mut self, name: &str) {
         let Some(open) = &self.state.open else {
             return;
         };
         let id = open.id;
-        let name = (open.view.as_ref().and_then(|view| view.chat()))
-            .and_then(|node| node.commands.get(at))
-            .map(|command| command.name.clone());
-        if let Some(name) = name {
+        let offered = (open.view.as_ref().and_then(|view| view.chat()))
+            .is_some_and(|node| node.commands.iter().any(|command| command.name == name));
+        if offered {
             self.state.drafts.insert(id, format!("/{name} "));
             self.save_draft(id);
             self.state.dirty.footer = true;

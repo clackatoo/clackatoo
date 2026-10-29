@@ -8,7 +8,7 @@ use crate::keys::{Key, Modifiers};
 use crate::state::HomeFilter;
 
 /// What tapping something does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Shows the list of chats.
     Home,
@@ -74,9 +74,9 @@ pub enum Action {
     Decline(u64),
     /// Answers question `0`'s link as opened, as the link itself opens.
     OpenLink(u64),
-    /// Puts the agent's slash command at this place in the chat's list in
-    /// the message being typed.
-    Command(usize),
+    /// Puts the agent's slash command of this name in the message being
+    /// typed.
+    Command(String),
 }
 
 /// The keys on the row above the phone's keyboard: those a phone's
@@ -230,7 +230,7 @@ impl Action {
             Self::Fill(question) => format!("fill:{question}"),
             Self::Decline(question) => format!("decline:{question}"),
             Self::OpenLink(question) => format!("open-link:{question}"),
-            Self::Command(at) => format!("command:{at}"),
+            Self::Command(name) => format!("command:{name}"),
         }
     }
 
@@ -286,7 +286,7 @@ impl Action {
             ("fill", question) => Self::Fill(question.parse().ok()?),
             ("decline", question) => Self::Decline(question.parse().ok()?),
             ("open-link", question) => Self::OpenLink(question.parse().ok()?),
-            ("command", at) => Self::Command(at.parse().ok()?),
+            ("command", name) if !name.is_empty() => Self::Command(name.to_owned()),
             _ => return None,
         })
     }
@@ -360,7 +360,7 @@ mod tests {
             Action::OpenTerminal(TerminalId(3)),
             Action::Bring(TabId(4)),
             Action::Dismiss(TabId(5)),
-            Action::Command(3),
+            Action::Command("mcp:fs:list".into()),
             Action::Fit,
             Action::Unfit,
             Action::Type,

@@ -161,13 +161,62 @@ pub const INTERFACE_COMMANDS: &[&str] = &[
 
 /// The command a client does itself, of [`INTERFACE_COMMANDS`], that
 /// `text`, a message to a chat whose agent offers `offered`, starts
-/// with, if any: one the agent offers is the agent's.
+/// with, if any, as that list names it, and what follows it: one the
+/// agent offers is the agent's. Names are matched ignoring case. What
+/// follows is for the client to judge: `/help me find the bug` is words
+/// for the agent, not `/help`.
 #[must_use]
-pub fn interface_command<'a>(text: &'a str, offered: &[AgentCommand]) -> Option<&'a str> {
-    let (name, _) = slash_command(text)?;
-    let ours = INTERFACE_COMMANDS.contains(&name);
-    let theirs = offered.iter().any(|command| command.name == name);
-    (ours && !theirs).then_some(name)
+pub fn interface_command<'a>(
+    text: &'a str,
+    offered: &[AgentCommand],
+) -> Option<(&'static str, &'a str)> {
+    let (name, rest) = slash_command(text)?;
+    let ours = INTERFACE_COMMANDS
+        .iter()
+        .find(|ours| ours.eq_ignore_ascii_case(name))?;
+    let theirs = (offered.iter()).any(|command| command.name.eq_ignore_ascii_case(name));
+    (!theirs).then_some((ours, rest))
+}
+
+/// Commands Claude Code's and Codex's adapters do whether or not they've
+/// said so yet, as `available_commands_update` may not have come.
+pub const KNOWN_COMMANDS: &[&str] = &[
+    "compact",
+    "init",
+    "review",
+    "review-branch",
+    "review-commit",
+    "plan",
+    "goal",
+    "mcp",
+    "skills",
+    "status",
+    "context",
+    "heapdump",
+    "extra-usage",
+    "usage",
+    "clear",
+    "resume",
+    "rename",
+    "logout",
+];
+
+/// Whether `text`, a message to a chat whose agent offers `offered`, is
+/// a command the agent's adapter reads as one: a name it offers, or one
+/// of [`KNOWN_COMMANDS`] if it hasn't said what it offers. `/usr is
+/// full` isn't one.
+#[must_use]
+pub fn agent_command(text: &str, offered: &[AgentCommand]) -> bool {
+    let Some((name, _)) = slash_command(text) else {
+        return false;
+    };
+    if offered.is_empty() {
+        KNOWN_COMMANDS
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(name))
+    } else {
+        (offered.iter()).any(|command| command.name.eq_ignore_ascii_case(name))
+    }
 }
 
 /// One step of an agent's plan.
@@ -1917,14 +1966,36 @@ mod tests {
 
     #[test]
     fn an_interface_command_is_the_agents_if_it_offers_one_of_the_name() {
-        assert_eq!(interface_command("/clear", &[]), Some("clear"));
+        assert_eq!(interface_command("/clear", &[]), Some(("clear", "")));
+        assert_eq!(interface_command("/Clear ", &[]), Some(("clear", "")));
+        assert_eq!(
+            interface_command("/help me find why this test fails", &[]),
+            Some(("help", "me find why this test fails"))
+        );
         assert_eq!(interface_command("/compact", &[]), None);
         let offered = [AgentCommand {
             name: "clear".into(),
             description: String::new(),
             hint: None,
         }];
-        assert_eq!(interface_command("/clear", &offered), None);
+        assert_eq!(interface_command("/CLEAR", &offered), None);
+    }
+
+    #[test]
+    fn an_agent_command_is_one_it_offers_or_else_one_its_adapter_knows() {
+        assert!(agent_command("/compact", &[]));
+        assert!(agent_command("/Review main", &[]));
+        assert!(!agent_command("/usr is full, clean it up", &[]));
+        let offered = [AgentCommand {
+            name: "deploy".into(),
+            description: String::new(),
+            hint: None,
+        }];
+        assert!(agent_command("/deploy now", &offered));
+        assert!(
+            !agent_command("/compact", &offered),
+            "it said what it offers"
+        );
     }
 
     #[test]

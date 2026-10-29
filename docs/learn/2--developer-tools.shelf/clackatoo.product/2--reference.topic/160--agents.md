@@ -130,7 +130,7 @@ Agents take commands in a message that begins with `/`: Claude Code's `/compact`
 
 A click on a command puts it in, as Tab does. Once there's a space after the name, the menu closes. The menu lists what the agent last said it has; a chat that has moved to another agent lists none of the old one's, and after a daemon upgrade or restart, the agent's own come back once its session opens again with your next message.
 
-Claude Code's and Codex's own terminal interfaces have commands their adapters don't, so sent to the agent they'd reach the model as words. Unless the agent says it has a command of that name, in which case it's the agent's and is sent, clackatoo does what each is for itself instead of sending it:
+Claude Code's and Codex's own terminal interfaces have commands their adapters don't, so sent to the agent they'd reach the model as words. Typed as the whole message, such as `/clear` alone, clackatoo does what each is for itself instead of sending it, unless the agent says it has a command of that name (in any case), which is then the agent's and is sent. With words after the name, as `/help me find why this test fails`, the message is words for the agent and goes as typed.
 
 | Command | In clackatoo |
 |---|---|
@@ -140,14 +140,14 @@ Claude Code's and Codex's own terminal interfaces have commands their adapters d
 | `/context` | Shows how full the agent's context is, as `K` does. |
 | `/status`, `/cost`, `/usage` | Opens **Usage & limits**. |
 | `/diff` | Opens [`:Review`](#reviewing-its-changes) of what the chat's agents changed. |
-| `/model` | Opens the model menu. |
+| `/model` | Opens the model menu. `/model NAME` picks the agent's model of that name or value, such as `/model sonnet`; a name it hasn't is sent as words. |
 | `/export` | Copies the conversation, as text, to the clipboard. `clackatoo capture` prints all of it, older turns not loaded too. |
 
-Others, such as `/exit`, `/help`, `/config`, `/permissions` and `/login`, aren't sent either: the bar says what to use instead, such as `:q`, Ctrl+?, `:set` or the mode chip. Every other message beginning with `/` goes to the agent as typed.
+Others, such as `/exit`, `/help`, `/config`, `/permissions` and `/login`, aren't sent either: the bar says what to use instead, such as `:q`, Ctrl+?, `:set` or the mode chip, and what you typed stays in the box. Every other message beginning with `/` goes to the agent as typed.
 
-A command goes to the agent on its own. The first message after a chat moves to another agent, or a profile's first message, usually goes after the conversation so far or the profile's instructions; a command waits with those for your next message instead, as Codex reads a command only when it comes first, Claude Code only when it comes last, and some of Claude Code's only when they come alone.
+A command the agent says it has (or, before it has said, one its adapter is known to do, such as `/compact`, `/init` or `/review`) goes to the agent on its own. The first message after a chat moves to another agent, or a profile's first message, usually goes after the conversation so far or the profile's instructions; a command waits with those for your next message instead, as Codex reads a command only when it comes first, Claude Code only when it comes last, and some of Claude Code's only when they come alone. Any other message starting with `/`, such as `/usr is full`, goes with them as usual, so a profile's limits are never left behind.
 
-The phone lists the agent's commands too, as you type `/` and a name, and a tap puts one in your message. It doesn't send the commands clackatoo does itself: use those in the window.
+The phone lists the agent's commands too, as you type `/` and a name, and a tap puts one in your message. It doesn't send the commands clackatoo does itself, typed alone: use those in the window.
 
 One message is answered at a time. While the agent answers, the button in the box's corner is a stop button, and Enter keeps what you typed until it's done. Clicking the button with nothing being answered sends the message, as Enter does.
 

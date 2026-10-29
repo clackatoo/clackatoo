@@ -1470,11 +1470,14 @@ impl HostedChat {
     /// the only one, and Claude Code itself reads one from the last, so
     /// only a command alone is one to both. A command Codex's adapter
     /// does, such as `/compact`, never shows the model the rest either,
-    /// and the digest would be counted as heard (CLACKA-189).
+    /// and the digest would be counted as heard (CLACKA-189). Only a
+    /// command the agent offers, or before it has said, one its adapter
+    /// is known to do, waits so: the role is a profile's limits, which
+    /// words such as `/usr is full` mustn't slip past.
     fn prompt(&mut self, text: Prompt) -> Action {
         let to = self.node.turns.len().saturating_sub(1);
         let owed = self.role.is_some() || self.known < to;
-        if owed && clackatoo_protocol::slash_command(&text.text).is_some() {
+        if owed && clackatoo_protocol::agent_command(&text.text, &self.node.commands) {
             return Action::Prompt(text);
         }
         if let Some(role) = self.role.take() {
@@ -5772,12 +5775,27 @@ mod tests {
             matches!(&next[..], [Action::Briefed { role, text }] if role.starts_with("Review only") && text.text == "inspect"),
             "{next:?}"
         );
-        // A path isn't a command: it goes with the role as any words do.
+        // A path isn't a command, nor a word the agent doesn't offer:
+        // they go with the role as any words do.
+        for words in ["/etc/hosts is wrong", "/usr is full, clean it up"] {
+            let mut c = chat();
+            c.role = Some("Be brief.".into());
+            connect(&mut c, "s");
+            let first = send(&mut c, words);
+            assert!(matches!(&first[..], [Action::Briefed { .. }]), "{first:?}");
+        }
+        // Once the agent has said what it offers, only those wait.
         let mut c = chat();
         c.role = Some("Be brief.".into());
         connect(&mut c, "s");
-        let first = send(&mut c, "/etc/hosts is wrong");
-        assert!(matches!(&first[..], [Action::Briefed { .. }]), "{first:?}");
+        update(
+            &mut c,
+            r#"{"sessionUpdate":"available_commands_update","availableCommands":[
+                {"name":"deploy","description":"Deploy"}]}"#,
+        );
+        assert_eq!(send(&mut c, "/deploy"), [Action::Prompt("/deploy".into())]);
+        let next = send_after(&mut c, "/compact");
+        assert!(matches!(&next[..], [Action::Briefed { .. }]), "{next:?}");
     }
 
     #[test]

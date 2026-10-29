@@ -201,7 +201,7 @@ If you have a chat open, ask it to run `sleep 30` in the background, watch the s
 
 ## Slash commands
 
-Type `/` at the start of a message and a menu opens over the box: the agent's own commands, such as Claude Code's `/compact` or Codex's `/review`, your skills, then clackatoo's. Keep typing to narrow it, Down and Up to pick, Tab to put one in, Enter to put it in or, once the whole name is typed, to send it, and Esc to close the menu without leaving insert mode. Commands only the agent's own terminal interface has don't go to the agent: `/clear` and `/resume` open the start page, `/model` the model menu, `/diff` `:Review`, `/status` your usage limits, `/rewind` undoes the last turn's files, and `/export` copies the conversation.
+Type `/` at the start of a message and a menu opens over the box: the agent's own commands, such as Claude Code's `/compact` or Codex's `/review`, your skills, then clackatoo's. Keep typing to narrow it, Down and Up to pick, Tab to put one in, Enter to put it in or, once the whole name is typed, to send it, and Esc to close the menu without leaving insert mode. Typed alone, commands only the agent's own terminal interface has don't go to the agent: `/clear` and `/resume` open the start page, `/model` the model menu, `/diff` `:Review`, `/status` your usage limits, `/rewind` undoes the last turn's files, and `/export` copies the conversation.
 
 If you have a chat open, type `/` in its box, then `/model` and Enter to open the model menu.
 

@@ -427,7 +427,7 @@ fn measure(document: &Document, grid: &HtmlElement) -> f64 {
 }
 
 impl super::App {
-    pub(super) fn terminal_control(&mut self, action: Action) {
+    pub(super) fn terminal_control(&mut self, action: &Action) {
         match action {
             Action::Fit => {
                 let size = self.term_page.as_ref().and_then(TermPage::phone_size);

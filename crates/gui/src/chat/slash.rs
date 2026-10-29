@@ -123,19 +123,21 @@ fn instead(name: &str) -> &'static str {
 /// What the window does with `text`, a message to a chat whose agent
 /// offers `offered`, in place of sending it, if it's one of the commands
 /// only the agent's own interface has (see [`interface_command`]).
-pub(crate) fn native(text: &str, offered: &[AgentCommand]) -> Option<(&'static str, Native)> {
-    let name = interface_command(text, offered)?;
-    let (name, native) = (OURS.iter()).find(|(ours, ..)| *ours == name).map_or_else(
-        || {
-            let name = (clackatoo_protocol::INTERFACE_COMMANDS.iter())
-                .find(|ours| **ours == name)
-                .copied()
-                .unwrap_or("");
-            (name, Native::Say(instead(name)))
-        },
-        |&(name, _, native)| (name, native),
-    );
-    Some((name, native))
+///
+/// It's one only as the whole message, `/name` alone: with words after
+/// it, as `/help me find why this fails`, it's words for the agent. The
+/// one exception is `/model NAME`, whose name the window may pick (see
+/// [`ChatView::native_command`](super::ChatView::native_command)), so
+/// what follows is given back.
+pub(crate) fn native<'a>(
+    text: &'a str,
+    offered: &[AgentCommand],
+) -> Option<(&'static str, Native, &'a str)> {
+    let (name, rest) = interface_command(text, offered)?;
+    let native = (OURS.iter())
+        .find(|(ours, ..)| *ours == name)
+        .map_or_else(|| Native::Say(instead(name)), |&(_, _, native)| native);
+    (rest.is_empty() || native == Native::Model).then_some((name, native, rest))
 }
 
 /// One of the commands the menu offers.
@@ -397,14 +399,31 @@ impl super::ChatView {
     /// Does what the message typed is for, in place of sending it, if
     /// it's one of the commands only the agent's own interface has (see
     /// [`native`]), and empties the box. Returns whether it was one.
+    ///
+    /// The box is emptied only once something's done: `/exit`, which has
+    /// nothing like it here, says what to use and keeps what's typed, and
+    /// `/model NAME` naming no model the agent has is sent as words.
     pub(super) fn native_command(&mut self, settled: &mut Settled) -> bool {
         use crate::command::{Command, Kind, Place, ReviewCommand};
         use clackatoo_protocol::ReviewScope;
-        let Some((name, native)) = native(self.editor.raw_text(), &self.node.commands) else {
+        let typed = self.editor.raw_text().to_owned();
+        let Some((name, native, rest)) = native(&typed, &self.node.commands) else {
             return false;
         };
+        if !rest.is_empty() && !self.pick_model(rest, settled) {
+            return false;
+        }
+        if let Native::Say(instead) = native {
+            self.say(format!(
+                "/{name} is the agent's own interface's, so it isn't sent: {instead}"
+            ));
+            return true;
+        }
         self.editor.set_text("");
         self.refresh_slash();
+        if !rest.is_empty() {
+            return true;
+        }
         let agent = self.agent().to_owned();
         match native {
             Native::StartPage | Native::Sessions => settled.commands.push(Command::Open {
@@ -412,7 +431,7 @@ impl super::ChatView {
                 kind: Kind::Agent,
                 agent: None,
             }),
-            Native::Undo => self.undo_key(false),
+            Native::Undo => self.undo_turn(self.turn_to_undo(false), false),
             Native::Context => {
                 if !self.usage_modal
                     && self.detail != Some(super::paint::Detail::Asked)
@@ -447,12 +466,30 @@ impl super::ChatView {
                     "copied the conversation, {turns} turns, to the clipboard{older}"
                 ));
             }
-            Native::Say(instead) => {
-                self.say(format!(
-                    "/{name} is the agent's own interface's, so it isn't sent: {instead}"
-                ));
-            }
+            Native::Say(_) => {}
         }
+        true
+    }
+
+    /// Picks the agent's model `named`, its value or its name, ignoring
+    /// case, as `/model opus` does. Returns whether there's one so named.
+    fn pick_model(&mut self, named: &str, settled: &mut Settled) -> bool {
+        let Some(setting) = (self.node.settings.iter()).find(|s| s.kind == SettingKind::Model)
+        else {
+            return false;
+        };
+        let Some(choice) = (setting.choices.iter()).find(|choice| {
+            choice.value.eq_ignore_ascii_case(named) || choice.name.eq_ignore_ascii_case(named)
+        }) else {
+            return false;
+        };
+        let (id, value, name) = (
+            setting.id.clone(),
+            choice.value.clone(),
+            choice.name.clone(),
+        );
+        self.choose(id, value, settled);
+        self.say(format!("model: {name}"));
         true
     }
 }
@@ -542,12 +579,23 @@ mod tests {
 
     #[test]
     fn the_interfaces_commands_are_done_here_unless_the_agent_offers_them() {
-        assert_eq!(native("/clear", &[]), Some(("clear", Native::StartPage)));
-        assert_eq!(native("/diff", &[]), Some(("diff", Native::Review)));
+        assert_eq!(
+            native("/clear", &[]),
+            Some(("clear", Native::StartPage, ""))
+        );
+        assert_eq!(native("/Diff ", &[]), Some(("diff", Native::Review, "")));
         assert!(matches!(
             native("/exit", &[]),
-            Some(("exit", Native::Say(_)))
+            Some(("exit", Native::Say(_), ""))
         ));
+        // With words after it, it's words for the agent; but `/model`'s
+        // name is the window's to pick.
+        assert_eq!(native("/help me find why this test fails", &[]), None);
+        assert_eq!(native("/clear the cache, then rerun", &[]), None);
+        assert_eq!(
+            native("/model opus", &[]),
+            Some(("model", Native::Model, "opus"))
+        );
         assert_eq!(native("/compact", &[]), None);
         assert_eq!(native("/clear", &[command("clear", None)]), None);
         assert_eq!(native("not /clear", &[]), None);

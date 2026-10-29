@@ -819,14 +819,20 @@ impl ChatView {
     /// that turn's in view and has something to undo or redo; or else the
     /// last turn that has, or the first to redo. The bar says which, or
     /// that none has.
-    pub(super) fn undo_key(&mut self, redo: bool) {
+    fn undo_key(&mut self, redo: bool) {
         // The cursor's turn only if it's in view: what's undone is never
         // out of sight.
         let here = (self.cursor.map(|cursor| cursor.text.turn)).filter(|&turn| {
             (self.shown.iter()).any(|shown| shown.key.turn == turn)
                 && (self.node.turns.get(turn)).is_some_and(|turn| super::undoable(turn, redo))
         });
-        let Some(turn) = here.or_else(|| self.turn_to_undo(redo)) else {
+        self.undo_turn(here.or_else(|| self.turn_to_undo(redo)), redo);
+    }
+
+    /// Undoes what `turn` changed in files, or with `redo` makes it again,
+    /// saying so in the bar, or that there's no such turn if `None`.
+    pub(super) fn undo_turn(&mut self, turn: Option<usize>, redo: bool) {
+        let Some(turn) = turn else {
             let undo = if redo { "redo" } else { "undo" };
             self.say(format!("no turn has files to {undo}"));
             return;

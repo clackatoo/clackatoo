@@ -1123,14 +1123,14 @@ pub fn box_bar(node: &ChatNode, open: &OpenChat, now: u64, offset: Offset<'_>) -
     if open.folds.get(SETTINGS_FOLD).copied().unwrap_or(false) {
         bar = bar.child(sheet(
             "Agent settings",
-            Action::Settings,
+            &Action::Settings,
             crate::settings::panel(node, &open.picker, &open.capabilities),
         ));
     }
     if open.folds.get(USAGE_FOLD).copied().unwrap_or(false) {
         bar = bar.child(sheet(
             "Context & usage",
-            Action::Usage,
+            &Action::Usage,
             usage_panel(node, open, now, offset),
         ));
     }
@@ -1218,7 +1218,7 @@ pub const SETTINGS_FOLD: &str = "settings";
 
 /// The same accessible sheet for settings and account usage. Its close button
 /// takes focus; the app contains Tab and restores focus when it closes.
-fn sheet(title: &str, close: Action, content: Element) -> Element {
+fn sheet(title: &str, close: &Action, content: Element) -> Element {
     el("div")
         .class("sheet-layer")
         .child(
@@ -1226,7 +1226,7 @@ fn sheet(title: &str, close: Action, content: Element) -> Element {
                 .class("sheet-backdrop")
                 .attr("tabindex", "-1")
                 .attr("aria-label", "Close panel")
-                .action(&close),
+                .action(close),
         )
         .child(
             el("section")
@@ -1242,7 +1242,7 @@ fn sheet(title: &str, close: Action, content: Element) -> Element {
                             el("button")
                                 .class("quiet sheet-close")
                                 .attr("aria-label", "Close panel")
-                                .action(&close)
+                                .action(close)
                                 .text("Done"),
                         ),
                 )
@@ -1264,16 +1264,15 @@ pub fn commands(node: &ChatNode, draft: &str) -> Element {
         return list;
     };
     let typed = typed.to_lowercase();
-    let matching: Vec<(usize, &clackatoo_protocol::AgentCommand)> = (node.commands.iter())
-        .enumerate()
-        .filter(|(_, command)| command.name.to_lowercase().starts_with(&typed))
+    let matching: Vec<&clackatoo_protocol::AgentCommand> = (node.commands.iter())
+        .filter(|command| command.name.to_lowercase().starts_with(&typed))
         .take(MOST_COMMANDS_SHOWN)
         .collect();
     if matching.is_empty() {
         return list;
     }
     list = list.child(el("div").class("queue-heading").text("Commands"));
-    for (at, command) in matching {
+    for command in matching {
         let hint = command
             .hint
             .as_ref()
@@ -1282,7 +1281,7 @@ pub fn commands(node: &ChatNode, draft: &str) -> Element {
             el("button")
                 .class("queued-message")
                 .attr("type", "button")
-                .action(&Action::Command(at))
+                .action(&Action::Command(command.name.clone()))
                 .child(
                     el("div")
                         .class("queued-text")
@@ -1808,7 +1807,7 @@ mod tests {
         let taps: Vec<String> = (commands(&node, "/re").find_all("data-action").iter())
             .filter_map(|element| element.get("data-action").map(str::to_owned))
             .collect();
-        assert_eq!(taps, ["command:1"]);
+        assert_eq!(taps, ["command:review"]);
     }
 
     fn open() -> OpenChat {

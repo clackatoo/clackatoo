@@ -951,7 +951,8 @@ impl State {
         let offered = (self.open.as_ref())
             .and_then(|open| open.view.as_ref()?.chat())
             .map_or(&[][..], |node| node.commands.as_slice());
-        if let Some(name) = clackatoo_protocol::interface_command(&text, offered) {
+        // Words after its name are words for the agent: `/help me`.
+        if let Some((name, "")) = clackatoo_protocol::interface_command(&text, offered) {
             self.note = Some(format!(
                 "/{name} is the agent's own interface's, so it isn't sent: use it in the clackatoo window."
             ));
@@ -1771,8 +1772,15 @@ mod tests {
         assert!(state.take_outbox().is_empty());
         assert_eq!(state.drafts[&TerminalId(4)], "/clear");
         assert!(state.note.as_deref().unwrap().contains("/clear"));
-        // The agent's own commands go as any message does.
+        // The agent's own commands go as any message does, and so do
+        // words after one of those names.
         state.drafts.insert(TerminalId(4), "/compact".into());
+        state.submit(false);
+        assert_eq!(state.take_outbox().len(), 1);
+        state.receive(ServerMessage::Response(Response::Done));
+        state
+            .drafts
+            .insert(TerminalId(4), "/help me find why this test fails".into());
         state.submit(false);
         assert_eq!(state.take_outbox().len(), 1);
     }

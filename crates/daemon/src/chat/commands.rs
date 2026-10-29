@@ -23,6 +23,9 @@ use super::plan::one_line;
 /// offers a few hundred at most.
 const MOST_COMMANDS: usize = 256;
 
+/// The most of what an agent says are commands looked at, kept or not.
+const MOST_LOOKED_AT: usize = 4 * MOST_COMMANDS;
+
 /// The most characters of a command's name: longer isn't a name anyone
 /// types.
 const MOST_NAME: usize = 64;
@@ -57,14 +60,17 @@ impl HostedChat {
 /// once.
 fn kept(said: Vec<AvailableCommand>) -> Vec<AgentCommand> {
     let mut kept: Vec<AgentCommand> = Vec::new();
-    for command in said {
+    let mut names = std::collections::HashSet::new();
+    // Past this many, an agent filling the list with names that can't be
+    // typed or come again isn't looked at further.
+    for command in said.into_iter().take(MOST_LOOKED_AT) {
         if kept.len() == MOST_COMMANDS {
             break;
         }
         let Some(name) = name(&command.name) else {
             continue;
         };
-        if kept.iter().any(|known| known.name == name) {
+        if !names.insert(name.clone()) {
             continue;
         }
         let hint = match command.input {
@@ -144,6 +150,10 @@ mod tests {
         let commands = kept(said(&json));
         assert_eq!(commands.len(), 1, "{commands:?}");
         assert_eq!(commands[0].description, "first");
+        // A list of nothing but those isn't read to its end.
+        let junk = vec![r#"{"name":"a b","description":""}"#; MOST_LOOKED_AT];
+        let json = format!(r#"[{},{{"name":"late","description":""}}]"#, junk.join(","));
+        assert!(kept(said(&json)).is_empty());
     }
 
     #[test]

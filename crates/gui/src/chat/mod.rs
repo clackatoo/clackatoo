@@ -2953,6 +2953,8 @@ mod tests {
             "{:?}",
             view.said
         );
+        assert_eq!(view.editor.raw_text(), "/exit", "kept, as nothing was done");
+        view.editor.set_text("");
         typed(&mut view, "/export");
         enter(&mut view, false);
         let settled = view.settle(&mut fonts);
@@ -2968,6 +2970,61 @@ mod tests {
         enter(&mut view, false);
         let settled = view.settle(&mut fonts);
         assert_eq!(settled.actions, [ChatAction::Send("/clear".into())]);
+    }
+
+    #[test]
+    fn words_after_an_interface_commands_name_go_to_the_agent_whole() {
+        let mut fonts = fonts();
+        let words = [
+            "/help me find why this test fails…",
+            "/clear the build cache, then rerun it",
+            "/Diff against main please",
+        ];
+        for text in words {
+            // Sent alone, queued and steered alike.
+            for (queue, ctrl) in [(false, false), (true, false), (true, true)] {
+                let mut view = with_commands();
+                view.queue_supported = queue;
+                typed(&mut view, text);
+                press(
+                    &mut view,
+                    &Key::Named(NamedKey::Enter),
+                    Some("\r"),
+                    Modifiers {
+                        ctrl,
+                        ..Modifiers::default()
+                    },
+                );
+                let settled = view.settle(&mut fonts);
+                let sent = match &settled.actions[..] {
+                    [ChatAction::Send(sent) | ChatAction::Submit { text: sent, .. }] => sent,
+                    other => panic!("{text:?}: {other:?}"),
+                };
+                assert_eq!(sent, text);
+                assert!(settled.commands.is_empty(), "{text:?}");
+            }
+        }
+        // One with nothing like it here says so, and keeps what's typed.
+        let mut view = with_commands();
+        typed(&mut view, "/exit");
+        enter(&mut view, false);
+        assert!(view.settle(&mut fonts).actions.is_empty());
+        assert_eq!(view.editor.raw_text(), "/exit");
+        // `/model NAME` picks the agent's model so named, ignoring case;
+        // a name it hasn't is words.
+        let mut view = with_settings();
+        typed(&mut view, "/model Sonnet");
+        enter(&mut view, false);
+        let settled = view.settle(&mut fonts);
+        assert_eq!(settled.actions, [set("model", "sonnet")]);
+        assert_eq!(view.editor.raw_text(), "");
+        typed(&mut view, "/model of the solar system");
+        enter(&mut view, false);
+        let settled = view.settle(&mut fonts);
+        assert_eq!(
+            settled.actions,
+            [ChatAction::Send("/model of the solar system".into())]
+        );
     }
 
     #[test]
