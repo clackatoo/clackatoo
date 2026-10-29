@@ -3185,10 +3185,18 @@ fn compacting_the_context_shows_as_a_line_across_the_turn_for_claude_and_codex()
         .unwrap();
     let codex = newest_chat(&mut client);
     wait_for_chat(&mut client, codex, |node| node.state == ChatState::Ready);
-    let node = ask(&mut client, codex, "compact");
-    let items = &node.turns.last().unwrap().items;
-    assert_eq!(items[0], Item::Compacted(String::new()));
-    assert_eq!(last_words(&node), "compacted\n");
+    // Codex's, as a tool call it names so, and as a notice, its older way.
+    for script in ["compact", "compact-legacy"] {
+        let node = ask(&mut client, codex, script);
+        let items = &node.turns.last().unwrap().items;
+        assert_eq!(items[0], Item::Compacted(String::new()), "{script}");
+        assert!(
+            !items.iter().any(|item| matches!(item, Item::Tool(_))),
+            "{items:?}"
+        );
+        assert_eq!(last_words(&node), "compacted\n");
+        assert_eq!(node.notice, None);
+    }
 }
 
 #[test]
@@ -19489,6 +19497,157 @@ fn a_real_codex_session_stops_and_takes_queued_messages() {
     assert!(words[1].contains("two"), "{node:#?}");
     assert!(words[2].contains("three"), "{node:#?}");
     eprintln!("native steering: {}", node.delivery.native_steering);
+}
+
+/// Codex, on its cheapest model, asked for ACP's notices (CLACKA-197):
+/// a command's output still shows; in Read-only it asks before writing
+/// a file, and the answer holds; a message steers a running turn; set from
+/// the box, Plan mode plans and asks to implement the plan, and approved,
+/// Codex implements it and leaves Plan mode itself; and `/compact` is the
+/// turn's compaction line. The adapter is found as for
+/// [`a_real_codex_session_stops_and_takes_queued_messages`]; its traffic
+/// is in `$TMPDIR/acp-codex-parity`, to diff a run with notices against
+/// one without (edit `agent::client_capabilities`).
+#[test]
+#[ignore = "talks to a real model: run with --ignored"]
+#[allow(clippy::too_many_lines, reason = "one session, scenario by scenario")]
+fn a_real_codex_plans_from_the_box_and_says_its_notices_as_such() {
+    let Some(command) = real_adapter("codex", "CLACKATOO_REAL_CODEX") else {
+        return;
+    };
+    let trace = live_trace("codex-parity");
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent("codex", command)];
+        config.agents.trace = Some(trace.clone());
+    });
+    let git = std::env::temp_dir().join(".git");
+    let _git = (!git.exists()).then(|| GitLeft(git));
+    let mut client = daemon.client();
+    let client = &mut client;
+    client
+        .new_workspace(None, new_chat_with(Some("codex")))
+        .unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minute = Duration::from_mins(1);
+    let limit = 2 * minute;
+    wait_for_chat_for(client, chat, minute, |node| node.state == ChatState::Ready);
+    let set = |client: &mut Client, setting: &str, value: &str| {
+        client
+            .chat(
+                chat,
+                ChatAction::Set {
+                    setting: setting.into(),
+                    value: value.into(),
+                },
+            )
+            .unwrap();
+        wait_for_chat_for(client, chat, minute, |node| {
+            node.settings
+                .iter()
+                .any(|known| known.id == setting && known.value == value)
+        });
+    };
+    set(client, "model", "gpt-6-luna");
+    set(client, "reasoning_effort", "low");
+    let dir = daemon.dir.path();
+    let notes = dir.join("notes.txt");
+    std::fs::write(&notes, "alpha\n").unwrap();
+
+    // A command's output.
+    let node = live_send(
+        client,
+        chat,
+        "Run `echo clackatoo-$((6*7))` in your shell, then reply with what it printed.",
+        limit,
+    );
+    assert_ended_whole(&node);
+    assert!(
+        live_tools(&node)
+            .iter()
+            .any(|tool| tool_text(tool).contains("clackatoo-42")),
+        "{node:#?}"
+    );
+
+    // Asked before writing, in Read-only.
+    set(client, "mode", "read-only");
+    let text = format!(
+        "Run `printf 'beta\\n' >> {}` with your shell tool, setting its sandbox_permissions \
+         to require_escalated with a short justification, so I'm asked to approve it. Then \
+         reply with the word done.",
+        notes.display()
+    );
+    client.chat(chat, ChatAction::Send(text.clone())).unwrap();
+    let node = live_wait(client, chat, limit, |node| {
+        node.turns.last().is_some_and(|turn| turn.prompt == text) && live_idle(node)
+    });
+    assert_ended_whole(&node);
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "alpha\nbeta\n");
+    set(client, "mode", "agent");
+
+    // Steered while it runs a command.
+    let first = "Run exactly `sleep 8` in your shell, then reply with the word slept.";
+    client
+        .chat(chat, ChatAction::Send(first.to_owned()))
+        .unwrap();
+    live_wait(client, chat, limit, |node| {
+        node.turns.last().is_some_and(|turn| turn.prompt == first)
+            && live_tools(node)
+                .iter()
+                .any(|tool| tool.status == ToolStatus::Running)
+    });
+    live_submit(
+        client,
+        chat,
+        "Also end your reply with the word steered.",
+        true,
+    );
+    let node = live_wait(client, chat, limit, |node| {
+        live_idle(node)
+            && (node.turns.iter().rev())
+                .take(2)
+                .any(|turn| last_words_of(turn).to_lowercase().contains("steered"))
+    });
+    eprintln!("native steering: {}", node.delivery.native_steering);
+
+    // Plan mode, from the box.
+    let plan_mode = |node: &ChatNode| {
+        (node.settings.iter())
+            .find(|setting| setting.is_plan_mode())
+            .cloned()
+            .expect("Codex's Plan mode")
+    };
+    set(client, "collaboration_mode", "plan");
+    let text = format!(
+        "Plan adding the line gamma to the end of {}. A one-step plan; change nothing yet.",
+        notes.display()
+    );
+    client.chat(chat, ChatAction::Send(text.clone())).unwrap();
+    let node = wait_for_chat_for(client, chat, limit, |node| {
+        node.question.as_ref().is_some_and(|question| question.plan.is_some())
+            || (node.turns.last().is_some_and(|turn| turn.prompt == text) && live_idle(node))
+    });
+    let question = node.question.expect("asked to implement the plan");
+    let implement = (question.choices.iter())
+        .find(|choice| choice.id == "implement_plan")
+        .expect("Codex's implement_plan");
+    answer(client, chat, Some(implement.id.clone()));
+    let node = live_wait(client, chat, limit, |node| {
+        live_idle(node) && !plan_mode(node).planning()
+    });
+    assert_eq!(
+        std::fs::read_to_string(&notes).unwrap(),
+        "alpha\nbeta\ngamma\n",
+        "{node:#?}"
+    );
+
+    // Compacting.
+    let node = live_send(client, chat, "/compact", limit);
+    let items = &node.turns.last().unwrap().items;
+    assert!(
+        items.iter().any(|item| matches!(item, Item::Compacted(_))),
+        "{node:#?}"
+    );
+    eprintln!("notice: {:?}", node.notice);
 }
 
 /// A daemon whose agent is the fake one with `flags`, noting what it does
