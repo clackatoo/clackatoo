@@ -351,9 +351,9 @@ impl HostedChat {
         );
         // Messages handed over wait, shown paused, for the user to send
         // or drop: any may have been delivered as the upgrade came. An
-        // empty queue has nothing to look at, and paused, would hold a
-        // message sent while the chat is busy for good (CLACKA-185).
-        self.node.delivery.paused = !self.user_queue.messages.is_empty();
+        // empty queue stays paused too, so one paused by a failure keeps
+        // that; a message the user sends next unpauses it (CLACKA-185).
+        self.node.delivery.paused = true;
         self.show_queue();
     }
 }

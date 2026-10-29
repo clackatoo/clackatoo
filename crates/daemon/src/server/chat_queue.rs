@@ -25,7 +25,11 @@ impl Daemon {
                 "A steering message is already being delivered.".into(),
             ));
         }
-        if idle && !state.has_user_queue() {
+        // An empty paused queue holds nothing awaiting the user's say, and
+        // a new message is fresh intent: unpause it, busy or not, or a
+        // message sent mid-turn after an upgrade waits for good
+        // (CLACKA-185).
+        if !state.has_user_queue() {
             state.pause_queue(false);
         }
         let id = state

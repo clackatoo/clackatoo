@@ -4478,16 +4478,19 @@ mod tests {
         assert!(resumed.node.delivery.paused, "kept, shown paused");
     }
 
-    /// An empty queue handed over comes back as it went, not paused: a
-    /// message sent later while the chat is busy goes once it's idle
-    /// (CLACKA-185).
+    /// An empty queue handed over comes back paused, as a full one does,
+    /// so a pause from a failure survives; sending a message unpauses it
+    /// (the server does so for an empty queue, busy or not), and then it
+    /// goes (CLACKA-185).
     #[test]
-    fn an_empty_queue_handed_over_comes_back_unpaused() {
+    fn an_empty_queue_handed_over_comes_back_paused() {
         let c = chat();
         let record = c.hand_over_queue();
         let mut resumed = chat();
         resumed.resume_queue(&mut [record]);
-        assert!(!resumed.node.delivery.paused);
+        assert!(resumed.node.delivery.paused);
+        assert!(!resumed.has_user_queue());
+        resumed.pause_queue(false);
         let id = resumed.enqueue_user("later".into(), vec![], None).unwrap();
         assert_eq!(resumed.next_user(), Some(id));
     }
