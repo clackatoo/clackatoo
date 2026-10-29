@@ -479,7 +479,7 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
             );
         }
         if !turn.prompt.is_empty() {
-            prompt = prompt.child(el("div").class("bubble").text(turn.prompt.clone()));
+            prompt = prompt.child(message(&turn.prompt));
         }
         section = section.child(prompt);
     }
@@ -1827,6 +1827,30 @@ pub mod pairing {
     }
 }
 
+/// A message as it was typed, in its bubble, each file it mentions,
+/// `@path` (see [`clackatoo_protocol::mentions`]), a chip naming it.
+fn message(text: &str) -> Element {
+    let mut bubble = el("div").class("bubble");
+    let mut at = 0;
+    for mention in clackatoo_protocol::mentions(text) {
+        if mention.range.start > at {
+            bubble = bubble.text(&text[at..mention.range.start]);
+        }
+        let written = &text[mention.range.clone()];
+        bubble = bubble.child(
+            el("span")
+                .class("mention")
+                .attr("title", mention.path)
+                .text(written),
+        );
+        at = mention.range.end;
+    }
+    if at < text.len() {
+        bubble = bubble.text(&text[at..]);
+    }
+    bubble
+}
+
 #[cfg(test)]
 mod tests {
     use clackatoo_protocol::{
@@ -1849,6 +1873,33 @@ mod tests {
             profile: None,
             failed: None,
         }
+    }
+
+    #[test]
+    fn a_messages_mentions_are_chips_and_the_rest_its_words() {
+        let bubble = super::message("see @src/a.rs#L2 and @\"b c.md\".");
+        let kinds: Vec<String> = (bubble.children.iter())
+            .map(|node| match node {
+                Node::Text(text) => format!("text {text}"),
+                Node::Element(element) => {
+                    format!(
+                        "{} {:?}",
+                        element.get("class").unwrap(),
+                        element.get("title")
+                    )
+                }
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "text see ",
+                "mention Some(\"src/a.rs\")",
+                "text  and ",
+                "mention Some(\"b c.md\")",
+                "text .",
+            ]
+        );
     }
 
     #[test]
