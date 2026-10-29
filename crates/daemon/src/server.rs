@@ -2556,6 +2556,7 @@ impl Daemon {
             Hosted::Chat(chat) => {
                 self.close_chat(id, &chat);
                 self.forget_glance(id);
+                self.hand_back_forked(id);
                 self.agent_files.forget(id);
                 self.chat_closed_in_review(id);
                 if self.workspaces.remove_terminal(id) {

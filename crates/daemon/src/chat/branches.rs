@@ -447,7 +447,15 @@ impl HostedChat {
             uids: self.uids.within(0..keep).to_vec(),
             plan,
             title: self.title.clone(),
-            chosen: self.chosen.clone(),
+            // Its limits and profile go with it, never more than it may
+            // do; the user's keeping it, and a browser it was let use,
+            // are the chat's own, to be given the copy again.
+            chosen: (self.chosen.iter())
+                .filter(|(setting, _)| {
+                    setting != super::KEPT_SETTING && setting != super::BROWSING_SETTING
+                })
+                .cloned()
+                .collect(),
         })
     }
 
@@ -1959,6 +1967,34 @@ mod tests {
             answer(&mut chat, &format!("msg-{at}"));
         }
         chat
+    }
+
+    #[test]
+    fn a_copy_takes_the_turns_a_fork_at_the_last_point_and_the_limits_but_not_the_grants() {
+        let mut chat = talked(&["apple", "banana", "cherry"]);
+        for (setting, value) in [
+            (super::super::LIMITS_SETTING, "read-only"),
+            (super::super::KEPT_SETTING, "on"),
+            (super::super::BROWSING_SETTING, "on"),
+        ] {
+            chat.chosen.push((setting.to_owned(), value.to_owned()));
+        }
+        let copied = chat.copy_of(2).unwrap();
+        assert_eq!(copied.turns.len(), 2);
+        let plan = copied.plan.clone().unwrap();
+        assert_eq!(plan.from, "s1");
+        assert_eq!(plan.message.as_deref(), Some("msg-1"));
+        assert_eq!(plan.known, 2);
+        let has = |setting: &str| copied.chosen.iter().any(|(known, _)| known == setting);
+        assert!(has(super::super::LIMITS_SETTING));
+        assert!(!has(super::super::KEPT_SETTING));
+        assert!(!has(super::super::BROWSING_SETTING));
+        let mut copy = super::super::tests::chat();
+        let uids = copy.take_copy(copied);
+        assert_eq!(uids.len(), 2);
+        assert_eq!(prompts(&copy), ["apple", "banana"]);
+        assert_eq!(copy.fork_plan(), Some(&plan));
+        assert!(chat.copy_of(0).is_err());
     }
 
     fn answer(chat: &mut HostedChat, id: &str) {

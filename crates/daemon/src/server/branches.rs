@@ -7,9 +7,7 @@
 
 use std::collections::HashSet;
 
-use clackatoo_protocol::{
-    Error, ForkFiles, ForkPlace, PaneTerminal, Response, TerminalId, TurnFilesState,
-};
+use clackatoo_protocol::{Error, ForkFiles, ForkPlace, PaneTerminal, TerminalId, TurnFilesState};
 
 use super::Daemon;
 use super::turn_undo::Reversal;
@@ -119,6 +117,9 @@ impl Daemon {
         keep: usize,
         place: ForkPlace,
     ) -> Result<TerminalId, Error> {
+        // What's being worked out of the turns' files settles first, so
+        // what's moved is all of it.
+        self.settle_all_pending();
         let chat = self.chat_ref(id).ok_or(Error::NotAChat(id))?;
         let copied = chat.copy_of(keep).map_err(Error::Other)?;
         let (agent, cwd, tools, task, browser, size) = (
@@ -129,6 +130,8 @@ impl Daemon {
             chat.browser(),
             chat.size(),
         );
+        let last = clackatoo_protocol::turn_number(&chat.node().turns, copied.uids.len() - 1)
+            .unwrap_or(copied.uids.len());
         let pane = self.workspaces.get().pane_showing(id);
         let workspace = pane.and_then(|pane| {
             let (workspace, ..) = self.workspaces.get().find_pane(pane)?;
@@ -139,7 +142,6 @@ impl Daemon {
                 "The chat isn't in a pane to copy it beside.".to_owned(),
             ));
         };
-        self.settle_all_pending();
         let spec = self.agent_spec(&agent);
         let copy = self.next_terminal();
         let mut hosted = crate::chat::HostedChat::new(copy, size, cwd, &spec, tools, task, browser);
@@ -147,6 +149,8 @@ impl Daemon {
         let to = hosted.take_copy(copied);
         let pairs: Vec<_> = from.iter().copied().zip(to).collect();
         self.agent_files.log.move_turns(id, copy, &pairs);
+        // Handed back if the copy closes while the chat still shows them.
+        (self.agent_files.forked).insert(copy, (id, pairs.clone()));
         log::info!(
             "chat {copy} started, with {agent}, a copy of chat {id}'s first {} turns",
             pairs.len()
@@ -155,18 +159,82 @@ impl Daemon {
         self.refresh_files(id, from);
         self.refresh_files(copy, pairs.iter().map(|&(_, new)| new));
         let placed = match place {
-            ForkPlace::Here => {
-                self.workspaces.replace_terminal(pane, copy);
-                self.workspaces_changed();
-                Ok(Response::PaneCreated(pane))
+            ForkPlace::Here => match self.workspaces.replace_terminal(pane, copy) {
+                Some(_) => {
+                    self.workspaces_changed();
+                    Ok(())
+                }
+                None => Err(Error::Other("The chat's pane has gone.".to_owned())),
+            },
+            ForkPlace::Beside(beside) => {
+                (self.split(pane, beside, PaneTerminal::Existing(copy))).map(drop)
             }
-            ForkPlace::Beside(beside) => self.split(pane, beside, PaneTerminal::Existing(copy)),
-            ForkPlace::Tab => self.new_tab(workspace, PaneTerminal::Existing(copy)),
+            ForkPlace::Tab => (self.new_tab(workspace, PaneTerminal::Existing(copy))).map(drop),
         };
+        // Not shown, it's not had: closing it hands the records back.
         if let Err(err) = placed {
-            log::warn!("chat {copy}, a copy, couldn't be shown: {err}");
+            log::warn!("chat {copy}, a copy, couldn't be shown, so it's closed: {err}");
+            if self.close_terminal(copy).is_err() {
+                log::warn!("chat {copy} couldn't be closed");
+            }
+            return Err(err);
         }
+        let turns = if last == 1 {
+            "turn 1".to_owned()
+        } else {
+            format!("turns 1–{last}")
+        };
+        if let Some(chat) = self.chat(id) {
+            chat.notify(format!(
+                "Forked into chat {copy}; undo for {turns} moved with it."
+            ));
+        }
+        let left = match place {
+            ForkPlace::Here => {
+                format!(" Chat {id} is on the start page, among the chats in no pane.")
+            }
+            _ => String::new(),
+        };
+        if let Some(hosted) = self.chat(copy) {
+            hosted.notify(format!(
+                "A copy of chat {id}'s {turns}; undo for them moved here.{left}"
+            ));
+        }
+        self.collect_damage(id);
+        self.collect_damage(copy);
         Ok(copy)
+    }
+
+    /// The copy `copy` (`:fork`) closes: what its copied turns changed in
+    /// files goes back to the chat it was copied from, for the turns that
+    /// chat still shows, to be undone there again; the rest is forgotten
+    /// with the copy.
+    pub(super) fn hand_back_forked(&mut self, copy: TerminalId) {
+        let Some((source, pairs)) = self.agent_files.forked.remove(&copy) else {
+            return;
+        };
+        let Some(chat) = self.chat_ref(source) else {
+            return;
+        };
+        let back: Vec<_> = (pairs.iter())
+            .filter(|&&(old, _)| chat.turn_index(old).is_some())
+            .map(|&(old, new)| (new, old))
+            .collect();
+        if back.is_empty() {
+            return;
+        }
+        self.agent_files.log.move_turns(copy, source, &back);
+        // Records of chats copied from the copy stay its.
+        for (from, _) in self.agent_files.forked.values_mut() {
+            if *from == copy {
+                *from = source;
+            }
+        }
+        log::info!(
+            "chat {copy} closed: {} turns' undo goes back to chat {source}",
+            back.len()
+        );
+        self.refresh_files(source, back.iter().map(|&(_, old)| old));
     }
 
     /// Answers [`ChatAction::SwitchBranch`](clackatoo_protocol::ChatAction::SwitchBranch).

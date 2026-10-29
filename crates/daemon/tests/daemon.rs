@@ -13681,6 +13681,12 @@ fn undoing_a_turn_keeps_your_edits_and_redoing_puts_it_back() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "ONE\ntwo\nthree\n");
 }
 
+/// Redoes turn 2 of `copy`, undone, and waits for it to say so.
+fn notice_redo(client: &mut Client, copy: TerminalId) {
+    let notice = undo_turn(client, copy, 1, true, false);
+    assert_eq!(notice, "Redid turn 2: notes.txt.");
+}
+
 /// `:fork` (CLACKA-198): a chat's turns are copied into a new chat of
 /// its own beside it, which undoes what they changed in files from then
 /// on, the chat copied no longer; and the copy's agent, which can't fork
@@ -13723,6 +13729,21 @@ fn forking_a_chat_copies_its_turns_into_a_new_chat_that_undoes_their_files() {
     // Its agent answers, the turns before told it as a digest.
     let node = ask(&mut client, copy, "cwd");
     assert_eq!(node.turns.len(), 3);
+    let notice = client.capture(chat).unwrap().chat().unwrap().notice.clone();
+    assert_eq!(
+        notice.as_deref(),
+        Some(format!("Forked into chat {copy}; undo for turns 1–2 moved with it.").as_str())
+    );
+    // The copy closed, the turns' undo goes back to the chat copied.
+    notice_redo(&mut client, copy);
+    client
+        .request(&Request::CloseTerminal { terminal: copy })
+        .unwrap();
+    let state = turn_files(&mut client, chat, 1).map(|files| files.state);
+    assert_eq!(state, Some(TurnFilesState::Made));
+    let notice = undo_turn(&mut client, chat, 1, false, false);
+    assert_eq!(notice, "Undid turn 2: notes.txt.");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n");
     // Nothing to copy: refused.
     client.new_workspace(None, new_chat()).unwrap();
     let list = client.watch_workspaces().unwrap().list;

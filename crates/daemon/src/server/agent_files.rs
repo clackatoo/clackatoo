@@ -94,6 +94,17 @@ pub(super) struct AgentFiles {
     /// them.
     pub(super) captures: Vec<Capture>,
     pub(super) log: EditLog,
+    /// Each chat copied from another (`:fork`), with that chat and the
+    /// turns copied, by their uids there and in the copy: what they
+    /// changed in files goes back if the copy closes. Not handed over: a
+    /// copy closed after an upgrade forgets them, as any chat does.
+    pub(super) forked: std::collections::HashMap<
+        TerminalId,
+        (
+            TerminalId,
+            Vec<(crate::chat::TurnUid, crate::chat::TurnUid)>,
+        ),
+    >,
     /// Works out changes to big files off the loop.
     settler: Settler,
     /// The changes to files being worked out by `settler`, each holding
