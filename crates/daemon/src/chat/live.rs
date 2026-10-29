@@ -266,6 +266,7 @@ fn resume_question(live: handover::LiveQuestion) -> Option<(Asker, Question)> {
         own: live.own,
         form: None,
         plan: live.plan,
+        tool: None,
     };
     Some((asker, question))
 }

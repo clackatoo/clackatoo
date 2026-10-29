@@ -372,7 +372,8 @@ impl Digest<'_> {
     fn tools(&self, turn: &Turn) -> String {
         let mut kinds: Vec<(&str, Vec<String>)> = Vec::new();
         for item in &turn.items {
-            let Item::Tool(tool) = item else { continue };
+            // A subagent's tools too: what it changed is the chat's.
+            let Some(tool) = item.tool() else { continue };
             let (verb, targets): (&str, Vec<String>) = match tool.kind {
                 ToolKind::Execute => ("ran", vec![format!("`{}`", one_line(&tool.title, 60))]),
                 ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {

@@ -1192,6 +1192,7 @@ fn a_chat_asking_something_arrives_in_normal_mode_and_keeps_the_windows() {
             own: false,
             form: None,
             plan: None,
+            tool: None,
         }),
         ..ChatNode::default()
     };
@@ -1238,6 +1239,7 @@ fn a_chat_asking_something_is_answered_from_normal_mode_once_its_arrived() {
             own: false,
             form: None,
             plan: None,
+            tool: None,
         }),
         ..ChatNode::default()
     };
@@ -1339,6 +1341,7 @@ fn an_answer_armed_is_dropped_when_the_command_line_or_a_binding_has_the_next_ke
             own: false,
             form: None,
             plan: None,
+            tool: None,
         }),
         ..ChatNode::default()
     };

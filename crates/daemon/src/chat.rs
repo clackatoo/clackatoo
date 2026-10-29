@@ -402,6 +402,9 @@ pub(crate) struct HostedChat {
     /// The mode a new chat asks for when its session first opens.
     starting_mode: Option<String>,
     journal: Journal,
+    /// Where what subagents did stands in the turn answering: see
+    /// `nested::Index`.
+    nest: nested::Index,
     /// What each tool of the turn being answered last said it changed in
     /// files, by its ID.
     diffs: Vec<(String, Vec<RawDiff>)>,
@@ -653,6 +656,7 @@ impl HostedChat {
             ],
             starting_mode: agent.starting_mode.clone(),
             journal: Journal::default(),
+            nest: nested::Index::default(),
             diffs: Vec::new(),
             relations: Relations::default(),
             known: 0,
@@ -1850,6 +1854,7 @@ impl HostedChat {
             own: true,
             form: None,
             plan: None,
+            tool: None,
         };
         self.next_question += 1;
         self.asking.push_back((asker, question));
@@ -1890,6 +1895,7 @@ impl HostedChat {
             own: true,
             form: None,
             plan: None,
+            tool: None,
         };
         self.next_question += 1;
         // First: it's why the chat is stuck, and a suggestion to install
@@ -2251,6 +2257,7 @@ impl HostedChat {
             own: false,
             form: None,
             plan: elicit::plan(tool, options),
+            tool: Some(id),
         };
         self.next_question += 1;
         self.asking.push_back((Asker::Agent(request), question));
@@ -2308,6 +2315,7 @@ impl HostedChat {
             own: false,
             form: None,
             plan: None,
+            tool: None,
         };
         self.next_question += 1;
         self.asking.push_back((Asker::Tool(call), question));
@@ -2400,14 +2408,26 @@ impl HostedChat {
         match update {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 self.progressed();
-                self.message_image(&chunk.content);
-                let parent = self.parent_here(chunk.meta.as_ref(), None);
-                self.write(&chunk.content, false, parent.as_deref());
+                match self.under(chunk.meta.as_ref(), None) {
+                    nested::Under::Own => {
+                        self.message_image(&chunk.content);
+                        self.write(&chunk.content, false, None);
+                    }
+                    nested::Under::Parent(parent) => {
+                        self.write(&chunk.content, false, Some(&parent));
+                    }
+                    nested::Under::Dropped(_) => {}
+                }
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 self.progressed();
-                let parent = self.parent_here(chunk.meta.as_ref(), None);
-                self.write(&chunk.content, true, parent.as_deref());
+                match self.under(chunk.meta.as_ref(), None) {
+                    nested::Under::Own => self.write(&chunk.content, true, None),
+                    nested::Under::Parent(parent) => {
+                        self.write(&chunk.content, true, Some(&parent));
+                    }
+                    nested::Under::Dropped(_) => {}
+                }
             }
             SessionUpdate::ToolCall(call) => {
                 self.progressed();
@@ -2431,7 +2451,15 @@ impl HostedChat {
                     native_output(&mut tool, call.raw_output.as_ref());
                 }
                 let (id, wrote) = (tool.id.clone(), self.wrote(&tool));
-                let parent = self.parent_here(call.meta.as_ref(), Some(&id));
+                let parent = match self.under(call.meta.as_ref(), Some(&id)) {
+                    nested::Under::Own => None,
+                    nested::Under::Parent(parent) => Some(parent),
+                    // What it wrote is still the agent's, to undo.
+                    nested::Under::Dropped(root) => {
+                        self.drop_tool(&id, &root);
+                        return wrote;
+                    }
+                };
                 self.set_tool(tool, parent);
                 self.add_output(&id, call.meta.as_ref());
                 self.compaction(&id, call.meta.as_ref(), call.raw_output.as_ref());
@@ -2502,7 +2530,14 @@ impl HostedChat {
                 // as an append, not the tool again. Claude Code's adapter
                 // can name a call's subagent first in an update, as for
                 // one it asked about before it streamed.
-                let parent = self.parent_here(update.meta.as_ref(), Some(&id));
+                let parent = match self.under(update.meta.as_ref(), Some(&id)) {
+                    nested::Under::Own => None,
+                    nested::Under::Parent(parent) => Some(parent),
+                    nested::Under::Dropped(root) => {
+                        self.drop_tool(&id, &root);
+                        return wrote;
+                    }
+                };
                 let nests = parent.is_some() && !self.is_nested(&id);
                 if known.as_ref() != Some(&tool) || nests {
                     self.set_tool(tool, parent);
@@ -2784,9 +2819,12 @@ impl HostedChat {
             items.push(item.clone());
             let at = items.len() - 1;
             self.patch_item(index, at, item);
-            if let Some(parent) = parent {
-                self.bound_nested(index, parent);
+            if parent.is_some() {
+                self.nested_added(index);
             }
+        }
+        if let Some(parent) = parent {
+            self.nested_grew(parent, text.len(), 0);
         }
         let items = &mut self.node.turns[index].items;
         if let Some(Item::Words(words) | Item::Thought(words)) =
@@ -2840,21 +2878,27 @@ impl HostedChat {
 
     /// Adds `tool` to the turn answering, or changes the one with its ID:
     /// under the tool call `parent`, whose subagent used it, if that's
-    /// given. A tool once nested stays where it is.
+    /// given. A tool once nested stays where it is. One of clackatoo's own
+    /// rows is never nested, whatever an agent said of its ID.
     fn set_tool(&mut self, tool: Tool, parent: Option<String>) {
         let Some(index) = self.answering_turn() else {
             return;
         };
+        let own = tool.id.starts_with(nested::OWN);
         let items = &mut self.node.turns[index].items;
         let at = (items.iter()).position(|item| item.tool().is_some_and(|old| old.id == tool.id));
-        let parent = at
-            .and_then(|at| items[at].parent().map(str::to_owned))
-            .or(parent);
-        let added = at.is_none();
+        let was = at.and_then(|at| Some((items[at].parent()?.to_owned(), item_weight(&items[at]))));
+        let parent = match (own, &was) {
+            (true, _) => None,
+            (false, Some((was, _))) => Some(was.clone()),
+            (false, None) => parent,
+        };
         let item = match &parent {
             Some(parent) => Item::nested(parent.clone(), Item::Tool(tool)),
             None => Item::Tool(tool),
         };
+        let weight = item_weight(&item);
+        let added = at.is_none();
         let at = if let Some(at) = at {
             items[at] = item.clone();
             at
@@ -2865,8 +2909,13 @@ impl HostedChat {
         // Only the tool goes, not its turn: a turn of many tools, each
         // with its output, would be sent again with every change.
         self.patch_item(index, at, item);
-        if let (true, Some(parent)) = (added, &parent) {
-            self.bound_nested(index, parent);
+        match (&parent, was) {
+            (None, None) => {}
+            // It changed where it was.
+            (Some(parent), Some((_, old))) => self.nested_grew(parent, weight, old),
+            (Some(_), None) if added => self.nested_added(index),
+            // Nested where it was, or taken out: what's under what moved.
+            _ => self.nest_changed(),
         }
     }
 

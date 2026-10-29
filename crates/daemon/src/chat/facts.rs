@@ -295,7 +295,7 @@ impl HostedChat {
             .find(|id| {
                 !items
                     .iter()
-                    .any(|item| matches!(item, Item::Tool(tool) if tool.id == *id))
+                    .any(|item| item.tool().is_some_and(|tool| tool.id == *id))
             })
             .unwrap_or_else(|| format!("clackatoo-agent-image:{most}+"))
     }

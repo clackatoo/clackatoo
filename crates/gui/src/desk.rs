@@ -4203,6 +4203,7 @@ mod tests {
             own: false,
             form: None,
             plan: None,
+            tool: None,
         };
         for (terminal, node) in [(2, chat(None)), (3, chat(Some(question)))] {
             // Asking in a tab not shown: drawn, for its name to say so.

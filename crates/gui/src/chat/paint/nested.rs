@@ -260,4 +260,60 @@ mod tests {
         });
         assert_eq!(words.as_deref(), Some("I'll look for the needle in src."));
     }
+
+    #[test]
+    fn a_question_about_a_subagents_tool_opens_the_cards_its_folded_under() {
+        let mut fonts = fonts();
+        let mut chat = ChatView::new(String::new(), delegating());
+        paint(&mut chat, &mut fonts);
+        assert!(!chat.open_cards.contains("task"));
+        let question = clackatoo_protocol::Question {
+            id: 4,
+            title: "Read src/parse.rs".into(),
+            choices: Vec::new(),
+            own: false,
+            form: None,
+            plan: None,
+            tool: Some("read".into()),
+        };
+        let patch = clackatoo_protocol::Patch::Chat(clackatoo_protocol::ChatPatch::Question(Some(
+            question,
+        )));
+        chat.apply(&clackatoo_protocol::ViewUpdate::Patch(vec![patch]));
+        paint(&mut chat, &mut fonts);
+        assert!(chat.open_cards.contains("task"));
+        assert!(
+            shown(&chat).contains(&(ITEMS + 4, true)),
+            "{:?}",
+            shown(&chat)
+        );
+    }
+
+    #[test]
+    fn a_folded_tasks_line_says_what_its_subagent_changed_and_ran() {
+        let mut node = delegating();
+        let edit = Item::Tool(Tool {
+            id: "edit".into(),
+            title: "Edit src/parse.rs".into(),
+            status: ToolStatus::Done,
+            kind: ToolKind::Edit,
+            content: Vec::new(),
+            locations: vec![clackatoo_protocol::Location {
+                path: "src/parse.rs".into(),
+                line: Some(3),
+            }],
+            exit: None,
+        });
+        node.turns[0].items.push(Item::nested("task".into(), edit));
+        if let Item::Tool(task) = &mut node.turns[0].items[0] {
+            task.status = ToolStatus::Done;
+        }
+        let mut fonts = fonts();
+        let mut chat = ChatView::new(String::new(), node);
+        paint(&mut chat, &mut fonts);
+        assert_eq!(
+            task_line(&chat).as_deref(),
+            Some("↳ Done · 3 tool uses · edited 1 file")
+        );
+    }
 }

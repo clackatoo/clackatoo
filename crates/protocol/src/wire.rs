@@ -1552,6 +1552,7 @@ mod tests {
                 own: false,
                 form: None,
                 plan: None,
+                tool: None,
             })))
         };
         let choices = |patches: Vec<Patch>| match &patches[..] {

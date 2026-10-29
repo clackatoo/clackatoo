@@ -401,6 +401,7 @@ fn node(id: TerminalId) -> ChatNode {
             ],
             form: None,
             plan: None,
+            tool: None,
         });
     }
     node

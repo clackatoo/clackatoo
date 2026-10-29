@@ -683,6 +683,7 @@ mod tests {
             own: false,
             form: None,
             plan: None,
+            tool: None,
         });
         let mut pane = ChatPane::of_snapshot(TerminalId(1), &snapshot(node));
         pane.enter_normal_mode();

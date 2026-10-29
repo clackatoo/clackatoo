@@ -492,6 +492,7 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
         section = section.child(el("div").class("from").text(said));
     }
     let answer = answer_start(turn);
+    let asked = (node.question.as_ref()).and_then(|question| question.tool.as_deref());
     let running = turn.end.is_none();
     if answer > 0 || running {
         let key = format!("t{index}");
@@ -508,10 +509,11 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
         if opened {
             work = work.attr("open", "");
         }
-        work = work.children(items_view(turn, 0..answer, open, index));
+        work = work.children(items_view(turn, 0..answer, (open, asked), index));
         section = section.child(work);
     }
-    section = section.children(items_view(turn, answer..turn.items.len(), open, index));
+    let rest = answer..turn.items.len();
+    section = section.children(items_view(turn, rest, (open, asked), index));
     for (at, activity) in node
         .activities
         .iter()
@@ -609,34 +611,64 @@ pub fn next_second(node: &ChatNode, online: Online, now: u64) -> Option<u64> {
     Some(sent + (now.saturating_sub(sent) / 1000 + 1) * 1000)
 }
 
+/// What subagents did in a turn, as the phone folds it under their tools.
+struct Nesting<'a> {
+    work: std::collections::HashMap<&'a str, clackatoo_protocol::NestedWork>,
+    /// The turn's tools, and the tool call each subagent's was under.
+    tools: std::collections::HashMap<&'a str, Option<&'a str>>,
+    /// The cards the tool the agent asks about is folded under: they're
+    /// open, so what's asked about shows.
+    asked: std::collections::HashSet<&'a str>,
+}
+
+impl<'a> Nesting<'a> {
+    fn of(turn: &'a Turn, asked: Option<&str>) -> Self {
+        let work = turn.nested_work();
+        let mut tools = std::collections::HashMap::new();
+        let mut over = std::collections::HashSet::new();
+        if !work.is_empty() {
+            tools = (turn.items.iter())
+                .filter_map(|item| Some((item.tool()?.id.as_str(), item.parent())))
+                .collect();
+            let mut at = asked.and_then(|id| tools.get(id).copied().flatten());
+            for _ in 0..DEEPEST {
+                let Some(id) = at else { break };
+                over.insert(id);
+                at = tools.get(id).copied().flatten();
+            }
+        }
+        Self {
+            work,
+            tools,
+            asked: over,
+        }
+    }
+}
+
 /// The items of `turn`, turn `index`, in `range`: each the agent's own,
 /// and under each tool call that started a subagent, what the subagent
 /// did, folded under a line saying what it does now and how many tools
-/// it used. What a subagent of no tool of the turn did shows as the
-/// agent's own.
+/// it used, unless what the agent asks about is in it. What a subagent
+/// of no tool of the turn did shows on its own.
 fn items_view(
     turn: &Turn,
     range: std::ops::Range<usize>,
-    open: &OpenChat,
+    (open, asked): (&OpenChat, Option<&str>),
     index: usize,
 ) -> Vec<Element> {
-    let work = turn.nested_work();
-    let tools: std::collections::HashSet<&str> = if work.is_empty() {
-        std::collections::HashSet::new()
-    } else {
-        (turn.items.iter())
-            .filter_map(|item| item.tool().map(|tool| tool.id.as_str()))
-            .collect()
-    };
+    let nesting = Nesting::of(turn, asked);
     let mut shown = Vec::new();
     for at in range {
         let item = &turn.items[at];
-        if item.parent().is_some_and(|parent| tools.contains(parent)) {
+        if item
+            .parent()
+            .is_some_and(|parent| nesting.tools.contains_key(parent))
+        {
             continue;
         }
         shown.push(item_view(item.inner(), open, index, at));
         if let Some(tool) = item.tool() {
-            shown.extend(nested_view(turn, tool, (&work, DEEPEST), open, index));
+            shown.extend(nested_view(turn, tool, (&nesting, DEEPEST), open, index));
         }
     }
     shown
@@ -653,21 +685,21 @@ const DEEPEST: usize = 8;
 fn nested_view(
     turn: &Turn,
     tool: &Tool,
-    (work, depth): (
-        &std::collections::HashMap<&str, clackatoo_protocol::NestedWork>,
-        usize,
-    ),
+    (nesting, depth): (&Nesting<'_>, usize),
     open: &OpenChat,
     index: usize,
 ) -> Option<Element> {
-    let sum = work.get(tool.id.as_str()).filter(|_| depth > 0)?;
+    let sum = nesting.work.get(tool.id.as_str()).filter(|_| depth > 0)?;
     let summary = el("summary").text(turn.nested_line(tool, sum));
     let mut details = folded(open, format!("t{index}n{}", tool.id), "nested", summary);
+    if nesting.asked.contains(tool.id.as_str()) {
+        details = details.attr("open", "");
+    }
     for (at, item) in turn.items.iter().enumerate().take(sum.last + 1) {
         if item.parent() == Some(tool.id.as_str()) {
             details = details.child(item_view(item.inner(), open, index, at));
             if let Some(inner) = item.tool() {
-                let deeper = nested_view(turn, inner, (work, depth - 1), open, index);
+                let deeper = nested_view(turn, inner, (nesting, depth - 1), open, index);
                 details = details.children(deeper);
             }
         }
@@ -2042,6 +2074,22 @@ mod tests {
         let task = all.find("Find the parser").unwrap();
         assert!(all.find("I'll look.").unwrap() > task);
         assert!(all.contains("Meanwhile, mine.") && all.contains("Of no tool here."));
+        // Asked about, the subagent's tool shows: its card is open.
+        node.question = Some(clackatoo_protocol::Question {
+            id: 1,
+            title: "Read src/parse.rs".into(),
+            choices: Vec::new(),
+            own: false,
+            form: None,
+            plan: None,
+            tool: Some("r".into()),
+        });
+        let section = turn(&node, &open(), 0, 50_000);
+        let folds = section.find_all("data-fold");
+        let nested = (folds.iter())
+            .find(|fold| fold.get("data-fold") == Some("t0ntask"))
+            .unwrap();
+        assert_eq!(nested.get("open"), Some(""));
     }
 
     #[test]
@@ -2056,6 +2104,7 @@ mod tests {
                     own: own_question,
                     form: None,
                     plan: None,
+                    tool: None,
                 }),
                 ..ChatNode::default()
             };
@@ -2119,6 +2168,7 @@ mod tests {
                 own: false,
                 form: Some(form.clone()),
                 plan: None,
+                tool: None,
             }),
             ..ChatNode::default()
         };
@@ -2179,6 +2229,7 @@ mod tests {
                         ask: FormAsk::Url(url.into()),
                     }),
                     plan: None,
+                    tool: None,
                 }),
                 ..ChatNode::default()
             };
@@ -2213,6 +2264,7 @@ mod tests {
                 own: false,
                 form: None,
                 plan: Some("1. Test it".into()),
+                tool: None,
             }),
             ..ChatNode::default()
         };
@@ -2232,6 +2284,7 @@ mod tests {
                 own: false,
                 form: None,
                 plan: None,
+                tool: None,
             }),
             ..ChatNode::default()
         };
@@ -2277,6 +2330,7 @@ mod tests {
                 own: false,
                 form: None,
                 plan: None,
+                tool: None,
             }),
             ..ChatNode::default()
         };
@@ -2567,6 +2621,7 @@ mod tests {
             own: false,
             form: None,
             plan: None,
+            tool: None,
         });
         assert_eq!(said(&node, 13_400), None);
         // The turn's own line says so instead, in the accent colour.

@@ -1448,6 +1448,11 @@ fn nested_work() -> Vec<Sample> {
                     item: 3,
                     value: items[3].clone(),
                 }),
+                // A question about the subagent's tool, which names it.
+                Patch::Chat(ChatPatch::Question(Some(Question {
+                    tool: Some("toolu_read".into()),
+                    ..question()
+                }))),
             ]),
         })),
         Sample::Server(ServerMessage::Event(Event::View {
@@ -1713,6 +1718,7 @@ fn elicitation() -> Vec<Sample> {
         own: false,
         form: Some(form),
         plan: None,
+        tool: None,
     };
     let asked = |question| {
         Server(ServerMessage::Event(Event::View {
@@ -1751,6 +1757,7 @@ fn elicitation() -> Vec<Sample> {
             own: false,
             form: None,
             plan: Some("## Plan\n\n1. Write the tests.".into()),
+            tool: None,
         }),
         fill(
             7,
@@ -3562,6 +3569,7 @@ fn question() -> Question {
         own: true,
         form: None,
         plan: None,
+        tool: None,
     }
 }
 

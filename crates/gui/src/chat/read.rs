@@ -941,6 +941,29 @@ impl ChatView {
         self.reveal = true;
     }
 
+    /// Opens the cards the tool the agent asks about is folded under, as a
+    /// subagent's: what's asked about always shows.
+    pub(super) fn open_cards_over_asked(&mut self) {
+        let Some(id) = (self.node.question.as_ref()).and_then(|question| question.tool.clone())
+        else {
+            return;
+        };
+        for index in (0..self.node.turns.len()).rev() {
+            let turn = &self.node.turns[index];
+            let item =
+                (turn.items.iter()).find(|item| item.tool().is_some_and(|tool| tool.id == id));
+            if let Some(item) = item {
+                let folded =
+                    super::paint::nested::Nesting::of(turn).folded_above(item, &self.open_cards);
+                if !folded.is_empty() {
+                    self.open_cards.extend(folded);
+                    self.restyled(index);
+                }
+                return;
+            }
+        }
+    }
+
     /// Puts the cursor, if it's on what a subagent did that's folded away
     /// under its tool's card, onto the card that shows in its place.
     pub(super) fn cursor_off_folded_work(&mut self) {

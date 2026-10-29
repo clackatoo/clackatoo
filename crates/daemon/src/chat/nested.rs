@@ -1,33 +1,47 @@
 //! What an agent's own subagents do, under the tool call that started
 //! each (CLACKA-195).
 //!
-//! Claude Code's Task tool starts a subagent in the agent's own process.
-//! Its adapter, asked for `forwardSubagentText` as clackatoo asks it, sends
-//! what the subagent says and every tool it uses as it does the agent's
-//! own, each marked with the tool call that started it in
-//! `_meta.claudeCode.parentToolUseId`; it does so again as a session loads.
-//! The chat keeps such an item where it came, as [`Item::Nested`], so the
-//! patches that change it still find it, and windows show it under that
-//! tool, folded away until it's opened.
+//! Claude Code's Task tool, now called Agent, starts a subagent in the
+//! agent's own process. Its adapter, asked for `forwardSubagentText` as
+//! clackatoo asks it, sends what the subagent says and every tool it uses
+//! as it does the agent's own, each marked with the tool call that started
+//! it in `_meta.claudeCode.parentToolUseId`. The chat keeps such an item
+//! where it came, as [`Item::Nested`], so the patches that change it still
+//! find it, and windows show it under that tool, folded away until it's
+//! opened. An item marked with a tool call the turn doesn't have is nested
+//! all the same: windows show it on its own, never run on into the agent's
+//! answer.
 //!
-//! A subagent busy for long says a lot: what's kept of each is bounded,
-//! and what's let go of first is the oldest, which a note says.
+//! A subagent busy for long says a lot: what's kept under each Task the
+//! agent itself started, its subagents' subagents included, is bounded,
+//! and what's let go of first is the oldest, whole subtrees at a time,
+//! which a note says. What comes later for what was let go of is dropped,
+//! and counted in the note.
+//!
+//! Clackatoo's own rows, whose IDs start `clackatoo-`, are never nested,
+//! nor anything under them: an agent can't fold away what clackatoo shows.
+
+use std::collections::{HashMap, HashSet};
 
 use agent_client_protocol_schema::v1::ContentChunk;
 use serde_json::Value;
 
 use super::{HostedChat, Item, handover, index_u32, item_weight};
 
-/// The most items kept of what one subagent did, before the oldest go.
+/// The most items kept of what one Task's subagents did, before the
+/// oldest go.
 pub(super) const MOST_NESTED: usize = 200;
-/// The most bytes kept of what one subagent did, before the oldest go.
+/// The most bytes kept of what one Task's subagents did, before the
+/// oldest go.
 pub(super) const MOST_NESTED_BYTES: usize = 1024 * 1024;
 /// How deep subagents' subagents go before a deeper one's work is taken
 /// as its parent's own.
 const DEEPEST: usize = 8;
-/// How the note on what was let go of starts: "*12 earlier steps not
+/// How the note on what was let go of ends: "*12 earlier steps not
 /// shown*".
 const CUT_NOTE: &str = " earlier steps not shown*";
+/// How the IDs of clackatoo's own rows start.
+pub(super) const OWN: &str = "clackatoo-";
 
 /// The tool call whose subagent sent something, as Claude Code's adapter
 /// says it: `_meta.claudeCode.parentToolUseId`.
@@ -51,78 +65,278 @@ fn cut_note(item: &Item) -> Option<usize> {
     text.strip_prefix('*')?.strip_suffix(CUT_NOTE)?.parse().ok()
 }
 
+/// Where something marked as a subagent's goes.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Under {
+    /// In the turn as the agent's own: it's marked as no subagent's, or
+    /// it may not be nested.
+    Own,
+    /// Under the tool call with this ID.
+    Parent(String),
+    /// Nowhere: what it's under was let go of to keep the bounds, under
+    /// the Task with this ID, whose note counts it.
+    Dropped(String),
+}
+
+/// A tool of the turn answering, as [`Index`] has it.
+#[derive(Debug)]
+struct Spot {
+    /// The tool call whose subagent used it, if a subagent did.
+    parent: Option<String>,
+    /// The Task its work counts under: the outermost tool it's nested
+    /// under, or itself.
+    root: String,
+}
+
+/// What's kept under one Task, its subagents' subagents included.
+#[derive(Debug, Default, Clone, Copy)]
+struct Sum {
+    items: usize,
+    bytes: usize,
+}
+
+/// The turn answering's tools and what's nested under each, so finding
+/// where something goes and keeping the bounds cost nothing per update.
+/// Made again from the turn whenever it's changed other than through it.
+#[derive(Debug, Default)]
+pub(super) struct Index {
+    /// The turn it's of, and how many items it had: anything else, and
+    /// it's made again.
+    turn: Option<usize>,
+    len: usize,
+    /// Set when the turn's items changed other than by being added.
+    stale: bool,
+    tools: HashMap<String, Spot>,
+    sums: HashMap<String, Sum>,
+    /// The tools of the turn let go of, with the Task each counted under:
+    /// what comes later for them is dropped. Not made again: kept until
+    /// the turn changes.
+    cut: HashMap<String, String>,
+}
+
+impl Index {
+    /// The Task what's nested under `parent` counts under.
+    fn root_of(&self, parent: &str) -> String {
+        (self.tools.get(parent)).map_or_else(|| parent.to_owned(), |spot| spot.root.clone())
+    }
+
+    /// Made again from `items`, turn `turn`'s.
+    fn rebuild(&mut self, turn: usize, items: &[Item]) {
+        if self.turn != Some(turn) {
+            self.cut.clear();
+        }
+        self.turn = Some(turn);
+        self.len = items.len();
+        self.stale = false;
+        self.tools.clear();
+        self.sums.clear();
+        for item in items {
+            self.note(item);
+        }
+    }
+
+    /// Takes in `item`, added at the end.
+    fn note(&mut self, item: &Item) {
+        let root = item.parent().map(|parent| self.root_of(parent));
+        if let Some(root) = &root {
+            let sum = self.sums.entry(root.clone()).or_default();
+            sum.items += 1;
+            sum.bytes += item_weight(item);
+        }
+        if let Some(tool) = item.tool() {
+            let spot = Spot {
+                parent: item.parent().map(str::to_owned),
+                root: root.unwrap_or_else(|| tool.id.clone()),
+            };
+            self.tools.insert(tool.id.clone(), spot);
+        }
+    }
+}
+
 impl HostedChat {
-    /// The tool call `meta` says started the subagent that sent it, if
-    /// it's a tool of the turn answering. Not if it's the item `id`
-    /// itself, nor nested under it: nothing is nested under itself. Nor
-    /// past [`DEEPEST`], or a tool from another turn: what such a
-    /// subagent did shows as the agent's own, as it did before.
-    pub(super) fn parent_here(
-        &self,
+    /// The index of the turn answering, made again if it isn't current;
+    /// `None` while no turn is being answered.
+    fn nest_index(&mut self) -> Option<&mut Index> {
+        let turn = self.answering_turn()?;
+        let items = &self.node.turns[turn].items;
+        let index = &mut self.nest;
+        if index.stale || index.turn != Some(turn) || index.len != items.len() {
+            index.rebuild(turn, items);
+        }
+        Some(index)
+    }
+
+    /// The turn answering's items changed other than by one being added
+    /// at the end: its index is made again when next needed.
+    pub(super) fn nest_changed(&mut self) {
+        self.nest.stale = true;
+    }
+
+    /// Where something `meta` marks goes: item `id`, if it's a tool call,
+    /// or words or thinking. Clackatoo's own rows, and what's marked with
+    /// one, are the agent's own; so is a tool that would be nested under
+    /// itself, or deeper than [`DEEPEST`]. What was let go of, or is
+    /// marked with what was, is dropped.
+    pub(super) fn under(
+        &mut self,
         meta: Option<&serde_json::Map<String, Value>>,
         id: Option<&str>,
-    ) -> Option<String> {
-        let parent = parent_of(meta)?;
-        let items = &self.node.turns.get(self.answering_turn()?)?.items;
-        let mut at = parent;
+    ) -> Under {
+        let parent = parent_of(meta);
+        let Some(index) = self.nest_index() else {
+            return Under::Own;
+        };
+        if let Some(root) = id.and_then(|id| index.cut.get(id)) {
+            return Under::Dropped(root.clone());
+        }
+        let Some(parent) = parent else {
+            return Under::Own;
+        };
+        if parent.starts_with(OWN) || id.is_some_and(|id| id.starts_with(OWN)) {
+            return Under::Own;
+        }
+        if let Some(root) = index.cut.get(parent) {
+            return Under::Dropped(root.clone());
+        }
+        let mut at = Some(parent);
         for _ in 0..DEEPEST {
-            if Some(at) == id {
-                return None;
-            }
-            let item = (items.iter()).find(|item| item.tool().is_some_and(|tool| tool.id == at))?;
-            match item.parent() {
-                Some(above) => at = above,
-                None => return Some(parent.to_owned()),
+            match at {
+                None => return Under::Parent(parent.to_owned()),
+                Some(above) if Some(above) == id => return Under::Own,
+                Some(above) => {
+                    at = index
+                        .tools
+                        .get(above)
+                        .and_then(|spot| spot.parent.as_deref());
+                }
             }
         }
-        None
+        if at.is_none() {
+            Under::Parent(parent.to_owned())
+        } else {
+            Under::Own
+        }
     }
 
     /// Whether the tool `id`, in the turn answering, is a subagent's.
-    pub(super) fn is_nested(&self, id: &str) -> bool {
-        let Some(turn) = self.answering_turn() else {
-            return false;
-        };
-        (self.node.turns[turn].items.iter())
-            .any(|item| item.parent().is_some() && item.tool().is_some_and(|tool| tool.id == id))
+    pub(super) fn is_nested(&mut self, id: &str) -> bool {
+        (self.nest_index())
+            .and_then(|index| index.tools.get(id))
+            .is_some_and(|spot| spot.parent.is_some())
     }
 
-    /// Keeps what the subagent the tool call `parent` started did, in turn
-    /// `turn`, within [`MOST_NESTED`] items and [`MOST_NESTED_BYTES`]:
-    /// past either by a quarter, the oldest go, and a note in place of the
-    /// first says how many have. The turn goes again whole, as its items
-    /// have moved, so not for every item past the bounds.
-    pub(super) fn bound_nested(&mut self, turn: usize, parent: &str) {
+    /// The item just added at the end of turn `turn`, the turn answering,
+    /// is nested: it's counted, and the bounds kept.
+    pub(super) fn nested_added(&mut self, turn: usize) {
         let items = &self.node.turns[turn].items;
-        let children: Vec<usize> = (0..items.len())
-            .filter(|&at| items[at].parent() == Some(parent))
-            .collect();
-        let (mut count, mut bytes) = (children.len(), 0);
-        for &at in &children {
-            bytes += item_weight(&items[at]);
+        let Some(item) = items.last() else {
+            return;
+        };
+        let index = &mut self.nest;
+        if index.stale || index.turn != Some(turn) || index.len + 1 != items.len() {
+            index.rebuild(turn, items);
+        } else {
+            index.len += 1;
+            index.note(item);
         }
-        if count <= MOST_NESTED + MOST_NESTED / 4
-            && bytes <= MOST_NESTED_BYTES + MOST_NESTED_BYTES / 4
+        let root = item.parent().map(|parent| index.root_of(parent));
+        if let Some(root) = root {
+            self.bound_nested(turn, &root);
+        }
+    }
+
+    /// What's nested under `parent`, in the turn answering, grew by
+    /// `bytes`, or shrank by `less`.
+    pub(super) fn nested_grew(&mut self, parent: &str, bytes: usize, less: usize) {
+        if let Some(index) = self.nest_index() {
+            let root = index.root_of(parent);
+            let sum = index.sums.entry(root).or_default();
+            sum.bytes = (sum.bytes + bytes).saturating_sub(less);
+        }
+    }
+
+    /// Something for what was let go of under the Task `root` was dropped:
+    /// its note counts it.
+    pub(super) fn nested_dropped(&mut self, root: &str) {
+        let Some(turn) = self.answering_turn() else {
+            return;
+        };
+        let items = &mut self.node.turns[turn].items;
+        let Some(at) =
+            (items.iter()).position(|item| item.parent() == Some(root) && cut_note(item).is_some())
+        else {
+            return;
+        };
+        let gone = cut_note(&items[at]).unwrap_or(0) + 1;
+        items[at] = Item::nested(root.to_owned(), Item::Words(format!("*{gone}{CUT_NOTE}")));
+        let note = items[at].clone();
+        self.patch_item(turn, at, note);
+    }
+
+    /// Records that the tool call `id`, which `under` dropped, is let go
+    /// of under the Task `root`, so what comes for it later is too, and
+    /// counts it.
+    pub(super) fn drop_tool(&mut self, id: &str, root: &str) {
+        if let Some(index) = self.nest_index()
+            && !index.cut.contains_key(id)
+        {
+            index.cut.insert(id.to_owned(), root.to_owned());
+            self.nested_dropped(root);
+        }
+    }
+
+    /// Keeps what's under the Task `root`, in turn `turn`, within
+    /// [`MOST_NESTED`] items and [`MOST_NESTED_BYTES`]: past either by a
+    /// quarter, the oldest go, each with all that's under it, and a note
+    /// in place of the first says how many have. The newest stays, unless
+    /// what it's under goes. The turn goes again whole, as its items have
+    /// moved: so only once for every quarter of the bounds.
+    fn bound_nested(&mut self, turn: usize, root: &str) {
+        let sum = self.nest.sums.get(root).copied().unwrap_or_default();
+        if sum.items <= MOST_NESTED + MOST_NESTED / 4
+            && sum.bytes <= MOST_NESTED_BYTES + MOST_NESTED_BYTES / 4
         {
             return;
         }
-        // The note so far goes too, and counts what it said. The newest
-        // always stays, however big.
+        let items = &self.node.turns[turn].items;
+        let index = &mut self.nest;
+        index.rebuild(turn, items);
+        // What's under the root, oldest first.
+        let members: Vec<usize> = (0..items.len())
+            .filter(|&at| items[at].parent().is_some_and(|p| index.root_of(p) == root))
+            .collect();
+        let (mut count, mut bytes) = (members.len(), 0);
+        for &at in &members {
+            bytes += item_weight(&items[at]);
+        }
+        let newest = members.last().copied();
         let mut gone = 0;
         let mut cut = Vec::new();
-        for &at in &children {
-            if count <= 1 || count <= MOST_NESTED && bytes <= MOST_NESTED_BYTES {
-                break;
+        let mut cut_tools = HashSet::new();
+        for &at in &members {
+            let item = &items[at];
+            let forced = item
+                .parent()
+                .is_some_and(|parent| cut_tools.contains(parent));
+            let within = count <= MOST_NESTED && bytes <= MOST_NESTED_BYTES;
+            if !forced && (within || Some(at) == newest) {
+                continue;
             }
-            gone += cut_note(&items[at]).unwrap_or(1);
+            gone += cut_note(item).unwrap_or(1);
             count -= 1;
-            bytes -= item_weight(&items[at]);
+            bytes -= item_weight(item);
+            if let Some(tool) = item.tool() {
+                cut_tools.insert(tool.id.clone());
+            }
             cut.push(at);
         }
         let Some(&first) = cut.first() else {
             return;
         };
-        let note = Item::nested(parent.to_owned(), Item::Words(format!("*{gone}{CUT_NOTE}")));
+        for id in cut_tools {
+            index.cut.insert(id, root.to_owned());
+        }
+        let note = Item::nested(root.to_owned(), Item::Words(format!("*{gone}{CUT_NOTE}")));
         let items = &mut self.node.turns[turn].items;
         items[first] = note;
         let mut at = 0;
@@ -130,6 +344,7 @@ impl HostedChat {
             at += 1;
             cut[1..].binary_search(&(at - 1)).is_err()
         });
+        self.nest.stale = true;
         self.patch_turn(turn);
     }
 
@@ -154,15 +369,20 @@ impl HostedChat {
     }
 
     /// Nests again the items `records` say are subagents', of this chat's.
+    /// Never one of clackatoo's own rows, whatever a record says.
     pub(crate) fn resume_nesting(&mut self, records: &[handover::NestedItem]) {
         for record in records.iter().filter(|record| record.chat == self.id.0) {
             let item = (self.node.turns.get_mut(record.turn as usize))
                 .and_then(|turn| turn.items.get_mut(record.item as usize));
-            if let Some(item) = item {
+            if let Some(item) = item
+                && !item.tool().is_some_and(|tool| tool.id.starts_with(OWN))
+                && !record.parent.starts_with(OWN)
+            {
                 let flat = std::mem::replace(item, Item::Words(String::new()));
                 *item = Item::nested(record.parent.clone(), flat);
             }
         }
+        self.nest_changed();
     }
 }
 
@@ -288,10 +508,24 @@ mod tests {
     }
 
     #[test]
-    fn what_names_no_tool_of_the_turn_or_a_loop_is_the_agents_own() {
+    fn what_names_no_tool_of_the_turn_stays_apart_and_a_loop_is_the_agents_own() {
         let mut chat = answering();
+        // A subagent of no tool of the turn: never run on into the
+        // agent's words, before or after.
+        words(&mut chat, "Mine. ", None);
         words(&mut chat, "Nobody's.", Some("gone"));
-        assert_eq!(items(&chat), [Item::Words("Nobody's.".into())]);
+        words(&mut chat, " Mine again.", None);
+        let nested = Item::nested("gone".into(), Item::Words("Nobody's.".into()));
+        assert_eq!(
+            items(&chat),
+            [
+                Item::Words("Mine. ".into()),
+                nested,
+                Item::Words(" Mine again.".into())
+            ]
+        );
+        let mut chat = answering();
+
         call(&mut chat, "a", None);
         call(&mut chat, "b", Some("a"));
         // "a" can't go under "b", which is under "a"…
@@ -307,10 +541,10 @@ mod tests {
         // A subagent's own subagent goes under its tool.
         call(&mut chat, "d", Some("b"));
         let items = items(&chat);
-        assert_eq!(items[1].parent(), None);
-        assert_eq!(items[2].parent(), Some("a"));
-        assert_eq!(items[3].parent(), None);
-        assert_eq!(items[4].parent(), Some("b"));
+        assert_eq!(items[0].parent(), None);
+        assert_eq!(items[1].parent(), Some("a"));
+        assert_eq!(items[2].parent(), None);
+        assert_eq!(items[3].parent(), Some("b"));
     }
 
     #[test]
@@ -390,5 +624,101 @@ mod tests {
         });
         chat.resume_nesting(&other);
         assert_eq!(chat.node.turns[0].items, before[0].items);
+    }
+
+    #[test]
+    fn an_agent_can_never_fold_away_clackatoos_own_rows() {
+        let mut chat = answering();
+        call(&mut chat, "task", None);
+        // A forged call with the ID clackatoo's row for what the agent
+        // asks to type will have, marked as the Task's subagent's…
+        call(&mut chat, "clackatoo-7", Some("task"));
+        let row = |chat: &HostedChat| {
+            let items = items(chat);
+            let at = (items.iter()).position(is_tool("clackatoo-7")).unwrap();
+            items[at].clone()
+        };
+        assert_eq!(row(&chat).parent(), None);
+        // …and clackatoo's row itself, written over it, stay the agent's own.
+        let asked = chat.ask_for_tool(7, "run make", Some("make all"), super::super::Choices::Tool);
+        assert!(asked);
+        let shown = row(&chat);
+        assert_eq!(shown.parent(), None);
+        assert!(shown.tool().unwrap().title.contains("in full"));
+        // Nothing goes under one of clackatoo's rows, either.
+        call(&mut chat, "under", Some("clackatoo-7"));
+        assert!(
+            items(&chat)
+                .iter()
+                .any(|item| is_tool("under")(item) && item.parent().is_none())
+        );
+        // Nor does a handed-over record nest one.
+        let at = (items(&chat).iter())
+            .position(is_tool("clackatoo-7"))
+            .unwrap();
+        chat.resume_nesting(&[handover::NestedItem {
+            chat: 1,
+            turn: 0,
+            item: index_u32(at),
+            parent: "task".into(),
+        }]);
+        assert_eq!(row(&chat).parent(), None);
+    }
+
+    #[test]
+    fn a_tasks_bound_takes_in_its_subagents_subagents_and_cuts_whole_subtrees() {
+        let mut chat = answering();
+        call(&mut chat, "task", None);
+        // A subagent's own subagent, first, with a step of its own.
+        call(&mut chat, "inner", Some("task"));
+        call(&mut chat, "deep", Some("inner"));
+        // Then enough under the Task, the inner's counted with them, to go
+        // past the bound by a quarter.
+        let last = MOST_NESTED + MOST_NESTED / 4 - 2;
+        for n in 0..=last {
+            call(&mut chat, &format!("t{n}"), Some("task"));
+        }
+        let under_task = |chat: &HostedChat| {
+            (items(chat).iter())
+                .filter(|item| item.parent().is_some())
+                .count()
+        };
+        assert!(
+            under_task(&chat) <= MOST_NESTED + 1,
+            "{}",
+            under_task(&chat)
+        );
+        // The inner subagent went whole, its step with it.
+        assert!(!items(&chat).iter().any(is_tool("inner")));
+        assert!(!items(&chat).iter().any(is_tool("deep")));
+        let note = |chat: &HostedChat| {
+            (items(chat).iter())
+                .find_map(|item| cut_note(item).filter(|_| item.parent() == Some("task")))
+        };
+        let gone = note(&chat).expect("a note");
+        // What comes later for what went is dropped, and counted, never
+        // shown as the agent's own.
+        call(&mut chat, "later", Some("inner"));
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call_update","toolCallId":"deep","status":"completed"}"#,
+        );
+        words(&mut chat, "Still here.", Some("inner"));
+        assert!(
+            !items(&chat)
+                .iter()
+                .any(|item| is_tool("later")(item) || is_tool("deep")(item))
+        );
+        assert!(
+            !(items(&chat).iter())
+                .any(|item| matches!(item.inner(), Item::Words(w) if w.contains("Still")))
+        );
+        assert_eq!(note(&chat), Some(gone + 1));
+        // A subagent of no tool of the turn is bounded all the same.
+        let mut chat = answering();
+        for n in 0..=MOST_NESTED + MOST_NESTED / 4 {
+            call(&mut chat, &format!("o{n}"), Some("gone"));
+        }
+        assert!(items(&chat).len() <= MOST_NESTED + 1);
     }
 }

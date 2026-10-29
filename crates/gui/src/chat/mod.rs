@@ -831,6 +831,7 @@ impl ChatView {
             if asking.is_some() {
                 self.asked_at = Some(self.now());
             }
+            self.open_cards_over_asked();
             self.proposal_scroll = 0.0;
             self.proposal_rect = None;
         }
@@ -3248,6 +3249,7 @@ mod tests {
                 own: false,
                 form: None,
                 plan: None,
+                tool: None,
             }),
             ..ChatNode::default()
         };
@@ -3343,6 +3345,7 @@ mod tests {
                 own: false,
                 form: Some(form),
                 plan: None,
+                tool: None,
             }),
             ..ChatNode::default()
         };

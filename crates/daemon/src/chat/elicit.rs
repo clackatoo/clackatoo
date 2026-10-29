@@ -59,6 +59,7 @@ impl HostedChat {
             // The question holds the form; nothing else does.
             form: Some(asked.form),
             plan: None,
+            tool: None,
         };
         self.next_question += 1;
         let held = Asker::Elicit {

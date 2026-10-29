@@ -3098,6 +3098,7 @@ mod tests {
             own,
             form: None,
             plan: None,
+            tool: None,
         };
         assert_eq!(
             asked(&question("run `make` in a terminal", false), true),
@@ -3137,6 +3138,7 @@ mod tests {
             own: false,
             form: None,
             plan: None,
+            tool: None,
         });
         let mut chat = ChatView::new(String::new(), node);
         let paint = crate::chat::fixtures::paint(&mut chat, &mut fonts);

@@ -420,6 +420,7 @@ mod tests {
             own: false,
             form: None,
             plan: None,
+            tool: None,
         });
         let mut chat = ChatView::new(String::new(), node);
         assert_eq!(drawn(&mut chat, &mut fonts, SENT, true), None);

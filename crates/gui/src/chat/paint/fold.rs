@@ -339,6 +339,7 @@ mod tests {
             own,
             form: None,
             plan: None,
+            tool: None,
         };
         chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Question(
             Some(question(false)),

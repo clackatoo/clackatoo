@@ -1271,6 +1271,15 @@ pub struct Question {
         deserialize_with = "wire::since::<{ wire::ELICITATION }, _, _>"
     )]
     pub plan: Option<String>,
+    /// The ID of the agent's tool call it asks about, if it asks about
+    /// one: a window opens the cards of the tools whose subagents it's
+    /// folded under, so what's asked about shows.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::NESTED_WORK }, _>",
+        deserialize_with = "wire::since::<{ wire::NESTED_WORK }, _, _>"
+    )]
+    pub tool: Option<String>,
 }
 
 /// A block of code in an agent's words, to colour: see
@@ -2076,29 +2085,80 @@ pub struct NestedWork {
     pub tools: usize,
     /// The index in the turn of the last of its items.
     pub last: usize,
+    /// How many files it, or a subagent of its own, changed, made,
+    /// deleted or moved, by tools that finished: what's folded away
+    /// under its card that changed files is never unsaid.
+    pub files: usize,
+    /// How many commands it, or a subagent of its own, ran to the end.
+    pub commands: usize,
 }
+
+/// How deep [`Turn::nested_work`] follows subagents' subagents: a peer
+/// could say each is the other's.
+const DEEPEST_NESTED: usize = 8;
 
 impl Turn {
     /// What the subagents of the turn's tool calls did, by the ID of the
-    /// tool call that started each: only what each did itself, not its
-    /// own subagents. Empty, and cheap, for a turn with nothing nested.
+    /// tool call that started each: its items and tools only what each
+    /// did itself, the files and commands its own subagents' too. Empty,
+    /// and cheap, for a turn with nothing nested.
     #[must_use]
     pub fn nested_work(&self) -> std::collections::HashMap<&str, NestedWork> {
-        let mut work = std::collections::HashMap::new();
+        use std::collections::{HashMap, HashSet};
+        let mut work: HashMap<&str, NestedWork> = HashMap::new();
+        if self.items.iter().all(|item| item.parent().is_none()) {
+            return work;
+        }
+        let parents: HashMap<&str, Option<&str>> = (self.items.iter())
+            .filter_map(|item| Some((item.tool()?.id.as_str(), item.parent())))
+            .collect();
+        let mut files: HashMap<&str, HashSet<&str>> = HashMap::new();
         for (at, item) in self.items.iter().enumerate() {
-            if let Some(parent) = item.parent() {
-                let sum: &mut NestedWork = work.entry(parent).or_default();
-                sum.items += 1;
-                sum.tools += usize::from(item.tool().is_some());
-                sum.last = at;
+            let Some(parent) = item.parent() else {
+                continue;
+            };
+            let sum = work.entry(parent).or_default();
+            sum.items += 1;
+            sum.tools += usize::from(item.tool().is_some());
+            sum.last = at;
+            let Some(tool) = item.tool().filter(|tool| tool.status == ToolStatus::Done) else {
+                continue;
+            };
+            let changed: Vec<&str> = match tool.kind {
+                ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
+                    let diffs = (tool.content.iter()).filter_map(|content| match content {
+                        ToolContent::Diff(diff) => Some(diff.path.as_str()),
+                        _ => None,
+                    });
+                    let places = tool.locations.iter().map(|place| place.path.as_str());
+                    let mut paths: Vec<&str> = diffs.chain(places).collect();
+                    if paths.is_empty() {
+                        paths.push(tool.id.as_str());
+                    }
+                    paths
+                }
+                _ => Vec::new(),
+            };
+            let ran = tool.kind == ToolKind::Execute;
+            // Said on its card, and every card it's folded under.
+            let mut above = Some(parent);
+            for _ in 0..DEEPEST_NESTED {
+                let Some(id) = above else { break };
+                files.entry(id).or_default().extend(&changed);
+                work.entry(id).or_default().commands += usize::from(ran);
+                above = parents.get(id).copied().flatten();
             }
+        }
+        for (id, paths) in files {
+            work.entry(id).or_default().files = paths.len();
         }
         work
     }
 
     /// The line a tool call whose subagent did `work` says it with:
     /// "↳ Reading src/main.rs · 3 tool uses" while `tool`, the call, runs,
-    /// what the subagent does now; then "↳ Done · 12 tool uses".
+    /// what the subagent does now; then "↳ Done · 12 tool uses", and what
+    /// it changed and ran, "· edited 2 files · ran 1 command".
     #[must_use]
     pub fn nested_line(&self, tool: &Tool, work: &NestedWork) -> String {
         let now = match tool.status {
@@ -2118,11 +2178,28 @@ impl Turn {
                 _ => "Working".to_owned(),
             },
         };
-        match work.tools {
-            0 => format!("↳ {now}"),
-            1 => format!("↳ {now} · 1 tool use"),
-            tools => format!("↳ {now} · {tools} tool uses"),
+        let plural = |count: usize, one: &str, many: &str| {
+            if count == 1 {
+                format!("1 {one}")
+            } else {
+                format!("{count} {many}")
+            }
+        };
+        let mut line = format!("↳ {now}");
+        if work.tools > 0 {
+            let _ = write!(line, " · {}", plural(work.tools, "tool use", "tool uses"));
         }
+        if work.files > 0 {
+            let _ = write!(line, " · edited {}", plural(work.files, "file", "files"));
+        }
+        if work.commands > 0 {
+            let _ = write!(
+                line,
+                " · ran {}",
+                plural(work.commands, "command", "commands")
+            );
+        }
+        line
     }
 }
 
@@ -2359,6 +2436,43 @@ mod tests {
             "↳ Done · 2 tool uses"
         );
         assert_eq!(turn.nested_line(&done, &work["inner"]), "↳ Done");
+        // What changed files and ran commands, its own subagent's too, is
+        // said on the card it's folded under; what's still running isn't.
+        let with = |kind, path: &str, status| Tool {
+            kind,
+            locations: vec![Location {
+                path: path.into(),
+                line: None,
+            }],
+            ..tool(path, path, status)
+        };
+        turn.items.extend([
+            Item::nested(
+                "inner".into(),
+                Item::Tool(with(ToolKind::Edit, "a.rs", ToolStatus::Done)),
+            ),
+            nested(Item::Tool(with(ToolKind::Edit, "a.rs", ToolStatus::Done))),
+            nested(Item::Tool(with(ToolKind::Delete, "b.rs", ToolStatus::Done))),
+            nested(Item::Tool(with(
+                ToolKind::Edit,
+                "c.rs",
+                ToolStatus::Running,
+            ))),
+            nested(Item::Tool(with(
+                ToolKind::Execute,
+                "make",
+                ToolStatus::Done,
+            ))),
+        ]);
+        let work = turn.nested_work();
+        assert_eq!(
+            turn.nested_line(&done, &work["task"]),
+            "↳ Done · 6 tool uses · edited 2 files · ran 1 command"
+        );
+        assert_eq!(
+            turn.nested_line(&done, &work["inner"]),
+            "↳ Done · 1 tool use · edited 1 file"
+        );
         assert!(
             Turn {
                 items: Vec::new(),
@@ -2714,6 +2828,7 @@ mod tests {
             own: false,
             form: None,
             plan: None,
+            tool: None,
         });
         assert!(chat.asking() && !chat.working() && chat.doing().is_none());
         chat.question = None;
@@ -2763,6 +2878,7 @@ mod tests {
             own: true,
             form: None,
             plan: None,
+            tool: None,
         });
         assert!(chat.working() && !chat.asking());
         assert_eq!(chat.doing().as_deref(), Some("Working"));
@@ -2827,6 +2943,7 @@ mod tests {
                 own: false,
                 form: None,
                 plan: None,
+                tool: None,
             }
             .said()
         };

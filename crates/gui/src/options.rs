@@ -620,7 +620,7 @@ options! {
     /// tools. The chat's Tools setting changes it later.
     agenttools("agt", "Default tool permissions for new chats"): AgentTools = AgentTools::Ask;
     /// A new chat with Claude Code keeps Claude Code's own Task tool,
-    /// which runs helpers you don't see inside one turn. Off, as it is
+    /// which runs helpers inside one turn, folded under the Task's card. Off, as it is
     /// unless you turn it on, Claude hands work on as every agent does,
     /// with clackatoo's `start_chat` and `start_chats`, in chats you see
     /// as cards and can open, steer and undo. Other agents have no Task

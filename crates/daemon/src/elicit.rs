@@ -547,6 +547,7 @@ mod tests {
             own: false,
             form: Some(biggest.form),
             plan: None,
+            tool: None,
         };
         let message = clackatoo_protocol::ServerMessage::Event(clackatoo_protocol::Event::View {
             terminal: clackatoo_protocol::TerminalId(1),
