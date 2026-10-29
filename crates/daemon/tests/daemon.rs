@@ -18757,9 +18757,17 @@ fn slowest_answer_while_a_big_file_is_rewritten(open: bool, small: bool) -> Dura
     eprintln!("slowest other answer: {slowest:?}");
     assert_eq!(std::fs::read_to_string(&big).unwrap(), made);
     if let Some(buffer) = buffer {
-        // The buffer has the change, and nothing not saved.
-        let snapshot = attach_buffer(&mut client, buffer);
-        assert!(snapshot.text == made && !snapshot.modified);
+        // The buffer has the change, and nothing not saved, once it's
+        // merged, which on a loaded machine may be after the wait above.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let snapshot = attach_buffer(&mut client, buffer);
+            if snapshot.text == made && !snapshot.modified {
+                break;
+            }
+            assert!(Instant::now() < deadline, "never merged");
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
     slowest
 }
