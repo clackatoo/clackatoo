@@ -51,7 +51,8 @@
 //! | `retry-wait` | As `retry`, but then waits until the message is cancelled |
 //! | `signed-out` | Refuses the message with ACP's `-32000`, as a sign-in that ran out mid-turn |
 //! | `usage-limit` | Fails as the account's usage limit is reached: as AIR's `sessionFailure` on the answer, to a client that asked for it; as Codex's `usageLimitExceeded` with `--codex`; else as Claude Code's SDK's `billing_error` |
-//! | `compact` | Compacts its context: a tool call "Compact conversation" as Claude Code's adapter says one, finished, then finished again with its facts, or with `--codex`, Codex's notice of it, or its words to a client that can't show notices; then `compacted` |
+//! | `compact` | Compacts its context: a tool call "Compact conversation" as Claude Code's adapter says one, finished, then finished again with its facts, or with `--codex`, Codex's tool call "Compact conversation" of kind `think`; then `compacted` |
+//! | `compact-legacy` | Compacts its context as Codex reports a compaction the older way: a notice "Context compacted", or Codex's words for it to a client that can't show notices; then `compacted` |
 //! | `odd-failure` | Ends its turn failed, as AIR's `sessionFailure` on the answer, of a category no build knows |
 //! | `wake-fail` | As `wake`, to a client that asked for AIR's `asyncTasks`, but its turn hits the usage limit, which it says as AIR's `sessionFailure` by itself, with nothing more |
 //! | `session-error` | Says, by itself, as AIR's `sessionFailure`, that its connection was lost, then `carried on` |
@@ -1477,7 +1478,24 @@ impl Fake {
             "usage-limit" => send(&json!({ "jsonrpc": "2.0", "id": id,
                 "error": { "code": -32603, "message": "Internal error: Credit balance is too low",
                     "data": { "errorKind": "billing_error" } } })),
-            "compact" if self.codex && self.notices => {
+            // As Codex 0.160 compacts, through codex-acp 2.2.2.
+            "compact" if self.codex => {
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "tool_call", "toolCallId": "c1",
+                             "kind": "think", "title": "Compact conversation",
+                             "status": "in_progress" }),
+                );
+                update(
+                    session,
+                    &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1",
+                             "status": "completed" }),
+                );
+                say(session, "compacted\n");
+                done(id, "end_turn");
+            }
+            // As a compaction Codex reports the older way.
+            "compact-legacy" if self.notices => {
                 update(
                     session,
                     &json!({ "sessionUpdate": "notice", "severity": "info",
@@ -1487,7 +1505,7 @@ impl Fake {
                 say(session, "compacted\n");
                 done(id, "end_turn");
             }
-            "compact" if self.codex => {
+            "compact-legacy" => {
                 say(
                     session,
                     "*Context compacted to fit the model's context window.*\n\n",

@@ -19,8 +19,11 @@
 //!   `_meta.jetbrains.air.contextCompaction` (AIR) or
 //!   `_meta.claudeCode.toolName` `compact`, whose facts (trigger and
 //!   tokens) come as it ends, in that `_meta` or its `rawOutput`; Codex's,
-//!   a notice "Context compacted", or to a client that can't take one, the
-//!   words "*Context compacted to fit the model's context window.*".
+//!   a tool call "Compact conversation" of kind `think`, with nothing
+//!   more, or for a compaction Codex reports the older way
+//!   (`thread/compacted`), a notice "Context compacted", or to a client
+//!   that can't take one, the words "*Context compacted to fit the model's
+//!   context window.*".
 //! - Exit codes: `_meta.terminal_exit.exit_code`, which both send for a
 //!   command run as a terminal (Claude Code's says 1 for any that failed,
 //!   to AIR), and Codex's `rawOutput.exit_code` for one that isn't.
@@ -40,6 +43,12 @@ use crate::agent::{Answer, Failure};
 /// What Codex's adapter says, as words, to a client that can't take a
 /// notice, when it compacted its context.
 const CODEX_COMPACTED: &str = "*Context compacted to fit the model's context window.*\n\n";
+
+/// The title of the tool call, of kind `think`, by which Codex's adapter
+/// (with Codex 0.160) says it compacts its context, with nothing more to a
+/// client that isn't AIR (an AIR client gets
+/// `_meta.jetbrains.air.contextCompaction` too).
+pub(super) const CODEX_COMPACTING: &str = "Compact conversation";
 
 /// The title of the notice Codex's adapter gives, to a client that can take
 /// one, when it compacted its context: "Context compacted", with "Conversation
@@ -192,11 +201,18 @@ impl HostedChat {
     }
 
     /// Notes tool call `id` as the agent compacting its context, if its
-    /// `meta` says it is; and, if it is and has finished, shows it as the
-    /// line across the turn that says so, with what `meta` or `raw` say
-    /// of it. Claude Code's adapter says it finished once, then again with
-    /// the tokens before and after, which the line then says.
-    pub(super) fn compaction(&mut self, id: &str, meta: Option<&Meta>, raw: Option<&Value>) {
+    /// `meta` says it is, or it's Codex's (`codex`, as it starts); and, if
+    /// it is and has finished, shows it as the line across the turn that
+    /// says so, with what `meta` or `raw` say of it. Claude Code's adapter
+    /// says it finished once, then again with the tokens before and after,
+    /// which the line then says.
+    pub(super) fn compaction(
+        &mut self,
+        id: &str,
+        meta: Option<&Meta>,
+        raw: Option<&Value>,
+        codex: bool,
+    ) {
         let air = (meta.and_then(|meta| meta.get("jetbrains")))
             .and_then(|jetbrains| jetbrains.pointer("/air/contextCompaction"));
         let named = (meta.and_then(|meta| meta.get("claudeCode")))
@@ -210,7 +226,7 @@ impl HostedChat {
             // A report on one of a turn that's over goes nowhere.
             Some(known) if self.facts.compactions[known].turn != Some(turn) => return,
             Some(known) => known,
-            None if air.is_some() || named => {
+            None if air.is_some() || named || codex => {
                 if self.facts.compactions.len() == COMPACTIONS {
                     self.facts.compactions.pop_front();
                 }

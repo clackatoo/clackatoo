@@ -2482,9 +2482,15 @@ impl HostedChat {
                         return wrote;
                     }
                 };
+                // Codex's adapter says it's compacting its context, to a
+                // client that isn't AIR, by this title alone.
+                let codex = self.agent == "codex"
+                    && tool.kind == ToolKind::Think
+                    && tool.title == facts::CODEX_COMPACTING;
                 self.set_tool(tool, parent);
                 self.add_output(&id, call.meta.as_ref());
-                self.compaction(&id, call.meta.as_ref(), call.raw_output.as_ref());
+                let raw = call.raw_output.as_ref();
+                self.compaction(&id, call.meta.as_ref(), raw, codex);
                 return wrote;
             }
             SessionUpdate::ToolCallUpdate(update) => {
@@ -2492,7 +2498,7 @@ impl HostedChat {
                 // More of a compaction shown as a line already.
                 if self.compacted(&update.tool_call_id.0) {
                     let raw = update.fields.raw_output.as_ref();
-                    self.compaction(&update.tool_call_id.0, update.meta.as_ref(), raw);
+                    self.compaction(&update.tool_call_id.0, update.meta.as_ref(), raw, false);
                     return None;
                 }
                 if let Some(content) = &update.fields.content {
@@ -2565,7 +2571,7 @@ impl HostedChat {
                     self.set_tool(tool, parent);
                 }
                 self.add_output(&id, update.meta.as_ref());
-                self.compaction(&id, update.meta.as_ref(), raw);
+                self.compaction(&id, update.meta.as_ref(), raw, false);
                 return wrote;
             }
             SessionUpdate::SessionInfoUpdate(info) => {
