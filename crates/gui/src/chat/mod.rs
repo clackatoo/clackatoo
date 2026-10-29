@@ -22,6 +22,7 @@ mod images;
 mod paint;
 mod pane;
 mod picker;
+mod prompts;
 mod queue;
 mod read;
 mod search;
@@ -98,6 +99,12 @@ enum Input {
         question: u64,
         pick: Pick,
     },
+    /// Puts the caret at the end of the message, as after its text was
+    /// replaced by what was typed elsewhere or taken back from the queue.
+    CaretToEnd,
+    /// Puts a message sent before in at the caret, as picked in the
+    /// finder (see [`prompts`]).
+    Recalled(String),
 }
 
 /// What settling the chat's queue came to.
@@ -139,6 +146,8 @@ enum Hit {
     Steer,
     RemoveQueued(u64),
     SendQueued(u64),
+    /// The pencil on a queued message, which takes it back into the box.
+    EditQueued(u64),
     /// The button that stops a task the agent runs in the background, by
     /// the agent's name for it.
     StopTask(String),
@@ -457,6 +466,20 @@ pub(crate) struct ChatView {
     /// A click went into a box of the form, to type in: the pane goes to
     /// insert mode.
     wants_insert: bool,
+    /// Where Up and Down have gone through the messages sent, and the text
+    /// they showed: typing anything else forgets it (see [`prompts`]).
+    recall: Option<(crate::cmdline::recall::Walk, String)>,
+    /// The queued message being taken back into the box, by its ID, and
+    /// its text, until the daemon has taken it out of the queue.
+    taking_back: Option<(u64, String)>,
+    /// Whether the daemon keeps what's typed in the box (protocol 116 on).
+    pub(crate) drafts_supported: bool,
+    /// What the daemon was last told is typed in the box, or told the
+    /// window, as it came.
+    draft_sent: String,
+    /// When what's typed first changed since the daemon was last told,
+    /// and last changed, as turns count time.
+    draft_changed: Option<(u64, u64)>,
 }
 
 /// How long, in milliseconds, after a number arms an answer in normal mode
@@ -603,7 +626,13 @@ impl ChatView {
             proposal_scroll: 0.0,
             proposal_rect: None,
             wants_insert: false,
+            recall: None,
+            taking_back: None,
+            drafts_supported: false,
+            draft_sent: String::new(),
+            draft_changed: None,
         };
+        view.came_whole();
         // A chat first seen asking may be arrived at already.
         if view.node.question.is_some() {
             view.asked_at = Some(view.now());
@@ -727,6 +756,7 @@ impl ChatView {
                     }
                     self.history_pending = None;
                     chat.clone_into(&mut self.node);
+                    self.came_whole();
                 }
                 view.title.clone_into(&mut self.title);
                 view.cwd.clone_into(&mut self.folder);
@@ -816,6 +846,9 @@ impl ChatView {
                                 }
                             }
                             self.node.apply(patch.clone());
+                            if let clackatoo_protocol::ChatPatch::Draft(draft) = patch {
+                                self.draft_came(draft);
+                            }
                         }
                         clackatoo_protocol::Patch::Grid { .. }
                         | clackatoo_protocol::Patch::Cwd(_) => {}
@@ -871,7 +904,15 @@ impl ChatView {
         {
             return Some(std::time::Instant::now() + std::time::Duration::from_millis(16));
         }
-        if self.offline { None } else { self.live }
+        if self.offline {
+            return None;
+        }
+        // What's typed waits to be told the daemon.
+        let draft = self.draft_due().map(|due| {
+            let wait = due.saturating_sub(self.now());
+            std::time::Instant::now() + std::time::Duration::from_millis(wait)
+        });
+        self.live.into_iter().chain(draft).min()
     }
 
     /// Whether its agent is at work, for its tab to say so, as far as the
@@ -1369,30 +1410,7 @@ impl ChatView {
                 Input::PasteFailed(why) => {
                     self.say(why);
                 }
-                Input::Image(image) => {
-                    if self.node.question.is_some() {
-                        self.typed_while_asking();
-                    } else if !image.valid()
-                        || self.images.len()
-                            + self
-                                .handoff_sent
-                                .as_ref()
-                                .map_or(0, |draft| draft.images.len())
-                            >= clackatoo_protocol::ChatImage::MAX_COUNT
-                        || self
-                            .images
-                            .iter()
-                            .chain(self.handoff_sent.iter().flat_map(|draft| &draft.images))
-                            .map(|image| image.data.len())
-                            .sum::<usize>()
-                            + image.data.len()
-                            > clackatoo_protocol::ChatImage::MAX_DATA
-                    {
-                        self.say("Paste up to four images, 8 MiB encoded in total.".into());
-                    } else {
-                        self.images.push(image);
-                    }
-                }
+                Input::Image(image) => self.settle_image(image),
                 Input::Paste(text) => self.settle_paste(fonts, &text),
                 Input::Press { at, clicks, shift } => {
                     self.pressed(fonts, at, clicks, shift, &mut settled);
@@ -1430,6 +1448,12 @@ impl ChatView {
                     self.settle_reading(fonts, input, &mut settled);
                 }
                 Input::Answer { question, pick } => self.pick(question, pick, &mut settled),
+                Input::CaretToEnd => self.drive(fonts, |driver| {
+                    driver.move_to_text_end();
+                }),
+                Input::Recalled(text) => {
+                    self.drive(fonts, |driver| driver.insert_or_replace_selection(&text));
+                }
                 Input::Act(action) => settled.actions.push(action),
                 Input::Compose(_) if self.searching_models() => {}
                 Input::Compose(Some((text, cursor))) => {
@@ -1441,7 +1465,34 @@ impl ChatView {
             }
         }
         settled.redraw |= self.preview_search(fonts);
+        self.note_draft();
         settled
+    }
+
+    /// Attaches `image`, pasted, unless it's one too many or too big.
+    fn settle_image(&mut self, image: clackatoo_protocol::ChatImage) {
+        if self.node.question.is_some() {
+            self.typed_while_asking();
+        } else if !image.valid()
+            || self.images.len()
+                + self
+                    .handoff_sent
+                    .as_ref()
+                    .map_or(0, |draft| draft.images.len())
+                >= clackatoo_protocol::ChatImage::MAX_COUNT
+            || self
+                .images
+                .iter()
+                .chain(self.handoff_sent.iter().flat_map(|draft| &draft.images))
+                .map(|image| image.data.len())
+                .sum::<usize>()
+                + image.data.len()
+                > clackatoo_protocol::ChatImage::MAX_DATA
+        {
+            self.say("Paste up to four images, 8 MiB encoded in total.".into());
+        } else {
+            self.images.push(image);
+        }
     }
 
     /// Edits the message with parley's editor.
@@ -1580,19 +1631,28 @@ impl ChatView {
                         (false, false, false) => driver.move_right(),
                     });
                 };
-            (Key::Named(named @ (NamedKey::ArrowUp | NamedKey::ArrowDown)), _) =>
-                Hint::Action(if shift {
-                    "Extend selection vertically"
+            (Key::Named(NamedKey::ArrowUp), _) if !shift && self.takes_back() =>
+                Hint::Action("Edit the last queued message"),
+                {
+                    if let Some(id) = self.node.delivery.queued.last().map(|message| message.id) {
+                        self.take_back(id, settled);
+                    }
+                };
+            (Key::Named(named @ (NamedKey::ArrowUp | NamedKey::ArrowDown)), _) if !shift =>
+                Hint::Action(if *named == NamedKey::ArrowUp {
+                    "Move caret up, or on the first line, recall the message sent before"
                 } else {
-                    "Move caret vertically"
+                    "Move caret down, or on the last line, recall the message sent after"
                 }),
+                self.up_or_down(*named == NamedKey::ArrowUp, fonts);
+            (Key::Named(named @ (NamedKey::ArrowUp | NamedKey::ArrowDown)), _) =>
+                Hint::Action("Extend selection vertically"),
                 {
                     let up = *named == NamedKey::ArrowUp;
-                    self.drive(fonts, |driver| match (up, shift) {
-                        (true, true) => driver.select_up(),
-                        (true, false) => driver.move_up(),
-                        (false, true) => driver.select_down(),
-                        (false, false) => driver.move_down(),
+                    self.drive(fonts, |driver| if up {
+                        driver.select_up();
+                    } else {
+                        driver.select_down();
                     });
                 };
             (Key::Named(NamedKey::Home), _) =>
@@ -1620,6 +1680,12 @@ impl ChatView {
                     } else {
                         driver.move_to_line_end();
                     }
+                });
+            (_, Some("r" | "R")) if ctrl =>
+                Hint::Action("Search the messages sent, to put one in"),
+                settled.commands.push(crate::command::Command::Find {
+                    kind: crate::finder::Kind::Prompts,
+                    query: String::new(),
                 });
             (_, Some("a" | "A")) if ctrl =>
                 Hint::Action("Select draft"),
@@ -2389,6 +2455,7 @@ impl ChatView {
                 self.queue_page = self.queue_page.saturating_add_signed(isize::from(delta));
             }
             Some(Hit::RemoveQueued(id)) => settled.actions.push(ChatAction::RemoveQueued { id }),
+            Some(Hit::EditQueued(id)) => self.take_back(id, settled),
             Some(Hit::StopTask(id)) => settled.actions.push(ChatAction::StopTask { id }),
             Some(Hit::Plan) => self.plan_open = !self.plan_open,
             Some(Hit::SendQueued(id)) => settled.actions.push(ChatAction::SendQueued {

@@ -23,6 +23,8 @@ pub(crate) enum Icon {
     File,
     Undo,
     Redo,
+    /// A pencil: to edit something.
+    Edit,
     Shield,
     Ring,
     Hatch,
@@ -76,6 +78,7 @@ impl Icon {
             Self::File => "M14 3H6V21H18V7Z M14 3V7H18 M9 12H15 M9 16H15".into(),
             Self::Undo => "M8 4L3 9L8 14 M3 9H14A6 6 0 0 1 14 21".into(),
             Self::Redo => "M16 4L21 9L16 14 M21 9H10A6 6 0 0 0 10 21".into(),
+            Self::Edit => "M4 20L5 15L15.5 4.5L19.5 8.5L9 19Z M13 7L17 11".into(),
             Self::Hatch => "M-16 24L8 0 M-8 24L16 0 M0 24L24 0 M8 24L32 0 M16 24L40 0".into(),
             Self::Close => "M6 6L18 18 M18 6L6 18".into(),
             Self::Send => "M12 20V4 M5 11L12 4L19 11".into(),

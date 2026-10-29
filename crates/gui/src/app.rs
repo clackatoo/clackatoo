@@ -2439,6 +2439,7 @@ impl App {
         let queue = self.desk.daemon_has(clackatoo_protocol::wire::CHAT_QUEUE);
         let resend = self.desk.daemon_has(clackatoo_protocol::wire::CHAT_FACTS);
         let cost = self.desk.options().chatcost;
+        let drafts = self.desk.daemon_has(clackatoo_protocol::wire::PROMPT_BOX);
         let usage = self
             .desk
             .daemon_has(clackatoo_protocol::wire::PROVIDER_USAGE);
@@ -2454,6 +2455,7 @@ impl App {
             view.queue_supported = queue;
             view.set_resend_supported(resend);
             view.set_show_cost(cost);
+            view.drafts_supported = drafts;
             view.usage_supported = usage;
             // In insert mode, the cursor is in the box; in normal mode, in
             // the conversation; and while a prompt has the keys, nowhere.
@@ -3282,6 +3284,8 @@ impl ApplicationHandler<SessionEvent> for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         // A lesson goes with the window, and its scratch files with it.
         self.desk.tutor_exiting();
+        // What's typed in chats' boxes, for the window opened next.
+        self.desk.send_drafts(true);
         self.send_outbox();
         // The last command run is kept, unless the disk is very slow.
         self.recall_writer
@@ -3374,6 +3378,11 @@ impl App {
         // Where editors are, for the daemon to keep for a restart, if
         // they've moved: nothing to draw.
         if self.desk.tell_places(Instant::now()) {
+            self.send_outbox();
+        }
+        // What's typed in a chat's box, once typing pauses, for the
+        // daemon to keep.
+        if self.desk.send_drafts(false) {
             self.send_outbox();
         }
         // The background tabs' list's preview is looked at again now and

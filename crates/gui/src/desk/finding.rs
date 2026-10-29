@@ -56,6 +56,7 @@ impl Desk {
             Kind::Lessons => return self.tutor(None),
             Kind::News => return self.tutor(Some("new")),
             Kind::Background => return self.open_background_list(),
+            Kind::Prompts => return self.list_prompts(&query),
             Kind::Symbols if !self.needs_daemon("listing a file's symbols", SYMBOLS) => return,
             Kind::ProjectSymbols if !self.needs_daemon("finding symbols", SYMBOLS) => return,
             _ => {}
@@ -87,7 +88,8 @@ impl Desk {
             | Kind::Lessons
             | Kind::News
             | Kind::Symbols
-            | Kind::Background => {}
+            | Kind::Background
+            | Kind::Prompts => {}
         }
     }
 
@@ -195,6 +197,9 @@ impl Desk {
                 self.close_finder();
                 if kind == Some(Kind::Background) {
                     self.bring_background(&opening.path);
+                } else if kind == Some(Kind::Prompts) {
+                    // The message itself, into the chat's box.
+                    self.put_in_focused_chat(opening.path);
                 } else if kind == Some(Kind::Boards) {
                     self.open_picked_board(&opening);
                 } else if matches!(kind, Some(Kind::Lessons | Kind::News)) {

@@ -122,6 +122,7 @@ impl ChatView {
         let mut images = draft.images;
         images.append(&mut self.images);
         self.images = images;
+        self.note_draft();
         self.say(why.to_owned());
     }
 }

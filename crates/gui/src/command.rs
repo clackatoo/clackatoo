@@ -337,7 +337,7 @@ const KINDS: [(&str, Kind); 2] = [("Terminal", Kind::Terminal), ("Agent", Kind::
 const EDITOR: &str = "Editor";
 
 /// What the finder lists, by name.
-const FINDERS: [(&str, finder::Kind); 7] = [
+const FINDERS: [(&str, finder::Kind); 8] = [
     ("Files", finder::Kind::Files),
     ("Grep", finder::Kind::Grep),
     ("Buffers", finder::Kind::Buffers),
@@ -345,6 +345,7 @@ const FINDERS: [(&str, finder::Kind); 7] = [
     ("Boards", finder::Kind::Boards),
     ("Symbols", finder::Kind::Symbols),
     ("ProjectSymbols", finder::Kind::ProjectSymbols),
+    ("Prompts", finder::Kind::Prompts),
 ];
 
 /// The kind of pane that shows a board, which takes the board's name.
@@ -928,6 +929,7 @@ command_names! {
     "Boards" => "Find and open a board",
     "Symbols" => "Find a symbol in the current file",
     "ProjectSymbols" => "Find a symbol across the project",
+    "Prompts" => "Search the messages sent in the chat, to send one again",
     "Terminal" => "Open a new terminal",
     "Agent" => "Start a chat with an agent",
     EDITOR => "Open a file in an editor pane",
@@ -1125,6 +1127,7 @@ mod tests {
         ("Boards", ""),
         ("Symbols", ""),
         ("ProjectSymbols", ""),
+        ("Prompts", ""),
         ("Terminal", ""),
         ("Agent", ""),
         ("Editor", ""),

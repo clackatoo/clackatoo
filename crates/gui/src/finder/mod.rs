@@ -1,8 +1,9 @@
 //! The finder: a picker over the panes, as Telescope's and fzf's are, for
 //! the files in a project, the lines in them a pattern matches, the files
 //! open, the places a language server's answer gives, and the symbols in a
-//! file or a project; and for the tutor's lessons, what's new, and the
-//! background tabs, which the window lists itself.
+//! file or a project; and for the tutor's lessons, what's new, the
+//! background tabs, and the messages sent in a chat, which the window
+//! lists itself.
 //!
 //! The daemon owns the files, so it lists and greps them, and sends what it
 //! finds a batch at a time (see `clackatoo_protocol::Found`). The finder
@@ -83,6 +84,9 @@ pub(crate) enum Kind {
     ProjectSymbols,
     /// The background tabs: the workspace shown's, then the others'.
     Background,
+    /// The messages sent in the focused chat, the newest first, to put
+    /// one in its box (see `chat::prompts`).
+    Prompts,
 }
 
 impl Kind {
@@ -100,6 +104,7 @@ impl Kind {
             Self::Symbols => "Symbols",
             Self::ProjectSymbols => "Project symbols",
             Self::Background => "Background",
+            Self::Prompts => "Messages sent",
         }
     }
 
@@ -113,7 +118,10 @@ impl Kind {
     /// Whether the window lists it itself, previews and all, with no help
     /// from the daemon.
     fn local(self) -> bool {
-        matches!(self, Self::Lessons | Self::News | Self::Background)
+        matches!(
+            self,
+            Self::Lessons | Self::News | Self::Background | Self::Prompts
+        )
     }
 }
 
@@ -1020,8 +1028,9 @@ impl Finder {
         if self.kind.local() {
             let index = self.ranking.get(self.picker.selected())?;
             let lines = self.local_previews.get(index)?;
-            // A background tab's screen, as it is: no line numbers.
-            if self.kind == Kind::Background {
+            // A background tab's screen, or a message, as it is: no line
+            // numbers.
+            if matches!(self.kind, Kind::Background | Kind::Prompts) {
                 return Some(PreviewView::screen(lines, (rows, cols)));
             }
             return Some(PreviewView::new(0, lines, None, (rows, cols)));

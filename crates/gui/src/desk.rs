@@ -3825,6 +3825,43 @@ mod tests {
     }
 
     /// Draws the chat in terminal 2 of [`working_chat_desk`].
+    #[test]
+    fn ctrl_r_in_a_chats_box_finds_a_message_sent_and_puts_it_in() {
+        let (mut desk, _) = working_chat_desk();
+        let chat = TerminalId(2);
+        desk.show_tab(TabId(2));
+        assert_eq!(desk.focused_terminal(), Some(chat));
+        let mut fonts =
+            crate::fonts::Fonts::load(&crate::fonts::FontOptions::default(), 1.0).unwrap();
+        assert_eq!(desk.chat(chat).map(ChatPane::mode), Some(Mode::Insert));
+        ctrl(&mut desk, "r");
+        desk.settle_chats(&mut fonts);
+        let finder = desk.finder.as_ref().expect("the finder");
+        assert_eq!(finder.kind(), crate::finder::Kind::Prompts);
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert!(desk.finder.is_none());
+        desk.settle_chats(&mut fonts);
+        let view = desk.chat(chat).unwrap().view();
+        assert!(view.shown_text().ends_with("Why does CI fail?"));
+        // A terminal has no messages sent to find: the bar says so.
+        desk.show_tab(TabId(1));
+        desk.run(Command::Find {
+            kind: crate::finder::Kind::Prompts,
+            query: String::new(),
+        });
+        assert!(desk.finder.is_none());
+        assert!(
+            (desk.message.as_deref()).is_some_and(|message| message.contains("only a chat")),
+            "{:?}",
+            desk.message
+        );
+    }
+
     fn paint_chat_two(desk: &mut Desk, fonts: &mut crate::fonts::Fonts) {
         let pane = desk.chat_mut(TerminalId(2)).expect("the chat's pane");
         pane.paint(fonts, [0.0; 2], [900.0, 1000.0], true);

@@ -17,6 +17,7 @@ use clackatoo_protocol::{TerminalId, ViewUpdate, wire};
 
 use super::Desk;
 use crate::chat::ChatPane;
+use crate::finder::{self, Finder, LocalItem};
 use crate::input::KeyPress;
 use crate::pane::Pane;
 
@@ -459,4 +460,82 @@ impl Desk {
         };
         chat.finish_paste(result);
     }
+
+    /// Opens the finder on the messages sent in the focused chat, the
+    /// newest first, starting with `query` typed: Enter puts the one
+    /// picked in the chat's box (see `chat::prompts`).
+    pub(super) fn list_prompts(&mut self, query: &str) {
+        let Some(chat) = self.focused_chat() else {
+            self.refuse("only a chat has messages sent to search".into());
+            return;
+        };
+        let items: Vec<LocalItem> = (chat.view().node.prompts.iter().rev())
+            .map(|prompt| {
+                let text = one_line(prompt);
+                LocalItem {
+                    name: prompt.clone(),
+                    name_len: text.len(),
+                    text,
+                    preview: prompt.lines().take(PREVIEWED).map(str::to_owned).collect(),
+                    alert: None,
+                }
+            })
+            .collect();
+        if items.is_empty() {
+            self.refuse("nothing has been sent in this chat yet".into());
+            return;
+        }
+        self.close_finder();
+        let case = crate::options::Case::of(&self.options);
+        let mut finder = Finder::local(finder::Kind::Prompts, items, case);
+        if !query.is_empty() {
+            finder.paste(query);
+        }
+        self.finder = Some(finder);
+    }
+
+    /// Tells the daemon what's typed in chats' boxes where typing has
+    /// paused since it changed, or wherever it's changed if `now`, as the
+    /// window closes. Returns whether it told it any.
+    pub(crate) fn send_drafts(&mut self, now: bool) -> bool {
+        let mut sent = false;
+        for chat in self.chats.values_mut() {
+            sent |= chat.send_draft(now);
+        }
+        sent
+    }
+
+    /// Puts `text`, a message sent before, picked in the finder, in at
+    /// the caret in the focused chat's box, which goes to insert mode.
+    pub(super) fn put_in_focused_chat(&mut self, text: String) {
+        if let Some(chat) = self.focused_chat_mut() {
+            chat.put_recalled(text);
+        }
+    }
+}
+
+/// The most lines of a message the finder previews.
+const PREVIEWED: usize = 200;
+
+/// `prompt` on one line, as the finder lists it: its lines joined by a
+/// mark, cut short.
+fn one_line(prompt: &str) -> String {
+    const LONGEST: usize = 300;
+    let mut text = String::new();
+    for (index, line) in prompt
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .enumerate()
+    {
+        if index > 0 {
+            text.push_str(" ⏎ ");
+        }
+        text.push_str(line.trim());
+        if text.len() > LONGEST {
+            text.truncate(text.floor_char_boundary(LONGEST));
+            text.push('…');
+            break;
+        }
+    }
+    text
 }

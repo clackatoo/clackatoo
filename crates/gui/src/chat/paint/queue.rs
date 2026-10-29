@@ -22,7 +22,10 @@ impl ChatView {
             .iter()
             .skip(self.queue_page * 3)
             .take(3)
-            .map(|message| (message.id, excerpt(message)))
+            .map(|message| {
+                let editable = super::super::queue::editable(message);
+                (message.id, excerpt(message), editable)
+            })
             .collect();
         if messages.is_empty() {
             return 0.0;
@@ -83,7 +86,7 @@ impl ChatView {
                 }
             }
             top += header;
-            for (index, (id, text)) in messages.iter().enumerate() {
+            for (index, (id, text, editable)) in messages.iter().enumerate() {
                 if index > 0 {
                     canvas.fill(Fill::solid(
                         [inner_left, top, inner_width, 1.0],
@@ -94,7 +97,7 @@ impl ChatView {
                     canvas,
                     m,
                     frame,
-                    (*id, text),
+                    (*id, text, *editable),
                     [inner_left, top, inner_width, row],
                 );
                 top += row;
@@ -108,14 +111,14 @@ impl ChatView {
         canvas: &mut Canvas<'_>,
         m: Measures,
         frame: &BoxFrame,
-        (id, text): (u64, &str),
+        (id, text, editable): (u64, &str, bool),
         [left, top, width, row]: [f32; 4],
     ) {
         self.queue_text(
             canvas,
             m,
             text,
-            [left, top, (width - m.em(4.5)).max(0.0), row],
+            [left, top, (width - m.em(6.5)).max(0.0), row],
             Tone::Plain,
         );
         if self.node.delivery.sending == Some(id) {
@@ -127,10 +130,13 @@ impl ChatView {
                 Tone::Muted,
             );
         } else {
-            for (icon, hit, offset) in [
+            // Back into the box, to edit, unless it has what the box
+            // can't be given back (see `ChatView::take_back`).
+            let edit = editable.then_some((Icon::Edit, Hit::EditQueued(id), 5.8));
+            for (icon, hit, offset) in edit.into_iter().chain([
                 (Icon::Send, Hit::SendQueued(id), 3.8),
                 (Icon::Close, Hit::RemoveQueued(id), 1.8),
-            ] {
+            ]) {
                 self.queue_icon(
                     canvas,
                     m,

@@ -39,6 +39,9 @@ enum Pending {
     Handoff,
     /// A message queued, sent or taken back.
     Control,
+    /// A queued message taken out of the queue to edit in the box, by its
+    /// ID (see `ChatView::take_back`).
+    TakeBack(u64),
     /// Older turns, before the one numbered so.
     History(u32),
 }
@@ -288,6 +291,9 @@ impl ChatPane {
             }
             let pending = match action {
                 ChatAction::SendTo { .. } | ChatAction::Submit { .. } => Pending::Handoff,
+                ChatAction::RemoveQueued { id } if self.view.taking_back(id) => {
+                    Pending::TakeBack(id)
+                }
                 ChatAction::RemoveQueued { .. } | ChatAction::SendQueued { .. } => Pending::Control,
                 _ => Pending::Other,
             };
@@ -303,6 +309,24 @@ impl ChatPane {
         self.yanks.extend(settled.yanks);
         self.commands.extend(settled.commands);
         settled.redraw
+    }
+
+    /// Tells the daemon what's typed in the box, if typing has paused
+    /// since it changed, or whenever it's changed if `now`, as the window
+    /// closes (see `chat::prompts`). Returns whether it told it.
+    pub(crate) fn send_draft(&mut self, now: bool) -> bool {
+        let Some(text) = self.view.take_draft(now) else {
+            return false;
+        };
+        self.ask(ChatAction::Draft { text }, Pending::Other);
+        true
+    }
+
+    /// Puts `text`, a message sent before, in at the caret in the box,
+    /// going to insert mode to type on.
+    pub(crate) fn put_recalled(&mut self, text: String) {
+        self.mode = Mode::Insert;
+        self.view.put_recalled(text);
     }
 
     fn ask(&mut self, action: ChatAction, pending: Pending) {
@@ -585,6 +609,8 @@ impl ChatPane {
                 self.view.history_answer(before, response);
             }
             (Some(Pending::Control), response) => self.view.queue_answer(response),
+            (Some(Pending::TakeBack(id)), response) => self.view.taken_back(id, response),
+
             (Some(Pending::Handoff), response) => self.view.handoff_answer(response),
             (Some(Pending::Original(serial)), response) => {
                 self.view.original_answer(serial, response);
