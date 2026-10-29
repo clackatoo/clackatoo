@@ -103,6 +103,9 @@ pub use chat::{
     UsageLimit, UsageLine, agent_command, code_span, interface_command, said, slash_command,
     tokens, turn_number, turn_numbered,
 };
+pub use chat::{
+    DRAFT_LONGEST, PROMPT_LONGEST, PROMPTS_BYTES, PROMPTS_KEPT, recent_prompts, remember_prompt,
+};
 pub use clackatoo_text::{
     AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
     StepPlace, StepSelection, StepState, StepVisual,
@@ -136,7 +139,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 117;
+pub const PROTOCOL_VERSION: u32 = 118;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

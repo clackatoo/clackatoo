@@ -302,6 +302,10 @@ gates! {
     /// started each, as Claude Code's Task tool starts them:
     /// `Item::Nested`. An older peer gets each item as the agent's own.
     NESTED_WORK = 117,
+    /// The chat's prompt box: the messages the user sent, for Up to recall,
+    /// `ChatNode`'s `prompts`; and the message being typed and not sent,
+    /// `ChatNode`'s `draft`, `ChatPatch::Draft` and `ChatAction::Draft`.
+    PROMPT_BOX = 118,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -476,6 +480,7 @@ impl Since for ChatPatch {
             Self::Tasks(_) => AGENT_TASKS,
             Self::Plan(_) => AGENT_PLAN,
             Self::Commands(_) => AGENT_COMMANDS,
+            Self::Draft(_) => PROMPT_BOX,
             Self::Retrying(_) => CHAT_FACTS,
         }
     }
@@ -1075,6 +1080,7 @@ impl Downgrade for ClientMessage {
 fn chat_action_since(action: &crate::ChatAction) -> u32 {
     use crate::ChatAction;
     match action {
+        ChatAction::Draft { .. } => PROMPT_BOX,
         ChatAction::Fill { .. } => ELICITATION,
         ChatAction::Resend => CHAT_FACTS,
         ChatAction::StopTask { .. } => AGENT_TASKS,
@@ -1226,7 +1232,7 @@ fn without_chat_facts(message: &ServerMessage) -> ServerMessage {
 /// without the chat updates it has no controls for, or else without what
 /// `CHAT_FACTS` brought. `None` if it reads it as it is.
 fn older_chat(message: &ServerMessage, wire: u32) -> Option<ServerMessage> {
-    if wire >= CHAT_FACTS {
+    if wire >= PROMPT_BOX {
         return None;
     }
     without_optional_chat_updates(message, wire)
@@ -1243,7 +1249,8 @@ fn without_optional_chat_updates(message: &ServerMessage, wire: u32) -> Option<S
         return None;
     };
     let unsupported = |patch: &Patch| {
-        matches!(patch, Patch::Chat(ChatPatch::Retrying(_)) if wire < CHAT_FACTS)
+        matches!(patch, Patch::Chat(ChatPatch::Draft(_)) if wire < PROMPT_BOX)
+            || matches!(patch, Patch::Chat(ChatPatch::Retrying(_)) if wire < CHAT_FACTS)
             || matches!(patch, Patch::Chat(ChatPatch::Commands(_)) if wire < AGENT_COMMANDS)
             || matches!(patch, Patch::Chat(ChatPatch::Plan(_)) if wire < AGENT_PLAN)
             || matches!(patch, Patch::Chat(ChatPatch::Tasks(_)) if wire < AGENT_TASKS)

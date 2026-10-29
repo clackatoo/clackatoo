@@ -1179,6 +1179,7 @@ impl Daemon {
         let nested = std::mem::take(&mut handover.state.nested);
         let mut image_originals = std::mem::take(&mut handover.state.image_originals);
         let mut chat_queues = std::mem::take(&mut handover.state.chat_queues);
+        let mut drafts = std::mem::take(&mut handover.state.drafts);
         let mut continuations: std::collections::HashMap<_, _> =
             std::mem::take(&mut handover.state.chat_continuations)
                 .into_iter()
@@ -1272,6 +1273,7 @@ impl Daemon {
             chat.resume_tool_previews(&mut tool_previews);
             chat.resume_originals(&mut image_originals);
             chat.resume_queue(&mut chat_queues);
+            chat.resume_draft(&mut drafts);
             let id = chat.info().id;
             // Its agent went on through the upgrade: so does it, as it
             // was, with nothing to tell. If its agent couldn't be taken
@@ -1486,6 +1488,7 @@ impl Daemon {
         let mut nested = Vec::new();
         let mut image_originals = Vec::new();
         let mut chat_queues = Vec::new();
+        let mut drafts = Vec::new();
         let mut chat_continuations = Vec::new();
         let mut standing = handover::Talk::default();
         self.abandon_clipboard_asks();
@@ -1522,6 +1525,7 @@ impl Daemon {
                     nested.extend(chat.hand_over_nesting());
                     image_originals.push(chat.hand_over_originals());
                     chat_queues.push(chat.hand_over_queue());
+                    drafts.extend(chat.hand_over_draft());
                     if live {
                         let (handed, live) = chat.hand_over_live();
                         chats.push(handed);
@@ -1592,6 +1596,8 @@ impl Daemon {
                 tool_previews,
                 image_originals,
                 chat_queues,
+                drafts,
+
                 chat_continuations,
                 activities,
                 lent_background: self.workspaces.hand_over_lent_background(),

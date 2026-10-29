@@ -2763,6 +2763,7 @@ fn touches(patch: &clackatoo_protocol::ChatPatch) -> Option<usize> {
         | ChatPatch::Plan(_)
         | ChatPatch::Commands(_)
         | ChatPatch::Retrying(_)
+        | ChatPatch::Draft(_)
         | ChatPatch::History { .. } => None,
     }
 }

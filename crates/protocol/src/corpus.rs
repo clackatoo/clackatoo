@@ -1403,7 +1403,47 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             .into_iter()
             .map(|sample| (crate::wire::NESTED_WORK, sample)),
     );
+    samples.extend(
+        prompt_box()
+            .into_iter()
+            .map(|sample| (crate::wire::PROMPT_BOX, sample)),
+    );
     samples
+}
+
+/// Samples of protocol 118: the chat's prompt box, the user's messages
+/// and a draft in a snapshot, a draft as a patch and one emptied, and a
+/// window keeping a draft (CLACKA-192).
+fn prompt_box() -> Vec<Sample> {
+    let terminal = TerminalId(3);
+    vec![
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Snapshot(View {
+                title: "prompts".into(),
+                cwd: None,
+                root: Node::Chat(Box::new(ChatNode {
+                    prompts: vec!["fix the tests".into(), "now the docs\nand NEWS".into()],
+                    draft: "and then ".into(),
+                    ..chat()
+                })),
+            }),
+        })),
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Draft("half a thought".into()))]),
+        })),
+        Sample::Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Draft(String::new()))]),
+        })),
+        Sample::Client(ClientMessage::Request(Request::Chat {
+            terminal,
+            action: ChatAction::Draft {
+                text: "half a thought".into(),
+            },
+        })),
+    ]
 }
 
 /// Samples of protocol 117: what a Task subagent did, under the tool
@@ -3481,6 +3521,8 @@ fn chat() -> ChatNode {
         tasks: Vec::new(),
         plan: Vec::new(),
         commands: Vec::new(),
+        prompts: Vec::new(),
+        draft: String::new(),
         provider_usage: vec![crate::ProviderUsage {
             agent: "codex".into(),
             title: "Codex".into(),

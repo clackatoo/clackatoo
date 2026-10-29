@@ -34,6 +34,7 @@ use crate::handoff::{self, Changed, Digest, Step, StepState};
 use crate::handover;
 
 mod commands;
+mod draft;
 mod elicit;
 mod facts;
 pub(crate) mod failure;
@@ -568,6 +569,7 @@ impl Journal {
                 (ChatPatch::Plan(_), ChatPatch::Plan(_))
                     | (ChatPatch::Tasks(_), ChatPatch::Tasks(_))
                     | (ChatPatch::Commands(_), ChatPatch::Commands(_))
+                    | (ChatPatch::Draft(_), ChatPatch::Draft(_))
             )
         };
         if self.end() > self.sent.get()
@@ -831,6 +833,9 @@ impl HostedChat {
         (resumed.node.settings).push(browser_setting(resumed.browser()));
         resumed.starting_mode = None;
         resumed.node.state = chat.failure.map_or(ChatState::Ready, ChatState::Failed);
+        // What Up recalls is the user's messages among its turns, now
+        // they know who sent each.
+        resumed.node.prompts = clackatoo_protocol::recent_prompts(&resumed.node.turns);
         resumed
     }
 
@@ -1075,6 +1080,8 @@ impl HostedChat {
             | ChatAction::RefreshUsage { .. }
             | ChatAction::LearnModels
             | ChatAction::Open { .. } => {}
+            // The chat's own, for clients: the agent never hears of it.
+            ChatAction::Draft { text } => self.set_draft(text),
             ChatAction::StopTask { id } => self.stop_task(&id, &mut actions),
             ChatAction::Fill { question, reply } => self.fill(question, &reply, &mut actions),
             ChatAction::Resend => self.resend(&mut actions),
@@ -3311,7 +3318,13 @@ impl HostedChat {
         self.diffs.clear();
         self.woken_stopping = false;
         self.facts_begin();
+        // The user's, for Up to recall: as each viewer's copy keeps it,
+        // taking in the turn (see `ChatNode::apply`).
+        if let Some(prompt) = turn.user_prompt() {
+            clackatoo_protocol::remember_prompt(&mut self.node.prompts, prompt);
+        }
         self.node.turns.push(turn);
+
         self.patch_turn(self.node.turns.len() - 1);
     }
 
@@ -3525,6 +3538,7 @@ fn weight(patch: &ChatPatch) -> usize {
         ChatPatch::Item { value, .. } => item(value),
         ChatPatch::Append { text, .. }
         | ChatPatch::Output { text, .. }
+        | ChatPatch::Draft(text)
         | ChatPatch::Notice(Some(text)) => text.len(),
         ChatPatch::Question(Some(question)) => {
             question.title.len()
@@ -4189,6 +4203,61 @@ mod tests {
 
     fn chat() -> HostedChat {
         chat_with("claude")
+    }
+
+    #[test]
+    fn the_users_messages_are_kept_for_up_and_worked_out_again_after_an_upgrade() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "one");
+        chat.answered(Ok(StopReason::EndTurn));
+        send(&mut chat, "two");
+        chat.answered(Ok(StopReason::EndTurn));
+        send(&mut chat, "one");
+        assert_eq!(chat.node.prompts, ["two", "one"]);
+        // A viewer has them in the chat whole.
+        assert_eq!(chat.node.since_turn(None).prompts, ["two", "one"]);
+        let agent = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        let resumed = HostedChat::resume(chat.hand_over(), &agent);
+        assert_eq!(resumed.node.prompts, ["two", "one"]);
+    }
+
+    #[test]
+    fn a_draft_is_kept_cut_to_size_and_handed_over() {
+        let mut chat = chat();
+        chat.act(ChatAction::Draft {
+            text: "and then".into(),
+        });
+        assert_eq!(chat.node.draft, "and then");
+        // The same again changes nothing for viewers.
+        let end = chat.journal.end();
+        chat.act(ChatAction::Draft {
+            text: "and then".into(),
+        });
+        assert_eq!(chat.journal.end(), end);
+        // Too long is cut at a character's edge.
+        let long = "é".repeat(clackatoo_protocol::DRAFT_LONGEST);
+        chat.act(ChatAction::Draft { text: long });
+        assert!(chat.node.draft.len() <= clackatoo_protocol::DRAFT_LONGEST);
+        assert!(chat.node.draft.chars().all(|c| c == 'é'));
+        // Through an upgrade.
+        chat.act(ChatAction::Draft {
+            text: "the docs".into(),
+        });
+        let mut drafts: Vec<_> = chat.hand_over_draft().into_iter().collect();
+        let mut resumed = chat_with("claude");
+        resumed.resume_draft(&mut drafts);
+        assert_eq!(resumed.node.draft, "the docs");
+        assert!(drafts.is_empty());
+        // Nothing typed is nothing to hand over, and the agent hears of
+        // none of it.
+        let actions = chat.act(ChatAction::Draft {
+            text: String::new(),
+        });
+        assert!(actions.is_empty());
+        assert!(chat.hand_over_draft().is_none());
     }
 
     /// A chat with the known agent called `name`.

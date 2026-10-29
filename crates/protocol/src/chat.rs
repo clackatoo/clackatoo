@@ -109,6 +109,94 @@ pub struct ChatNode {
         deserialize_with = "wire::since::<{ wire::CHAT_FACTS }, _, _>"
     )]
     pub retrying: Option<String>,
+    /// The messages the user sent, oldest first, each once, for Up to
+    /// recall in the box: the chat's own turns' (see
+    /// [`Turn::user_prompt`]), the newest [`PROMPTS_KEPT`] that fit in
+    /// [`PROMPTS_BYTES`]. Nothing but the turns: the daemon works them out
+    /// again from its turns after an upgrade (see [`recent_prompts`]), and
+    /// it and every client keep them as turns come (see
+    /// [`ChatNode::apply`]), so a snapshot needn't hold every turn for
+    /// them all to be recalled.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::PROMPT_BOX }, _>",
+        deserialize_with = "wire::since::<{ wire::PROMPT_BOX }, _, _>"
+    )]
+    pub prompts: Vec<String>,
+    /// The message being typed in the chat's box and not sent yet, as a
+    /// client last said: text only, at most [`DRAFT_LONGEST`] bytes. A
+    /// client opening the chat with nothing typed starts with it.
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::PROMPT_BOX }, _>",
+        deserialize_with = "wire::since::<{ wire::PROMPT_BOX }, _, _>"
+    )]
+    pub draft: String,
+}
+
+/// How many of the user's messages a chat keeps for Up to recall, as
+/// [`ChatNode::prompts`].
+pub const PROMPTS_KEPT: usize = 200;
+
+/// The most bytes of them it keeps, so a chat's snapshot stays small.
+pub const PROMPTS_BYTES: usize = 128 * 1024;
+
+/// The longest message kept for Up to recall, in bytes: longer is surely
+/// pasted, and too much to send with every snapshot.
+pub const PROMPT_LONGEST: usize = 16 * 1024;
+
+/// The longest draft a chat keeps, in bytes: as long as a message may be.
+pub const DRAFT_LONGEST: usize = 64 * 1024;
+
+/// Whether `prompt` is one Up recalls: not blank, nor longer than
+/// [`PROMPT_LONGEST`].
+fn recallable(prompt: &str) -> bool {
+    !prompt.trim().is_empty() && prompt.len() <= PROMPT_LONGEST
+}
+
+/// The user's messages in `turns`, oldest first, as [`ChatNode::prompts`]
+/// keeps them: each once, where it was sent last, the newest
+/// [`PROMPTS_KEPT`] that fit in [`PROMPTS_BYTES`] together. It's what
+/// [`remember_prompt`] makes of them one at a time, worked out from the
+/// newest back.
+#[must_use]
+pub fn recent_prompts(turns: &[Turn]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut kept = Vec::new();
+    let mut bytes = 0;
+    for prompt in turns.iter().rev().filter_map(Turn::user_prompt) {
+        if !recallable(prompt) || !seen.insert(prompt) {
+            continue;
+        }
+        if kept.len() == PROMPTS_KEPT || bytes + prompt.len() > PROMPTS_BYTES {
+            break;
+        }
+        bytes += prompt.len();
+        kept.push(prompt.to_owned());
+    }
+    kept.reverse();
+    kept
+}
+
+/// Adds `prompt` to `prompts`, kept as [`ChatNode::prompts`] are: as the
+/// newest, moved there if it was kept before, and the oldest let go past
+/// [`PROMPTS_KEPT`] or [`PROMPTS_BYTES`].
+pub fn remember_prompt(prompts: &mut Vec<String>, prompt: &str) {
+    if !recallable(prompt) {
+        return;
+    }
+    prompts.retain(|kept| kept != prompt);
+    prompts.push(prompt.to_owned());
+    let mut bytes: usize = prompts.iter().map(String::len).sum();
+    let mut drop = prompts.len().saturating_sub(PROMPTS_KEPT);
+    for gone in &prompts[..drop] {
+        bytes -= gone.len();
+    }
+    while bytes > PROMPTS_BYTES {
+        bytes -= prompts[drop].len();
+        drop += 1;
+    }
+    prompts.drain(..drop);
 }
 
 /// A slash command an agent offers, typed as `/name` at the start of a
@@ -831,6 +919,18 @@ pub struct Turn {
         deserialize_with = "wire::since::<{ wire::AGENT_TURNS }, _, _>"
     )]
     pub woke: Option<String>,
+}
+
+impl Turn {
+    /// The message the user typed, if the turn is one the user sent: not
+    /// another chat's agent's, nor a notice of clackatoo's (both have a
+    /// sender), nor one the agent took by itself, nor a move to another
+    /// agent, nor one with no words, such as an image alone.
+    #[must_use]
+    pub fn user_prompt(&self) -> Option<&str> {
+        let own = self.from.is_none() && self.switch.is_none() && self.woke.is_none();
+        (own && !self.prompt.trim().is_empty()).then_some(self.prompt.as_str())
+    }
 }
 
 /// The chat whose agent sent a message to another chat, as it was when it
@@ -1611,6 +1711,9 @@ pub enum ChatPatch {
     Commands(Vec<AgentCommand>),
     /// What the agent says as it tries again is now this.
     Retrying(Option<String>),
+    /// The message being typed in the box is now this (see
+    /// [`ChatNode::draft`]).
+    Draft(String),
 }
 
 /// A small, decoded image for chat history. Shared by snapshots and paint
@@ -1825,6 +1928,14 @@ pub enum ChatAction {
     /// Send the last turn's message, which failed, again, with its
     /// images, as a turn of its own. Requires `wire::CHAT_FACTS`.
     Resend,
+    /// Keep `text` as the message being typed in the chat's box and not
+    /// sent yet, for any client to start with (see [`ChatNode::draft`]).
+    /// Empty for none; at most [`DRAFT_LONGEST`] bytes. Requires
+    /// `wire::PROMPT_BOX`.
+    Draft {
+        /// What's typed.
+        text: String,
+    },
 }
 
 /// The number turn `index` of `turns` goes by, as people count them: from
@@ -1918,6 +2029,8 @@ impl ChatNode {
             plan: self.plan.clone(),
             commands: self.commands.clone(),
             retrying: self.retrying.clone(),
+            prompts: self.prompts.clone(),
+            draft: self.draft.clone(),
             first_turn: self
                 .first_turn
                 .saturating_add(u32::try_from(start).unwrap_or(u32::MAX)),
@@ -1943,7 +2056,14 @@ impl ChatNode {
                 };
                 match index.cmp(&self.turns.len()) {
                     std::cmp::Ordering::Less => self.turns[index] = *turn,
-                    std::cmp::Ordering::Equal => self.turns.push(*turn),
+                    // A message the user sent, from whichever client, is
+                    // the newest for Up to recall.
+                    std::cmp::Ordering::Equal => {
+                        if let Some(prompt) = turn.user_prompt() {
+                            remember_prompt(&mut self.prompts, prompt);
+                        }
+                        self.turns.push(*turn);
+                    }
                     std::cmp::Ordering::Greater => {}
                 }
             }
@@ -2003,6 +2123,7 @@ impl ChatNode {
             ChatPatch::Plan(plan) => self.plan = plan,
             ChatPatch::Commands(commands) => self.commands = commands,
             ChatPatch::Retrying(retrying) => self.retrying = retrying,
+            ChatPatch::Draft(draft) => self.draft = draft,
             ChatPatch::History {
                 first,
                 before,
@@ -2528,6 +2649,75 @@ mod tests {
             .nested_work()
             .is_empty()
         );
+    }
+
+    #[test]
+    fn only_the_users_own_words_are_prompts_to_recall() {
+        assert_eq!(turn("fix it", Vec::new()).user_prompt(), Some("fix it"));
+        assert_eq!(turn("  \n", Vec::new()).user_prompt(), None);
+        let from = Turn {
+            from: Some(Sender {
+                chat: crate::TerminalId(2),
+                agent: "Clackatoo".into(),
+                title: "Subagents finished".into(),
+            }),
+            ..turn("they're done", Vec::new())
+        };
+        assert_eq!(from.user_prompt(), None);
+        let woke = Turn {
+            woke: Some("the build ended".into()),
+            ..turn("", Vec::new())
+        };
+        assert_eq!(woke.user_prompt(), None);
+    }
+
+    #[test]
+    fn prompts_kept_one_at_a_time_are_those_worked_out_from_the_turns() {
+        // Repeats, a blank, one too long, and enough bytes to let the
+        // oldest go.
+        let long = "x".repeat(PROMPT_LONGEST + 1);
+        let big = |n: usize| format!("{n}{}", "y".repeat(PROMPT_LONGEST - 1));
+        let mut said: Vec<String> = vec!["a".into(), "b".into(), "a".into(), " ".into(), long];
+        said.extend((0..8).map(big));
+        said.extend((0..PROMPTS_KEPT + 20).map(|n| format!("p{}", n % 230)));
+        said.push("b".into());
+        let turns: Vec<Turn> = said.iter().map(|text| turn(text, Vec::new())).collect();
+        let mut kept = Vec::new();
+        for turn in &turns {
+            if let Some(prompt) = turn.user_prompt() {
+                remember_prompt(&mut kept, prompt);
+            }
+        }
+        assert_eq!(kept, recent_prompts(&turns));
+        assert_eq!(kept.len(), PROMPTS_KEPT);
+        assert_eq!(kept.last().map(String::as_str), Some("b"));
+        assert!(kept.iter().map(String::len).sum::<usize>() <= PROMPTS_BYTES);
+        // By bytes, before by count.
+        let turns: Vec<Turn> = (0..10).map(|n| turn(&big(n), Vec::new())).collect();
+        let worked_out = recent_prompts(&turns);
+        assert_eq!(worked_out.len(), PROMPTS_BYTES / PROMPT_LONGEST);
+        assert!(worked_out[0].starts_with('2'));
+    }
+
+    #[test]
+    fn a_turn_the_user_sent_is_kept_to_recall_as_it_comes_once() {
+        let mut chat = ChatNode {
+            turns: vec![turn("one", Vec::new())],
+            prompts: vec!["one".into()],
+            ..ChatNode::default()
+        };
+        chat.apply(ChatPatch::Turn {
+            index: 1,
+            turn: Box::new(turn("two", Vec::new())),
+        });
+        // Changed after, it's still the one message.
+        chat.apply(ChatPatch::Turn {
+            index: 1,
+            turn: Box::new(turn("two", vec![Item::Words("done".into())])),
+        });
+        assert_eq!(chat.prompts, ["one", "two"]);
+        chat.apply(ChatPatch::Draft("and".into()));
+        assert_eq!(chat.draft, "and");
     }
 
     #[test]
