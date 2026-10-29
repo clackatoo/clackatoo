@@ -1922,7 +1922,10 @@ mod tests {
     fn a_rewind_cuts_back_and_asks_nothing_of_the_agent_until_the_next_message() {
         let mut chat = talked(&["apple", "banana"]);
         let first = chat.turn_uid(0).unwrap();
-        let end = chat.journal.end();
+        // A viewer sent everything so far.
+        let mut viewer = super::super::ChatSent::default();
+        chat.catch_up(&mut viewer);
+        assert!(chat.catch_up(&mut viewer).is_none());
         let actions = chat.rewind(1, false, false).unwrap();
         assert!(actions.is_empty(), "{actions:?}");
         assert_eq!(prompts(&chat), ["apple"]);
@@ -1932,8 +1935,11 @@ mod tests {
         assert_eq!((place.at, place.current, place.count), (1, 2, 2));
         assert_eq!(place.branches[0].first, "banana");
         assert_eq!(place.branches[0].turns, 1);
-        // Viewers get the chat whole.
-        assert_eq!(chat.journal.first, end);
+        // Viewers get the chat whole, one sent everything before too.
+        assert!(matches!(
+            chat.catch_up(&mut viewer),
+            Some(clackatoo_protocol::ViewUpdate::Snapshot(_))
+        ));
         assert_eq!(
             chat.session.as_deref(),
             Some("s1"),

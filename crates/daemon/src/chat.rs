@@ -633,9 +633,10 @@ impl Journal {
     }
 
     /// Lets every change kept go: every viewer gets the chat whole next,
-    /// as after a cut, which no change says.
+    /// as after a cut, which no change says. A number is skipped, so a
+    /// viewer sent everything so far is behind too.
     fn restart(&mut self) {
-        self.first = self.end();
+        self.first = self.end() + 1;
         self.patches.clear();
         self.bytes = 0;
     }
