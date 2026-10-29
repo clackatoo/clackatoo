@@ -530,6 +530,81 @@ mod tests {
     }
 
     #[test]
+    fn codexs_plan_mode_goes_in_the_permissions_menu_beside_its_mode() {
+        let setting = |id: &str, name: &str, kind, value: &str, choices| Setting {
+            id: id.into(),
+            name: name.into(),
+            kind,
+            value: value.into(),
+            choices,
+        };
+        // Codex's settings, as its adapter gives them, and clackatoo's.
+        let mut settings = vec![
+            setting(
+                "mode",
+                "Mode",
+                SettingKind::Mode,
+                "agent",
+                vec![
+                    choice("read-only", "Read-only", None),
+                    choice("agent", "Auto review", None),
+                ],
+            ),
+            setting(
+                "collaboration_mode",
+                "Collaboration mode",
+                SettingKind::Other,
+                "default",
+                vec![
+                    choice("default", "Default", None),
+                    choice("plan", "Plan", Some("Plan before making changes")),
+                ],
+            ),
+            setting(
+                "fast-mode",
+                "Fast mode",
+                SettingKind::Other,
+                "off",
+                vec![choice("off", "Off", None), choice("on", "On", None)],
+            ),
+            setting(
+                "clackatoo.tools",
+                "Tools",
+                SettingKind::Tools,
+                "ask",
+                vec![choice("ask", "Ask", None), choice("allow", "Allow", None)],
+            ),
+        ];
+        let ids: Vec<String> = (permissions(&settings).into_iter())
+            .map(|setting| setting.id)
+            .collect();
+        assert_eq!(ids, ["mode", "collaboration_mode", "clackatoo.tools"]);
+        assert_eq!(permissions_label(&settings), "Auto review");
+        settings[1].value = "plan".into();
+        assert_eq!(permissions_label(&settings), "Plan · Auto review");
+        // Its menu has a heading for each, Plan mode's choices under its.
+        let rows = rows(&settings, &menu(&["mode", "collaboration_mode", "clackatoo.tools"], None));
+        let headings: Vec<&str> = (rows.iter())
+            .filter_map(|row| match row {
+                Row::Heading { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headings, ["Mode", "Collaboration mode", "Tools"]);
+        let chosen: Vec<(String, bool)> = (shown(&rows).into_iter())
+            .map(|(name, current, ..)| (name, current))
+            .collect();
+        assert_eq!(
+            chosen[2..4],
+            [("Default".to_owned(), false), ("Plan".to_owned(), true)]
+        );
+        // Another setting of no known kind, or one without Plan, isn't it.
+        settings[1].choices.pop();
+        assert!(permissions(&settings).iter().all(|s| s.kind != SettingKind::Other));
+        assert_eq!(permissions_label(&settings), "Auto review");
+    }
+
+    #[test]
     fn other_agents_models_follow_the_agents_own_each_under_its_name() {
         let providers = [
             Provider {
@@ -766,6 +841,36 @@ pub(super) fn fast_mode(settings: &[Setting]) -> Option<&Setting> {
                 .iter()
                 .all(|value| setting.choices.iter().any(|c| c.value == *value))
     })
+}
+
+/// The settings the permissions control's menu holds, in order: the
+/// agent's mode, Codex's Plan mode (see [`Setting::is_plan_mode`]), and
+/// clackatoo's own Tools and Browser.
+pub(super) fn permissions(settings: &[Setting]) -> Vec<Setting> {
+    let of = |kind| settings.iter().find(|setting| setting.kind == kind);
+    (of(SettingKind::Mode).into_iter())
+        .chain(settings.iter().find(|setting| setting.is_plan_mode()))
+        .chain([SettingKind::Tools, SettingKind::Browser].into_iter().filter_map(of))
+        .cloned()
+        .collect()
+}
+
+/// What the permissions control says: the agent's mode, after Codex's
+/// "Plan" while it's in Plan mode, as Claude Code's Plan is a mode; else
+/// "Permissions".
+pub(super) fn permissions_label(settings: &[Setting]) -> String {
+    let name = |setting: &Setting| {
+        setting
+            .current()
+            .map_or_else(|| setting.value.clone(), |choice| choice.name.clone())
+    };
+    let mode = (settings.iter())
+        .find(|setting| setting.kind == SettingKind::Mode)
+        .map_or_else(|| "Permissions".to_owned(), name);
+    match settings.iter().find(|setting| setting.planning()) {
+        Some(plan) => format!("{} · {mode}", name(plan)),
+        None => mode,
+    }
 }
 
 pub(super) fn provider_name<'a>(offer: &'a Offer<'_>, choice: &ChoiceRow) -> &'a str {

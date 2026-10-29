@@ -1647,20 +1647,13 @@ impl ChatView {
             .into_iter()
             .chain(of(SettingKind::Effort))
             .collect();
-        let permissions: Vec<Setting> =
-            [SettingKind::Mode, SettingKind::Tools, SettingKind::Browser]
-                .into_iter()
-                .filter_map(of)
-                .collect();
+        let permissions = picker::permissions(&self.node.settings);
         if models.is_empty() && permissions.is_empty() {
             return;
         }
         let start = frame.left + frame.pad - m.em(0.4);
         let room = (right - start).max(0.0);
-        let permission_name = permissions
-            .iter()
-            .find(|s| s.kind == SettingKind::Mode)
-            .map_or_else(|| "Permissions".to_owned(), chosen_name);
+        let permission_name = picker::permissions_label(&self.node.settings);
         let natural = self.box_label(
             canvas.fonts,
             m,

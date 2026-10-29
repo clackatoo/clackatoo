@@ -940,6 +940,23 @@ impl Setting {
             .iter()
             .find(|choice| choice.value == self.value)
     }
+
+    /// Whether it's Codex's Plan mode: its adapter's `collaboration_mode`,
+    /// Default or Plan, which is of no kind clackatoo knows (`Other`), as
+    /// its category is Codex's own, but goes with the mode where clients
+    /// show settings.
+    #[must_use]
+    pub fn is_plan_mode(&self) -> bool {
+        self.kind == SettingKind::Other
+            && self.id == "collaboration_mode"
+            && self.choices.iter().any(|choice| choice.value == "plan")
+    }
+
+    /// Whether it's [Codex's Plan mode](Self::is_plan_mode), in Plan mode.
+    #[must_use]
+    pub fn planning(&self) -> bool {
+        self.is_plan_mode() && self.value == "plan"
+    }
 }
 
 /// A message the user sent, and what the agent did with it.

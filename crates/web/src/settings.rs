@@ -110,7 +110,7 @@ pub fn panel(node: &ChatNode, picker: &Picker, capabilities: &[(String, String)]
                     matches!(
                         s.kind,
                         SettingKind::Mode | SettingKind::Tools | SettingKind::Browser
-                    )
+                    ) || s.is_plan_mode()
                 })
                 .map(choices),
         );

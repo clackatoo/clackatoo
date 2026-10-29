@@ -4942,6 +4942,48 @@ mod tests {
     }
 
     #[test]
+    fn the_permissions_chip_opens_codexs_plan_mode_beside_its_mode() {
+        use clackatoo_protocol::SettingChoice;
+        let mut fonts = fonts();
+        let mut view = with_every_chip();
+        view.node.settings.insert(
+            1,
+            Setting {
+                id: "collaboration_mode".into(),
+                name: "Collaboration mode".into(),
+                kind: SettingKind::Other,
+                value: "default".into(),
+                choices: ["default", "plan"]
+                    .map(|value| SettingChoice {
+                        value: value.into(),
+                        name: value.into(),
+                        description: None,
+                    })
+                    .to_vec(),
+            },
+        );
+        view.paint(&mut fonts, [0.0; 2], [900.0, 800.0], false);
+        let chips: Vec<&Vec<String>> = (view.hits.iter())
+            .filter_map(|(hit, _)| match hit {
+                Hit::Chip(settings) => Some(settings),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chips,
+            [
+                &vec!["model".to_owned()],
+                &vec![
+                    "mode".to_owned(),
+                    "collaboration_mode".to_owned(),
+                    "clackatoo.tools".to_owned(),
+                    "clackatoo.browser".to_owned(),
+                ],
+            ]
+        );
+    }
+
+    #[test]
     fn context_gauge_fits_beside_send_at_every_width() {
         let mut fonts = fonts();
         let mut view = with_every_chip();
