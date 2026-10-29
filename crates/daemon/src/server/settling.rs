@@ -42,6 +42,7 @@ use std::sync::{Arc, mpsc};
 use clackatoo_protocol::TerminalId;
 
 use clackatoo_protocol::BufferId;
+use clackatoo_text::Rope;
 
 use super::agent_files::{Merging, Settled};
 use super::edit_log::{Diffed, Maker};
@@ -75,12 +76,17 @@ pub(super) struct Diffing {
 
 /// What a change being merged into buffer `id` is merged again from, if
 /// it can't be made as merged.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct Open {
     pub(super) id: BufferId,
     pub(super) source: Source,
     /// How many times it's been merged again.
     pub(super) tries: u32,
+    /// The buffer's text saved as it was merged into, and whether the file
+    /// was there then: what the file held before the change, if the
+    /// worker is lost with the change, and the buffer has closed.
+    pub(super) saved: Rope,
+    pub(super) existed: bool,
 }
 
 /// Where a change to a buffer's file came from.
@@ -326,6 +332,9 @@ impl Settler {
 mod tests {
     use clackatoo_protocol::{Author, BufferId};
 
+    use serde_json::json;
+
+    use crate::server::disk::tests::{finish_command, says, start_command};
     use crate::server::turn_undo::tests::{World, big_file, change_big_file};
 
     /// `big.txt`, open, with a change to its first line by the chat's
@@ -383,6 +392,91 @@ mod tests {
         assert!(notice.contains("where you have unsaved edits"), "{notice}");
         let buffer = &world.daemon.buffers[&id].buffer;
         assert!(buffer.changed_on_disk().unwrap().is_some());
+        // Saved only if forced, over the agent's file.
+        assert!(world.daemon.save_buffer(id, false).is_err());
+        world.daemon.save_buffer(id, true).unwrap();
+        assert_eq!(world.disk("big.txt"), Some(world.text(id)));
+    }
+
+    #[test]
+    fn typing_on_while_a_big_change_is_merged_again_has_it_merged_on_the_loop_at_last() {
+        let mut world = World::new();
+        let (id, first, second) = merging(&mut world);
+        let mut typed = String::new();
+        for (key, pending) in [("a\n", true), ("b\n", true), ("c\n", false)] {
+            world.type_in(id, first.len() + typed.len(), "", key);
+            typed.push_str(key);
+            world.daemon.take_one_settled();
+            assert_eq!(world.daemon.agent_files.diffing(world.chat), pending, "{key}");
+        }
+        assert_eq!(world.text(id), format!("{second}{typed}"));
+        world.end_turn();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.text(id), format!("{first}{typed}"));
+    }
+
+    #[test]
+    fn your_own_undo_after_a_big_change_merged_again_leaves_it_be() {
+        let mut world = World::new();
+        let (id, first, second) = merging(&mut world);
+        world.type_in(id, first.len(), "", "typed\n");
+        world.daemon.settle_all_pending();
+        assert_eq!(world.text(id), format!("{second}typed\n"));
+        let buffer = &mut world.daemon.buffers.get_mut(&id).unwrap().buffer;
+        let made = buffer.reverse(Author::User, false).unwrap().unwrap();
+        world.daemon.made_for_user(id, made);
+        assert_eq!(world.text(id), second);
+        let buffer = &mut world.daemon.buffers.get_mut(&id).unwrap().buffer;
+        assert!(buffer.reverse(Author::User, false).unwrap().is_none());
+    }
+
+    #[test]
+    fn what_the_agents_command_changes_while_a_big_change_is_merged_is_its_too() {
+        let mut world = World::new();
+        let (id, first, second) = merging(&mut world);
+        let chat = world.chat;
+        let done = json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+        });
+        says(&mut world.daemon, chat, done);
+        // A command, as `sed -i`, changes it too, before the change is
+        // made.
+        start_command(&mut world.daemon, chat);
+        let third = second.replacen("line 5\n", "line #5\n", 1);
+        std::fs::write(world.path("big.txt"), &third).unwrap();
+        world.daemon.disk_maybe_changed(id);
+        world.daemon.check_disk();
+        finish_command(&mut world.daemon, chat);
+        // The loop looks at what's changed on every pass, the command's
+        // finish forgotten by the next.
+        world.daemon.check_disk();
+        world.daemon.check_disk();
+        world.daemon.settle_all_pending();
+        world.daemon.check_disk();
+        world.daemon.settle_all_pending();
+        assert!(!world.daemon.buffers[&id].stale());
+        assert_eq!(world.text(id), third);
+        world.end_turn();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.text(id), first);
+    }
+
+    #[test]
+    fn a_file_changed_from_outside_while_a_big_change_is_merged_says_so_once_made() {
+        let mut world = World::new();
+        let (id, _, second) = merging(&mut world);
+        world.end_turn();
+        let third = second.replacen("line 7\n", "line #7\n", 1);
+        std::fs::write(world.path("big.txt"), third).unwrap();
+        world.daemon.disk_maybe_changed(id);
+        world.daemon.check_disk();
+        assert!(!world.daemon.buffers[&id].stale());
+        world.daemon.settle_all_pending();
+        world.daemon.check_disk();
+        // The agent's change is made as its own; the other isn't taken.
+        assert_eq!(world.text(id), second);
+        assert!(world.daemon.buffers[&id].stale());
+        assert!(world.daemon.agent_files.log.turn(world.chat, 0).is_some());
     }
 
     #[test]
@@ -519,6 +613,24 @@ mod tests {
         world.end_turn();
         assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
         assert_eq!(world.text(id), first);
+    }
+
+    #[test]
+    fn a_big_change_given_a_worker_lost_with_its_buffer_closed_is_still_taken_in() {
+        use super::GONE;
+        let mut world = World::new();
+        let first = big_file(&world);
+        let id = world.open("big.txt");
+        world.daemon.agent_files.panic_next(GONE);
+        let second = change_big_file(&mut world, ("t1", 1), &first);
+        world.daemon.close_if_unwanted(id);
+        world.daemon.settle_all_pending();
+        assert!(!world.daemon.agent_files.diffing(world.chat));
+        assert!(world.daemon.reviews.keeps_closed(&world.path("big.txt")));
+        assert_eq!(world.disk("big.txt"), Some(second));
+        world.end_turn();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.disk("big.txt"), Some(first));
     }
 
     #[test]

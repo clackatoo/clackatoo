@@ -182,6 +182,15 @@ impl Daemon {
         }
     }
 
+    /// Has buffer `id`'s file looked at again, late in this pass, once an
+    /// agent's change merged into it has been made, unless a change found
+    /// meanwhile is noted as an agent's: that's taken as its own then.
+    pub(super) fn look_again(&mut self, id: BufferId) {
+        if !self.disk.noted.contains_key(&id) {
+            self.disk_maybe_changed(id);
+        }
+    }
+
     /// Has buffer `id`'s file looked at, late in this pass, as it may
     /// have changed.
     pub(super) fn disk_maybe_changed(&mut self, id: BufferId) {
@@ -223,6 +232,17 @@ impl Daemon {
             .map(|(&id, &noted)| (id, noted))
             .collect();
         for (id, noted) in noted {
+            let merging = (self.buffers.get(&id))
+                .is_some_and(|slot| self.agent_files.merging(noted.chat, slot.buffer.path()));
+            if merging {
+                // The chat's own change to the file is still being merged:
+                // this is taken after it, from what it leaves, and is still
+                // the tool's that finished, if one has.
+                if ran.contains(&noted.chat) && !self.disk.ran.contains(&noted.chat) {
+                    self.disk.ran.push(noted.chat);
+                }
+                continue;
+            }
             let running = self.chat(noted.chat).is_some_and(|chat| chat.answering());
             if running && !ran.contains(&noted.chat) {
                 continue;
@@ -247,11 +267,6 @@ impl Daemon {
             return;
         };
         let path = slot.buffer.path().to_owned();
-        if self.agent_files.pending(&path) {
-            // An agent's change to it, still being merged into the buffer,
-            // which has it looked at again once it's made.
-            return;
-        }
         match DiskStamp::now(&path) {
             Ok(Some(now)) if Some(now) != slot.buffer.disk() => {}
             // As the buffer last read or wrote it, or gone.
@@ -271,6 +286,11 @@ impl Daemon {
                 self.disk.noted.insert(id, by);
             }
             (Some(by), Some(noted)) if noted.chat == by.chat => {}
+            // An agent's change to it is still being merged into the
+            // buffer, which doesn't know the file as it is yet: nothing is
+            // taken as from outside until it's made, and the file looked
+            // at again.
+            _ if self.agent_files.pending(&path) => {}
             _ => {
                 self.disk.noted.remove(&id);
                 self.changed_outside(id, true);
@@ -427,7 +447,7 @@ fn changed_notice(path: &Path) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::server) mod tests {
     use clackatoo_protocol::{Edit, OpenFile};
     use serde_json::{Value, json};
 
@@ -451,7 +471,7 @@ mod tests {
     }
 
     /// Has the agent in `chat` say `update`, as the event loop hears it.
-    fn says(daemon: &mut Daemon, chat: TerminalId, update: Value) {
+    pub(in crate::server) fn says(daemon: &mut Daemon, chat: TerminalId, update: Value) {
         let update = serde_json::from_value(update).unwrap();
         if daemon.chat(chat).unwrap().finishes_writing(&update) {
             daemon.writing_ended(chat);
@@ -460,7 +480,7 @@ mod tests {
     }
 
     /// Has the agent in `chat` start running a command, as tool call `c`.
-    fn start_command(daemon: &mut Daemon, chat: TerminalId) {
+    pub(in crate::server) fn start_command(daemon: &mut Daemon, chat: TerminalId) {
         let call = json!({
             "sessionUpdate": "tool_call", "toolCallId": "c", "title": "cargo fmt",
             "kind": "execute", "status": "in_progress",
@@ -469,7 +489,7 @@ mod tests {
     }
 
     /// Has the agent in `chat` say its command, tool call `c`, finished.
-    fn finish_command(daemon: &mut Daemon, chat: TerminalId) {
+    pub(in crate::server) fn finish_command(daemon: &mut Daemon, chat: TerminalId) {
         let done = json!({
             "sessionUpdate": "tool_call_update", "toolCallId": "c", "status": "completed",
         });

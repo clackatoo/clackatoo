@@ -43,6 +43,7 @@
 
 use std::collections::VecDeque;
 use std::ops::Range;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use clackatoo_protocol::{Author, BufferId, BufferUpdate, TerminalId};
@@ -122,6 +123,12 @@ impl AgentFiles {
     /// the agent's, and the buffer doesn't know it yet.
     pub(super) fn pending(&self, path: &Path) -> bool {
         self.diffing.iter().any(|diffing| diffing.path == path)
+    }
+
+    /// Whether a change the agent in `chat` made to the file `path` is
+    /// being worked out or merged.
+    pub(super) fn merging(&self, chat: TerminalId, path: &Path) -> bool {
+        (self.diffing.iter()).any(|diffing| diffing.chat() == chat && diffing.path == path)
     }
 
     /// A new serial number for a report.
@@ -291,11 +298,14 @@ pub(super) struct Merging {
 
 impl Merging {
     /// The text it holds, in bytes, as a change to a file not open counts
-    /// its texts before and after: the ropes share most of what they hold,
-    /// so they're counted as the bigger.
+    /// its texts before and after: the buffer's before, and the file's
+    /// after. The ropes share most of what they hold, so they're counted
+    /// as the bigger, and the steps before the last only as the file's
+    /// text once: several tools' edits to a big file are each about as big
+    /// as it, and counting each whole would merge them on the loop.
     pub(super) fn bytes(&self) -> usize {
         self.saved.len_bytes().max(self.text.len_bytes())
-            + self.steps.iter().map(|(text, _)| text.len()).sum::<usize>()
+            + self.steps.last().map_or(0, |(text, _)| text.len())
     }
 
     /// Merges the change into the buffer's text as it was, as the buffer
@@ -575,13 +585,31 @@ impl Daemon {
         }
     }
 
-    /// As [`settle_pending`](Self::settle_pending), for buffer `id`'s file.
+    /// As [`settle_pending`](Self::settle_pending), for buffer `id`'s file,
+    /// telling everyone following it, as it holds up what waits: as long
+    /// as the worker's work ahead of it, at most about a second's.
     pub(super) fn settle_buffer_pending(&mut self, id: BufferId) {
         if let Some(slot) = self.buffers.get(&id)
             && self.agent_files.pending(slot.buffer.path())
         {
             let path = slot.buffer.path().to_owned();
+            let file = path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            let notice = format!("Waited for the agent's change to {file} to be merged first");
             self.settle_pending(&path);
+            self.tell_viewers(id, None, &BufferUpdate::Notice(notice));
+        }
+    }
+
+    /// Waits for the next change the worker is done with, and takes it in,
+    /// as a test's way of acting between one try and the next.
+    #[cfg(test)]
+    pub(super) fn take_one_settled(&mut self) {
+        match self.agent_files.settler.wait() {
+            Some(worked) => self.took_settled(worked),
+            None => self.settler_lost(),
         }
     }
 
@@ -634,9 +662,9 @@ impl Daemon {
         &mut self,
         merging: Merging,
         prepared: Option<Result<Prepared, Unprepared>>,
-        diffing: Diffing,
+        mut diffing: Diffing,
     ) {
-        let Some(open) = diffing.open else {
+        let Some(open) = diffing.open.take() else {
             return self.after_diffing(diffing);
         };
         let id = merging.id;
@@ -654,20 +682,25 @@ impl Daemon {
                 // read; not a file whose change was refused, as the user
                 // has been told of it already.
                 if self.land(merging, prepared) {
-                    self.disk_maybe_changed(id);
+                    self.look_again(id);
                 }
                 self.after_diffing(diffing);
             }
             // Changed meanwhile: merged again from the buffer as it is.
-            (Some(_), Some(_)) => self.merge_again(diffing, open, open.tries + 1),
+            (Some(_), Some(_)) => {
+                let tries = open.tries + 1;
+                self.merge_again(diffing, &open, tries);
+            }
             // Merging failed on the worker: on the loop, then.
-            (Some(_), None) => self.merge_again(diffing, open, MERGES),
+            (Some(_), None) => self.merge_again(diffing, &open, MERGES),
         }
     }
 
     /// Merges the change `diffing` waited for into its buffer again, from
     /// the buffer and its file as they are now, as try `tries`.
-    fn merge_again(&mut self, diffing: Diffing, open: Open, tries: u32) {
+    /// A buffer closed meanwhile has it taken in as a change to the file
+    /// not open, from the text the buffer had saved.
+    fn merge_again(&mut self, diffing: Diffing, open: &Open, tries: u32) {
         let (chat, path) = (diffing.chat(), diffing.path.clone());
         if self.buffer_of(&path) == Some(open.id) {
             match open.source {
@@ -676,8 +709,41 @@ impl Daemon {
                 }
                 Source::Commands { turn } => self.commands_into(chat, turn, open.id, tries),
             }
+        } else {
+            self.settle_gone_as_closed(&diffing, open);
         }
         self.carry_on(diffing);
+    }
+
+    /// Takes in the change `diffing` waited for, to a buffer that has
+    /// since closed, whose merge was lost, as a change to the file not
+    /// open: from the text the buffer had saved to the file's now.
+    fn settle_gone_as_closed(&mut self, diffing: &Diffing, open: &Open) {
+        let (chat, path) = (diffing.chat(), diffing.path.clone());
+        (self.agent_files.reports).retain(|report| report.chat != chat || report.path != path);
+        let (disk, read_as) = match buffer::read(&path) {
+            Ok((text, stamp)) => (Some(buffer::lf(text)), Some(stamp)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (None, None),
+            Err(err) => {
+                log::warn!("{}: {err}", path.display());
+                return self.unknown(diffing);
+            }
+        };
+        let settled = Settled {
+            chat,
+            path,
+            maker: diffing.maker.clone(),
+            before: open.existed.then(|| open.saved.to_string()),
+            disk,
+            read_as,
+        };
+        if let Some(settled) = self.settle_off_loop(settled) {
+            let diffed = Diffed::between(
+                settled.before.as_deref().unwrap_or_default(),
+                settled.disk.as_deref().unwrap_or_default(),
+            );
+            self.settled_closed(settled, &diffed);
+        }
     }
 
     /// Goes on with what waited for `diffing`, a change to a buffer's file
@@ -742,12 +808,12 @@ impl Daemon {
     /// what waited for it goes on.
     fn settler_lost(&mut self) {
         log::warn!("settling: the worker is gone; what it had is noted as unknown");
-        for diffing in std::mem::take(&mut self.agent_files.diffing) {
+        for mut diffing in std::mem::take(&mut self.agent_files.diffing) {
             if self.chat(diffing.chat()).is_none() {
                 continue;
             }
-            if let Some(open) = diffing.open {
-                self.merge_again(diffing, open, MERGES);
+            if let Some(open) = diffing.open.take() {
+                self.merge_again(diffing, &open, MERGES);
             } else {
                 self.unknown(&diffing);
                 self.after_diffing(diffing);
@@ -910,6 +976,7 @@ impl Daemon {
     fn merge_into(&mut self, merging: Merging, source: Source, tries: u32) {
         let merging = if merging.bytes() > ON_LOOP && tries < MERGES {
             let (path, id) = (merging.path.clone(), merging.id);
+            let (saved, existed) = (merging.saved.clone(), merging.existed);
             let maker = merging.makers.first().cloned().unwrap_or(Maker {
                 chat: merging.chat,
                 turn: 0,
@@ -922,7 +989,13 @@ impl Daemon {
                         maker,
                         again: false,
                         last: false,
-                        open: Some(Open { id, source, tries }),
+                        open: Some(Open {
+                            id,
+                            source,
+                            tries,
+                            saved,
+                            existed,
+                        }),
                     });
                     return;
                 }
@@ -940,9 +1013,26 @@ impl Daemon {
         } else {
             merging
         };
-        let (id, prepared) = (merging.id, merging.prepare());
-        if self.land(merging, prepared) {
-            self.disk_maybe_changed(id);
+        let id = merging.id;
+        // A merge that panics on the loop isn't tried again: the change is
+        // noted as unknown, and the file looked at again, as changed by
+        // someone else.
+        match catch_unwind(AssertUnwindSafe(|| merging.prepare())) {
+            Ok(prepared) => {
+                if self.land(merging, prepared) {
+                    self.look_again(id);
+                }
+            }
+            Err(panic) => {
+                log::warn!("buffer {id}: merging an agent's change panicked: {panic:?}");
+                self.agent_files.forget_reports(&merging.covered);
+                let turns: Vec<usize> = merging.makers.iter().map(|maker| maker.turn).collect();
+                for maker in &merging.makers {
+                    (self.agent_files.log).note_unknown(maker, &merging.path);
+                }
+                self.refresh_files(merging.chat, turns);
+                self.disk_maybe_changed(id);
+            }
         }
     }
 
