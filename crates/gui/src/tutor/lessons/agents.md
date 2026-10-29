@@ -179,6 +179,12 @@ Each subagent starts as a profile, which gives it a role, limits, and an agent a
 
 Add your own, or change these, in the daemon's `agents.toml`, under `[profiles.NAME]`. Claude Code's own Task tool, whose helpers you don't see, is off unless you `:set claudetask`.
 
+## Claude Code's own helpers
+
+With `:set claudetask`, a new Claude Code chat can hand work to a helper with its Task tool. The helper's words and tools fold under the Task's card, which says what the helper is doing now, as `↳ Reading src/parse.rs · 3 tool uses`. Click the card, or press `za` on it in normal mode, to see what it did, indented under it; `za` in there folds it again. A search opens the card if it finds something inside.
+
+If you have a chat open with `claudetask` on, ask it to use its Agent tool to read a file, then open the card with `za`.
+
 ## The browser
 
 A chat's agent can drive a web page once you turn on **Browser** in the permissions menu beside the model, or for every new chat with `:set chatbrowser`. You can turn it on during an existing conversation; no new chat is needed. It opens pages, reads them as an outline of headings, links, buttons and text boxes, clicks, types and takes pictures, each a tool call you see in the chat. Before its first page, it asks. Turning Browser off closes its page and blocks further browser calls immediately.

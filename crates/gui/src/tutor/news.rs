@@ -1073,6 +1073,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "A chat you can't see that finishes, fails or asks something shows a desktop notification; :set notify",
     },
+    News {
+        id: "nested-tasks",
+        date: "2026-10-29",
+        lesson: "agents",
+        what: "Claude Code's Task helpers fold under their card, saying what they're doing now; za opens it to show their work",
+    },
 ];
 
 impl News {

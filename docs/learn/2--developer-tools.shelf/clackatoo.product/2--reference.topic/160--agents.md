@@ -292,7 +292,7 @@ Only Claude Code says what it runs in the background. The phone lists the same l
 Claude Code's adapter says so only to a client that asks as JetBrains' AIR does, and to such a client it reports some things differently:
 
 - It sends a read or a search of files without what it found. clackatoo asks it for the messages it hands the model too, and shows what Claude Code's Read, Grep and Glob found from those, as before, while they run: in a past session opened again, those rows don't show it. (Claude Code 2.1.310 has no Grep or Glob of its own here: it searches with commands, whose output shows anyway.)
-- It keeps the words and thinking of Claude Code's own subagents (its Task tool) to itself unless asked for them: clackatoo asks, so they show as before, and a past session opened again tells them too, which it didn't.
+- It keeps the words and thinking of Claude Code's own subagents (its Task tool) to itself unless asked for them: clackatoo asks, and shows them [under the Task's card](#claude-code-s-own-subagents).
 - It doesn't send the same task list twice in a row, which changes nothing shown.
 - Its notices, such as a fast mode turned off, come as notices above the box rather than as words in the turn.
 - A command moved to the background doesn't go on showing its output in its row once it has moved: the shelf says how it's going, and Claude Code reads what it printed when it ends.
@@ -301,6 +301,14 @@ Claude Code's adapter says so only to a client that asks as JetBrains' AIR does,
 - clackatoo also asks for AIR's session failures, so Claude Code says when it [tries a request again](#when-a-turn-fails), and why a turn failed by its kind. A turn that fails then ends as if well, with the failure beside, which clackatoo reads; and Claude Code's error for a failure leaves out the provider's words, which come with the failure instead.
 
 Commands' output, file changes and images are as before. To have none of this and no shelf, set `tasks = false` for Claude Code in [`agents.toml`](#which-agent).
+
+### Claude Code's own subagents
+
+With `:set claudetask`, Claude Code can hand work to a helper of its own with its Task tool, which it now calls Agent. What the helper says and the tools it uses go under the Task's card, not into the turn as Claude Code's own. The card starts folded, with a line under its title saying what the helper is doing now and how many tools it has used, as `↳ Reading src/parse.rs · 3 tool uses`, and once it's done, `↳ Done · 12 tool uses`. Open it as any card, with a click on its head, or Enter, `za` or `zo` on it in normal mode, and the helper's words and tool rows show under it, indented, in the order they came. `za` or `zc` in the helper's words folds the card again. Searching finds what's folded in a card and opens it; yanking and motions go through what shows. The line above the box says what the helper is doing while it works.
+
+Each Task keeps the last 200 of its helper's steps, and 1 MB of them; past either, the oldest go, and a line at the top says how many, as `12 earlier steps not shown`. The phone folds the helper's work under the card the same way. A window older than this sees the helper's work as Claude Code's own, as before.
+
+The work survives an upgrade. Claude Code 2.1.310 runs a Task in the background and keeps its helper's transcript apart, so a past session opened again shows the Task's card without what its helper did. What a helper does after the turn that started it has ended shows in the later turn as Claude Code's own.
 
 ### The agent's plan
 
