@@ -113,12 +113,14 @@ struct Held {
 }
 
 /// What's kept of a segment's turns let go: the first line of the first
-/// one's message, cut short; their uids, which they come back with, or
-/// none for a segment the saved workspaces kept, whose turns come back
-/// numbered anew; and the cards on them.
+/// one's message, cut short; each turn's [`mark`], by which the turns
+/// told again are known for them; their uids, which they come back with,
+/// or none for a segment the saved workspaces kept, whose turns come
+/// back numbered anew; and the cards on them.
 #[derive(Debug, Default)]
 struct Stub {
     first: String,
+    marks: Vec<u64>,
     uids: Vec<TurnUid>,
     cards: Vec<Subagent>,
 }
@@ -126,29 +128,31 @@ struct Stub {
 /// A branch switched to whose turns were let go, as its session tells
 /// them again: it parts at `at`, and has `count` turns after, numbered
 /// `uids` (or anew, if empty), with `cards` on them; what was undone of
-/// them in files is to be made again as `files` says. Its session had
-/// seen `known` turns of the whole branch, and `firsts` are the first
-/// lines of the messages its segments start with, by their places after
-/// `at`: the evidence the turns told are the ones kept.
+/// them in files, `redo`, is to be made again as `files` says. Its
+/// session had seen `known` turns of the whole branch, and `marks` are
+/// its turns' [`mark`]s, in order: the evidence the turns told are the
+/// ones kept.
 #[derive(Debug)]
 struct Reload {
     at: usize,
     count: usize,
     known: usize,
-    firsts: Vec<(usize, String)>,
+    marks: Vec<u64>,
     uids: Vec<TurnUid>,
     cards: Vec<Subagent>,
     files: ForkFiles,
+    redo: Vec<TurnUid>,
 }
 
 /// A branch's turns have come back: the uids they have, from where it
 /// parts, for the server to tell them what they changed in files, and
-/// redo what was undone of them as `files` says.
+/// redo `redo`, what leaving them undid, as `files` says.
 #[derive(Debug)]
 pub(crate) struct Told {
     pub(crate) at: usize,
     pub(crate) uids: Vec<TurnUid>,
     pub(crate) files: ForkFiles,
+    pub(crate) redo: Vec<TurnUid>,
 }
 
 /// A chat's branches: see the module.
@@ -176,6 +180,9 @@ pub(super) struct Tree {
     /// left them undid: those a switch back redoes, and no others, as
     /// the user may have undone others on purpose.
     undone: Vec<TurnUid>,
+    /// The turns of the branch just shown again that its leaving undid:
+    /// what a switch redoes, if it does, taken once.
+    redo: Vec<TurnUid>,
     /// The chats whose cards were on branches let go, or on stubs a cold
     /// start brought back without them, the latest [`MOST_GONE`]: their
     /// finishing is never told to the branch shown, whose agent never
@@ -606,6 +613,21 @@ impl HostedChat {
         self.tree.current = leaf;
         let used = now();
         self.tree.seg_mut(leaf).used = used;
+        // What leaving it undid is the switch's to redo, now or never:
+        // shown again, its turns' files are the user's to undo or redo.
+        let shown: Vec<TurnUid> = match &self.tree.reload {
+            Some(reload) => reload.uids.clone(),
+            None => self.uids.within(at..self.node.turns.len()).to_vec(),
+        };
+        let redo: Vec<TurnUid> = (self.tree.undone.iter())
+            .filter(|uid| shown.contains(uid))
+            .copied()
+            .collect();
+        self.tree.undone.retain(|uid| !shown.contains(uid));
+        match &mut self.tree.reload {
+            Some(reload) => reload.redo = redo,
+            None => self.tree.redo = redo,
+        }
         let mut actions = self.take_branch_session(wanted);
         self.heard = None;
         if let_go {
@@ -624,21 +646,18 @@ impl HostedChat {
     fn reload_from(&mut self, at: usize, down: &[usize]) {
         let mut uids = Vec::new();
         let mut cards = Vec::new();
-        let mut firsts = Vec::new();
+        let mut marks = Vec::new();
+        let mut marked = true;
         let mut numbered = true;
         for &id in down {
             let seg = self.tree.seg_mut(id);
-            let offset = seg.start - at;
             if let Some(held) = seg.held.take() {
-                if let Some((_, turn)) = held.turns.first() {
-                    firsts.push((offset, first_line(&turn.prompt)));
-                }
+                marks.extend(held.turns.iter().map(|(_, turn)| mark(&turn.prompt)));
                 uids.extend(held.turns.into_iter().map(|(uid, _)| uid));
                 cards.extend(held.cards);
             } else if let Some(stub) = seg.stub.take() {
-                if seg.len > 0 {
-                    firsts.push((offset, stub.first));
-                }
+                marked &= stub.marks.len() == seg.len;
+                marks.extend(stub.marks);
                 numbered &= stub.uids.len() == seg.len;
                 uids.extend(stub.uids);
                 cards.extend(stub.cards);
@@ -652,14 +671,19 @@ impl HostedChat {
         if !numbered || uids.len() != count {
             uids.clear();
         }
+        // Marked whole or not at all: never matched in part.
+        if !marked {
+            marks.clear();
+        }
         self.tree.reload = Some(Reload {
             at,
             count,
             known,
-            firsts,
+            marks,
             uids,
             cards,
             files: ForkFiles::Keep,
+            redo: Vec::new(),
         });
     }
 
@@ -750,19 +774,23 @@ impl HostedChat {
             at,
             count,
             known,
-            firsts,
+            marks,
             uids,
             cards,
             files,
+            redo,
         } = reload;
         let shown = self.node.turns.len();
         let told = shown.saturating_sub(at);
         let from = at + told.saturating_sub(count);
+        // The session told no more turns than it had seen, had seen them
+        // all, and the last it told are the branch's, every one, in order.
         let exact = told >= count
             && known >= at + count
-            && (firsts.iter()).all(|(offset, first)| {
-                (self.node.turns.get(from + offset))
-                    .is_some_and(|turn| first_line(&turn.prompt) == *first)
+            && told <= known
+            && marks.len() == count
+            && (self.node.turns.get(from..shown)).is_some_and(|turns| {
+                (turns.iter().zip(&marks)).all(|(turn, &kept)| mark(&turn.prompt) == kept)
             });
         let told_uids = self.uids.within(at..shown).to_vec();
         let before = from - at;
@@ -818,6 +846,7 @@ impl HostedChat {
             at,
             uids: self.uids.within(at..at + count).to_vec(),
             files: if kept { files } else { ForkFiles::Keep },
+            redo: if kept { redo } else { Vec::new() },
         });
         self.publish_cut();
     }
@@ -917,6 +946,12 @@ impl HostedChat {
                 Some(target) => {
                     let actions = self.show_branch(at, target);
                     self.put_back.extend(actions);
+                    // Shown again by the agent, not a switch: nothing's
+                    // redone.
+                    self.tree.redo.clear();
+                    if let Some(reload) = &mut self.tree.reload {
+                        reload.redo.clear();
+                    }
                 }
                 None => self.tree.pending = None,
             }
@@ -1173,6 +1208,11 @@ impl HostedChat {
             .unwrap_or_default();
         seg.stub = Some(Stub {
             first,
+            marks: held
+                .turns
+                .iter()
+                .map(|(_, turn)| mark(&turn.prompt))
+                .collect(),
             uids: held.turns.into_iter().map(|(uid, _)| uid).collect(),
             cards: held.cards,
         });
@@ -1292,16 +1332,17 @@ impl HostedChat {
         self.tree.undone.dedup();
     }
 
-    /// Whether turn `uid`'s files were undone by the rewind or switch that
-    /// left it, to redo as its branch is shown again.
-    pub(crate) fn left_undone(&self, uid: TurnUid) -> bool {
-        self.tree.undone.binary_search(&uid).is_ok()
+    /// The turns of the branch just shown again whose files its leaving
+    /// undid, for the switch to redo, if it does: taken once.
+    pub(crate) fn take_redo(&mut self) -> Vec<TurnUid> {
+        std::mem::take(&mut self.tree.redo)
     }
 
-    /// Turn `uid`'s files were redone, or its branch is shown again
-    /// without: it's left to the user from now on.
+    /// The user undid or redid turn `uid` themselves: its files are theirs
+    /// from now on, and no switch redoes them.
     pub(crate) fn forget_left_undone(&mut self, uid: TurnUid) {
         self.tree.undone.retain(|undone| *undone != uid);
+        self.tree.redo.retain(|redo| *redo != uid);
     }
 
     /// The agent sessions of the branches not shown, so the start page
@@ -1340,6 +1381,7 @@ impl HostedChat {
                     }),
                     stub: seg.stub.as_ref().map(|stub| handover::StubTurns {
                         first: stub.first.clone(),
+                        marks: stub.marks.clone(),
                         uids: stub.uids.iter().map(|uid| uid.0).collect(),
                         cards: (stub.cards.iter())
                             .filter_map(|card| serde_json::to_string(card).ok())
@@ -1414,6 +1456,7 @@ impl HostedChat {
                     }),
                     stub: seg.stub.map(|stub| Stub {
                         first: stub.first.chars().take(FIRST_CHARS).collect(),
+                        marks: stub.marks,
                         uids: stub.uids.into_iter().map(TurnUid).collect(),
                         cards: (stub.cards.iter())
                             .filter_map(|card| serde_json::from_str(card).ok())
@@ -1449,6 +1492,7 @@ impl HostedChat {
             saved: None,
             told: None,
             undone: record.undone.into_iter().map(TurnUid).collect(),
+            redo: Vec::new(),
             lost_cards: (record.lost_cards.into_iter())
                 .take(MOST_GONE)
                 .map(clackatoo_protocol::TerminalId)
@@ -1481,18 +1525,24 @@ impl HostedChat {
         let number = |at: usize| u32::try_from(at).unwrap_or(u32::MAX);
         let segments = (tree.live())
             .map(|(_, seg)| {
-                let first = match (&seg.held, &seg.stub) {
-                    (Some(held), _) => (held.turns.first())
-                        .map(|(_, turn)| first_line(&turn.prompt))
-                        .unwrap_or_default(),
-                    (None, Some(stub)) => stub.first.clone(),
-                    (None, None) => String::new(),
+                let (first, marks) = match (&seg.held, &seg.stub) {
+                    (Some(held), _) => (
+                        (held.turns.first())
+                            .map(|(_, turn)| first_line(&turn.prompt))
+                            .unwrap_or_default(),
+                        (held.turns.iter())
+                            .map(|(_, turn)| mark(&turn.prompt))
+                            .collect(),
+                    ),
+                    (None, Some(stub)) => (stub.first.clone(), stub.marks.clone()),
+                    (None, None) => (String::new(), Vec::new()),
                 };
                 saved::Segment {
                     parent: seg.parent.and_then(|parent| place.get(&parent).copied()),
                     start: number(seg.start),
                     len: number(seg.len),
                     first,
+                    marks,
                     session: seg.session.as_ref().map(|session| saved::BranchSession {
                         agent: session.agent.clone(),
                         session: session.session.clone(),
@@ -1592,8 +1642,14 @@ impl HostedChat {
                 && !path.contains(&id)
             {
                 let first = kept.segments[id].first.chars().take(FIRST_CHARS).collect();
+                let marks = &kept.segments[id].marks;
                 seg.stub = Some(Stub {
                     first,
+                    marks: if marks.len() == seg.len {
+                        marks.clone()
+                    } else {
+                        Vec::new()
+                    },
                     ..Stub::default()
                 });
             }
@@ -1671,13 +1727,14 @@ impl HostedChat {
             let seg = self.tree.seg(*down.last().expect("one"));
             down.push(seg.parent.expect("under the first"));
         }
-        // Only if each segment starts with the message kept for it.
+        // Only if every turn is the one kept, in order.
         let matches = down.iter().all(|&id| {
             let seg = self.tree.seg(id);
-            let kept = seg.stub.as_ref().map_or("", |stub| stub.first.as_str());
-            seg.len == 0
-                || (self.node.turns.get(seg.start))
-                    .is_some_and(|turn| first_line(&turn.prompt) == kept)
+            let marks = seg.stub.as_ref().map_or(&[][..], |stub| &stub.marks[..]);
+            marks.len() == seg.len
+                && (self.node.turns.get(seg.start..seg.start + seg.len)).is_some_and(|turns| {
+                    (turns.iter().zip(marks)).all(|(turn, &kept)| mark(&turn.prompt) == kept)
+                })
         });
         if !matches {
             return;
@@ -1758,6 +1815,18 @@ fn fits(tree: &Tree, turns: Option<usize>) -> bool {
     });
     let ends = turns.is_none_or(|turns| shown_end == turns);
     rooted && held_right && ends && tree.pending.is_none_or(|at| at == shown_end)
+}
+
+/// What a turn told again must have to be the turn kept: a hash
+/// (FNV-1a, the same in every build) of its message's first line, cut
+/// short, as a session tells it again.
+fn mark(prompt: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in first_line(prompt).bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// The first line of `prompt`, cut short, as a stub keeps it.
@@ -2180,6 +2249,52 @@ mod tests {
         assert!(fits(&chat.tree, Some(2)));
         let outcome = chat.node.turns[1].end.as_ref().map(|end| &end.outcome);
         assert!(matches!(outcome, Some(Outcome::Failed(_))), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_turn_dropped_and_another_added_among_short_prompts_isnt_taken_for_the_branch() {
+        let mut chat = talked(&["apple"]);
+        let big = "q".repeat(MOST_BRANCH_BYTES + 1024);
+        for (word, id) in [(big.as_str(), "m-b"), ("yes", "m-y"), ("continue", "m-c")] {
+            send(&mut chat, word);
+            answer(&mut chat, id);
+        }
+        let uids = chat.turn_uids(1..4).to_vec();
+        chat.rewind(1, false, false).unwrap();
+        assert_eq!(chat.branch_bytes(), 0, "a stub");
+        let tell = |chat: &mut HostedChat, words: &[&str]| {
+            chat.switch_branch(1, 1, false).unwrap();
+            chat.session_closed();
+            for (at, word) in words.iter().enumerate() {
+                replay_user(chat, word);
+                replay_answer(chat, &format!("r-{at}"));
+            }
+            chat.opened_again(true);
+            connect(chat, "s1");
+        };
+        // "yes" dropped and "continue" told twice: the first and the
+        // count fit, but not every turn.
+        tell(&mut chat, &["apple", &big, "continue", "continue"]);
+        assert_eq!(prompts(&chat)[1..], [big.as_str(), "continue", "continue"]);
+        assert!(chat.turn_uids(1..4).iter().all(|uid| !uids.contains(uid)));
+        assert!(
+            chat.node
+                .notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not as it was kept")
+        );
+        // Told more turns than its session had seen: not believed either,
+        // though the last are the branch's.
+        let mut chat = talked(&["apple"]);
+        for (word, id) in [(big.as_str(), "m-b"), ("yes", "m-y"), ("continue", "m-c")] {
+            send(&mut chat, word);
+            answer(&mut chat, id);
+        }
+        let uids = chat.turn_uids(1..4).to_vec();
+        chat.rewind(1, false, false).unwrap();
+        tell(&mut chat, &["extra", "apple", &big, "yes", "continue"]);
+        assert!(chat.turn_uids(1..4).iter().all(|uid| !uids.contains(uid)));
     }
 
     #[test]

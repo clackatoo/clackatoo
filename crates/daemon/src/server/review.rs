@@ -1414,8 +1414,12 @@ impl Daemon {
             }
             ReviewScope::Turn(Some(turn)) => {
                 let uid = self.turn_uid_of(chat, turn);
-                let uid =
-                    uid.ok_or_else(|| Error::Review("there's no chat to review".to_owned()))?;
+                let uid = uid.ok_or_else(|| {
+                    Error::Review(match chat {
+                        Some(_) => format!("there's no turn {} to review", u64::from(turn) + 1),
+                        None => "there's no chat to review".to_owned(),
+                    })
+                })?;
                 ReviewScope::Turn(Some(uid))
             }
             scope => scope,
@@ -1522,8 +1526,14 @@ impl Daemon {
     /// review made again after a cold start names one before the chat's
     /// turns are told again. `None` if the chat isn't open.
     fn turn_uid_of(&self, chat: Option<TerminalId>, turn: u32) -> Option<u32> {
+        /// Further ahead than turns still to be told again can be: what an
+        /// older window says for a turn on another branch (CLACKA-198).
+        const MOST_AHEAD: usize = 1_000_000;
         let index = usize::try_from(turn).ok()?;
         let hosted = self.chat_ref(chat?)?;
+        if index > hosted.node().turns.len() + MOST_AHEAD {
+            return None;
+        }
         hosted.turn_uid_to_come(index).map(|uid| uid.0)
     }
 

@@ -95,6 +95,10 @@ impl Daemon {
         let notice = self.reverse_turn(chat, turn, redo, force);
         if let Some(hosted) = self.chat(chat) {
             hosted.notify(notice);
+            // The user's own: no switch redoes it after this.
+            if let Some(uid) = uid {
+                hosted.forget_left_undone(uid);
+            }
         }
         let dropped = self.agent_files.log.trim(chat);
         self.refresh_files(chat, dropped.into_iter().chain(uid));

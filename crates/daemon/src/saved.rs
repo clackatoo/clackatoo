@@ -410,6 +410,10 @@ pub(crate) struct Segment {
     pub(crate) len: u32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) first: String,
+    /// Off the branch shown, a hash of each turn's first line, by which
+    /// the turns its session tells again are known for its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) marks: Vec<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) session: Option<BranchSession>,
     #[serde(default)]
@@ -1038,6 +1042,7 @@ mod tests {
                     start: 1,
                     len: 2,
                     first: "try it this way".into(),
+                    marks: vec![1, 2],
                     session: Some(BranchSession {
                         agent: "claude".into(),
                         session: Some("5f0c".into()),

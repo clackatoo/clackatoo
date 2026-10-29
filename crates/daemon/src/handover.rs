@@ -349,6 +349,9 @@ pub(crate) struct HeldTurns {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct StubTurns {
     pub(crate) first: String,
+    /// Each turn's mark (`chat/branches.rs`), by which its turns told
+    /// again are known.
+    pub(crate) marks: Vec<u64>,
     pub(crate) uids: Vec<u32>,
     pub(crate) cards: Vec<String>,
 }
@@ -4688,6 +4691,7 @@ mod tests {
                         held: None,
                         stub: Some(StubTurns {
                             first: "try the other way".to_owned(),
+                            marks: vec![7, 8],
                             uids: vec![4, 5],
                             cards: vec![],
                         }),
