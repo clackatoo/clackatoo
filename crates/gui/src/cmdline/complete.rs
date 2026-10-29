@@ -609,7 +609,7 @@ mod tests {
         for prefix in ["re", "Re", "RE", "rE"] {
             assert_eq!(choices(prefix, &none()), choices("re", &none()));
         }
-        assert_eq!(choices("f", &none()), ["Files", "format"]);
+        assert_eq!(choices("f", &none()), ["Files", "fork", "format"]);
         assert_eq!(
             choices("M", &none()),
             ["markdown", "Marks", "Messages", "move"]

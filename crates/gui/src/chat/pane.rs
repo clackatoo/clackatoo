@@ -278,6 +278,19 @@ impl ChatPane {
         Ok(())
     }
 
+    /// `:fork`: asks the daemon to copy its turns up to the one numbered
+    /// `number`, as people count them, or all of them, into a new chat,
+    /// where `place` says (see `chat::branches`).
+    pub(crate) fn fork(
+        &mut self,
+        number: Option<usize>,
+        place: clackatoo_protocol::ForkPlace,
+    ) -> Result<(), String> {
+        let keep = self.view.fork_keep(number)?;
+        self.ask(ChatAction::Fork { keep, place }, Pending::Branch);
+        Ok(())
+    }
+
     /// Lays it out and draws it in a pane `size` pixels with its top left
     /// at `origin`. `caret` draws the cursor in the message being typed.
     pub(crate) fn paint(

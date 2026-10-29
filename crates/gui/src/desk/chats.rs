@@ -500,6 +500,25 @@ impl Desk {
         }
     }
 
+    /// `:fork`: the focused chat's turns up to the one numbered `number`,
+    /// or all of them, copied into a new chat, where `place` says.
+    pub(super) fn fork_chat(
+        &mut self,
+        number: Option<usize>,
+        place: clackatoo_protocol::ForkPlace,
+    ) {
+        if !self.needs_daemon("copying a chat", wire::CHAT_FORK) {
+            return;
+        }
+        let asked = (self.focused_chat_mut()).map_or_else(
+            || Err("that's for a chat with an agent".to_owned()),
+            |chat| chat.fork(number, place),
+        );
+        if let Err(why) = asked {
+            self.refuse(why);
+        }
+    }
+
     /// `:branches`: the finder over every branch of the focused chat,
     /// where each parts from the others: Enter shows the one picked.
     pub(super) fn list_branches(&mut self) {

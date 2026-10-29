@@ -183,6 +183,25 @@ impl ChatView {
         Ok(())
     }
 
+    /// How many turns `:fork N` copies, from the conversation's start:
+    /// those up to turn `number`, as people count them, or all of them.
+    pub(crate) fn fork_keep(&self, number: Option<usize>) -> Result<u32, String> {
+        if self.working() || self.node.asking() {
+            return Err("wait for the agent to finish, or stop it, first".to_owned());
+        }
+        let Some(number) = number else {
+            return Ok(u32::MAX);
+        };
+        let local = number
+            .checked_sub(self.node.first_message as usize)
+            .filter(|&local| local > 0)
+            .ok_or("Scroll up to load that turn before copying up to it")?;
+        let turn = clackatoo_protocol::turn_numbered(&self.node.turns, local)
+            .ok_or(format!("there's no turn {number}"))?;
+        let keep = (self.absolute(turn)).and_then(|at| at.checked_add(1));
+        keep.ok_or_else(|| "that turn is too far on".to_owned())
+    }
+
     /// Rewinds to before turn `turn`, by its index among those held, as
     /// [`ChatAction::Rewind`] does, with its message in the box if
     /// `edit`, asking first what's to become of the files and tasks,

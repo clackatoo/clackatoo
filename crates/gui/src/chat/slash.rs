@@ -44,6 +44,9 @@ pub(crate) enum Native {
     /// `/rewind`: rewinds the conversation to before its last turn, as
     /// `:rewind` does, asking whether to undo what it changed in files.
     Rewind,
+    /// `/fork`, and Claude Code's `/branch`: `:fork`, a copy of the
+    /// conversation in a new chat, in this pane.
+    Fork,
     /// `/context`: how full the agent's context is, as `K` shows it.
     Context,
     /// `/status`, `/cost`, `/usage`: the account's usage limits.
@@ -80,6 +83,16 @@ const OURS: &[(&str, &str, Native)] = &[
         "rewind",
         "Rewind the conversation to before the last turn",
         Native::Rewind,
+    ),
+    (
+        "fork",
+        "Copy the conversation into a new chat, as :fork does",
+        Native::Fork,
+    ),
+    (
+        "branch",
+        "Copy the conversation into a new chat, as :fork does",
+        Native::Fork,
     ),
     (
         "context",
@@ -439,6 +452,10 @@ impl super::ChatView {
                     self.say(why);
                 }
             }
+            Native::Fork => settled.commands.push(Command::Fork {
+                number: None,
+                place: clackatoo_protocol::ForkPlace::Here,
+            }),
             Native::Context => {
                 if !self.usage_modal
                     && self.detail != Some(super::paint::Detail::Asked)

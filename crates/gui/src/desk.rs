@@ -2929,6 +2929,7 @@ impl Desk {
             Command::Rewind { number, force } => self.rewind_chat(number, force),
             Command::Branch(to) => self.switch_chat_branch(to),
             Command::Branches => self.list_branches(),
+            Command::Fork { number, place } => self.fork_chat(number, place),
             Command::StopTask(line) => self.stop_task(line),
             Command::TaskOutput(line) => self.task_output(line),
             Command::Plan => self.toggle_plan(),

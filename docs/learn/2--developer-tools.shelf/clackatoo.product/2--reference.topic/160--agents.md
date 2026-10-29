@@ -138,6 +138,7 @@ Claude Code's and Codex's own terminal interfaces have commands their adapters d
 |---|---|
 | `/clear`, `/new` | Opens the [start page](#the-start-page), to start a new chat. |
 | `/resume` | Opens the start page, which lists the agent's past sessions under the new chat. |
+| `/fork`, `/branch` | Copies the conversation into a new chat in this pane, as `:fork` does. |
 | `/rewind` | Rewinds the conversation to before its last turn, as `:rewind` does, asking whether to undo what it changed in files (see [Rewinding and branches](#rewinding-and-branches)). `u` still undoes only the files. |
 | `/context` | Shows how full the agent's context is, as `K` does. |
 | `/status`, `/cost`, `/usage` | Opens **Usage & limits**. |
@@ -508,12 +509,15 @@ Undoing a turn takes it out of the files, but the agent still remembers it. Rewi
 | `[b` `]b`, a click on ‹ or › | Shows the branch before or after where branches part. |
 | `:branch N` | Shows branch N where they part, at the turn under the cursor or the nearest above. |
 | `:branches` | The finder over every branch: where it parts, its first message, its turns, when it was last shown. Enter shows it. |
+| `:fork N`, `:fork` | Copies the branch shown, up to turn N or all of it, into a new chat in this pane; the chat copied goes to the start page's chats in no pane. `:\|fork` and `:-fork` put the copy beside instead. `/fork` and `/branch`, typed as the whole message, are `:fork`. |
 
 A rewind always asks first, naming the turn and quoting its message, as in `Rewind to before turn 7 ("fix the lint…")? (y/n)`: `dG` and `cc` are a key or two, and fall back to the last turn when the turn under the cursor isn't in view. Only `:rewind!` doesn't ask. If the turns taken out changed files, the same question asks whether to undo them: `y` undoes them, newest first, as undoing each turn does, `n` leaves them and rewinds all the same, and any other key changes nothing. The `rewindfiles` option (`ask`, `undo` or `keep`) answers about the files for you. A turn whose files can't be undone, as when you've changed the same lines since, stops the rewind before anything is rewound; the turns after it that were undone stay undone, and the chat says so. If the agent runs anything in the background, the bar says leaving the branch stops it, and asks first. Nothing can be rewound while the agent is answering or asking you something, and a chat another agent started can't be rewound.
 
 After a rewind, the chat ends at the turn before, with a row saying "New branch · write to go on from here". Nothing is asked of the agent until you send: the first message makes the branch, forking the agent's session at the end of the turn before, so the agent knows the conversation up to there exactly. Where the agent can't fork its session there, it's told the turns before as a summary, and the switcher says "from a summary".
 
 Where branches part, `‹ 2/3 ›` shows over the turn: which branch is shown, of how many. Switching to another branch goes on with that branch's own agent session, which remembers it exactly as it left it and knows nothing of the others. With `rewindfiles` at `ask`, the bar asks whether to undo what this branch changed in files after the turn where they part, and make again what leaving the other branch undid; or, with nothing here to undo, just whether to make that again. `y` does, and `n` switches leaving the files as they are. Your files are shared by every branch, so with `n`, the branch you switch to sees files from the one you left.
+
+`:fork` is the deliberate way to a separate chat, when you want both conversations side by side. The copy has the same agent, folder and settings, and only the branch shown, with no other branches. Its agent's session is forked from the chat's where it can be, so it knows the conversation exactly; otherwise it's told it as a summary with your first message. Files aren't touched, but what the copied turns changed is undone from the copy from then on, not from the chat copied. A chat another agent started can be copied, and the copy is your own.
 
 A chat keeps at most 16 branches and about 4 MB of their turns; past that, the least recently shown keep only where they part and their first message, and their turns are told again by the agent when you switch to one. A branch whose agent didn't tell a turn again shows that turn as failed. The phone says where branches part ("Branch 2 of 3"), but switching is the window's for now.
 

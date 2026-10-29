@@ -13681,6 +13681,66 @@ fn undoing_a_turn_keeps_your_edits_and_redoing_puts_it_back() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "ONE\ntwo\nthree\n");
 }
 
+/// `:fork` (CLACKA-198): a chat's turns are copied into a new chat of
+/// its own beside it, which undoes what they changed in files from then
+/// on, the chat copied no longer; and the copy's agent, which can't fork
+/// the session, hears them as a digest with its first message.
+#[test]
+fn forking_a_chat_copies_its_turns_into_a_new_chat_that_undoes_their_files() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt").display().to_string();
+    std::fs::write(&path, "one\n").unwrap();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    agent_says(&mut client, chat, "hello");
+    let said = agent_says(&mut client, chat, &format!("write {path}\nONE\n"));
+    assert_eq!(said, "wrote");
+    let fork = Request::Chat {
+        terminal: chat,
+        action: ChatAction::Fork {
+            keep: 9,
+            place: clackatoo_protocol::ForkPlace::Beside(Side::Right),
+        },
+    };
+    let Response::TerminalCreated(copy) = client.request(&fork).unwrap() else {
+        panic!("no copy");
+    };
+    let node = wait_for_chat(&mut client, copy, |node| {
+        node.turns.len() == 2 && node.state == ChatState::Ready
+    });
+    assert_eq!(node.turns[0].prompt, "hello");
+    // Beside the chat copied.
+    let workspaces = client.watch_workspaces().unwrap();
+    assert_eq!(workspaces.list[0].terminals(), [chat, copy]);
+    // Its turns' files are the copy's to undo now.
+    assert_eq!(turn_files(&mut client, chat, 1), None);
+    let state = turn_files(&mut client, copy, 1).map(|files| files.state);
+    assert_eq!(state, Some(TurnFilesState::Made));
+    let notice = undo_turn(&mut client, copy, 1, false, false);
+    assert_eq!(notice, "Undid turn 2: notes.txt.");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n");
+    // Its agent answers, the turns before told it as a digest.
+    let node = ask(&mut client, copy, "cwd");
+    assert_eq!(node.turns.len(), 3);
+    // Nothing to copy: refused.
+    client.new_workspace(None, new_chat()).unwrap();
+    let list = client.watch_workspaces().unwrap().list;
+    let empty = list.last().unwrap().terminals()[0];
+    wait_for_chat(&mut client, empty, |node| node.state == ChatState::Ready);
+    let refused = client.request(&Request::Chat {
+        terminal: empty,
+        action: ChatAction::Fork {
+            keep: 1,
+            place: clackatoo_protocol::ForkPlace::Tab,
+        },
+    });
+    assert!(
+        matches!(refused, Ok(Response::Error(_)) | Err(_)),
+        "{refused:?}"
+    );
+}
+
 #[test]
 fn undoing_a_turn_whose_lines_you_changed_is_refused_and_said() {
     let daemon = TestDaemon::start();
@@ -18385,6 +18445,52 @@ fn live_rewind(agent: &str) {
     {
         eprintln!("forkedFrom: {line}");
     }
+}
+
+/// `:fork` with the real Claude Code on haiku: the copy's session is
+/// forked from the chat's, still open, at its last message, and knows the
+/// conversation (CLACKA-198).
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_claude_chat_is_copied_by_fork_knowing_its_conversation() {
+    let Some(Live {
+        daemon: _daemon,
+        mut client,
+        chat,
+        trace,
+    }) = live_claude("fork")
+    else {
+        return;
+    };
+    let limit = Duration::from_mins(2);
+    let text = "Remember the word APPLE. Reply with exactly: ok. Use no tools.";
+    live_send(&mut client, chat, text, limit);
+    let fork = Request::Chat {
+        terminal: chat,
+        action: ChatAction::Fork {
+            keep: u32::MAX,
+            place: clackatoo_protocol::ForkPlace::Tab,
+        },
+    };
+    let Response::TerminalCreated(copy) = client.request(&fork).unwrap() else {
+        panic!("no copy");
+    };
+    wait_for_chat_for(&mut client, copy, Duration::from_mins(1), |node| {
+        node.state == ChatState::Ready
+    });
+    let ask = "Which word did I ask you to remember? Reply with just that word, and use no tools.";
+    let node = live_send(&mut client, copy, ask, limit);
+    let words = last_words(&node).to_uppercase();
+    eprintln!("the copy says: {words}");
+    assert!(words.contains("APPLE"), "{words}");
+    let log: String = (std::fs::read_dir(&trace).unwrap().flatten())
+        .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
+        .collect();
+    assert!(
+        log.lines()
+            .any(|line| line.contains("session/fork") && line.contains("messageId")),
+        "forked at a message"
+    );
 }
 
 /// [`live_rewind`] with Claude Code on haiku.

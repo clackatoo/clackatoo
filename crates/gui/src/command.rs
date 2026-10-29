@@ -244,6 +244,14 @@ pub(crate) enum Command {
     Branch(u16),
     /// `:branches`: the finder over every branch of the focused chat.
     Branches,
+    /// `:fork`: copy the focused chat's turns up to the one numbered
+    /// `number`, as people count them, or all of them, into a new chat,
+    /// where `place` says: in the chat's pane, or with a mark (`:|fork`),
+    /// beside it.
+    Fork {
+        number: Option<usize>,
+        place: clackatoo_protocol::ForkPlace,
+    },
     /// `:stoptask`: ask the focused chat's agent to stop what it runs in
     /// the background on line `line` of the shelf above the box, counting
     /// from 0, or the newest running.
@@ -855,6 +863,19 @@ fn marked_pane(
             review_scope(argument)
                 .map(|scope| Command::Review(ReviewCommand::Open { scope, side })),
         ),
+        "fork" => Some(match argument.map(str::parse::<usize>) {
+            None => Ok(None),
+            Some(Ok(number)) if number > 0 => Ok(Some(number)),
+            Some(_) => Err("fork takes a turn's number, from 1: :fork 3".to_owned()),
+        })
+        .map(|number| {
+            number.map(|number| Command::Fork {
+                number,
+                place: side.map_or(clackatoo_protocol::ForkPlace::Here, |side| {
+                    clackatoo_protocol::ForkPlace::Beside(side)
+                }),
+            })
+        }),
         _ => None,
     }
 }
@@ -983,6 +1004,7 @@ command_names! {
     "rewind" => "Rewind the chat to before a turn, keeping what follows as a branch",
     "branch" => "Show another branch of the chat, where branches part",
     "branches" => "Find and show a branch of the chat",
+    "fork" => "Copy the chat's turns into a new chat",
     "stoptask" => "Stop what the agent runs in the background",
     "taskoutput" => "Follow what a background task printed",
     "plan" => "Open or fold the agent's plan",
@@ -1186,6 +1208,7 @@ mod tests {
         ("rewind", ""),
         ("branch", ""),
         ("branches", ""),
+        ("fork", ""),
         ("stoptask", ""),
         ("taskoutput", ""),
         ("plan", ""),
@@ -1713,6 +1736,24 @@ mod tests {
         assert_eq!(parse("branch 2").unwrap(), Command::Branch(2));
         assert!(parse("branch").is_err());
         assert_eq!(parse("branches").unwrap(), Command::Branches);
+        let fork = |number, place| Command::Fork { number, place };
+        assert_eq!(
+            parse("fork").unwrap(),
+            fork(None, clackatoo_protocol::ForkPlace::Here)
+        );
+        assert_eq!(
+            parse("fork 3").unwrap(),
+            fork(Some(3), clackatoo_protocol::ForkPlace::Here)
+        );
+        assert_eq!(
+            parse("|fork").unwrap(),
+            fork(None, clackatoo_protocol::ForkPlace::Beside(Side::Right))
+        );
+        assert_eq!(
+            parse("-fork 2").unwrap(),
+            fork(Some(2), clackatoo_protocol::ForkPlace::Beside(Side::Below))
+        );
+        assert!(parse("fork 0").is_err());
         assert!(parse("agentredo last").is_err());
     }
 

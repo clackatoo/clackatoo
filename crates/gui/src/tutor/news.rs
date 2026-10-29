@@ -1121,6 +1121,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Rewind a chat with dG or /rewind, edit a message with cc, and switch between its branches with [b and ]b",
     },
+    News {
+        id: "chat-fork",
+        date: "2026-10-29",
+        lesson: "agents",
+        what: ":fork copies a chat's conversation into a new chat, in its pane, and :|fork beside it; /fork does too",
+    },
 ];
 
 impl News {
