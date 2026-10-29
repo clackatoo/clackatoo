@@ -38,6 +38,7 @@ mod draft;
 mod elicit;
 mod facts;
 pub(crate) mod failure;
+mod forks;
 mod limits;
 mod live;
 mod modes;
@@ -503,6 +504,9 @@ pub(crate) struct HostedChat {
     /// The uid of each turn, which what's kept of a turn is keyed by
     /// (see `chat/uids.rs`), in step with `node.turns`.
     uids: uids::Uids,
+    /// Where its session could be forked, by turn (see `chat/forks.rs`).
+    /// Not handed over yet: after an upgrade, older turns have none.
+    forks: forks::ForkPoints,
 }
 
 /// A session a chat had with another agent, which it can go back to.
@@ -716,6 +720,7 @@ impl HostedChat {
             user_queue: queue::Queue::default(),
             facts: facts::Facts::default(),
             uids: uids::Uids::default(),
+            forks: forks::ForkPoints::default(),
         }
     }
 
@@ -2515,6 +2520,7 @@ impl HostedChat {
                     nested::Under::Own => {
                         self.message_image(&chunk.content);
                         self.write(&chunk.content, false, None);
+                        self.note_message(chunk.message_id.as_ref());
                     }
                     nested::Under::Parent(parent) => {
                         self.write(&chunk.content, false, Some(&parent));
@@ -2525,7 +2531,10 @@ impl HostedChat {
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 self.progressed();
                 match self.under(chunk.meta.as_ref(), None) {
-                    nested::Under::Own => self.write(&chunk.content, true, None),
+                    nested::Under::Own => {
+                        self.write(&chunk.content, true, None);
+                        self.note_message(chunk.message_id.as_ref());
+                    }
                     nested::Under::Parent(parent) => {
                         self.write(&chunk.content, true, Some(&parent));
                     }
@@ -4438,7 +4447,7 @@ mod tests {
         assert!(resumed.enqueue_user("later".into(), vec![], None).unwrap() > id);
     }
 
-    fn chat() -> HostedChat {
+    pub(super) fn chat() -> HostedChat {
         chat_with("claude")
     }
 
@@ -4894,7 +4903,7 @@ mod tests {
     }
 
     /// Opens `chat`'s session, `session`, with no settings.
-    fn connect(chat: &mut HostedChat, session: &str) -> Vec<Action> {
+    pub(super) fn connect(chat: &mut HostedChat, session: &str) -> Vec<Action> {
         chat.connected(Opened {
             session: session.to_owned(),
             settings: None,
@@ -4913,7 +4922,7 @@ mod tests {
         .unwrap()
     }
 
-    fn send(chat: &mut HostedChat, text: &str) -> Vec<Action> {
+    pub(super) fn send(chat: &mut HostedChat, text: &str) -> Vec<Action> {
         chat.act(ChatAction::Send(text.to_owned()))
     }
 

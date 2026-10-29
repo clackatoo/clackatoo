@@ -359,6 +359,14 @@ pub(crate) fn embeds_checked(name: &str) -> bool {
     matches!(name, "claude" | "codex")
 }
 
+/// Whether the agent called `name`, carried on through an upgrade from a
+/// build that didn't hand over what it can do with sessions, is known to
+/// fork one at an agent's message and to resume one: the adapters checked,
+/// at the versions pinned (CLACKA-198).
+pub(crate) fn forks_checked(name: &str) -> bool {
+    matches!(name, "claude" | "codex")
+}
+
 impl AgentConfig {
     /// Whether agents' processes go on through an upgrade, with all they
     /// run (CLACKA-188), rather than being stopped first: unless

@@ -1220,6 +1220,7 @@ impl Daemon {
                 terminal,
                 result,
                 loaded,
+                ..
             } => {
                 if !self.session_opened((agent, name), terminal, result, loaded) {
                     return;

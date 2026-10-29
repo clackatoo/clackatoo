@@ -58,11 +58,15 @@ enum Pending {
     Initialize,
     /// A session for the chat in this terminal: a new one or, given its
     /// ID, given as `resumed`, one it had before, told again as it goes
-    /// if `load`.
+    /// if `load`; or, if `fork`, a new one forked from another (see
+    /// [`Agent::fork_session`]). Whether it's a fork isn't handed over:
+    /// one that goes on through an upgrade is taken for a new session,
+    /// which knows less, never more.
     Session {
         terminal: TerminalId,
         resumed: Option<String>,
         load: bool,
+        fork: bool,
     },
     /// A message from the chat in this terminal.
     Prompt(TerminalId),
@@ -105,11 +109,18 @@ pub(crate) enum Incoming {
     },
     /// The chat in `terminal` has a session, or couldn't get one. One
     /// opened again was told again as it went, as updates before this, if
-    /// `loaded`.
+    /// `loaded`. One asked to be forked from another was, if `forked`;
+    /// if not, it's a new session that knows nothing of the conversation,
+    /// as the agent couldn't fork.
     Session {
         terminal: TerminalId,
         result: Result<Opened, Refused>,
         loaded: bool,
+        #[expect(
+            dead_code,
+            reason = "a branch of the conversation is forked here (CLACKA-198), next"
+        )]
+        forked: bool,
     },
     /// The sessions the agent kept, for the server's listing numbered
     /// `listing`, or why it couldn't say.
@@ -362,6 +373,9 @@ pub(crate) struct Listed {
     pub(crate) title: String,
     /// When it last changed, in RFC 3339, as the agent said it.
     pub(crate) updated: Option<String>,
+    /// The session it was forked from, if the agent says: both adapters
+    /// put it in `_meta.jetbrains.air.forkedFrom`.
+    pub(crate) forked_from: Option<String>,
 }
 
 /// The most sessions a listing keeps, newest first, of the many an agent
@@ -404,6 +418,9 @@ pub(crate) struct Agent {
     /// Whether the agent can list the sessions it kept, once it has said
     /// what it can.
     can_list: Option<bool>,
+    /// What the agent can do with sessions beyond opening them: see
+    /// [`Forking`].
+    forking: Forking,
     /// Whether it was asked what it runs in the background, and so says
     /// when it takes a turn by itself (see `chat/woken.rs`).
     tasks: bool,
@@ -508,6 +525,7 @@ impl Agent {
             can_embed: false,
             can_steer: false,
             can_list: None,
+            forking: Forking::default(),
             tasks,
             client: Value::Null,
             asked_at: BTreeMap::new(),
@@ -568,8 +586,82 @@ impl Agent {
             terminal,
             resumed,
             load,
+            fork: false,
         };
         self.request(pending, method, &params);
+    }
+
+    /// Asks for a new session for the chat in `terminal`, working in
+    /// `cwd`, forked from the session `from`: knowing its conversation up
+    /// to and with the agent's message `message`, if given, or else all
+    /// of it. The point is named as both adapters read it, as `JetBrains`
+    /// AIR's `_meta.jetbrains.air.fork`, whether or not the agent was told
+    /// clackatoo is AIR. Nothing of the conversation is told again.
+    ///
+    /// An agent that can't fork, or can't at a message and is asked to,
+    /// is asked for a new session instead, which knows nothing of the
+    /// conversation, and the answer says so (see [`Incoming::Session`]).
+    /// Before it has said what it can, that's worked out as it does (see
+    /// `cannot_fork`).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a branch of the conversation is forked here (CLACKA-198), next"
+        )
+    )]
+    pub(crate) fn fork_session(
+        &mut self,
+        terminal: TerminalId,
+        cwd: &str,
+        from: &str,
+        message: Option<&str>,
+        opening: Opening,
+    ) {
+        let mut params = session_params(cwd, opening);
+        if self.tasks {
+            params["_meta"]["claudeCode"]["options"]["forwardSubagentText"] = true.into();
+            params["_meta"]["claudeCode"]["emitRawSDKMessages"] = json!([{ "type": "user" }]);
+        }
+        params["sessionId"] = from.into();
+        if let Some(message) = message {
+            params["_meta"]["jetbrains"]["air"]["fork"] = json!({
+                "version": 1,
+                "messageId": message,
+            });
+        }
+        let pending = Pending::Session {
+            terminal,
+            resumed: None,
+            load: false,
+            fork: true,
+        };
+        if self.held.is_some() || self.forking.can(message.is_some()) {
+            self.request(pending, "session/fork", &params);
+        } else {
+            let mut message = json!({"method": "session/fork", "params": params});
+            unforked(&mut message);
+            let pending = Pending::Session {
+                terminal,
+                resumed: None,
+                load: false,
+                fork: false,
+            };
+            self.request(pending, "session/new", &message["params"]);
+        }
+    }
+
+    /// What the agent can do with sessions beyond opening them, once it
+    /// has said (see [`Forking`]).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a branch of the conversation is forked here (CLACKA-198), next"
+        )
+    )]
+    pub(crate) fn forking(&self) -> Forking {
+        self.forking
     }
 
     /// Asks for the sessions the agent kept that work in `cwd`, for the
@@ -1091,9 +1183,14 @@ impl Agent {
             (result.pointer("/agentCapabilities/sessionCapabilities/list")).is_some()
         });
         self.can_list = Some(can_list);
+        self.forking = result.as_ref().map(Forking::said).unwrap_or_default();
         for mut message in self.held.take().unwrap_or_default() {
             if !self.can_load && message["method"] == "session/load" {
                 self.cannot_load(&mut message);
+            }
+            let at_message = (message.pointer("/params/_meta/jetbrains/air/fork")).is_some();
+            if message["method"] == "session/fork" && !self.forking.can(at_message) {
+                self.cannot_fork(&mut message);
             }
             if !can_list && message["method"] == "session/list" {
                 self.cannot_list(&message, incoming);
@@ -1139,10 +1236,16 @@ impl Agent {
                     message: error.message,
                 });
             incoming.push(match pending {
-                Pending::Session { terminal, load, .. } => Incoming::Session {
+                Pending::Session {
+                    terminal,
+                    load,
+                    fork,
+                    ..
+                } => Incoming::Session {
                     terminal,
                     result,
                     loaded: load,
+                    forked: fork,
                 },
                 _ => Incoming::Probed { result },
             });
@@ -1226,6 +1329,17 @@ impl Agent {
             if matches!(pending, Pending::Listing { listing: asked, .. } if *asked == listing) {
                 *pending = Pending::Ignored;
             }
+        }
+    }
+
+    /// Makes `message`, a request to fork a session held back until the
+    /// agent said what it can, a request for a new session instead, as
+    /// the agent can't fork it: its answer says the session wasn't forked.
+    fn cannot_fork(&mut self, message: &mut Value) {
+        unforked(message);
+        let id = message["id"].as_u64();
+        if let Some(Pending::Session { fork, .. }) = id.and_then(|id| self.pending.get_mut(&id)) {
+            *fork = false;
         }
     }
 
@@ -1402,6 +1516,8 @@ impl Agent {
             can_embed: crate::agents::embeds_checked(&live.name),
             can_steer: live.can_steer,
             can_list: live.can_list,
+            // Not handed over: known for the adapters checked.
+            forking: Forking::checked(&live.name),
             tasks: live.tasks,
             client: serde_json::from_str(&live.client).unwrap_or_default(),
         })
@@ -1452,6 +1568,7 @@ impl Pending {
                 terminal,
                 resumed,
                 load,
+                ..
             } => Live::Session {
                 terminal: terminal.0,
                 resumed,
@@ -1481,6 +1598,7 @@ impl Pending {
                 terminal: TerminalId(terminal),
                 resumed,
                 load,
+                fork: false,
             },
             Live::Prompt(terminal) => Self::Prompt(TerminalId(terminal)),
             Live::Steer(terminal, message) => Self::Steer(TerminalId(terminal), message),
@@ -1653,11 +1771,18 @@ fn listed_page(result: &Value) -> Vec<Listed> {
             })?;
             let cwd = text("cwd").filter(|cwd| cwd.len() <= MOST_PATH)?;
             let updated = text("updatedAt").filter(|updated| updated.len() <= 64);
+            let forked_from = (session.pointer("/_meta/jetbrains/air/forkedFrom"))
+                .or_else(|| session.get("forkedFrom"))
+                .and_then(Value::as_str)
+                .filter(|from| {
+                    !from.is_empty() && from.len() <= MOST_ID && !from.contains(char::is_control)
+                });
             Some(Listed {
                 session: id.to_owned(),
                 cwd: cwd.to_owned(),
                 title: one_line(text("title").unwrap_or_default(), MOST_TITLE),
                 updated: updated.map(str::to_owned),
+                forked_from: forked_from.map(str::to_owned),
             })
         })
         .collect()
@@ -1935,6 +2060,100 @@ fn settings(result: &Value) -> Option<Vec<SessionConfigOption>> {
     )
 }
 
+/// Makes `message`, a request to fork a session, a request for a new
+/// session instead, with the same parameters but the session forked from
+/// and the point.
+fn unforked(message: &mut Value) {
+    message["method"] = "session/new".into();
+    if let Some(params) = message.get_mut("params").and_then(Value::as_object_mut) {
+        params.remove("sessionId");
+    }
+    // Nothing of AIR's is left behind, not even empty: an adapter may take
+    // `_meta.jetbrains.air` anywhere for the client being AIR.
+    let Some(meta) = (message.pointer_mut("/params/_meta")).and_then(Value::as_object_mut) else {
+        return;
+    };
+    if let Some(jetbrains) = meta.get_mut("jetbrains").and_then(Value::as_object_mut) {
+        if let Some(air) = jetbrains.get_mut("air").and_then(Value::as_object_mut) {
+            air.remove("fork");
+            if air.is_empty() {
+                jetbrains.remove("air");
+            }
+        }
+        if jetbrains.is_empty() {
+            meta.remove("jetbrains");
+        }
+    }
+}
+
+/// What an agent can do with sessions beyond opening them, as it said in
+/// answer to `initialize`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Forking {
+    /// It can fork a session whole (`sessionCapabilities.fork`).
+    pub(crate) fork: bool,
+    /// It can fork one at an agent's message, named as `JetBrains` AIR's
+    /// `_meta.jetbrains.air.fork` names it: only the adapters checked to,
+    /// at the versions pinned, as nothing in what it says tells.
+    pub(crate) at_message: bool,
+    /// It can open a session again without telling the conversation so
+    /// far (`sessionCapabilities.resume`).
+    pub(crate) resume: bool,
+}
+
+impl Forking {
+    /// As `result`, the agent's answer to `initialize`, says.
+    fn said(result: &Value) -> Self {
+        let has = |name: &str| {
+            (result.pointer(&format!("/agentCapabilities/sessionCapabilities/{name}"))).is_some()
+        };
+        let fork = has("fork");
+        Self {
+            fork,
+            at_message: fork && forks_at_messages(result),
+            resume: has("resume"),
+        }
+    }
+
+    /// As for an agent called `name` that went on through an upgrade from
+    /// a build that didn't hand over what it said: the adapters checked,
+    /// at the versions pinned.
+    fn checked(name: &str) -> Self {
+        let checked = crate::agents::forks_checked(name);
+        Self {
+            fork: checked,
+            at_message: checked,
+            resume: checked,
+        }
+    }
+
+    /// Whether it can fork a session, at a message if `at_message`.
+    pub(crate) fn can(self, at_message: bool) -> bool {
+        self.fork && (self.at_message || !at_message)
+    }
+}
+
+/// Whether the agent answering `initialize` with `result` is an adapter
+/// checked to fork a session at an agent's message, from the point named
+/// as `_meta.jetbrains.air.fork`, and to cut there inclusively: Claude
+/// Code's adapter (`fork-session.js`) and Codex's (`SessionFork.ts`), at
+/// the versions pinned. A bump re-verifies it, as steering's does.
+fn forks_at_messages(result: &Value) -> bool {
+    matches!(
+        (
+            result.pointer("/agentInfo/name").and_then(Value::as_str),
+            result.pointer("/agentInfo/version").and_then(Value::as_str)
+        ),
+        (
+            Some("@agentclientprotocol/claude-agent-acp"),
+            Some("0.98.0")
+        ) | (
+            Some("@agentclientprotocol/codex-acp"),
+            Some("2.2.2" | "2.2.2+clackatoo.1")
+        )
+    )
+}
+
 fn safe_steering(result: &Value) -> bool {
     result
         .pointer("/_meta/steering/supported")
@@ -1978,6 +2197,150 @@ mod steering_tests {
         v["agentInfo"]["version"] = json!("0.87.0");
         assert!(!safe_steering(&v));
         assert!(!safe_steering(&json!({})));
+    }
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+
+    /// An agent that hasn't answered `initialize` yet, holding back what
+    /// it's asked.
+    fn agent() -> Agent {
+        let parser = Parser::idle();
+        let command: Vec<OsString> = vec!["cat".into()];
+        let mut agent = Agent::start("cat", &command, (None, None), false, &parser).unwrap();
+        agent.held = Some(Vec::new());
+        agent.pending.clear();
+        agent
+    }
+
+    /// What the agent was asked since `initialize`, as written to it.
+    fn asked(agent: Agent) -> Vec<Value> {
+        let mut fds = Fds::default();
+        let handed = agent.hand_over(&mut fds);
+        let written = String::from_utf8(handed.outgoing).unwrap();
+        (written.lines())
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|message| message["method"] != "initialize")
+            .collect()
+    }
+
+    fn initialize(name: &str, version: &str, fork: bool) -> Value {
+        let mut capabilities = json!({"resume": {}, "close": {}});
+        if fork {
+            capabilities["fork"] = json!({});
+        }
+        json!({
+            "agentInfo": {"name": name, "version": version},
+            "agentCapabilities": {"loadSession": true, "sessionCapabilities": capabilities},
+        })
+    }
+
+    #[test]
+    fn a_fork_names_the_session_and_the_message_as_both_adapters_read_it() {
+        let mut agent = agent();
+        agent.fork_session(
+            TerminalId(3),
+            "/src",
+            "s1",
+            Some("msg_01"),
+            Opening::default(),
+        );
+        agent.fork_session(TerminalId(4), "/src", "s1", None, Opening::default());
+        let claude = initialize("@agentclientprotocol/claude-agent-acp", "0.98.0", true);
+        agent.initialized(&Ok(claude), &mut Vec::new());
+        assert_eq!(
+            agent.forking(),
+            Forking {
+                fork: true,
+                at_message: true,
+                resume: true
+            }
+        );
+        assert!(
+            (agent.pending.values())
+                .all(|pending| matches!(pending, Pending::Session { fork, .. } if *fork))
+        );
+        let asked = asked(agent);
+        assert_eq!(asked.len(), 2, "{asked:#?}");
+        assert_eq!(asked[0]["method"], "session/fork");
+        assert_eq!(asked[0]["params"]["sessionId"], "s1");
+        assert_eq!(asked[0]["params"]["cwd"], "/src");
+        assert_eq!(
+            asked[0]["params"]["_meta"]["jetbrains"]["air"]["fork"],
+            json!({"version": 1, "messageId": "msg_01"})
+        );
+        // Without a message, the whole session.
+        assert_eq!(asked[1]["method"], "session/fork");
+        assert!(asked[1].pointer("/params/_meta/jetbrains").is_none());
+    }
+
+    #[test]
+    fn an_agent_that_cant_fork_at_a_message_is_asked_for_a_new_session() {
+        let mut agent = agent();
+        agent.fork_session(
+            TerminalId(3),
+            "/src",
+            "s1",
+            Some("msg_01"),
+            Opening::default(),
+        );
+        agent.fork_session(TerminalId(4), "/src", "s1", None, Opening::default());
+        // It forks, but isn't one checked to fork at a message.
+        let other = initialize("some-adapter", "1.0.0", true);
+        agent.initialized(&Ok(other), &mut Vec::new());
+        assert!(agent.forking().fork && !agent.forking().at_message);
+        let forks: Vec<bool> = (agent.pending.values())
+            .map(|pending| matches!(pending, Pending::Session { fork, .. } if *fork))
+            .collect();
+        assert_eq!(forks, [false, true]);
+        // Asked once it has said, an agent that can't fork at all is
+        // asked for a new session at once.
+        agent.forking = Forking::default();
+        agent.fork_session(TerminalId(5), "/src", "s1", None, Opening::default());
+        let asked = asked(agent);
+        assert_eq!(asked.len(), 3, "{asked:#?}");
+        assert_eq!(asked[0]["method"], "session/new");
+        assert!(asked[0]["params"].get("sessionId").is_none());
+        assert!(
+            asked[0]
+                .pointer("/params/_meta/jetbrains/air/fork")
+                .is_none()
+        );
+        assert_eq!(asked[1]["method"], "session/fork");
+        assert_eq!(asked[2]["method"], "session/new");
+    }
+
+    #[test]
+    fn codexs_patched_adapter_forks_at_messages_and_an_unknown_version_doesnt() {
+        let codex = |version| {
+            let result = initialize("@agentclientprotocol/codex-acp", version, true);
+            Forking::said(&result)
+        };
+        assert!(codex("2.2.2+clackatoo.1").at_message);
+        assert!(codex("2.2.2").at_message);
+        assert!(!codex("2.3.0").at_message);
+        let unforking = initialize("@agentclientprotocol/claude-agent-acp", "0.98.0", false);
+        assert!(!Forking::said(&unforking).at_message);
+        assert!(Forking::checked("claude").can(true));
+        assert!(!Forking::checked("someone").can(false));
+    }
+
+    #[test]
+    fn a_listed_session_says_what_it_was_forked_from() {
+        let page = json!({"sessions": [
+            {"sessionId": "a", "cwd": "/src",
+             "_meta": {"jetbrains": {"air": {"version": 1, "forkedFrom": "s1"}}}},
+            {"sessionId": "b", "cwd": "/src", "forkedFrom": "s2"},
+            {"sessionId": "c", "cwd": "/src", "_meta": {"jetbrains": {"air": {"forkedFrom": "x\ny"}}}},
+            {"sessionId": "d", "cwd": "/src"},
+        ]});
+        let from: Vec<Option<String>> = listed_page(&page)
+            .into_iter()
+            .map(|listed| listed.forked_from)
+            .collect();
+        assert_eq!(from, [Some("s1".into()), Some("s2".into()), None, None]);
     }
 }
 
@@ -2046,6 +2409,7 @@ mod handover_tests {
                 terminal: TerminalId(5),
                 resumed: Some("s5".to_owned()),
                 load: false,
+                fork: false,
             },
         );
         let next = agent.next_id;
@@ -2073,7 +2437,7 @@ mod handover_tests {
             [
                 format!("{} Prompt(TerminalId(4))", next - 2),
                 format!("{} Ignored", next - 1),
-                "90 Session { terminal: TerminalId(5), resumed: Some(\"s5\"), load: false }"
+                "90 Session { terminal: TerminalId(5), resumed: Some(\"s5\"), load: false, fork: false }"
                     .to_owned(),
             ]
         );
