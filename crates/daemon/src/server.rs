@@ -193,9 +193,9 @@ const UNREADABLE_FORGOTTEN: u32 = 8;
 struct Upgrading {
     /// The program the daemon is to become.
     executable: PathBuf,
-    /// Whether it takes the signals held back for it (see
-    /// [`crate::upgrade::TAKES_SIGNALS`]).
-    takes_signals: bool,
+    /// What it takes beside the handover: the signals held back for it,
+    /// and agents' processes as they are.
+    takes: crate::upgrade::Takes,
     /// The client that asked.
     token: Token,
     /// The longest it waits for file operations under way to finish.
@@ -398,6 +398,10 @@ struct Client {
     /// Encoded responses not yet written.
     outgoing: Vec<u8>,
     greeted: bool,
+    /// Whether it has sent anything but its `Hello`, so it's known what
+    /// it's for: until then, it may be a relay about to ask to serve a
+    /// chat's tools (see `chats/live.rs`).
+    asked: bool,
     /// The connection ends once `outgoing` is flushed: the client hung up, or
     /// broke the protocol.
     finished: bool,
@@ -670,6 +674,7 @@ impl Client {
             unreadable: Unreadable::default(),
             outgoing: Vec::new(),
             greeted: false,
+            asked: false,
             finished: false,
             wants_writable: false,
             views: BTreeMap::new(),
@@ -1186,6 +1191,13 @@ impl Daemon {
         let edits = std::mem::take(&mut handover.state.edits);
         let reviews = std::mem::take(&mut handover.state.reviews);
         let mut standing = handover.state.talk.take();
+        let mut live = handover.state.live.take();
+        let mut live_chats: std::collections::HashMap<u32, handover::LiveChat> = (live.as_mut())
+            .map(|live| std::mem::take(&mut live.chats))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|chat| (chat.chat, chat))
+            .collect();
         let state = &handover.state;
         let fds = &mut handover.fds;
         let listener = std::os::unix::net::UnixListener::from(fds.take(state.listener)?);
@@ -1240,10 +1252,17 @@ impl Daemon {
         // each again was going.
         daemon.resume_restarts(&state.kept);
         daemon.refresh_kept();
+        // The agents that went on through the upgrade, before their chats.
+        let kept = match live.as_mut() {
+            Some(live) => daemon.resume_agents(live, fds),
+            None => std::collections::HashSet::new(),
+        };
+        let mut kept_chats = std::collections::HashSet::new();
         for chat in chats {
             let continuation = continuations.remove(&chat.id);
             let agent = daemon.agent_spec(&chat.agent);
             let images = previews.remove(&chat.id);
+            let record = live_chats.remove(&chat.id);
             let mut chat = HostedChat::resume(chat, &agent);
             if let Some(images) = images {
                 chat.resume_previews(images);
@@ -1251,12 +1270,31 @@ impl Daemon {
             chat.resume_tool_previews(&mut tool_previews);
             chat.resume_originals(&mut image_originals);
             chat.resume_queue(&mut chat_queues);
+            let id = chat.info().id;
+            // Its agent went on through the upgrade: so does it, as it
+            // was, with nothing to tell. If its agent couldn't be taken
+            // back, it goes on as one whose agent the upgrade stopped.
+            let mut continuation = continuation;
+            let going_on = record.is_some() && kept.contains(chat.agent());
+            let stopped = (standing.as_mut())
+                .map(|standing| chat.resume_standing(standing, going_on))
+                .unwrap_or_default();
+            if let Some(record) = record {
+                if going_on {
+                    chat.resume_live(record);
+                    if chat.is_connected() {
+                        chat.set_native_steering(daemon.agent_steers(chat.agent()));
+                    }
+                    log::info!("chat {id}: it goes on with its agent through the upgrade");
+                    kept_chats.insert(id);
+                    daemon.add_chat(chat);
+                    continue;
+                }
+                log::info!("chat {id}: its agent couldn't go on through the upgrade");
+                continuation = chat.live_lost(record);
+            }
             // What it ran in the background went with its agent: it's told
             // so, as its turn goes on, or else in a turn of its own.
-            let stopped = (standing.as_mut())
-                .map(|standing| chat.resume_standing(standing))
-                .unwrap_or_default();
-            let id = chat.info().id;
             let mut told = false;
             if let Some(continuation) = continuation {
                 if chat.continue_after_upgrade(continuation, &stopped) {
@@ -1278,6 +1316,12 @@ impl Daemon {
                 );
             }
             daemon.add_chat(chat);
+        }
+        // What waits on the agents that went on, and the connections their
+        // tools are served on.
+        if let Some(live) = live.as_mut() {
+            daemon.resume_agent_timers(live, &kept_chats);
+            daemon.resume_tools(live, fds, &kept_chats);
         }
         daemon.next_buffer = state.next_buffer;
         // Older builds had none, and keep the one just chosen.
@@ -1403,8 +1447,24 @@ impl Daemon {
     /// left with nothing to hang up when it's dropped. The listening socket
     /// is shared: closing this daemon's copy leaves it open. Language
     /// servers are waited for until `servers_until`.
-    #[allow(clippy::too_many_lines, reason = "each part of the state in turn")]
+    #[cfg(test)]
     fn hand_over(&mut self, servers_until: Instant) -> io::Result<Handover> {
+        self.hand_over_keeping(servers_until, &[])
+    }
+
+    /// Everything the next build needs, as [`hand_over`](Self::hand_over)
+    /// takes it, but the agents `keep` aren't stopped: they go on, with
+    /// their chats, as they are, and the connections their tools are
+    /// served on (see `chats/live.rs`).
+    #[allow(clippy::too_many_lines, reason = "each part of the state in turn")]
+    fn hand_over_keeping(
+        &mut self,
+        servers_until: Instant,
+        keep: &[AgentId],
+    ) -> io::Result<Handover> {
+        let kept_names = self.agent_names(keep);
+        let kept_chats = self.chats_of(&kept_names);
+        let mut live_chats = Vec::new();
         // Agents' changes to big files still being worked out go into the
         // edit log first, so the next build has them.
         self.settle_all_pending();
@@ -1450,13 +1510,21 @@ impl Daemon {
                     shells.extend(shell);
                 }
                 Hosted::Chat(mut chat) => {
-                    let continuation = chat.prepare_upgrade();
+                    // Its agent goes on, and so does it, as it is.
+                    let live = kept_chats.contains(&chat.info().id);
+                    let continuation = if live { None } else { chat.prepare_upgrade() };
                     chat.hand_over_standing(&mut standing);
                     chat_previews.push(chat.hand_over_previews());
                     tool_previews.extend(chat.hand_over_tool_previews());
                     image_originals.push(chat.hand_over_originals());
                     chat_queues.push(chat.hand_over_queue());
-                    chats.push(chat.hand_over());
+                    if live {
+                        let (handed, live) = chat.hand_over_live();
+                        chats.push(handed);
+                        live_chats.push(live);
+                    } else {
+                        chats.push(chat.hand_over());
+                    }
                     chat_continuations.extend(continuation);
                 }
             }
@@ -1465,14 +1533,21 @@ impl Daemon {
         // beside the old.
         self.abandon_renames();
         // The agents and language servers stop, and the next build reaps
-        // them; nothing they started is left to it. The boards' last
-        // changes are written, for it to read.
-        self.stop_agents();
+        // them; nothing they started is left to it, but what the agents
+        // kept run, which goes on with them. The boards' last changes are
+        // written, for it to read.
+        self.stop_agents(keep);
         self.stop_servers();
         self.begin_stopping_browser();
         self.wait_for_stopping(servers_until);
         self.stop_browser();
         self.stop_boards();
+        let live = (!keep.is_empty()).then(|| {
+            let mut live = self.hand_over_agents(keep, &kept_chats, &mut fds);
+            live.chats = live_chats;
+            self.hand_over_tools(&mut live, &mut fds, &kept_chats);
+            live
+        });
         let recovery_lock = self.stop_recovery().map(|lock| fds.add(lock));
         let orphan_tokens: Vec<usize> = (self.sources.iter())
             .filter(|(_, source)| matches!(source, Source::Orphan(_)))
@@ -1518,6 +1593,7 @@ impl Daemon {
                 lent_background: self.workspaces.hand_over_lent_background(),
                 undelivered: self.hand_over_talk(),
                 talk: Some(self.hand_over_counts(standing)),
+                live,
                 orphans,
                 workspaces,
                 next_buffer: self.next_buffer,
@@ -1799,7 +1875,7 @@ impl Daemon {
         // Asked first, to shut down while the rest stops. The boards'
         // last changes and the browser's moment to stop go by meanwhile.
         self.stop_servers();
-        self.stop_agents();
+        self.stop_agents(&[]);
         self.begin_stopping_boards();
         self.begin_stopping_recovery();
         self.begin_stopping_browser();
@@ -1826,22 +1902,35 @@ impl Daemon {
         let Some(upgrading) = self.upgrade_to.take() else {
             return Ok(None);
         };
-        match self.file_ops_hold_upgrade(upgrading.until, Instant::now()) {
-            Ok(false) => {}
-            // Asked again when one finishes, or at the time.
-            Ok(true) => {
-                self.upgrade_to = Some(upgrading);
-                return Ok(None);
+        // Once nothing holds it up, which agents go on through the upgrade
+        // is decided, before anything stops, and what the parser's thread
+        // had of them taken in (see `chats/live.rs`): before the file
+        // operations are waited for again, and the boards and the web app
+        // made ready, as what's taken in may ask for any of them. Only on
+        // the turn the upgrade goes ahead.
+        let mut drained = None;
+        let keep = loop {
+            match self.file_ops_hold_upgrade(upgrading.until, Instant::now()) {
+                Ok(false) => {}
+                // Asked again when one finishes, or at the time.
+                Ok(true) => {
+                    self.upgrade_to = Some(upgrading);
+                    return Ok(None);
+                }
+                Err(reason) => {
+                    log::warn!("not upgrading: {reason}");
+                    self.refuse_upgrade(upgrading.token, reason);
+                    return Ok(None);
+                }
             }
-            Err(reason) => {
-                log::warn!("not upgrading: {reason}");
-                self.refuse_upgrade(upgrading.token, reason);
-                return Ok(None);
+            match drained {
+                Some(keep) => break keep,
+                None => drained = Some(self.agents_to_keep(&upgrading.takes)),
             }
-        }
+        };
         let Upgrading {
             executable,
-            takes_signals,
+            takes,
             token,
             ..
         } = upgrading;
@@ -1855,14 +1944,19 @@ impl Daemon {
         // So are the devices paired with the web app.
         if let Err(reason) = self.prepare_web_for_upgrade() {
             log::warn!("not upgrading: {reason}");
+            // The boards were let go for it: taken back.
+            self.take_boards_back();
             self.refuse_upgrade(token, reason);
             return Ok(None);
         }
-        // There's no way back now. Language servers are asked to shut down
-        // first, and agents stopped, to do so while remote windows are told.
+        // There's no way back now. What can't wait for the next build is
+        // answered for the agents that go on. Language servers are asked to
+        // shut down, and the other agents stopped, to do so while remote
+        // windows are told.
+        self.ready_kept(&keep);
         let servers_until = Instant::now() + stopping::STOP_WAIT;
         self.stop_servers();
-        self.stop_agents();
+        self.stop_agents(&keep);
         // The client that asked hears how it went: its connection closes
         // as the new build starts, or says why it didn't.
         self.close_remotes("the daemon is upgrading to a new build");
@@ -1878,8 +1972,8 @@ impl Daemon {
         };
         Ok(Some(Upgrade {
             executable,
-            takes_signals,
-            handover: self.hand_over(servers_until)?,
+            takes_signals: takes.signals,
+            handover: self.hand_over_keeping(servers_until, &keep)?,
             requester,
         }))
     }
@@ -2731,6 +2825,7 @@ impl Daemon {
                 break;
             }
             let greeted = client.greeted;
+            client.asked |= !matches!(message, Some(ClientMessage::Hello { .. }));
             let reply = match message {
                 // A request it couldn't read, from a newer client: answered
                 // all the same, so the answers to the rest stay in order.
@@ -2783,11 +2878,11 @@ impl Daemon {
                     let local = matches!(client.link, Link::Unix(_));
                     let executable = PathBuf::from(std::ffi::OsString::from_vec(executable));
                     match self.check_upgrade(local, protocol_version, &executable) {
-                        Ok(takes_signals) => {
+                        Ok(takes) => {
                             // The connection closes as the daemon upgrades.
                             self.upgrade_to = Some(Upgrading {
                                 executable,
-                                takes_signals,
+                                takes,
                                 token,
                                 until: Instant::now() + UPGRADE_OPS_WAIT,
                             });
@@ -2947,14 +3042,14 @@ impl Daemon {
 
     /// Why the daemon won't become `executable`, if it won't, as a client
     /// speaking `protocol_version` asked, on this machine if `local`. If it
-    /// will, whether `executable` takes the signals held back for it (see
-    /// [`crate::upgrade::TAKES_SIGNALS`]).
+    /// will, what `executable` takes beside the handover (see
+    /// [`crate::upgrade::Takes`]).
     fn check_upgrade(
         &self,
         local: bool,
         protocol_version: u32,
         executable: &Path,
-    ) -> Result<bool, String> {
+    ) -> Result<crate::upgrade::Takes, String> {
         if !local {
             return Err("only a client on the daemon's machine can upgrade it".to_owned());
         }

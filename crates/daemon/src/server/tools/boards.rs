@@ -34,7 +34,10 @@ impl Daemon {
         chat: TerminalId,
         tool: Tool,
     ) -> Result<Result<String, String>, Tool> {
-        if self.boards.reading() {
+        // Not read yet, or written for the last time as the daemon
+        // upgrades: carried out once they're read, by the next build if it
+        // comes to that, never changed here unwritten.
+        if self.boards.reading() || (self.boards.ready().is_ok() && !self.boards.writing()) {
             return Err(tool);
         }
         if let Err(why) = self.boards.ready() {
@@ -148,8 +151,8 @@ impl Daemon {
             what,
         } in ready
         {
-            if let Wait::Boards { tool, .. } = what {
-                self.carry_out(token, chat, id, tool);
+            if let Wait::Boards { tool, raw, .. } = what {
+                self.carry_out(token, chat, id, tool, raw);
             }
         }
     }
@@ -439,6 +442,37 @@ mod tests {
     use crate::server::Source;
     use crate::server::agent_files::tests::daemon_with_chat;
 
+    /// Once an upgrade has written the boards for the last time and let
+    /// them go, a call that would change them waits for the next build, as
+    /// one waits for them to be read, rather than change them unwritten
+    /// (CLACKA-188).
+    #[test]
+    fn a_board_call_after_the_boards_are_let_go_waits_for_the_next_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let boards = tempfile::tempdir().unwrap();
+        let (mut daemon, chat) = daemon_with_chat(dir.path());
+        daemon.boards =
+            crate::server::boards::BoardState::start(Some(boards.path().to_owned()), &daemon.waker);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !daemon.take_boards() {
+            assert!(Instant::now() < deadline, "the boards were never read");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let post = || Tool::BoardCreate {
+            name: "plan".to_owned(),
+            purpose: String::new(),
+            global: true,
+        };
+        daemon
+            .prepare_boards_for_upgrade(Duration::from_secs(10))
+            .unwrap();
+        assert!(matches!(
+            daemon.board_tool(chat, post()),
+            Err(Tool::BoardCreate { .. })
+        ));
+        assert!(daemon.boards.list.list.is_empty(), "changed unwritten");
+    }
+
     #[test]
     fn a_call_waiting_for_the_boards_is_told_to_try_again_in_time() {
         let dir = tempfile::tempdir().unwrap();
@@ -458,6 +492,7 @@ mod tests {
             chat,
             what: Wait::Boards {
                 tool: Tool::BoardList { archived: false },
+                raw: crate::mcp::Raw::default(),
                 due: Instant::now(),
             },
         });

@@ -38,6 +38,7 @@ mod elicit;
 mod facts;
 pub(crate) mod failure;
 mod limits;
+mod live;
 mod originals;
 mod plan;
 pub(crate) mod queue;
@@ -682,6 +683,12 @@ impl HostedChat {
         if self.answering() {
             self.end_turn(Outcome::Failed(upgrade::CUT_OFF.to_owned()));
         }
+        self.into_handover()
+    }
+
+    /// The chat, for the next build, as it is: a turn being answered
+    /// stays open.
+    fn into_handover(self) -> handover::Chat {
         let failure = match self.node.state {
             ChatState::Failed(why) => Some(why),
             _ => None,
@@ -3732,7 +3739,7 @@ fn clean_text(text: &str) -> String {
         .collect()
 }
 
-fn setting_to_handover(setting: Setting) -> handover::ChatSetting {
+pub(crate) fn setting_to_handover(setting: Setting) -> handover::ChatSetting {
     handover::ChatSetting {
         id: setting.id,
         name: setting.name,
@@ -3756,7 +3763,7 @@ fn setting_to_handover(setting: Setting) -> handover::ChatSetting {
     }
 }
 
-fn setting_from_handover(setting: handover::ChatSetting) -> Setting {
+pub(crate) fn setting_from_handover(setting: handover::ChatSetting) -> Setting {
     Setting {
         id: setting.id,
         name: setting.name,
@@ -5326,6 +5333,81 @@ mod tests {
         assert_eq!(resumed.node.state, ChatState::Ready);
     }
 
+    /// A chat whose agent goes on through the upgrade goes on too
+    /// (CLACKA-188): its turn stays open, its tool running, its session
+    /// open, and the agent's question still asked, its answer going back to
+    /// the request the agent waits on.
+    #[test]
+    fn a_chat_handed_over_with_its_agent_goes_on_answering() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "hi");
+        words(&mut chat, "hello");
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"t1","title":"make","kind":"execute","status":"in_progress"}"#,
+        );
+        let options: Vec<PermissionOption> =
+            serde_json::from_str(r#"[{"optionId":"yes","name":"Allow","kind":"allow_once"}]"#)
+                .unwrap();
+        let tool: ToolCallUpdate =
+            serde_json::from_str(r#"{"toolCallId":"t1","title":"make"}"#).unwrap();
+        chat.ask(Value::from("p7"), &tool, &options, &[]);
+        assert!(chat.can_go_on());
+        let agent = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        let (handed, live) = chat.hand_over_live();
+        let mut resumed = HostedChat::resume(handed, &agent);
+        resumed.resume_live(live);
+        assert!(resumed.is_connected());
+        assert_eq!(resumed.node.state, ChatState::Answering);
+        let turn = &resumed.node.turns[0];
+        assert_eq!(turn.end, None);
+        assert!(matches!(
+            &turn.items[..],
+            [Item::Words(hello), Item::Tool(tool)]
+                if hello == "hello" && tool.status == ToolStatus::Running
+        ));
+        let question = resumed.node.question.clone().expect("still asked");
+        assert_eq!(question.title, "make");
+        assert_eq!(
+            answer(&mut resumed, Some("yes".into())),
+            [Action::Answer {
+                request: Value::from("p7"),
+                option: Some("yes".into()),
+            }]
+        );
+        // The turn ends as the agent says, as it would have.
+        resumed.answered(Ok(StopReason::EndTurn));
+        assert_eq!(outcome(&resumed.node.turns[0]), Some(&Outcome::Done));
+    }
+
+    /// A chat handed over to go on with its agent, which couldn't be taken
+    /// back, goes on as one whose agent the upgrade stopped (CLACKA-188):
+    /// its turn cut off, and continued.
+    #[test]
+    fn a_chat_whose_agent_couldnt_go_on_is_continued_as_before() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "hi");
+        words(&mut chat, "hello");
+        let agent = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        let (handed, live) = chat.hand_over_live();
+        let mut resumed = HostedChat::resume(handed, &agent);
+        let continuation = resumed.live_lost(live).expect("a turn to go on with");
+        assert_eq!(
+            outcome(&resumed.node.turns[0]),
+            Some(&Outcome::Failed("cut off by an upgrade".into()))
+        );
+        assert!(!resumed.is_connected());
+        assert!(resumed.continue_after_upgrade(continuation, &[]));
+        assert_eq!(resumed.node.turns.len(), 1);
+        assert_eq!(resumed.node.turns[0].end, None, "it goes on");
+    }
+
     #[test]
     fn a_chat_handed_over_shows_its_agents_plan_still() {
         let mut chat = chat();
@@ -5493,7 +5575,7 @@ mod tests {
             .find("claude")
             .unwrap();
         let mut resumed = HostedChat::resume(c.hand_over(), &agent);
-        let stopped = resumed.resume_standing(&mut standing);
+        let stopped = resumed.resume_standing(&mut standing, false);
         assert_eq!(stopped, ["Serve the docs"]);
         let task = &resumed.node.tasks[0];
         assert_eq!(task.state, clackatoo_protocol::AgentTaskState::Lost);

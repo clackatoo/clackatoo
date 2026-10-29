@@ -39,6 +39,8 @@ pub(super) struct BoardState {
     pub(super) list: Boards,
     /// The thread reading and writing them, while it runs.
     disk: Option<Disk>,
+    /// Where they're kept, if they are.
+    dir: Option<PathBuf>,
     /// Where the thread puts what it read.
     reading: Reading,
     /// The clients showing each board.
@@ -71,6 +73,7 @@ impl BoardState {
             status: Status::Reading,
             list: Boards::default(),
             disk: None,
+            dir: dir.clone(),
             reading: Arc::clone(&reading),
             viewers: BTreeMap::new(),
             early: Vec::new(),
@@ -97,6 +100,12 @@ impl BoardState {
     /// Whether they're still being read.
     pub(super) fn reading(&self) -> bool {
         self.status == Status::Reading
+    }
+
+    /// Whether what's changed in them is written: not once an upgrade
+    /// has written their last changes and let them go.
+    pub(super) fn writing(&self) -> bool {
+        self.disk.is_some()
     }
 
     /// Checks they can be used, or says why not.
@@ -154,6 +163,36 @@ impl Daemon {
             }
         }
         true
+    }
+
+    /// Takes the boards back after an upgrade that had written them for
+    /// the last time and let them go was refused after all: they're read
+    /// again, as the daemon starts, and written from then on. Calls made
+    /// meanwhile wait for them, as they do as the daemon starts.
+    pub(super) fn take_boards_back(&mut self) {
+        if self.boards.disk.is_some() || self.boards.status != Status::Ready {
+            return;
+        }
+        let Some(dir) = self.boards.dir.clone() else {
+            return;
+        };
+        let waker = Arc::clone(&self.waker);
+        let wake = move || {
+            if let Err(err) = waker.wake() {
+                log::warn!("waking the event loop for the boards failed: {err}");
+            }
+        };
+        match Disk::start(dir, Arc::clone(&self.boards.reading), wake) {
+            Ok(disk) => {
+                self.boards.disk = Some(disk);
+                self.boards.status = Status::Reading;
+            }
+            Err(err) => {
+                let why = format!("the boards couldn't be read again: {err}");
+                log::warn!("{why}");
+                self.boards.status = Status::Off(why);
+            }
+        }
     }
 
     /// Writes what's waiting, and stops the thread, for an upgrade, waiting
@@ -475,6 +514,43 @@ mod tests {
             .prepare_boards_for_upgrade(Duration::from_secs(5))
             .unwrap();
         assert!(daemon.boards.disk.is_none());
+        let (next, read) = read_again(boards.path());
+        assert_eq!(read.boards.get(id).unwrap().entries.len(), 1);
+        assert!(next.stop(Duration::from_secs(5)));
+    }
+
+    /// An upgrade refused after the boards were let go for it takes them
+    /// back: read again, as they were, and written from then on.
+    #[test]
+    fn a_refused_upgrade_takes_the_boards_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let boards = tempfile::tempdir().unwrap();
+        let mut daemon = daemon_with_boards(dir.path(), boards.path());
+        let id = daemon
+            .create_board("plan", "", BoardScope::Global, &BoardAuthor::User)
+            .unwrap();
+        daemon
+            .prepare_boards_for_upgrade(Duration::from_secs(5))
+            .unwrap();
+        assert!(!daemon.boards.writing());
+        daemon.take_boards_back();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !daemon.take_boards() {
+            assert!(
+                Instant::now() < deadline,
+                "the boards were never read again"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(daemon.boards.writing());
+        assert!(daemon.boards.ready().is_ok());
+        assert!(daemon.boards.list.get(id).is_some());
+        let user = BoardAuthor::User;
+        let post = |board: &Board| board.post(&user, 1, PostKind::Note, "x", Vec::new());
+        daemon.change_board(id, post).unwrap();
+        daemon
+            .prepare_boards_for_upgrade(Duration::from_secs(5))
+            .unwrap();
         let (next, read) = read_again(boards.path());
         assert_eq!(read.boards.get(id).unwrap().entries.len(), 1);
         assert!(next.stop(Duration::from_secs(5)));

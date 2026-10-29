@@ -73,6 +73,30 @@ pub const VERSIONS_FLAG: &str = "--handover-versions";
 /// that aren't numbers.
 pub const TAKES_SIGNALS: &str = "signals";
 
+/// The word a build adds to its answer to [`VERSIONS_FLAG`] when it takes
+/// agents' processes over as they are, rather than have them stopped
+/// (CLACKA-188): their pipes, what they were doing, and all they run. The
+/// build upgrading decides by it before it stops anything; a build that
+/// doesn't say it, as one from before, or one told not to (see
+/// `AgentConfig::kept_through_upgrades`), has every agent stopped first,
+/// as before. It's followed by a word for each adapter the build pins,
+/// [`ADAPTER_PIN`]`NAME=VERSION`: an agent run from an adapter pinned at
+/// another version than this build's is stopped too, as the new build
+/// would start another.
+pub const TAKES_ADAPTERS: &str = "adapters";
+
+/// How a word naming an adapter a build pins starts (see
+/// [`TAKES_ADAPTERS`]).
+pub const ADAPTER_PIN: &str = "adapter:";
+
+/// How a word naming what a build declares to agents starts: one for each
+/// kind of declaration, `client:KIND=HASH` (see
+/// `agent::declaration_kind` and `agent::declaration_hash`). An agent was
+/// told what it can rely on as it started; one that goes on is carried
+/// only into a build that would tell it the same, or that build would
+/// count on what it was never told.
+pub const CLIENT_DECLARES: &str = "client:";
+
 /// How long a build may take to answer [`VERSIONS_FLAG`].
 const VERSIONS_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -82,21 +106,98 @@ pub fn readable_versions() -> &'static [u32] {
     crate::handover::READABLE
 }
 
-/// What this build answers [`VERSIONS_FLAG`] with.
+/// What this build answers [`VERSIONS_FLAG`] with: its
+/// [`readable_versions`], [`TAKES_SIGNALS`], and, unless agents are to be
+/// stopped as it upgrades, [`TAKES_ADAPTERS`], the adapters it pins and
+/// what it declares to agents.
 #[must_use]
 pub fn versions_answer() -> String {
+    let agents = crate::agents::AgentConfig {
+        file: crate::config_dir().map(|dir| dir.join("daemon/agents.toml")),
+        restart_on_upgrade: crate::restart_agents_on_upgrade(),
+        ..crate::agents::AgentConfig::default()
+    };
+    let adapters = agents.kept_through_upgrades();
+    let pins = (crate::agents::KNOWN.iter())
+        .map(|known| format!("{ADAPTER_PIN}{}={}", known.name, known.version));
+    let declares = [(true, true), (true, false), (false, true), (false, false)]
+        .into_iter()
+        .map(|(files, tasks)| {
+            let declared = crate::agent::client_capabilities(files, tasks);
+            format!(
+                "{CLIENT_DECLARES}{}={}",
+                crate::agent::declaration_kind(files, tasks),
+                crate::agent::declaration_hash(&declared)
+            )
+        });
     (readable_versions().iter())
         .map(u32::to_string)
         .chain([TAKES_SIGNALS.to_owned()])
+        .chain(adapters.then(|| TAKES_ADAPTERS.to_owned()))
+        .chain(pins.chain(declares).filter(|_| adapters))
         .collect::<Vec<String>>()
         .join(" ")
 }
 
+/// What a build that can take over from this one takes beside the
+/// handover, as it answered [`VERSIONS_FLAG`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Takes {
+    /// It takes the signals held back for it (see [`TAKES_SIGNALS`]).
+    pub(crate) signals: bool,
+    /// It takes agents' processes as they are (see [`TAKES_ADAPTERS`]):
+    /// if so, the adapters it pins, by name, at their versions.
+    pub(crate) adapters: Option<Vec<(String, String)>>,
+    /// What it declares to agents, by the kind of declaration (see
+    /// [`CLIENT_DECLARES`]).
+    pub(crate) declares: Vec<(String, String)>,
+}
+
+impl Takes {
+    /// What `answer`, a build's answer to [`VERSIONS_FLAG`], says it takes.
+    fn from_answer(answer: &str) -> Self {
+        let words = || answer.split_whitespace();
+        let pairs = |prefix: &'static str| {
+            words()
+                .filter_map(move |word| word.strip_prefix(prefix)?.split_once('='))
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .collect::<Vec<_>>()
+        };
+        Self {
+            signals: words().any(|word| word == TAKES_SIGNALS),
+            adapters: words()
+                .any(|word| word == TAKES_ADAPTERS)
+                .then(|| pairs(ADAPTER_PIN)),
+            declares: pairs(CLIENT_DECLARES),
+        }
+    }
+
+    /// Whether it takes over the agent called `name`, run from the adapter
+    /// this build pins at `version` if it's one this build knows, `None`
+    /// if it's the user's own, and told `declared`, a declaration's kind
+    /// and hash, as it started: it takes agents' processes, pins that
+    /// adapter at the same version, and declares the same.
+    pub(crate) fn takes_agent(
+        &self,
+        name: &str,
+        version: Option<&str>,
+        (kind, hash): (&str, &str),
+    ) -> bool {
+        let Some(pins) = &self.adapters else {
+            return false;
+        };
+        let pinned = version.is_none_or(|version| {
+            (pins.iter()).any(|(pinned, at)| pinned == name && at == version)
+        });
+        let declared = (self.declares.iter()).any(|(each, at)| each == kind && at == hash);
+        pinned && declared
+    }
+}
+
 /// Checks that `executable`, run with `args`, is a build that can take
 /// over from this one, by asking it which handover versions it reads.
-/// Returns whether it also takes the signals held back for it (see
-/// [`TAKES_SIGNALS`]).
-pub(crate) fn check_takes_over(executable: &Path, args: &[OsString]) -> Result<bool, String> {
+/// Returns what else it takes (see [`Takes`]).
+pub(crate) fn check_takes_over(executable: &Path, args: &[OsString]) -> Result<Takes, String> {
     let run = |err: io::Error| format!("{} can't be run: {err}", executable.display());
     let mut child = Command::new(executable)
         .args(args)
@@ -123,7 +224,7 @@ pub(crate) fn check_takes_over(executable: &Path, args: &[OsString]) -> Result<b
         .split_whitespace()
         .any(|version| version.parse() == Ok(crate::handover::VERSION));
     if takes_over {
-        Ok(answer.split_whitespace().any(|word| word == TAKES_SIGNALS))
+        Ok(Takes::from_answer(&answer))
     } else {
         Err(format!(
             "{} can't take over from this build: it isn't a build of clackatoo that reads \
@@ -407,5 +508,66 @@ fn receive_fds() -> Result<Vec<OwnedFd>, HandoverError> {
         if received.bytes == 0 {
             return Ok(fds);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a build takes is read from its answer, words this build doesn't
+    /// know skipped: agents only from one that says so, and each at the
+    /// version it pins (CLACKA-188).
+    #[test]
+    fn what_a_build_takes_is_read_from_its_answer() {
+        let told = ("ft", "0123");
+        let before = Takes::from_answer("36 37 signals");
+        assert_eq!(
+            before,
+            Takes {
+                signals: true,
+                adapters: None,
+                declares: Vec::new(),
+            }
+        );
+        assert!(!before.takes_agent("claude", Some("0.98.0"), told));
+        assert!(!before.takes_agent("mine", None, told));
+
+        let now = Takes::from_answer(
+            "37 38 signals adapters adapter:claude=0.98.0 client:ft=0123 client:f-=4567 later",
+        );
+        assert!(now.takes_agent("claude", Some("0.98.0"), told));
+        assert!(
+            !now.takes_agent("claude", Some("0.99.0"), told),
+            "pinned otherwise"
+        );
+        assert!(
+            !now.takes_agent("codex", Some("2.2.2"), told),
+            "pinned by no one"
+        );
+        assert!(
+            now.takes_agent("mine", None, told),
+            "the user's own command"
+        );
+        assert!(now.takes_agent("mine", None, ("f-", "4567")));
+        // Told otherwise as it started, by kind or by what was declared.
+        assert!(!now.takes_agent("mine", None, ("ft", "4567")));
+        assert!(!now.takes_agent("claude", Some("0.98.0"), ("-t", "0123")));
+        assert!(!Takes::from_answer("38").signals);
+    }
+
+    /// This build says it takes agents over, at the versions it pins,
+    /// unless it's told to stop them as it upgrades.
+    #[test]
+    fn this_build_says_it_takes_agents_at_its_pins() {
+        let takes = Takes::from_answer(&versions_answer());
+        let claude = crate::agents::known("claude").unwrap();
+        // The environment of the tests doesn't stop them.
+        if !crate::restart_agents_on_upgrade() {
+            let declared = crate::agent::client_capabilities(true, true);
+            let told = ("ft", crate::agent::declaration_hash(&declared));
+            assert!(takes.takes_agent("claude", Some(claude.version), (told.0, &told.1)));
+        }
+        assert!(takes.signals);
     }
 }

@@ -6,8 +6,16 @@
 //! for it, as an upgrade asks first. With `--fresh`, it makes none of the
 //! workspaces kept from its last run again, as `clackatoo daemon --fresh`.
 //!
+//! Run as `upgrade NEXT`, it asks the daemon in `$XDG_RUNTIME_DIR` to
+//! upgrade in place to the program NEXT, as `clackatoo upgrade` does, and
+//! returns once it has.
+//!
 //! Run as a program whose name ends `-old`, it acts as a build from before
 //! daemons caught signals: it doesn't say it takes them, and catches none.
+//! Run as one ending `-unadapted`, it says it can't take agents' processes
+//! over as an upgrade asks; ending `-repinned`, it says it pins every
+//! adapter at another version; ending `-redeclared`, that it declares
+//! otherwise to every agent.
 //!
 //! It stands in for `clackatoo` in tests of daemons connecting to each
 //! other, too: run as `bridge`, it relays to the daemon in
@@ -34,6 +42,9 @@ fn main() -> ExitCode {
     if args.len() == 2 && args[0] == "old" && args[1] == "bridge" {
         return old_bridge();
     }
+    if args.len() == 2 && args[0] == "upgrade" {
+        return upgrade_to(std::path::Path::new(&args[1]));
+    }
     if args.first().is_some_and(|arg| arg == "bridge") {
         return match remote::bridge(&RuntimeDir::for_current_user(), false) {
             Ok(()) => ExitCode::SUCCESS,
@@ -43,8 +54,10 @@ fn main() -> ExitCode {
             }
         };
     }
-    let old = (std::env::current_exe().ok())
-        .is_some_and(|program| program.to_string_lossy().ends_with("-old"));
+    let program = (std::env::current_exe().ok())
+        .map(|program| program.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let old = program.ends_with("-old");
     if args.iter().any(|arg| arg == VERSIONS_FLAG) {
         if old {
             let versions: Vec<String> = (upgrade::readable_versions().iter())
@@ -52,7 +65,7 @@ fn main() -> ExitCode {
                 .collect();
             println!("{}", versions.join(" "));
         } else {
-            println!("{}", upgrade::versions_answer());
+            println!("{}", versions_answer(&program));
         }
         return ExitCode::SUCCESS;
     }
@@ -80,6 +93,77 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("daemon: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// What this build answers [`VERSIONS_FLAG`] with, run as `program`: as
+/// the daemon's, but run as a program whose name ends `-unadapted`, as a
+/// build that can't take agents' processes over, and ending `-repinned`,
+/// as one that pins every adapter at another version, and `-redeclared`,
+/// as one that declares otherwise to every agent.
+fn versions_answer(program: &str) -> String {
+    let answer = upgrade::versions_answer();
+    let words = answer.split(' ').filter_map(|word| {
+        if program.ends_with("-unadapted")
+            && (word == upgrade::TAKES_ADAPTERS || word.starts_with(upgrade::ADAPTER_PIN))
+        {
+            return None;
+        }
+        match word.split_once('=') {
+            Some((pin, _))
+                if program.ends_with("-repinned") && pin.starts_with(upgrade::ADAPTER_PIN) =>
+            {
+                Some(format!("{pin}=0.0.0-repinned"))
+            }
+            Some((kind, _))
+                if program.ends_with("-redeclared")
+                    && kind.starts_with(upgrade::CLIENT_DECLARES) =>
+            {
+                Some(format!("{kind}=redeclared"))
+            }
+            _ => Some(word.to_owned()),
+        }
+    });
+    words.collect::<Vec<String>>().join(" ")
+}
+
+/// Asks the daemon in `$XDG_RUNTIME_DIR` to upgrade in place to `next`, as
+/// `clackatoo upgrade` does, and waits until it has: its connection closes
+/// as the new build starts. Fails, saying why, if it won't.
+fn upgrade_to(next: &std::path::Path) -> ExitCode {
+    use std::io::{Read, Write};
+    use std::os::unix::ffi::OsStrExt;
+
+    use clackatoo_protocol::frame::{self, FrameDecoder};
+    use clackatoo_protocol::{ClientMessage, PROTOCOL_VERSION, ServerMessage};
+
+    let socket = RuntimeDir::for_current_user().socket_path();
+    let upgrade = ClientMessage::Upgrade {
+        protocol_version: PROTOCOL_VERSION,
+        executable: next.as_os_str().as_bytes().to_vec(),
+    };
+    let asked = std::os::unix::net::UnixStream::connect(&socket).and_then(|mut stream| {
+        let message = frame::encode(PROTOCOL_VERSION, &upgrade).map_err(std::io::Error::other)?;
+        stream.write_all(&message)?;
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer)?;
+        Ok(answer)
+    });
+    let answer = match asked {
+        Ok(answer) => answer,
+        Err(err) => {
+            eprintln!("upgrade: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut decoder = FrameDecoder::new();
+    decoder.push(&answer);
+    match decoder.decode::<ServerMessage>(PROTOCOL_VERSION) {
+        Ok(None) => ExitCode::SUCCESS,
+        refused => {
+            eprintln!("upgrade: {refused:?}");
             ExitCode::FAILURE
         }
     }

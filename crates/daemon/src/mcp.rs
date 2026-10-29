@@ -300,7 +300,7 @@ impl NewChat {
 pub(crate) enum Incoming {
     /// A tool call, with its JSON-RPC ID, to answer with
     /// [`Connection::answer`].
-    Call { id: Value, tool: Tool },
+    Call { id: Value, tool: Tool, raw: Raw },
     /// The agent no longer wants the answer to the call with this ID.
     Cancelled(Value),
 }
@@ -416,6 +416,66 @@ impl Connection {
         self.incoming.parsed()
     }
 
+    /// Takes all the parser's thread has parsed of what the agent sent,
+    /// reading nothing more, as [`read`](Self::read) would. Returns
+    /// whether the connection can go on through an upgrade now: it hasn't
+    /// finished, and what's been read of it is only bytes.
+    pub(crate) fn take_parsed(&mut self, incoming: &mut Vec<Incoming>) -> bool {
+        let mut messages = Vec::new();
+        self.incoming.take(&mut messages, usize::MAX);
+        for message in messages {
+            self.receive(message, incoming);
+        }
+        self.can_hand_over()
+    }
+
+    /// Whether the connection can go on through an upgrade as it is (see
+    /// [`take_parsed`](Self::take_parsed)).
+    pub(crate) fn can_hand_over(&self) -> bool {
+        !self.finished && self.incoming.can_hand_over()
+    }
+
+    /// Hands the connection over to the next build, which serves it as it
+    /// was, its socket into `fds`, so the relay at the other end never
+    /// knows. Only one that [`can_hand_over`](Self::can_hand_over).
+    pub(crate) fn hand_over(
+        self,
+        fds: &mut crate::handover::Fds,
+    ) -> crate::handover::LiveConnection {
+        crate::handover::LiveConnection {
+            stream: fds.add(std::os::fd::OwnedFd::from(self.stream)),
+            chat: self.chat.0,
+            listed: self.listed,
+            incoming: self.incoming.into_bytes(),
+            outgoing: self.outgoing,
+            browser: self.browser,
+        }
+    }
+
+    /// The connection the last build handed over as `live`, its socket
+    /// taken from `fds`, telling the agent `instructions` if it asks again,
+    /// its big messages parsed by `parser`.
+    pub(crate) fn resume(
+        live: crate::handover::LiveConnection,
+        fds: &mut crate::handover::Fds,
+        instructions: String,
+        parser: &Parser,
+    ) -> Result<Self, crate::handover::HandoverError> {
+        let stream = std::os::unix::net::UnixStream::from(fds.take(live.stream)?);
+        stream.set_nonblocking(true)?;
+        Ok(Self {
+            listed: live.listed,
+            stream: UnixStream::from_std(stream),
+            chat: TerminalId(live.chat),
+            incoming: Inbox::resume(Framing::Lines, parser, live.incoming),
+            outgoing: live.outgoing,
+            wants_writable: false,
+            finished: false,
+            instructions,
+            browser: live.browser,
+        })
+    }
+
     /// Whether messages the agent sent are with the parser's thread.
     pub(crate) fn parsing(&self) -> bool {
         self.incoming.parsing()
@@ -438,7 +498,7 @@ impl Connection {
         self.incoming.gone_due()
     }
 
-    fn receive(&mut self, message: Message, incoming: &mut Vec<Incoming>) {
+    fn receive(&mut self, mut message: Message, incoming: &mut Vec<Incoming>) {
         let (Some(method), id) = (message.method, message.id) else {
             // An answer: the server asks the agent nothing.
             return;
@@ -478,10 +538,19 @@ impl Connection {
                 self.reply(&id, &json!({ "tools": catalogue(self.browser) }));
             }
             "tools/call" => {
-                let name = message.params["name"].as_str().unwrap_or_default();
-                let arguments = &message.params["arguments"];
-                match parse(name, arguments) {
-                    Ok(tool) => incoming.push(Incoming::Call { id, tool }),
+                let name = message.params["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let arguments = (message.params.get_mut("arguments"))
+                    .map(Value::take)
+                    .unwrap_or_default();
+                match parse(&name, &arguments) {
+                    Ok(tool) => incoming.push(Incoming::Call {
+                        id,
+                        tool,
+                        raw: Raw { name, arguments },
+                    }),
                     Err(Unknown) => self.fail(&id, -32602, &format!("there's no tool {name:?}")),
                     Err(Bad(why)) => self.answer(&id, Err(why)),
                 }
@@ -555,6 +624,24 @@ enum Refused {
 }
 
 use Refused::{Bad, Unknown};
+
+/// A tool call as it came: the tool's name, and its arguments. A call
+/// that waits, for the user or the boards, keeps it, so it can wait
+/// through an upgrade, which can't write a [`Tool`] down: the next build
+/// reads it again as it was (see [`Raw::read_again`]).
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Raw {
+    pub(crate) name: String,
+    pub(crate) arguments: Value,
+}
+
+impl Raw {
+    /// The tool it calls, read as it was when it came: `None` if this
+    /// build has no such tool, or reads its arguments otherwise.
+    pub(crate) fn read_again(&self) -> Option<Tool> {
+        parse(&self.name, &self.arguments).ok()
+    }
+}
 
 /// The tool `name` called with `arguments`.
 #[allow(clippy::too_many_lines, reason = "one arm per tool, each short")]
@@ -1638,8 +1725,7 @@ pub fn relay(
     mut input: impl Read + Send + 'static,
     mut output: impl Write,
 ) -> Result<(), ClientError> {
-    let mut daemon = StdUnixStream::connect(socket).map_err(ClientError::Connect)?;
-    open(&mut daemon, chat)?;
+    let mut daemon = connect(socket, chat)?;
     let mut to_daemon = daemon.try_clone()?;
     std::thread::Builder::new()
         .name("mcp-input".into())
@@ -1651,6 +1737,45 @@ pub fn relay(
         })?;
     copy(&mut daemon, &mut output)?;
     Ok(())
+}
+
+/// How long the relay waits before each try again to reach the daemon,
+/// after it was cut off on the way.
+const RECONNECT: [Duration; 5] = [
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+];
+
+/// A connection to the daemon listening at `socket`, serving the chat
+/// `chat`'s tools. One cut off on the way, as by the daemon upgrading in
+/// place, which closes every connection not yet serving tools, is tried
+/// again a few times, a little later each: the listening socket outlives
+/// the upgrade, and the next build answers. A daemon that says no isn't
+/// asked again.
+fn connect(socket: &Path, chat: TerminalId) -> Result<StdUnixStream, ClientError> {
+    let mut waits = RECONNECT.iter();
+    loop {
+        let tried = StdUnixStream::connect(socket)
+            .map_err(ClientError::Connect)
+            .and_then(|mut stream| open(&mut stream, chat).map(|()| stream));
+        match tried {
+            Ok(stream) => return Ok(stream),
+            Err(
+                err @ (ClientError::Daemon(_)
+                | ClientError::UnexpectedMessage(_)
+                | ClientError::VersionMismatch { .. }),
+            ) => {
+                return Err(err);
+            }
+            Err(err) => match waits.next() {
+                Some(&wait) => std::thread::sleep(wait),
+                None => return Err(err),
+            },
+        }
+    }
 }
 
 /// Greets the daemon on `stream` and asks it to serve the chat's tools
@@ -1778,6 +1903,57 @@ mod tests {
             );
         }
         opened
+    }
+
+    /// A relay cut off before the daemon served its chat's tools, as by
+    /// the daemon upgrading in place, tries again, and is served by what
+    /// answers next (CLACKA-188).
+    #[test]
+    fn a_relay_cut_off_on_the_way_tries_again() {
+        use std::io::Read;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let fake = std::thread::spawn(move || {
+            // The first is cut off once it has said hello, unanswered.
+            let (mut first, _) = listener.accept().unwrap();
+            let mut said = [0; 1];
+            first.read_exact(&mut said).unwrap();
+            drop(first);
+            let (mut daemon, _) = listener.accept().unwrap();
+            let mut decoder = FrameDecoder::new();
+            let mut buffer = [0; 256];
+            let mut next = |daemon: &mut StdUnixStream| loop {
+                if let Some(message) = decoder.decode::<ClientMessage>(PROTOCOL_VERSION).unwrap() {
+                    return message;
+                }
+                let n = daemon.read(&mut buffer).unwrap();
+                assert!(n > 0, "the relay hung up");
+                decoder.push(&buffer[..n]);
+            };
+            next(&mut daemon);
+            let hello = ServerMessage::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            };
+            daemon
+                .write_all(&frame::encode(PROTOCOL_VERSION, &hello).unwrap())
+                .unwrap();
+            let carry = next(&mut daemon);
+            let done = ServerMessage::Response(Response::Done);
+            daemon
+                .write_all(&frame::encode(PROTOCOL_VERSION, &done).unwrap())
+                .unwrap();
+            carry
+        });
+        let connected = connect(&socket, TerminalId(3));
+        assert!(connected.is_ok(), "{connected:?}");
+        assert_eq!(
+            fake.join().unwrap(),
+            ClientMessage::Request(Request::CarryMcp {
+                chat: TerminalId(3)
+            })
+        );
     }
 
     #[test]

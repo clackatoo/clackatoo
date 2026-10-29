@@ -5711,11 +5711,12 @@ impl Drop for Killed {
 /// with its turn as laptop's daemon upgrades, as one of desk's own does
 /// (47423b3): the daemon there continues it by itself, and desk shows the
 /// same chat, by the same number, carrying on (CLACKA-163). Laptop's daemon
-/// runs in a process of its own here, so it can upgrade.
+/// runs in a process of its own here, so it can upgrade, set to stop its
+/// agents as it does, as before they went on (CLACKA-188).
 #[test]
 fn a_chat_answering_on_another_machine_goes_on_after_it_upgrades() {
     let world = World::new();
-    let (child, socket) = process_daemon(&world, "laptop");
+    let (child, socket) = process_daemon_with(&world, "laptop", stopping_agents);
     let mut at_laptop = Client::connect(&socket).unwrap();
     at_laptop.set_read_timeout(Some(PATIENCE)).unwrap();
     at_laptop
@@ -5749,15 +5750,102 @@ fn a_chat_answering_on_another_machine_goes_on_after_it_upgrades() {
     );
 }
 
+/// Sets a daemon to stop its agents as it upgrades, as before they went on
+/// through upgrades (CLACKA-188): the switch to turn that off.
+fn stopping_agents(daemon: &mut Command) {
+    daemon.env("CLACKATOO_LIVE_AGENTS", "off");
+}
+
 /// What an idle chat's agent ran in the background goes with it in a real
-/// upgrade: the chat shows it lost, ended by the upgrade, and the agent
-/// gets a turn of its own saying what was stopped (CLACKA-187).
+/// upgrade, if the daemon is set to stop its agents as it upgrades: the
+/// chat shows it lost, ended by the upgrade, and the agent gets a turn of
+/// its own saying what was stopped (CLACKA-187).
 #[test]
 fn an_idle_chats_background_task_is_lost_through_a_real_upgrade_and_it_is_told() {
-    use clackatoo_protocol::AgentTaskState;
+    let world = World::new();
+    let (child, socket) = process_daemon_with(&world, "laptop", stopping_agents);
+    lost_and_told(&child, &socket, "daemon-next");
+}
+
+/// So does it to a build that can't take agents' processes over, whatever
+/// the daemon is set to do (CLACKA-188): the daemon decides before it
+/// stops anything.
+#[test]
+fn a_background_task_is_lost_through_an_upgrade_to_a_build_that_cant_take_agents() {
     let world = World::new();
     let (child, socket) = process_daemon(&world, "laptop");
+    lost_and_told(&child, &socket, "daemon-next-unadapted");
+}
+
+/// So does it to a build that would declare otherwise to the agent than
+/// the one that started it: the agent was never told what that build
+/// would count on (CLACKA-188). The agent is the user's own command here,
+/// which no pin covers.
+#[test]
+fn a_background_task_is_lost_through_an_upgrade_to_a_build_that_declares_otherwise() {
+    let world = World::new();
+    let (child, socket) = process_daemon(&world, "laptop");
+    lost_and_told(&child, &socket, "daemon-next-redeclared");
+}
+
+/// An agent whose chat is still opening its session, as its relay to
+/// clackatoo's tools may be connecting meanwhile, is stopped as the daemon
+/// upgrades, rather than carried on to lose its tools (CLACKA-188); the
+/// chat then opens its session with the next.
+#[test]
+fn an_agent_opening_a_session_stops_for_an_upgrade() {
+    let world = World::new();
+    let agent = format!("{} --slow-new 2000", example("fake_agent").display());
+    let (child, socket) = process_daemon_with(&world, "laptop", |daemon| {
+        daemon.env("CLACKATOO_AGENT", &agent);
+    });
     let mut client = Client::connect(&socket).unwrap();
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    client.new_workspace(Some("work".into()), chat()).unwrap();
+    let shown = client.watch_workspaces().unwrap();
+    let id = first_terminal((shown.list.iter()).find(|w| w.name == "work").unwrap());
+    let log = world.path().join("laptop.log");
+    let deadline = Instant::now() + PATIENCE;
+    while !std::fs::read_to_string(&log).is_ok_and(|log| log.contains("started: pid")) {
+        assert!(Instant::now() < deadline, "the agent never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    upgrade_process(&child, &socket);
+    let said = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        said.contains("stops for the upgrade: a chat of it is opening its session"),
+        "{said}"
+    );
+    let mut client = follow_again(&socket, id);
+    let node = ask_chat(&mut client, id, "hello");
+    assert!(last_words(&node).contains("echo: hello"), "{node:#?}");
+}
+
+/// An agent isn't carried on through an upgrade while a connection to the
+/// daemon hasn't said what it's for: it may be the relay to an agent's
+/// tools, which the upgrade would cut off (CLACKA-188). The agent stops,
+/// as before, and its chat is told.
+#[test]
+fn an_agent_stops_for_an_upgrade_while_a_connection_is_silent() {
+    let world = World::new();
+    let (child, socket) = process_daemon(&world, "laptop");
+    let silent = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+    lost_and_told(&child, &socket, "daemon-next");
+    let said = std::fs::read_to_string(world.path().join("laptop.log")).unwrap();
+    assert!(
+        said.contains("a connection hasn't said what it's for"),
+        "{said}"
+    );
+    drop(silent);
+}
+
+/// Has the agent of a chat on the daemon in `child`, at `socket`, run
+/// something in the background, upgrades the daemon to this build run as
+/// `next`, and checks what it ran was lost and the agent told so.
+fn lost_and_told(child: &Killed, socket: &Path, next: &str) {
+    use clackatoo_protocol::AgentTaskState;
+    let mut client = Client::connect(socket).unwrap();
     client.set_read_timeout(Some(PATIENCE)).unwrap();
     client.new_workspace(Some("work".into()), chat()).unwrap();
     let shown = client.watch_workspaces().unwrap();
@@ -5777,8 +5865,8 @@ fn an_idle_chats_background_task_is_lost_through_a_real_upgrade_and_it_is_told()
     });
     assert_eq!(node.tasks[0].state, AgentTaskState::Running, "{node:#?}");
 
-    upgrade_process(&child, &socket);
-    let mut client = Client::connect(&socket).unwrap();
+    upgrade_process_to(child, socket, next);
+    let mut client = Client::connect(socket).unwrap();
     client.set_read_timeout(Some(PATIENCE)).unwrap();
     attach_to(&mut client, id);
     let node = wait_for_chat(&mut client, id, |node| {
@@ -5805,12 +5893,13 @@ fn an_idle_chats_background_task_is_lost_through_a_real_upgrade_and_it_is_told()
 /// to end, goes on through a real upgrade, which hands it over in the
 /// chat's inbox: the turn it waited for is continued, and then it's sent
 /// (CLACKA-186). The daemon runs in a process of its own here, serving
-/// its agents' tools through the fake agent's relay.
+/// its agents' tools through the fake agent's relay, set to stop its
+/// agents as it upgrades, so the turn is continued.
 #[test]
 fn a_message_waiting_a_chats_turn_goes_on_through_a_real_upgrade() {
     use clackatoo_protocol::AgentTools;
     let world = World::new();
-    let (child, socket) = process_daemon(&world, "laptop");
+    let (child, socket) = process_daemon_with(&world, "laptop", stopping_agents);
     let mut client = Client::connect(&socket).unwrap();
     client.set_read_timeout(Some(PATIENCE)).unwrap();
     let tooled = |tools| match chat() {
@@ -5864,6 +5953,369 @@ fn a_message_waiting_a_chats_turn_goes_on_through_a_real_upgrade() {
     let turn = &node.turns[1];
     assert_eq!(turn.prompt, "hi b");
     assert_eq!(turn.from.as_ref().map(|from| from.chat), Some(a));
+}
+
+// --- Agents going on through upgrades (CLACKA-188) ---------------------
+
+/// A chat in a workspace `work` of the daemon at `socket`, its tools as
+/// `tools` says, once its session is open, and a client following it.
+fn ready_chat(socket: &Path, tools: clackatoo_protocol::AgentTools) -> (Client, TerminalId) {
+    let mut client = Client::connect(socket).unwrap();
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    let new = match chat() {
+        PaneTerminal::Agent(new) => PaneTerminal::Agent(NewAgent { tools, ..new }),
+        other => other,
+    };
+    client.new_workspace(Some("work".into()), new).unwrap();
+    let shown = client.watch_workspaces().unwrap();
+    let work = (shown.list.iter())
+        .find(|workspace| workspace.name == "work")
+        .unwrap();
+    let id = first_terminal(work);
+    attach_to(&mut client, id);
+    wait_for_chat(&mut client, id, |node| {
+        node.state == clackatoo_protocol::ChatState::Ready
+    });
+    (client, id)
+}
+
+/// A client of the daemon at `socket` following the chat `id`, as a window
+/// reconnects after an upgrade.
+fn follow_again(socket: &Path, id: TerminalId) -> Client {
+    let mut client = Client::connect(socket).unwrap();
+    client.set_read_timeout(Some(PATIENCE)).unwrap();
+    attach_to(&mut client, id);
+    client
+}
+
+/// The process ID the fake agent of the chat `id` says it has.
+fn agent_pid(client: &mut Client, id: TerminalId) -> u32 {
+    let node = ask_chat(client, id, "pid");
+    let words = last_words(&node);
+    let pid = words.trim().strip_prefix("pid ").unwrap_or_default();
+    pid.parse().unwrap_or_else(|_| panic!("{node:#?}"))
+}
+
+/// The process ID written to `path`, once it's there.
+fn pid_in(path: &Path) -> u32 {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if let Ok(pid) = std::fs::read_to_string(path) {
+            return pid.trim().parse().unwrap();
+        }
+        assert!(Instant::now() < deadline, "{} never came", path.display());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Whether the process `pid` is running: there, and not a zombie.
+fn running(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        // The state follows the name, which is in parentheses.
+        (stat.rsplit_once(") ")).is_some_and(|(_, rest)| !rest.starts_with('Z'))
+    })
+}
+
+/// Whether any item of `node`'s turns says a turn was continued after an
+/// upgrade, as one is when its agent was stopped.
+fn continued(node: &ChatNode) -> bool {
+    (node.turns.iter().flat_map(|turn| &turn.items))
+        .any(|item| matches!(item, Item::Other(text) if text.contains("Continuing after")))
+        || (node.turns.iter()).any(|turn| turn.prompt.starts_with("[daemon restarted]"))
+}
+
+/// What an agent ran in the background goes on through a real upgrade
+/// with it: the same process, the same pid, still running, its task still
+/// going, and nothing told of it, as nothing was lost; it ends as it
+/// would have (CLACKA-188).
+#[test]
+fn a_background_sleep_survives_a_real_upgrade() {
+    use clackatoo_protocol::AgentTaskState;
+    let world = World::new();
+    let (child, socket) = process_daemon(&world, "laptop");
+    let (mut client, id) = ready_chat(&socket, clackatoo_protocol::AgentTools::Off);
+    let agent = agent_pid(&mut client, id);
+    let path = world.path().join("sleep.pid");
+    let node = ask_chat(&mut client, id, &format!("sleep-bg {}", path.display()));
+    assert_eq!(node.tasks[0].state, AgentTaskState::Running, "{node:#?}");
+    let sleeping = pid_in(&path);
+    assert!(running(sleeping));
+
+    upgrade_process(&child, &socket);
+    let mut client = follow_again(&socket, id);
+    let node = wait_for_chat(&mut client, id, |node| node.turns.len() == 2);
+    assert_eq!(node.tasks[0].state, AgentTaskState::Running, "{node:#?}");
+    assert!(running(sleeping), "what the agent ran went");
+    // Nothing is told of it: no turn of its own comes.
+    std::thread::sleep(Duration::from_millis(500));
+    let node = wait_for_chat(&mut client, id, |_| true);
+    assert_eq!(node.turns.len(), 2, "{node:#?}");
+    assert!(!continued(&node), "{node:#?}");
+    assert_eq!(
+        agent_pid(&mut client, id),
+        agent,
+        "the agent was started again"
+    );
+    let node = ask_chat(&mut client, id, "finish");
+    assert_eq!(node.tasks[0].state, AgentTaskState::Done, "{node:#?}");
+}
+
+/// A turn the agent is answering as the daemon upgrades goes on: its words
+/// keep coming, in order, into the same turn, which ends as it would have,
+/// with nothing sent to go on with it (CLACKA-188).
+#[test]
+fn a_turn_mid_stream_goes_on_through_a_real_upgrade() {
+    let world = World::new();
+    let (child, socket) = process_daemon(&world, "laptop");
+    let (mut client, id) = ready_chat(&socket, clackatoo_protocol::AgentTools::Off);
+    client
+        .chat(id, ChatAction::Send("stream-slow 20 100".into()))
+        .unwrap();
+    wait_for_chat(&mut client, id, |node| last_words(node).contains("2 "));
+
+    upgrade_process(&child, &socket);
+    let mut client = follow_again(&socket, id);
+    let node = wait_for_chat(&mut client, id, |node| {
+        node.turns.last().is_some_and(|turn| turn.end.is_some())
+    });
+    let numbers: String = (0..20).map(|number| number.to_string() + " ").collect();
+    assert_eq!(last_words(&node), format!("{numbers}done\n"), "{node:#?}");
+    assert_eq!(node.turns.len(), 1, "{node:#?}");
+    assert!(!continued(&node), "{node:#?}");
+    let ended = node.turns[0].end.as_ref().map(|end| &end.outcome);
+    assert!(
+        matches!(ended, Some(clackatoo_protocol::Outcome::Done)),
+        "{node:#?}"
+    );
+}
+
+/// What the agent asked the user, which it waits on, is still asked after
+/// a real upgrade, and the answer reaches the agent, which never stopped
+/// waiting for it (CLACKA-188).
+#[test]
+fn a_pending_permission_survives_a_real_upgrade() {
+    let world = World::new();
+    let (child, socket) = process_daemon(&world, "laptop");
+    let (mut client, id) = ready_chat(&socket, clackatoo_protocol::AgentTools::Off);
+    client.chat(id, ChatAction::Send("ask".into())).unwrap();
+    wait_for_chat(&mut client, id, |node| node.question.is_some());
+
+    upgrade_process(&child, &socket);
+    let mut client = follow_again(&socket, id);
+    let node = wait_for_chat(&mut client, id, |node| node.question.is_some());
+    let question = node.question.as_ref().unwrap();
+    assert_eq!(question.title, "Write notes.txt", "{node:#?}");
+    let answer = ChatAction::Answer {
+        question: question.id,
+        option: Some("allow".into()),
+    };
+    client.chat(id, answer).unwrap();
+    let node = wait_for_chat(&mut client, id, |node| {
+        node.turns.last().is_some_and(|turn| turn.end.is_some())
+    });
+    assert!(last_words(&node).contains("picked allow"), "{node:#?}");
+    assert_eq!(node.turns.len(), 1, "{node:#?}");
+}
+
+/// One chat's agent waiting, through clackatoo's tools, for another chat
+/// to answer, as the daemon upgrades, still gets its answer, on the call it
+/// made: the connection its tools are served on goes on with it
+/// (CLACKA-188).
+#[test]
+fn a_pending_wait_for_chat_survives_a_real_upgrade() {
+    use clackatoo_protocol::AgentTools;
+    let world = World::new();
+    let (child, socket) = process_daemon(&world, "laptop");
+    let (mut client, a) = ready_chat(&socket, AgentTools::Allow);
+    let shown = client.watch_workspaces().unwrap();
+    let work = (shown.list.iter()).find(|w| w.name == "work").unwrap();
+    let tooled = match chat() {
+        PaneTerminal::Agent(new) => PaneTerminal::Agent(NewAgent {
+            tools: AgentTools::Allow,
+            ..new
+        }),
+        other => other,
+    };
+    let pane = client.new_tab(work.id, tooled).unwrap();
+    let shown = client.watch_workspaces().unwrap();
+    let b = shown.find_pane(pane).unwrap().2.content.terminal().unwrap();
+    attach_to(&mut client, b);
+    wait_for_chat(&mut client, b, |node| {
+        node.state == clackatoo_protocol::ChatState::Ready
+    });
+    client
+        .chat(b, ChatAction::Send("stream-slow 10 300".into()))
+        .unwrap();
+    wait_for_chat(&mut client, b, |node| last_words(node).contains("0 "));
+    let call = format!("mcp wait_for_chat {{\"chat\":{b}}}");
+    client.chat(a, ChatAction::Send(call)).unwrap();
+    wait_for_chat(&mut client, a, |node| {
+        node.state == clackatoo_protocol::ChatState::Answering
+    });
+    // Its call has reached the daemon, and waits.
+    std::thread::sleep(Duration::from_millis(300));
+
+    upgrade_process(&child, &socket);
+    let mut client = follow_again(&socket, a);
+    let node = wait_for_chat(&mut client, a, |node| {
+        node.turns.last().is_some_and(|turn| turn.end.is_some())
+    });
+    let said = last_words(&node);
+    assert!(said.starts_with("wait_for_chat: "), "{node:#?}");
+    assert!(said.contains("9 done"), "{node:#?}");
+    assert_eq!(node.turns.len(), 1, "{node:#?}");
+    assert!(!continued(&node), "{node:#?}");
+}
+
+/// An upgrade that fails to start the next build changes nothing for the
+/// agents: the daemon goes on as it was, from what it handed over, its
+/// agent's process, and all that runs, the same (CLACKA-188).
+#[test]
+fn a_failed_exec_keeps_the_agent() {
+    use clackatoo_protocol::AgentTaskState;
+    let world = World::new();
+    let (_child, socket) = process_daemon(&world, "laptop");
+    let (mut client, id) = ready_chat(&socket, clackatoo_protocol::AgentTools::Off);
+    let agent = agent_pid(&mut client, id);
+    let path = world.path().join("sleep.pid");
+    ask_chat(&mut client, id, &format!("sleep-bg {}", path.display()));
+    let sleeping = pid_in(&path);
+
+    // A build that says it takes everything over, agents and all, then
+    // vanishes before the exec.
+    let answer = Command::new(example("daemon"))
+        .arg("--handover-versions")
+        .output()
+        .unwrap();
+    let answer = String::from_utf8(answer.stdout).unwrap();
+    assert!(answer.contains("adapters"), "{answer}");
+    let vanishing = world.path().join("vanishing");
+    let body = format!(
+        "#!/bin/sh\ncase \" $* \" in *\" --handover-versions \"*) echo '{}'; rm -- \"$0\";; esac\n",
+        answer.trim()
+    );
+    let mut writer = Command::new("sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(&vanishing)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writer
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    assert!(writer.wait().unwrap().success());
+    match ask_to_upgrade(&socket, &vanishing) {
+        Some(ServerMessage::NotUpgrading { reason }) => {
+            assert!(reason.contains("starting the new build failed"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let mut client = follow_again(&socket, id);
+    assert_eq!(
+        agent_pid(&mut client, id),
+        agent,
+        "the agent was started again"
+    );
+    assert!(running(sleeping), "what the agent ran went");
+    let node = wait_for_chat(&mut client, id, |_| true);
+    assert_eq!(node.tasks[0].state, AgentTaskState::Running, "{node:#?}");
+    assert!(!continued(&node), "{node:#?}");
+}
+
+/// An agent run from an adapter the next build pins at another version
+/// doesn't go on: it's stopped as before agents went on, what it ran with
+/// it, and its chat is told (CLACKA-188). The agent is the fake, installed
+/// as Claude Code's adapter, at the version this build pins.
+#[test]
+fn an_agent_whose_adapter_the_next_build_pins_otherwise_stops_as_before() {
+    let world = World::new();
+    let state = world.path().join("laptop-state");
+    let known = clackatoo_daemon::upgrade::versions_answer();
+    let version = (known.split(' '))
+        .find_map(|word| word.strip_prefix("adapter:claude="))
+        .unwrap()
+        .to_owned();
+    let installed = state.join(format!(
+        "data/clackatoo/agents/claude-{version}/claude-agent-acp/node_modules/.bin"
+    ));
+    std::fs::create_dir_all(&installed).unwrap();
+    std::fs::hard_link(example("fake_agent"), installed.join("claude-agent-acp")).unwrap();
+    let (child, socket) = process_daemon_with(&world, "laptop", |daemon| {
+        daemon.env_remove("CLACKATOO_AGENT");
+    });
+    let (mut client, id) = ready_chat(&socket, clackatoo_protocol::AgentTools::Off);
+    let path = world.path().join("sleep.pid");
+    ask_chat(&mut client, id, &format!("sleep-bg {}", path.display()));
+    let sleeping = pid_in(&path);
+
+    upgrade_process_to(&child, &socket, "daemon-next-repinned");
+    let mut client = follow_again(&socket, id);
+    let node = wait_for_chat(&mut client, id, |node| {
+        node.turns.len() == 2 && node.turns[1].end.is_some()
+    });
+    assert_eq!(
+        node.tasks[0].state,
+        clackatoo_protocol::AgentTaskState::Lost,
+        "{node:#?}"
+    );
+    assert!(
+        node.turns[1].prompt.starts_with("[daemon restarted]"),
+        "{node:#?}"
+    );
+    let deadline = Instant::now() + PATIENCE;
+    while running(sleeping) {
+        assert!(Instant::now() < deadline, "what the agent ran went on");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The headline (CLACKA-188): a command an agent runs in its turn, and
+/// waits for, as it runs `scripts/deploy --wait`, upgrades the daemon, and
+/// goes on through the upgrade it started: the same process runs on, the
+/// turn waits on, and once the command finishes, the agent says so and
+/// the turn ends, as if nothing had happened.
+#[test]
+fn an_agents_deploy_survives_the_upgrade_it_starts() {
+    let world = World::new();
+    let (child, socket) = process_daemon(&world, "laptop");
+    let (mut client, id) = ready_chat(&socket, clackatoo_protocol::AgentTools::Off);
+    let next = next_build("daemon-next");
+    let path = world.path().join("deploy.pid");
+    let deploy = format!(
+        "deploy {path}\n\"{daemon}\" upgrade \"{next}\" && while [ ! -e \"{path}.go\" ]; do sleep \
+         0.05; done",
+        path = path.display(),
+        daemon = example("daemon").display(),
+        next = next.display(),
+    );
+    client.chat(id, ChatAction::Send(deploy)).unwrap();
+    let deploying = pid_in(&path);
+    wait_for_build(&child, &next);
+
+    let mut client = follow_again(&socket, id);
+    let node = wait_for_chat(&mut client, id, |node| node.turns.len() == 1);
+    assert!(node.turns[0].end.is_none(), "the turn ended: {node:#?}");
+    assert!(running(deploying), "the deploy went");
+    std::fs::write(world.path().join("deploy.pid.go"), "").unwrap();
+    let node = wait_for_chat(&mut client, id, |node| {
+        node.turns.last().is_some_and(|turn| turn.end.is_some())
+    });
+    assert!(last_words(&node).contains("deployed"), "{node:#?}");
+    assert_eq!(node.turns.len(), 1, "{node:#?}");
+    assert!(!continued(&node), "{node:#?}");
+    let tool = (node.turns[0].items.iter()).find_map(|item| match item {
+        Item::Tool(tool) => Some(tool),
+        _ => None,
+    });
+    assert_eq!(
+        tool.map(|tool| tool.status),
+        Some(clackatoo_protocol::ToolStatus::Done),
+        "{node:#?}"
+    );
 }
 
 #[test]
@@ -6333,12 +6785,23 @@ fn found_workspace(workspaces: &Workspaces, id: clackatoo_protocol::WorkspaceId)
 /// that can upgrade, with the agent for tests, keeping none of its
 /// workspaces: the process, killed as it's dropped, and its socket.
 fn process_daemon(world: &World, host: &str) -> (Killed, PathBuf) {
+    process_daemon_with(world, host, |_| {})
+}
+
+/// A daemon as [`process_daemon`] starts, with its command changed by
+/// `setup` first, as to set more of its environment.
+fn process_daemon_with(
+    world: &World,
+    host: &str,
+    setup: impl FnOnce(&mut Command),
+) -> (Killed, PathBuf) {
     let dir = world.host(host);
     let state = world.path().join(format!("{host}-state"));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::create_dir_all(&state).unwrap();
     let log = std::fs::File::create(world.path().join(format!("{host}.log"))).unwrap();
-    let child = Command::new(example("daemon"))
+    let mut command = Command::new(example("daemon"));
+    command
         .arg("daemon")
         .env("CLACKATOO_UDP_PORTS", "off")
         .env("CLACKATOO_BROWSER", "off")
@@ -6361,10 +6824,9 @@ fn process_daemon(world: &World, host: &str) -> (Killed, PathBuf) {
         .env("CLACKATOO_RECOVERY", "off")
         .stderr(log)
         .stdout(Stdio::null())
-        .stdin(Stdio::null())
-        .spawn()
-        .unwrap();
-    let child = Killed(child);
+        .stdin(Stdio::null());
+    setup(&mut command);
+    let child = Killed(command.spawn().unwrap());
     let socket = dir.join("clackatoo/daemon.sock");
     let deadline = Instant::now() + PATIENCE;
     while Client::connect(&socket).is_err() {
@@ -6377,13 +6839,36 @@ fn process_daemon(world: &World, host: &str) -> (Killed, PathBuf) {
 /// Upgrades the daemon in `child`, at `socket`, in place, to another
 /// build: this one again, by another name. Returns once it has.
 fn upgrade_process(child: &Killed, socket: &Path) {
+    upgrade_process_to(child, socket, "daemon-next");
+}
+
+/// Upgrades the daemon in `child`, at `socket`, as [`upgrade_process`]
+/// does, to this build run as `name`, which may change what it says it
+/// takes over (see the `daemon` example).
+fn upgrade_process_to(child: &Killed, socket: &Path, name: &str) {
+    let next = next_build(name);
+    let refused = ask_to_upgrade(socket, &next);
+    assert!(refused.is_none(), "{refused:?}");
+    wait_for_build(child, &next);
+}
+
+/// This build, as a program called `name`, to upgrade to: a hard link,
+/// which outlives the test, as the daemon runs from it.
+fn next_build(name: &str) -> PathBuf {
+    let bin = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let next = bin.path().join(name);
+    std::fs::hard_link(example("daemon"), &next).unwrap();
+    std::mem::forget(bin);
+    next
+}
+
+/// Asks the daemon at `socket` to upgrade in place to `next`. Returns why
+/// it won't, if it won't: its answer once its connection closes.
+fn ask_to_upgrade(socket: &Path, next: &Path) -> Option<ServerMessage> {
     use clackatoo_protocol::PROTOCOL_VERSION;
     use clackatoo_protocol::frame;
     use std::io::Read as _;
     use std::os::unix::ffi::OsStrExt;
-    let bin = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let next = bin.path().join("daemon-next");
-    std::fs::hard_link(example("daemon"), &next).unwrap();
     let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
     let upgrade = ClientMessage::Upgrade {
         protocol_version: PROTOCOL_VERSION,
@@ -6396,15 +6881,20 @@ fn upgrade_process(child: &Killed, socket: &Path) {
     stream.read_to_end(&mut answer).unwrap();
     let mut decoder = frame::FrameDecoder::new();
     decoder.push(&answer);
-    let refused: Option<ServerMessage> = decoder.decode(PROTOCOL_VERSION).unwrap();
-    assert!(refused.is_none(), "{refused:?}");
+    decoder.decode(PROTOCOL_VERSION).unwrap()
+}
+
+/// Waits until the daemon in `child` runs as `next`.
+fn wait_for_build(child: &Killed, next: &Path) {
     let deadline = Instant::now() + PATIENCE;
-    while std::fs::read_link(format!("/proc/{}/exe", child.0.id())).ok() != Some(next.clone()) {
+    while std::fs::read_link(format!("/proc/{}/exe", child.0.id()))
+        .ok()
+        .as_deref()
+        != Some(next)
+    {
         assert!(Instant::now() < deadline, "it never upgraded");
         std::thread::sleep(Duration::from_millis(20));
     }
-    // The build runs from the hard link, which outlives this.
-    std::mem::forget(bin);
 }
 
 /// A shell laptop lends desk as a background tab is still one after

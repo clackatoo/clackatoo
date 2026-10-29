@@ -84,6 +84,12 @@
 //!     each chat has had from each other, the counts agents' work is held
 //!     to, and the waits for chats the upgrade cut off. Before, all of it
 //!     was lost.
+//! 38. The agents' processes that go on through the upgrade (CLACKA-188):
+//!     each adapter's pipes and pidfd, the requests it hasn't answered,
+//!     what it said it can do, and what's half read of it; each of its
+//!     chats' open turn, link and questions; the connections its tools are
+//!     served on, and the calls on them still waiting. Before, every agent
+//!     was stopped, and all it ran with it.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -96,12 +102,12 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 37;
+pub(crate) const VERSION: u32 = 38;
 
 /// The versions this build reads.
 pub(crate) const READABLE: &[u32] = &[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, VERSION,
+    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, VERSION,
 ];
 
 /// Everything one build hands the next.
@@ -257,6 +263,11 @@ pub(crate) struct State {
     /// Where chats stand among the others: see [`Talk`]. Since version
     /// 37; `None` before, from a build that couldn't hand it over.
     pub(crate) talk: Option<Talk>,
+    /// The agents' processes that go on through the upgrade, and what
+    /// goes on with them: see [`Live`]. Since version 38; `None` before,
+    /// and from a build that stopped its agents, as it was told to, or as
+    /// the build it upgraded to couldn't take them.
+    pub(crate) live: Option<Live>,
 }
 
 /// Where chats stand among the others, beyond what [`Chat`] keeps: since
@@ -359,6 +370,306 @@ pub(crate) struct CutWait {
     pub(crate) waiter: u32,
     pub(crate) chats: Vec<u32>,
     pub(crate) first: bool,
+}
+
+/// The agents' processes that go on through an upgrade, rather than
+/// stop, and what goes on with them: since version 38. Each chat and
+/// terminal is by its number, and each fd by its index in [`Fds`]; every
+/// deadline is the milliseconds left of it, as an `Instant` means nothing
+/// to another process; and every JSON-RPC ID and set of tool arguments is
+/// JSON text, as postcard can't keep JSON's values themselves.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct Live {
+    pub(crate) agents: Vec<LiveAgent>,
+    /// The number the next agent started gets, so none's is used again.
+    pub(crate) next_agent: u32,
+    /// The chats of those agents.
+    pub(crate) chats: Vec<LiveChat>,
+    /// The connections those chats' tools are served on.
+    pub(crate) tools: Vec<LiveConnection>,
+    /// The calls on those connections still waiting.
+    pub(crate) waiting: Vec<LiveWait>,
+    /// The number the next call waiting for the user gets.
+    pub(crate) next_call: u64,
+    /// The chats asking their agent for a session, until it answers.
+    pub(crate) opening: Vec<LiveOpening>,
+    /// The idle chats in the background, and when each lets its session
+    /// go.
+    pub(crate) parking: Vec<LiveDue>,
+    /// The chats whose agent took a turn by itself, and when that turn is
+    /// taken to have ended, the agent being quiet till then.
+    pub(crate) woken: Vec<LiveDue>,
+    /// The terminals agents ran commands in, for the waits for them.
+    pub(crate) commanded: Vec<LiveCommanded>,
+    /// Each agent's settings, by its name, as its sessions last gave them.
+    pub(crate) settings: Vec<(String, Vec<ChatSetting>)>,
+    /// How many tokens each agent's context holds, by its name.
+    pub(crate) context: Vec<(String, u64)>,
+    /// Each agent's account's limits, by its name: how much of each is
+    /// used, in percent, and when it starts again, in milliseconds since
+    /// the Unix epoch, if it was said.
+    pub(crate) limits: Vec<LiveLimits>,
+}
+
+/// An agent's account's limits, as it last said them (see [`Live`]).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LiveLimits {
+    pub(crate) agent: String,
+    pub(crate) five_hour: Option<(u8, Option<u64>)>,
+    pub(crate) weekly: Option<(u8, Option<u64>)>,
+}
+
+/// An agent's process, going on through the upgrade (see [`Live`]).
+#[derive(Debug, Serialize, Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent capabilities the agent negotiated"
+)]
+pub(crate) struct LiveAgent {
+    /// The daemon's number for it.
+    pub(crate) id: u32,
+    /// Its name, which chats find it by.
+    pub(crate) name: String,
+    /// What it was started with, each word's bytes.
+    pub(crate) command: Vec<Vec<u8>>,
+    pub(crate) process: Process,
+    pub(crate) stdin: u32,
+    pub(crate) stdout: u32,
+    pub(crate) stderr: u32,
+    /// Messages to it not yet written, framed.
+    pub(crate) outgoing: Vec<u8>,
+    /// What's been read of a message from it not yet whole.
+    pub(crate) incoming: Vec<u8>,
+    /// What's been read of a line of its stderr not yet ended.
+    pub(crate) errors: Vec<u8>,
+    /// The last lines of its stderr.
+    pub(crate) last_errors: Vec<String>,
+    pub(crate) login_required: bool,
+    /// The ID its next request gets.
+    pub(crate) next_id: u64,
+    /// The requests sent it that it hasn't answered, by ID.
+    pub(crate) pending: Vec<(u64, LivePending)>,
+    /// How long each of those has waited, in milliseconds, by ID, so one
+    /// left unanswered through several upgrades is still seen to be.
+    pub(crate) waited: Vec<(u64, u64)>,
+    /// What it said it can do, as it answered `initialize`: kept, never
+    /// worked out again, as it's this process that said it.
+    pub(crate) can_close: bool,
+    pub(crate) can_load: bool,
+    pub(crate) can_image: bool,
+    pub(crate) can_steer: bool,
+    pub(crate) can_list: Option<bool>,
+    /// Whether it was asked what it runs in the background.
+    pub(crate) tasks: bool,
+    /// The client capabilities clackatoo declared to it as it started, as
+    /// JSON: what this connection negotiated, whatever the next build
+    /// would declare.
+    pub(crate) client: String,
+}
+
+/// What a request sent an agent was for, waiting for its answer (see
+/// `agent::Pending`). One a client waited for, which can't wait through
+/// an upgrade, goes as `Ignored`, its answer dropped.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum LivePending {
+    Initialize,
+    Session {
+        terminal: u32,
+        resumed: Option<String>,
+        load: bool,
+    },
+    Prompt(u32),
+    Steer(u32, u64),
+    Setting(u32),
+    Probe,
+    Abandoned(u32, Option<String>),
+    Closing(u32),
+    StopTask(u32, String),
+    Ignored,
+}
+
+/// A chat whose agent goes on through the upgrade: what it needs beside
+/// [`Chat`] to go on as it was (see [`Live`]). Its open turn, if it has
+/// one, goes on: [`Chat`] keeps it unended, its tools running.
+#[derive(Debug, Serialize, Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent facts of the chat"
+)]
+pub(crate) struct LiveChat {
+    pub(crate) chat: u32,
+    pub(crate) link: LiveLink,
+    /// A message waiting for its session to open.
+    pub(crate) queued: Option<ResumePrompt>,
+    pub(crate) stop_requested: bool,
+    /// Whether it says its agent is slow to open its session.
+    pub(crate) slow: bool,
+    /// How many turns the session will have seen once the message sent
+    /// with a digest is answered.
+    pub(crate) heard: Option<u64>,
+    /// The task standing for the turn its agent took by itself.
+    pub(crate) woke_by_task: Option<String>,
+    pub(crate) woken_stopping: bool,
+    /// How many milliseconds more what the agent says with no turn open
+    /// opens none.
+    pub(crate) wake_held: Option<u64>,
+    /// The tool calls naming clackatoo's own MCP server.
+    pub(crate) own_tools: Vec<String>,
+    /// What each tool of the open turn last said it changed, by its ID.
+    pub(crate) diffs: Vec<(String, Vec<LiveDiff>)>,
+    /// The questions waiting for answers, the first shown.
+    pub(crate) asking: Vec<LiveQuestion>,
+    /// The number its next question gets.
+    pub(crate) next_question: u64,
+    /// A steering message being delivered: its number, turn and item.
+    pub(crate) native: Option<(u64, u64, u64)>,
+    /// The queued message a stop is to start again with.
+    pub(crate) restart: Option<u64>,
+    /// Whether its queue of messages is paused.
+    pub(crate) queue_paused: bool,
+}
+
+/// Whether a chat's session is open in its agent (see `chat::Link`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum LiveLink {
+    Closed,
+    Opening,
+    Open,
+    Closing,
+}
+
+/// A change a tool said it made to a file.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LiveDiff {
+    pub(crate) path: String,
+    pub(crate) old: Option<String>,
+    pub(crate) new: String,
+}
+
+/// A question waiting in a chat, and who asked it.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LiveQuestion {
+    pub(crate) asker: LiveAsker,
+    pub(crate) id: u64,
+    pub(crate) title: String,
+    /// The answers offered: each one's ID, its name, and what it means.
+    pub(crate) choices: Vec<(String, String, LiveChoice)>,
+    pub(crate) own: bool,
+    /// The plan it asks to go ahead with, in Markdown, if it asks to leave
+    /// planning.
+    pub(crate) plan: Option<String>,
+}
+
+/// What an answer means (see `clackatoo_protocol::ChoiceKind`).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) enum LiveChoice {
+    AllowOnce,
+    AllowAlways,
+    RejectOnce,
+    RejectAlways,
+    /// One whose meaning the build didn't know, shown as the agent named it.
+    Other,
+}
+
+/// Who asked a question (see `chat::Asker`).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum LiveAsker {
+    /// The agent, in the request with this ID, as JSON.
+    Agent(String),
+    /// A call to clackatoo's tools, by its number.
+    Tool(u64),
+    Install,
+    Suggest,
+    Slow,
+}
+
+/// A connection a chat's tools are served on, going on through the
+/// upgrade, its socket and all (see [`Live`]).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LiveConnection {
+    pub(crate) stream: u32,
+    pub(crate) chat: u32,
+    pub(crate) listed: bool,
+    /// What's been read of a message not yet whole.
+    pub(crate) incoming: Vec<u8>,
+    /// Messages not yet written.
+    pub(crate) outgoing: Vec<u8>,
+    pub(crate) browser: bool,
+}
+
+/// A call to a chat's tools still waiting, on the connection
+/// `connection`, by its index in [`Live::tools`].
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LiveWait {
+    pub(crate) connection: u32,
+    /// The call's JSON-RPC ID, as JSON.
+    pub(crate) id: String,
+    pub(crate) chat: u32,
+    pub(crate) what: LiveWaiting,
+}
+
+/// What a call waits for (see `server::tools::Wait`). One waiting on the
+/// user or the boards keeps the call as it came, its tool's name and
+/// arguments, to be read again as it was.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum LiveWaiting {
+    Permission {
+        call: u64,
+        tool: String,
+        arguments: String,
+    },
+    Finish {
+        terminal: u32,
+        lines: u64,
+        left: u64,
+    },
+    Turn {
+        chat: u32,
+        left: u64,
+    },
+    Chats {
+        chats: Vec<u32>,
+        first: bool,
+        left: u64,
+    },
+    Boards {
+        tool: String,
+        arguments: String,
+        left: u64,
+    },
+}
+
+/// A chat asking its agent for a session: the milliseconds it has waited
+/// since asking, and has left before it's told the agent is slow.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LiveOpening {
+    pub(crate) chat: u32,
+    pub(crate) waited: u64,
+    pub(crate) left: u64,
+    pub(crate) fetching: bool,
+}
+
+/// Something of a chat due in `left` milliseconds.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LiveDue {
+    pub(crate) chat: u32,
+    pub(crate) left: u64,
+}
+
+/// A terminal an agent ran a command in (see `server::tools::Commanded`).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LiveCommanded {
+    pub(crate) terminal: u32,
+    pub(crate) owner: Option<u32>,
+    pub(crate) name: Option<String>,
+    /// A command still waiting for the shell's first prompt: what's to be
+    /// typed, the milliseconds it waits still, and whether the shell marks
+    /// its prompts.
+    pub(crate) typing: Option<(String, u64, bool)>,
+    pub(crate) failed: Option<String>,
+    pub(crate) expect: Option<u32>,
+    pub(crate) expect_first: bool,
+    pub(crate) renumbered: u64,
 }
 
 /// Why the last message the chat `from` sent the chat `to` was dropped
@@ -1241,6 +1552,7 @@ impl State {
             34 => Ok(postcard::from_bytes::<v34::State>(body)?.into()),
             35 => Ok(postcard::from_bytes::<v35::State>(body)?.into()),
             36 => Ok(postcard::from_bytes::<v36::State>(body)?.into()),
+            37 => Ok(postcard::from_bytes::<v37::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -1335,6 +1647,7 @@ mod v31 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -1427,6 +1740,7 @@ mod v30 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -1518,6 +1832,7 @@ mod v29 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -1608,6 +1923,7 @@ mod v28 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -1696,6 +2012,7 @@ mod v27 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -1787,6 +2104,7 @@ mod v26 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -1875,6 +2193,7 @@ mod v25 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -1961,6 +2280,7 @@ mod v24 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -2045,6 +2365,7 @@ mod v23 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -2142,6 +2463,7 @@ mod v22 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -2222,6 +2544,7 @@ mod v21 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -2300,6 +2623,7 @@ mod v20 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -2374,6 +2698,7 @@ mod v19 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -2448,6 +2773,7 @@ mod v18 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -2987,6 +3313,7 @@ mod v7 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -3085,6 +3412,7 @@ mod v8 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -3153,6 +3481,7 @@ mod v9 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -3223,6 +3552,7 @@ mod v11 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -3342,6 +3672,7 @@ mod v15 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -3415,6 +3746,7 @@ mod v14 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -3486,6 +3818,7 @@ mod v13 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -3599,6 +3932,7 @@ mod v12 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -3710,6 +4044,7 @@ mod v10 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -4031,6 +4366,7 @@ mod tests {
                 }],
                 stopped: vec![4],
             }),
+            live: Some(live()),
             undo_states: vec![BufferUndo {
                 buffer: 1,
                 authors: vec![AuthorUndo {
@@ -4316,6 +4652,165 @@ mod tests {
         assert_eq!(state.edits.chats[0].chat, 2);
     }
 
+    /// What goes on through an upgrade with an agent, each part filled.
+    #[allow(clippy::too_many_lines, reason = "each part of it filled")]
+    fn live() -> Live {
+        Live {
+            agents: vec![LiveAgent {
+                id: 3,
+                name: "claude".to_owned(),
+                command: vec![b"/bin/claude-agent-acp".to_vec()],
+                process: Process { pid: 77, pidfd: 9 },
+                stdin: 10,
+                stdout: 11,
+                stderr: 12,
+                outgoing: b"{\"id\":5}\n".to_vec(),
+                incoming: b"{\"jsonrpc\":\"2.0\",\"me".to_vec(),
+                errors: b"half a li".to_vec(),
+                last_errors: vec!["warning".to_owned()],
+                login_required: false,
+                next_id: 6,
+                pending: vec![
+                    (4, LivePending::Prompt(2)),
+                    (
+                        5,
+                        LivePending::Session {
+                            terminal: 4,
+                            resumed: Some("s4".to_owned()),
+                            load: false,
+                        },
+                    ),
+                ],
+                waited: vec![(4, 60_000), (5, 150_000)],
+                can_close: true,
+                can_load: true,
+                can_image: true,
+                can_steer: true,
+                can_list: Some(true),
+                tasks: true,
+                client: "{\"terminal\":false}".to_owned(),
+            }],
+            next_agent: 4,
+            chats: vec![LiveChat {
+                chat: 2,
+                link: LiveLink::Open,
+                queued: None,
+                stop_requested: false,
+                slow: false,
+                heard: Some(1),
+                woke_by_task: None,
+                woken_stopping: false,
+                wake_held: Some(300),
+                own_tools: vec!["toolu_1".to_owned()],
+                diffs: vec![(
+                    "t".to_owned(),
+                    vec![LiveDiff {
+                        path: "/src/a".to_owned(),
+                        old: None,
+                        new: "b".to_owned(),
+                    }],
+                )],
+                asking: vec![LiveQuestion {
+                    asker: LiveAsker::Agent("\"p1\"".to_owned()),
+                    id: 7,
+                    title: "Write notes.txt".to_owned(),
+                    choices: vec![(
+                        "allow".to_owned(),
+                        "Allow".to_owned(),
+                        LiveChoice::AllowOnce,
+                    )],
+                    own: false,
+                    plan: Some("1. Fix it".to_owned()),
+                }],
+                next_question: 8,
+                native: Some((1, 0, 2)),
+                restart: None,
+                queue_paused: false,
+            }],
+            tools: vec![LiveConnection {
+                stream: 13,
+                chat: 2,
+                listed: true,
+                incoming: b"{\"jsonrpc\"".to_vec(),
+                outgoing: Vec::new(),
+                browser: false,
+            }],
+            waiting: vec![LiveWait {
+                connection: 0,
+                id: "3".to_owned(),
+                chat: 2,
+                what: LiveWaiting::Chats {
+                    chats: vec![4],
+                    first: true,
+                    left: 1000,
+                },
+            }],
+            next_call: 9,
+            opening: vec![LiveOpening {
+                chat: 4,
+                waited: 20,
+                left: 29_980,
+                fetching: false,
+            }],
+            parking: vec![LiveDue {
+                chat: 5,
+                left: 60_000,
+            }],
+            woken: Vec::new(),
+            commanded: vec![LiveCommanded {
+                terminal: 6,
+                owner: Some(2),
+                name: Some("deploy".to_owned()),
+                typing: None,
+                failed: None,
+                expect: Some(3),
+                expect_first: false,
+                renumbered: 0,
+            }],
+            settings: vec![("claude".to_owned(), Vec::new())],
+            context: vec![("claude".to_owned(), 200_000)],
+            limits: vec![LiveLimits {
+                agent: "claude".to_owned(),
+                five_hour: Some((42, Some(1_760_018_400_000))),
+                weekly: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn version_38_keeps_the_agents_that_go_on() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v38.bin"))
+            .unwrap();
+        let read = State::read(&mut file).unwrap();
+        let live = read.live.expect("kept");
+        let agent = &live.agents[0];
+        assert_eq!((agent.id, agent.name.as_str()), (3, "claude"));
+        assert_eq!((agent.process.pid, agent.stdout), (77, 11));
+        assert_eq!(agent.incoming, b"{\"jsonrpc\":\"2.0\",\"me");
+        assert!(matches!(agent.pending[0], (4, LivePending::Prompt(2))));
+        assert_eq!((agent.can_list, agent.next_id), (Some(true), 6));
+        assert_eq!(agent.waited, [(4, 60_000), (5, 150_000)]);
+        let chat = &live.chats[0];
+        assert_eq!((chat.chat, chat.link), (2, LiveLink::Open));
+        assert!(matches!(&chat.asking[0].asker, LiveAsker::Agent(id) if id == "\"p1\""));
+        assert_eq!(live.tools[0].stream, 13);
+        assert!(matches!(
+            live.waiting[0].what,
+            LiveWaiting::Chats { first: true, .. }
+        ));
+        assert_eq!((live.next_agent, live.next_call), (4, 9));
+        assert_eq!(live.commanded[0].expect, Some(3));
+        assert_eq!(agent.client, "{\"terminal\":false}");
+        assert_eq!(chat.asking[0].plan.as_deref(), Some("1. Fix it"));
+        assert_eq!(live.context, [("claude".to_owned(), 200_000)]);
+        assert_eq!(
+            live.limits[0].five_hour,
+            Some((42, Some(1_760_018_400_000)))
+        );
+        assert!(read.talk.is_some());
+    }
+
     #[test]
     fn version_37_keeps_where_chats_stand_among_the_others() {
         let mut file = tempfile::tempfile().unwrap();
@@ -4343,6 +4838,8 @@ mod tests {
             (3, &[2][..])
         );
         assert_eq!(read.undelivered.len(), 1);
+        // Its agents all stopped.
+        assert!(read.live.is_none());
     }
 
     #[test]
@@ -4761,11 +5258,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v37.bin"]
+    #[ignore = "writes tests/fixtures/handover-v38.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v37.bin"
+            "/tests/fixtures/handover-v38.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();
@@ -5311,6 +5808,7 @@ mod v32 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -5468,6 +5966,7 @@ mod v33 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -5628,6 +6127,7 @@ mod v34 {
                 lent_background: Vec::new(),
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -5791,6 +6291,7 @@ mod v35 {
                 lent_background: state.lent_background,
                 undelivered: Vec::new(),
                 talk: None,
+                live: None,
             }
         }
     }
@@ -5957,6 +6458,177 @@ mod v36 {
                 lent_background: state.lent_background,
                 undelivered: state.undelivered,
                 talk: None,
+                live: None,
+            }
+        }
+    }
+}
+
+/// Version 37, before agents' processes went on through upgrades. Keep
+/// this shape frozen. It's version 36, before what chats ran in the background, which answers
+/// each had, and where agents talking to each other stood were handed
+/// over. Keep this shape frozen.
+mod v37 {
+    use super::{
+        Applied, Background, Borrower, Buffer, BufferUndo, Chat, ChatContinuation, ChatPreviews,
+        ChatQueue, Connection, Deserialize, EditLog, Exe, Files, ImageOriginals, Kept, Known,
+        Lender, Lent, LentBackground, Process, Restored, Reviews, Sharing, Shell, Talk, Terminal,
+        ToolPreviews, Trusted, Undelivered, Workspaces,
+    };
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        /// The listening socket.
+        listener: u32,
+        /// The runtime directory's lock, set by whoever holds it.
+        lock: Option<u32>,
+        /// The ID the next terminal gets.
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        /// Chats with agents, which are terminals too: their IDs are
+        /// terminals' IDs.
+        chats: Vec<Chat>,
+        /// Closed terminals' programs that haven't exited yet, and agents that
+        /// were stopped.
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        /// The ID the next buffer gets.
+        next_buffer: u32,
+        /// Files being edited.
+        buffers: Vec<Buffer>,
+        /// The ID the next file explorer gets.
+        next_files: u32,
+        /// File explorers.
+        explorers: Vec<Files>,
+        /// What agents changed in files.
+        edits: EditLog,
+        /// The last change each window sent each buffer. Since version 14.
+        applied: Vec<Applied>,
+        /// The daemon's own number, chosen at random when it first started:
+        /// see [`BufferSnapshot::daemon`](clackatoo_protocol::BufferSnapshot).
+        /// Since version 14; 0 before, for the build reading it to choose one.
+        daemon: u64,
+        /// What agents changed that the user hasn't reviewed, and reviews.
+        reviews: Reviews,
+        /// The lock on the recovery files, if the daemon keeps them (see
+        /// `crate::recovery`). Since version 19.
+        recovery_lock: Option<u32>,
+        /// The secrets of the terminals' shells that have one. Since version
+        /// 20; before, no shell had one.
+        shells: Vec<Shell>,
+        /// Which machine the daemon is: its ID (see
+        /// [`MachineId`](clackatoo_protocol::MachineId)). Since version 21;
+        /// `None` before, for the build reading it to take the one its state
+        /// directory keeps.
+        machine: Option<[u8; 16]>,
+        /// The daemon's connections to the daemons on other machines. Since
+        /// version 21; before, there were none.
+        connections: Vec<Connection>,
+        /// The workspaces lent to the daemons on other machines. Since version
+        /// 22; before, there were none.
+        lent: Vec<Lent>,
+        /// The machines they're lent to. Since version 22.
+        borrowers: Vec<Borrower>,
+        /// What the machines the panes borrowed are on are called. Since
+        /// version 23; before, none were known.
+        lenders: Vec<Lender>,
+        /// Which of the connections aren't passed on, and the machine each
+        /// was last connected to, by host. Since version 24; before, every
+        /// one was passed on, and none's machine was known.
+        sharing: Vec<Sharing>,
+        /// The seed of the machine's identity key (see `crate::machine`).
+        /// Since version 24; before, the next build reads it from the
+        /// `machine` file, or chooses one.
+        key: Option<[u8; 32]>,
+        /// The identity keys of other machines the daemon knows. Since version
+        /// 24; before, none were known.
+        keys: Vec<Known>,
+        /// The workspaces' background tabs. Since version 25; before, there
+        /// were none.
+        background: Vec<Background>,
+        /// The terminals the user marked to keep running. Since version 26;
+        /// before, none was. How running each again was going isn't handed
+        /// over: it starts again.
+        kept: Vec<Kept>,
+        /// Each terminal's blocks whose commands its shell's integration said,
+        /// with its secret, so the command a shell ran last is still known to
+        /// be its own: [`Shell::trusted`] says only the latest block's. Since
+        /// version 26; before, only that one was.
+        trusted: Vec<Trusted>,
+        /// The program each terminal was started as, so one its shell has
+        /// become another program in, as with `exec`, is still known to have
+        /// no shell to type into. Since version 26; before, none was known.
+        exes: Vec<Exe>,
+        /// What panes made again as the daemon last started afresh still have
+        /// to show for it (see
+        /// [`Workspaces::restored`](clackatoo_protocol::Workspaces::restored)).
+        /// Since version 27: `None` from a build before, which couldn't hand
+        /// them over, as distinct from one that had none to.
+        restored: Option<Vec<Restored>>,
+        /// Small image previews retained by chat and turn, since version 28.
+        chat_previews: Vec<ChatPreviews>,
+        /// Thumbnails attached to tools, since version 29.
+        tool_previews: Vec<ToolPreviews>,
+        /// Compressed originals and thumbnail handles, since version 30.
+        image_originals: Vec<ImageOriginals>,
+        /// Pending drafts, resumed paused unless continuing a turn, since version 31.
+        chat_queues: Vec<ChatQueue>,
+        /// Only work interrupted by this upgrade, since version 32.
+        chat_continuations: Vec<ChatContinuation>,
+        /// Versioned managed-operation records, since version 33.
+        activities: Vec<u8>,
+        /// What the buffers' undo steps keep, since version 34.
+        undo_states: Vec<BufferUndo>,
+        /// The workspaces lent as background tabs, since version 35.
+        lent_background: Vec<LentBackground>,
+        /// Why waiting messages were dropped, since version 36.
+        undelivered: Vec<Undelivered>,
+        /// Where chats stand among the others, since version 37.
+        talk: Option<Talk>,
+    }
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+                recovery_lock: state.recovery_lock,
+                shells: state.shells,
+                machine: state.machine,
+                connections: state.connections,
+                lent: state.lent,
+                borrowers: state.borrowers,
+                lenders: state.lenders,
+                sharing: state.sharing,
+                key: state.key,
+                keys: state.keys,
+                background: state.background,
+                kept: state.kept,
+                trusted: state.trusted,
+                exes: state.exes,
+                restored: state.restored,
+                chat_previews: state.chat_previews,
+                tool_previews: state.tool_previews,
+                image_originals: state.image_originals,
+                chat_queues: state.chat_queues,
+                chat_continuations: state.chat_continuations,
+                activities: state.activities,
+                undo_states: state.undo_states,
+                lent_background: state.lent_background,
+                undelivered: state.undelivered,
+                talk: state.talk,
+                live: None,
             }
         }
     }

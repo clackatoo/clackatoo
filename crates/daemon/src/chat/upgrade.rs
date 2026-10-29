@@ -136,7 +136,7 @@ impl HostedChat {
     /// Takes back where the chat stood, from `talk`, as the last build
     /// handed it over. Returns the background tasks the upgrade stopped,
     /// to tell the agent.
-    pub(crate) fn resume_standing(&mut self, talk: &mut handover::Talk) -> Vec<String> {
+    pub(crate) fn resume_standing(&mut self, talk: &mut handover::Talk, live: bool) -> Vec<String> {
         let id = self.id.0;
         for woke in (talk.woke.iter()).filter(|woke| woke.chat == id) {
             let at = usize::try_from(woke.turn).unwrap_or(usize::MAX);
@@ -149,7 +149,7 @@ impl HostedChat {
             self.heard_by(TerminalId(heard.by), turns.min(self.node.turns.len()));
         }
         match talk.tasks.iter().position(|tasks| tasks.chat == id) {
-            Some(at) => self.resume_tasks(talk.tasks.swap_remove(at)),
+            Some(at) => self.resume_tasks(talk.tasks.swap_remove(at), live),
             None => Vec::new(),
         }
     }
@@ -223,7 +223,7 @@ fn stopped_tasks(stopped: &[String]) -> Option<String> {
     ))
 }
 
-fn keep_image(image: &ChatImage) -> QueuedImage {
+pub(super) fn keep_image(image: &ChatImage) -> QueuedImage {
     QueuedImage {
         data: image.data.clone(),
         width: image.width,
@@ -239,7 +239,7 @@ fn keep_image(image: &ChatImage) -> QueuedImage {
     }
 }
 
-fn restore_image(image: QueuedImage) -> ChatImage {
+pub(super) fn restore_image(image: QueuedImage) -> ChatImage {
     ChatImage {
         data: image.data,
         width: image.width,

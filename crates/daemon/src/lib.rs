@@ -385,6 +385,7 @@ impl DaemonConfig {
                 dir: languages_dir().map(|dir| dir.with_file_name("agents")),
                 path: None,
                 trace: non_empty("CLACKATOO_ACP_TRACE").map(PathBuf::from),
+                restart_on_upgrade: restart_agents_on_upgrade(),
             },
             // Only the `clackatoo` program knows it can relay them, unless
             // the environment names a program that can (tests do).
@@ -523,6 +524,13 @@ fn state_dir_from(state: Option<OsString>, home: Option<OsString>) -> Option<Pat
                 .map(|home| PathBuf::from(home).join(".local/state"))
         })?;
     Some(state.join("clackatoo"))
+}
+
+/// Whether the environment says to stop agents as the daemon upgrades, as
+/// before they went on through upgrades: `CLACKATOO_LIVE_AGENTS=off` (see
+/// [`AgentConfig::restart_on_upgrade`]).
+pub(crate) fn restart_agents_on_upgrade() -> bool {
+    std::env::var_os("CLACKATOO_LIVE_AGENTS").is_some_and(|live| live == "off")
 }
 
 /// clackatoo's config directory: `clackatoo` in `$XDG_CONFIG_HOME`, or

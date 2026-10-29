@@ -1559,7 +1559,11 @@ mod tests {
         let asker = Token(1000);
         let upgrading = || Upgrading {
             executable: PathBuf::from("/next/clackatoo"),
-            takes_signals: true,
+            takes: crate::upgrade::Takes {
+                signals: true,
+                adapters: None,
+                declares: Vec::new(),
+            },
             token: Token(1001),
             until: Instant::now() + UPGRADE_OPS_WAIT,
         };
@@ -1657,7 +1661,11 @@ mod tests {
         assert_eq!(daemon.explorers.running, 2);
         daemon.upgrade_to = Some(Upgrading {
             executable: PathBuf::from("/next/clackatoo"),
-            takes_signals: true,
+            takes: crate::upgrade::Takes {
+                signals: true,
+                adapters: None,
+                declares: Vec::new(),
+            },
             token: Token(1001),
             until: Instant::now() + UPGRADE_OPS_WAIT,
         });

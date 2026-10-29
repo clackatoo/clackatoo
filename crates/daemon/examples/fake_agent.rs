@@ -26,6 +26,10 @@
 //! | `bounce`, from another chat | Sends that chat `bounce` back with `send_to_chat`, and says what it answered |
 //! | `background` | Runs `npm run dev` in the background, as Claude Code's adapter says one to a client that asked for AIR's `asyncTasks`: a command that finishes at once, then a task, `t1`, "Serve the docs", that goes on; and says `started`, or `no tasks` to a client that didn't ask |
 //! | `finish` | Says task `t1` completed, then `finished` |
+//! | `pid` | `pid` and its process ID |
+//! | `sleep-bg PATH` | As `background`, but what it runs is `sleep 1000`, in its process group, whose pid it writes to PATH, an absolute path; then `started` |
+//! | `stream-slow N MS` | As `stream N`, but MS milliseconds apart, reading nothing meanwhile |
+//! | `deploy PATH` | Runs a command in its turn, as `scripts/deploy --wait`, which goes on until the file `PATH.go` is there, writing its pid to PATH, an absolute path; then says it finished, and `deployed` |
 //! | `wake` | Says `started` and ends its turn; 300 ms later takes a turn by itself, as Claude Code does when something it ran in the background ends: runs `git commit` and says `committed`. To a client that asked for AIR's `asyncTasks`, it says the turn starts and ends, as a task of kind `turn` |
 //! | `wake-wait` | As `wake`, but its turn goes on, saying `working`, until it's cancelled: then it says `late` as words in flight would, and that the turn stopped |
 //! | `wake-missed` | As `wake`, to a client that asked for AIR's `asyncTasks`, but as if what said the turn started went missing: it runs `git commit`, says `committed`, and says task `autonomous-turn-9` completed |
@@ -418,6 +422,98 @@ fn stream(id: &Value, session: &str, asked: &str) {
     drop(stdout);
     say(session, "done\n");
     done(id, "end_turn");
+}
+
+/// Answers `sleep-bg PATH` in `session`: starts `sleep` in the background,
+/// in this process's group, as Claude Code's shells run, and writes its
+/// pid to PATH, an absolute path, renamed into place; then says so as
+/// `background` does, as task `t1`, which `finish` ends.
+#[allow(
+    clippy::zombie_processes,
+    reason = "it's meant to outlive the turn, and be stopped with its agent"
+)]
+fn sleep_in_background(session: &str, path: &str) {
+    let sleeping = Command::new("sleep")
+        .arg("1000")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let new = format!("{path}.new");
+    std::fs::write(&new, sleeping.id().to_string()).unwrap();
+    std::fs::rename(&new, path).unwrap();
+    update(
+        session,
+        &json!({ "sessionUpdate": "tool_call", "toolCallId": "bg", "title": "sleep 1000",
+                 "kind": "execute", "status": "completed" }),
+    );
+    update(
+        session,
+        &json!({ "sessionUpdate": "async_task_spawned", "asyncTaskId": "t1",
+                 "name": "Sleep", "taskType": "shell", "description": "Sleep",
+                 "showInTranscript": false, "canStop": true, "toolCallId": "bg" }),
+    );
+}
+
+/// Answers `stream-slow N MS`, the message `id` in `session`: says the
+/// numbers from 0 to N − 1, each followed by a space, MS milliseconds
+/// apart, as an agent thinking as it writes, then `done`. It reads
+/// nothing meanwhile.
+fn stream_slowly(id: &Value, session: &str, asked: &str) {
+    let mut words = asked.split(' ').skip(1);
+    let mut number = || -> u64 { words.next().and_then(|n| n.parse().ok()).unwrap_or(0) };
+    let (count, gap) = (number(), number());
+    for number in 0..count {
+        if number > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(gap));
+        }
+        say(session, &format!("{number} "));
+    }
+    say(session, "done\n");
+    done(id, "end_turn");
+}
+
+/// Answers `deploy PATH`, the message `id` in `session`, as an agent runs
+/// `scripts/deploy --wait`: a command in its turn, which the turn waits
+/// for, in this process's group, and which runs until the file `PATH.go`
+/// is there, or, if the message goes on, after a line's end, that, with
+/// `sh -c`. It writes the command's pid to PATH, an absolute path, renamed
+/// into place, and once the command has finished, says so, and
+/// `deployed`. It reads on meanwhile.
+fn deploy(id: Value, session: String, asked: &str) {
+    update(
+        &session,
+        &json!({ "sessionUpdate": "tool_call", "toolCallId": "deploy",
+                 "title": "scripts/deploy --wait", "kind": "execute",
+                 "status": "in_progress" }),
+    );
+    let (path, command) = asked.split_once('\n').unwrap_or((asked, ""));
+    let gate = format!("{path}.go");
+    let wait = r#"while [ ! -e "$1" ]; do sleep 0.05; done"#;
+    let command = if command.is_empty() { wait } else { command };
+    let mut running = Command::new("sh")
+        .args(["-c", command, "sh", &gate])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let new = format!("{path}.new");
+    std::fs::write(&new, running.id().to_string()).unwrap();
+    std::fs::rename(&new, path).unwrap();
+    std::thread::spawn(move || {
+        let status = running.wait().unwrap();
+        update(
+            &session,
+            &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "deploy",
+                     "status": if status.success() { "completed" } else { "failed" },
+                     "content": [{ "type": "content", "content": { "type": "text",
+                                   "text": format!("```console\n{status}\n```") } }] }),
+        );
+        say(&session, "deployed\n");
+        done(&id, "end_turn");
+    });
 }
 
 /// Says the account's limits as Claude Code's adapter says a
@@ -1667,6 +1763,17 @@ impl Fake {
                 );
                 self.waiting = Some((id, session));
             }
+            "pid" => {
+                say(&session, &format!("pid {}\n", std::process::id()));
+                done(&id, "end_turn");
+            }
+            _ if text.starts_with("sleep-bg ") => {
+                sleep_in_background(&session, &text["sleep-bg ".len()..]);
+                say(&session, "started\n");
+                done(&id, "end_turn");
+            }
+            _ if text.starts_with("stream-slow ") => stream_slowly(&id, &session, text),
+            _ if text.starts_with("deploy ") => deploy(id, session, &text["deploy ".len()..]),
             "wait" => self.waits.push((id, session)),
             "busy" => self.busy(id, session),
             "exit" => return false,

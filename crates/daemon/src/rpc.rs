@@ -39,6 +39,7 @@ use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde_json::{Value, json};
 
 use crate::group::Group;
+use crate::handover::Fds;
 use crate::pty::Process;
 
 /// The most one message may hold before it's dropped as broken: far more
@@ -704,6 +705,118 @@ impl Peer {
         log::info!("{} stopped", self.name);
         self.process
     }
+
+    /// Whether the program can go on through an upgrade as it is: it
+    /// hasn't gone, and what's been read of it is only bytes, none of it
+    /// with the parser's thread, nor a line too long being dropped.
+    pub(crate) fn can_hand_over(&self) -> bool {
+        !self.has_gone() && !self.exited && self.incoming.can_hand_over()
+    }
+
+    /// Takes all the parser's thread has parsed of what the program sent
+    /// into `messages`, reading nothing more. Once nothing of it is with
+    /// the thread, it can go on through an upgrade.
+    pub(crate) fn take_parsed(&mut self, messages: &mut Vec<Message>) {
+        self.incoming.take(messages, usize::MAX);
+    }
+
+    /// Hands the program over to the next build, which goes on with it as
+    /// it was: its pipes and pidfd into `fds`, and what's half written and
+    /// half read of its messages. Only one that
+    /// [`can_hand_over`](Self::can_hand_over). Its trace, if it has one,
+    /// ends here: the next build begins its own.
+    pub(crate) fn hand_over(self, fds: &mut Fds) -> HandedPeer {
+        debug_assert!(self.can_hand_over(), "{} can't be handed over", self.name);
+        log::info!("{} goes on through the upgrade", self.name);
+        let (pid, pidfd) = self.process.into_parts();
+        HandedPeer {
+            process: crate::handover::Process {
+                pid: pid.as_raw_pid(),
+                pidfd: fds.add(pidfd),
+            },
+            stdin: fds.add(OwnedFd::from(self.stdin)),
+            stdout: fds.add(OwnedFd::from(self.stdout)),
+            stderr: fds.add(OwnedFd::from(self.stderr)),
+            outgoing: self.outgoing,
+            incoming: self.incoming.into_bytes(),
+            errors: self.errors,
+            last_errors: self.last_errors.into(),
+            login_required: self.login_required,
+        }
+    }
+
+    /// The program the last build handed over as `handed`, called `name`
+    /// in the log, its fds taken from `fds`, framed as `framing` says, its
+    /// big messages parsed by `parser`: reading it goes on where that
+    /// build left off.
+    pub(crate) fn resume(
+        name: &str,
+        framing: Framing,
+        handed: HandedPeer,
+        fds: &mut Fds,
+        parser: &Parser,
+    ) -> Result<Self, (crate::handover::HandoverError, Option<Process>)> {
+        let pid = rustix::process::Pid::from_raw(handed.process.pid).ok_or((
+            crate::handover::HandoverError::Damaged("a pid isn't one"),
+            None,
+        ))?;
+        let pidfd = fds.take(handed.process.pidfd).map_err(|err| (err, None))?;
+        let process = Process::from_parts(pid, pidfd);
+        // From here, what fails gives its process back, to be let go.
+        let mut pipes = || {
+            let stdin = ChildStdin::from(fds.take(handed.stdin)?);
+            let stdout = ChildStdout::from(fds.take(handed.stdout)?);
+            let stderr = ChildStderr::from(fds.take(handed.stderr)?);
+            // As it was, as that goes with the pipe; but a build that
+            // handed over one that blocked mustn't stall this one's loop.
+            for fd in [stdin.as_fd(), stdout.as_fd(), stderr.as_fd()] {
+                rustix::io::ioctl_fionbio(fd, true).map_err(io::Error::from)?;
+            }
+            Ok::<_, crate::handover::HandoverError>((stdin, stdout, stderr))
+        };
+        let (stdin, stdout, stderr) = match pipes() {
+            Ok(pipes) => pipes,
+            Err(err) => return Err((err, Some(process))),
+        };
+        let incoming = Inbox::resume(framing, parser, handed.incoming);
+        let mut last_errors: VecDeque<String> = handed.last_errors.into();
+        last_errors.truncate(LAST_ERRORS);
+        log::info!(
+            "{name} went on through the upgrade: pid {}",
+            pid.as_raw_nonzero()
+        );
+        Ok(Self {
+            name: name.to_owned(),
+            framing,
+            process,
+            stdin,
+            stdout,
+            stderr,
+            outgoing: handed.outgoing,
+            incoming,
+            exited: false,
+            errors: handed.errors,
+            last_errors,
+            login_required: handed.login_required,
+            trace: None,
+        })
+    }
+}
+
+/// A program handed over to the next build (see [`Peer::hand_over`]):
+/// its process and pipes, by their indices in the handover's fds, and
+/// what's half written and half read of its messages and stderr.
+#[derive(Debug)]
+pub(crate) struct HandedPeer {
+    pub(crate) process: crate::handover::Process,
+    pub(crate) stdin: u32,
+    pub(crate) stdout: u32,
+    pub(crate) stderr: u32,
+    pub(crate) outgoing: Vec<u8>,
+    pub(crate) incoming: Vec<u8>,
+    pub(crate) errors: Vec<u8>,
+    pub(crate) last_errors: Vec<String>,
+    pub(crate) login_required: bool,
 }
 
 /// Queues `message` onto `outgoing`, framed as `framing` says.
@@ -803,6 +916,31 @@ impl Inbox {
             dropping: None,
             gone: None,
         }
+    }
+
+    /// What the build before had read of a message not yet whole,
+    /// `bytes`, to go on reading messages framed as `framing` says, the
+    /// big ones to be parsed by `parser`. More than a message may hold is
+    /// never taken, whatever handed it over.
+    pub(crate) fn resume(framing: Framing, parser: &Parser, bytes: Vec<u8>) -> Self {
+        let mut inbox = Self::new(framing, parser);
+        if bytes.len() <= MAX_MESSAGE {
+            inbox.bytes = bytes;
+        }
+        inbox
+    }
+
+    /// Whether what's been read can go to the next build as it is: only
+    /// bytes of a message not yet whole, none with the parser's thread, nor
+    /// a line too long being dropped.
+    pub(crate) fn can_hand_over(&self) -> bool {
+        self.parsing == 0 && self.dropping.is_none()
+    }
+
+    /// What's been read of a message not yet whole, for the next build
+    /// (see [`resume`](Self::resume)).
+    pub(crate) fn into_bytes(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.bytes)
     }
 
     /// Takes in `read`, what was just read from `name`: the whole messages
@@ -2059,6 +2197,65 @@ mod tests {
             .map(|message| (message.method.as_deref(), message.id.as_ref()))
             .collect();
         assert_eq!(said, [(Some("told"), None), (None, Some(&Value::from(2)))]);
+        peer.kill();
+        while peer.try_wait().unwrap().is_none() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Reads `peer` until a message comes, into `messages`.
+    fn read_a_message(peer: &mut Peer, messages: &mut Vec<Message>) {
+        let mut buffer = vec![0; 64 * 1024];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while messages.is_empty() {
+            assert!(Instant::now() < deadline, "nothing came");
+            std::thread::sleep(Duration::from_millis(2));
+            peer.read(&mut buffer, usize::MAX, messages).unwrap();
+        }
+    }
+
+    /// A program handed over goes on where it was in each direction: a
+    /// message half read is read whole after, and one queued and not yet
+    /// written is written (CLACKA-188). `cat` says back what it's sent.
+    #[test]
+    fn a_program_handed_over_goes_on_where_it_was() {
+        let command: Vec<OsString> = vec!["cat".into()];
+        let parser = Parser::idle();
+        let mut peer = Peer::start("cat", &command, None, None, Framing::Lines, &parser).unwrap();
+        let pid = peer.process.pid();
+        peer.outgoing.extend_from_slice(
+            br#"{"jsonrpc":"2.0","method":"first"}
+{"jsonrpc":"2.0","met"#,
+        );
+        peer.flush().unwrap();
+        let mut messages = Vec::new();
+        read_a_message(&mut peer, &mut messages);
+        assert_eq!(messages[0].method.as_deref(), Some("first"));
+        // The rest of what `cat` said is still coming.
+        let mut buffer = vec![0; 64];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while peer.incoming.bytes.is_empty() {
+            assert!(Instant::now() < deadline, "the rest never came");
+            std::thread::sleep(Duration::from_millis(2));
+            peer.read(&mut buffer, usize::MAX, &mut messages).unwrap();
+        }
+        assert_eq!(peer.incoming.bytes, br#"{"jsonrpc":"2.0","met"#);
+        peer.outgoing.extend_from_slice(b"hod\":\"second\"}\n");
+        assert!(peer.can_hand_over());
+
+        let mut fds = Fds::default();
+        let handed = peer.hand_over(&mut fds);
+        // As the next build receives them: the same files, other fds.
+        let received: Vec<OwnedFd> = fds.iter().map(|fd| fd.try_clone().unwrap()).collect();
+        drop(fds);
+        let mut fds = Fds::from_received(received);
+        let mut peer = Peer::resume("cat", Framing::Lines, handed, &mut fds, &parser).unwrap();
+        assert_eq!(peer.process.pid(), pid);
+        assert!(peer.has_outgoing());
+        peer.flush().unwrap();
+        let mut messages = Vec::new();
+        read_a_message(&mut peer, &mut messages);
+        assert_eq!(messages[0].method.as_deref(), Some("second"));
         peer.kill();
         while peer.try_wait().unwrap().is_none() {
             std::thread::sleep(Duration::from_millis(5));

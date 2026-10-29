@@ -34,6 +34,7 @@ use agent_client_protocol_schema::v1::{
 use clackatoo_protocol::TerminalId;
 use serde_json::{Value, json};
 
+use crate::handover::{self, Fds};
 use crate::mcp;
 use crate::profiles::Limits;
 use crate::pty::Process;
@@ -396,6 +397,72 @@ pub(crate) struct Agent {
     /// Whether it was asked what it runs in the background, and so says
     /// when it takes a turn by itself (see `chat/woken.rs`).
     tasks: bool,
+    /// The client capabilities clackatoo declared to it as it started:
+    /// what this connection negotiated, which goes with it through an
+    /// upgrade (see [`client_capabilities`]).
+    client: Value,
+    /// When each request waiting for an answer was sent, by its ID, to
+    /// tell an agent that has stopped answering (see
+    /// [`longest_unanswered`](Self::longest_unanswered)), through upgrades
+    /// too.
+    asked_at: BTreeMap<u64, std::time::Instant>,
+}
+
+/// Whether clackatoo offers its files to the agent called `name`.
+/// Antigravity replaces its image-capable `view_file` with a text-only client
+/// tool when fs is advertised, so it keeps its native file tools; their ACP
+/// diffs and permissions still flow through the common chat machinery.
+pub(crate) fn client_files(name: &str) -> bool {
+    name != "antigravity"
+}
+
+/// The client capabilities clackatoo declares to an agent as it starts:
+/// offering its files if `files`, and asking what it runs in the
+/// background if `tasks`. An agent going on through an upgrade was told
+/// these by the build before, so it goes on only to a build that would
+/// declare the same (see `crate::upgrade::CLIENT_DECLARES`).
+pub(crate) fn client_capabilities(files: bool, tasks: bool) -> Value {
+    // Codex's adapter streams commands' output in this, which the daemon
+    // adds to the tool's.
+    let mut meta = json!({ "terminal_output_delta": true });
+    let mut capabilities = json!({
+        "fs": { "readTextFile": files, "writeTextFile": files },
+        "terminal": false,
+    });
+    if tasks {
+        meta["jetbrains"] = json!({ "air": { "version": 1, "capabilities": AIR_CAPABILITIES } });
+        // Else Claude Code's adapter says its notices, such as that a task
+        // was stopped, as words, which would seem a turn of its own.
+        // Codex's says its warnings so too: it isn't asked.
+        capabilities["session"] = json!({ "notices": {} });
+    }
+    // Claude Code's adapter takes its AskUserQuestion tool away from a
+    // client that can't show forms; Codex's can't ask its questions. See
+    // `elicit` for what else asking for them changes.
+    capabilities["elicitation"] = json!({ "form": {}, "url": {} });
+    capabilities["_meta"] = meta;
+    capabilities
+}
+
+/// A short name for what [`client_capabilities`] declares, given `files`
+/// and `tasks`: what a build says it declares by (see
+/// `crate::upgrade::CLIENT_DECLARES`).
+pub(crate) fn declaration_kind(files: bool, tasks: bool) -> &'static str {
+    match (files, tasks) {
+        (true, true) => "ft",
+        (true, false) => "f-",
+        (false, true) => "-t",
+        (false, false) => "--",
+    }
+}
+
+/// A fingerprint of `capabilities`, the same in every build that declares
+/// the same: FNV-1a over its JSON, in hex.
+pub(crate) fn declaration_hash(capabilities: &Value) -> String {
+    let hash = (capabilities.to_string().bytes()).fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{hash:016x}")
 }
 
 impl Agent {
@@ -426,31 +493,11 @@ impl Agent {
             can_steer: false,
             can_list: None,
             tasks,
+            client: Value::Null,
+            asked_at: BTreeMap::new(),
         };
-        // Antigravity replaces its image-capable view_file with a text-only
-        // client tool when fs is advertised. Keep its native file tools; their
-        // ACP diffs/permissions still flow through the common chat machinery.
-        let client_files = name != "antigravity";
-        // Codex's adapter streams commands' output in this, which the
-        // daemon adds to the tool's.
-        let mut meta = json!({ "terminal_output_delta": true });
-        let mut capabilities = json!({
-            "fs": { "readTextFile": client_files, "writeTextFile": client_files },
-            "terminal": false,
-        });
-        if tasks {
-            meta["jetbrains"] =
-                json!({ "air": { "version": 1, "capabilities": AIR_CAPABILITIES } });
-            // Else Claude Code's adapter says its notices, such as that a
-            // task was stopped, as words, which would seem a turn of its
-            // own. Codex's says its warnings so too: it isn't asked.
-            capabilities["session"] = json!({ "notices": {} });
-        }
-        // Claude Code's adapter takes its AskUserQuestion tool away from a
-        // client that can't show forms; Codex's can't ask its questions.
-        // See `elicit` for what else asking for them changes.
-        capabilities["elicitation"] = json!({ "form": {}, "url": {} });
-        capabilities["_meta"] = meta;
+        let capabilities = client_capabilities(client_files(name), tasks);
+        agent.client = capabilities.clone();
         agent.request(
             Pending::Initialize,
             "initialize",
@@ -744,10 +791,18 @@ impl Agent {
         });
     }
 
+    /// What the request with ID `id` was for, now the agent has answered
+    /// it, if it was the daemon's.
+    fn answered_request(&mut self, id: u64) -> Option<Pending> {
+        self.asked_at.remove(&id);
+        self.pending.remove(&id)
+    }
+
     fn request(&mut self, pending: Pending, method: &str, params: &Value) {
         let id = self.next_id;
         self.next_id += 1;
         self.pending.insert(id, pending);
+        self.asked_at.insert(id, std::time::Instant::now());
         self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
     }
 
@@ -934,7 +989,7 @@ impl Agent {
                 }
             }
             (None, Some(id)) => {
-                let Some(pending) = id.as_u64().and_then(|id| self.pending.remove(&id)) else {
+                let Some(pending) = id.as_u64().and_then(|id| self.answered_request(id)) else {
                     return;
                 };
                 let result = match (message.result, message.error) {
@@ -1202,6 +1257,207 @@ impl Agent {
     /// group is to be ended (see [`crate::group`]).
     pub(crate) fn stop(self) -> Process {
         self.peer.stop()
+    }
+
+    /// Whether the agent can go on through an upgrade as it is: it has
+    /// answered `initialize`, so nothing is held back for it, and it can
+    /// as a program (see [`Peer::can_hand_over`]). One still starting is
+    /// stopped instead, as starting it again costs little.
+    pub(crate) fn can_hand_over(&self) -> bool {
+        self.held.is_none() && self.peer.can_hand_over()
+    }
+
+    /// Takes all the parser's thread has parsed of what the agent sent,
+    /// reading nothing more, into `incoming`, as [`read`](Self::read)
+    /// would. Returns whether it can go on through an upgrade now.
+    pub(crate) fn take_parsed(&mut self, incoming: &mut Vec<Incoming>) -> bool {
+        let mut messages = Vec::new();
+        self.peer.take_parsed(&mut messages);
+        for message in messages {
+            self.receive(message, incoming);
+        }
+        self.can_hand_over()
+    }
+
+    /// Hands the agent over to the next build, which goes on with it as it
+    /// is: its process and pipes into `fds`, the requests it hasn't
+    /// answered, and what it said it can do. A listing a client asked for
+    /// can't wait through the upgrade, which ends the client's connection:
+    /// its answer is dropped. The handover's `id`, `name` and `command`
+    /// are for the server to fill.
+    pub(crate) fn hand_over(self, fds: &mut Fds) -> handover::LiveAgent {
+        let peer = self.peer.hand_over(fds);
+        handover::LiveAgent {
+            id: 0,
+            name: String::new(),
+            command: Vec::new(),
+            process: peer.process,
+            stdin: peer.stdin,
+            stdout: peer.stdout,
+            stderr: peer.stderr,
+            outgoing: peer.outgoing,
+            incoming: peer.incoming,
+            errors: peer.errors,
+            last_errors: peer.last_errors,
+            login_required: peer.login_required,
+            next_id: self.next_id,
+            waited: (self.asked_at.iter())
+                .filter(|(id, _)| self.pending.contains_key(id))
+                .map(|(&id, at)| {
+                    (
+                        id,
+                        u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    )
+                })
+                .collect(),
+            pending: (self.pending.into_iter())
+                .map(|(id, pending)| (id, pending.hand_over()))
+                .collect(),
+            can_close: self.can_close,
+            can_load: self.can_load,
+            can_image: self.can_image,
+            can_steer: self.can_steer,
+            can_list: self.can_list,
+            tasks: self.tasks,
+            client: self.client.to_string(),
+        }
+    }
+
+    /// The agent the last build handed over as `live`, its fds taken from
+    /// `fds`, its big messages parsed by `parser`: it goes on as it was,
+    /// what it said it can do and all, as it's the same process.
+    ///
+    /// If it can't be taken back, its process comes back with why, if it
+    /// can, to be let go as an agent stopped is (see [`Peer::resume`]).
+    pub(crate) fn resume(
+        live: handover::LiveAgent,
+        fds: &mut Fds,
+        parser: &Parser,
+    ) -> Result<Self, (handover::HandoverError, Option<Process>)> {
+        let peer = crate::rpc::HandedPeer {
+            process: live.process,
+            stdin: live.stdin,
+            stdout: live.stdout,
+            stderr: live.stderr,
+            outgoing: live.outgoing,
+            incoming: live.incoming,
+            errors: live.errors,
+            last_errors: live.last_errors,
+            login_required: live.login_required,
+        };
+        let logged = format!("agent {}", live.name);
+        let peer = Peer::resume(&logged, Framing::Lines, peer, fds, parser)?;
+        let now = std::time::Instant::now();
+        Ok(Self {
+            peer,
+            next_id: live.next_id,
+            asked_at: (live.pending.iter())
+                .map(|&(id, _)| {
+                    let waited = (live.waited.iter())
+                        .find(|&&(waiting, _)| waiting == id)
+                        .map_or(0, |&(_, waited)| waited);
+                    let waited = std::time::Duration::from_millis(waited);
+                    (id, now.checked_sub(waited).unwrap_or(now))
+                })
+                .collect(),
+            pending: (live.pending.into_iter())
+                .map(|(id, pending)| (id, Pending::resume(pending)))
+                .collect(),
+            held: None,
+            can_close: live.can_close,
+            can_load: live.can_load,
+            can_image: live.can_image,
+            can_steer: live.can_steer,
+            can_list: live.can_list,
+            tasks: live.tasks,
+            client: serde_json::from_str(&live.client).unwrap_or_default(),
+        })
+    }
+
+    /// The client capabilities clackatoo declared to the agent as it
+    /// started (see [`client_capabilities`]).
+    pub(crate) fn declared(&self) -> &Value {
+        &self.client
+    }
+
+    /// How long the agent has left unanswered the oldest request it should
+    /// answer soon, if any waits: for a session, a setting, a steer, a
+    /// stop or a close. A message's answer can take an hour, and isn't
+    /// counted; nor what nothing waits for.
+    pub(crate) fn longest_unanswered(&self) -> Option<std::time::Duration> {
+        (self.pending.iter())
+            .filter(|(_, pending)| {
+                matches!(
+                    pending,
+                    Pending::Session { .. }
+                        | Pending::Setting(_)
+                        | Pending::Steer(..)
+                        | Pending::StopTask(..)
+                        | Pending::Closing(_)
+                )
+            })
+            .filter_map(|(id, _)| self.asked_at.get(id))
+            .map(std::time::Instant::elapsed)
+            .max()
+    }
+
+    /// Writes every message to and from the agent from now on to a file of
+    /// its own in `dir`, as one started does (see
+    /// [`Peer::trace_agent_to`]): for one that went on through an upgrade.
+    pub(crate) fn trace_to(&mut self, dir: &std::path::Path, name: &str) {
+        self.peer.trace_agent_to(dir, name);
+    }
+}
+
+impl Pending {
+    /// What the request is for, for the next build.
+    fn hand_over(self) -> handover::LivePending {
+        use handover::LivePending as Live;
+        match self {
+            Self::Initialize => Live::Initialize,
+            Self::Session {
+                terminal,
+                resumed,
+                load,
+            } => Live::Session {
+                terminal: terminal.0,
+                resumed,
+                load,
+            },
+            Self::Prompt(terminal) => Live::Prompt(terminal.0),
+            Self::Steer(terminal, message) => Live::Steer(terminal.0, message),
+            Self::Setting(terminal) => Live::Setting(terminal.0),
+            Self::Probe => Live::Probe,
+            Self::Abandoned(terminal, resumed) => Live::Abandoned(terminal.0, resumed),
+            Self::Closing(terminal) => Live::Closing(terminal.0),
+            Self::StopTask(terminal, task) => Live::StopTask(terminal.0, task),
+            Self::Listing { .. } | Self::Ignored => Live::Ignored,
+        }
+    }
+
+    /// What a request the last build handed over was for.
+    fn resume(live: handover::LivePending) -> Self {
+        use handover::LivePending as Live;
+        match live {
+            Live::Initialize => Self::Initialize,
+            Live::Session {
+                terminal,
+                resumed,
+                load,
+            } => Self::Session {
+                terminal: TerminalId(terminal),
+                resumed,
+                load,
+            },
+            Live::Prompt(terminal) => Self::Prompt(TerminalId(terminal)),
+            Live::Steer(terminal, message) => Self::Steer(TerminalId(terminal), message),
+            Live::Setting(terminal) => Self::Setting(TerminalId(terminal)),
+            Live::Probe => Self::Probe,
+            Live::Abandoned(terminal, resumed) => Self::Abandoned(TerminalId(terminal), resumed),
+            Live::Closing(terminal) => Self::Closing(TerminalId(terminal)),
+            Live::StopTask(terminal, task) => Self::StopTask(TerminalId(terminal), task),
+            Live::Ignored => Self::Ignored,
+        }
     }
 }
 
@@ -1609,5 +1865,109 @@ mod steering_tests {
         v["agentInfo"]["version"] = json!("0.87.0");
         assert!(!safe_steering(&v));
         assert!(!safe_steering(&json!({})));
+    }
+}
+
+#[cfg(test)]
+mod handover_tests {
+    use super::*;
+
+    /// A request the agent should answer soon, left unanswered, is still
+    /// seen to be after an upgrade, for as long as it has been, so an agent
+    /// stuck through one upgrade is stopped by the next (CLACKA-188). A
+    /// message's answer, which can take an hour, doesn't count.
+    #[test]
+    fn a_request_left_unanswered_is_still_seen_to_be_after_an_upgrade() {
+        let parser = Parser::idle();
+        let command: Vec<OsString> = vec!["cat".into()];
+        let mut agent = Agent::start("cat", &command, (None, None), false, &parser).unwrap();
+        agent.held = None;
+        agent.pending.clear();
+        agent.asked_at.clear();
+        agent.prompt(TerminalId(4), "s4", &["go"], &[]);
+        let ago = (std::time::Instant::now())
+            .checked_sub(std::time::Duration::from_mins(3))
+            .unwrap();
+        for at in agent.asked_at.values_mut() {
+            *at = ago;
+        }
+        assert_eq!(agent.longest_unanswered(), None, "a message can take long");
+        agent.set_setting(TerminalId(4), "s4", "mode", "auto");
+        for at in agent.asked_at.values_mut() {
+            *at = ago;
+        }
+        let waited = agent.longest_unanswered().unwrap();
+        assert!(waited >= std::time::Duration::from_mins(3), "{waited:?}");
+
+        let mut fds = Fds::default();
+        let mut handed = agent.hand_over(&mut fds);
+        handed.name = "cat".to_owned();
+        let received: Vec<std::os::fd::OwnedFd> =
+            fds.iter().map(|fd| fd.try_clone().unwrap()).collect();
+        drop(fds);
+        let mut fds = Fds::from_received(received);
+        let agent = Agent::resume(handed, &mut fds, &parser).unwrap();
+        let waited = agent.longest_unanswered().unwrap();
+        assert!(waited >= std::time::Duration::from_mins(3), "{waited:?}");
+        agent.stop().kill_group();
+    }
+
+    /// An agent handed over goes on as it was (CLACKA-188): its requests
+    /// waiting for answers, by the IDs it sent them with, and what it said
+    /// it can do, never worked out again; a listing a client waited for,
+    /// which can't wait through an upgrade, has its answer dropped.
+    #[test]
+    fn an_agent_handed_over_keeps_what_it_waits_for_and_what_it_can_do() {
+        let parser = Parser::idle();
+        let command: Vec<OsString> = vec!["cat".into()];
+        let mut agent = Agent::start("cat", &command, (None, None), true, &parser).unwrap();
+        // As if it had answered `initialize`, saying what it can do.
+        agent.held = None;
+        (agent.can_close, agent.can_steer, agent.can_list) = (true, true, Some(false));
+        agent.pending.clear();
+        agent.prompt(TerminalId(4), "s4", &["go"], &[]);
+        agent.list_sessions(7, "/src");
+        agent.pending.insert(
+            90,
+            Pending::Session {
+                terminal: TerminalId(5),
+                resumed: Some("s5".to_owned()),
+                load: false,
+            },
+        );
+        let next = agent.next_id;
+        assert!(agent.can_hand_over());
+
+        let mut fds = Fds::default();
+        let mut handed = agent.hand_over(&mut fds);
+        handed.name = "cat".to_owned();
+        let received: Vec<std::os::fd::OwnedFd> =
+            fds.iter().map(|fd| fd.try_clone().unwrap()).collect();
+        drop(fds);
+        let mut fds = Fds::from_received(received);
+        let agent = Agent::resume(handed, &mut fds, &parser).unwrap();
+        assert_eq!(agent.next_id, next);
+        assert!(agent.can_close() && agent.can_steer() && agent.tells_turns());
+        assert_eq!(agent.can_list(), Some(false));
+        assert!(agent.started());
+        // What it was told as it started goes with it, as it was.
+        assert_eq!(agent.declared(), &client_capabilities(true, true));
+        let pending: Vec<String> = (agent.pending.iter())
+            .map(|(id, pending)| format!("{id} {pending:?}"))
+            .collect();
+        assert_eq!(
+            pending,
+            [
+                format!("{} Prompt(TerminalId(4))", next - 2),
+                format!("{} Ignored", next - 1),
+                "90 Session { terminal: TerminalId(5), resumed: Some(\"s5\"), load: false }"
+                    .to_owned(),
+            ]
+        );
+        assert_eq!(
+            agent.waiting().collect::<Vec<_>>(),
+            [TerminalId(4), TerminalId(5)]
+        );
+        agent.stop().kill_group();
     }
 }

@@ -274,12 +274,15 @@ impl HostedChat {
     /// the last build handed it over. The upgrade ended the agent, and
     /// with it all it ran: those still going are lost, and ended by the
     /// upgrade. Returns what each of those was, to tell the agent.
-    pub(crate) fn resume_tasks(&mut self, kept: handover::ChatTasks) -> Vec<String> {
+    ///
+    /// Unless the agent went on through the upgrade, `live`: then so did
+    /// all it ran, and those going are still going.
+    pub(crate) fn resume_tasks(&mut self, kept: handover::ChatTasks, live: bool) -> Vec<String> {
         self.tasks_session = kept.session;
         let ended = now();
         let mut lost = Vec::new();
         let mut tasks: Vec<AgentTask> = kept.tasks.into_iter().filter_map(task_in).collect();
-        for task in tasks.iter_mut().filter(|task| task.going()) {
+        for task in (tasks.iter_mut()).filter(|task| !live && task.going()) {
             task.state = AgentTaskState::Lost;
             task.summary = Some(ENDED_BY_UPGRADE.to_owned());
             task.ended = Some(ended);

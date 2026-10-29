@@ -47,6 +47,7 @@ use crate::mcp::{self, Connection, Incoming, Tool};
 
 mod activities;
 mod boards;
+mod live;
 mod native;
 mod subagents;
 mod talk;
@@ -116,8 +117,13 @@ struct Waiting {
 #[derive(Debug)]
 enum Wait {
     /// The user's answer to the chat's question numbered `call`: then
-    /// it's carried out.
-    Permission { call: u64, tool: Tool },
+    /// it's carried out. The call as it came goes with it, for an upgrade
+    /// to hand over (see [`mcp::Raw`]).
+    Permission {
+        call: u64,
+        tool: Tool,
+        raw: mcp::Raw,
+    },
     /// The command in `terminal` finishing, until `due`.
     Finish {
         terminal: TerminalId,
@@ -136,7 +142,11 @@ enum Wait {
     },
     /// The boards being read, which takes a moment as the daemon starts:
     /// then it's carried out, unless they aren't read by `due`.
-    Boards { tool: Tool, due: Instant },
+    Boards {
+        tool: Tool,
+        due: Instant,
+        raw: mcp::Raw,
+    },
     /// The browser's answer to the call it was handed as `call`. The
     /// browser's thread gives up on its own waits.
     Browser { call: u64 },
@@ -512,7 +522,7 @@ impl Daemon {
         }
         for message in incoming {
             match message {
-                Incoming::Call { id, tool } => self.call_tool(token, chat, id, tool),
+                Incoming::Call { id, tool, raw } => self.call_tool(token, chat, id, tool, raw),
                 Incoming::Cancelled(id) => self.cancel_call(token, &id),
             }
         }
@@ -624,7 +634,7 @@ impl Daemon {
 
     /// Carries out a call from the agent of the chat `chat`, asking the
     /// user first if it must.
-    fn call_tool(&mut self, token: Token, chat: TerminalId, id: Value, tool: Tool) {
+    fn call_tool(&mut self, token: Token, chat: TerminalId, id: Value, tool: Tool, raw: mcp::Raw) {
         let Some(tools) = self.chat(chat).map(|chat| chat.tools()) else {
             self.answer_tool(token, &id, Err("the chat has closed".to_owned()));
             return;
@@ -652,7 +662,7 @@ impl Daemon {
                 .any(|r| r.activity.owner == chat && r.activity.id == *operation)
         {
             // Recovery is read-only: an unanswered approval is never replayed.
-            self.carry_out(token, chat, id, tool);
+            self.carry_out(token, chat, id, tool, raw);
             return;
         }
         // What would be refused anyway isn't asked about.
@@ -663,7 +673,7 @@ impl Daemon {
             return;
         }
         let Some((what, whole)) = self.question_for(chat, &tool, tools) else {
-            self.carry_out(token, chat, id, tool);
+            self.carry_out(token, chat, id, tool, raw);
             return;
         };
         let call = self.tools.next_call;
@@ -683,7 +693,7 @@ impl Daemon {
             token,
             id,
             chat,
-            what: Wait::Permission { call, tool },
+            what: Wait::Permission { call, tool, raw },
         });
         self.collect_damage(chat);
     }
@@ -804,11 +814,11 @@ impl Daemon {
             chat,
             what,
         } = self.tools.waiting.remove(at);
-        let Wait::Permission { tool, .. } = what else {
+        let Wait::Permission { tool, raw, .. } = what else {
             return;
         };
         if allow {
-            self.carry_out(token, chat, id, tool);
+            self.carry_out(token, chat, id, tool, raw);
         } else {
             let refused =
                 Err("the user said no: don't try it another way without asking them".to_owned());
@@ -819,7 +829,7 @@ impl Daemon {
     /// Does what `tool` asks, for the agent of the chat `chat`, and
     /// answers, unless it waits.
     #[allow(clippy::too_many_lines, reason = "dispatches the tool catalogue")]
-    fn carry_out(&mut self, token: Token, chat: TerminalId, id: Value, tool: Tool) {
+    fn carry_out(&mut self, token: Token, chat: TerminalId, id: Value, tool: Tool, raw: mcp::Raw) {
         let result = match tool {
             Tool::StartActivity {
                 id,
@@ -894,7 +904,7 @@ impl Daemon {
                         token,
                         id,
                         chat,
-                        what: Wait::Boards { tool, due },
+                        what: Wait::Boards { tool, due, raw },
                     });
                     return;
                 }

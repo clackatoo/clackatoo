@@ -300,6 +300,11 @@ pub struct AgentConfig {
     /// file for each agent started, with obvious secrets taken out (see
     /// [`crate::rpc::Peer::trace_agent_to`]). `None` writes none.
     pub trace: Option<PathBuf>,
+    /// Stops every agent as the daemon upgrades, as before agents went on
+    /// through upgrades, whatever `agents.toml` says: the switch to turn
+    /// that off, `CLACKATOO_LIVE_AGENTS=off` (see
+    /// [`kept_through_upgrades`](Self::kept_through_upgrades)).
+    pub restart_on_upgrade: bool,
 }
 
 impl Known {
@@ -330,6 +335,35 @@ pub(crate) fn known(name: &str) -> Option<&'static Known> {
 }
 
 impl AgentConfig {
+    /// Whether agents' processes go on through an upgrade, with all they
+    /// run (CLACKA-188), rather than being stopped first: unless
+    /// [`restart_on_upgrade`](Self::restart_on_upgrade) says otherwise, or
+    /// `agents.toml` does, with
+    ///
+    /// ```toml
+    /// [upgrade]
+    /// keep_agents = false
+    /// ```
+    ///
+    /// The build upgrading asks this, and so does the build it upgrades to,
+    /// which then doesn't say it takes them (see
+    /// [`crate::upgrade::TAKES_ADAPTERS`]).
+    pub(crate) fn kept_through_upgrades(&self) -> bool {
+        if self.restart_on_upgrade {
+            return false;
+        }
+        let document = self.file.as_deref().and_then(read_document);
+        let kept = document.as_ref().and_then(|document| {
+            let item = document.get("upgrade")?.get("keep_agents")?;
+            let kept = item.as_bool();
+            if kept.is_none() {
+                log::warn!("agents.toml: upgrade.keep_agents is true or false");
+            }
+            kept
+        });
+        kept.unwrap_or(true)
+    }
+
     /// The agent called `name`: the one clackatoo knows, changed or
     /// replaced by the user's, or why there isn't one.
     pub(crate) fn find(&self, name: &str) -> Result<AgentSpec, String> {
@@ -862,6 +896,30 @@ mod tests {
             starting_mode: None,
             tasks: None,
         }
+    }
+
+    /// Agents go on through upgrades unless `agents.toml` or the switch
+    /// says not to (CLACKA-188).
+    #[test]
+    fn agents_go_on_through_upgrades_unless_told_not_to() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("agents.toml");
+        let config = AgentConfig {
+            file: Some(file.clone()),
+            ..AgentConfig::default()
+        };
+        assert!(config.kept_through_upgrades(), "no file");
+        fs::write(&file, "[upgrade]\nkeep_agents = true\n").unwrap();
+        assert!(config.kept_through_upgrades());
+        fs::write(&file, "[upgrade]\nkeep_agents = false\n").unwrap();
+        assert!(!config.kept_through_upgrades());
+        fs::write(&file, "[upgrade]\nkeep_agents = \"no\"\n").unwrap();
+        assert!(config.kept_through_upgrades(), "nonsense is ignored");
+        let switched = AgentConfig {
+            restart_on_upgrade: true,
+            ..AgentConfig::default()
+        };
+        assert!(!switched.kept_through_upgrades());
     }
 
     #[test]

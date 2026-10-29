@@ -4,9 +4,11 @@
 //! chat closes.
 //!
 //! One process runs for each agent chats talk to, by name: every Claude
-//! Code chat shares one, every Codex chat another. An agent doesn't come
-//! through an upgrade: the next build starts it again for interrupted
-//! turns, or when an idle chat is next sent a message.
+//! Code chat shares one, every Codex chat another. An agent's process goes
+//! on through an upgrade, with all it runs, when the next build can take
+//! it (see `chats/live.rs`); otherwise it's stopped, and the next build
+//! starts it again for interrupted turns, or when an idle chat is next
+//! sent a message.
 //!
 //! A chat can move to another agent (see `handoff.rs`). The session it
 //! leaves is closed, and its agent stopped if no chat talks to it now; the
@@ -39,6 +41,8 @@ use crate::agent::{Agent, Answer, Failure, Incoming, Listed, Opened, Opening, Re
 use crate::agents::{self, AgentSpec, Launch, Start};
 use crate::chat::{Action, HostedChat, Limits, settings_of};
 use crate::pty::Process;
+
+mod live;
 
 /// Identifies a running agent within one daemon. Never reused, so a
 /// token left over from a stopped agent can't reach another.
@@ -648,6 +652,27 @@ impl Daemon {
         )?;
         let id = AgentId(self.agents.next);
         self.agents.next += 1;
+        match self.watch_agent(id, spec, command, agent) {
+            Ok(()) => Ok(id),
+            Err(failed) => {
+                let (err, agent, name) = *failed;
+                // Its pipes close as it's dropped, which ends it.
+                self.let_agent_go(agent.stop(), &name, End::Gently(KILL_AFTER));
+                Err(err)
+            }
+        }
+    }
+
+    /// Watches `agent`, `spec`'s, started with `command`, as agent `id`:
+    /// its pipes and its process. If they can't be watched, it's given
+    /// back, with why and its name, to be stopped.
+    fn watch_agent(
+        &mut self,
+        id: AgentId,
+        spec: AgentSpec,
+        command: Vec<OsString>,
+        agent: Agent,
+    ) -> Result<(), Box<(io::Error, Agent, String)>> {
         let mut tokens: Vec<Token> = Vec::new();
         let sources = [
             (agent.stdout_fd(), Pipe::Output, Interest::READABLE),
@@ -663,12 +688,11 @@ impl Daemon {
                 .registry()
                 .register(&mut SourceFd(&fd), token, interest)
             {
-                for token in tokens {
+                for (token, (fd, ..)) in tokens.into_iter().zip(sources) {
                     self.sources.remove(token.0);
+                    let _ = self.poll.registry().deregister(&mut SourceFd(&fd));
                 }
-                // Its pipes close as it's dropped, which ends it.
-                self.let_agent_go(agent.stop(), &spec.name, End::Gently(KILL_AFTER));
-                return Err(err);
+                return Err(Box::new((err, agent, spec.name)));
             }
             entry.insert(Source::Agent(id, pipe));
             tokens.push(token);
@@ -683,7 +707,7 @@ impl Daemon {
                 unread_errors: false,
             },
         );
-        Ok(id)
+        Ok(())
     }
 
     /// Acts on an event on one of agent `id`'s pipes.
@@ -2286,15 +2310,19 @@ impl Daemon {
         self.watch_orphan(Orphan::new(process));
     }
 
-    /// Stops every agent, as the daemon stops or upgrades: none survives
-    /// either. Each is left [`AGENT_STOP_WAIT`] to end by itself once its
-    /// pipes close, as an adapter may be writing its session down for the
-    /// next build to go on with, and then its process group is sent
-    /// SIGTERM. They're waited for with the language servers (see
-    /// [`super::stopping`]). The next build, if there's one, reaps them.
-    pub(super) fn stop_agents(&mut self) {
+    /// Stops every agent but those in `keep`, as the daemon stops or
+    /// upgrades: those go on through the upgrade (see `live.rs`), and
+    /// nothing of them is ended, nor their process groups. Each stopped is
+    /// left [`AGENT_STOP_WAIT`] to end by itself once its pipes close, as
+    /// an adapter may be writing its session down for the next build to go
+    /// on with, and then its process group is sent SIGTERM. They're waited
+    /// for with the language servers (see [`super::stopping`]). The next
+    /// build, if there's one, reaps them.
+    pub(super) fn stop_agents(&mut self, keep: &[AgentId]) {
         self.agents.usage.stop();
-        let running: Vec<AgentId> = self.agents.running.keys().copied().collect();
+        let running: Vec<AgentId> = (self.agents.running.keys().copied())
+            .filter(|id| !keep.contains(id))
+            .collect();
         for id in running {
             self.end_agent(id, End::Gently(AGENT_STOP_WAIT));
         }
@@ -2511,7 +2539,7 @@ mod tests {
         ));
         assert!(chat.node().turns[0].items.iter().any(|item| matches!(item, clackatoo_protocol::Item::Words(text) if text.contains("echo: Clackatoo resumed"))));
         assert!(std::fs::read_to_string(log).unwrap().contains("resumed s1"));
-        resumed.stop_agents();
+        resumed.stop_agents(&[]);
     }
 
     #[test]
@@ -2587,6 +2615,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(again > 0);
-        daemon.stop_agents();
+        daemon.stop_agents(&[]);
     }
 }
