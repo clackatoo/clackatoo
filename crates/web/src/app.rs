@@ -63,18 +63,6 @@ const REFIT_AFTER: i32 = 300;
 /// chat's box is told the daemon, as in the window.
 const DRAFT_PAUSE: i32 = 600;
 
-/// A random number, other than 0, which is the daemon's, for this page to
-/// know the drafts it told by.
-fn own_number() -> u64 {
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "a random number below 2^53"
-    )]
-    let random = (js_sys::Math::random() * 9_007_199_254_740_992.0) as u64;
-    random.max(1)
-}
-
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
 }
@@ -414,7 +402,7 @@ pub(crate) fn start() {
             document: document.clone(),
             root: root.clone(),
             screen: Screen::Boot,
-            state: State::with_number(own_number()),
+            state: State::default(),
             session: Session::default(),
             socket: None,
             retry: 1,
@@ -479,9 +467,10 @@ fn listen_for_chat_input(root: &DomElement) {
         {
             grow(&area);
             with_app(|app| {
-                if let Some(open) = &app.state.open {
-                    app.state.drafts.insert(open.id, area.value());
-                    app.save_draft(open.id);
+                if let Some(chat) = app.state.open.as_ref().map(|open| open.id) {
+                    app.state.drafts.insert(chat, area.value());
+                    app.state.typed_draft(chat);
+                    app.save_draft(chat);
                     app.typed_draft();
                     app.draw_soon();
                 }
@@ -1386,7 +1375,7 @@ impl App {
         // The device was unpaired, its password is to be given again, or the
         // daemon refused it: the daemon says which, and the app shows it.
         if (4001..=4003).contains(&code) {
-            self.state = State::with_number(own_number());
+            self.state = State::default();
             spawn_local(boot());
             return;
         }

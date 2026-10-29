@@ -147,8 +147,6 @@ enum Asked {
     },
     /// Something the user did, as "sending the message".
     Doing(&'static str),
-    /// What's typed in a chat's box, told: its failure is only logged.
-    DraftTold(TerminalId),
     /// The list of terminals.
     Terminals,
     /// History of the terminal shown, while what it held was of this
@@ -182,22 +180,17 @@ pub struct State {
     pub home_filter: HomeFilter,
     pub home_query: String,
     pub drafts: BTreeMap<TerminalId, String>,
-    /// The last draft each chat's box took or told: while what's typed is
-    /// this, the box hasn't changed, and takes the next draft that comes
-    /// (see [`State::tell_draft`]).
+    /// What each chat's daemon was last told is typed in its box, or the
+    /// draft the box took (see [`State::tell_draft`]).
     drafts_synced: BTreeMap<TerminalId, String>,
-    /// Drafts told that haven't come back yet, by chat: one another
-    /// client told that comes before them was told before them.
-    drafts_awaiting: BTreeMap<TerminalId, u32>,
-    /// The chats a draft told to may not have reached: the connection went
-    /// with it unanswered, or the daemon refused it.
-    drafts_lost: BTreeSet<TerminalId>,
-    /// The chats whose draft the daemon changed here, for the app to keep
-    /// in the page's storage.
+    /// The chats whose box has been typed in since the page loaded: they
+    /// never take the daemon's draft again.
+    drafts_touched: BTreeSet<TerminalId>,
+    /// The chats whose draft the daemon sent whole since the page loaded.
+    drafts_loaded: BTreeSet<TerminalId>,
+    /// The chats whose draft changed here other than by typing, for the
+    /// app to keep in the page's storage.
     pub drafts_changed: BTreeSet<TerminalId>,
-    /// This page's own number for itself, random, which the drafts it tells
-    /// carry back, so it doesn't take its own.
-    draft_by: u64,
     pub images: BTreeMap<TerminalId, Vec<Attachment>>,
     pub loading_images: BTreeSet<TerminalId>,
     next_image: u64,
@@ -247,10 +240,9 @@ impl Default for State {
             home_query: String::new(),
             drafts: BTreeMap::new(),
             drafts_synced: BTreeMap::new(),
-            drafts_awaiting: BTreeMap::new(),
-            drafts_lost: BTreeSet::new(),
+            drafts_touched: BTreeSet::new(),
+            drafts_loaded: BTreeSet::new(),
             drafts_changed: BTreeSet::new(),
-            draft_by: 1,
             images: BTreeMap::new(),
             loading_images: BTreeSet::new(),
             next_image: 0,
@@ -269,19 +261,9 @@ impl Default for State {
 }
 
 impl State {
-    /// A state whose page knows the drafts it tells by `draft_by`.
-    #[must_use]
-    pub fn with_number(draft_by: u64) -> Self {
-        Self {
-            draft_by,
-            ..Self::default()
-        }
-    }
-
     /// The connection opened: says hello, and asks for what the app shows.
     pub fn connected(&mut self) {
         self.online = Online::Open;
-        self.drafts_unanswered();
         self.asked.clear();
         self.outbox.clear();
         self.outbox.push(ClientMessage::Hello {
@@ -330,7 +312,6 @@ impl State {
             self.note = Some("Connection lost before delivery was confirmed. Your draft is kept; check the conversation before retrying.".into());
             self.submitting.clear();
         }
-        self.drafts_unanswered();
         self.asked.clear();
         self.outbox.clear();
         self.listing = false;
@@ -360,21 +341,11 @@ impl State {
     fn answered(&mut self, response: Response) {
         let asked = self.asked.pop_front().map(|(asked, _)| asked);
         self.keys_heard();
-        // Refused, as by an older daemon, a draft told won't come back.
-        if let Some(Asked::DraftTold(chat)) = &asked
-            && !matches!(response, Response::Done)
-        {
-            let awaiting = self.drafts_awaiting.entry(*chat).or_default();
-            *awaiting = awaiting.saturating_sub(1);
-            self.drafts_lost.insert(*chat);
-        }
         if let Some(Asked::Submitted { chat, text, images }) = &asked {
             self.submitting.remove(chat);
             if !matches!(response, Response::Error(_)) {
                 if self.drafts.get(chat) == Some(text) {
                     self.drafts.remove(chat);
-                    // Sent: other boxes that haven't changed empty too.
-                    self.tell_draft_of(*chat);
                 }
                 if let Some(current) = self.images.get_mut(chat) {
                     current.retain(|image| !images.contains(&image.id));
@@ -435,7 +406,7 @@ impl State {
     fn failed(&mut self, err: &clackatoo_protocol::Error, asked: &Asked) {
         let note = match asked {
             Asked::Capabilities(_) => Some(format!("Could not inspect capabilities: {err}")),
-            Asked::Quiet | Asked::DraftTold(_) => None,
+            Asked::Quiet => None,
             Asked::ChatHistory { terminal, before } => {
                 if let Some(open) = self
                     .open
@@ -525,14 +496,19 @@ impl State {
             }
             return;
         }
-        let came = match &update {
-            ViewUpdate::Snapshot(view) => view.chat().map(|chat| (chat.draft.clone(), None)),
-            ViewUpdate::Patch(patches) => patches.iter().rev().find_map(|patch| match patch {
-                Patch::Chat(ChatPatch::Draft { text, rev, by }) => {
-                    Some((text.clone(), Some((*rev, *by))))
-                }
-                _ => None,
-            }),
+        let whole = match &update {
+            ViewUpdate::Snapshot(view) => view.chat().map(|chat| chat.draft.clone()),
+            ViewUpdate::Patch(_) => None,
+        };
+        // Every message sent from a box, in order.
+        let sent: Vec<String> = match &update {
+            ViewUpdate::Patch(patches) => (patches.iter())
+                .filter_map(|patch| match patch {
+                    Patch::Chat(ChatPatch::DraftCleared { sent }) => Some(sent.clone()),
+                    _ => None,
+                })
+                .collect(),
+            ViewUpdate::Snapshot(_) => Vec::new(),
         };
         let Some(open) = self.open.as_mut().filter(|open| open.id == terminal) else {
             // One left behind, before the detach landed: acknowledged, so
@@ -584,64 +560,57 @@ impl State {
             }
             (None, ViewUpdate::Patch(_)) => {}
         }
-        if let Some((text, patch)) = came {
-            self.draft_came(terminal, text, patch);
+        if let Some(draft) = whole {
+            self.draft_came(terminal, draft);
+        }
+        for sent in sent {
+            self.draft_sent(terminal, &sent);
         }
     }
 
-    /// Takes in the draft of chat `terminal`, `text`, as a snapshot brought
-    /// it or, numbered `rev`, as the client `by` set it: into the box if it
-    /// hasn't changed since the last draft it took or told, never its own,
-    /// nor one told before its own came back, nor one replaced since. A
-    /// snapshot's doesn't replace a draft told that may not have reached
-    /// the daemon, which is told again.
-    fn draft_came(&mut self, terminal: TerminalId, text: String, patch: Option<(u64, u64)>) {
+    /// Takes in chat `terminal`'s draft, `draft`, as the chat came whole:
+    /// into the box if it hasn't been typed in since the page loaded, and
+    /// this is the first time the chat came whole, or the box is empty. So
+    /// the page's own copy, from its storage, gives way to the daemon's,
+    /// and a reconnect never replaces what's typed.
+    fn draft_came(&mut self, terminal: TerminalId, draft: String) {
         let local = self.drafts.get(&terminal).map_or("", String::as_str);
-        let synced = self.drafts_synced.get(&terminal).map_or("", String::as_str);
-        let unchanged = local == synced;
-        match patch {
-            // Its own, come back.
-            Some((_, by)) if by == self.draft_by => {
-                let awaiting = self.drafts_awaiting.entry(terminal).or_default();
-                *awaiting = awaiting.saturating_sub(1);
-                return;
-            }
-            Some((rev, _)) => {
-                let awaiting = self.drafts_awaiting.get(&terminal).is_some_and(|n| *n > 0);
-                if rev == 0 || awaiting || !unchanged {
-                    return;
-                }
-            }
-            None => {
-                let lost = self.drafts_lost.remove(&terminal)
-                    | self
-                        .drafts_awaiting
-                        .remove(&terminal)
-                        .is_some_and(|n| n > 0);
-                if lost || !unchanged {
-                    // What's typed here stands, and is told.
-                    self.drafts_synced.insert(terminal, text);
-                    self.tell_draft_of(terminal);
-                    return;
-                }
-            }
+        let first = self.drafts_loaded.insert(terminal);
+        if self.drafts_touched.contains(&terminal) || !(first || local.is_empty()) {
+            return;
         }
-        if local != text {
-            self.drafts.insert(terminal, text.clone());
+        if local != draft {
+            if draft.is_empty() {
+                self.drafts.remove(&terminal);
+            } else {
+                self.drafts.insert(terminal, draft.clone());
+            }
             self.drafts_changed.insert(terminal);
             self.dirty.footer = true;
         }
-        self.drafts_synced.insert(terminal, text);
+        self.drafts_synced.insert(terminal, draft);
     }
 
-    /// Drafts told that haven't come back as the connection goes may be
-    /// lost.
-    fn drafts_unanswered(&mut self) {
-        for (chat, telling) in std::mem::take(&mut self.drafts_awaiting) {
-            if telling > 0 {
-                self.drafts_lost.insert(chat);
-            }
+    /// A message, `sent`, was sent from a box of chat `terminal`, which
+    /// emptied the daemon's draft: this box empties too if it holds just
+    /// that, ignoring white space at its ends, and anything else typed here
+    /// is told again.
+    fn draft_sent(&mut self, terminal: TerminalId, sent: &str) {
+        let sent = sent.trim();
+        let local = self.drafts.get(&terminal).map_or("", String::as_str);
+        if !sent.is_empty() && local.trim() == sent {
+            self.drafts.remove(&terminal);
+            self.drafts_changed.insert(terminal);
+            self.dirty.footer = true;
         }
+        self.drafts_synced.insert(terminal, String::new());
+        self.tell_draft_of(terminal);
+    }
+
+    /// Notes that what's typed in chat `terminal`'s box was typed here: the
+    /// box never takes the daemon's draft again.
+    pub fn typed_draft(&mut self, terminal: TerminalId) {
+        self.drafts_touched.insert(terminal);
     }
 
     /// Tells the daemon what's typed in the open chat's box (see
@@ -653,9 +622,9 @@ impl State {
     }
 
     /// Tells the daemon what's typed in chat `terminal`'s box, if it's
-    /// changed since the last draft the box took or told, for a window or
-    /// this phone to start with later. Its failure, as from another
-    /// machine's older daemon, is only logged, and the draft stays here.
+    /// changed since it was last told, for a window or this phone to start
+    /// with later. Its failure, as from another machine's older daemon, is
+    /// only logged, and the draft stays here.
     pub fn tell_draft_of(&mut self, terminal: TerminalId) {
         if self.online != Online::Open {
             return;
@@ -665,13 +634,8 @@ impl State {
             return;
         }
         self.drafts_synced.insert(terminal, text.clone());
-        *self.drafts_awaiting.entry(terminal).or_default() += 1;
-        let by = self.draft_by;
-        let action = ChatAction::Draft { text, by };
-        self.request(
-            Request::Chat { terminal, action },
-            Asked::DraftTold(terminal),
-        );
+        let action = ChatAction::Draft { text };
+        self.request(Request::Chat { terminal, action }, Asked::Quiet);
     }
 
     /// Shows chat `id`.
@@ -1224,7 +1188,7 @@ fn mark(dirty: &mut Dirty, patch: &Patch) {
         | ChatPatch::Plan(_)
         | ChatPatch::Commands(_)
         | ChatPatch::Retrying(_)
-        | ChatPatch::Draft { .. } => dirty.footer = true,
+        | ChatPatch::DraftCleared { .. } => dirty.footer = true,
     }
 }
 
@@ -1269,10 +1233,9 @@ mod tests {
         })
     }
 
-    /// A state with chat 4 open, connected, its page numbered 7, and what
-    /// it sent so far taken.
+    /// A state with chat 4 open, connected, and what it sent so far taken.
     fn drafting() -> State {
-        let mut state = State::with_number(7);
+        let mut state = State::default();
         state.connected();
         state.open_chat(TerminalId(4));
         state.take_outbox();
@@ -1296,13 +1259,13 @@ mod tests {
         })
     }
 
-    /// The draft now `text`, numbered `rev`, set by `by`.
-    fn draft(text: &str, rev: u64, by: u64) -> ServerMessage {
-        patch(vec![ChatPatch::Draft {
-            text: text.into(),
-            rev,
-            by,
-        }])
+    /// `sent` sent from a box, as one patch among others.
+    fn sent(sent: &[&str]) -> ServerMessage {
+        let mut patches = vec![ChatPatch::Notice(None)];
+        patches.extend(sent.iter().map(|sent| ChatPatch::DraftCleared {
+            sent: (*sent).into(),
+        }));
+        patch(patches)
     }
 
     /// The drafts the page told, from what it sent.
@@ -1310,19 +1273,18 @@ mod tests {
         (state.take_outbox().into_iter())
             .filter_map(|message| match message {
                 ClientMessage::Request(Request::Chat {
-                    action: ChatAction::Draft { text, by },
+                    action: ChatAction::Draft { text },
                     ..
-                }) => {
-                    assert_eq!(by, 7);
-                    Some(text)
-                }
+                }) => Some(text),
                 _ => None,
             })
             .collect()
     }
 
+    /// The user types `text` in the box.
     fn type_in_box(state: &mut State, text: &str) {
         state.drafts.insert(TerminalId(4), text.into());
+        state.typed_draft(TerminalId(4));
     }
 
     fn shown(state: &State) -> &str {
@@ -1330,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn whats_typed_elsewhere_fills_an_unchanged_box_and_whats_typed_here_is_told_once() {
+    fn the_phone_starts_with_the_draft_and_tells_what_it_types_once() {
         let mut state = drafting();
         state.receive(kept("and then"));
         assert_eq!(shown(&state), "and then");
@@ -1342,75 +1304,88 @@ mod tests {
         state.tell_draft();
         state.tell_draft();
         assert_eq!(told(&mut state), ["and then the docs"]);
-        // Typed here since, what's typed elsewhere doesn't replace it.
-        type_in_box(&mut state, "and then the docs!");
-        state.receive(draft("on the laptop", 3, 9));
-        assert_eq!(shown(&state), "and then the docs!");
     }
 
     #[test]
-    fn a_box_cleared_on_the_phone_isnt_filled_again_by_a_patch() {
+    fn a_box_cleared_on_the_phone_is_never_filled_again() {
         let mut state = drafting();
         state.receive(kept("old words"));
-        // Cleared, not told yet: any draft that comes leaves it empty.
         type_in_box(&mut state, "");
-        state.receive(draft("old words", 2, 9));
-        state.receive(draft("other words", 3, 9));
+        // Nothing typed elsewhere comes in live, and a message sent that
+        // isn't this leaves it as it is.
+        state.receive(sent(&["other words"]));
         assert_eq!(shown(&state), "");
-        // Told: another's, told before its own came back, is passed over,
-        // and its own coming back changes nothing.
-        state.tell_draft();
-        assert_eq!(told(&mut state), [""]);
-        state.receive(draft("old words", 4, 9));
-        assert_eq!(shown(&state), "");
-        state.receive(draft("", 5, 7));
-        assert_eq!(shown(&state), "");
-        // One told after, the box unchanged, comes in.
-        state.receive(draft("from the laptop", 6, 9));
-        assert_eq!(shown(&state), "from the laptop");
-    }
-
-    #[test]
-    fn a_message_sent_from_the_phone_empties_its_box_for_good_and_says_so() {
-        let mut state = drafting();
-        state.receive(kept("send this"));
-        state.asked.clear();
-        state.submit(true);
-        let sent = state.take_outbox();
-        assert!(!sent.is_empty());
-        // The daemon took it: the box empties, and the empty draft is told.
-        state.receive(ServerMessage::Response(Response::Done));
-        assert_eq!(shown(&state), "");
-        assert_eq!(told(&mut state), [""]);
-        // The old draft's patch, late, doesn't bring it back.
-        state.receive(draft("send this", 2, 9));
-        assert_eq!(shown(&state), "");
-    }
-
-    #[test]
-    fn an_unchanged_box_empties_once_another_window_sends() {
-        let mut state = drafting();
-        state.receive(kept("and then"));
-        state.receive(draft("", 5, 9));
-        assert_eq!(shown(&state), "");
-    }
-
-    #[test]
-    fn an_empty_draft_lost_with_the_connection_stands_against_the_snapshot_after() {
-        let mut state = drafting();
-        state.receive(kept("abc"));
-        type_in_box(&mut state, "");
-        state.tell_draft();
-        assert_eq!(told(&mut state), [""]);
+        // Nor does a reconnect bring back what the daemon had.
         state.lost(1);
         state.connected();
         state.take_outbox();
         state.asked.clear();
-        // The daemon still has the old draft: the box stays empty, and
-        // tells it again.
-        state.receive(kept("abc"));
+        state.receive(kept("old words"));
         assert_eq!(shown(&state), "");
-        assert_eq!(told(&mut state), [""]);
+    }
+
+    #[test]
+    fn a_box_holding_a_message_sent_elsewhere_empties_whatever_else_the_patch_holds() {
+        let mut state = drafting();
+        state.receive(kept("fix the lint"));
+        // Not the last change in the patch, and with white space at its end.
+        state.receive(sent(&["fix the lint\n", "something else"]));
+        assert_eq!(shown(&state), "");
+        assert!(told(&mut state).is_empty(), "the daemon's is empty too");
+    }
+
+    #[test]
+    fn a_box_holding_something_else_keeps_it_and_tells_it_again() {
+        let mut state = drafting();
+        state.receive(kept("fix the lint"));
+        type_in_box(&mut state, "fix the lint and the docs");
+        state.tell_draft();
+        told(&mut state);
+        state.receive(sent(&["fix the lint"]));
+        assert_eq!(shown(&state), "fix the lint and the docs");
+        assert_eq!(told(&mut state), ["fix the lint and the docs"]);
+    }
+
+    #[test]
+    fn a_reloaded_page_takes_the_daemons_draft_over_its_stored_copy_unless_typed_in() {
+        // The page's storage held a draft sent since from another window.
+        let mut state = drafting();
+        state.drafts.insert(TerminalId(4), "sent already".into());
+        state.receive(kept(""));
+        assert_eq!(shown(&state), "");
+        assert!(told(&mut state).is_empty());
+        // Typed in since the page loaded, what's typed stands.
+        let mut state = drafting();
+        state.drafts.insert(TerminalId(4), "mine".into());
+        type_in_box(&mut state, "mine!");
+        state.receive(kept("theirs"));
+        assert_eq!(shown(&state), "mine!");
+    }
+
+    #[test]
+    fn a_reconnect_never_replaces_whats_in_the_box() {
+        let mut state = drafting();
+        state.receive(kept("and then"));
+        state.lost(1);
+        state.connected();
+        state.take_outbox();
+        state.asked.clear();
+        state.receive(kept("from the laptop"));
+        assert_eq!(shown(&state), "and then");
+    }
+
+    #[test]
+    fn a_message_sent_from_the_phone_empties_its_box_for_good() {
+        let mut state = drafting();
+        state.receive(kept("send this"));
+        state.asked.clear();
+        state.submit(true);
+        assert!(!state.take_outbox().is_empty());
+        state.receive(ServerMessage::Response(Response::Done));
+        assert_eq!(shown(&state), "");
+        state.receive(sent(&["send this"]));
+        assert_eq!(shown(&state), "");
+        assert!(told(&mut state).is_empty());
     }
 
     #[test]
