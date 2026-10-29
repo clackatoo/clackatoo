@@ -238,7 +238,7 @@ impl HostedChat {
     /// Why the conversation can't be cut back or switched now, if it
     /// can't: with `stop_tasks`, background tasks going are stopped
     /// instead of refusing.
-    fn unsettled(&self, stop_tasks: bool) -> Option<String> {
+    pub(crate) fn unsettled(&self, stop_tasks: bool) -> Option<String> {
         if self.relations.parent.is_some() {
             return Some(
                 "A chat another agent started can't be rewound: its agent waits on its answers. \
@@ -393,6 +393,17 @@ impl HostedChat {
         if let Some(why) = self.unsettled(stop_tasks) {
             return Err(why);
         }
+        let Some(target) = self.switch_target(at, to)? else {
+            return Ok(Vec::new());
+        };
+        let mut actions = self.stop_tasks_left();
+        actions.extend(self.show_branch(at, target));
+        Ok(actions)
+    }
+
+    /// The first segment of branch `to` of those parting at turn `at`, or
+    /// `None` if it's the one shown; or why it can't be switched to.
+    pub(crate) fn switch_target(&self, at: usize, to: u16) -> Result<Option<usize>, String> {
         let place = self
             .divergence(at)
             .ok_or("The conversation doesn't part there.")?;
@@ -403,7 +414,7 @@ impl HostedChat {
             return Err(format!("There are {} branches there.", place.count));
         }
         if to == place.current {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         let (_, alternatives) = self
             .alternatives(at)
@@ -419,9 +430,7 @@ impl HostedChat {
                 "That branch is with another agent, {agent}: switching to it isn't done yet."
             ));
         }
-        let mut actions = self.stop_tasks_left();
-        actions.extend(self.show_branch(at, target));
-        Ok(actions)
+        Ok(Some(target))
     }
 
     /// Shows the branch whose first segment is `target`, parting at turn

@@ -20,6 +20,7 @@
 //! what the log keeps for the turn, and redoing takes them out in turn.
 
 use std::fmt::Write as _;
+use std::ops::Not as _;
 use std::path::{Path, PathBuf};
 
 use clackatoo_protocol::{Author, BufferId, TerminalId, TurnFilesState};
@@ -59,6 +60,17 @@ pub(super) enum Disk {
     Write(String),
     /// It goes to the trash, as the turn made it.
     Trash,
+}
+
+/// How undoing or redoing a turn went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Reversal {
+    /// Its files were put right, or those that could be, if forced.
+    Done,
+    /// It had nothing to put right.
+    Nothing,
+    /// It couldn't be, or not all of it, and nothing more was done.
+    Refused,
 }
 
 /// A file put right, for the log.
@@ -129,39 +141,60 @@ impl Daemon {
     ///
     /// [`undo_turn`]: Self::undo_turn
     fn reverse_turn(&mut self, chat: TerminalId, turn: usize, redo: bool, force: bool) -> String {
+        self.reverse_turn_said(chat, turn, redo, force).0
+    }
+
+    /// As [`reverse_turn`](Self::reverse_turn), with how it went, for
+    /// undoing or redoing several turns in turn, as a rewind does.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one undo, planned, carried out and said"
+    )]
+    pub(super) fn reverse_turn_said(
+        &mut self,
+        chat: TerminalId,
+        turn: usize,
+        redo: bool,
+        force: bool,
+    ) -> (String, Reversal) {
         let (done, undo) = if redo {
             ("Redid", "redo")
         } else {
             ("Undid", "undo")
         };
         let Some(hosted) = self.chat(chat) else {
-            return String::new();
+            return (String::new(), Reversal::Refused);
         };
         if hosted.answering() {
-            return format!("Wait for the agent to finish before you {undo} a turn.");
+            return (
+                format!("Wait for the agent to finish before you {undo} a turn."),
+                Reversal::Refused,
+            );
         }
         let turns = &hosted.node().turns;
         if turn >= turns.len() {
             let numbered = turns.iter().filter(|turn| turn.switch.is_none()).count();
-            return format!("There's no turn {}.", numbered + turn - turns.len() + 1);
+            let said = format!("There's no turn {}.", numbered + turn - turns.len() + 1);
+            return (said, Reversal::Refused);
         }
         // Counted as people count them, without where the chat moved.
         let Some(number) = clackatoo_protocol::turn_number(turns, turn) else {
-            return format!(
-                "That's where the chat moved to another agent: there's nothing to {undo}."
-            );
+            let said =
+                format!("That's where the chat moved to another agent: there's nothing to {undo}.");
+            return (said, Reversal::Nothing);
         };
         let Some(turn) = hosted.turn_uid(turn) else {
-            return String::new();
+            return (String::new(), Reversal::Refused);
         };
         let cwd = PathBuf::from(hosted.working_directory());
         let Some(edits) = self.agent_files.log.turn(chat, turn) else {
-            return match self.agent_files.log.summary(chat, turn) {
+            let said = match self.agent_files.log.summary(chat, turn) {
                 Some(files) if files.state == TurnFilesState::TooOld => format!(
                     "Turn {number} is too old to {undo}: clackatoo no longer keeps what it changed."
                 ),
                 _ => format!("Turn {number} changed no files."),
             };
+            return (said, Reversal::Nothing);
         };
         // A file whose undo changed nothing has nothing to redo.
         let wanted: Vec<usize> = (edits.files.iter().enumerate())
@@ -169,7 +202,10 @@ impl Daemon {
             .map(|(index, _)| index)
             .collect();
         if wanted.is_empty() {
-            return format!("Turn {number} has nothing to {undo}.");
+            return (
+                format!("Turn {number} has nothing to {undo}."),
+                Reversal::Nothing,
+            );
         }
         let mut plans = Vec::new();
         let mut refused = Vec::new();
@@ -187,19 +223,23 @@ impl Daemon {
             } else {
                 format!(" :{command}! {number} does the other files.")
             };
-            return format!(
+            let said = format!(
                 "Couldn't {undo} turn {number}, so nothing was: {}.{rest}",
                 refused.join("; ")
             );
+            return (said, Reversal::Refused);
         }
         let names: Vec<String> = (plans.iter()).map(|plan| shown(&plan.path, &cwd)).collect();
         let remakes = redo.then_some(turn);
         let made = match self.carry_out_undo(chat, plans, remakes) {
             Ok(made) => made,
-            Err(why) => return format!("Couldn't {undo} turn {number}, so nothing was: {why}."),
+            Err(why) => {
+                let said = format!("Couldn't {undo} turn {number}, so nothing was: {why}.");
+                return (said, Reversal::Refused);
+            }
         };
         let Some(edits) = self.agent_files.log.turn_mut(chat, turn) else {
-            return String::new();
+            return (String::new(), Reversal::Refused);
         };
         let mut put_right = Vec::new();
         let mut failed = Vec::new();
@@ -229,7 +269,14 @@ impl Daemon {
         if !failed.is_empty() {
             let _ = write!(notice, " Left as it was: {}.", failed.join("; "));
         }
-        notice
+        let whole =
+            put_right.is_empty().not() && (force || (refused.is_empty() && failed.is_empty()));
+        let how = if whole {
+            Reversal::Done
+        } else {
+            Reversal::Refused
+        };
+        (notice, how)
     }
 
     /// Works out what taking `file`'s changes out does, changing nothing,
