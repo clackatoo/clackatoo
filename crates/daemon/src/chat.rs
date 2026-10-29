@@ -56,7 +56,7 @@ mod subagent;
 
 pub(crate) use limits::Limits;
 pub(crate) use relations::{Cause, MAX_INBOX, Message, Relations};
-pub(crate) use subagent::{Wanted, role_for};
+pub(crate) use subagent::{Standing, Wanted, role_for};
 
 /// The most characters of a title the agent gives a conversation that a
 /// chat keeps, for its tab.
@@ -422,6 +422,11 @@ pub(crate) struct HostedChat {
     put_back: Vec<Action>,
     /// The mode a new chat asks for when its session first opens.
     starting_mode: Option<String>,
+    /// The mode it was in, by its setting's ID and the value, as the saved
+    /// workspaces kept it, if it was made again from them as an agent's
+    /// chat (see [`Self::stand_again`]): what it asks for again, and is
+    /// kept as, until its session says. Not handed over: `chosen` holds it.
+    restored_mode: Option<(String, String)>,
     journal: Journal,
     /// Where what subagents did stands in the turn answering: see
     /// `nested::Index`.
@@ -682,6 +687,7 @@ impl HostedChat {
                 ),
             ],
             starting_mode: agent.starting_mode.clone(),
+            restored_mode: None,
             journal: Journal::default(),
             nest: nested::Index::default(),
             diffs: Vec::new(),
@@ -1503,7 +1509,7 @@ impl HostedChat {
             self.chosen.push((setting.id.clone(), mode));
         } else if starting.is_none()
             && fresh
-            && self.relations.parent.is_some()
+            && self.agents_chat()
             && let Some(setting) = self.setting_of(SettingKind::Mode)
             && !self.chosen.iter().any(|(id, _)| *id == setting.id)
             && let Some(safest) = modes::safest(
@@ -1705,8 +1711,7 @@ impl HostedChat {
         } else {
             self.known = 0;
             // An agent's chat never starts in more than the user chose.
-            self.starting_mode =
-                (to.starting_mode.clone()).filter(|_| self.relations.parent.is_none());
+            self.starting_mode = (to.starting_mode.clone()).filter(|_| !self.agents_chat());
             settings.map(<[Setting]>::to_vec).unwrap_or_default()
         };
         self.chosen.retain(|(id, _)| !chat_wide(id));
@@ -1837,7 +1842,7 @@ impl HostedChat {
             // first it offers, as Manual or Read-only, never more than its
             // parent chose.
             if setting.kind == SettingKind::Mode
-                && self.relations.parent.is_some()
+                && self.agents_chat()
                 && let Some(safest) = setting.choices.first()
             {
                 chosen.push((setting.id.clone(), safest.value.clone()));
@@ -6960,6 +6965,66 @@ mod tests {
         kid.started_by(TerminalId(7), TerminalId(7), 1, Some("agent".into()));
         kid.start_as("x", Limits::NoCommands, None, Wanted::default());
         kid.wanted = None;
+        let actions = kid.connected(Opened {
+            session: "k".into(),
+            settings: Some(codex_settings()),
+        });
+        assert!(actions.contains(&read_only), "{actions:?}");
+    }
+
+    #[test]
+    fn a_subagent_made_again_after_a_restart_stands_as_it_did_in_the_mode_it_was_in() {
+        use crate::profiles::Limits;
+
+        let mut kid = chat_with("codex");
+        kid.go_on_with(clackatoo_protocol::ResumeSession {
+            session: "k".into(),
+            title: String::new(),
+        });
+        kid.stand_again(Standing {
+            parent: Some(TerminalId(7)),
+            root: Some(TerminalId(7)),
+            depth: 1,
+            profile: Some("explore".into()),
+            limits: Limits::None,
+            kept: true,
+            mode: Some(("mode".into(), "read-only".into())),
+        });
+        assert_eq!(kid.relations.parent, Some(TerminalId(7)));
+        assert_eq!(
+            (kid.relations.root, kid.relations.depth),
+            (Some(TerminalId(7)), 1)
+        );
+        assert_eq!(
+            (kid.profile(), kid.limits()),
+            (Some("explore"), Limits::None)
+        );
+        assert!(kid.kept_by_user() && kid.agents_chat());
+        // Before its session opens, it's ranked, and kept, by the mode it
+        // was in, never the one a new chat of the user's starts in.
+        assert_eq!(kid.mode_to_come(), Some("read-only"));
+        assert_eq!(kid.kept_mode(), Some(("mode".into(), "read-only".into())));
+        let actions = kid.connected(Opened {
+            session: String::new(),
+            settings: Some(codex_settings()),
+        });
+        let read_only = Action::Set {
+            setting: "mode".into(),
+            value: "read-only".into(),
+        };
+        assert!(actions.contains(&read_only), "{actions:?}");
+        // And the limits go with the profile: one that may run no commands
+        // opens read-only, whatever mode was kept.
+        let mut kid = chat_with("codex");
+        kid.stand_again(Standing {
+            depth: 1,
+            profile: Some("x".into()),
+            limits: Limits::NoCommands,
+            mode: Some(("mode".into(), "agent".into())),
+            ..Standing::default()
+        });
+        // On its own, it's still an agent's chat.
+        assert!(kid.agents_chat() && kid.relations.root.is_none());
         let actions = kid.connected(Opened {
             session: "k".into(),
             settings: Some(codex_settings()),

@@ -8,7 +8,9 @@
 //! each pane what's needed to make it again: a terminal's directory, and
 //! the command its shell was running, if one was; an editor's file, the
 //! directory it was opened from, and where its cursor and view were; an explorer's or a folder's root; a
-//! board; a review; and a chat's agent and session, which the agent kept.
+//! board; a review; and a chat's agent and session, which the agent kept,
+//! and for a chat an agent started, which chat started it, its profile
+//! and limits, and whether the user kept it.
 //! Beside the workspaces, the daemon's connections to the daemons on other
 //! machines: each one's host, and the command that runs clackatoo there.
 //! Each workspace's background tabs, as its tabs are, in order: terminals
@@ -283,6 +285,11 @@ pub(crate) enum Pane {
         /// Whether its Browser setting was on.
         #[serde(default)]
         browser: bool,
+        /// Where it stood among the chats agents started, if an agent
+        /// started it (CLACKA-184). Builds before then pass this over, and
+        /// make it a chat of the user's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started: Option<Started>,
     },
     /// An editor, editing a file, or a buffer with no file yet, by an
     /// empty path.
@@ -318,6 +325,49 @@ pub(crate) enum Pane {
         /// The directory whose project it's of.
         root: String,
     },
+}
+
+/// Where a chat an agent started stood among the others: what a cold
+/// start needs to make it a subagent again, with no more than it had.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Started {
+    /// The chat whose agent started it, or took it on, by its ID in the
+    /// run that wrote the file, if that chat was kept too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) parent: Option<u32>,
+    /// How many chats started by agents led down to it: 1 for one the
+    /// user's chat started. Never less as it comes back, so it starts no
+    /// more chats than it could.
+    #[serde(default)]
+    pub(crate) depth: u8,
+    /// The turn of its parent's whose card showed it, by its index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) turn: Option<u32>,
+    /// The profile it was started as, if one: `explore`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) profile: Option<String>,
+    /// What it may do beyond its agent's own settings, by the limits'
+    /// names (`read-only`); one this build doesn't know reads as the
+    /// strictest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) limits: Option<String>,
+    /// The user had it in a pane and sent it back, so it's theirs to
+    /// close, never its parent's agent's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) kept: bool,
+    /// The mode its agent was in, if it said: asked for again as its
+    /// session opens, never the mode a new chat of the user's starts in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) mode: Option<Mode>,
+}
+
+/// A mode an agent was in: its setting, and the value chosen.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Mode {
+    /// The setting's ID, as the agent names it: `mode`.
+    pub(crate) setting: String,
+    /// The value chosen, as the agent names it: `default`.
+    pub(crate) value: String,
 }
 
 /// The command a terminal is kept running, as the user marked it.
@@ -700,6 +750,7 @@ mod tests {
                                         tools: Tools::Allow,
                                         task: false,
                                         browser: true,
+                                        started: None,
                                     }),
                                     Layout::Pane(Pane::Review {
                                         chat: Some(7),
@@ -822,6 +873,64 @@ mod tests {
         let encoded = state.encode();
         assert!(String::from_utf8_lossy(&encoded).contains("\"dir\": \"/src/clackatoo\""));
         assert_eq!(State::decode(&encoded).unwrap(), state);
+    }
+
+    #[test]
+    fn where_a_subagent_stood_reads_back_and_is_left_out_for_a_users_chat() {
+        let encoded = String::from_utf8(state().encode()).unwrap();
+        assert!(!encoded.contains("\"started\""), "{encoded}");
+        let mut state = state();
+        let started = Started {
+            parent: Some(7),
+            depth: 1,
+            turn: Some(2),
+            profile: Some("explore".into()),
+            limits: Some("read-only".into()),
+            kept: true,
+            mode: Some(Mode {
+                setting: "mode".into(),
+                value: "default".into(),
+            }),
+        };
+        state.workspaces[1].tabs[0].layout = Layout::Pane(Pane::Chat {
+            id: 8,
+            agent: "claude".into(),
+            session: Some("5f0d".into()),
+            title: "Read the parser".into(),
+            cwd: "/src/clackatoo".into(),
+            model: None,
+            tools: Tools::Ask,
+            task: false,
+            browser: false,
+            started: Some(started),
+        });
+        let encoded = state.encode();
+        let text = String::from_utf8_lossy(&encoded);
+        assert!(
+            text.contains("\"parent\": 7") && text.contains("\"limits\": \"read-only\""),
+            "{text}"
+        );
+        assert_eq!(State::decode(&encoded).unwrap(), state);
+        // Only what's known is written.
+        state.workspaces[1].tabs[0].layout = Layout::Pane(Pane::Chat {
+            id: 8,
+            agent: "claude".into(),
+            session: None,
+            title: String::new(),
+            cwd: "/src".into(),
+            model: None,
+            tools: Tools::Ask,
+            task: false,
+            browser: false,
+            started: Some(Started {
+                depth: 1,
+                ..Started::default()
+            }),
+        });
+        let text = String::from_utf8(state.encode()).unwrap();
+        for absent in ["parent", "turn", "profile", "limits", "kept", "mode"] {
+            assert!(!text.contains(&format!("\"{absent}\"")), "{absent}: {text}");
+        }
     }
 
     /// Written by the first build that wrote version 1. It must always be

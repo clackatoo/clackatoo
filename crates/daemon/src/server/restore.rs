@@ -17,7 +17,9 @@
 //! it was; each explorer and folder at its root; boards and reviews; and
 //! each chat on its agent's session, which it opens only once it's shown
 //! or sent a message, loading it so the conversation so far is told, and
-//! nothing told acts (see `chat::resume`). A terminal whose shell was
+//! nothing told acts (see `chat::resume`); a chat an agent started is
+//! its parent's subagent again, as its profile, with no more than it had
+//! ([`Daemon::restore_standing`]). A terminal whose shell was
 //! running a command comes back with it in [`Workspaces::restored`], for
 //! windows to offer to put at the new shell's prompt; it's never run by
 //! itself, nor put there unasked. Nothing in the
@@ -43,7 +45,8 @@ use clackatoo_protocol::{
 use clackatoo_term::Progress;
 
 use super::{Daemon, Hosted};
-use crate::chat::HostedChat;
+use crate::chat::{HostedChat, Standing};
+use crate::profiles::Limits;
 use crate::saved::{self, Pane, Scope, State, Tools};
 use crate::workspaces::Borrowed;
 
@@ -517,6 +520,7 @@ impl Daemon {
                     },
                     task: chat.task(),
                     browser: chat.browser(),
+                    started: self.kept_standing(terminal, chat),
                 }),
             },
             Content::Buffer(buffer) => {
@@ -656,6 +660,7 @@ impl Daemon {
         self.workspaces.refresh_background();
         self.restate_backgrounds();
         self.restate_lent_backgrounds();
+        self.restore_standing(&state, &chats);
         self.restore_cold_activities(state.operations, &chats);
         self.keep_restored();
         self.restore_borrowers(&state.borrowers);
@@ -927,6 +932,7 @@ impl Daemon {
                 tools,
                 task,
                 browser,
+                started: _,
             }) => {
                 if *room == 0 || chats.contains_key(id) {
                     return;
@@ -956,6 +962,141 @@ impl Daemon {
                 chats.insert(*id, (chat, false));
             }
             saved::Layout::Pane(_) => {}
+        }
+    }
+
+    /// Where the chat `id`, `chat`, stands among the chats agents
+    /// started, to keep: `None` for one the user started.
+    fn kept_standing(&self, id: TerminalId, chat: &HostedChat) -> Option<saved::Started> {
+        if !chat.agents_chat() && chat.profile().is_none() {
+            return None;
+        }
+        let relations = chat.relations();
+        let parent = (relations.parent).filter(|&parent| self.chat_ref(parent).is_some());
+        Some(saved::Started {
+            parent: parent.map(|parent| parent.0),
+            depth: relations.depth,
+            turn: parent.and_then(|parent| Some(self.chat_ref(parent)?.subagent(id)?.turn)),
+            profile: chat.profile().map(str::to_owned),
+            limits: Some(chat.limits().name().to_owned()),
+            kept: chat.kept_by_user(),
+            mode: (chat.kept_mode()).map(|(setting, value)| saved::Mode { setting, value }),
+        })
+    }
+
+    /// Makes each chat an agent started, made again in `chats` by its ID
+    /// in the run that kept `state`, stand as it did: under its parent, on
+    /// its parent's card, as its profile, with its limits, and the mode it
+    /// was in, never more than it had. A chat whose parent wasn't made
+    /// again is on its own, with what it may do as it was, and says so. A
+    /// chain of parents that loops, or goes further up than chats go deep,
+    /// as only a file mended by hand could have, is cut.
+    fn restore_standing(&mut self, state: &State, chats: &HashMap<u32, (TerminalId, bool)>) {
+        let mut kept = HashMap::new();
+        for tab in state
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+        {
+            let mut panes = Vec::new();
+            saved_panes(&tab.layout, &mut panes);
+            for pane in panes {
+                if let Pane::Chat {
+                    id,
+                    started: Some(started),
+                    ..
+                } = pane
+                    && chats.contains_key(id)
+                {
+                    kept.entry(*id).or_insert(started);
+                }
+            }
+        }
+        if kept.is_empty() {
+            return;
+        }
+        // Each one's parent, by the file's IDs, if it was made again.
+        let mut parents: HashMap<u32, u32> = (kept.iter())
+            .filter_map(|(&id, started)| {
+                let parent = started.parent?;
+                (parent != id && chats.contains_key(&parent)).then_some((id, parent))
+            })
+            .collect();
+        let mut order: Vec<u32> = kept.keys().copied().collect();
+        order.sort_unstable();
+        for &id in &order {
+            if above(&parents, id).is_none() {
+                log::warn!(
+                    "chat {id} kept: its parents go round, or too far up, so it's on its own"
+                );
+                parents.remove(&id);
+            }
+        }
+        // Parents first, so each child is made to stand under its parent
+        // as it stands now.
+        order.sort_by_key(|id| (above(&parents, *id).unwrap_or(0), *id));
+        for id in order {
+            let (chat, _) = chats[&id];
+            let started = kept[&id];
+            let parent = parents.get(&id).map(|parent| chats[parent].0);
+            let of = parent.and_then(|parent| Some((parent, self.chat_ref(parent)?)));
+            let (root, depth, parent_limits) = match of {
+                Some((parent, of)) => (
+                    Some(of.relations().root.unwrap_or(parent)),
+                    of.relations().depth.saturating_add(1),
+                    of.limits(),
+                ),
+                None => (None, 1, Limits::None),
+            };
+            let limits = match started.limits.as_deref() {
+                Some(name) => Limits::named(name).unwrap_or_else(|| {
+                    log::warn!(
+                        "chat {id} kept with limits {name:?}, which this build doesn't know: \
+                         it's read-only"
+                    );
+                    Limits::ReadOnly
+                }),
+                // A profile is never made again without its limits.
+                None if started.profile.is_some() => Limits::ReadOnly,
+                None => Limits::None,
+            };
+            let standing = Standing {
+                parent,
+                root,
+                depth: started.depth.max(depth),
+                profile: started.profile.clone(),
+                limits: limits.max(parent_limits),
+                kept: started.kept,
+                mode: (started.mode.as_ref())
+                    .map(|mode| (mode.setting.clone(), mode.value.clone())),
+            };
+            let alone = started.parent.is_some() && parent.is_none();
+            let Some(hosted) = self.chat(chat) else {
+                continue;
+            };
+            hosted.stand_again(standing);
+            if alone {
+                hosted.stand_alone();
+                log::info!("chat {chat} made again on its own: the chat that started it wasn't");
+                continue;
+            }
+            let Some(parent) = parent else {
+                continue;
+            };
+            log::info!("chat {chat} made again as a subagent of chat {parent}");
+            // Its card in its parent, on the turn it was, as neither has
+            // its turns until its session is told again.
+            let shown = self.workspaces.get().pane_showing(chat).is_some();
+            let turn = (started.turn)
+                .or_else(|| Some(self.chat_ref(parent)?.turn_at(u64::MAX)))
+                .unwrap_or_default();
+            let card = (self.chat_ref(chat)).map(|kid| kid.as_subagent(turn, shown));
+            if let Some(card) = card
+                && let Some(of) = self.chat(parent)
+            {
+                of.set_subagent(card);
+                self.collect_damage(parent);
+            }
         }
     }
 
@@ -1290,6 +1431,23 @@ fn unoffer(layout: &mut saved::Layout, at: &mut usize, offered: &[usize]) {
             *at += 1;
         }
     }
+}
+
+/// How many chats are above the chat `id` by `parents`, each chat's
+/// parent by the saved file's IDs: `None` if they go round, or further up
+/// than chats go deep.
+fn above(parents: &HashMap<u32, u32>, id: u32) -> Option<u8> {
+    /// Further than chats go deep (`MAX_DEPTH`), and than chats taken on
+    /// by those above as their parents close can be.
+    const MOST: u8 = 8;
+    let mut at = id;
+    for count in 0..=MOST {
+        match parents.get(&at) {
+            None => return Some(count),
+            Some(&up) => at = up,
+        }
+    }
+    None
 }
 
 /// The panes of `layout`, as kept, in order, from the top left, added to

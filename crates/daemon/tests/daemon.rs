@@ -14352,6 +14352,198 @@ fn closing_a_subagents_pane_sends_it_back_to_its_card_until_its_chat_is_closed()
     assert!(!alive(&mut client).contains(&other));
 }
 
+/// A daemon keeping its workspaces in `file`, as [`TestDaemon::keeping`],
+/// whose chats' agents have clackatoo's tools, as
+/// [`TestDaemon::with_tools`].
+fn keeping_with_tools(file: &Path) -> TestDaemon {
+    TestDaemon::start_with_restoring(
+        |dir, config| {
+            let agent = vec![
+                fake_agent().into(),
+                "--log".into(),
+                dir.join("agent.log").into(),
+            ];
+            config.agents.custom = vec![custom_agent("claude", agent)];
+            config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+            config.workspaces = Some(file.to_owned());
+        },
+        true,
+    )
+}
+
+/// Every chat, as windows list them.
+fn chats_listed(client: &mut Client) -> Vec<clackatoo_protocol::ChatSummary> {
+    let Response::Chats(chats) = client.request(&Request::WatchChats).unwrap() else {
+        panic!("not the chats");
+    };
+    chats
+}
+
+#[test]
+fn a_subagent_in_a_pane_comes_back_a_subagent_after_a_cold_restart() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    {
+        let daemon = keeping_with_tools(&file);
+        let mut client = daemon.client();
+        let a = start_tooled_chat(&mut client, AgentTools::Allow);
+        let kid = TerminalId(a.0 + 1);
+        let show = "mcp start_chat {\"prompt\":\"hi kid\",\"show\":true,\"profile\":\"explore\"}";
+        ask_for(&mut client, a, show, Duration::from_secs(10));
+        wait_for_chat(&mut client, kid, |node| last_outcome(node).is_some());
+        // Sent back and opened again from its card, it's the user's.
+        let panes = first_tab_panes(&client.watch_workspaces().unwrap());
+        client.close_pane(panes[1]).unwrap();
+        client.chat(a, ChatAction::Open { chat: kid }).unwrap();
+        assert_eq!(tab_contents(&mut client)[1], Content::Terminal(kid));
+        let card = card_of(&mut client, a);
+        wait_for_kept(&file, |kept| {
+            kept.contains(&format!("\"parent\": {}", a.0))
+                && kept.contains("\"profile\": \"explore\"")
+                && kept.contains("\"limits\": \"read-only\"")
+                && kept.contains("\"kept\": true")
+                && kept.contains(&format!("\"turn\": {}", card[0].turn))
+        });
+    }
+    let daemon = keeping_with_tools(&file);
+    let mut client = daemon.client();
+    let [Content::Terminal(a), Content::Terminal(kid)] = tab_contents(&mut client)[..] else {
+        panic!("not the two chats: {:?}", tab_contents(&mut client));
+    };
+    // Its band: started by the chat made again with it, as its profile.
+    let listed = chats_listed(&mut client);
+    let of = |chat| listed.iter().find(|listed| listed.chat == chat).unwrap();
+    assert_eq!(
+        (of(kid).parent, of(kid).profile.as_deref()),
+        (Some(a), Some("explore"))
+    );
+    assert_eq!((of(a).parent, of(a).profile.as_deref()), (None, None));
+    // On its parent's card, in a pane, as it was.
+    let card = card_of(&mut client, a);
+    assert_eq!(card.len(), 1, "{card:#?}");
+    assert_eq!((card[0].chat, card[0].shown), (kid, true));
+    assert_eq!(card[0].profile.as_deref(), Some("explore"));
+
+    // Its parent messages it, and waits for it, as a child of its own.
+    let prompt = format!(
+        "mcp send_to_chat {{\"chat\":{kid},\"message\":\"hello again\"}}\n\
+         mcp wait_for_chat {{\"chat\":{kid}}}"
+    );
+    let words = last_words(&ask_for(&mut client, a, &prompt, Duration::from_secs(20)));
+    assert!(
+        words.contains(&format!("send_to_chat: Sent to chat {kid}.")),
+        "{words}"
+    );
+    assert!(
+        words.contains(&format!(
+            "wait_for_chat: Chat {kid}'s answer to your message"
+        )),
+        "{words}"
+    );
+    // Still read-only, as its profile is: it can't message the chat that
+    // started it, whose agent may do more.
+    let back = format!("mcp send_to_chat {{\"chat\":{a},\"message\":\"hi\"}}");
+    let words = last_words(&ask_for(&mut client, kid, &back, Duration::from_secs(10)));
+    assert!(words.contains("may do more than this one"), "{words}");
+    // And it's the user's still: its parent's agent can't close it.
+    let close = format!("mcp close_chat {{\"chat\":{kid}}}");
+    let words = last_words(&ask_for(&mut client, a, &close, Duration::from_secs(10)));
+    assert!(words.contains("close_chat: failed:"), "{words}");
+
+    // `:q` sends it back to its parent's card, rather than closing it.
+    let panes = first_tab_panes(&client.watch_workspaces().unwrap());
+    client.close_pane(panes[1]).unwrap();
+    assert_eq!(tab_contents(&mut client), [Content::Terminal(a)]);
+    let alive: Vec<TerminalId> = (client.list_terminals().unwrap().iter())
+        .map(|terminal| terminal.id)
+        .collect();
+    assert!(alive.contains(&kid), "{alive:?}");
+    let card = card_of(&mut client, a);
+    assert_eq!((card[0].chat, card[0].shown), (kid, false));
+}
+
+#[test]
+fn a_subagent_kept_without_its_parent_or_by_an_older_build_is_on_its_own_with_its_limits() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let chat = |id: u32, title: &str, started: Option<serde_json::Value>| {
+        let mut chat = serde_json::json!({
+            "id": id,
+            "agent": "claude",
+            "session": "past-2",
+            "title": title,
+            "cwd": kept.path(),
+            "tools": "allow",
+        });
+        if let Some(started) = started {
+            chat["started"] = started;
+        }
+        serde_json::json!({ "pane": { "chat": chat } })
+    };
+    // Chat 4's parent wasn't kept, and its limits are newer than this
+    // build; chats 5 and 6 each name the other as parent; chat 8 was kept
+    // by a build from before subagents were.
+    let orphan = serde_json::json!({
+        "parent": 3, "depth": 1, "profile": "explore", "limits": "sandboxed",
+        "mode": { "setting": "mode", "value": "auto" },
+    });
+    let parts = [
+        chat(4, "orphan", Some(orphan)),
+        chat(
+            5,
+            "five",
+            Some(serde_json::json!({ "parent": 6, "depth": 1 })),
+        ),
+        chat(
+            6,
+            "six",
+            Some(serde_json::json!({ "parent": 5, "depth": 1 })),
+        ),
+        chat(8, "older", None),
+    ];
+    let json = serde_json::json!({
+        "clackatoo_workspaces": 1,
+        "workspaces": [{"name": "w", "tabs": [{"layout": {"split": {
+            "left_to_right": true,
+            "parts": parts,
+            "shares": [1, 1, 1, 1],
+        }}}]}],
+    });
+    std::fs::write(&file, json.to_string()).unwrap();
+    let daemon = keeping_with_tools(&file);
+    let mut client = daemon.client();
+    let made: Vec<TerminalId> = (tab_contents(&mut client).iter())
+        .map(|content| content.terminal().unwrap())
+        .collect();
+    let [orphan, fifth, sixth, older] = made[..] else {
+        panic!("not four chats: {made:?}");
+    };
+    let listed = chats_listed(&mut client);
+    let of = |chat| listed.iter().find(|listed| listed.chat == chat).unwrap();
+    assert_eq!(
+        (of(orphan).parent, of(orphan).profile.as_deref()),
+        (None, Some("explore"))
+    );
+    assert_eq!(
+        (of(older).parent, of(older).profile.as_deref()),
+        (None, None)
+    );
+    // The loop is cut once: one of the two is under the other.
+    assert_eq!((of(fifth).parent, of(sixth).parent), (None, Some(fifth)));
+    // Limits it doesn't know are the strictest: it can't message a chat
+    // in the mode it was in, Claude Code's new chats' Auto, that may do
+    // more.
+    ask_for(&mut client, older, "hi", Duration::from_secs(10));
+    let message = format!("mcp send_to_chat {{\"chat\":{older},\"message\":\"hi\"}}");
+    let words = last_words(&ask_for(
+        &mut client,
+        orphan,
+        &message,
+        Duration::from_secs(10),
+    ));
+    assert!(words.contains("may do more than this one"), "{words}");
+}
+
 #[test]
 fn start_chats_starts_several_and_wait_for_chats_sums_them_up_for_all_or_the_first() {
     let daemon = TestDaemon::with_tools();

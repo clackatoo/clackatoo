@@ -38,7 +38,96 @@ pub(crate) struct Wanted {
     pub(crate) read_only: bool,
 }
 
+/// Where a chat an agent started stood, as the saved workspaces kept it:
+/// what a daemon starting afresh makes it again with (see
+/// `server::restore`), never more than it had.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Standing {
+    /// The chat whose agent started it, made again, if it was.
+    pub(crate) parent: Option<TerminalId>,
+    /// The user's chat the chats starting it go back to, if it has a
+    /// parent.
+    pub(crate) root: Option<TerminalId>,
+    /// How many chats started by agents lead down to it.
+    pub(crate) depth: u8,
+    /// The profile it was started as, if one.
+    pub(crate) profile: Option<String>,
+    /// What it may do beyond its agent's own settings.
+    pub(crate) limits: Limits,
+    /// The user had it in a pane and sent it back.
+    pub(crate) kept: bool,
+    /// The mode it was in, by its setting's ID and the value, if known.
+    pub(crate) mode: Option<(String, String)>,
+}
+
 impl HostedChat {
+    /// It's made again as the daemon starts afresh, as a chat an agent
+    /// started that stood as `standing` says: its parent, profile and
+    /// limits, together, and the mode it was in, asked for as its session
+    /// opens, never the mode a new chat of the user's starts in.
+    pub(crate) fn stand_again(&mut self, standing: Standing) {
+        let Standing {
+            parent,
+            root,
+            depth,
+            profile,
+            limits,
+            kept,
+            mode,
+        } = standing;
+        self.relations.parent = parent;
+        self.relations.root = parent.and(root);
+        self.relations.depth = depth;
+        self.starting_mode = None;
+        self.chosen
+            .retain(|(id, _)| id != PROFILE_SETTING && id != LIMITS_SETTING);
+        if let Some(profile) = profile {
+            (self.chosen).push((PROFILE_SETTING.to_owned(), profile));
+        }
+        (self.chosen).push((LIMITS_SETTING.to_owned(), limits.name().to_owned()));
+        if kept {
+            self.keep_for_user();
+        }
+        if let Some((setting, value)) = mode {
+            self.chosen.retain(|(id, _)| *id != setting);
+            (self.chosen).push((setting.clone(), value.clone()));
+            self.restored_mode = Some((setting, value));
+        }
+        // One that may run no commands opens in its agent's read-only
+        // mode, where it has one, as it did as it started.
+        if limits.no_commands() {
+            self.wanted.get_or_insert_with(Wanted::default).read_only = true;
+        }
+    }
+
+    /// It was made again as the daemon started afresh, and the chat that
+    /// started it wasn't: it's on its own, and says so.
+    pub(crate) fn stand_alone(&mut self) {
+        self.set_notice(Some(
+            "The chat that started this one wasn't kept through the restart, so it's on its own \
+             now, with no more than it could do before."
+                .to_owned(),
+        ));
+    }
+
+    /// Whether an agent started it: it has a parent, or had one before a
+    /// restart that didn't keep it. Such a chat never starts in a mode
+    /// that may let it do more than it could.
+    pub(crate) fn agents_chat(&self) -> bool {
+        self.relations.parent.is_some() || self.relations.depth > 0
+    }
+
+    /// The mode it's in, by its setting's ID and the value, as the saved
+    /// workspaces keep it: as its agent last said, or if its session
+    /// hasn't opened since it was made again, the mode it was made again
+    /// with.
+    pub(crate) fn kept_mode(&self) -> Option<(String, String)> {
+        match self.setting_of(SettingKind::Mode) {
+            Some(setting) => Some((setting.id.clone(), setting.value.clone())),
+            None => self.restored_mode.clone(),
+        }
+    }
+
     /// The profile it was started as, if it was.
     pub(crate) fn profile(&self) -> Option<&str> {
         (self.chosen.iter())
@@ -99,11 +188,18 @@ impl HostedChat {
     }
 
     /// The mode it asks for as its session opens, by its value, if its
-    /// session hasn't opened yet and it asks for one.
+    /// session hasn't opened yet, or since it was made again as the daemon
+    /// started, and it asks for one.
     pub(crate) fn mode_to_come(&self) -> Option<&str> {
-        self.session
-            .is_none()
-            .then_some(self.starting_mode.as_deref())?
+        if self.session.is_none() {
+            return self.starting_mode.as_deref();
+        }
+        // Made again as the daemon started, and not opened since: the
+        // mode it was in, which it asks for again.
+        if self.setting_of(SettingKind::Mode).is_none() {
+            return (self.restored_mode.as_ref()).map(|(_, value)| value.as_str());
+        }
+        None
     }
 
     /// Where the mode `value` is among the modes its agent offers, from
