@@ -3977,6 +3977,52 @@ fn what_an_agent_that_died_started_is_stopped_at_once() {
     assert_eq!(last_words(&ask(&mut client, chat, "hi")), "echo: hi\n");
 }
 
+/// Claude Code's slash commands reach the chat's view, from the adapter
+/// in `CLACKATOO_REAL_AGENT` (as below), on the cheapest model: once its
+/// session opens, or at most after one short message (CLACKA-189).
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agents_slash_commands_reach_the_chat() {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
+    };
+    let daemon = TestDaemon::start_with_agent(|_| {
+        ["env", "ANTHROPIC_MODEL=haiku"]
+            .into_iter()
+            .chain(command.split_whitespace())
+            .map(Into::into)
+            .collect()
+    });
+    let mut client = daemon.client();
+    client.new_workspace(None, new_chat()).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minute = Duration::from_mins(1);
+    wait_for_chat_for(&mut client, chat, minute, |node| {
+        node.state == ChatState::Ready
+    });
+    let node = chat_now(&mut client, chat);
+    let node = if node.commands.is_empty() {
+        client
+            .chat(chat, ChatAction::Send("Reply with one word: pong.".into()))
+            .unwrap();
+        wait_for_chat_for(&mut client, chat, minute, |node| {
+            !node.commands.is_empty() && last_outcome(node).is_some()
+        })
+    } else {
+        node
+    };
+    let names: Vec<&str> = (node.commands.iter())
+        .map(|command| command.name.as_str())
+        .collect();
+    assert!(names.contains(&"compact"), "{names:?}");
+    assert!(
+        (node.commands.iter())
+            .all(|command| !command.name.starts_with('/') && !command.description.contains('\n')),
+        "{:#?}",
+        node.commands
+    );
+}
+
 /// Claude Code, through its adapter, on the cheapest model. Run by hand,
 /// with the adapter's command in `CLACKATOO_REAL_AGENT`, such as
 /// `~/.local/share/clackatoo/agents/claude-0.98.0/claude-agent-acp/node_modules/.bin/claude-agent-acp`,
