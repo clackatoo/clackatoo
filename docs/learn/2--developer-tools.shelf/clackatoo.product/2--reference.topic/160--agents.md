@@ -434,6 +434,8 @@ The [`notify` option](~clackatoo/reference/config#options) says which are shown:
 
 When the agent changes a file you have open, the change lands in the editor as the agent's own edit, in every window showing it, beside anything you've typed and not saved. `u` takes back your edits, never the agent's, and each of the agent's tool calls is one step of its own. A change to a line you've changed and not saved isn't made: the bar and the chat say so, the file keeps the agent's version, and `:e!` takes it or `:w!` keeps yours.
 
+A change to a big file, such as an agent's rewrite of a few megabytes, is merged into the editor on a thread of the daemon's own, so windows and terminals carry on while it's worked out. It lands once it's ready: anything you type in the file meanwhile is kept, and the change is merged again around it. Saving the file, or `:e!`, waits for it first.
+
 The file on disk gets the agent's change underneath yours: a file you'd saved stays saved, and one you hadn't stays changed by just your edits, still unsaved. So the commands the agent runs, such as `cargo build`, see its change, and your work in progress reaches the disk only when you write it.
 
 The agent's commands change files too, such as `cargo fmt`, `sed -i` or a code generator, without saying so. clackatoo watches the files you have open, and a change made while one of the agent's tools runs, with only that chat answering in the project, is taken in as that agent's, under the same rule about lines you've changed; undoing its turn takes it out too. A change made while it's thinking or asking permission, or while two chats are answering in the project, is treated as from outside. Files indented with tabs are taken in like any other.

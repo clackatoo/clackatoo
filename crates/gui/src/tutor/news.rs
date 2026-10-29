@@ -1085,6 +1085,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "In a chat's box, Up recalls messages sent and takes queued ones back, Ctrl+R finds one, and drafts are kept",
     },
+    News {
+        id: "big-agent-edits",
+        date: "2026-10-29",
+        lesson: "agents",
+        what: "An agent's big edit to a file you have open no longer freezes the window while it lands",
+    },
 ];
 
 impl News {
