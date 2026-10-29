@@ -48,6 +48,7 @@ mod links;
 mod lua;
 mod markdown;
 mod motion;
+mod notify;
 mod objects;
 mod options;
 mod other;

@@ -142,6 +142,13 @@ impl ChatPane {
         self.view.node.question.is_some()
     }
 
+    /// Whether its last turn ended in failure, as far as its view has it.
+    pub(crate) fn last_turn_failed(&self) -> bool {
+        (self.view.node.turns.last())
+            .and_then(|turn| turn.end.as_ref())
+            .is_some_and(|end| matches!(end.outcome, clackatoo_protocol::Outcome::Failed(_)))
+    }
+
     /// Whether a local image modal owns the chat's input.
     pub(crate) fn viewing_modal(&self) -> bool {
         self.view.viewing_modal()

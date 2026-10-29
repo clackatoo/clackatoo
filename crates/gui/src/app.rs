@@ -504,13 +504,19 @@ impl App {
         remote_command: String,
     ) -> Self {
         let proxy = session.proxy();
+        let mut desk = Desk::default();
+        // A window on the desktop tells the desktop of chats it can't see;
+        // one drawn offscreen, to look at (see `look`), doesn't.
+        if matches!(proxy, crate::session::Proxy::EventLoop(_)) {
+            desk.set_notifier(Box::new(crate::notify::Desktop::new(proxy.clone())));
+        }
         let forwards = Forwards::new(move || drop(proxy.send_event(SessionEvent::Forwards)));
         Self {
             native: native::Native::default(),
             started,
             startup,
             frame: None,
-            desk: Desk::default(),
+            desk,
             buttons: ButtonLayout::default(),
             pointer: None,
             hover: Hit::Nothing,
@@ -3827,6 +3833,11 @@ impl App {
                     self.request_redraw();
                 }
             }
+            SessionEvent::Notified { chat, token } => {
+                self.desk.notice_clicked(chat);
+                self.raise(token.as_deref());
+                self.request_redraw();
+            }
             SessionEvent::Hosts(found) => {
                 if let Some(picker) = &mut self.picker
                     && picker.found(found)
@@ -3836,6 +3847,23 @@ impl App {
             }
             SessionEvent::Lost(reason) => self.lost(reason),
         }
+    }
+
+    /// Brings the window to the front, for a desktop notification clicked,
+    /// as far as the desktop lets a window do that itself. On X11 it takes
+    /// the focus. On Wayland a window can't without an activation token:
+    /// GNOME raises it anyway, as clackatoo's desktop file's (`clackatoo
+    /// desktop install`). `token`, the one the notification server gave
+    /// for the click, would do it on other desktops, but winit 0.30 takes
+    /// one only as a window opens, so it isn't used yet.
+    fn raise(&self, token: Option<&str>) {
+        let Some(window) = self.frame.as_ref().and_then(Frame::window) else {
+            return;
+        };
+        if token.is_some() {
+            log::debug!("the desktop gave an activation token, which winit can't use yet");
+        }
+        window.focus_window();
     }
 
     /// The connection was lost, or a try at making it failed, `why`.

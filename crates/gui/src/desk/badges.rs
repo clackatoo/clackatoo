@@ -16,8 +16,11 @@
 //! shown of a window in the background is unseen until the window has
 //! the focus again. A window that comes to a daemon whose list says a
 //! chat finished while no one at all was looking takes that as unseen
-//! too. What's watched is forgotten when the window connects to a daemon
-//! on another machine, whose chats' numbers mean others.
+//! too, and so is one whose agent couldn't start, out of sight. The
+//! desktop's notifications tell of the same chats (see
+//! [`notices`](super::notices)). What's watched is forgotten when the
+//! window connects to a daemon on another machine, whose chats' numbers
+//! mean others.
 //!
 //! Nothing here runs but on an event: the list changing, the workspaces
 //! changing, the window showing another tab, or its having the focus.
@@ -54,6 +57,11 @@ enum Daemon {
     On(String),
 }
 
+/// Whether `chat`'s agent couldn't start.
+fn failed(chat: &ChatSummary) -> bool {
+    matches!(chat.state, ChatState::Failed(_))
+}
+
 /// Whether `chat`'s agent is at work, as the list says: starting, or
 /// answering, and not asking.
 fn working(chat: &ChatSummary) -> bool {
@@ -69,6 +77,7 @@ impl Desk {
         let daemon = host.map_or(Daemon::Here, |host| Daemon::On(host.to_owned()));
         if !matches!(self.watched.daemon, Daemon::None) && self.watched.daemon != daemon {
             self.watched = Watched::default();
+            self.withdraw_notices();
         }
         self.watched.daemon = daemon;
     }
@@ -91,26 +100,35 @@ impl Desk {
     }
 
     /// The chats are now `chats`, every one. Returns whether a mark the
-    /// window shows changed.
+    /// window shows changed. The desktop is told of those that have just
+    /// finished, failed or asked something out of sight (see
+    /// [`notices`](super::notices)).
     pub(crate) fn chats_changed(&mut self, chats: Vec<ChatSummary>) -> bool {
         let before = self.marks();
         let mut seen = std::mem::take(&mut self.watched.chats);
+        // What the window saw happen, as against what it heard of as it
+        // came: only that's told.
+        let mut fresh = Vec::new();
         for chat in chats {
             let was = seen.remove(&chat.chat);
             let id = chat.chat;
+            if was.as_ref().is_some_and(|was| !was.asking) && chat.asking {
+                fresh.push(id);
+            }
             if chat.state == ChatState::Answering {
                 // Going again: it's what it does now that it says.
                 self.watched.unseen.remove(&id);
             } else if chat.parent.is_none() && !self.chat_shown(id) {
                 // A chat another chat started tells that chat, not the
                 // user. One that finished while no one was looking at all
-                // is unseen here too, whenever the window comes.
-                let finished = was
-                    .as_ref()
-                    .is_some_and(|was| was.state == ChatState::Answering);
+                // is unseen here too, whenever the window comes. So is one
+                // whose agent couldn't start.
+                let finished = was.as_ref().is_some_and(|was| {
+                    was.state == ChatState::Answering || (!failed(was) && failed(&chat))
+                });
                 let nobody = chat.unseen && was.as_ref().is_none_or(|was| !was.unseen);
-                if finished || nobody {
-                    self.watched.unseen.insert(id);
+                if (finished || nobody) && self.watched.unseen.insert(id) && was.is_some() {
+                    fresh.push(id);
                 }
             }
             self.watched.chats.insert(id, chat);
@@ -119,7 +137,14 @@ impl Desk {
         for id in seen.keys() {
             self.watched.unseen.remove(id);
         }
+        self.notify(&fresh);
         self.marks() != before
+    }
+
+    /// Whether chat `id` finished, or failed, while this window wasn't
+    /// showing it, and it hasn't since.
+    pub(super) fn unseen(&self, id: TerminalId) -> bool {
+        self.watched.unseen.contains(&id)
     }
 
     /// Chat `id`, as the daemon last summed it up, if it's open.
@@ -128,25 +153,25 @@ impl Desk {
     }
 
     /// The chats shown now are seen: those in the tab shown, while the
-    /// window has the focus.
+    /// window has the focus. Their notifications are taken back.
     pub(super) fn see_shown(&mut self) {
-        if self.watched.unseen.is_empty() || self.unfocused {
-            return;
+        if !self.watched.unseen.is_empty()
+            && !self.unfocused
+            && let Some(tab) = self.shown_tab()
+        {
+            let shown: Vec<TerminalId> = (tab.layout.panes().iter())
+                .filter_map(|pane| pane.content.terminal())
+                .collect();
+            for id in shown {
+                self.watched.unseen.remove(&id);
+            }
         }
-        let Some(tab) = self.shown_tab() else {
-            return;
-        };
-        let shown: Vec<TerminalId> = (tab.layout.panes().iter())
-            .filter_map(|pane| pane.content.terminal())
-            .collect();
-        for id in shown {
-            self.watched.unseen.remove(&id);
-        }
+        self.notify(&[]);
     }
 
     /// Whether chat `id` is seen: in the tab shown, while the window has
     /// the focus.
-    fn chat_shown(&self, id: TerminalId) -> bool {
+    pub(super) fn chat_shown(&self, id: TerminalId) -> bool {
         !self.unfocused
             && self.shown_tab().is_some_and(|tab| {
                 (tab.layout.panes().iter()).any(|pane| pane.content.terminal() == Some(id))

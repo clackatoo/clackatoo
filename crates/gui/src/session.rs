@@ -150,6 +150,13 @@ pub(crate) enum SessionEvent {
     /// A folder's files, listed for Tab on the command line. Sent from a
     /// thread listing them (see [`crate::cmdline::complete::Listing`]).
     Listed(crate::cmdline::complete::Listed),
+    /// The desktop notification about `chat` was clicked. Sent from the
+    /// notifications' thread (see [`crate::notify`]), with the activation
+    /// token the desktop gave for the click, if it gave one.
+    Notified {
+        chat: TerminalId,
+        token: Option<String>,
+    },
 }
 
 /// A way to wake the window with a [`SessionEvent`], from another thread:

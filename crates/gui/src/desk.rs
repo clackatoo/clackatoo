@@ -183,6 +183,7 @@ mod macros;
 mod markdown;
 mod messages;
 mod mode;
+mod notices;
 mod offers;
 mod restored;
 mod scrolling;
@@ -302,6 +303,8 @@ pub(crate) struct Desk {
     pointed: Option<(PaneId, std::time::Instant)>,
     /// The chats, as a list, to mark the tabs and workspaces with.
     watched: badges::Watched,
+    /// The desktop notifications of chats the user can't see.
+    notices: notices::Notices,
     /// A subagent whose pane this window asked to close, until the
     /// workspaces show it gone: then the bar says where it went.
     sending_back: Option<TerminalId>,
@@ -3053,6 +3056,7 @@ mod tests {
     mod messages;
     mod mode;
     mod mouse;
+    mod notices;
     mod restored;
     mod scrolling;
     mod shared;

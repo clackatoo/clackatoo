@@ -181,6 +181,8 @@ impl Desk {
         for chat in self.chats.values_mut() {
             chat.set_options(&self.options);
         }
+        // `notify` turned down takes back what it no longer tells of.
+        self.notify(&[]);
     }
 
     /// Puts the options back as they start, as a config run again from

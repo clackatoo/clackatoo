@@ -637,6 +637,14 @@ options! {
     /// say: the newest turns whole, older ones a line each. An agent it
     /// goes back to hears only what happened since, as briefly.
     carryover("co", "Token budget for context handed to another provider"): u32 (1000..=200_000) = 20_000;
+    /// Which chats you can't see the desktop shows a notification for:
+    /// one whose agent finished or failed, or asks you something, while
+    /// the window doesn't have the focus or the chat isn't in the tab
+    /// shown. `all` tells of all three; `questions` only of questions;
+    /// `off` of none. A notification is taken back once you look at its
+    /// chat, and clicking it goes there. A subagent's finishing tells the
+    /// chat that started it, not you, but its questions are yours.
+    notify("ntf", "Desktop notifications for chats you can’t see"): Notify = Notify::All;
     /// Look for a new release of clackatoo, at most once a day, a while
     /// after the window opens, and say in the bar when one is out. It's
     /// never installed until `:update` or `clackatoo update` asks.
@@ -683,6 +691,18 @@ options! {
     /// `$CLACKATOO_FONT_SIZE` overrides what `init.lua` sets as it runs,
     /// but not what's set after.
     fontsize("fsz", "Font size in points"): Decimal (4..=200) = Decimal::whole(12);
+}
+
+choice! {
+    /// Which chats `notify` shows desktop notifications for.
+    Notify {
+        /// Those that finished, failed, or ask something.
+        All = "all",
+        /// Those that ask something.
+        Questions = "questions",
+        /// None.
+        Off = "off",
+    }
 }
 
 choice! {
