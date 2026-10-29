@@ -65,6 +65,7 @@ mod form;
 mod forward;
 pub mod frame;
 mod machines;
+mod mention;
 mod native;
 mod review;
 mod view;
@@ -123,6 +124,7 @@ pub use form::{
 };
 pub use forward::{Forward, ForwardFailure, Forwarding};
 pub use machines::{BadMachineId, Connection, ConnectionState, Machine, MachineId, Passed, Secret};
+pub use mention::{MOST_MENTIONS, Mention, lines_suffix, mention, mention_lines, mentions};
 pub use review::{
     ChatName, CommentPlace, Hunks, Made, NewReview, ReviewAction, ReviewChat, ReviewComment,
     ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
