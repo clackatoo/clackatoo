@@ -435,7 +435,7 @@ impl HostedChat {
         let prompt = match &self.facts.last_prompt {
             Some((at, prompt)) if Some(*at) == uid => prompt.clone(),
             _ => {
-                let (words, images) = without_image_labels(&turn.prompt);
+                let (words, images) = clackatoo_protocol::without_image_labels(&turn.prompt);
                 if words.trim().is_empty() {
                     self.set_notice(Some(
                         "That message can't be sent again: its images aren't kept any more. \
@@ -470,26 +470,6 @@ impl HostedChat {
             self.set_notice(notice);
         }
     }
-}
-
-/// `shown`, a message as a turn shows it, without the labels that stand
-/// for its images, `[Image · 640 × 480]` or `[Image]` on lines of their
-/// own; and whether it had any.
-pub(super) fn without_image_labels(shown: &str) -> (String, bool) {
-    let label = |line: &str| {
-        line == "[Image]"
-            || line
-                .strip_prefix("[Image · ")
-                .and_then(|rest| rest.strip_suffix(']'))
-                .is_some_and(|size| {
-                    size.split_once(" × ").is_some_and(|(width, height)| {
-                        width.parse::<u32>().is_ok() && height.parse::<u32>().is_ok()
-                    })
-                })
-    };
-    let had = shown.lines().any(label);
-    let words: Vec<&str> = shown.lines().filter(|line| !label(line)).collect();
-    (words.join("\n").trim().to_owned(), had)
 }
 
 /// The notice that says `failure`, a failure in plain words, by itself.

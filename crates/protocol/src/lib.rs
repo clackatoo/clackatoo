@@ -102,7 +102,7 @@ pub use chat::{
     Said, Sender, Setting, SettingChoice, SettingKind, Spent, Subagent, SubagentStatus, Switch,
     Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, TurnFilesState, Usage,
     UsageLimit, UsageLine, agent_command, code_span, interface_command, said, slash_command,
-    tokens, turn_number, turn_numbered,
+    tokens, turn_number, turn_numbered, without_image_labels,
 };
 pub use chat::{BranchSummary, Divergence, ForkFiles, TURN_NOT_SHOWN};
 pub use chat::{

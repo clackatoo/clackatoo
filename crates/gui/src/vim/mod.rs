@@ -9,6 +9,7 @@
 //! and its panes are in.
 
 mod command;
+pub(crate) mod confirm;
 mod grammar;
 pub(crate) mod list;
 pub(crate) mod search;

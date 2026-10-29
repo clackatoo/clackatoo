@@ -49,8 +49,6 @@
 //! root follows the folder shown, so the finder, and a relative path
 //! opened, are from there.
 
-use crate::shortcuts::bindings::Hint;
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -180,8 +178,8 @@ enum Prompt {
     Add { dir: String, name: String },
     /// The new name of what's at `from`.
     Rename { from: String, name: String },
-    /// Whether to do `op`, as `question` asks.
-    Confirm { question: String, op: FileOp },
+    /// Whether to do the operation, as the question asks.
+    Confirm(crate::vim::confirm::Confirm<FileOp>),
 }
 
 /// A pane showing a file explorer.
@@ -465,7 +463,7 @@ impl Explorer {
                 list::paste_into(name, text);
                 true
             }
-            Some(Prompt::Confirm { .. }) => false,
+            Some(Prompt::Confirm(_)) => false,
             None => self.search.paste(text),
         }
     }
@@ -510,7 +508,7 @@ impl Explorer {
             Some(Prompt::Rename { from, name }) => {
                 return format!("rename {} to: {name}▏", self.shown(from));
             }
-            Some(Prompt::Confirm { question, .. }) => return question.clone(),
+            Some(Prompt::Confirm(asked)) => return asked.question().to_owned(),
             None => {}
         }
         if let Some(message) = &self.message {
@@ -680,7 +678,7 @@ impl Explorer {
                         let question = format!(
                             "{shown} is already there, {what}: write over it, losing it? (y/n)"
                         );
-                        self.prompt = Some(Prompt::Confirm { question, op });
+                        self.prompt = Some(confirm(question, op));
                     }
                     None => self.message = Some(format!("{shown} is already there, {what}")),
                 }
@@ -696,7 +694,7 @@ impl Explorer {
                     trash: false,
                     expect,
                 };
-                self.prompt = Some(Prompt::Confirm { question, op });
+                self.prompt = Some(confirm(question, op));
             }
             (Err(err), _) => self.message = Some(err.to_string()),
         }
@@ -1098,9 +1096,8 @@ impl Explorer {
     /// Takes `stroke` for what's being typed in the bar.
     fn prompt_stroke(&mut self, stroke: Stroke) {
         let name = match &mut self.prompt {
-            Some(Prompt::Confirm { op, .. }) => {
-                let op = op.clone();
-                if confirmation(stroke).0 {
+            Some(Prompt::Confirm(asked)) => {
+                if let Some(op) = asked.answer(stroke) {
                     self.asks.push(Ask::Op(op));
                 } else {
                     self.message = Some("nothing was done".to_owned());
@@ -1151,7 +1148,7 @@ impl Explorer {
                     self.asks.push(Ask::Op(op));
                 }
             }
-            Prompt::Confirm { .. } => {}
+            Prompt::Confirm(_) => {}
         }
     }
 
@@ -1362,7 +1359,7 @@ impl Explorer {
                 trash: true,
                 expect: None,
             };
-            self.prompt = Some(Prompt::Confirm { question, op });
+            self.prompt = Some(confirm(question, op));
         }
     }
 
@@ -2050,11 +2047,11 @@ impl Explorer {
             return context;
         }
         match &self.prompt {
-            Some(Prompt::Confirm { .. }) => {
+            Some(Prompt::Confirm(asked)) => {
                 return crate::shortcuts::bindings::list(
                     "Confirm file operation",
                     None,
-                    |stroke, _| confirmation(stroke).1,
+                    |stroke, _| asked.hint(stroke),
                 );
             }
             Some(Prompt::Add { name, .. } | Prompt::Rename { name, .. }) => {
@@ -2070,12 +2067,8 @@ impl Explorer {
     }
 }
 
-fn confirmation(stroke: Stroke) -> (bool, Hint) {
-    match stroke {
-        Stroke::Char {
-            ch: 'y' | 'Y',
-            ctrl: false,
-        } => (true, Hint::Action("Confirm")),
-        _ => (false, Hint::Text("Cancel")),
-    }
+/// The question asking whether to do `op`: `y` does it, and any other key
+/// doesn't.
+fn confirm(question: String, op: FileOp) -> Prompt {
+    Prompt::Confirm(crate::vim::confirm::Confirm::new(question).choice('y', "Confirm", op))
 }

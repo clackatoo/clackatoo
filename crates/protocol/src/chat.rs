@@ -1079,6 +1079,27 @@ impl Turn {
     }
 }
 
+/// `shown`, a message as a turn shows it, without the labels that stand
+/// for its images, `[Image · 640 × 480]` or `[Image]` on lines of their
+/// own; and whether it had any.
+#[must_use]
+pub fn without_image_labels(shown: &str) -> (String, bool) {
+    let label = |line: &str| {
+        line == "[Image]"
+            || line
+                .strip_prefix("[Image · ")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .is_some_and(|size| {
+                    size.split_once(" × ").is_some_and(|(width, height)| {
+                        width.parse::<u32>().is_ok() && height.parse::<u32>().is_ok()
+                    })
+                })
+    };
+    let had = shown.lines().any(label);
+    let words: Vec<&str> = shown.lines().filter(|line| !label(line)).collect();
+    (words.join("\n").trim().to_owned(), had)
+}
+
 /// The chat whose agent sent a message to another chat, as it was when it
 /// sent it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

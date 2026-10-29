@@ -464,7 +464,7 @@ impl HostedChat {
             return Err(why);
         }
         let turn = &self.node.turns[at];
-        let edited = edit.then(|| super::facts::without_image_labels(&turn.prompt));
+        let edited = edit.then(|| clackatoo_protocol::without_image_labels(&turn.prompt));
         let actions = self.stop_tasks_left();
         self.root_tree();
         if self.tree.pending.is_none() {
