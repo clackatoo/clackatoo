@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026.10.111 (2026-10-29)
+
+### Fixes
+
+- **daemon:** an empty queue comes back from an upgrade unpaused (CLACKA-185) (12826090)
+- **daemon:** known machines wait for every writer thread before writing the last time (CLACKA-204) (582b290e)
+
 ## 2026.10.110 (2026-10-29)
 
 ### Features
