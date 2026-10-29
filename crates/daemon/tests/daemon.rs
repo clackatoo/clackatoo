@@ -18392,6 +18392,85 @@ fn a_real_chat_told_again_shows_a_stopped_turn_as_stopped() {
     assert_eq!(last_outcome(&node), Some(&Outcome::Stopped), "{node:#?}");
 }
 
+/// What a Task subagent says and does goes under the Task's tool call
+/// (CLACKA-195), live and once the session is told again after a restart.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_task_subagents_work_goes_under_its_tool_call_live_and_told_again() {
+    let kept = tempfile::tempdir().unwrap();
+    let file = kept.path().join("workspaces");
+    let project = kept.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("notes.txt"), "the answer is 42\n").unwrap();
+    let Some(command) = real_claude() else {
+        return;
+    };
+    let trace = live_trace("task-nested");
+    let limit = Duration::from_mins(3);
+    // The Task's tool, and the parents of what came after it.
+    let nesting = |node: &ChatNode| -> (Option<String>, Vec<Option<String>>) {
+        let items = &node.turns.last().unwrap().items;
+        let task = (items.iter()).position(|item| {
+            item.parent().is_none() && item.tool().is_some_and(|tool| tool.kind == ToolKind::Think)
+        });
+        let id = task
+            .and_then(|at| items[at].tool())
+            .map(|tool| tool.id.clone());
+        let after = (items.iter().skip(task.map_or(items.len(), |at| at + 1)))
+            .map(|item| item.parent().map(str::to_owned))
+            .collect();
+        (id, after)
+    };
+    let live = {
+        let daemon = live_keeping(&file, &trace, &command);
+        let mut client = daemon.client();
+        // A chat that keeps Claude Code's own Task tool, as the window can start one.
+        let mut new = live_chat_in(&project);
+        if let PaneTerminal::Agent(agent) = &mut new {
+            agent.task = true;
+        }
+        client.new_workspace(None, new).unwrap();
+        let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+        wait_for_chat_for(&mut client, chat, limit, |node| {
+            node.state == ChatState::Ready
+        });
+        let text = "Use the Agent tool, with subagent_type general-purpose and the description \
+                    \"Read the notes\", to have a subagent read notes.txt with the Read tool and \
+                    report what it says. Then reply with just the number it found.";
+        let node = live_send(&mut client, chat, text, limit);
+        assert_eq!(last_outcome(&node), Some(&Outcome::Done), "{node:#?}");
+        let (task, after) = nesting(&node);
+        let task = task.unwrap_or_else(|| panic!("no Task: {node:#?}"));
+        // The subagent's Read at least, under the Task.
+        let items = &node.turns.last().unwrap().items;
+        assert!(
+            (items.iter())
+                .any(|item| item.parent() == Some(task.as_str()) && item.tool().is_some()),
+            "{node:#?}"
+        );
+        // The agent's answer is its own.
+        assert_eq!(after.last(), Some(&None), "{node:#?}");
+        assert!(last_words(&node).contains("42"), "{node:#?}");
+        wait_for_kept(&file, |kept| kept.contains("\"session\""));
+        task
+    };
+    let daemon = live_keeping(&file, &trace, &command);
+    let mut client = daemon.client();
+    let chat = client.list_terminals().unwrap()[0].id;
+    client.attach(chat).unwrap();
+    let node = wait_for_chat_for(&mut client, chat, limit, |node| {
+        node.state == ChatState::Ready && !node.turns.is_empty()
+    });
+    // Told again: one turn, with the Task. Claude Code 2.1.310 runs an
+    // Agent call in the background and keeps its subagent's transcript
+    // apart, which loading a session doesn't tell again (recorded
+    // 2026-10-29): the subagent's work is gone, not flattened.
+    assert_eq!(node.turns.len(), 1, "{node:#?}");
+    let (task, after) = nesting(&node);
+    assert_eq!(task.as_deref(), Some(live.as_str()), "{node:#?}");
+    assert!(after.iter().all(Option::is_none), "{node:#?}");
+}
+
 /// `/compact`, as a Claude Code user types it: the conversation is
 /// compacted, the turn ends, and the session goes on, remembering.
 #[test]
