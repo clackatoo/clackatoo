@@ -53,9 +53,9 @@ use super::Daemon;
 use super::buffers::resolve;
 use super::chats::AgentId;
 use super::edit_log::{Diffed, EditLog, Maker, edit_bytes};
-use super::settling::{Diffing, ON_LOOP, Settler, Worked};
+use super::settling::{Diffing, Job, ON_LOOP, Open, Settler, Source, Worked};
 use crate::agent::{FAILED, NOT_FOUND};
-use crate::buffer::{self, Buffer, DiskStamp, Made, Refused};
+use crate::buffer::{self, Buffer, DiskStamp, Made, Prepared, PreparedStep, Refused, Unprepared};
 use crate::chat::{RawDiff, Wrote};
 
 /// How many files' text, as agents last read them, are kept, to merge
@@ -72,6 +72,12 @@ const READ_BYTES: usize = 64 * 1024 * 1024;
 /// read, and what the tool does to it can't be undone.
 const CAPTURE_BYTES: usize = 64 * 1024 * 1024;
 
+/// How many times a change to a file open in a buffer is merged again off
+/// the loop, the buffer having changed while it was merged, before it's
+/// merged on the loop instead: as you can't type while it is, that's the
+/// last time.
+const MERGES: u32 = 3;
+
 /// What the daemon knows of agents' files.
 #[derive(Debug, Default)]
 pub(super) struct AgentFiles {
@@ -81,6 +87,8 @@ pub(super) struct AgentFiles {
     /// What agents' tools said they changed in files, not yet taken into
     /// buffers or the log.
     reports: Vec<Report>,
+    /// The serial number the next report, or report changed, is given.
+    serials: u64,
     /// The text of files not open, as the turns' tools are about to change
     /// them.
     pub(super) captures: Vec<Capture>,
@@ -107,6 +115,25 @@ impl AgentFiles {
     /// worked out, so the edit log doesn't have it yet.
     pub(super) fn diffing(&self, chat: TerminalId) -> bool {
         self.diffing.iter().any(|diffing| diffing.chat() == chat)
+    }
+
+    /// Whether a change to the file `path` is being worked out, or merged
+    /// into the buffer open on it: until it's taken in, what's on disk is
+    /// the agent's, and the buffer doesn't know it yet.
+    pub(super) fn pending(&self, path: &Path) -> bool {
+        self.diffing.iter().any(|diffing| diffing.path == path)
+    }
+
+    /// A new serial number for a report.
+    fn serial(&mut self) -> u64 {
+        self.serials += 1;
+        self.serials
+    }
+
+    /// Forgets the reports numbered `covered`, whose changes have been
+    /// taken in.
+    fn forget_reports(&mut self, covered: &[u64]) {
+        (self.reports).retain(|report| !covered.contains(&report.serial));
     }
 }
 
@@ -234,10 +261,58 @@ pub(super) struct Settled {
     read_as: Option<DiskStamp>,
 }
 
+/// A change an agent made to a file open in a buffer, to be merged into
+/// the buffer's text as it was at `version`: off the loop, if it's big
+/// (see [`super::settling`]).
+#[derive(Debug)]
+pub(super) struct Merging {
+    chat: TerminalId,
+    path: PathBuf,
+    id: BufferId,
+    /// The buffer's version, and what it knew of its file, as the change
+    /// was merged into it: it's made only if they're still so.
+    version: u64,
+    known: Option<DiskStamp>,
+    /// The buffer's text saved, and its text, then.
+    saved: Rope,
+    text: Rope,
+    /// The file's text after each step of the change, from the text saved,
+    /// with whether it starts an undo step: the last is the file's text
+    /// now, which `stamp` says what it is.
+    steps: Vec<(String, bool)>,
+    stamp: DiskStamp,
+    /// Who made each step.
+    makers: Vec<Maker>,
+    /// The reports it takes in, by serial number, forgotten once it is.
+    covered: Vec<u64>,
+    /// Whether the file was there before.
+    existed: bool,
+}
+
+impl Merging {
+    /// The text it holds, in bytes, as a change to a file not open counts
+    /// its texts before and after: the ropes share most of what they hold,
+    /// so they're counted as the bigger.
+    pub(super) fn bytes(&self) -> usize {
+        self.saved.len_bytes().max(self.text.len_bytes())
+            + self.steps.iter().map(|(text, _)| text.len()).sum::<usize>()
+    }
+
+    /// Merges the change into the buffer's text as it was, as the buffer
+    /// would, with what the review needs of each step.
+    pub(super) fn prepare(&self) -> Result<Prepared, Unprepared> {
+        let (saved, now) = (self.saved.to_string(), self.text.to_string());
+        buffer::prepare_written((&saved, &now, &self.text), &self.steps, true)
+    }
+}
+
 /// What a tool of an agent said it changed in a file, waiting for the file
 /// to be checked against it.
 #[derive(Debug)]
 struct Report {
+    /// Its number, which changes as what it says does, so a change taken
+    /// in forgets only the reports it took in.
+    serial: u64,
     chat: TerminalId,
     turn: usize,
     /// Where the tool is among its turn's items.
@@ -276,6 +351,8 @@ impl Daemon {
         path: &Path,
     ) -> Result<(TerminalId, PathBuf, Rope), (i64, String)> {
         let (chat, path) = self.agent_path(name, session, path)?;
+        // As the agent's changes before have left it.
+        self.settle_pending(&path);
         if let Some(id) = self.buffer_of(&path) {
             let text = self.buffers[&id].buffer.text().clone();
             return Ok((chat, path, text));
@@ -353,7 +430,7 @@ impl Daemon {
                 .write_merged(&base, &content, author, step)
                 .map_err(|err| refused(err, &base))?;
             // Its server hears of the edit before that the file's saved.
-            self.landed(id, &maker, &path, made, existed);
+            self.landed(id, &maker, &path, made, None, existed);
             self.saved_in_server(id);
         } else {
             // A file not open is changed as a buffer opened for the moment,
@@ -412,14 +489,19 @@ impl Daemon {
                 .filter(|diff| resolve(&diff.path, &cwd, &home) == path)
                 .cloned()
                 .collect();
+            let serial = self.agent_files.serial();
             let reports = &mut self.agent_files.reports;
             let same = |report: &&mut Report| {
                 report.chat == chat && report.tool == wrote.tool && report.path == path
             };
             match reports.iter_mut().find(same) {
-                Some(report) if !diffs.is_empty() => report.diffs = diffs,
+                Some(report) if !diffs.is_empty() => {
+                    report.diffs = diffs;
+                    report.serial = serial;
+                }
                 Some(_) => {}
                 None => reports.push(Report {
+                    serial,
                     chat,
                     turn: wrote.turn,
                     order: wrote.order,
@@ -493,6 +575,16 @@ impl Daemon {
         }
     }
 
+    /// As [`settle_pending`](Self::settle_pending), for buffer `id`'s file.
+    pub(super) fn settle_buffer_pending(&mut self, id: BufferId) {
+        if let Some(slot) = self.buffers.get(&id)
+            && self.agent_files.pending(slot.buffer.path())
+        {
+            let path = slot.buffer.path().to_owned();
+            self.settle_pending(&path);
+        }
+    }
+
     /// As [`settle_pending`](Self::settle_pending), for every file.
     pub(super) fn settle_all_pending(&mut self) {
         while !self.agent_files.diffing.is_empty() {
@@ -504,8 +596,11 @@ impl Daemon {
     }
 
     /// Takes in a change the worker has done with.
-    fn took_settled(&mut self, (settled, diffed): Worked) {
-        let (chat, path) = (settled.chat, settled.path.clone());
+    fn took_settled(&mut self, worked: Worked) {
+        let (chat, path) = match &worked {
+            Worked::Closed(settled, _) => (settled.chat, settled.path.clone()),
+            Worked::Open(merging, _) => (merging.chat, merging.path.clone()),
+        };
         let files = &mut self.agent_files;
         let Some(at) = (files.diffing.iter())
             .position(|diffing| diffing.chat() == chat && diffing.path == path)
@@ -513,24 +608,144 @@ impl Daemon {
             return;
         };
         let diffing = files.diffing.remove(at);
-        // A chat closed meanwhile has nothing to take it in.
+        // A chat closed meanwhile has nothing to take it in. A buffer it
+        // was merged into has its file looked at again, as changed by
+        // someone else.
         if self.chat(chat).is_none() {
             self.agent_files.ending.retain(|&ending| ending != chat);
+            if let Worked::Open(merging, _) = worked {
+                self.disk_maybe_changed(merging.id);
+            }
             return;
         }
-        match diffed {
-            Some(diffed) => self.settled_closed(settled, &diffed),
-            None => self.unknown(&diffing),
+        match worked {
+            Worked::Closed(settled, Some(diffed)) => self.settled_closed(settled, &diffed),
+            Worked::Closed(_, None) => self.unknown(&diffing),
+            Worked::Open(merging, prepared) => return self.merged(merging, prepared, diffing),
         }
         self.after_diffing(diffing);
     }
 
-    /// The worker's gone, with every change it had: each is noted unknown,
-    /// and what waited for it goes on.
+    /// Takes in a change merged into a buffer off the loop, as `prepared`
+    /// says, or `None` if it couldn't be: made, if the buffer is still as
+    /// it was merged into, or else merged again; or for a buffer closed
+    /// meanwhile, taken in as a change to a file not open.
+    fn merged(
+        &mut self,
+        merging: Merging,
+        prepared: Option<Result<Prepared, Unprepared>>,
+        diffing: Diffing,
+    ) {
+        let Some(open) = diffing.open else {
+            return self.after_diffing(diffing);
+        };
+        let id = merging.id;
+        let slot = (self.buffers.get(&id)).filter(|slot| slot.buffer.path() == merging.path);
+        match (slot, prepared) {
+            (None, _) => {
+                self.settle_as_closed(merging);
+                self.carry_on(diffing);
+            }
+            (Some(slot), Some(prepared))
+                if slot.buffer.version() == merging.version
+                    && slot.buffer.disk() == merging.known =>
+            {
+                self.land(merging, prepared);
+                self.disk_maybe_changed(id);
+                self.after_diffing(diffing);
+            }
+            // Changed meanwhile: merged again from the buffer as it is.
+            (Some(_), Some(_)) => self.merge_again(diffing, open, open.tries + 1),
+            // Merging failed on the worker: on the loop, then.
+            (Some(_), None) => self.merge_again(diffing, open, MERGES),
+        }
+    }
+
+    /// Merges the change `diffing` waited for into its buffer again, from
+    /// the buffer and its file as they are now, as try `tries`.
+    fn merge_again(&mut self, diffing: Diffing, open: Open, tries: u32) {
+        let (chat, path) = (diffing.chat(), diffing.path.clone());
+        if self.buffer_of(&path) == Some(open.id) {
+            match open.source {
+                Source::Tools { last } => {
+                    self.settle_open(chat, &path, open.id, last || diffing.last, tries);
+                }
+                Source::Commands { turn } => self.commands_into(chat, turn, open.id, tries),
+            }
+        }
+        self.disk_maybe_changed(open.id);
+        self.carry_on(diffing);
+    }
+
+    /// Goes on with what waited for `diffing`, a change to a buffer's file
+    /// taken in some other way than it was to be: by the change that now
+    /// waits instead, if one does, or else now.
+    fn carry_on(&mut self, diffing: Diffing) {
+        let (chat, path) = (diffing.chat(), &diffing.path);
+        match (self.agent_files.diffing.iter_mut())
+            .find(|waiting| waiting.chat() == chat && waiting.path == *path)
+        {
+            Some(waiting) => {
+                waiting.again |= diffing.again;
+                waiting.last |= diffing.last;
+            }
+            None => self.after_diffing(diffing),
+        }
+    }
+
+    /// Takes in a change merged into a buffer that has since closed, or
+    /// been opened again as another, as a change to the file not open: the
+    /// file had the buffer's text saved before.
+    fn settle_as_closed(&mut self, merging: Merging) {
+        let Merging {
+            chat,
+            path,
+            saved,
+            mut steps,
+            stamp,
+            makers,
+            covered,
+            existed,
+            ..
+        } = merging;
+        self.agent_files.forget_reports(&covered);
+        let (Some(first), Some(last)) = (makers.first(), makers.last()) else {
+            return;
+        };
+        let maker = Maker {
+            chat,
+            turn: first.turn,
+            tool: last.tool.clone(),
+        };
+        let settled = Settled {
+            chat,
+            path,
+            maker,
+            before: existed.then(|| saved.to_string()),
+            disk: steps.pop().map(|(text, _)| text),
+            read_as: Some(stamp),
+        };
+        if let Some(settled) = self.settle_off_loop(settled) {
+            let diffed = Diffed::between(
+                settled.before.as_deref().unwrap_or_default(),
+                settled.disk.as_deref().unwrap_or_default(),
+            );
+            self.settled_closed(settled, &diffed);
+        }
+    }
+
+    /// The worker's gone, with every change it had: each to a file not
+    /// open is noted unknown, each to a buffer merged on the loop, and
+    /// what waited for it goes on.
     fn settler_lost(&mut self) {
         log::warn!("settling: the worker is gone; what it had is noted as unknown");
         for diffing in std::mem::take(&mut self.agent_files.diffing) {
-            if self.chat(diffing.chat()).is_some() {
+            if self.chat(diffing.chat()).is_none() {
+                continue;
+            }
+            if let Some(open) = diffing.open {
+                self.merge_again(diffing, open, MERGES);
+            } else {
                 self.unknown(&diffing);
                 self.after_diffing(diffing);
             }
@@ -586,7 +801,26 @@ impl Daemon {
     /// and not saved, none is, and the user is told. Otherwise, with
     /// `last`, as the agent's turn ends, the user is told the file changed
     /// some other way; without, more may yet be said.
+    ///
+    /// A big change is merged off the loop, and made once it has been
+    /// (see [`super::settling`]): what more the chat's tools say of the
+    /// file meanwhile waits for it.
     fn settle(&mut self, chat: TerminalId, path: &Path, id: BufferId, last: bool) {
+        self.settle_open(chat, path, id, last, 0);
+    }
+
+    /// As [`settle`](Self::settle), as try `tries` (see [`MERGES`]).
+    fn settle_open(&mut self, chat: TerminalId, path: &Path, id: BufferId, last: bool, tries: u32) {
+        // What the chat's tools did before is still being merged: this
+        // waits for it, as it goes from what that leaves.
+        if let Some(diffing) = (self.agent_files.diffing.iter_mut())
+            .find(|diffing| diffing.chat() == chat && diffing.path == path)
+        {
+            diffing.again = true;
+            diffing.last |= last;
+            return;
+        }
+        // Another chat's change to it is taken in first.
         self.settle_pending(path);
         let forget = |files: &mut AgentFiles| {
             (files.reports).retain(|report| report.chat != chat || report.path != path);
@@ -602,6 +836,7 @@ impl Daemon {
         };
         let existed = buffer.disk().is_some();
         let reports = self.reports_of(chat, path);
+        let covered: Vec<u64> = reports.iter().map(|report| report.serial).collect();
         // Each report's own changes, in the order the agent made them.
         let mut text = buffer.saved().to_string();
         let mut steps = Vec::with_capacity(reports.len());
@@ -648,20 +883,96 @@ impl Daemon {
                 return;
             }
         }
-        forget(&mut self.agent_files);
-        let slot = self.buffers.get_mut(&id).expect("the buffer just found");
-        match slot
-            .buffer
-            .take_written(&steps, (&disk, stamp), Author::Agent(chat))
-        {
+        let buffer = &self.buffers[&id].buffer;
+        let merging = Merging {
+            chat,
+            path: path.to_owned(),
+            id,
+            version: buffer.version(),
+            known: buffer.disk(),
+            saved: buffer.saved().clone(),
+            text: buffer.text().clone(),
+            steps,
+            stamp,
+            makers,
+            covered,
+            existed,
+        };
+        self.merge_into(merging, Source::Tools { last }, tries);
+    }
+
+    /// Merges `merging`'s change into its buffer: off the loop if it's big
+    /// and this, try `tries`, isn't the last, made once it's merged; or
+    /// else now.
+    fn merge_into(&mut self, merging: Merging, source: Source, tries: u32) {
+        let merging = if merging.bytes() > ON_LOOP && tries < MERGES {
+            let (path, id) = (merging.path.clone(), merging.id);
+            let maker = merging.makers.first().cloned().unwrap_or(Maker {
+                chat: merging.chat,
+                turn: 0,
+                tool: None,
+            });
+            match self.agent_files.settler.submit(Job::Open(merging), &self.waker) {
+                None => {
+                    self.agent_files.diffing.push(Diffing {
+                        path,
+                        maker,
+                        again: false,
+                        last: false,
+                        open: Some(Open { id, source, tries }),
+                    });
+                    return;
+                }
+                Some(job) => {
+                    // A worker found gone had changes it won't give back.
+                    if self.agent_files.settler.lost() {
+                        self.settler_lost();
+                    }
+                    let Job::Open(merging) = job else {
+                        unreachable!("the worker gives back the job it was given");
+                    };
+                    merging
+                }
+            }
+        } else {
+            merging
+        };
+        let prepared = merging.prepare();
+        self.land(merging, prepared);
+    }
+
+    /// Makes `merging`'s change, merged into its buffer, which is as it
+    /// was merged into, as `prepared` says: each step as the agent's own
+    /// edit, or if one touches a line changed and not saved, none, and the
+    /// user is told.
+    fn land(&mut self, merging: Merging, prepared: Result<Prepared, Unprepared>) {
+        let Merging {
+            chat,
+            path,
+            id,
+            stamp,
+            makers,
+            covered,
+            existed,
+            ..
+        } = merging;
+        self.agent_files.forget_reports(&covered);
+        let Some(slot) = self.buffers.get_mut(&id) else {
+            return;
+        };
+        let author = Author::Agent(chat);
+        let made = prepared
+            .map_err(|unprepared| slot.buffer.unprepared(unprepared))
+            .and_then(|prepared| slot.buffer.take_prepared(prepared, stamp, author));
+        match made {
             Ok(made) => {
-                for (made, maker) in made.into_iter().zip(&makers) {
-                    self.landed(id, maker, path, made, existed);
+                for ((made, step), maker) in made.into_iter().zip(&makers) {
+                    self.landed(id, maker, &path, made, Some(step), existed);
                 }
                 self.note_modified(id);
                 self.saved_in_server(id);
             }
-            Err(Refused::Conflict(_)) => self.tell_of_change(chat, id, path, true),
+            Err(Refused::Conflict(_)) => self.tell_of_change(chat, id, &path, true),
             Err(Refused::Failed(err)) => log::warn!("buffer {id}: {err}"),
         }
     }
@@ -684,7 +995,27 @@ impl Daemon {
         if reported {
             return;
         }
-        let (disk, stamp) = match slot.buffer.changed_on_disk() {
+        if self.agent_files.pending(&path) {
+            // The chat's own change, being merged, has the file looked at
+            // again once it's made. Another chat's is taken in first.
+            if (self.agent_files.diffing.iter())
+                .any(|diffing| diffing.chat() == chat && diffing.path == path)
+            {
+                return;
+            }
+            self.settle_pending(&path);
+        }
+        self.commands_into(chat, turn, id, 0);
+    }
+
+    /// As [`take_from_commands`](Self::take_from_commands), once nothing
+    /// else is pending for the file, as try `tries` (see [`MERGES`]).
+    fn commands_into(&mut self, chat: TerminalId, turn: usize, id: BufferId, tries: u32) {
+        let Some(slot) = self.buffers.get(&id) else {
+            return;
+        };
+        let buffer = &slot.buffer;
+        let (disk, stamp) = match buffer.changed_on_disk() {
             Ok(Some(changed)) => changed,
             Ok(None) => return,
             Err(err) => {
@@ -692,25 +1023,25 @@ impl Daemon {
                 return;
             }
         };
-        let existed = slot.buffer.disk().is_some();
-        let slot = self.buffers.get_mut(&id).expect("the buffer just found");
-        let steps = [(disk.clone(), true)];
-        match (slot.buffer).take_written(&steps, (&disk, stamp), Author::Agent(chat)) {
-            Ok(made) => {
-                let maker = Maker {
-                    chat,
-                    turn,
-                    tool: None,
-                };
-                for made in made {
-                    self.landed(id, &maker, &path, made, existed);
-                }
-                self.note_modified(id);
-                self.saved_in_server(id);
-            }
-            Err(Refused::Conflict(_)) => self.tell_of_change(chat, id, &path, true),
-            Err(Refused::Failed(err)) => log::warn!("buffer {id}: {err}"),
-        }
+        let merging = Merging {
+            chat,
+            path: buffer.path().to_owned(),
+            id,
+            version: buffer.version(),
+            known: buffer.disk(),
+            saved: buffer.saved().clone(),
+            text: buffer.text().clone(),
+            steps: vec![(disk, true)],
+            stamp,
+            makers: vec![Maker {
+                chat,
+                turn,
+                tool: None,
+            }],
+            covered: Vec::new(),
+            existed: buffer.disk().is_some(),
+        };
+        self.merge_into(merging, Source::Commands { turn }, tries);
     }
 
     /// Checks the file `path`, not open, against what the tools of the
@@ -821,21 +1152,25 @@ impl Daemon {
             return Some(settled);
         }
         let (path, maker) = (settled.path.clone(), settled.maker.clone());
-        match self.agent_files.settler.submit(settled, &self.waker) {
+        match self.agent_files.settler.submit(Job::Closed(settled), &self.waker) {
             None => {
                 self.agent_files.diffing.push(Diffing {
                     path,
                     maker,
                     again: false,
                     last: false,
+                    open: None,
                 });
                 None
             }
-            Some(settled) => {
+            Some(job) => {
                 // A worker found gone had changes it won't give back.
                 if self.agent_files.settler.lost() {
                     self.settler_lost();
                 }
+                let Job::Closed(settled) = job else {
+                    unreachable!("the worker gives back the job it was given");
+                };
                 Some(settled)
             }
         }
@@ -921,6 +1256,7 @@ impl Daemon {
         maker: &Maker,
         path: &Path,
         made: Option<Made>,
+        step: Option<PreparedStep>,
         existed: bool,
     ) {
         let Some(made) = made else {
@@ -930,7 +1266,7 @@ impl Daemon {
         };
         let change = (id, made.version, edit_bytes(&made.edit));
         let dropped = (self.agent_files.log).note_buffer(maker, path, change, existed);
-        self.made_by_agent(id, made, maker.hunks());
+        self.made_by_agent_as(id, made, maker.hunks(), step);
         self.refresh_files(maker.chat, dropped.into_iter().chain([maker.turn]));
     }
 
@@ -1059,6 +1395,14 @@ const TAB_WIDTHS: [usize; 3] = [2, 4, 8];
 /// agent that shows a file's tabs so says its changes: as many for each
 /// tab as one of [`TAB_WIDTHS`].
 fn made_with_tabs_as_spaces(saved: &Rope, reports: &[&Report], disk: &str) -> bool {
+    // Quick to rule out first, before reading a big file three times: a
+    // report with no changes can't make it, and with no tab on either
+    // side, the changes would have made it as they are.
+    let tabbed = (saved.chunks()).any(|chunk| memchr::memchr(b'\t', chunk.as_bytes()).is_some())
+        || memchr::memchr(b'\t', disk.as_bytes()).is_some();
+    if !tabbed || reports.iter().any(|report| report.diffs.is_empty()) {
+        return false;
+    }
     let saved = saved.to_string();
     TAB_WIDTHS.into_iter().any(|width| {
         let mut text = tabs_as_spaces(&saved, width);
@@ -1322,6 +1666,7 @@ pub(super) mod tests {
     #[test]
     fn changes_said_with_tabs_as_spaces_make_the_file_only_with_its_indent() {
         let report = |old: &str, new: &str| Report {
+            serial: 0,
             chat: TerminalId(1),
             turn: 0,
             order: 0,

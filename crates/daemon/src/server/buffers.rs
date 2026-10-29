@@ -17,7 +17,7 @@ use mio::Token;
 use super::language::Opened;
 use super::recovery::Recovered;
 use super::{Daemon, Source};
-use crate::buffer::{Buffer, DiskStamp, Made, Restamp, Reversed};
+use crate::buffer::{Buffer, DiskStamp, Made, PreparedStep, Restamp, Reversed};
 
 /// A buffer, and the clients following it.
 #[derive(Debug)]
@@ -655,6 +655,8 @@ impl Daemon {
     /// Answers [`Request::Save`](clackatoo_protocol::Request::Save).
     pub(super) fn save_buffer(&mut self, id: BufferId, force: bool) -> Result<Response, Error> {
         self.forget_formats(id);
+        // An agent's change to the file still being merged is made first.
+        self.settle_buffer_pending(id);
         let slot = self.buffers.get_mut(&id).ok_or(Error::NoSuchBuffer(id))?;
         let saved = slot.buffer.save(force)?;
         let path = slot.buffer.path().to_owned();
@@ -673,6 +675,9 @@ impl Daemon {
     /// Answers [`Request::Discard`](clackatoo_protocol::Request::Discard):
     /// the file read again, as an edit every client is sent.
     pub(super) fn discard_buffer(&mut self, id: BufferId) -> Result<Response, Error> {
+        // An agent's change to the file still being merged is made first,
+        // so the edit log has it.
+        self.settle_buffer_pending(id);
         let slot = self.buffers.get_mut(&id).ok_or(Error::NoSuchBuffer(id))?;
         let edit = slot.buffer.discard()?;
         let base = slot.buffer.version();
@@ -707,13 +712,32 @@ impl Daemon {
     /// [`made_by`](Self::made_by) does: the lines it changed become agent
     /// hunks, which every window following the buffer is sent.
     pub(super) fn made_by_agent(&mut self, id: BufferId, made: Made, maker: Maker) {
+        self.made_by_agent_as(id, made, maker, None);
+    }
+
+    /// As [`made_by_agent`](Self::made_by_agent), with what the review
+    /// needs of the edit worked out already, if `step` has it.
+    pub(super) fn made_by_agent_as(
+        &mut self,
+        id: BufferId,
+        made: Made,
+        maker: Maker,
+        step: Option<PreparedStep>,
+    ) {
         let author = Author::Agent(clackatoo_protocol::TerminalId(maker.chat));
-        self.pass_on(id, made, author, Some(maker));
+        self.pass_on(id, made, author, Some((maker, step)));
     }
 
     /// Passes on an edit `author` made to buffer `id`, an agent's own
     /// change if `agent` says who made it.
-    fn pass_on(&mut self, id: BufferId, made: Made, author: Author, agent: Option<Maker>) {
+    fn pass_on(
+        &mut self,
+        id: BufferId,
+        made: Made,
+        author: Author,
+        agent: Option<(Maker, Option<PreparedStep>)>,
+    ) {
+        let by_agent = agent.is_some();
         self.edited(id, made.version, &made.edit, agent);
         let update = BufferUpdate::Edited {
             version: made.version,
@@ -722,7 +746,7 @@ impl Daemon {
             answers: None,
         };
         self.tell_viewers(id, None, &update);
-        if agent.is_some() {
+        if by_agent {
             self.tell_agents(id);
         }
         self.note_modified(id);
@@ -771,6 +795,7 @@ impl Daemon {
     /// git, and opened in them again at its new path, as its language may
     /// have changed with its name, and every client following it told.
     pub(super) fn move_buffer(&mut self, id: BufferId, to: PathBuf, disk: crate::buffer::Restamp) {
+        self.settle_buffer_pending(id);
         let Some(slot) = self.buffers.get_mut(&id) else {
             return;
         };
@@ -952,12 +977,18 @@ impl Daemon {
     /// moves its highlights and hunks along with it, having it parsed and
     /// compared again. An agent's own change, as `agent` says, makes agent
     /// hunks; any other edit moves them.
-    fn edited(&mut self, id: BufferId, version: u64, edit: &Edit, agent: Option<Maker>) {
+    fn edited(
+        &mut self,
+        id: BufferId,
+        version: u64,
+        edit: &Edit,
+        agent: Option<(Maker, Option<PreparedStep>)>,
+    ) {
         self.trim_history(id);
         self.edited_in_server(id, version, edit);
         self.edited_in_git(id, edit);
         match agent {
-            Some(maker) => self.agent_edited(id, edit, maker),
+            Some((maker, step)) => self.agent_edited(id, edit, maker, step),
             None => self.edited_in_review(id, edit),
         }
         let Some(slot) = self.buffers.get_mut(&id) else {

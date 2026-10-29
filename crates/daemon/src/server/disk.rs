@@ -247,6 +247,11 @@ impl Daemon {
             return;
         };
         let path = slot.buffer.path().to_owned();
+        if self.agent_files.pending(&path) {
+            // An agent's change to it, still being merged into the buffer,
+            // which has it looked at again once it's made.
+            return;
+        }
         match DiskStamp::now(&path) {
             Ok(Some(now)) if Some(now) != slot.buffer.disk() => {}
             // As the buffer last read or wrote it, or gone.
@@ -359,8 +364,8 @@ impl Daemon {
     /// as one no longer UTF-8, is said so of once, until it changes again.
     pub(super) fn reload_buffer(&mut self, id: BufferId) -> Result<Response, Error> {
         let slot = self.buffers.get_mut(&id).ok_or(Error::NoSuchBuffer(id))?;
-        if self.disk.noted.contains_key(&id) {
-            // An agent's, still to be taken as its own.
+        if self.disk.noted.contains_key(&id) || self.agent_files.pending(slot.buffer.path()) {
+            // An agent's, still to be taken as its own, or being merged.
             return Ok(Response::Done);
         }
         let notice = changed_notice(slot.buffer.path());

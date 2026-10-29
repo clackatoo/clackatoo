@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use clackatoo_protocol::{Author, BufferSnapshot, Edit, Error, Op, TerminalId};
 use clackatoo_text::{
-    History, HistoryError, HistorySnapshot, MOST_PIECES, Merged, Reversal, Rope, StepPlace,
-    StepSelection, StepState, StepVisual, Steps, merge,
+    ChangedLines, History, HistoryError, HistorySnapshot, MOST_PIECES, Merged, Reversal, Rope,
+    StepPlace, StepSelection, StepState, StepVisual, Steps, merge,
 };
 
 use crate::handover;
@@ -149,6 +149,122 @@ pub(crate) struct Made {
     pub(crate) version: u64,
     /// The edit, made to the version before.
     pub(crate) edit: Edit,
+}
+
+/// Changes an agent wrote to a buffer's file, merged into the buffer's
+/// text as it was at one version, to be made to it (see
+/// [`Buffer::take_written`]). Working them out takes as long as the file,
+/// so for a big one it's done off the daemon's loop, from a copy of the
+/// texts, and made only if the buffer is still at that version.
+#[derive(Debug)]
+pub(crate) struct Prepared {
+    /// Each step's edit, made to the text after the one before, as
+    /// [`Buffer::edit`] will make it, with whether it starts an undo step.
+    pub(crate) steps: Vec<PreparedStep>,
+    /// The file's text: the text saved once they're made.
+    pub(crate) saved: Rope,
+}
+
+/// One step of [`Prepared`] changes.
+#[derive(Debug)]
+pub(crate) struct PreparedStep {
+    pub(crate) edit: Edit,
+    pub(crate) step: bool,
+    /// The texts before and after it, and the lines it changes, which the
+    /// review would otherwise work out on the loop once it's made: empty
+    /// unless asked for.
+    pub(crate) old: String,
+    pub(crate) new: String,
+    pub(crate) lines: ChangedLines,
+}
+
+/// Why changes an agent wrote couldn't be [`Prepared`].
+#[derive(Debug)]
+pub(crate) enum Unprepared {
+    /// As [`Refused::Conflict`].
+    Conflict(Vec<Range<usize>>),
+    /// The changes don't fit the texts, saying why.
+    Failed(String),
+}
+
+/// Merges changes an agent wrote to a buffer's file itself into the
+/// buffer's text `now`, as [`Buffer::take_written`] makes them: `steps`
+/// are the file's text after each, from `saved`, the last the file's text
+/// now. `rope` is `now` as the buffer has it, for an edit too long to keep
+/// whole to be coarsened against, as the buffer would. With `review`, each
+/// step keeps what the review needs of it.
+///
+/// Every step is merged before any is made, so one that can't be leaves
+/// the buffer as it was. Each is merged from the text after the one
+/// before, which only makes sense because the whole change is first found
+/// to touch no line changed and not saved. A single step is the whole
+/// change, already merged: merging a big file again would take as long
+/// again.
+pub(crate) fn prepare_written(
+    (saved, now, rope): (&str, &str, &Rope),
+    steps: &[(String, bool)],
+    review: bool,
+) -> Result<Prepared, Unprepared> {
+    let failed = |err: clackatoo_text::EditError| Unprepared::Failed(err.to_string());
+    let Some((disk, _)) = steps.last() else {
+        return Err(Unprepared::Failed("the changes don't make the file's text".into()));
+    };
+    let whole = match merge(saved, disk, now).map_err(failed)? {
+        Merged::Made(edit) => edit,
+        Merged::Conflict(lines) => return Err(Unprepared::Conflict(lines)),
+    };
+    let mut edits = Vec::with_capacity(steps.len());
+    if steps.len() == 1 {
+        edits.push(whole);
+    } else {
+        let mut before = saved;
+        let mut text = now.to_owned();
+        for (after, _) in steps {
+            match merge(before, after, &text).map_err(failed)? {
+                Merged::Made(edit) => {
+                    text = edit.apply_to(&text).map_err(failed)?;
+                    edits.push(edit);
+                }
+                Merged::Conflict(lines) => return Err(Unprepared::Conflict(lines)),
+            }
+            before = after;
+        }
+    }
+    let mut prepared = Vec::with_capacity(edits.len());
+    // The text each step is made to, if it's needed: for the review, or
+    // to coarsen a step after the first against.
+    let keep = review || edits.len() > 1;
+    let mut old = if keep { now.to_owned() } else { String::new() };
+    for (index, (mut edit, &(_, step))) in edits.into_iter().zip(steps).enumerate() {
+        if edit.ops().len() > MOST_PIECES {
+            // As `Buffer::edit_from` would, so it makes this edit as it is.
+            edit = if index == 0 {
+                edit.coarsened(rope, MOST_PIECES)
+            } else {
+                edit.coarsened(&Rope::from_str(&old), MOST_PIECES)
+            };
+        }
+        let mut made = PreparedStep {
+            edit,
+            step,
+            old: String::new(),
+            new: String::new(),
+            lines: ChangedLines::default(),
+        };
+        if keep {
+            let new = made.edit.apply_to(&old).map_err(failed)?;
+            let before = std::mem::replace(&mut old, new);
+            if review {
+                made.lines = ChangedLines::of(&made.edit, &before, &old);
+                (made.old, made.new) = (before, old.clone());
+            }
+        }
+        prepared.push(made);
+    }
+    Ok(Prepared {
+        steps: prepared,
+        saved: Rope::from_str(disk),
+    })
 }
 
 /// An undo or a redo made (see [`Buffer::reverse_keeping`]).
@@ -584,55 +700,55 @@ impl Buffer {
         (disk, stamp): (&str, DiskStamp),
         author: Author,
     ) -> Result<Vec<Option<Made>>, Refused> {
-        let path = self.path.display().to_string();
-        let failed = |reason: String| {
-            Refused::Failed(Error::OpenFailed {
-                path: path.clone(),
-                reason,
-            })
-        };
         if steps.last().map(|(text, _)| text.as_str()) != Some(disk) {
-            return Err(failed("the changes don't make the file's text".into()));
+            return Err(self.unprepared(Unprepared::Failed(
+                "the changes don't make the file's text".into(),
+            )));
         }
         let saved = self.saved.to_string();
-        let mut now = self.text.to_string();
-        let whole = match merge(&saved, disk, &now).map_err(|err| failed(err.to_string()))? {
-            Merged::Made(edit) => edit,
-            Merged::Conflict(lines) => return Err(Refused::Conflict(lines)),
-        };
-        // Every step is merged before any is made, so one that can't be
-        // leaves the buffer as it was. Each is merged from the text after
-        // the one before, which only makes sense because the whole change
-        // was found to touch no line changed and not saved, just above.
-        // A single step is the whole change, already merged: merging a big
-        // file again would hold up the loop as long again.
-        let mut edits = Vec::with_capacity(steps.len());
-        if steps.len() == 1 {
-            edits.push(whole);
-        } else {
-            let mut before = saved.as_str();
-            for (text, _) in steps {
-                match merge(before, text, &now).map_err(|err| failed(err.to_string()))? {
-                    Merged::Made(edit) => {
-                        now = edit.apply_to(&now).map_err(|err| failed(err.to_string()))?;
-                        edits.push(edit);
-                    }
-                    Merged::Conflict(lines) => return Err(Refused::Conflict(lines)),
-                }
-                before = text;
-            }
+        let now = self.text.to_string();
+        let prepared = prepare_written((&saved, &now, &self.text), steps, false)
+            .map_err(|unprepared| self.unprepared(unprepared))?;
+        Ok(self
+            .take_prepared(prepared, stamp, author)?
+            .into_iter()
+            .map(|(made, _)| made)
+            .collect())
+    }
+
+    /// Why changes that couldn't be [`Prepared`] weren't made.
+    pub(crate) fn unprepared(&self, unprepared: Unprepared) -> Refused {
+        match unprepared {
+            Unprepared::Conflict(lines) => Refused::Conflict(lines),
+            Unprepared::Failed(reason) => Refused::Failed(Error::OpenFailed {
+                path: self.path.display().to_string(),
+                reason,
+            }),
         }
-        let mut made = Vec::with_capacity(steps.len());
-        for (edit, &(_, step)) in edits.into_iter().zip(steps) {
-            if edit.is_noop() {
-                made.push(None);
+    }
+
+    /// Makes changes an agent wrote to the file, [`Prepared`] from the
+    /// buffer as it is now, by `author`, and has the file's text, which
+    /// `stamp` says what it is, be the text saved. Returns the edit each
+    /// step made, with what the review needs of it.
+    pub(crate) fn take_prepared(
+        &mut self,
+        prepared: Prepared,
+        stamp: DiskStamp,
+        author: Author,
+    ) -> Result<Vec<(Option<Made>, PreparedStep)>, Refused> {
+        let mut made = Vec::with_capacity(prepared.steps.len());
+        for step in prepared.steps {
+            if step.edit.is_noop() {
+                made.push((None, step));
                 continue;
             }
             let version = self.version();
-            let one = self.edit(edit, version, step, author);
-            made.push(Some(one.map_err(|err| failed(err.to_string()))?));
+            let one = (self.edit(step.edit.clone(), version, step.step, author))
+                .map_err(|err| self.unprepared(Unprepared::Failed(err.to_string())))?;
+            made.push((Some(one), step));
         }
-        self.saved = Rope::from_str(disk);
+        self.saved = prepared.saved;
         self.disk = Some(stamp);
         Ok(made)
     }

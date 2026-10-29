@@ -1207,7 +1207,7 @@ pub(in crate::server) mod tests {
 
     /// A file of 300,000 lines, as `big.txt` in `world`: more than is
     /// worked out on the loop. Returns its text.
-    fn big_file(world: &World) -> String {
+    pub(in crate::server) fn big_file(world: &World) -> String {
         let mut text = String::new();
         for n in 1..=300_000 {
             use std::fmt::Write as _;
@@ -1220,7 +1220,11 @@ pub(in crate::server) mod tests {
     /// Has tool `tool` of the chat's agent change line `line` of `big.txt`,
     /// `before`, itself, and say so, so the change is worked out off the
     /// loop. Returns the file's text after it.
-    fn change_big_file(world: &mut World, tool: (&str, u32), before: &str) -> String {
+    pub(in crate::server) fn change_big_file(
+        world: &mut World,
+        tool: (&str, u32),
+        before: &str,
+    ) -> String {
         change_big(world, "big.txt", tool, before)
     }
 

@@ -43,13 +43,13 @@ use clackatoo_protocol::{
     NewReview, PaneId, Response, ReviewAction, ReviewChat, ReviewComment, ReviewFile, ReviewId,
     ReviewList, ReviewScope, Subagent, TerminalId,
 };
-use clackatoo_text::{AgentHunk, AgentHunks, Bias, Edit, Maker, Rope};
+use clackatoo_text::{AgentHunk, AgentHunks, Bias, ChangedLines, Edit, Maker, Rope};
 use mio::Token;
 
 use super::Daemon;
 use super::edit_log::Diffed;
 use super::turn_undo::{Disk, Plan, Target, shown, take_out};
-use crate::buffer::{self, Buffer, DiskStamp};
+use crate::buffer::{self, Buffer, DiskStamp, PreparedStep};
 use crate::changes::{Compared, listed};
 use crate::handover;
 
@@ -257,21 +257,38 @@ impl Daemon {
 
     /// Puts in an agent's edit `edit` to buffer `id`, which the text now
     /// was made by, by `maker`: the lines it changed become hunks.
-    pub(super) fn agent_edited(&mut self, id: BufferId, edit: &Edit, maker: Maker) {
+    ///
+    /// What it needs of the edit, the texts before and after it and the
+    /// lines it changed, is worked out here, unless `step` has it already,
+    /// as for a big change merged off the loop.
+    pub(super) fn agent_edited(
+        &mut self,
+        id: BufferId,
+        edit: &Edit,
+        maker: Maker,
+        step: Option<PreparedStep>,
+    ) {
         let Some(slot) = self.buffers.get_mut(&id) else {
             return;
         };
-        let new = slot.buffer.text().to_string();
-        let Ok(old) = edit.invert().apply_to(&new) else {
-            log::error!("buffer {id}: an agent's edit doesn't undo");
-            return;
+        let (old, new, lines) = if let Some(step) = step {
+            (step.old, step.new, step.lines)
+        } else {
+            let new = slot.buffer.text().to_string();
+            let Ok(old) = edit.invert().apply_to(&new) else {
+                log::error!("buffer {id}: an agent's edit doesn't undo");
+                return;
+            };
+            let lines = ChangedLines::of(edit, &old, &new);
+            (old, new, lines)
         };
         let mut chats = chats_of(&slot.agents);
         chats.push(TerminalId(maker.chat));
         let reviews = &mut self.reviews;
         let known = &reviews.made;
         let fits = |hunk: &AgentHunk| fits(hunk, &old, known);
-        let added = (slot.agents).add(edit, (&old, &new), (maker, &fits), &mut reviews.next_hunk);
+        let next = &mut reviews.next_hunk;
+        let added = (slot.agents).add_lines(&lines, (&old, &new), (maker, &fits), next);
         for gone in &added.gone {
             reviews.made.remove(gone);
         }

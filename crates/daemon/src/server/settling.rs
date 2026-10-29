@@ -9,6 +9,18 @@
 //! it's worked out on a thread of its own, and the loop takes it in once
 //! it's done. Small files are worked out at once, as before.
 //!
+//! A change to a file open in a buffer is merged into the buffer's text
+//! the same way (CLACKA-201): the worker merges it into a copy of the
+//! text, as it was at one version (ropes share what they have in common,
+//! so the copy is cheap), and works out what the review needs of it. The
+//! loop makes the merged edits only if the buffer is still at that
+//! version, with the file as it was, so the merge's promise never to mix
+//! the agent's change into lines changed and not saved still holds.
+//! Otherwise, as when you typed meanwhile, or undid something, it's merged
+//! again from the buffer as it is now, and after a few tries, on the loop.
+//! A buffer closed meanwhile, or opened again as another, has the change
+//! taken in as one to a file not open, from the text the buffer had saved.
+//!
 //! What's taken in is in order. While a file's change is being worked out
 //! (see [`Diffing`]), what more the same chat's tools do to it waits, and
 //! so does the end of the chat's turn. Anything else about the file, such
@@ -19,7 +31,9 @@
 //!
 //! A change the worker fails to work out, as if it panicked, is noted as
 //! unknown, as one whose text before wasn't seen; a worker that's gone
-//! fails every change it had, and the next is given a new one.
+//! fails every change it had, and the next is given a new one. A change
+//! to a buffer that fails is merged again on the loop instead, as all it
+//! needs is still at hand.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
@@ -27,8 +41,11 @@ use std::sync::{Arc, mpsc};
 
 use clackatoo_protocol::TerminalId;
 
-use super::agent_files::Settled;
+use clackatoo_protocol::BufferId;
+
+use super::agent_files::{Merging, Settled};
 use super::edit_log::{Diffed, Maker};
+use crate::buffer::{Prepared, Unprepared};
 
 /// The most bytes of text, before and after together, worked out on the
 /// loop. A change to a bigger file is worked out on the worker.
@@ -52,6 +69,28 @@ pub(super) struct Diffing {
     pub(super) again: bool,
     /// The settling again is the turn's last.
     pub(super) last: bool,
+    /// For a change to a file open in a buffer, being merged into it.
+    pub(super) open: Option<Open>,
+}
+
+/// What a change being merged into buffer `id` is merged again from, if
+/// it can't be made as merged.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Open {
+    pub(super) id: BufferId,
+    pub(super) source: Source,
+    /// How many times it's been merged again.
+    pub(super) tries: u32,
+}
+
+/// Where a change to a buffer's file came from.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Source {
+    /// What the chat's tools said they changed, as its turn ends if
+    /// `last`.
+    Tools { last: bool },
+    /// The chat's commands, in turn `turn`.
+    Commands { turn: usize },
 }
 
 impl Diffing {
@@ -60,12 +99,75 @@ impl Diffing {
     }
 }
 
+/// A change given the worker.
+#[derive(Debug)]
+pub(super) enum Job {
+    /// To a file not open: the edit to work out.
+    Closed(Settled),
+    /// To a file open in a buffer: to merge into it.
+    Open(Merging),
+}
+
 /// A change the worker has done with: worked out, or `None` if it
 /// couldn't be.
-pub(super) type Worked = (Settled, Option<Diffed>);
+#[derive(Debug)]
+pub(super) enum Worked {
+    Closed(Settled, Option<Diffed>),
+    Open(Merging, Option<Result<Prepared, Unprepared>>),
+}
+
+impl Job {
+    /// The text it holds, in bytes.
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Closed(settled) => bytes(settled),
+            Self::Open(merging) => merging.bytes(),
+        }
+    }
+
+    /// Works it out, as the worker does, having `first` run first, in the
+    /// same guard against a panic.
+    fn work(self, first: &dyn Fn()) -> Worked {
+        match self {
+            Self::Closed(settled) => {
+                let diffed = catch_unwind(AssertUnwindSafe(|| {
+                    first();
+                    Diffed::between(
+                        settled.before.as_deref().unwrap_or_default(),
+                        settled.disk.as_deref().unwrap_or_default(),
+                    )
+                }));
+                if let Err(panic) = &diffed {
+                    log::warn!("settling: working out a change panicked: {panic:?}");
+                }
+                Worked::Closed(settled, diffed.ok())
+            }
+            Self::Open(merging) => {
+                let prepared = catch_unwind(AssertUnwindSafe(|| {
+                    first();
+                    merging.prepare()
+                }));
+                if let Err(panic) = &prepared {
+                    log::warn!("settling: merging a change panicked: {panic:?}");
+                }
+                Worked::Open(merging, prepared.ok())
+            }
+        }
+    }
+}
+
+impl Worked {
+    /// The text the change given the worker held, in bytes.
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Closed(settled, _) => bytes(settled),
+            Self::Open(merging, _) => merging.bytes(),
+        }
+    }
+}
 
 /// Where the worker is given changes, and gives them back.
-type Worker = (mpsc::Sender<Settled>, mpsc::Receiver<Worked>);
+type Worker = (mpsc::Sender<Job>, mpsc::Receiver<Worked>);
 
 /// The worker, started when first needed.
 #[derive(Debug, Default)]
@@ -103,17 +205,16 @@ fn bytes(settled: &Settled) -> usize {
 }
 
 impl Settler {
-    /// Works out `settled`'s change on the worker, waking the loop with
-    /// `waker` once it's done. Gives `settled` back if the worker can't
-    /// take it, as when too much is in flight already, for the loop to
-    /// work it out itself.
-    pub(super) fn submit(&mut self, settled: Settled, waker: &Arc<mio::Waker>) -> Option<Settled> {
-        let size = bytes(&settled);
+    /// Works out `job` on the worker, waking the loop with `waker` once
+    /// it's done. Gives `job` back if the worker can't take it, as when
+    /// too much is in flight already, for the loop to work it out itself.
+    pub(super) fn submit(&mut self, job: Job, waker: &Arc<mio::Waker>) -> Option<Job> {
+        let size = job.bytes();
         if self.in_flight + size > IN_FLIGHT {
-            return Some(settled);
+            return Some(job);
         }
         if self.worker.is_none() {
-            let (send, jobs) = mpsc::channel::<Settled>();
+            let (send, jobs) = mpsc::channel::<Job>();
             let (done, receive) = mpsc::channel();
             let waker = Arc::clone(waker);
             #[cfg(test)]
@@ -121,49 +222,42 @@ impl Settler {
             let spawned = std::thread::Builder::new()
                 .name("settling".into())
                 .spawn(move || {
-                    while let Ok(settled) = jobs.recv() {
+                    while let Ok(job) = jobs.recv() {
                         #[cfg(test)]
                         if panic.load(std::sync::atomic::Ordering::SeqCst) == GONE {
                             panic.store(0, std::sync::atomic::Ordering::SeqCst);
                             panic!("the settling worker is lost, as a test asked");
                         }
-                        let diffed = catch_unwind(AssertUnwindSafe(|| {
+                        let worked = job.work(&|| {
                             #[cfg(test)]
                             assert_ne!(
                                 panic.swap(0, std::sync::atomic::Ordering::SeqCst),
                                 CAUGHT,
                                 "working out a change failed, as a test asked"
                             );
-                            Diffed::between(
-                                settled.before.as_deref().unwrap_or_default(),
-                                settled.disk.as_deref().unwrap_or_default(),
-                            )
-                        }));
-                        if let Err(panic) = &diffed {
-                            log::warn!("settling: working out a change panicked: {panic:?}");
-                        }
-                        if done.send((settled, diffed.ok())).is_err() {
+                        });
+                        if done.send(worked).is_err() {
                             break;
                         }
                         let _ = waker.wake();
                     }
                 });
             if spawned.is_err() {
-                return Some(settled);
+                return Some(job);
             }
             self.worker = Some((send, receive));
         }
         let (send, _) = self.worker.as_ref()?;
-        match send.send(settled) {
+        match send.send(job) {
             Ok(()) => {
                 self.in_flight += size;
                 None
             }
-            Err(mpsc::SendError(settled)) => {
+            Err(mpsc::SendError(job)) => {
                 self.worker = None;
                 self.in_flight = 0;
                 self.gone = true;
-                Some(settled)
+                Some(job)
             }
         }
     }
@@ -216,12 +310,230 @@ impl Settler {
     /// Counts what `taken` gave back as no longer in flight, and lets go
     /// of a worker that's gone.
     fn gave_back(&mut self, taken: &Taken) {
-        for (settled, _) in &taken.worked {
-            self.in_flight = self.in_flight.saturating_sub(bytes(settled));
+        for worked in &taken.worked {
+            self.in_flight = self.in_flight.saturating_sub(worked.bytes());
         }
         if taken.lost {
             self.worker = None;
             self.in_flight = 0;
         }
+    }
+}
+
+/// Changes to big files open in buffers, merged off the loop, and what
+/// may happen to the buffer meanwhile (CLACKA-201).
+#[cfg(test)]
+mod tests {
+    use clackatoo_protocol::{Author, BufferId};
+
+    use crate::server::turn_undo::tests::{World, big_file, change_big_file};
+
+    /// `big.txt`, open, with a change to its first line by the chat's
+    /// agent being merged into it off the loop. Returns the buffer, and
+    /// the file's text before the change and after.
+    fn merging(world: &mut World) -> (BufferId, String, String) {
+        let first = big_file(world);
+        let id = world.open("big.txt");
+        let second = change_big_file(world, ("t1", 1), &first);
+        assert_eq!(world.text(id), first, "not made yet");
+        (id, first, second)
+    }
+
+    /// The buffer's text saved.
+    fn saved(world: &World, id: BufferId) -> String {
+        world.daemon.buffers[&id].buffer.saved().to_string()
+    }
+
+    #[test]
+    fn a_big_change_to_an_open_file_is_merged_off_the_loop_and_undone_by_turn() {
+        let mut world = World::new();
+        let (id, first, second) = merging(&mut world);
+        world.daemon.settle_all_pending();
+        assert!(!world.daemon.agent_files.diffing(world.chat));
+        assert_eq!((world.text(id), saved(&world, id)), (second.clone(), second));
+        assert!(!world.daemon.buffers[&id].agents.is_empty(), "reviewed");
+        world.end_turn();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.text(id), first);
+    }
+
+    #[test]
+    fn typing_while_a_big_change_is_merged_has_it_merged_again() {
+        let mut world = World::new();
+        let (id, first, second) = merging(&mut world);
+        world.type_in(id, first.len(), "", "typed\n");
+        world.daemon.settle_all_pending();
+        assert_eq!(world.text(id), format!("{second}typed\n"));
+        assert_eq!(saved(&world, id), second);
+        world.end_turn();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.text(id), format!("{first}typed\n"));
+    }
+
+    #[test]
+    fn typing_on_the_lines_a_big_change_touches_meanwhile_refuses_it() {
+        let mut world = World::new();
+        let (id, first, _) = merging(&mut world);
+        world.type_in(id, 0, "line 1\n", "LINE 1\n");
+        world.daemon.settle_all_pending();
+        // Never mixed in: yours is as you left it, and still refuses to be
+        // written over the agent's file unless forced.
+        assert_eq!(world.text(id), first.replacen("line 1\n", "LINE 1\n", 1));
+        let notice = world.chat_node().notice.unwrap_or_default();
+        assert!(notice.contains("where you have unsaved edits"), "{notice}");
+        let buffer = &world.daemon.buffers[&id].buffer;
+        assert!(buffer.changed_on_disk().unwrap().is_some());
+    }
+
+    #[test]
+    fn undoing_while_a_big_change_is_merged_has_it_merged_again() {
+        let mut world = World::new();
+        let first = big_file(&world);
+        let id = world.open("big.txt");
+        world.type_in(id, first.len(), "", "typed\n");
+        let second = change_big_file(&mut world, ("t1", 1), &first);
+        let buffer = &mut world.daemon.buffers.get_mut(&id).unwrap().buffer;
+        let made = buffer.reverse(Author::User, false).unwrap().unwrap();
+        world.daemon.made_for_user(id, made);
+        world.daemon.settle_all_pending();
+        assert_eq!(world.text(id), second);
+        world.end_turn();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.text(id), first);
+    }
+
+    #[test]
+    fn a_second_change_while_a_big_one_is_merged_waits_for_it() {
+        let mut world = World::new();
+        let (id, first, second) = merging(&mut world);
+        // By another of the chat's tools, then through the daemon.
+        let third = change_big_file(&mut world, ("t2", 2), &second);
+        world.daemon.settle_all_pending();
+        assert_eq!(world.text(id), third);
+        world.write("big.txt", "small\n");
+        assert_eq!(world.text(id), "small\n");
+        world.end_turn();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.text(id), first);
+    }
+
+    #[test]
+    fn a_write_through_the_daemon_takes_in_a_big_change_being_merged_first() {
+        let mut world = World::new();
+        let (id, first, _) = merging(&mut world);
+        world.write("big.txt", "small\n");
+        assert!(!world.daemon.agent_files.diffing(world.chat));
+        assert_eq!(world.text(id), "small\n");
+        world.end_turn();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.text(id), first);
+    }
+
+    #[test]
+    fn a_buffer_closed_while_a_big_change_is_merged_has_it_as_a_file_not_open() {
+        let mut world = World::new();
+        let (id, first, second) = merging(&mut world);
+        world.daemon.close_if_unwanted(id);
+        assert!(!world.daemon.buffers.contains_key(&id));
+        world.daemon.settle_all_pending();
+        assert!(world.daemon.reviews.keeps_closed(&world.path("big.txt")));
+        assert_eq!(world.disk("big.txt"), Some(second));
+        world.end_turn();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.disk("big.txt"), Some(first));
+    }
+
+    #[test]
+    fn a_file_opened_again_while_a_big_change_is_merged_takes_it_in_first() {
+        let mut world = World::new();
+        let (id, first, second) = merging(&mut world);
+        world.daemon.close_if_unwanted(id);
+        let again = world.open("big.txt");
+        assert_ne!(again, id);
+        assert!(!world.daemon.agent_files.diffing(world.chat));
+        assert_eq!(world.text(again), second);
+        assert!(
+            !world.daemon.buffers[&again].agents.is_empty(),
+            "its hunk came along"
+        );
+        world.end_turn();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.text(again), first);
+    }
+
+    #[test]
+    fn a_buffer_whose_big_change_is_merged_isnt_taken_as_changed_from_outside() {
+        let mut world = World::new();
+        let (id, first, second) = merging(&mut world);
+        // With no tool running, a change found on disk would be from
+        // outside, and a window would read it again.
+        world.end_turn();
+        world.daemon.disk_maybe_changed(id);
+        world.daemon.check_disk();
+        assert!(!world.daemon.buffers[&id].stale());
+        assert!(world.daemon.reload_buffer(id).is_ok());
+        assert_eq!(world.text(id), first, "nothing taken yet");
+        world.daemon.settle_all_pending();
+        assert_eq!(world.text(id), second);
+        world.daemon.check_disk();
+        assert!(!world.daemon.buffers[&id].stale());
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.text(id), first);
+    }
+
+    #[test]
+    fn saving_while_a_big_change_is_merged_takes_it_in_first() {
+        let mut world = World::new();
+        let (id, _, second) = merging(&mut world);
+        world.daemon.save_buffer(id, false).unwrap();
+        assert!(!world.daemon.agent_files.diffing(world.chat));
+        assert_eq!(world.text(id), second);
+        assert_eq!(world.disk("big.txt"), Some(second));
+    }
+
+    #[test]
+    fn a_handover_takes_in_a_big_change_being_merged_first() {
+        let mut world = World::new();
+        let (id, _, second) = merging(&mut world);
+        drop(world.daemon.hand_over(std::time::Instant::now()).unwrap());
+        assert!(!world.daemon.agent_files.diffing(world.chat));
+        assert_eq!(world.text(id), second);
+        assert!(world.daemon.agent_files.log.turn(world.chat, 0).is_some());
+    }
+
+    #[test]
+    fn a_big_change_the_worker_fails_to_merge_is_merged_on_the_loop() {
+        use super::{CAUGHT, GONE};
+        let mut world = World::new();
+        let first = big_file(&world);
+        let id = world.open("big.txt");
+        world.daemon.agent_files.panic_next(CAUGHT);
+        let second = change_big_file(&mut world, ("t1", 1), &first);
+        world.daemon.settle_all_pending();
+        assert_eq!(world.text(id), second);
+        // The worker itself goes.
+        world.daemon.agent_files.panic_next(GONE);
+        let third = change_big_file(&mut world, ("t2", 2), &second);
+        world.daemon.settle_all_pending();
+        assert_eq!(world.text(id), third);
+        world.end_turn();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.text(id), first);
+    }
+
+    #[test]
+    fn a_big_change_by_the_agents_commands_is_merged_off_the_loop() {
+        let mut world = World::new();
+        let first = big_file(&world);
+        let id = world.open("big.txt");
+        let second = first.replacen("line 1\n", "line #1\n", 1);
+        std::fs::write(world.path("big.txt"), &second).unwrap();
+        world.daemon.take_from_commands(world.chat, 0, id);
+        assert!(world.daemon.agent_files.diffing(world.chat));
+        world.daemon.settle_all_pending();
+        assert_eq!(world.text(id), second);
+        world.end_turn();
+        assert_eq!(world.undo(0, false, false), "Undid turn 1: big.txt.");
+        assert_eq!(world.text(id), first);
     }
 }
