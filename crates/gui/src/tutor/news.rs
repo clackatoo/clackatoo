@@ -1079,6 +1079,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Claude Code's Task helpers fold under their card, saying what they're doing now; za opens it to show their work",
     },
+    News {
+        id: "prompt-box",
+        date: "2026-10-29",
+        lesson: "agents",
+        what: "In a chat's box, Up recalls messages sent and takes queued ones back, Ctrl+R finds one, and drafts are kept",
+    },
 ];
 
 impl News {

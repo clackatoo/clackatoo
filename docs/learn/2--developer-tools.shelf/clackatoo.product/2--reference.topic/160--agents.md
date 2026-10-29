@@ -72,7 +72,7 @@ The separate **Gemini CLI** provider remains available for existing API-key setu
 
 ## Queuing and steering
 
-While an agent works, Enter queues your draft; Shift+Enter still inserts a newline. Pending messages share a compact Queued panel above the composer; its heading shows the count, or Queue paused when delivery is paused. They run in order after a successful turn. Each row has an ↑ control to send it now and × to remove it. Sending now during a turn steers that work; while idle it resumes delivery. Ctrl+Enter steers the current draft directly. While you type during a turn, the composer shows a compact Steer or Stop & continue button and a square Stop control.
+While an agent works, Enter queues your draft; Shift+Enter still inserts a newline. Pending messages share a compact Queued panel above the composer; its heading shows the count, or Queue paused when delivery is paused. They run in order after a successful turn. Each row has a pencil to [take it back into the box](#messages-sent-and-drafts) to edit, an ↑ control to send it now, and × to remove it. Sending now during a turn steers that work; while idle it resumes delivery. Ctrl+Enter steers the current draft directly. While you type during a turn, the composer shows a compact Steer or Stop & continue button and a square Stop control.
 
 For text sent to the installed Claude or Codex adapter, **Steer** adds the message to the running turn without cancelling it. Other adapters, image messages, and pending provider changes use **Stop & continue**: cancel the current turn, wait for it to finish, then send the new message. The label tells you which behavior will be used. If the turn finishes while guidance is being delivered, that message runs once as the next turn instead. Codex uses the installed adapter with Clackatoo's steering backport; unpatched custom or PATH adapters retain Stop & continue. An uncertain steering acknowledgment leaves the message paused so you can check the conversation before retrying.
 
@@ -110,7 +110,9 @@ In insert mode, what you type goes in the box at the bottom.
 | Ctrl+C | While the agent answers, asks it to stop, unless text in the message is selected, which it copies. When it's not answering, copies what's selected in the message or the conversation. |
 | Backspace, Delete | Delete a character, or with Ctrl, a word. |
 | Left, Right | Move by a character, or with Ctrl, a word. With Shift, they select. |
-| Up, Down, Home, End | Move by a line, or to its start or end. With Shift, they select. |
+| Up, Down | Move by a line. On the box's first line, Up goes back through the [messages sent](#messages-sent-and-drafts), and on its last, Down comes forward again. In an empty box, Up takes the newest queued message back to edit. With Shift, they select. |
+| Home, End | Move to the line's start or end. With Shift, they select. |
+| Ctrl+R | Opens the finder on the messages sent, to put one in. |
 | Ctrl+A | Selects the whole message. |
 | Shift+Tab | Moves the agent on to its next mode. |
 | Esc | Normal mode. There's no program in a chat to need Esc. |
@@ -151,7 +153,24 @@ The phone lists the agent's commands too, as you type `/` and a name, and a tap 
 
 One message is answered at a time. While the agent answers, the button in the box's corner is a stop button, and Enter keeps what you typed until it's done. Clicking the button with nothing being answered sends the message, as Enter does.
 
-What you've typed but not sent belongs to the window: another window, or this one after it closes, starts with an empty box.
+### Messages sent and drafts
+
+The box remembers what you've sent in the chat, as a shell remembers commands, and what you've typed but not sent.
+
+| Key | Does |
+|---|---|
+| Up, on the box's first line | The message sent before, of those that start with what's typed: in an empty box, every one, newest first. The cursor goes to its end. |
+| Down, on its last line | The message sent after; past the newest, back to what you had typed. |
+| Up, in an empty box with messages queued | Takes the newest queued message out of the queue and puts it in the box to edit, as Claude Code's Up does. |
+| Ctrl+R | Opens the finder on the messages sent, newest first: type to narrow them, and Enter puts the one picked in at the cursor. `:Prompts` opens it too. |
+
+Up on a message's other lines moves the cursor up a line, so on a message of several lines, Up goes to its first line before it goes back to the one before. Typing anything forgets where Up had gone: the next Up goes back from what's typed then. In normal mode, `k` and `j` still move through the conversation.
+
+The messages Up recalls are your own, in this chat: not another chat's agent's, nor clackatoo's notices. They're worked out from the conversation itself, so every window and the phone have the same ones, and they last through upgrades, and after a restart once the chat has told its conversation again. Up to the newest 200 are kept, those over 16 KiB left out. A message with images recalls its words. Messages from other chats aren't recalled.
+
+The pencil on a queued message, or Up in an empty box, asks the daemon to take it out of the queue, and puts its text in the box only once it's out, before anything you've typed since, so it's never both waiting and being edited. If it was sent meanwhile, the bar says so. A queued message with images, or one that moves the chat to another agent, has no pencil and isn't taken back: send or remove it.
+
+What you've typed but not sent belongs to the daemon too. A window tells it as you pause typing, and at once as the box empties, as when you send. A window, or the phone, opening the chat with nothing typed in its box starts with it: after closing the window, after an upgrade, or on another machine. What's already typed somewhere is never replaced by what's typed elsewhere; with two windows typing at once, the last to pause is what the next starts with. Sending it, from anywhere, clears it. Only the text is kept: images attached stay in the window. A full daemon restart doesn't keep it.
 
 ## The agent's settings
 
@@ -634,6 +653,8 @@ A chat that moved between agents keeps the sessions it had with each, and goes b
 When the daemon stops, a chat in a pane comes back with its workspace the next time it starts, on the same session: no agent starts until you look at the chat or send it a message, and then the agent tells the conversation so far, as going on with a [past session](#the-start-page) does, and nothing it tells acts again. A turn you stopped shows as stopped, as Claude Code keeps it; Codex keeps no note of a stop, so a stopped Codex turn shows as one that ended. Claude Code keeps a stop as a message reading `[Request interrupted by user]`, so a message of exactly that, typed yourself, comes back as a stop too. The chat keeps its agent, model, tools and Browser settings; it starts in the agent's own starting mode, and as a chat of its own, not another's subagent. Chats in no pane don't come back, but the start page lists their sessions.
 
 `clackatoo capture` prints a chat as text: each message after a `>`, and what the agent said.
+
+What you've typed but not sent in a chat's box, and the [messages sent](#messages-sent-and-drafts) Up recalls, last through an upgrade.
 
 A line where the agent compacted its context comes through an upgrade as words saying so; a command's exit code, what turns spent and the agent's own words for a failure don't.
 

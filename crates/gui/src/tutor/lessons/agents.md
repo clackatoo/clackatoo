@@ -22,7 +22,7 @@ If the agent hasn't opened the chat's session after 30 seconds, the chat says so
 
 ## Queuing and steering
 
-While an agent works, Enter queues your draft; Shift+Enter still inserts a newline. Pending messages share a compact Queued panel above the composer; its heading shows the count, or Queue paused when delivery is paused. They run in order after a successful turn. Each row has an ↑ control to send it now and × to remove it. Sending now during a turn steers that work; while idle it resumes delivery. Ctrl+Enter steers the current draft directly. While you type during a turn, the composer shows a compact Steer or Stop & continue button and a square Stop control.
+While an agent works, Enter queues your draft; Shift+Enter still inserts a newline. Pending messages share a compact Queued panel above the composer; its heading shows the count, or Queue paused when delivery is paused. They run in order after a successful turn. Each row has a pencil to take it back into the box to edit, an ↑ control to send it now, and × to remove it. Sending now during a turn steers that work; while idle it resumes delivery. Ctrl+Enter steers the current draft directly. While you type during a turn, the composer shows a compact Steer or Stop & continue button and a square Stop control.
 
 For text sent to the installed Claude or Codex adapter, **Steer** adds the message to the running turn without cancelling it. Other adapters, image messages, and pending provider changes use **Stop & continue**: cancel the current turn, wait for it to finish, then send the new message. The label tells you which behavior will be used. If the turn finishes while guidance is being delivered, that message runs once as the next turn instead. Codex uses the installed adapter with Clackatoo's steering backport; unpatched custom or PATH adapters retain Stop & continue. An uncertain steering acknowledgment leaves the message paused so you can check the conversation before retrying.
 
@@ -220,6 +220,16 @@ If you have a chat open, ask it to run `sleep 30` in the background, watch the s
 Type `/` at the start of a message and a menu opens over the box: the agent's own commands, such as Claude Code's `/compact` or Codex's `/review`, your skills, then clackatoo's. Keep typing to narrow it, Down and Up to pick, Tab to put one in, Enter to put it in or, once the whole name is typed, to send it, and Esc to close the menu without leaving insert mode. Typed alone, commands only the agent's own terminal interface has don't go to the agent: `/clear` and `/resume` open the start page, `/model` the model menu, `/diff` `:Review`, `/status` your usage limits, `/rewind` undoes the last turn's files, and `/export` copies the conversation.
 
 If you have a chat open, type `/` in its box, then `/model` and Enter to open the model menu.
+
+## Messages sent, and drafts
+
+The box remembers what you've sent, as a shell does. In insert mode, Up on the box's first line puts the message you sent before in the box, and again the one before that; Down on its last line comes forward, and past the newest, back to what you'd typed. With something typed, Up goes back only through messages that start with it. Ctrl+R opens the finder on every message sent: type to narrow them, and Enter puts the one picked in at the cursor. Normal mode's `k` still moves through the conversation.
+
+Up in an empty box while messages are queued takes the newest back out of the queue to edit, as Claude Code does; so does the pencil on its row.
+
+What you type and don't send is kept by the daemon, so closing the window, upgrading, or opening the chat on another machine or the phone finds it still in the box. Sending it clears it.
+
+If you have a chat open, press `i`, then Up to bring back your last message, and Ctrl+R to search them all.
 
 ## The agent's plan
 
