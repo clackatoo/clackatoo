@@ -363,6 +363,7 @@ impl Daemon {
         if unlisting {
             self.agents.unlisting.insert(name.to_owned());
         }
+        let result = result.map(|listed| self.without_branches(listed));
         self.sessions_listed(listing, name, result);
         self.stop_if_unneeded(agent);
     }
@@ -551,14 +552,25 @@ impl Daemon {
             chat.task(),
             chat.limits(),
         );
+        // A new branch's session, forked from the branch left's.
+        let plan = chat.fork_plan().cloned().filter(|_| session.is_none());
         let opening = Opening {
             tools: self.tools_server(id),
             task,
             limits,
         };
+        let mut sent = false;
         if let Some(slot) = self.agents.running.get_mut(&agent) {
-            slot.agent
-                .open_session(id, &cwd, session.as_deref(), load, opening);
+            match &plan {
+                Some(plan) => {
+                    let message = plan.message.as_deref();
+                    sent = slot.agent.started() && slot.agent.forking().can(message.is_some());
+                    (slot.agent).fork_session(id, &cwd, &plan.from, message, opening);
+                }
+                None => slot
+                    .agent
+                    .open_session(id, &cwd, session.as_deref(), load, opening),
+            }
             let fetching = !slot.agent.started() && through_npx(&slot.command);
             let mut wait = self.config.session_wait;
             if fetching {
@@ -567,6 +579,9 @@ impl Daemon {
             let at = Instant::now();
             let due = at + wait;
             (self.agents.opening).insert(id, Asked { at, due, fetching });
+        }
+        if sent && let Some(chat) = self.chat(id) {
+            chat.fork_sent();
         }
         self.flush_agent(agent);
     }
@@ -756,6 +771,21 @@ impl Daemon {
     }
 
     /// Carries out what a chat asked for.
+    /// Closes `session`, which the chat `id`, with agent `agent`, has
+    /// left for another branch of its conversation: the chat's own opens
+    /// once it's closed, or at once if the agent can't close it, if a
+    /// message waits for it.
+    fn let_branch_session_go(&mut self, id: TerminalId, agent: Option<AgentId>, session: &str) {
+        let slot = agent.and_then(|agent| self.agents.running.get_mut(&agent));
+        let asked = slot.is_some_and(|slot| slot.agent.park_session(id, session));
+        if let Some(agent) = agent.filter(|_| asked) {
+            self.flush_agent(agent);
+        } else if let Some(chat) = self.chat(id) {
+            let next = chat.session_closed();
+            self.act(id, next);
+        }
+    }
+
     pub(super) fn act(&mut self, id: TerminalId, actions: Vec<Action>) {
         let actions = self.not_waiting(id, actions);
         self.act_with(id, actions, None);
@@ -793,6 +823,12 @@ impl Daemon {
                     Err(()) => return,
                 },
             };
+            // A session a branch left: closed, and the chat's own opened
+            // once it is, if a message waits for it.
+            if let Action::LetGo(session) = &action {
+                self.let_branch_session_go(id, agent, session);
+                continue;
+            }
             let session = self
                 .chat(id)
                 .and_then(|chat| chat.session().map(str::to_owned));
@@ -1220,9 +1256,9 @@ impl Daemon {
                 terminal,
                 result,
                 loaded,
-                ..
+                forked,
             } => {
-                if !self.session_opened((agent, name), terminal, result, loaded) {
+                if !self.session_opened((agent, name), terminal, result, (loaded, forked)) {
                     return;
                 }
                 terminal
@@ -1452,7 +1488,7 @@ impl Daemon {
         (agent, name): (AgentId, &str),
         terminal: TerminalId,
         result: Result<Opened, Refused>,
-        loaded: bool,
+        (loaded, forked): (bool, bool),
     ) -> bool {
         // Looked for on PATH, so only when it's needed.
         let login = (result.as_ref().err())
@@ -1491,6 +1527,7 @@ impl Daemon {
             Ok(_) if let Some(why) = unheld => chat.failed_to_connect(&why),
             Ok(opened) => {
                 chat.set_native_steering(native);
+                chat.fork_answered(forked);
                 chat.opened_again(loaded);
                 let actions = chat.connected(opened);
                 self.act(terminal, actions);
@@ -1503,6 +1540,15 @@ impl Daemon {
             Err(refused) if refused.in_use => {
                 let why = crate::chat::failure::in_use(chat.agent_title());
                 chat.failed_to_connect(&why);
+            }
+            // A branch's session couldn't be forked: it's a new one, told
+            // the conversation as a digest.
+            Err(refused) if chat.fork_failed() => {
+                log::info!(
+                    "chat {terminal}: its session couldn't be forked: {}",
+                    refused.message
+                );
+                self.connect(terminal);
             }
             // The session it had is gone, as one closed long ago may be: it
             // starts a new one, which hears the whole conversation.

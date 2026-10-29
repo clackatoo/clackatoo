@@ -146,6 +146,76 @@ pub struct ChatNode {
         deserialize_with = "wire::since::<{ wire::CHAT_PATHS }, _, _>"
     )]
     pub paths: Option<ChatPaths>,
+    /// Where the conversation's branches part, on the branch shown, in
+    /// order: empty if it has none, or from a daemon older than protocol
+    /// 121 (see [`Divergence`]).
+    #[serde(
+        default,
+        skip_serializing_if = "wire::before::<{ wire::CHAT_BRANCHES }, _>",
+        deserialize_with = "wire::since::<{ wire::CHAT_BRANCHES }, _, _>"
+    )]
+    pub branches: Vec<Divergence>,
+}
+
+/// Where branches of a chat's conversation part, on the branch shown
+/// (CLACKA-198): a rewind or an edit starts a new branch from before a
+/// turn, and the one left is kept as another branch of the same chat, to
+/// switch back to.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Divergence {
+    /// The index of the turn where they part, on the branch shown: the
+    /// switcher goes on that turn, or on a row of its own after the last
+    /// turn if the branch shown has no turn there yet (a new branch, not
+    /// written to).
+    pub at: u32,
+    /// Which of them is shown, from 1.
+    pub current: u16,
+    /// How many there are. A new branch not written to yet counts, as
+    /// the last.
+    pub count: u16,
+    /// How many older branches here were let go to keep within the
+    /// bounds.
+    pub dropped: u16,
+    /// Each of them, in order, the one shown included.
+    pub branches: Vec<BranchSummary>,
+}
+
+/// One branch of a chat's conversation where it parts from others, as
+/// [`Divergence`] lists them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchSummary {
+    /// The message its first turn there began with, its first line at
+    /// most 200 characters, with controls shown (empty for a new branch
+    /// not written to yet).
+    pub first: String,
+    /// How many turns it has from there.
+    pub turns: u32,
+    /// When it was last the branch shown, in milliseconds since the Unix
+    /// epoch: 0 for a new branch not written to yet.
+    pub used: u64,
+    /// Whether its agent session was made from a summary of the turns
+    /// before, as the agent couldn't fork its session there, rather than
+    /// knowing them as they were.
+    pub summary: bool,
+}
+
+/// The turn a change was made in, as a review or a buffer's agent hunks
+/// say it, when it isn't on the branch of the conversation shown (see
+/// [`Divergence`]): there's no index to give.
+pub const TURN_NOT_SHOWN: u32 = u32::MAX;
+
+/// What a rewind, or a switch to another branch, does to the files the
+/// turns it takes out of the conversation changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForkFiles {
+    /// Leaves them as they are.
+    #[default]
+    Keep,
+    /// Undoes them, as undoing each turn does; a file changed on the same
+    /// lines since stops it.
+    Undo,
+    /// Undoes them, leaving out files that can't be.
+    UndoForce,
 }
 
 /// Where a chat works, made absolute on the daemon's machine.
@@ -1795,6 +1865,11 @@ pub enum ChatPatch {
         /// The message sent.
         sent: String,
     },
+    /// Where the conversation's branches part is now this (see
+    /// [`ChatNode::branches`]). A rewind or a switch to another branch,
+    /// which changes the turns shown, sends the chat whole instead.
+    /// Requires `wire::CHAT_BRANCHES`.
+    Branches(Vec<Divergence>),
 }
 
 /// A small, decoded image for chat history. Shared by snapshots and paint
@@ -2028,6 +2103,39 @@ pub enum ChatAction {
         /// The queued message's ID.
         queued: u64,
     },
+    /// Start a new branch of the conversation from before turn `at`, an
+    /// index on the branch shown, keeping the one left as another branch
+    /// of the chat: what follows goes from view, and the agent hears of
+    /// the new branch with the next message. With `edit`, turn `at`'s
+    /// message goes in the draft, before what's there. Refused while the
+    /// chat isn't settled, for a chat an agent started, and, unless
+    /// `stop_tasks`, while the agent runs anything in the background,
+    /// which leaving the branch stops. Requires `wire::CHAT_BRANCHES`.
+    Rewind {
+        /// The turn the new branch starts before.
+        at: u32,
+        /// What's done to the files the turns cut changed.
+        files: ForkFiles,
+        /// Whether turn `at`'s message goes in the draft.
+        edit: bool,
+        /// Whether what the agent runs in the background is stopped,
+        /// rather than refusing.
+        stop_tasks: bool,
+    },
+    /// Show branch `to`, from 1, of those parting at turn `at` (see
+    /// [`Divergence`]), going on with its own agent session. Refused as
+    /// [`ChatAction::Rewind`] is. Requires `wire::CHAT_BRANCHES`.
+    SwitchBranch {
+        /// The turn where the branches part.
+        at: u32,
+        /// The branch to show, from 1.
+        to: u16,
+        /// What's done to the files the turns left changed.
+        files: ForkFiles,
+        /// Whether what the agent runs in the background is stopped,
+        /// rather than refusing.
+        stop_tasks: bool,
+    },
 }
 
 /// The number turn `index` of `turns` goes by, as people count them: from
@@ -2124,6 +2232,7 @@ impl ChatNode {
             prompts: self.prompts.clone(),
             draft: self.draft.clone(),
             paths: self.paths.clone(),
+            branches: self.branches.clone(),
             first_turn: self
                 .first_turn
                 .saturating_add(u32::try_from(start).unwrap_or(u32::MAX)),
@@ -2217,6 +2326,7 @@ impl ChatNode {
             ChatPatch::Commands(commands) => self.commands = commands,
             ChatPatch::Retrying(retrying) => self.retrying = retrying,
             ChatPatch::DraftCleared { .. } => self.draft = Some(String::new()),
+            ChatPatch::Branches(branches) => self.branches = branches,
             ChatPatch::History {
                 first,
                 before,

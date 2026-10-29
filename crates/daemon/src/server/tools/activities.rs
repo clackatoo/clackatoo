@@ -176,6 +176,14 @@ impl Daemon {
             };
             r.activity.owner = owner;
             r.activity.pane = None;
+            // Saved by its turn's index: kept by the uid that turn gets
+            // as the chat's turns are told again.
+            let index = usize::try_from(r.activity.turn).unwrap_or(usize::MAX);
+            let uid = (self.chat_ref(owner)).and_then(|chat| chat.turn_uid_to_come(index));
+            let Some(uid) = uid else {
+                continue;
+            };
+            r.activity.turn = uid.0;
             if r.activity.state.active() {
                 r.activity.state = ActivityState::Unknown;
                 r.activity.result = "The daemon restarted. The previous process outcome is unknown; this command was not rerun.".into();
@@ -202,13 +210,12 @@ impl Daemon {
             .activities
             .iter()
             .filter(|r| r.activity.owner == chat && id.is_none_or(|id| r.activity.id == id))
-            .map(|r| {
-                // On the turn's index, as the agent counts turns.
+            // On the turn's index, as the agent counts turns: those of
+            // turns on other branches aren't its.
+            .filter_map(|r| {
                 let mut activity = r.activity.clone();
-                if let Some(hosted) = hosted {
-                    activity.turn = shown_turn(hosted, activity.turn);
-                }
-                activity
+                activity.turn = shown_turn(hosted?, activity.turn)?;
+                Some(activity)
             })
             .collect();
         if id.is_some() && records.is_empty() {
@@ -373,10 +380,11 @@ impl Daemon {
             .map(|r| r.activity.clone())
             .collect();
         if let Some(chat) = self.chat(owner) {
+            // An activity of a turn on another branch isn't shown on this.
             let records = (records.into_iter())
-                .map(|mut activity| {
-                    activity.turn = shown_turn(chat, activity.turn);
-                    activity
+                .filter_map(|mut activity| {
+                    activity.turn = shown_turn(chat, activity.turn)?;
+                    Some(activity)
                 })
                 .collect();
             chat.set_activities(records);
@@ -388,13 +396,16 @@ impl Daemon {
     /// The activities, for the saved workspaces file: each on its turn's
     /// index, as a cold start numbers the turns it tells again afresh.
     pub(in crate::server) fn saved_activities(&self) -> Vec<Record> {
-        let mut records = self.tools.activities.clone();
-        for record in &mut records {
-            if let Some(chat) = self.chat_ref(record.activity.owner) {
-                record.activity.turn = shown_turn(chat, record.activity.turn);
-            }
-        }
-        records
+        // Those of turns on other branches, which a cold start doesn't
+        // keep, aren't.
+        (self.tools.activities.iter())
+            .filter_map(|record| {
+                let mut record = record.clone();
+                let chat = self.chat_ref(record.activity.owner)?;
+                record.activity.turn = shown_turn(chat, record.activity.turn)?;
+                Some(record)
+            })
+            .collect()
     }
 
     pub(in crate::server) fn hand_over_activities(&self) -> Result<Vec<u8>, serde_json::Error> {
@@ -488,11 +499,10 @@ impl Daemon {
 }
 
 /// Where turn `uid` of `chat` is on the conversation shown, as an
-/// activity's card says; its last turn if it isn't there.
-fn shown_turn(chat: &crate::chat::HostedChat, uid: u32) -> u32 {
-    let index = (chat.turn_index(crate::chat::TurnUid(uid)))
-        .unwrap_or_else(|| chat.turns().saturating_sub(1));
-    u32::try_from(index).unwrap_or(u32::MAX)
+/// activity's card says: `None` if it isn't, being on another branch.
+fn shown_turn(chat: &crate::chat::HostedChat, uid: u32) -> Option<u32> {
+    let index = chat.turn_index_to_come(crate::chat::TurnUid(uid))?;
+    u32::try_from(index).ok()
 }
 
 #[cfg(test)]
@@ -519,7 +529,9 @@ mod tests {
     fn cold_recovery_remaps_owner_discards_stale_pane_and_never_starts_work() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, chat) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
-        let (_, records): (u32, Vec<Record>) = serde_json::from_str(JOURNAL).unwrap();
+        let (_, mut records): (u32, Vec<Record>) = serde_json::from_str(JOURNAL).unwrap();
+        // Saved on the chat's turn 3, before its turns are told again.
+        records[0].activity.turn = 3;
         let before = daemon.terminals.len();
         daemon.restore_cold_activities(
             records,
@@ -532,6 +544,14 @@ mod tests {
         assert!(r.notified);
         assert!(daemon.tools.commanded.is_empty());
         assert_eq!(daemon.terminals.len(), before);
+        // Kept by the uid turn 3 gets as it's told again, never the index
+        // (turns are numbered from 1000 in tests), and shown on turn 3.
+        let hosted = daemon.chat_ref(chat).unwrap();
+        let uid = hosted.turn_uid_to_come(3).unwrap();
+        assert_ne!(uid.0, 3);
+        assert_eq!(r.activity.turn, uid.0);
+        assert_eq!(hosted.node().activities[0].turn, 3);
+        assert_eq!(daemon.saved_activities()[0].activity.turn, 3);
     }
 
     #[test]

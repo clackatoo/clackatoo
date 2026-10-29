@@ -6493,7 +6493,10 @@ impl Editor {
             } else {
                 ""
             };
-            let said = format!("{what}{name}, turn {}", hunk.turn + 1);
+            let said = match hunk.turn {
+                clackatoo_protocol::TURN_NOT_SHOWN => format!("{what}{name}, on another branch"),
+                turn => format!("{what}{name}, turn {}", u64::from(turn) + 1),
+            };
             after_line(
                 builder,
                 end,

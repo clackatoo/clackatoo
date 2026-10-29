@@ -375,6 +375,7 @@ impl Review {
             .find(|chat| chat.chat == made.chat)
             .and_then(|chat| chat.turn);
         Some(started_in.unwrap_or(made.turn))
+            .filter(|&turn| turn != clackatoo_protocol::TURN_NOT_SHOWN)
     }
 
     // --- The daemon's news --------------------------------------------------
@@ -923,7 +924,12 @@ impl Review {
                         ..Style::DEFAULT
                     };
                     builder.push(&said, &faint, true);
-                    said = format!(" · {name}, turn {}", made.turn + 1);
+                    said = match made.turn {
+                        clackatoo_protocol::TURN_NOT_SHOWN => {
+                            format!(" · {name}, on another branch")
+                        }
+                        turn => format!(" · {name}, turn {}", u64::from(turn) + 1),
+                    };
                     builder.push(&said, &style, true);
                     if hunk.reviewed {
                         builder.push("  kept", &faint, true);

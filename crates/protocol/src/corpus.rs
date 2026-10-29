@@ -1408,6 +1408,11 @@ pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             .into_iter()
             .map(|sample| (crate::wire::PROMPT_BOX, sample)),
     );
+    samples.extend(
+        chat_branches()
+            .into_iter()
+            .map(|sample| (crate::wire::CHAT_BRANCHES, sample)),
+    );
     samples.push((
         crate::wire::CHAT_PATHS,
         Server(ServerMessage::Event(Event::View {
@@ -1479,6 +1484,62 @@ fn prompt_box() -> Vec<Sample> {
             action: ChatAction::TakeBack { queued: 9 },
         })),
     ]
+}
+
+/// Samples of protocol 121: where a chat's conversation's branches part,
+/// and rewinding it and switching between them (CLACKA-198).
+fn chat_branches() -> Vec<Sample> {
+    let terminal = TerminalId(3);
+    let place = crate::Divergence {
+        at: 4,
+        current: 2,
+        count: 3,
+        dropped: 1,
+        branches: vec![
+            crate::BranchSummary {
+                first: "use the old parser".into(),
+                turns: 6,
+                used: 1_760_000_000_000,
+                summary: false,
+            },
+            crate::BranchSummary {
+                first: "use the new parser".into(),
+                turns: 2,
+                used: 1_760_000_100_000,
+                summary: true,
+            },
+            crate::BranchSummary::default(),
+        ],
+    };
+    let mut samples = vec![Sample::Server(ServerMessage::Event(Event::View {
+        terminal,
+        update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Branches(vec![place]))]),
+    }))];
+    for files in [
+        crate::ForkFiles::Keep,
+        crate::ForkFiles::Undo,
+        crate::ForkFiles::UndoForce,
+    ] {
+        samples.push(Sample::Client(ClientMessage::Request(Request::Chat {
+            terminal,
+            action: ChatAction::Rewind {
+                at: 4,
+                files,
+                edit: files == crate::ForkFiles::Keep,
+                stop_tasks: files == crate::ForkFiles::UndoForce,
+            },
+        })));
+    }
+    samples.push(Sample::Client(ClientMessage::Request(Request::Chat {
+        terminal,
+        action: ChatAction::SwitchBranch {
+            at: 4,
+            to: 1,
+            files: crate::ForkFiles::Undo,
+            stop_tasks: true,
+        },
+    })));
+    samples
 }
 
 /// Samples of protocol 117: what a Task subagent did, under the tool
@@ -3559,6 +3620,7 @@ fn chat() -> ChatNode {
         prompts: Vec::new(),
         draft: None,
         paths: None,
+        branches: Vec::new(),
         provider_usage: vec![crate::ProviderUsage {
             agent: "codex".into(),
             title: "Codex".into(),

@@ -71,6 +71,14 @@ pub use quic::{Contact, Redial, Redialed, Route};
 pub use runtime::{DaemonLock, LockError, RuntimeDir};
 pub use server::{Daemon, ShutdownHandle};
 
+/// Numbers every chat's turns from `from` from now on, not 0, so a turn's
+/// uid, which what's kept of it is keyed by, is never its index: for
+/// tests, which would otherwise not tell the two apart (CLACKA-198).
+#[doc(hidden)]
+pub fn number_turns_from(from: u32) {
+    chat::number_turns_from(from);
+}
+
 /// How the daemon starts terminals.
 #[derive(Clone, Debug)]
 pub struct DaemonConfig {

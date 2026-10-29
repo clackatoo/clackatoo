@@ -39,6 +39,13 @@ pub(crate) struct ForkPoint {
 #[derive(Debug, Default)]
 pub(super) struct ForkPoints(BTreeMap<TurnUid, ForkPoint>);
 
+impl ForkPoints {
+    /// Forgets turn `uid`'s, as the turn is let go.
+    pub(super) fn forget(&mut self, uid: TurnUid) {
+        self.0.remove(&uid);
+    }
+}
+
 impl HostedChat {
     /// Notes that the agent's own words or thinking, a piece of its
     /// message `id`, went on the turn being answered: the turn's fork
@@ -48,6 +55,13 @@ impl HostedChat {
             return;
         };
         if id.is_empty() || id.len() > MOST_ID || id.contains(char::is_control) {
+            return;
+        }
+        // Codex keeps no mark of a turn stopped, so one told again ends as
+        // if it had finished, though it may stop between a tool's call and
+        // its result: a fork there could keep that dangling. Its turns told
+        // again are forked before by a digest instead.
+        if self.agent == "codex" && self.told_again() {
             return;
         }
         let (Some(turn), Some(session)) = (self.answering_turn(), self.session.as_deref()) else {
@@ -71,17 +85,13 @@ impl HostedChat {
     /// Where to fork the chat's session for a branch of the conversation
     /// before turn `at`: the nearest turn before it whose last message
     /// came in the session the chat has now, and that ended as the agent
-    /// meant it to, with its index. A turn stopped or failed may end
+    /// meant it to, with its index. A point just before the agent compacts
+    /// its context forks the whole conversation uncompacted, which costs
+    /// more context than the branch left had; that's kept, as the turns
+    /// are what was asked for. A turn stopped or failed may end
     /// between a tool's call and its result, which a fork there would keep
     /// dangling; a turn where the chat moved to another agent has no
     /// message of its own. `None` if there's no such turn, or no session.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "a branch of the conversation is forked here (CLACKA-198), next"
-        )
-    )]
     pub(crate) fn fork_point_before(&self, at: usize) -> Option<(usize, &ForkPoint)> {
         let session = self.session.as_deref()?;
         let turns = self.node.turns.get(..at)?;
@@ -93,6 +103,34 @@ impl HostedChat {
             let point = self.forks.0.get(&self.uids.of(index)?)?;
             (point.session == session).then_some((index, point))
         })
+    }
+
+    /// Where its session can be forked, for the next build: nothing if
+    /// nowhere is known.
+    pub(crate) fn hand_over_forks(&self) -> Option<super::handover::ChatForks> {
+        (!self.forks.0.is_empty()).then(|| super::handover::ChatForks {
+            chat: self.id.0,
+            points: (self.forks.0.iter())
+                .map(|(uid, point)| (uid.0, point.session.clone(), point.message.clone()))
+                .collect(),
+        })
+    }
+
+    /// Takes where its session can be forked from the build before, if it
+    /// kept any for this chat: only for turns it has, shown or not.
+    pub(crate) fn resume_forks(&mut self, records: &mut Vec<super::handover::ChatForks>) {
+        let Some(at) = records.iter().position(|record| record.chat == self.id.0) else {
+            return;
+        };
+        let record = records.swap_remove(at);
+        for (uid, session, message) in record.points {
+            let fits = |text: &str| {
+                !text.is_empty() && text.len() <= MOST_ID && !text.contains(char::is_control)
+            };
+            if fits(&session) && fits(&message) {
+                (self.forks.0).insert(TurnUid(uid), ForkPoint { session, message });
+            }
+        }
     }
 
     /// The fork point of turn `index`, if it has one.

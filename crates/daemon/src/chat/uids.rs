@@ -14,9 +14,11 @@
 //! turn, so what's handed over keyed by turn means the same either way
 //! for it, and only a chat that has been cut back hands over its uids.
 //!
-//! The daemon's own unit tests number a new chat's turns from
-//! [`FIRST`], not 0, so anything keyed by a turn's index where it should
-//! be keyed by its uid fails them, without a conversation being cut back.
+//! The daemon's own unit tests number a chat's turns from 1000, not 0, and
+//! so do its integration tests (through [`number_turns_from`]), so
+//! anything keyed by a turn's index where it should be keyed by its uid
+//! fails them, without a conversation being cut back. Such a daemon hands
+//! over every chat's uids, as none is its index.
 //!
 //! What counts turns rather than names one — how many the agent's session
 //! has seen (`known`), or how many another chat has heard the answers to —
@@ -42,9 +44,24 @@ impl std::fmt::Display for TurnUid {
     }
 }
 
-/// The uid a new chat's first turn gets: 0, as its index, except in the
-/// daemon's unit tests (see the module).
-const FIRST: u32 = if cfg!(test) { 1000 } else { 0 };
+/// The uid a chat's first turn gets, if a test said (see
+/// [`number_turns_from`]).
+static FIRST: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The uid a chat's first turn gets: 0, as its index, except in tests
+/// (see the module).
+fn first() -> u32 {
+    if cfg!(test) {
+        return 1000;
+    }
+    FIRST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Numbers every chat's first turn `from` from now on, for tests: so a
+/// turn's uid is never its index.
+pub(crate) fn number_turns_from(from: u32) {
+    FIRST.store(from, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// The uids of a chat's turns on the conversation shown, in step with its
 /// turns, and the uid the next turn gets.
@@ -59,7 +76,7 @@ impl Default for Uids {
     fn default() -> Self {
         Self {
             shown: Vec::new(),
-            next: FIRST,
+            next: first(),
         }
     }
 }
@@ -71,6 +88,20 @@ impl Uids {
         self.next = self.next.saturating_add(1);
         self.shown.push(uid);
         uid
+    }
+
+    /// Puts back `uid`, a turn's kept off the conversation shown, at its
+    /// end, as a branch is shown again.
+    pub(super) fn push_kept(&mut self, uid: TurnUid) {
+        debug_assert!(self.shown.last().is_none_or(|last| *last < uid));
+        debug_assert!(uid.0 < self.next);
+        self.shown.push(uid);
+    }
+
+    /// Cuts the conversation shown back to its first `len` turns: the uids
+    /// of those after are never given again.
+    pub(super) fn truncate(&mut self, len: usize) {
+        self.shown.truncate(len);
     }
 
     /// The uid of turn `index` of the conversation shown, if it has one.
@@ -129,12 +160,14 @@ impl Uids {
     /// them over in `record`, or else as for a chat never cut back. A
     /// record that doesn't fit the turns isn't believed.
     pub(super) fn resume(turns: usize, record: Option<&handover::ChatUids>) -> Self {
-        let plain = || Self {
-            shown: (0..turns).map(TurnUid::of_index).collect(),
-            next: u32::try_from(turns).unwrap_or(u32::MAX),
-        };
+        Self::resume_checked(turns, record).0
+    }
+
+    /// As [`resume`](Self::resume), and whether a record given fitted.
+    fn resume_checked(turns: usize, record: Option<&handover::ChatUids>) -> (Self, bool) {
+        let plain = || Self::numbered_from(first(), turns);
         let Some(record) = record else {
-            return plain();
+            return (plain(), true);
         };
         let fits = record.uids.len() == turns
             && record.uids.windows(2).all(|pair| pair[0] < pair[1])
@@ -144,12 +177,35 @@ impl Uids {
                 "chat {}'s turn numbers didn't fit its turns: numbered again",
                 record.chat
             );
-            return plain();
+            return (plain(), false);
         }
-        Self {
+        let uids = Self {
             shown: record.uids.iter().copied().map(TurnUid).collect(),
             next: record.next,
+        };
+        (uids, true)
+    }
+
+    /// `turns` turns numbered from `from`.
+    fn numbered_from(from: u32, turns: usize) -> Self {
+        let count = u32::try_from(turns).unwrap_or(u32::MAX);
+        Self {
+            shown: (0..count)
+                .map(|at| TurnUid(from.saturating_add(at)))
+                .collect(),
+            next: from.saturating_add(count),
         }
+    }
+
+    /// The uid turn `index` of the conversation shown has, or will have if
+    /// it comes next, as turns told again after a cold start do: so what a
+    /// saved file names by index can be kept by uid before they're told.
+    pub(crate) fn of_or_to_come(&self, index: usize) -> Option<TurnUid> {
+        if let Some(uid) = self.of(index) {
+            return Some(uid);
+        }
+        let ahead = u32::try_from(index.checked_sub(self.shown.len())?).ok()?;
+        Some(TurnUid(self.next.checked_add(ahead)?))
     }
 
     /// Leaves out `skip` uids before the next turn's, so turns from here
@@ -183,6 +239,23 @@ impl super::HostedChat {
         self.uids.last()
     }
 
+    /// The uid turn `index` has, or will have if it comes next, so many
+    /// turns after the last (see [`Uids::of_or_to_come`]).
+    pub(crate) fn turn_uid_to_come(&self, index: usize) -> Option<TurnUid> {
+        self.uids.of_or_to_come(index)
+    }
+
+    /// Where turn `uid` is on the conversation shown, or will be if it's
+    /// one to come, the inverse of [`turn_uid_to_come`](Self::turn_uid_to_come):
+    /// `None` for a turn on another branch, or let go.
+    pub(crate) fn turn_index_to_come(&self, uid: TurnUid) -> Option<usize> {
+        if let Some(index) = self.uids.index(uid) {
+            return Some(index);
+        }
+        let ahead = uid.0.checked_sub(self.uids.next().0)?;
+        Some(self.node.turns.len() + usize::try_from(ahead).ok()?)
+    }
+
     /// The uid the next turn gets.
     pub(crate) fn next_uid(&self) -> TurnUid {
         self.uids.next()
@@ -196,12 +269,17 @@ impl super::HostedChat {
 
     /// Takes its turns' uids from what the build before handed over, if
     /// it kept any for this chat. Before anything else handed over keyed
-    /// by turn is taken in.
-    pub(crate) fn resume_uids(&mut self, records: &mut Vec<handover::ChatUids>) {
-        if let Some(at) = records.iter().position(|record| record.chat == self.id.0) {
-            let record = records.swap_remove(at);
-            self.uids = Uids::resume(self.node.turns.len(), Some(&record));
-        }
+    /// by turn is taken in. Returns false if what was handed over didn't
+    /// fit, and the turns were numbered again: records kept by the old
+    /// uids are to be forgotten.
+    pub(crate) fn resume_uids(&mut self, records: &mut Vec<handover::ChatUids>) -> bool {
+        let Some(at) = records.iter().position(|record| record.chat == self.id.0) else {
+            return true;
+        };
+        let record = records.swap_remove(at);
+        let (uids, fitted) = Uids::resume_checked(self.node.turns.len(), Some(&record));
+        self.uids = uids;
+        fitted
     }
 
     /// Leaves out `skip` uids before the next turn's (see [`Uids::skip`]).
@@ -217,7 +295,7 @@ mod tests {
 
     #[test]
     fn a_chat_never_cut_back_numbers_each_turn_by_its_index_and_hands_nothing_over() {
-        let mut uids = Uids::resume(0, None);
+        let mut uids = Uids::numbered_from(0, 0);
         for at in 0..3 {
             assert_eq!(uids.push(), TurnUid::of_index(at));
         }
@@ -226,13 +304,13 @@ mod tests {
         assert_eq!(uids.of(3), None);
         assert_eq!(uids.within(1..9), &[TurnUid(1), TurnUid(2)]);
         assert!(uids.hand_over(4).is_none());
-        let back = Uids::resume(3, None);
+        let back = Uids::numbered_from(0, 3);
         assert_eq!((back.shown, back.next), (uids.shown, uids.next));
     }
 
     #[test]
     fn uids_other_than_indexes_are_found_and_handed_over() {
-        let mut uids = Uids::resume(0, None);
+        let mut uids = Uids::numbered_from(0, 0);
         uids.push();
         uids.skip(5);
         assert_eq!(uids.push(), TurnUid(6));
@@ -246,14 +324,16 @@ mod tests {
         assert_eq!(back.shown, uids.shown);
         assert_eq!(back.next, 8);
         // A record that doesn't fit the turns handed over isn't believed.
-        let back = Uids::resume(2, Some(&record));
-        assert_eq!(back.shown, vec![TurnUid(0), TurnUid(1)]);
-        assert_eq!(Uids::default().push(), TurnUid(FIRST));
+        let (back, fitted) = Uids::resume_checked(2, Some(&record));
+        assert!(!fitted);
+        assert_eq!(back.shown, vec![TurnUid(first()), TurnUid(first() + 1)]);
+        assert_eq!(Uids::default().push(), TurnUid(first()));
+        assert_eq!(Uids::resume(1, None).of(0), Some(TurnUid(first())));
         let bad = handover::ChatUids {
             chat: 4,
             next: 3,
             uids: vec![0, 6, 7],
         };
-        assert_eq!(Uids::resume(3, Some(&bad)).next, 3);
+        assert_eq!(Uids::resume(3, Some(&bad)).next, first() + 3);
     }
 }

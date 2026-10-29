@@ -281,6 +281,84 @@ pub(crate) struct State {
     /// aren't each numbered by their index: see [`ChatUids`]. Since
     /// version 41; before, every turn was.
     pub(crate) uids: Vec<ChatUids>,
+    /// The branches of chats' conversations, of the chats that have been
+    /// cut back: see [`ChatBranches`]. Since version 41.
+    pub(crate) branches: Vec<ChatBranches>,
+    /// Where chats' agent sessions can be forked: see [`ChatForks`].
+    /// Since version 41; before, none was known.
+    pub(crate) forks: Vec<ChatForks>,
+}
+
+/// The branches of the conversation of the chat `chat`, by its terminal's
+/// number (see `chat/branches.rs`): every segment of its tree, by its
+/// place, `None` for one let go; the leaf of the branch shown; where a new
+/// branch not yet written to starts; how many branches were let go where;
+/// and how the session of a branch being made is to be had. Since version
+/// 41.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatBranches {
+    pub(crate) chat: u32,
+    pub(crate) segs: Vec<Option<BranchSegment>>,
+    pub(crate) current: u64,
+    pub(crate) pending: Option<u64>,
+    /// The segment they came off, where, and how many.
+    pub(crate) dropped: Vec<(u64, u64, u16)>,
+    pub(crate) plan: Option<ForkPlanRecord>,
+}
+
+/// A segment of a chat's conversation: the one it goes on from, the index
+/// of its first turn, how many it has, and, off the branch shown, its
+/// turns; with the session that knows the branch ending there, if it's a
+/// leaf.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BranchSegment {
+    pub(crate) parent: Option<u64>,
+    pub(crate) start: u64,
+    pub(crate) len: u64,
+    pub(crate) held: Option<HeldTurns>,
+    pub(crate) session: Option<BranchSessionRecord>,
+    pub(crate) created: u64,
+    pub(crate) used: u64,
+    /// Its session was made from a digest of the turns before.
+    pub(crate) summary: bool,
+}
+
+/// The turns of a segment off the branch shown, each with its uid, and the
+/// subagent cards on them, each as the protocol's JSON: one this build
+/// can't read is left out.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct HeldTurns {
+    pub(crate) uids: Vec<u32>,
+    pub(crate) turns: Vec<ChatTurn>,
+    pub(crate) cards: Vec<String>,
+}
+
+/// The agent session that knows a branch.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BranchSessionRecord {
+    pub(crate) agent: String,
+    pub(crate) session: Option<String>,
+    pub(crate) known: u64,
+    pub(crate) chosen: Vec<(String, String)>,
+}
+
+/// How a branch's session being made is to be had: forked from `from` at
+/// the agent's message `message`, knowing the first `known` turns; `sent`
+/// if the agent was asked to fork and can.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ForkPlanRecord {
+    pub(crate) from: String,
+    pub(crate) message: Option<String>,
+    pub(crate) known: u64,
+    pub(crate) sent: bool,
+}
+
+/// Where the agent session of the chat `chat` can be forked: by turn uid,
+/// the session and the agent's message. Since version 41.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatForks {
+    pub(crate) chat: u32,
+    pub(crate) points: Vec<(u32, String, String)>,
 }
 
 /// The uids of the turns of the chat `chat`, by its terminal's number,
@@ -1702,6 +1780,8 @@ mod v31 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -1798,6 +1878,8 @@ mod v30 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -1893,6 +1975,8 @@ mod v29 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -1987,6 +2071,8 @@ mod v28 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -2079,6 +2165,8 @@ mod v27 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -2174,6 +2262,8 @@ mod v26 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -2266,6 +2356,8 @@ mod v25 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -2356,6 +2448,8 @@ mod v24 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -2444,6 +2538,8 @@ mod v23 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -2545,6 +2641,8 @@ mod v22 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -2629,6 +2727,8 @@ mod v21 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -2711,6 +2811,8 @@ mod v20 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -2789,6 +2891,8 @@ mod v19 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -2867,6 +2971,8 @@ mod v18 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -3410,6 +3516,8 @@ mod v7 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -3512,6 +3620,8 @@ mod v8 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -3584,6 +3694,8 @@ mod v9 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -3658,6 +3770,8 @@ mod v11 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -3781,6 +3895,8 @@ mod v15 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -3858,6 +3974,8 @@ mod v14 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -3933,6 +4051,8 @@ mod v13 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -4050,6 +4170,8 @@ mod v12 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -4165,6 +4287,8 @@ mod v10 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -4501,6 +4625,54 @@ mod tests {
                 chat: 2,
                 next: 9,
                 uids: vec![0, 7],
+            }],
+            branches: vec![ChatBranches {
+                chat: 2,
+                segs: vec![
+                    Some(BranchSegment {
+                        parent: None,
+                        start: 0,
+                        len: 1,
+                        held: None,
+                        session: None,
+                        created: 1,
+                        used: 1,
+                        summary: false,
+                    }),
+                    Some(BranchSegment {
+                        parent: Some(0),
+                        start: 1,
+                        len: 1,
+                        held: Some(HeldTurns {
+                            uids: vec![3],
+                            turns: vec![],
+                            cards: vec![],
+                        }),
+                        session: Some(BranchSessionRecord {
+                            agent: "claude".to_owned(),
+                            session: Some("s-left".to_owned()),
+                            known: 2,
+                            chosen: vec![],
+                        }),
+                        created: 2,
+                        used: 3,
+                        summary: false,
+                    }),
+                    None,
+                ],
+                current: 0,
+                pending: Some(1),
+                dropped: vec![(0, 1, 2)],
+                plan: Some(ForkPlanRecord {
+                    from: "s-left".to_owned(),
+                    message: Some("msg_01".to_owned()),
+                    known: 1,
+                    sent: true,
+                }),
+            }],
+            forks: vec![ChatForks {
+                chat: 2,
+                points: vec![(0, "s-left".to_owned(), "msg_01".to_owned())],
             }],
             undo_states: vec![BufferUndo {
                 buffer: 1,
@@ -4923,6 +5095,16 @@ mod tests {
             (read.uids[0].chat, read.uids[0].next, &read.uids[0].uids[..]),
             (2, 9, &[0, 7][..])
         );
+        let branches = &read.branches[0];
+        assert_eq!((branches.segs.len(), branches.pending), (3, Some(1)));
+        let left = branches.segs[1].as_ref().unwrap();
+        assert_eq!(left.held.as_ref().unwrap().uids, [3]);
+        assert_eq!(
+            left.session.as_ref().unwrap().session.as_deref(),
+            Some("s-left")
+        );
+        assert!(branches.plan.as_ref().unwrap().sent);
+        assert_eq!(read.forks[0].points[0].2, "msg_01");
         assert_eq!(read.drafts.len(), 1);
     }
 
@@ -5989,6 +6171,8 @@ mod v32 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -6150,6 +6334,8 @@ mod v33 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -6314,6 +6500,8 @@ mod v34 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -6481,6 +6669,8 @@ mod v35 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -6651,6 +6841,8 @@ mod v36 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -6824,6 +7016,8 @@ mod v37 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -6997,6 +7191,8 @@ mod v38 {
                 nested: Vec::new(),
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -7170,6 +7366,8 @@ mod v39 {
                 nested: state.nested,
                 drafts: Vec::new(),
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }
@@ -7345,6 +7543,8 @@ mod v40 {
                 nested: state.nested,
                 drafts: state.drafts,
                 uids: Vec::new(),
+                branches: Vec::new(),
+                forks: Vec::new(),
             }
         }
     }

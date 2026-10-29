@@ -120,6 +120,9 @@ impl TestDaemon {
             keep_wait: clackatoo_daemon::DEFAULT_KEEP_WAIT,
         };
         change(dir.path(), &mut config);
+        // A turn's uid is never its index here, so nothing that should
+        // follow a turn's uid follows its index (CLACKA-198).
+        clackatoo_daemon::number_turns_from(1000);
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
         if restore {
             daemon.restore_workspaces();

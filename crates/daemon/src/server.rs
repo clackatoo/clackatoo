@@ -57,6 +57,7 @@ use crate::workspaces::WorkspaceState;
 mod agent_files;
 mod background;
 mod boards;
+mod branches;
 mod browser;
 mod buffers;
 mod chain;
@@ -1186,6 +1187,9 @@ impl Daemon {
         let mut chat_queues = std::mem::take(&mut handover.state.chat_queues);
         let mut drafts = std::mem::take(&mut handover.state.drafts);
         let mut uids = std::mem::take(&mut handover.state.uids);
+        let mut branches = std::mem::take(&mut handover.state.branches);
+        let mut forks = std::mem::take(&mut handover.state.forks);
+        let mut renumbered: Vec<TerminalId> = Vec::new();
         let mut continuations: std::collections::HashMap<_, _> =
             std::mem::take(&mut handover.state.chat_continuations)
                 .into_iter()
@@ -1273,7 +1277,11 @@ impl Daemon {
             let record = live_chats.remove(&chat.id);
             let mut chat = HostedChat::resume(chat, &agent);
             // Before anything handed over keyed by turn.
-            chat.resume_uids(&mut uids);
+            if !chat.resume_uids(&mut uids) {
+                renumbered.push(chat.info().id);
+            }
+            chat.resume_branches(&mut branches);
+            chat.resume_forks(&mut forks);
             chat.resume_nesting(&nested);
             if let Some(images) = images {
                 chat.resume_previews(images);
@@ -1370,6 +1378,11 @@ impl Daemon {
         daemon.resume_talk(&state.undelivered, standing.as_ref());
         daemon.resume_activities(&state.activities);
         daemon.agent_files.log = edit_log::EditLog::resume(edits);
+        // A chat whose turns were numbered again keeps nothing by the old
+        // numbers.
+        for chat in renumbered {
+            daemon.agent_files.log.forget(chat);
+        }
         daemon.resume_reviews(reviews);
         daemon.learn_from_chats();
         daemon.refresh_all_files();
@@ -1498,6 +1511,8 @@ impl Daemon {
         let mut chat_queues = Vec::new();
         let mut drafts = Vec::new();
         let mut uids = Vec::new();
+        let mut branches = Vec::new();
+        let mut forks = Vec::new();
         let mut chat_continuations = Vec::new();
         let mut standing = handover::Talk::default();
         self.abandon_clipboard_asks();
@@ -1536,6 +1551,8 @@ impl Daemon {
                     chat_queues.push(chat.hand_over_queue());
                     drafts.extend(chat.hand_over_draft());
                     uids.extend(chat.hand_over_uids());
+                    branches.extend(chat.hand_over_branches());
+                    forks.extend(chat.hand_over_forks());
                     if live {
                         let (handed, live) = chat.hand_over_live();
                         chats.push(handed);
@@ -1608,6 +1625,8 @@ impl Daemon {
                 chat_queues,
                 drafts,
                 uids,
+                branches,
+                forks,
                 chat_continuations,
                 activities,
                 lent_background: self.workspaces.hand_over_lent_background(),
@@ -3700,6 +3719,23 @@ impl Daemon {
             .get_mut(&id)
             .ok_or(Error::NoSuchTerminal(id))?;
         let chat = slot.terminal.chat().ok_or(Error::NotAChat(id))?;
+        // Rewinding and switching branches are about files and sessions,
+        // so the daemon's.
+        match action {
+            ChatAction::Rewind {
+                at,
+                files,
+                edit,
+                stop_tasks,
+            } => return self.rewind_chat(id, at as usize, files, edit, stop_tasks),
+            ChatAction::SwitchBranch {
+                at,
+                to,
+                files,
+                stop_tasks,
+            } => return self.switch_chat_branch(id, at as usize, to, files, stop_tasks),
+            _ => {}
+        }
         // Undoing is about files, so the daemon's, not the agent's.
         if let ChatAction::Undo { turn, force } | ChatAction::Redo { turn, force } = action {
             let redo = matches!(action, ChatAction::Redo { .. });

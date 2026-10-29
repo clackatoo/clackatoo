@@ -1164,6 +1164,8 @@ fn mark(dirty: &mut Dirty, patch: &Patch) {
     };
     match patch {
         ChatPatch::History { .. } => {}
+        // The switchers go on turn headers.
+        ChatPatch::Branches(_) => dirty.all_turns = true,
         ChatPatch::Turn { index, .. } => {
             dirty.turns.insert(*index as usize);
         }

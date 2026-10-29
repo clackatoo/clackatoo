@@ -475,7 +475,7 @@ impl HostedChat {
 /// `shown`, a message as a turn shows it, without the labels that stand
 /// for its images, `[Image · 640 × 480]` or `[Image]` on lines of their
 /// own; and whether it had any.
-fn without_image_labels(shown: &str) -> (String, bool) {
+pub(super) fn without_image_labels(shown: &str) -> (String, bool) {
     let label = |line: &str| {
         line == "[Image]"
             || line

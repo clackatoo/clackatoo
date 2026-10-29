@@ -60,8 +60,9 @@ enum Pending {
     /// ID, given as `resumed`, one it had before, told again as it goes
     /// if `load`; or, if `fork`, a new one forked from another (see
     /// [`Agent::fork_session`]). Whether it's a fork isn't handed over:
-    /// one that goes on through an upgrade is taken for a new session,
-    /// which knows less, never more.
+    /// one that goes on through an upgrade answers as a new session, and
+    /// the chat's own plan for it, handed over, says it was asked as a
+    /// fork (`ForkPlan::sent`), so the turns it knows aren't told again.
     Session {
         terminal: TerminalId,
         resumed: Option<String>,
@@ -116,10 +117,6 @@ pub(crate) enum Incoming {
         terminal: TerminalId,
         result: Result<Opened, Refused>,
         loaded: bool,
-        #[expect(
-            dead_code,
-            reason = "a branch of the conversation is forked here (CLACKA-198), next"
-        )]
         forked: bool,
     },
     /// The sessions the agent kept, for the server's listing numbered
@@ -603,13 +600,6 @@ impl Agent {
     /// conversation, and the answer says so (see [`Incoming::Session`]).
     /// Before it has said what it can, that's worked out as it does (see
     /// `cannot_fork`).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "a branch of the conversation is forked here (CLACKA-198), next"
-        )
-    )]
     pub(crate) fn fork_session(
         &mut self,
         terminal: TerminalId,
@@ -653,13 +643,6 @@ impl Agent {
 
     /// What the agent can do with sessions beyond opening them, once it
     /// has said (see [`Forking`]).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "a branch of the conversation is forked here (CLACKA-198), next"
-        )
-    )]
     pub(crate) fn forking(&self) -> Forking {
         self.forking
     }

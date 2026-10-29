@@ -380,6 +380,12 @@ impl Daemon {
     }
 
     /// Marks every review stale, as after hunks are kept or rejected.
+    /// The reviews of chat `id`, and of chats above it, may list other
+    /// turns now.
+    pub(super) fn chat_reviews_stale(&mut self, id: TerminalId) {
+        self.review_stale(&[id], false);
+    }
+
     fn reviews_stale(&mut self) {
         for review in self.reviews.list.values_mut() {
             review.stale = true;
@@ -614,7 +620,8 @@ impl Daemon {
         let hunks: Vec<AgentHunk> = (slot.agents.all().iter())
             .map(|hunk| AgentHunk {
                 base: String::new(),
-                turn: self.shown_turn(Some(TerminalId(hunk.chat)), hunk.turn),
+                turn: (self.shown_turn(Some(TerminalId(hunk.chat)), hunk.turn))
+                    .unwrap_or(clackatoo_protocol::TURN_NOT_SHOWN),
                 ..hunk.clone()
             })
             .collect();
@@ -779,7 +786,7 @@ impl Daemon {
                 let task = turn
                     .and_then(|_| self.card(chat))
                     .map(|card| card.task.clone());
-                let turn = turn.map(|turn| self.shown_turn(family.chat, turn));
+                let turn = turn.and_then(|turn| self.shown_turn(family.chat, turn));
                 ReviewChat {
                     chat,
                     name: self.chat_name(chat),
@@ -832,7 +839,9 @@ impl Daemon {
             Hunks::Ids(_) => (Family::default(), ReviewScope::Base),
             Hunks::Turn { chat, turn } => (
                 self.family_of(Some(*chat)),
-                ReviewScope::Turn(Some(self.turn_uid_of(Some(*chat), *turn))),
+                // A turn the chat hasn't takes in nothing.
+                (self.turn_uid_of(Some(*chat), *turn))
+                    .map_or(ReviewScope::Base, |uid| ReviewScope::Turn(Some(uid))),
             ),
             Hunks::Chat(chat) => (self.family_of(Some(*chat)), ReviewScope::Chat),
         };
@@ -1400,11 +1409,15 @@ impl Daemon {
                     .filter_map(|hunk| family.turn_of(hunk))
                     .max();
                 let last = (chat.and_then(|chat| self.chat_ref(chat)))
-                    .and_then(crate::chat::HostedChat::last_uid)
-                    .map_or(0, |uid| uid.0);
+                    .map_or(0, |hosted| hosted.last_uid().unwrap_or(hosted.next_uid()).0);
                 ReviewScope::Turn(Some(latest.unwrap_or(last)))
             }
-            ReviewScope::Turn(Some(turn)) => ReviewScope::Turn(Some(self.turn_uid_of(chat, turn))),
+            ReviewScope::Turn(Some(turn)) => {
+                let uid = self.turn_uid_of(chat, turn);
+                let uid =
+                    uid.ok_or_else(|| Error::Review("there's no chat to review".to_owned()))?;
+                ReviewScope::Turn(Some(uid))
+            }
             scope => scope,
         };
         let root = new
@@ -1494,44 +1507,52 @@ impl Daemon {
         review: ReviewId,
     ) -> Option<(Option<TerminalId>, ReviewScope, &Path)> {
         let review = self.reviews.list.get(&review)?;
-        let scope = self.shown_scope(review.chat, review.scope);
+        // A turn not shown, on another branch, has no index: the chat's
+        // review stands for it.
+        let scope = match review.scope {
+            ReviewScope::Turn(Some(uid)) => (self.shown_turn(review.chat, uid))
+                .map_or(ReviewScope::Chat, |index| ReviewScope::Turn(Some(index))),
+            scope => scope,
+        };
         Some((review.chat, scope, &review.root))
     }
 
-    /// The uid of turn `turn`, by its index, of chat `chat`: the index
-    /// itself if the chat isn't open, or has no such turn, as a review of
-    /// a chat that closed lists nothing new.
-    fn turn_uid_of(&self, chat: Option<TerminalId>, turn: u32) -> u32 {
-        let index = usize::try_from(turn).unwrap_or(usize::MAX);
-        (chat.and_then(|chat| self.chat_ref(chat)))
-            .and_then(|hosted| hosted.turn_uid(index))
-            .map_or(turn, |uid| uid.0)
+    /// The uid of turn `turn`, by its index, of chat `chat`, or the uid
+    /// it will have if it's the turn to come so many after the last, as a
+    /// review made again after a cold start names one before the chat's
+    /// turns are told again. `None` if the chat isn't open.
+    fn turn_uid_of(&self, chat: Option<TerminalId>, turn: u32) -> Option<u32> {
+        let index = usize::try_from(turn).ok()?;
+        let hosted = self.chat_ref(chat?)?;
+        hosted.turn_uid_to_come(index).map(|uid| uid.0)
     }
 
     /// Where turn `uid` of chat `chat` is on the conversation it shows, as
-    /// clients name it: the uid itself if the chat isn't open, or the turn
-    /// isn't shown.
-    fn shown_turn(&self, chat: Option<TerminalId>, uid: u32) -> u32 {
-        (chat.and_then(|chat| self.chat_ref(chat)))
-            .and_then(|hosted| hosted.turn_index(TurnUid(uid)))
-            .map_or(uid, |index| u32::try_from(index).unwrap_or(u32::MAX))
+    /// clients name it: `None` if the chat isn't open, or the turn isn't
+    /// shown, being on another branch, or let go.
+    fn shown_turn(&self, chat: Option<TerminalId>, uid: u32) -> Option<u32> {
+        let index = self.chat_ref(chat?)?.turn_index_to_come(TurnUid(uid))?;
+        u32::try_from(index).ok()
     }
 
     /// `scope`, of chat `chat`, as clients are told it: a turn by its
-    /// index.
+    /// index, or none if it isn't shown.
     fn shown_scope(&self, chat: Option<TerminalId>, scope: ReviewScope) -> ReviewScope {
         match scope {
-            ReviewScope::Turn(Some(uid)) => ReviewScope::Turn(Some(self.shown_turn(chat, uid))),
+            ReviewScope::Turn(Some(uid)) => ReviewScope::Turn(self.shown_turn(chat, uid)),
             scope => scope,
         }
     }
 
     /// Says which turn made each hunk of `files` by its index, as clients
-    /// name it, not its uid.
+    /// name it, not its uid: [`TURN_NOT_SHOWN`] for one not shown.
+    ///
+    /// [`TURN_NOT_SHOWN`]: clackatoo_protocol::TURN_NOT_SHOWN
     fn show_turns(&self, files: &mut [ReviewFile]) {
         let hunks = files.iter_mut().flat_map(|file| &mut file.hunks);
         for made in hunks.filter_map(|hunk| hunk.by.as_mut()) {
-            made.turn = self.shown_turn(Some(made.chat), made.turn);
+            made.turn = (self.shown_turn(Some(made.chat), made.turn))
+                .unwrap_or(clackatoo_protocol::TURN_NOT_SHOWN);
         }
     }
 
@@ -2697,6 +2718,26 @@ mod tests {
         let review = world.daemon.reviews.list.keys().copied().next().unwrap();
         let (_, scope, _) = world.daemon.review_of(review).unwrap();
         assert_eq!(scope, ReviewScope::Turn(Some(1)));
+        // One made again after a cold start, before the chat's turns are
+        // told again, names a turn to come: kept by the uid it'll get.
+        let new = NewReview {
+            chat: Some(parent),
+            scope: ReviewScope::Turn(Some(7)),
+            cwd: None,
+        };
+        let later = world.daemon.new_review(new, None).unwrap();
+        let uid = world
+            .daemon
+            .chat_ref(parent)
+            .unwrap()
+            .turn_uid_to_come(7)
+            .unwrap();
+        assert_eq!(
+            world.daemon.reviews.list[&later].scope,
+            ReviewScope::Turn(Some(uid.0))
+        );
+        let (_, scope, _) = world.daemon.review_of(later).unwrap();
+        assert_eq!(scope, ReviewScope::Turn(Some(7)));
     }
 
     #[test]

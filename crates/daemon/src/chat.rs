@@ -33,6 +33,7 @@ use crate::agents::AgentSpec;
 use crate::handoff::{self, Changed, Digest, Step, StepState};
 use crate::handover;
 
+mod branches;
 mod commands;
 mod draft;
 mod elicit;
@@ -59,7 +60,7 @@ mod subagent;
 pub(crate) use limits::Limits;
 pub(crate) use relations::{Cause, MAX_INBOX, Message, Relations};
 pub(crate) use subagent::{Standing, Wanted, role_for};
-pub(crate) use uids::TurnUid;
+pub(crate) use uids::{TurnUid, number_turns_from};
 
 /// The most characters of a title the agent gives a conversation that a
 /// chat keeps, for its tab.
@@ -291,6 +292,11 @@ pub(crate) enum Action {
     /// Ask the agent to stop the task it runs in the background that it
     /// calls this.
     StopTask(String),
+    /// Let the session with this ID go, the chat's no longer: a branch of
+    /// the conversation was left for another (see `chat/branches.rs`).
+    /// The agent's answer that it's closed opens the chat's own, if a
+    /// message waits for it.
+    LetGo(String),
     /// Answer the agent's request `request`, a form it asked the user to
     /// fill in or a link to open, with `result`.
     Elicited { request: Value, result: Value },
@@ -505,8 +511,13 @@ pub(crate) struct HostedChat {
     /// (see `chat/uids.rs`), in step with `node.turns`.
     uids: uids::Uids,
     /// Where its session could be forked, by turn (see `chat/forks.rs`).
-    /// Not handed over yet: after an upgrade, older turns have none.
     forks: forks::ForkPoints,
+    /// Its conversation's branches, if it has ever been cut back (see
+    /// `chat/branches.rs`).
+    tree: branches::Tree,
+    /// The uids of turns let go with branches, whose records the server
+    /// is to forget.
+    forgotten: Vec<TurnUid>,
 }
 
 /// A session a chat had with another agent, which it can go back to.
@@ -621,6 +632,14 @@ impl Journal {
         }
     }
 
+    /// Lets every change kept go: every viewer gets the chat whole next,
+    /// as after a cut, which no change says.
+    fn restart(&mut self) {
+        self.first = self.end();
+        self.patches.clear();
+        self.bytes = 0;
+    }
+
     /// The number the next change will get.
     fn end(&self) -> u64 {
         self.first + self.patches.len() as u64
@@ -721,6 +740,8 @@ impl HostedChat {
             facts: facts::Facts::default(),
             uids: uids::Uids::default(),
             forks: forks::ForkPoints::default(),
+            tree: branches::Tree::default(),
+            forgotten: Vec::new(),
         }
     }
 
@@ -1139,6 +1160,8 @@ impl HostedChat {
             // The server's to do: they're about files, or other agents.
             ChatAction::Undo { .. }
             | ChatAction::Redo { .. }
+            | ChatAction::Rewind { .. }
+            | ChatAction::SwitchBranch { .. }
             | ChatAction::Switch { .. }
             | ChatAction::SendTo { .. }
             | ChatAction::Submit { .. }
@@ -1264,6 +1287,10 @@ impl HostedChat {
             self.told_too_big = false;
         }
         let own = from.is_none();
+        // The user's message on a new branch of the conversation makes it.
+        if own {
+            self.begin_branch(actions);
+        }
         self.push_turn(Turn {
             woke: None,
             previews,
@@ -1361,7 +1388,9 @@ impl HostedChat {
     /// Sends the first message waiting from another agent, if the agent
     /// has finished answering. Returns what the server must do to send it.
     pub(crate) fn deliver_next(&mut self) -> Vec<Action> {
-        if self.next_message_from().is_none() {
+        // A new branch not written to yet waits for the user's message:
+        // what other chats sent waits with it.
+        if self.next_message_from().is_none() || self.branch_pending() {
             return Vec::new();
         }
         // The notice that chats finished says what only as the server
@@ -2874,11 +2903,6 @@ impl HostedChat {
         self.set_notice(Some(notice));
     }
 
-    /// How many turns the chat has.
-    pub(crate) fn turns(&self) -> usize {
-        self.node.turns.len()
-    }
-
     /// Says that turn `turn` changed `files`.
     pub(crate) fn set_files(&mut self, turn: usize, files: Option<TurnFiles>) {
         if let Some(edited) = self.node.turns.get_mut(turn)
@@ -3438,6 +3462,7 @@ impl HostedChat {
     }
 
     fn push_turn(&mut self, turn: Turn) {
+        self.before_push();
         self.diffs.clear();
         self.woken_stopping = false;
         self.facts_begin();

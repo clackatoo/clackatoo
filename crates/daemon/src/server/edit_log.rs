@@ -388,6 +388,15 @@ impl EditLog {
         kept.chain(dropped).collect()
     }
 
+    /// Forgets what the agent in `chat` changed in turns `turns`, by their
+    /// uids, as they were let go with a branch of the conversation.
+    pub(super) fn forget_turns(&mut self, chat: TerminalId, turns: &[TurnUid]) {
+        if let Some(edits) = self.chats.iter_mut().find(|edits| edits.chat == chat) {
+            edits.turns.retain(|turn| !turns.contains(&turn.turn));
+            edits.dropped.retain(|(turn, _)| !turns.contains(turn));
+        }
+    }
+
     /// Forgets what the agent in `chat` changed, as the chat has closed,
     /// and nothing can undo it now.
     pub(super) fn forget(&mut self, chat: TerminalId) {

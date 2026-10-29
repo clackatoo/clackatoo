@@ -313,6 +313,10 @@ gates! {
     /// Where what an agent's background task prints goes, a file on the
     /// daemon's machine that a window can follow: `AgentTask`'s `output`.
     TASK_OUTPUT = 120,
+    /// Branches of a chat's conversation (CLACKA-198): `ChatNode`'s
+    /// `branches`, `ChatPatch::Branches`, and `ChatAction::Rewind` and
+    /// `ChatAction::SwitchBranch`.
+    CHAT_BRANCHES = 121,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -488,6 +492,7 @@ impl Since for ChatPatch {
             Self::Plan(_) => AGENT_PLAN,
             Self::Commands(_) => AGENT_COMMANDS,
             Self::DraftCleared { .. } => PROMPT_BOX,
+            Self::Branches(_) => CHAT_BRANCHES,
             Self::Retrying(_) => CHAT_FACTS,
         }
     }
@@ -1087,6 +1092,7 @@ impl Downgrade for ClientMessage {
 fn chat_action_since(action: &crate::ChatAction) -> u32 {
     use crate::ChatAction;
     match action {
+        ChatAction::Rewind { .. } | ChatAction::SwitchBranch { .. } => CHAT_BRANCHES,
         ChatAction::Draft { .. } | ChatAction::TakeBack { .. } => PROMPT_BOX,
         ChatAction::Fill { .. } => ELICITATION,
         ChatAction::Resend => CHAT_FACTS,
@@ -1243,7 +1249,7 @@ fn without_chat_facts(message: &ServerMessage) -> ServerMessage {
 /// chats, gated as fields are, so it needs nothing here, and `NESTED_WORK`
 /// (117) has its own step after this one (`without_nesting`).
 fn older_chat(message: &ServerMessage, wire: u32) -> Option<ServerMessage> {
-    if wire >= PROMPT_BOX {
+    if wire >= CHAT_BRANCHES {
         return None;
     }
     without_optional_chat_updates(message, wire).or_else(|| {
@@ -1261,7 +1267,8 @@ fn without_optional_chat_updates(message: &ServerMessage, wire: u32) -> Option<S
         return None;
     };
     let unsupported = |patch: &Patch| {
-        matches!(patch, Patch::Chat(ChatPatch::DraftCleared { .. }) if wire < PROMPT_BOX)
+        matches!(patch, Patch::Chat(ChatPatch::Branches(_)) if wire < CHAT_BRANCHES)
+            || matches!(patch, Patch::Chat(ChatPatch::DraftCleared { .. }) if wire < PROMPT_BOX)
             || matches!(patch, Patch::Chat(ChatPatch::Retrying(_)) if wire < CHAT_FACTS)
             || matches!(patch, Patch::Chat(ChatPatch::Commands(_)) if wire < AGENT_COMMANDS)
             || matches!(patch, Patch::Chat(ChatPatch::Plan(_)) if wire < AGENT_PLAN)
