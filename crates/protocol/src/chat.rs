@@ -947,12 +947,13 @@ pub struct Spent {
 }
 
 impl Spent {
-    /// What's shown under the turn: "12k tokens · $0.04".
+    /// What's shown under the turn: "12k tokens · $0.04", without a cost
+    /// of nothing, as a turn stopped before it said anything costs.
     #[must_use]
     pub fn label(&self) -> String {
         let tokens = self.input.saturating_add(self.output);
         let mut label = format!("{} tokens", self::tokens(tokens));
-        if let Some(cost) = self.cost {
+        if let Some(cost) = self.cost.filter(|cost| cost.micros > 0) {
             let _ = write!(label, " · {}", cost.label());
         }
         label
@@ -2266,6 +2267,21 @@ mod tests {
         assert_eq!(at(0.05).unwrap().since(None), at(0.05));
         assert_eq!(at(0.01).unwrap().since(at(0.02)), None);
         assert_eq!(at(0.05).unwrap().since(Cost::of(0.01, "EUR")), None);
+    }
+
+    #[test]
+    fn what_a_turn_spent_leaves_out_a_cost_of_nothing() {
+        let spent = |micros| Spent {
+            input: 24_000,
+            output: 0,
+            cached: 24_000,
+            cost: Some(Cost {
+                micros,
+                currency: *b"USD",
+            }),
+        };
+        assert_eq!(spent(0).label(), "24k tokens");
+        assert_eq!(spent(31_000).label(), "24k tokens · $0.03");
     }
 
     fn usage(used: u64, size: u64) -> Usage {
