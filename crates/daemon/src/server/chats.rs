@@ -459,8 +459,8 @@ impl Daemon {
         // Worked out once, here, as it walks the disk: the chat's tools
         // and messages ask for it often.
         let dir = cwd.canonicalize().unwrap_or_else(|_| cwd.to_owned());
-        let project = clackatoo_syntax::git_root(&dir, &self.config.home).unwrap_or(dir);
-        chat.show_cwd(shown, project);
+        let project = clackatoo_syntax::git_root(&dir, &self.config.home).unwrap_or(dir.clone());
+        chat.show_cwd(shown, &dir, project);
         self.terminals.insert(
             id,
             Slot {
@@ -756,10 +756,20 @@ impl Daemon {
     }
 
     /// Carries out what a chat asked for.
-    pub(super) fn act(&mut self, id: TerminalId, mut actions: Vec<Action>) {
-        if self.holding_for_mentions(id, &mut actions) {
-            return;
-        }
+    pub(super) fn act(&mut self, id: TerminalId, actions: Vec<Action>) {
+        let actions = self.not_waiting(id, actions);
+        self.act_with(id, actions, None);
+    }
+
+    /// Carries out `actions`, as [`act`](Self::act) does, the first of them
+    /// a message to send with `context`, the files it mentions, if that's
+    /// been read already (see `server/mentions.rs`).
+    pub(super) fn act_with(
+        &mut self,
+        id: TerminalId,
+        actions: Vec<Action>,
+        mut context: Option<Vec<serde_json::Value>>,
+    ) {
         let mut agent = self.agent_of(id);
         let mut actions = actions.into_iter();
         while let Some(action) = actions.next() {
@@ -773,8 +783,12 @@ impl Daemon {
             }
             // The files it mentions are read first, off the loop, and it
             // and what follows wait.
-            let Ok((action, context)) = self.mentioned(id, action, &mut actions) else {
-                return;
+            let (action, context) = match context.take() {
+                Some(context) => (action, context),
+                None => match self.mentioned(id, action, &mut actions) {
+                    Ok(mentioned) => mentioned,
+                    Err(()) => return,
+                },
             };
             let session = self
                 .chat(id)
@@ -2193,6 +2207,7 @@ impl Daemon {
             .chain(self.agents.woken.values().min().copied())
             .chain(self.next_session_due())
             .chain(self.next_listing_due())
+            .chain(self.next_mentions_due())
             .min()
     }
 
@@ -2472,13 +2487,42 @@ impl Daemon {
                 "A steering message is already being delivered.".into(),
             ));
         }
-        // Steering sends words alone: a message with images, or that
-        // mentions files, starts the turn again instead, sent whole.
+        // Steering sends words alone: a message with images starts the
+        // turn again instead, sent whole, as does one that mentions a file,
+        // once what it mentions has been read (see `steer_read`).
         let native = state.node().delivery.native_steering
             && pending.target.is_none()
-            && pending.prompt.images.is_empty()
-            && clackatoo_protocol::mentions(&pending.prompt.text).is_empty();
-        let session = state.session().map(str::to_owned);
+            && pending.prompt.images.is_empty();
+        let text = pending.prompt.text.clone();
+        if native && self.read_for_steering(chat, id, &text) {
+            return Ok(());
+        }
+        self.steer_now(chat, id, native)
+    }
+
+    /// Steers with the chat's queued message `id`, its files read, as
+    /// [`steer_queued`](Self::steer_queued) does: with its words unless it
+    /// mentions a file, `files`. Nothing, if it's gone, or another is being
+    /// delivered, meanwhile.
+    pub(super) fn steer_read(&mut self, chat: TerminalId, id: u64, files: bool) {
+        let still = self.chat_ref(chat).is_some_and(|state| {
+            state.queued_user(id).is_some() && state.node().delivery.sending.is_none()
+        });
+        if !still {
+            return;
+        }
+        if let Err(err) = self.steer_now(chat, id, !files) {
+            log::warn!("steering with chat {chat:?}'s message {id}: {err:?}");
+        }
+    }
+
+    /// Steers with the chat's queued message `id`: natively, its words
+    /// added to the turn, if `native`, or else by stopping the turn and
+    /// sending it whole.
+    fn steer_now(&mut self, chat: TerminalId, id: u64, native: bool) -> Result<(), Error> {
+        let session = (self.chat_ref(chat).ok_or(Error::NotAChat(chat))?)
+            .session()
+            .map(str::to_owned);
         if native {
             let agent = self
                 .agent_of(chat)

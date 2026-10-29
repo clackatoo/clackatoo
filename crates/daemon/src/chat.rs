@@ -926,10 +926,24 @@ impl HostedChat {
     }
 
     /// Has its view say the folder it works in as `shown`: its working
-    /// directory as people write it. Its project is `project`.
-    pub(crate) fn show_cwd(&mut self, shown: String, project: PathBuf) {
+    /// directory as people write it, which is `real`, made absolute with
+    /// links followed. Its project is `project`, made so too.
+    pub(crate) fn show_cwd(&mut self, shown: String, real: &Path, project: PathBuf) {
         self.shown_cwd = Some(shown);
+        self.node.paths = Some(clackatoo_protocol::ChatPaths {
+            cwd: real.display().to_string(),
+            project: project.display().to_string(),
+        });
         self.project = project;
+    }
+
+    /// Its working directory, made absolute with links followed, once it's
+    /// been worked out (see [`show_cwd`](Self::show_cwd)); or as given.
+    pub(crate) fn real_cwd(&self) -> PathBuf {
+        (self.node.paths.as_ref()).map_or_else(
+            || PathBuf::from(&self.cwd),
+            |paths| PathBuf::from(&paths.cwd),
+        )
     }
 
     /// Its project: the git repository its working directory is in, or
@@ -7207,24 +7221,26 @@ mod tests {
             &mut chat,
             "\n<context ref=\"file:///p/sub/src/a.rs\">\nfn secret() {}\n</context>",
         );
-        // As Codex's keeps the text sent, and a link of its own interface.
+        // As Codex's keeps the text sent.
         replay_user(
             &mut chat,
-            "[@src/a.rs#L2-L3](file:///p/sub/src/a.rs#L2-L3)\n<context ref=\"file:///p/sub/src/a.rs#L2-L3\">\nb\nc\n</context>",
+            "[@b.rs](file:///p/b.rs)\n<context ref=\"file:///p/b.rs\">\nb\n</context>",
         );
+        assert_eq!(prompts(&chat), ["look at @src/a.rs and @../b.rs"]);
+        // A link of the agent's own interface is a mention.
         let link = serde_json::json!({ "sessionUpdate": "user_message_chunk",
             "content": { "type": "resource_link", "name": "c", "uri": "file:///elsewhere/c.rs" } });
         replay(&mut chat, &link.to_string());
         assert_eq!(
             prompts(&chat),
-            ["look at @src/a.rs and @../b.rs @src/a.rs#L2-L3 @/elsewhere/c.rs"]
+            ["look at @src/a.rs and @../b.rs @/elsewhere/c.rs"]
         );
-        // Words shaped as a link, among others, are words.
-        replay_user(&mut chat, "see [@x](file:///p/x) here");
-        assert!(
-            chat.node.turns[0]
-                .prompt
-                .ends_with("see [@x](file:///p/x) here")
+        // Shaped as clackatoo's, but for no file the message mentions:
+        // words, as written, never left out.
+        replay_user(&mut chat, "[@x](file:///p/x)");
+        assert_eq!(
+            prompts(&chat),
+            ["look at @src/a.rs and @../b.rs @/elsewhere/c.rs\n\n[@x](file:///p/x)"]
         );
     }
 

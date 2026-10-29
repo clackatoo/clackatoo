@@ -28,22 +28,37 @@
 //!   UTF-8, goes as a link. So does a folder.
 //!
 //! A mention of something outside the chat's project (as CLACKA-178 draws
-//! it: canonicalized, so a link can't lead out) stays words, and the chat
-//! says so; one that names nothing is words. A slash command's message is
-//! read for none, as the adapters look for the command in its last or
-//! only block.
+//! it) stays words, and the chat says so; one that names nothing is
+//! words. It's judged first without the disk, by the path as written made
+//! absolute, so a path plainly outside is never looked at; then again with
+//! links followed. A file is read through one handle, opened without
+//! following a link or waiting on a pipe: it must be a plain file, under
+//! the project as the handle says, and no more is read of it than is to
+//! be sent, so nothing swapped in after the check is read. A slash
+//! command's message is read for none, as the adapters look for the
+//! command in its last or only block.
 //!
-//! The disk is read on a thread of its own, never the event loop: the
-//! message, and every action for its chat after it, wait for it (see
-//! [`Daemon::act`]), so nothing overtakes it.
+//! The disk is read on a thread of the message's own, never the event
+//! loop: the message, and what its chat asks after it, wait for it (see
+//! [`Daemon::act`]), so nothing overtakes it; but Stop, and answers to
+//! the agent, don't wait, and Stop drops the message. A thread a job
+//! each, rather than one for all, as a file system that hangs one read
+//! mustn't hold another chat's: a job is rare, one a message that
+//! mentions something, and at most [`MOST_READING`] go at once. One that
+//! takes longer than [`DEADLINE`] is given up on: the message goes
+//! without its files, and the chat says so; its thread ends whenever the
+//! file system lets it, and what it read is thrown away.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{TerminalId, lines_suffix, mentions, slash_command};
+use agent_client_protocol_schema::v1::StopReason;
+use clackatoo_protocol::{TerminalId, lines_suffix, mention, mentions, slash_command};
 use clackatoo_text::Rope;
 use serde_json::{Value, json};
 
@@ -60,15 +75,23 @@ pub(crate) const MOST_EMBEDDED: usize = 256 * 1024;
 
 /// The most of a file not open read for lines of it: those of a bigger
 /// one go as a link to them.
-const MOST_READ_FOR_LINES: u64 = 8 * 1024 * 1024;
+const MOST_READ_FOR_LINES: usize = 8 * 1024 * 1024;
+
+/// How long a message waits for the files it mentions to be read.
+pub(crate) const DEADLINE: Duration = Duration::from_secs(2);
+
+/// The most reads going at once, those stuck on a file system that hangs
+/// included, until they return: past it, a message goes without its
+/// files.
+const MOST_READING: usize = 8;
 
 /// What's to be read for a message's mentions, gathered on the loop.
 #[derive(Debug)]
 pub(crate) struct Job {
-    pub(crate) chat: TerminalId,
     /// Each mention: its path as written, and its lines.
     pub(crate) mentions: Vec<(String, Option<(u32, u32)>)>,
-    /// The chat's working directory and project.
+    /// The chat's working directory and project, made absolute with links
+    /// followed.
     pub(crate) cwd: PathBuf,
     pub(crate) project: PathBuf,
     pub(crate) home: PathBuf,
@@ -89,77 +112,171 @@ pub(crate) struct Read {
     pub(crate) outside: Vec<String>,
 }
 
-/// The thread that reads mentions: where jobs go to it, and where what
-/// it read comes back, by chat.
-type Worker = (mpsc::Sender<Job>, mpsc::Receiver<(TerminalId, Read)>);
+/// What a read is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum For {
+    /// The message its chat holds (see [`Held`]).
+    Message,
+    /// Steering the chat's queued message with this ID: with its words, as
+    /// steering sends, unless it mentions a file, when the turn is
+    /// stopped and it's sent whole.
+    Steer(u64),
+}
 
-/// The messages waiting for their mentions to be read, and the thread
-/// that reads them.
-#[derive(Debug, Default)]
+/// A read going on.
+#[derive(Debug)]
+struct Reading {
+    job: u64,
+    chat: TerminalId,
+    purpose: For,
+    /// When it's given up on.
+    due: Instant,
+    /// What the message mentions, as written, to say what wasn't read.
+    mentioned: Vec<String>,
+}
+
+/// A chat's message waiting for what it mentions to be read, and what the
+/// chat asked after it.
+#[derive(Debug)]
+struct Held {
+    job: u64,
+    message: Action,
+    after: Vec<Action>,
+}
+
+/// The messages waiting for their mentions to be read.
+#[derive(Debug)]
 pub(super) struct Mentioning {
-    worker: Option<Worker>,
-    /// Each chat's actions waiting, from the message being read for.
-    held: HashMap<TerminalId, VecDeque<Action>>,
-    /// What was read for each chat's message, until it's sent.
-    read: HashMap<TerminalId, Vec<Value>>,
+    next: u64,
+    reading: Vec<Reading>,
+    held: HashMap<TerminalId, Held>,
+    /// What threads have read, by job.
+    done: Arc<Mutex<Vec<(u64, Read)>>>,
+    /// The threads still going, those given up on included.
+    alive: Arc<AtomicUsize>,
+    /// How long a read may take: [`DEADLINE`], but for tests.
+    deadline: Duration,
+    /// What reads a job: [`read`], but for tests.
+    reader: fn(&Job) -> Read,
+}
+
+impl Default for Mentioning {
+    fn default() -> Self {
+        Self {
+            next: 0,
+            reading: Vec::new(),
+            held: HashMap::new(),
+            done: Arc::default(),
+            alive: Arc::default(),
+            deadline: DEADLINE,
+            reader: read,
+        }
+    }
 }
 
 impl Mentioning {
-    /// Reads `job` on the thread, starting it if it isn't going, and
-    /// wakes the loop with `waker` once it's read. Returns whether it
-    /// will be.
-    fn submit(&mut self, job: Job, waker: &Arc<mio::Waker>) -> bool {
-        if self.worker.is_none() {
-            let (send, jobs) = mpsc::channel::<Job>();
-            let (done, receive) = mpsc::channel();
-            let waker = Arc::clone(waker);
-            let spawned = std::thread::Builder::new()
-                .name("mentions".into())
-                .spawn(move || {
-                    while let Ok(job) = jobs.recv() {
-                        let chat = job.chat;
-                        if done.send((chat, read(&job))).is_err() {
-                            break;
-                        }
-                        if let Err(err) = waker.wake() {
-                            log::warn!("waking the event loop for mentions failed: {err}");
-                        }
-                    }
-                });
-            if let Err(err) = spawned {
-                log::error!("the mentions thread couldn't start: {err}");
-                return false;
-            }
-            self.worker = Some((send, receive));
+    /// Reads `job` for `purpose`, for the chat `chat`, on a thread of its
+    /// own, waking the loop with `waker` once it's read. Returns its
+    /// number, or `None` if it can't be read now.
+    fn submit(
+        &mut self,
+        (chat, purpose): (TerminalId, For),
+        job: Job,
+        waker: &Arc<mio::Waker>,
+    ) -> Option<u64> {
+        if self.alive.load(Ordering::Acquire) >= MOST_READING {
+            log::warn!("{MOST_READING} reads of mentioned files are going: no more for now");
+            return None;
         }
-        let sent = (self.worker.as_ref()).is_some_and(|(send, _)| send.send(job).is_ok());
-        if !sent {
-            self.worker = None;
+        self.next += 1;
+        let number = self.next;
+        let mentioned = (job.mentions.iter())
+            .map(|(path, lines)| mention(path, *lines))
+            .collect();
+        let (done, alive, waker) = (
+            Arc::clone(&self.done),
+            Arc::clone(&self.alive),
+            Arc::clone(waker),
+        );
+        let reader = self.reader;
+        alive.fetch_add(1, Ordering::AcqRel);
+        let spawned = std::thread::Builder::new()
+            .name("mentions".into())
+            .spawn(move || {
+                let read = reader(&job);
+                (done.lock().unwrap_or_else(PoisonError::into_inner)).push((number, read));
+                alive.fetch_sub(1, Ordering::AcqRel);
+                if let Err(err) = waker.wake() {
+                    log::warn!("waking the event loop for mentions failed: {err}");
+                }
+            });
+        if let Err(err) = spawned {
+            log::error!("a thread to read mentioned files couldn't start: {err}");
+            self.alive.fetch_sub(1, Ordering::AcqRel);
+            return None;
         }
-        sent
+        self.reading.push(Reading {
+            job: number,
+            chat,
+            purpose,
+            due: Instant::now() + self.deadline,
+            mentioned,
+        });
+        Some(number)
     }
 }
 
 impl Daemon {
-    /// Whether `id`'s actions wait for a message's mentions to be read.
-    pub(super) fn holding_for_mentions(
-        &mut self,
-        id: TerminalId,
-        actions: &mut Vec<Action>,
-    ) -> bool {
-        match self.mentioning.held.get_mut(&id) {
-            Some(held) => {
-                held.extend(actions.drain(..));
-                true
+    /// Of `actions`, asked by the chat in `id`, those to carry out now:
+    /// all of them, unless a message of its waits for what it mentions to
+    /// be read. Then the rest wait behind it, but for answers to the
+    /// agent, which go at once, and Stop, which drops the message, ends
+    /// its turn as stopped, and lets what waited behind it go.
+    pub(super) fn not_waiting(&mut self, id: TerminalId, actions: Vec<Action>) -> Vec<Action> {
+        let Some(held) = self.mentioning.held.get_mut(&id) else {
+            return actions;
+        };
+        let mut now = Vec::new();
+        let mut actions = actions.into_iter();
+        let mut stop = None;
+        for action in actions.by_ref() {
+            match action {
+                Action::Cancel | Action::Abandon => {
+                    stop = Some(action);
+                    break;
+                }
+                Action::Answer { .. } | Action::Elicited { .. } | Action::Permit { .. } => {
+                    now.push(action);
+                }
+                other => held.after.push(other),
             }
-            None => false,
         }
+        let Some(stop) = stop else {
+            return now;
+        };
+        let held = self.mentioning.held.remove(&id).expect("held above");
+        self.mentioning
+            .reading
+            .retain(|reading| reading.job != held.job);
+        if let Some(chat) = self.chat(id) {
+            chat.answered(Ok(StopReason::Cancelled));
+            self.settle_turn(id);
+            self.collect_damage(id);
+        }
+        // The message's turn is stopped already: Stop needn't reach the
+        // agent, which never had it.
+        if matches!(stop, Action::Abandon) {
+            now.push(stop);
+        }
+        now.extend(held.after);
+        now.extend(actions);
+        now
     }
 
     /// The blocks to send after `action`'s text, a message to the chat in
-    /// `id`: those read for it, or none. Starts reading them, if they're
-    /// to be read and haven't been, and returns `Err` with the action, and
-    /// what follows it held until they have.
+    /// `id`: none, unless it mentions files. Then it starts reading them,
+    /// and returns `Err`, holding the action, and what follows it in
+    /// `after`, until they're read.
     pub(super) fn mentioned(
         &mut self,
         id: TerminalId,
@@ -172,18 +289,35 @@ impl Daemon {
             | Action::Carry { text: prompt, .. } => &prompt.text,
             _ => return Ok((action, Vec::new())),
         };
-        if let Some(read) = self.mentioning.read.remove(&id) {
-            return Ok((action, read));
-        }
         let Some(job) = self.mention_job(id, text) else {
             return Ok((action, Vec::new()));
         };
-        if !self.mentioning.submit(job, &self.waker) {
+        let Some(number) = self.mentioning.submit((id, For::Message), job, &self.waker) else {
+            if let Some(chat) = self.chat(id) {
+                chat.notify("too many files are being read: the agent was sent the words".into());
+            }
             return Ok((action, Vec::new()));
-        }
-        let held = std::iter::once(action).chain(after.by_ref()).collect();
+        };
+        let held = Held {
+            job: number,
+            message: action,
+            after: after.by_ref().collect(),
+        };
         self.mentioning.held.insert(id, held);
         Err(())
+    }
+
+    /// Reads what `text`, the chat in `id`'s queued message `message`,
+    /// mentions, to steer with it as [`steer_read`](Self::steer_read)
+    /// says. Returns whether it's being read.
+    pub(super) fn read_for_steering(&mut self, id: TerminalId, message: u64, text: &str) -> bool {
+        let Some(job) = self.mention_job(id, text) else {
+            return false;
+        };
+        (self
+            .mentioning
+            .submit((id, For::Steer(message)), job, &self.waker))
+        .is_some()
     }
 
     /// What's to be read for `text`, a message to the chat in `id`, if it
@@ -200,7 +334,7 @@ impl Daemon {
         let agent = self.agent_of(id);
         let embed = (agent.and_then(|agent| self.agents_can_embed(agent))).unwrap_or(false);
         let chat = self.chat(id)?;
-        let cwd = PathBuf::from(chat.working_directory());
+        let cwd = chat.real_cwd();
         let project = chat.project().to_owned();
         let embed_saved = crate::agents::embeds_saved(chat.agent());
         let mentions: Vec<(String, Option<(u32, u32)>)> = (found.iter())
@@ -221,7 +355,6 @@ impl Daemon {
             })
             .collect();
         Some(Job {
-            chat: id,
             mentions,
             cwd,
             project,
@@ -232,38 +365,81 @@ impl Daemon {
         })
     }
 
-    /// Sends the messages whose mentions have been read, and what was held
-    /// behind them.
+    /// When the next read is given up on, if one is going.
+    pub(super) fn next_mentions_due(&self) -> Option<Instant> {
+        self.mentioning
+            .reading
+            .iter()
+            .map(|reading| reading.due)
+            .min()
+    }
+
+    /// Sends the messages whose mentions have been read, or whose reads
+    /// have taken too long, and what was held behind them; and steers with
+    /// those read for steering.
     pub(super) fn take_mentions(&mut self) {
-        let Some((_, receive)) = &self.mentioning.worker else {
-            return;
-        };
-        let done: Vec<(TerminalId, Read)> = receive.try_iter().collect();
-        for (id, read) in done {
-            let Some(held) = self.mentioning.held.remove(&id) else {
+        let done = std::mem::take(
+            &mut *(self.mentioning.done.lock()).unwrap_or_else(PoisonError::into_inner),
+        );
+        for (job, read) in done {
+            // One given up on, or whose message was stopped, is thrown away.
+            let Some(at) = (self.mentioning.reading.iter()).position(|reading| reading.job == job)
+            else {
                 continue;
             };
-            if !read.outside.is_empty()
-                && let Some(chat) = self.chat(id)
-            {
-                let named = read.outside.join(", ");
-                chat.notify(format!(
-                    "{named} isn't in the chat's project, so the agent was sent the words, not the file"
-                ));
-                self.collect_damage(id);
+            let reading = self.mentioning.reading.remove(at);
+            self.mentions_read(&reading, Some(read));
+        }
+        let now = Instant::now();
+        while let Some(at) = (self.mentioning.reading.iter()).position(|reading| reading.due <= now)
+        {
+            let reading = self.mentioning.reading.remove(at);
+            log::warn!("reading {:?} took too long: given up on", reading.mentioned);
+            self.mentions_read(&reading, None);
+        }
+    }
+
+    /// Goes on with what `reading` was for, now that what it read is
+    /// `read`, or it was given up on.
+    fn mentions_read(&mut self, reading: &Reading, read: Option<Read>) {
+        let id = reading.chat;
+        let notice = match &read {
+            Some(read) if !read.outside.is_empty() => Some(format!(
+                "{} isn't in the chat's project, so the agent was sent the words, not the file",
+                read.outside.join(", ")
+            )),
+            Some(_) => None,
+            None => Some(format!(
+                "couldn't read {} in time, so the agent was sent the words",
+                reading.mentioned.join(", ")
+            )),
+        };
+        if let Some(notice) = notice
+            && let Some(chat) = self.chat(id)
+        {
+            chat.notify(notice);
+            self.collect_damage(id);
+        }
+        let blocks = read.map(|read| read.blocks).unwrap_or_default();
+        match reading.purpose {
+            For::Message => {
+                let Some(held) =
+                    (self.mentioning.held.remove(&id)).filter(|held| held.job == reading.job)
+                else {
+                    return;
+                };
+                let actions = std::iter::once(held.message).chain(held.after).collect();
+                self.act_with(id, actions, Some(blocks));
             }
-            self.mentioning.read.insert(id, read.blocks);
-            self.act(id, held.into());
-            // Read for a message that wasn't sent after all.
-            self.mentioning.read.remove(&id);
+            For::Steer(message) => self.steer_read(id, message, !blocks.is_empty()),
         }
     }
 }
 
 /// Where `path`, mentioned in a chat working in `cwd` in `project`, may
-/// be, as written, in the order looked: from the working directory, as
-/// the agent reads it, then from the project's root, as the window's
-/// completion offers it.
+/// be, as written, made absolute, in the order looked: from the working
+/// directory, as the agent reads it, then from the project's root, as the
+/// window's completion offers it.
 fn places(path: &str, cwd: &Path, project: &Path, home: &Path) -> Vec<PathBuf> {
     if let Some(rest) = path.strip_prefix("~/") {
         return vec![lexical(&home.join(rest))];
@@ -278,32 +454,33 @@ fn places(path: &str, cwd: &Path, project: &Path, home: &Path) -> Vec<PathBuf> {
 /// Reads what `job` mentions, as the module's docs say.
 pub(crate) fn read(job: &Job) -> Read {
     let mut made = Read::default();
-    let Ok(root) = job.project.canonicalize() else {
-        return made;
-    };
+    let root = &job.project;
     let mut budget = MOST_EMBEDDED;
     let mut seen = HashSet::new();
     for (written, lines) in &job.mentions {
-        let candidates = places(written, &job.cwd, &job.project, &job.home);
-        let Some(real) = candidates
+        // Plainly outside, as written: the disk isn't looked at.
+        let candidates: Vec<PathBuf> = places(written, &job.cwd, root, &job.home)
+            .into_iter()
+            .filter(|place| place.starts_with(root))
+            .collect();
+        let real = candidates
             .iter()
-            .find_map(|place| place.canonicalize().ok())
-        else {
-            continue;
+            .find_map(|place| place.canonicalize().ok());
+        let outside = match &real {
+            None => candidates.is_empty(),
+            Some(real) => !real.starts_with(root),
         };
-        if !real.starts_with(&root) {
-            let shown = clackatoo_protocol::mention(written, *lines);
+        if outside {
+            let shown = mention(written, *lines);
             if !made.outside.contains(&shown) {
                 made.outside.push(shown);
             }
             continue;
         }
+        let Some(real) = real else { continue };
         if !seen.insert((real.clone(), *lines)) {
             continue;
         }
-        let Ok(meta) = fs::metadata(&real) else {
-            continue;
-        };
         let Ok(mut uri) = url::Url::from_file_path(&real) else {
             continue;
         };
@@ -311,21 +488,8 @@ pub(crate) fn read(job: &Job) -> Read {
         if let Some(fragment) = suffix.strip_prefix('#') {
             uri.set_fragment(Some(fragment));
         }
-        let buffer =
-            (job.buffers.iter()).find(|(path, ..)| *path == real || candidates.contains(path));
-        let text = if !job.embed || !meta.is_file() {
-            None
-        } else if let Some((first, last)) = *lines {
-            let whole = match buffer {
-                Some((_, _, rope)) => Some(rope.to_string()),
-                None if meta.len() <= MOST_READ_FOR_LINES => fs::read_to_string(&real).ok(),
-                None => None,
-            };
-            whole.and_then(|whole| lines_of(&whole, first, last))
-        } else if let Some((_, true, rope)) = buffer {
-            (rope.len_bytes() <= MOST_FILE).then(|| rope.to_string())
-        } else if job.embed_saved && meta.len() <= MOST_FILE as u64 {
-            read_small(&real)
+        let text = if job.embed {
+            text_of(job, &real, *lines)
         } else {
             None
         };
@@ -345,17 +509,48 @@ pub(crate) fn read(job: &Job) -> Read {
     made
 }
 
-/// The file at `path`, if it's text and no more than [`MOST_FILE`].
-fn read_small(path: &Path) -> Option<String> {
-    let mut bytes = Vec::new();
-    let file = fs::File::open(path).ok()?;
-    file.take(MOST_FILE as u64 + 1)
-        .read_to_end(&mut bytes)
+/// The text to send of the file at `real`, or of its `lines`, if it's to
+/// go as text: its buffer's, if it's open, or else what's on the disk.
+fn text_of(job: &Job, real: &Path, lines: Option<(u32, u32)>) -> Option<String> {
+    let buffer = (job.buffers.iter()).find(|(path, ..)| path == real);
+    let root = &job.project;
+    match (lines, buffer) {
+        (Some((first, last)), Some((_, _, rope))) => lines_of(&rope.to_string(), first, last),
+        (Some((first, last)), None) => {
+            let bytes = read_under(real, root, MOST_READ_FOR_LINES)?;
+            lines_of(&String::from_utf8(bytes).ok()?, first, last)
+        }
+        (None, Some((_, true, rope))) => (rope.len_bytes() <= MOST_FILE).then(|| rope.to_string()),
+        (None, _) if job.embed_saved => String::from_utf8(read_under(real, root, MOST_FILE)?).ok(),
+        (None, _) => None,
+    }
+}
+
+/// The file at `real`, at most `most` bytes of it, if it's a plain file
+/// under `root` as its handle says, and no bigger: opened once, without
+/// following a link or waiting on a pipe, so what's read is what was
+/// checked.
+fn read_under(real: &Path, root: &Path, most: usize) -> Option<Vec<u8>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(real)
         .ok()?;
-    if bytes.len() > MOST_FILE {
+    if !file.metadata().ok()?.is_file() {
         return None;
     }
-    String::from_utf8(bytes).ok()
+    let at = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()?;
+    if !at.starts_with(root) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    let most = u64::try_from(most).unwrap_or(u64::MAX);
+    file.take(most.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= most).then_some(bytes)
 }
 
 /// Lines `first` to `last` of `text`, from 1, with their line ends; those
@@ -372,14 +567,14 @@ mod tests {
     use super::*;
 
     fn job(dir: &Path, mentions: &[(&str, Option<(u32, u32)>)]) -> Job {
+        let dir = dir.canonicalize().unwrap();
         Job {
-            chat: TerminalId(1),
             mentions: (mentions.iter())
                 .map(|&(path, lines)| (path.to_owned(), lines))
                 .collect(),
             cwd: dir.join("project/sub"),
             project: dir.join("project"),
-            home: dir.to_owned(),
+            home: dir.clone(),
             buffers: Vec::new(),
             embed: true,
             embed_saved: true,
@@ -419,6 +614,7 @@ mod tests {
                 ("~/outside.rs", None),
                 ("link.rs", None),
                 ("missing.rs", None),
+                ("/etc/hostname", None),
                 ("b.rs", None),
             ],
         );
@@ -432,7 +628,10 @@ mod tests {
             ]
         );
         assert_eq!(read.blocks[1]["resource"]["text"], "two\nthree\n");
-        assert_eq!(read.outside, ["@~/outside.rs", "@link.rs"]);
+        assert_eq!(
+            read.outside,
+            ["@~/outside.rs", "@link.rs", "@/etc/hostname"]
+        );
         // To Claude, saved files are links; lines are still their text.
         job.embed_saved = false;
         let read = super::read(&job);
@@ -475,11 +674,10 @@ mod tests {
         for name in &names {
             fs::write(dir.path().join("project").join(name), "y".repeat(MOST_FILE)).unwrap();
         }
-        let mentions: Vec<(String, Option<(u32, u32)>)> = (names.iter())
+        let mut job = job(dir.path(), &[]);
+        job.mentions = (names.iter())
             .map(|name| (format!("../{name}"), None))
             .collect();
-        let mut job = job(dir.path(), &[]);
-        job.mentions = mentions;
         let read = read(&job);
         let embedded = (read.blocks.iter())
             .filter(|block| block["type"] == "resource")
@@ -489,9 +687,121 @@ mod tests {
     }
 
     #[test]
+    fn only_a_plain_file_under_the_root_is_read_and_no_more_of_it_than_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        files(dir.path());
+        let root = dir.path().join("project").canonicalize().unwrap();
+        // As if swapped in after the path was checked: a link out to an
+        // endless device, a pipe no one writes, and a link out of the root.
+        std::os::unix::fs::symlink("/dev/zero", root.join("zero")).unwrap();
+        let fifo = root.join("fifo");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .unwrap();
+        assert_eq!(read_under(&root.join("zero"), &root, 16), None);
+        assert_eq!(read_under(&fifo, &root, 16), None);
+        assert_eq!(read_under(&root.join("link.rs"), &root, 16), None);
+        assert_eq!(read_under(&root.join("a.rs"), &root, 4), None, "too big");
+        assert_eq!(
+            read_under(&root.join("a.rs"), &root, 64).as_deref(),
+            Some(&b"one\ntwo\nthree\n"[..])
+        );
+        assert_eq!(
+            read_under(&root.join("a.rs"), &dir.path().join("elsewhere"), 64),
+            None
+        );
+    }
+
+    #[test]
     fn lines_past_the_end_are_left_out() {
         assert_eq!(lines_of("a\nb\nc", 2, 9).as_deref(), Some("b\nc"));
         assert_eq!(lines_of("a\nb\n", 3, 4), None);
         assert_eq!(lines_of("a\n", 0, 1), None);
+    }
+
+    mod waiting {
+        use super::*;
+        use crate::chat::Prompt;
+        use crate::server::agent_files::tests::daemon_with_chat;
+
+        /// A read that never ends, as on a file system that hangs.
+        fn hangs(_: &Job) -> Read {
+            loop {
+                std::thread::park();
+            }
+        }
+
+        fn held(daemon: &Daemon, chat: TerminalId) -> bool {
+            daemon.mentioning.held.contains_key(&chat)
+        }
+
+        /// A daemon with a chat whose message, which mentions a file,
+        /// waits for a read that hangs, with a set later held behind it.
+        fn hanging(dir: &Path) -> (Daemon, TerminalId) {
+            let (mut daemon, chat) = daemon_with_chat(dir);
+            daemon.mentioning.reader = hangs;
+            daemon.act(chat, vec![Action::Prompt(Prompt::from("look at @a.rs"))]);
+            assert!(held(&daemon, chat), "the message waits for its read");
+            let set = Action::Set {
+                setting: "model".into(),
+                value: "opus".into(),
+            };
+            daemon.act(chat, vec![set]);
+            assert_eq!(daemon.mentioning.held[&chat].after.len(), 1);
+            (daemon, chat)
+        }
+
+        #[test]
+        fn a_read_that_hangs_is_given_up_on_and_the_message_goes_without_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut daemon, chat) = hanging(dir.path());
+            assert!(daemon.next_mentions_due().is_some());
+            daemon.take_mentions();
+            assert!(held(&daemon, chat), "not yet due");
+            for reading in &mut daemon.mentioning.reading {
+                reading.due = Instant::now();
+            }
+            daemon.take_mentions();
+            assert!(!held(&daemon, chat), "let go");
+            assert!(daemon.mentioning.reading.is_empty());
+            let notice = daemon.chat(chat).unwrap().node().notice.clone();
+            assert!(notice.unwrap().contains("couldn't read @a.rs in time"));
+            // The stuck thread doesn't hold the next read up.
+            assert_eq!(daemon.mentioning.alive.load(Ordering::Acquire), 1);
+            daemon.mentioning.reader = read;
+            daemon.act(chat, vec![Action::Prompt(Prompt::from("and @b.rs"))]);
+            assert!(held(&daemon, chat));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while daemon.mentioning.done.lock().unwrap().is_empty() {
+                assert!(Instant::now() < deadline, "the next read never ended");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            daemon.take_mentions();
+            assert!(!held(&daemon, chat));
+        }
+
+        #[test]
+        fn stop_while_a_read_hangs_acts_at_once_and_drops_the_message() {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut daemon, chat) = hanging(dir.path());
+            daemon.act(chat, vec![Action::Cancel]);
+            assert!(!held(&daemon, chat), "the message is dropped");
+            assert!(daemon.mentioning.reading.is_empty());
+            assert!(daemon.next_mentions_due().is_none());
+            // What it read, if it ever ends, is thrown away.
+            daemon
+                .mentioning
+                .done
+                .lock()
+                .unwrap()
+                .push((1, Read::default()));
+            daemon.take_mentions();
+            assert!(!held(&daemon, chat));
+        }
     }
 }
